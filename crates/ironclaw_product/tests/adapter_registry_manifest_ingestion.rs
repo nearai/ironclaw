@@ -159,7 +159,7 @@ fn host_ingress_fragment(cred: &str, scheme: &str) -> String {
         r#"
 [[product_adapter.inbound.host_ingress]]
 credential_handles = ["{cred}"]
-descriptor = {{ route_id = "telegram.updates", method = "post", route_pattern = "/webhooks/telegram/updates", policy = {{ listener_class = "public_webhook", auth = {{ type = "required", schemes = ["{scheme}"] }}, scope_source = "host_resolved", body_limit = {{ type = "limited", max_bytes = 262144 }}, rate_limit = {{ type = "limited", scope = "global", max_requests = 600, window_seconds = 60 }}, cors = "not_applicable", websocket_origin = "not_applicable", streaming = "none", audit = "public_callback", effect_path = {{ type = "product_workflow" }} }} }}
+descriptor = {{ route_id = "telegram.updates", method = "post", route_pattern = "/webhooks/telegram/updates", policy = {{ listener_class = "public_webhook", auth = {{ type = "required", schemes = ["{scheme}"] }}, scope_source = "host_resolved", body_limit = {{ type = "limited", max_bytes = 262144 }}, rate_limit = {{ type = "limited", scope = "global", max_requests = 600, window_seconds = 60 }}, cors = "not_applicable", websocket_origin = "not_applicable", streaming = "none", audit = "public_callback", effect_path = {{ type = "product_surface" }} }} }}
 "#
     )
 }

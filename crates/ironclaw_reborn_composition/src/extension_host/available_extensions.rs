@@ -12,21 +12,21 @@ use ironclaw_product::{
     ChannelConnectionRequirement, LifecycleChannelDirections,
     LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
     LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
-    LifecycleExtensionSummary, LifecyclePackageKind, LifecyclePackageRef, ProductWorkflowError,
+    LifecycleExtensionSummary, LifecyclePackageKind, LifecyclePackageRef, ProductSurfaceFailure,
 };
 use ironclaw_product::{ProductCapabilityFlag, ProductSurfaceKind};
 use std::sync::Arc;
 use toml::Value;
 
-use crate::extension_host::extension_credential_requirements::{
-    can_merge_lifecycle_credential_setup, merge_lifecycle_credential_setup,
-    product_auth_credential_source,
-};
 use crate::extension_host::extension_removal_cleanup::ExtensionRemovalCleanupRequirement;
 use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
 use crate::llm_admin::nearai_mcp::{
     NearAiMcpBootstrapConfig, NearAiMcpEndpoint, durable_product_auth_storage_enabled,
     nearai_mcp_endpoint_from_base, nearai_mcp_endpoint_from_env,
+};
+use ironclaw_extension_host::{
+    can_merge_lifecycle_credential_setup, merge_lifecycle_credential_setup,
+    product_auth_credential_source,
 };
 
 pub(crate) use super::available_extension_import::{
@@ -353,7 +353,7 @@ impl AvailableExtensionCatalog {
     }
 
     #[cfg(test)]
-    pub(crate) fn from_first_party_assets() -> Result<Self, ProductWorkflowError> {
+    pub(crate) fn from_first_party_assets() -> Result<Self, ProductSurfaceFailure> {
         Self::from_first_party_assets_with_nearai_mcp_config(
             None,
             &crate::extension_host::first_party::first_party_bundles_from_inventory(),
@@ -366,7 +366,7 @@ impl AvailableExtensionCatalog {
     pub(crate) fn from_first_party_assets_with_nearai_mcp_config(
         nearai_mcp_config: Option<&NearAiMcpBootstrapConfig>,
         first_party_bundles: &[crate::extension_host::first_party::FirstPartyPackageBundle],
-    ) -> Result<Self, ProductWorkflowError> {
+    ) -> Result<Self, ProductSurfaceFailure> {
         let mut packages = vec![nearai_mcp_package(nearai_mcp_config)?];
         for bundle in first_party_bundles {
             packages.push(package_from_bundle(bundle)?);
@@ -380,16 +380,16 @@ impl AvailableExtensionCatalog {
     /// ceiling; incompatible recipes are a startup error).
     pub(crate) fn bundled_vendor_recipes(
         first_party_bundles: &[crate::extension_host::first_party::FirstPartyPackageBundle],
-    ) -> Result<Vec<ironclaw_auth::ResolvedVendorAuthRecipe>, ProductWorkflowError> {
+    ) -> Result<Vec<ironclaw_auth::ResolvedVendorAuthRecipe>, ProductSurfaceFailure> {
         let catalog =
             Self::from_first_party_assets_with_nearai_mcp_config(None, first_party_bundles)?;
         let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-            ProductWorkflowError::InvalidBindingRequest {
+            ProductSurfaceFailure::InvalidBindingRequest {
                 reason: format!("host port catalog unavailable for recipe resolution: {error}"),
             }
         })?;
         let contracts = product_extension_host_api_contract_registry().map_err(|error| {
-            ProductWorkflowError::InvalidBindingRequest {
+            ProductSurfaceFailure::InvalidBindingRequest {
                 reason: format!("host API contracts unavailable for recipe resolution: {error}"),
             }
         })?;
@@ -402,7 +402,7 @@ impl AvailableExtensionCatalog {
                 None,
                 &contracts,
             )
-            .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+            .map_err(|error| ProductSurfaceFailure::InvalidBindingRequest {
                 reason: format!(
                     "bundled extension manifest failed recipe resolution ({}): {error}",
                     package.package_ref.id
@@ -411,7 +411,7 @@ impl AvailableExtensionCatalog {
             resolved.push(record.resolved().clone());
         }
         ironclaw_extension_host::unified_vendor_recipes(resolved.iter()).map_err(|conflict| {
-            ProductWorkflowError::InvalidBindingRequest {
+            ProductSurfaceFailure::InvalidBindingRequest {
                 reason: format!("bundled vendor recipes conflict: {conflict}"),
             }
         })
@@ -435,7 +435,7 @@ impl AvailableExtensionCatalog {
         fs: &F,
         root: &VirtualPath,
         reserved_bundled_ids: &[String],
-    ) -> Result<Self, ProductWorkflowError>
+    ) -> Result<Self, ProductSurfaceFailure>
     where
         F: RootFilesystem + ?Sized,
     {
@@ -455,7 +455,7 @@ impl AvailableExtensionCatalog {
         fs: &F,
         root: &VirtualPath,
         reserved_bundled_ids: &[String],
-    ) -> Result<Self, ProductWorkflowError>
+    ) -> Result<Self, ProductSurfaceFailure>
     where
         F: RootFilesystem + ?Sized,
     {
@@ -479,13 +479,13 @@ impl AvailableExtensionCatalog {
     pub(crate) fn resolve(
         &self,
         package_ref: &LifecyclePackageRef,
-    ) -> Result<Arc<AvailableExtensionPackage>, ProductWorkflowError> {
+    ) -> Result<Arc<AvailableExtensionPackage>, ProductSurfaceFailure> {
         package_ref.require_kind(LifecyclePackageKind::Extension)?;
         self.packages
             .iter()
             .find(|package| &package.package_ref == package_ref)
             .cloned()
-            .ok_or_else(|| ProductWorkflowError::InvalidBindingRequest {
+            .ok_or_else(|| ProductSurfaceFailure::InvalidBindingRequest {
                 reason: "available extension was not found".to_string(),
             })
     }
@@ -563,7 +563,7 @@ fn push_search_term(terms: &mut Vec<String>, term: impl AsRef<str>) {
 
 fn nearai_mcp_package(
     config: Option<&NearAiMcpBootstrapConfig>,
-) -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+) -> Result<AvailableExtensionPackage, ProductSurfaceFailure> {
     let manifest = nearai_mcp_manifest_toml_for_config(config)?;
     bundled_extension_package(
         NEARAI_EXTENSION_ID,
@@ -575,7 +575,7 @@ fn nearai_mcp_package(
 
 pub(crate) fn nearai_mcp_manifest_toml_for_config(
     config: Option<&NearAiMcpBootstrapConfig>,
-) -> Result<String, ProductWorkflowError> {
+) -> Result<String, ProductSurfaceFailure> {
     let endpoint = if durable_product_auth_storage_enabled() {
         match config {
             Some(config) => config.endpoint().map_err(map_binding_error)?,
@@ -589,7 +589,7 @@ pub(crate) fn nearai_mcp_manifest_toml_for_config(
 
 fn nearai_mcp_manifest_toml_for_endpoint(
     endpoint: &NearAiMcpEndpoint,
-) -> Result<String, ProductWorkflowError> {
+) -> Result<String, ProductSurfaceFailure> {
     let mut manifest = toml::from_str::<Value>(NEARAI_MCP_MANIFEST).map_err(|error| {
         map_binding_error(format!("bundled NEAR AI manifest TOML is invalid: {error}"))
     })?;
@@ -613,10 +613,10 @@ fn nearai_mcp_manifest_toml_for_endpoint(
 /// [`crate::extension_host::first_party::FirstPartyPackageBundle`]. The bundle
 /// carries only data (id, display copy, manifest, assets, search aliases); all
 /// manifest resolution / surface projection stays here (it needs
-/// product_workflow + host_runtime types the injecting binary sits below).
+/// product_surface + host_runtime types the injecting binary sits below).
 fn package_from_bundle(
     bundle: &crate::extension_host::first_party::FirstPartyPackageBundle,
-) -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+) -> Result<AvailableExtensionPackage, ProductSurfaceFailure> {
     let assets = bundle
         .assets
         .iter()
@@ -626,7 +626,7 @@ fn package_from_bundle(
         })
         .collect::<Vec<_>>();
     // The bundle carries its onboarding copy as plain data; map it to the host
-    // lifecycle type here (the injecting binary sits below product_workflow and
+    // lifecycle type here (the injecting binary sits below product_surface and
     // cannot name `LifecycleExtensionOnboarding`).
     let onboarding_override = bundle.onboarding.as_ref().map(|copy| {
         onboarding_message(
@@ -668,16 +668,16 @@ fn bundled_extension_package(
     label: &str,
     manifest_toml: &str,
     assets: Vec<AvailableExtensionAsset>,
-) -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+) -> Result<AvailableExtensionPackage, ProductSurfaceFailure> {
     let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, id)?;
     let root = VirtualPath::new(format!("/system/extensions/{id}")).map_err(map_binding_error)?;
     let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-        ProductWorkflowError::InvalidBindingRequest {
+        ProductSurfaceFailure::InvalidBindingRequest {
             reason: format!("host port catalog rejected bundled {label} extension: {error}"),
         }
     })?;
     let contracts = product_extension_host_api_contract_registry().map_err(|error| {
-        ProductWorkflowError::InvalidBindingRequest {
+        ProductSurfaceFailure::InvalidBindingRequest {
             reason: format!("host API contracts rejected bundled {label} extension: {error}"),
         }
     })?;
@@ -688,19 +688,19 @@ fn bundled_extension_package(
         None,
         &contracts,
     )
-    .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+    .map_err(|error| ProductSurfaceFailure::InvalidBindingRequest {
         reason: format!("bundled {label} extension manifest is invalid: {error}"),
     })?;
     let surface_kinds = surface_kinds_from_manifest_record(&record, label)?;
     let channel_directions = channel_directions_from_manifest_record(&record, label)?;
     let channel_presentation = channel_presentation_from_manifest_record(&record);
     let manifest = record.manifest().clone().try_into().map_err(|error| {
-        ProductWorkflowError::InvalidBindingRequest {
+        ProductSurfaceFailure::InvalidBindingRequest {
             reason: format!("bundled {label} extension manifest is invalid: {error}"),
         }
     })?;
     let package = ExtensionPackage::from_manifest_toml(manifest, root, record.raw_toml()).map_err(
-        |error| ProductWorkflowError::InvalidBindingRequest {
+        |error| ProductSurfaceFailure::InvalidBindingRequest {
             reason: format!("bundled {label} extension package is invalid: {error}"),
         },
     )?;
@@ -730,11 +730,11 @@ fn validate_bundled_package_assets(
     label: &str,
     package: &ExtensionPackage,
     assets: &[AvailableExtensionAsset],
-) -> Result<(), ProductWorkflowError> {
+) -> Result<(), ProductSurfaceFailure> {
     let has_asset = |path: &str| assets.iter().any(|asset| asset.path == path);
     let dynamic_schema_prefix = format!("schemas/{}/dynamic/", package.id.as_str());
     let is_inline_dynamic_schema_ref = |field: &str, path: &str| {
-        crate::extension_host::mcp_discovery::is_hosted_http_mcp_package(package)
+        ironclaw_extension_host::is_hosted_http_mcp_package(package)
             && matches!(field, "input_schema_ref" | "output_schema_ref")
             && path
                 .strip_prefix(&dynamic_schema_prefix)
@@ -744,7 +744,7 @@ fn validate_bundled_package_assets(
         if has_asset(path) {
             Ok(())
         } else {
-            Err(ProductWorkflowError::InvalidBindingRequest {
+            Err(ProductSurfaceFailure::InvalidBindingRequest {
                 reason: format!(
                     "bundled {label} extension {field} references missing package asset {path}"
                 ),
@@ -792,7 +792,7 @@ fn validate_bundled_package_assets(
 pub(crate) fn surface_kinds_from_manifest_record(
     record: &ExtensionManifestRecord,
     _label: &str,
-) -> Result<Vec<CapabilitySurfaceKind>, ProductWorkflowError> {
+) -> Result<Vec<CapabilitySurfaceKind>, ProductSurfaceFailure> {
     // Deduplicated, order-stable projection of the manifest's declared
     // surfaces (tool, channel, auth, ...) — the manifest is the single source
     // of truth; no section re-parse.
@@ -813,7 +813,7 @@ pub(crate) fn surface_kinds_from_manifest_record(
 fn channel_directions_from_manifest_record(
     record: &ExtensionManifestRecord,
     label: &str,
-) -> Result<Option<LifecycleChannelDirections>, ProductWorkflowError> {
+) -> Result<Option<LifecycleChannelDirections>, ProductSurfaceFailure> {
     // Manifest v3: the resolved channel descriptor declares its directions.
     if let Some(channel) = &record.resolved().channel {
         return Ok(Some(LifecycleChannelDirections {
@@ -824,7 +824,7 @@ fn channel_directions_from_manifest_record(
     // Manifest v2: derive from the product-adapter section capability flags.
     let sections =
         ironclaw_product::adapter_registry::product_adapter_sections(record).map_err(|error| {
-            ProductWorkflowError::InvalidBindingRequest {
+            ProductSurfaceFailure::InvalidBindingRequest {
                 reason: format!("{label} ProductAdapter manifest projection is invalid: {error}"),
             }
         })?;
@@ -894,7 +894,7 @@ async fn load_filesystem_packages<F>(
     root: &VirtualPath,
     stamp: ManifestSource,
     reserved_bundled_ids: &[String],
-) -> Result<Vec<AvailableExtensionPackage>, ProductWorkflowError>
+) -> Result<Vec<AvailableExtensionPackage>, ProductSurfaceFailure>
 where
     F: RootFilesystem + ?Sized,
 {
@@ -904,7 +904,7 @@ where
             return Ok(Vec::new());
         }
         Err(error) => {
-            return Err(ProductWorkflowError::Transient {
+            return Err(ProductSurfaceFailure::Transient {
                 reason: format!("failed to list available extensions: {error}"),
             });
         }
@@ -912,12 +912,12 @@ where
     entries.sort_by(|left, right| left.name.cmp(&right.name));
 
     let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-        ProductWorkflowError::InvalidBindingRequest {
+        ProductSurfaceFailure::InvalidBindingRequest {
             reason: format!("host port catalog rejected available extension: {error}"),
         }
     })?;
     let contracts = product_extension_host_api_contract_registry().map_err(|error| {
-        ProductWorkflowError::InvalidBindingRequest {
+        ProductSurfaceFailure::InvalidBindingRequest {
             reason: format!("host API contract registry rejected available extension: {error}"),
         }
     })?;
@@ -943,7 +943,7 @@ where
             // merge supersedes first-party ids afterwards. Infrastructure
             // errors (`Transient`) stay fail-closed so a flaky volume does not
             // silently drop installed extensions.
-            Err(ProductWorkflowError::InvalidBindingRequest { reason }) => {
+            Err(ProductSurfaceFailure::InvalidBindingRequest { reason }) => {
                 tracing::warn!(
                     extension_id = %extension_id,
                     %reason,
@@ -962,7 +962,7 @@ async fn load_filesystem_package<F>(
     host_ports: &HostPortCatalog,
     contracts: &HostApiContractRegistry,
     stamp: ManifestSource,
-) -> Result<Option<AvailableExtensionPackage>, ProductWorkflowError>
+) -> Result<Option<AvailableExtensionPackage>, ProductSurfaceFailure>
 where
     F: RootFilesystem + ?Sized,
 {
@@ -977,13 +977,13 @@ where
             return Ok(None);
         }
         Err(error) => {
-            return Err(ProductWorkflowError::Transient {
+            return Err(ProductSurfaceFailure::Transient {
                 reason: format!("failed to read available extension manifest: {error}"),
             });
         }
     };
     let manifest_toml = String::from_utf8(manifest_bytes).map_err(|error| {
-        ProductWorkflowError::InvalidBindingRequest {
+        ProductSurfaceFailure::InvalidBindingRequest {
             reason: format!("available extension manifest is not UTF-8: {error}"),
         }
     })?;
@@ -1055,8 +1055,8 @@ pub(crate) fn reserved_host_bundled_extension_id(
         || extension_id.as_str() == NEARAI_EXTENSION_ID
 }
 
-pub(crate) fn map_binding_error(error: impl std::fmt::Display) -> ProductWorkflowError {
-    ProductWorkflowError::InvalidBindingRequest {
+pub(crate) fn map_binding_error(error: impl std::fmt::Display) -> ProductSurfaceFailure {
+    ProductSurfaceFailure::InvalidBindingRequest {
         reason: error.to_string(),
     }
 }
@@ -1193,7 +1193,7 @@ mod tests {
             // prefix ship no package asset; every other ref remains static.
             let dynamic_schema_prefix = format!("schemas/{extension_id}/dynamic/");
             let is_dynamic_schema_ref = |schema_ref: &str| {
-                crate::extension_host::mcp_discovery::is_hosted_http_mcp_package(&package.package)
+                ironclaw_extension_host::is_hosted_http_mcp_package(&package.package)
                     && schema_ref
                         .strip_prefix(&dynamic_schema_prefix)
                         .is_some_and(|suffix| !suffix.is_empty())
@@ -1263,7 +1263,7 @@ input_schema_ref = "schemas/missing-assets/run.input.v1.json"
 
         let error = bundled_extension_package("missing-assets", "Missing Assets", MANIFEST, assets)
             .expect_err("a dangling static capability reference must fail catalog construction");
-        let ProductWorkflowError::InvalidBindingRequest { reason } = error else {
+        let ProductSurfaceFailure::InvalidBindingRequest { reason } = error else {
             panic!("expected invalid binding request");
         };
         assert!(
@@ -1286,7 +1286,7 @@ input_schema_ref = "schemas/missing-assets/run.input.v1.json"
             dynamic_assets,
         )
         .expect_err("a WASM schema cannot claim the hosted-MCP dynamic exemption");
-        let ProductWorkflowError::InvalidBindingRequest { reason } = error else {
+        let ProductSurfaceFailure::InvalidBindingRequest { reason } = error else {
             panic!("expected invalid binding request");
         };
         assert!(
@@ -1329,7 +1329,7 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
 
         let error = bundled_extension_package("static-mcp", "Static MCP", MANIFEST, assets)
             .expect_err("a non-hosted MCP package must carry dynamic-shaped schema refs");
-        let ProductWorkflowError::InvalidBindingRequest { reason } = error else {
+        let ProductSurfaceFailure::InvalidBindingRequest { reason } = error else {
             panic!("expected invalid binding request");
         };
         assert!(
@@ -2208,7 +2208,7 @@ handle = "web_token"
             .await
             .expect_err("second write fails");
 
-        assert!(matches!(error, ProductWorkflowError::Transient { .. }));
+        assert!(matches!(error, ProductSurfaceFailure::Transient { .. }));
         let writes = fs
             .recorded_paths(FilesystemOperation::WriteFile)
             .iter()

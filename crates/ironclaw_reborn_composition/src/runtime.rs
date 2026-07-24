@@ -580,7 +580,7 @@ pub struct RebornRuntime {
     pub(crate) channel_identity_store:
         Arc<crate::extension_host::channel_identity_store::FilesystemChannelIdentityStore>,
     pub(crate) channel_dm_target_store:
-        Arc<crate::extension_host::channel_dm_targets::FilesystemChannelDmTargetStore>,
+        Arc<ironclaw_extension_host::FilesystemChannelDmTargetStore>,
     pub(crate) extension_ingress:
         Option<crate::extension_host::extension_ingress::ExtensionIngressParts>,
     #[cfg(any(test, feature = "test-support"))]
@@ -991,7 +991,7 @@ impl SnapshotApprovalTurnRunLocator {
 
     async fn snapshot(
         &self,
-    ) -> Result<TurnPersistenceSnapshot, ironclaw_product::ProductWorkflowError> {
+    ) -> Result<TurnPersistenceSnapshot, ironclaw_product::ProductSurfaceFailure> {
         self.turn_state.turn_run_snapshot().await.map_err(|error| {
             tracing::debug!(
                 %error,
@@ -1132,7 +1132,7 @@ impl ApprovalTurnRunLocator for SnapshotApprovalTurnRunLocator {
     async fn blocked_approval_runs(
         &self,
         scope: &ApprovalInteractionScope,
-    ) -> Result<Vec<ApprovalBlockedTurnRun>, ironclaw_product::ProductWorkflowError> {
+    ) -> Result<Vec<ApprovalBlockedTurnRun>, ironclaw_product::ProductSurfaceFailure> {
         let turn_scope = TurnScope::new(
             scope.tenant_id.clone(),
             scope.agent_id.clone(),
@@ -1165,7 +1165,7 @@ impl ApprovalTurnRunLocator for SnapshotApprovalTurnRunLocator {
         &self,
         scope: &ApprovalInteractionScope,
         gate_ref: &ironclaw_turns::GateRef,
-    ) -> Result<Option<TurnRunId>, ironclaw_product::ProductWorkflowError> {
+    ) -> Result<Option<TurnRunId>, ironclaw_product::ProductSurfaceFailure> {
         let turn_scope = TurnScope::new(
             scope.tenant_id.clone(),
             scope.agent_id.clone(),
@@ -1227,8 +1227,8 @@ fn snapshot_run_actor_matches(
     })
 }
 
-fn approval_turn_locator_unavailable() -> ironclaw_product::ProductWorkflowError {
-    ironclaw_product::ProductWorkflowError::Transient {
+fn approval_turn_locator_unavailable() -> ironclaw_product::ProductSurfaceFailure {
+    ironclaw_product::ProductSurfaceFailure::Transient {
         reason: "approval turn-run locator unavailable".to_string(),
     }
 }
@@ -1625,7 +1625,7 @@ impl RebornRuntime {
         &self,
         package: &ironclaw_extensions::ExtensionPackage,
         resolved: Option<&ironclaw_extensions::ResolvedExtensionManifest>,
-    ) -> Option<Result<(), ironclaw_product::ProductWorkflowError>> {
+    ) -> Option<Result<(), ironclaw_product::ProductSurfaceFailure>> {
         Some(
             self.extension_management
                 .publish_bundled_package_for_test(package, resolved)
@@ -1640,7 +1640,7 @@ impl RebornRuntime {
     ) -> Option<
         Result<
             crate::factory::ActiveExtensionAuthorityForTest,
-            ironclaw_product::ProductWorkflowError,
+            ironclaw_product::ProductSurfaceFailure,
         >,
     > {
         Some(

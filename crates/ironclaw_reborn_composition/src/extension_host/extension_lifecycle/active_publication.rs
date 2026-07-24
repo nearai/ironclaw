@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_host_api::{EffectKind, PackageSource};
-use ironclaw_product::ProductWorkflowError;
+use ironclaw_product::ProductSurfaceFailure;
 use ironclaw_trust::{
     AdminEntry, HostTrustAssignment, HostTrustPolicy, InvalidationBus, TrustError,
 };
@@ -33,7 +33,7 @@ impl ActiveExtensionPublisher {
         self.active_registry.snapshot()
     }
 
-    pub(crate) fn publish(&self, package: &ExtensionPackage) -> Result<(), ProductWorkflowError> {
+    pub(crate) fn publish(&self, package: &ExtensionPackage) -> Result<(), ProductSurfaceFailure> {
         self.upsert_trust_policy(package)?;
         if let Err(error) = self
             .active_registry
@@ -52,13 +52,16 @@ impl ActiveExtensionPublisher {
         Ok(())
     }
 
-    pub(crate) fn unpublish(&self, package: &ExtensionPackage) -> Result<(), ProductWorkflowError> {
+    pub(crate) fn unpublish(
+        &self,
+        package: &ExtensionPackage,
+    ) -> Result<(), ProductSurfaceFailure> {
         self.remove_trust_policy(package)?;
         self.active_registry.remove(&package.id);
         Ok(())
     }
 
-    fn upsert_trust_policy(&self, package: &ExtensionPackage) -> Result<(), ProductWorkflowError> {
+    fn upsert_trust_policy(&self, package: &ExtensionPackage) -> Result<(), ProductSurfaceFailure> {
         let input = extension_trust_policy_input(package)?;
         let manifest_path = extension_local_manifest_path(package);
         let entry = AdminEntry::for_local_manifest(
@@ -83,7 +86,7 @@ impl ActiveExtensionPublisher {
             .map_err(map_trust_policy_error)
     }
 
-    fn remove_trust_policy(&self, package: &ExtensionPackage) -> Result<(), ProductWorkflowError> {
+    fn remove_trust_policy(&self, package: &ExtensionPackage) -> Result<(), ProductSurfaceFailure> {
         let input = extension_trust_policy_input(package)?;
         let package_id = input.identity.package_id.clone();
         let source = extension_local_manifest_source(package);
@@ -105,7 +108,7 @@ impl ActiveExtensionPublisher {
 
 pub(crate) fn extension_trust_policy_input(
     package: &ExtensionPackage,
-) -> Result<ironclaw_trust::TrustPolicyInput, ProductWorkflowError> {
+) -> Result<ironclaw_trust::TrustPolicyInput, ProductSurfaceFailure> {
     package
         .trust_policy_input(
             extension_local_manifest_source(package),
@@ -140,8 +143,8 @@ fn extension_allowed_effects(package: &ExtensionPackage) -> Vec<EffectKind> {
     effects
 }
 
-fn map_trust_policy_error(error: TrustError) -> ProductWorkflowError {
-    ProductWorkflowError::InvalidBindingRequest {
+fn map_trust_policy_error(error: TrustError) -> ProductSurfaceFailure {
+    ProductSurfaceFailure::InvalidBindingRequest {
         reason: format!("extension trust policy update failed: {error}"),
     }
 }

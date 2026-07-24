@@ -58,7 +58,7 @@ use ironclaw_product::{
     ConversationBindingService, DeliveryCoordinator, DeliveryRetryPolicy,
     ListPendingApprovalsRequest, ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
     ListPendingAuthInteractionsResponse, NoReplyContext, PendingApprovalInteractionView,
-    ProductWorkflowError, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ProductSurfaceFailure, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, ResolveBindingRequest,
     ResolvedBinding, RunDeliveryServices, RunDeliverySettings, TriggeredRunDeliveryDriver,
     TriggeredRunDeliveryRequest,
@@ -90,9 +90,6 @@ use super::{
     FilesystemChannelWorkflowStateFactory, GenericChannelHostAssembly, GenericChannelHostDeps,
 };
 use crate::extension_host::channel_config::{ChannelConfigReactivation, ChannelConfigService};
-use crate::extension_host::channel_delivery::{
-    IngressReplyContextSource, SnapshotChannelDeliveryResolver,
-};
 use crate::extension_host::extension_ingress::{
     ExtensionIngressParts, InboundPayloadClassifier, PostAdmissionObserver,
     build_extension_ingress, extension_ingress_route_mount,
@@ -100,6 +97,7 @@ use crate::extension_host::extension_ingress::{
 use crate::extension_host::run_delivery_ports::ProductAuthBlockedAuthPromptSource;
 use crate::webui::route_mounts::PublicRouteMount;
 use crate::{RebornUserIdentityLookup, RebornUserIdentityLookupError};
+use ironclaw_extension_host::{IngressReplyContextSource, SnapshotChannelDeliveryResolver};
 use ironclaw_product::AuthChallengeProvider;
 use ironclaw_product::BlockedAuthPromptSource;
 
@@ -381,13 +379,11 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
     let ingress = build_extension_ingress(
         host.snapshot_watch(),
         Arc::new(ironclaw_extension_host::DeploymentChannelRegistry::default()),
-        Arc::new(
-            crate::extension_host::reply_contexts::FilesystemReplyContextStore::new(
-                Arc::new(InMemoryBackend::new()),
-                TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
-                UserId::new(USER).expect("user"),       // safety: static test user id is valid.
-            ),
-        ),
+        Arc::new(ironclaw_extension_host::FilesystemReplyContextStore::new(
+            Arc::new(InMemoryBackend::new()),
+            TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
+            UserId::new(USER).expect("user"),       // safety: static test user id is valid.
+        )),
     );
     let delivery_coordinator = Arc::new(DeliveryCoordinator::new(
         Arc::clone(&outbound_store),
@@ -572,7 +568,7 @@ impl ChannelConfigReactivation for NoopChannelConfigReactivation {
     async fn reactivate_if_active(
         &self,
         _extension_id: &ExtensionId,
-    ) -> Result<(), ProductWorkflowError> {
+    ) -> Result<(), crate::extension_host::channel_config::ChannelConfigReactivationError> {
         Ok(())
     }
 }
@@ -681,7 +677,7 @@ impl ApprovalInteractionService for ForeignScopeApprovalService {
     async fn list_pending(
         &self,
         _request: ListPendingApprovalsRequest,
-    ) -> Result<ListPendingApprovalsResponse, ProductWorkflowError> {
+    ) -> Result<ListPendingApprovalsResponse, ProductSurfaceFailure> {
         Ok(ListPendingApprovalsResponse {
             approvals: Vec::new(),
         })
@@ -690,7 +686,7 @@ impl ApprovalInteractionService for ForeignScopeApprovalService {
     async fn resolve(
         &self,
         request: ResolveApprovalInteractionRequest,
-    ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
+    ) -> Result<ResolveApprovalInteractionResponse, ProductSurfaceFailure> {
         self.inner.resolve(request).await
     }
 }
@@ -826,8 +822,8 @@ impl ConversationBindingService for NoopTriggeredBindingService {
     async fn resolve_binding(
         &self,
         _request: ResolveBindingRequest,
-    ) -> Result<ResolvedBinding, ProductWorkflowError> {
-        Err(ProductWorkflowError::BindingResolutionFailed {
+    ) -> Result<ResolvedBinding, ProductSurfaceFailure> {
+        Err(ProductSurfaceFailure::BindingResolutionFailed {
             reason: "NoopTriggeredBindingService is not used in triggered delivery".to_string(),
         })
     }
@@ -835,8 +831,8 @@ impl ConversationBindingService for NoopTriggeredBindingService {
     async fn lookup_binding(
         &self,
         _request: ResolveBindingRequest,
-    ) -> Result<ResolvedBinding, ProductWorkflowError> {
-        Err(ProductWorkflowError::BindingResolutionFailed {
+    ) -> Result<ResolvedBinding, ProductSurfaceFailure> {
+        Err(ProductSurfaceFailure::BindingResolutionFailed {
             reason: "NoopTriggeredBindingService is not used in triggered delivery".to_string(),
         })
     }
@@ -2540,7 +2536,7 @@ impl RecordingTurnCoordinator {
             .clone()
     }
 
-    async fn cancel_blocked_run(&self) -> Result<TurnRunId, ProductWorkflowError> {
+    async fn cancel_blocked_run(&self) -> Result<TurnRunId, ProductSurfaceFailure> {
         let mut state = self
             .state
             .lock()
@@ -2548,11 +2544,11 @@ impl RecordingTurnCoordinator {
         let run_id =
             state
                 .blocked_run_id
-                .ok_or_else(|| ProductWorkflowError::TurnResumeRejected {
+                .ok_or_else(|| ProductSurfaceFailure::TurnResumeRejected {
                     reason: "missing blocked run".into(),
                 })?;
         let run = state.runs.get_mut(&run_id).ok_or_else(|| {
-            ProductWorkflowError::TurnResumeRejected {
+            ProductSurfaceFailure::TurnResumeRejected {
                 reason: "missing blocked run state".into(),
             }
         })?;
@@ -2568,7 +2564,7 @@ impl RecordingTurnCoordinator {
         actor: TurnActor,
         run_id: TurnRunId,
         text: &str,
-    ) -> Result<(), ProductWorkflowError> {
+    ) -> Result<(), ProductSurfaceFailure> {
         append_final_assistant_message(&self.threads, &scope, run_id, text).await?;
         let mut state = self
             .state
@@ -2604,10 +2600,10 @@ impl RecordingTurnCoordinator {
         Ok(())
     }
 
-    async fn complete_active_run(&self, text: &str) -> Result<(), ProductWorkflowError> {
+    async fn complete_active_run(&self, text: &str) -> Result<(), ProductSurfaceFailure> {
         let run_id =
             self.active_run_id()
-                .ok_or_else(|| ProductWorkflowError::TurnResumeRejected {
+                .ok_or_else(|| ProductSurfaceFailure::TurnResumeRejected {
                     reason: "missing active run".into(),
                 })?;
         self.complete_existing_run(run_id, text).await
@@ -2617,21 +2613,21 @@ impl RecordingTurnCoordinator {
         &self,
         run_id: TurnRunId,
         text: &str,
-    ) -> Result<(), ProductWorkflowError> {
+    ) -> Result<(), ProductSurfaceFailure> {
         let (scope, actor) = {
             let state = self
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let run = state.runs.get(&run_id).ok_or_else(|| {
-                ProductWorkflowError::TurnResumeRejected {
+                ProductSurfaceFailure::TurnResumeRejected {
                     reason: "missing run state".into(),
                 }
             })?;
             let actor =
                 run.actor
                     .clone()
-                    .ok_or_else(|| ProductWorkflowError::TurnResumeRejected {
+                    .ok_or_else(|| ProductSurfaceFailure::TurnResumeRejected {
                         reason: "missing run actor".into(),
                     })?;
             (run.scope.clone(), actor)
@@ -2639,7 +2635,7 @@ impl RecordingTurnCoordinator {
         self.complete_run(scope, actor, run_id, text).await
     }
 
-    async fn resume_blocked_run_to_running(&self) -> Result<(), ProductWorkflowError> {
+    async fn resume_blocked_run_to_running(&self) -> Result<(), ProductSurfaceFailure> {
         let mut state = self
             .state
             .lock()
@@ -2647,11 +2643,11 @@ impl RecordingTurnCoordinator {
         let run_id =
             state
                 .blocked_run_id
-                .ok_or_else(|| ProductWorkflowError::TurnResumeRejected {
+                .ok_or_else(|| ProductSurfaceFailure::TurnResumeRejected {
                     reason: "missing blocked run".into(),
                 })?;
         let run = state.runs.get_mut(&run_id).ok_or_else(|| {
-            ProductWorkflowError::TurnResumeRejected {
+            ProductSurfaceFailure::TurnResumeRejected {
                 reason: "missing blocked run state".into(),
             }
         })?;
@@ -2670,7 +2666,7 @@ impl RecordingTurnCoordinator {
     /// `Running` with no blocked marker, and posting the "Ironclaw is thinking..."
     /// working indicator — which would produce a spurious 4th message and make the
     /// `messages.len() == 3` assertion flaky.
-    async fn complete_blocked_run(&self, text: &str) -> Result<(), ProductWorkflowError> {
+    async fn complete_blocked_run(&self, text: &str) -> Result<(), ProductSurfaceFailure> {
         // Append the final assistant message first (does not touch `state`).
         let (scope, actor, run_id) = {
             let state = self
@@ -2680,18 +2676,18 @@ impl RecordingTurnCoordinator {
             let run_id =
                 state
                     .blocked_run_id
-                    .ok_or_else(|| ProductWorkflowError::TurnResumeRejected {
+                    .ok_or_else(|| ProductSurfaceFailure::TurnResumeRejected {
                         reason: "missing blocked run".into(),
                     })?;
             let run = state.runs.get(&run_id).ok_or_else(|| {
-                ProductWorkflowError::TurnResumeRejected {
+                ProductSurfaceFailure::TurnResumeRejected {
                     reason: "missing blocked run state".into(),
                 }
             })?;
             let actor =
                 run.actor
                     .clone()
-                    .ok_or_else(|| ProductWorkflowError::TurnResumeRejected {
+                    .ok_or_else(|| ProductSurfaceFailure::TurnResumeRejected {
                         reason: "missing run actor".into(),
                     })?;
             (run.scope.clone(), actor, run_id)
@@ -2882,13 +2878,13 @@ async fn append_final_assistant_message(
     scope: &TurnScope,
     run_id: TurnRunId,
     text: &str,
-) -> Result<(), ProductWorkflowError> {
+) -> Result<(), ProductSurfaceFailure> {
     let thread_scope = ThreadScope {
         tenant_id: scope.tenant_id.clone(),
         agent_id: scope
             .agent_id
             .clone()
-            .ok_or_else(|| ProductWorkflowError::Transient {
+            .ok_or_else(|| ProductSurfaceFailure::Transient {
                 reason: "missing agent id in fake turn scope".into(),
             })?,
         project_id: scope.project_id.clone(),
@@ -2905,7 +2901,7 @@ async fn append_final_assistant_message(
             content: MessageContent::text(text),
         })
         .await
-        .map_err(|error| ProductWorkflowError::Transient {
+        .map_err(|error| ProductSurfaceFailure::Transient {
             reason: error.to_string(),
         })?;
     threads
@@ -2916,7 +2912,7 @@ async fn append_final_assistant_message(
             MessageContent::text(text),
         )
         .await
-        .map_err(|error| ProductWorkflowError::Transient {
+        .map_err(|error| ProductSurfaceFailure::Transient {
             reason: error.to_string(),
         })?;
     Ok(())
@@ -2985,7 +2981,7 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
     async fn list_pending(
         &self,
         request: ListPendingApprovalsRequest,
-    ) -> Result<ListPendingApprovalsResponse, ProductWorkflowError> {
+    ) -> Result<ListPendingApprovalsResponse, ProductSurfaceFailure> {
         let Some(run_id) = self.coordinator.blocked_run_id() else {
             return Ok(ListPendingApprovalsResponse {
                 approvals: Vec::new(),
@@ -3015,7 +3011,7 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
                 scope: ApprovalInteractionScope::from_turn(&request.scope, &request.actor),
                 run_id,
                 gate_ref: GateRef::new(GATE).map_err(|err| {
-                    ProductWorkflowError::TurnSubmissionRejected {
+                    ProductSurfaceFailure::TurnSubmissionRejected {
                         reason: err.to_string(),
                     }
                 })?,
@@ -3029,13 +3025,13 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
     async fn resolve(
         &self,
         request: ResolveApprovalInteractionRequest,
-    ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
+    ) -> Result<ResolveApprovalInteractionResponse, ProductSurfaceFailure> {
         self.requests
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(request.clone());
         let run_id = self.coordinator.blocked_run_id().ok_or_else(|| {
-            ProductWorkflowError::TurnResumeRejected {
+            ProductSurfaceFailure::TurnResumeRejected {
                 reason: "missing blocked run".into(),
             }
         })?;
@@ -3050,7 +3046,7 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let run = state.runs.get_mut(&run_id).ok_or_else(|| {
-                ProductWorkflowError::TurnResumeRejected {
+                ProductSurfaceFailure::TurnResumeRejected {
                     reason: "missing blocked run state".into(),
                 }
             })?;
@@ -3111,7 +3107,7 @@ impl AuthInteractionService for RecordingAuthInteractionService {
     async fn list_pending(
         &self,
         _request: ListPendingAuthInteractionsRequest,
-    ) -> Result<ListPendingAuthInteractionsResponse, ProductWorkflowError> {
+    ) -> Result<ListPendingAuthInteractionsResponse, ProductSurfaceFailure> {
         Ok(ListPendingAuthInteractionsResponse {
             auth_interactions: Vec::new(),
         })
@@ -3120,7 +3116,7 @@ impl AuthInteractionService for RecordingAuthInteractionService {
     async fn resolve(
         &self,
         request: ResolveAuthInteractionRequest,
-    ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
+    ) -> Result<ResolveAuthInteractionResponse, ProductSurfaceFailure> {
         self.requests
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -3913,15 +3909,13 @@ async fn slack_approval_then_auth_resume_completes_without_second_approval() {
 
 // ─── Generic outbound-delivery targets + generic triggered hook (P6 c-rest) ─
 
-use crate::extension_host::channel_dm_targets::{
-    FilesystemChannelDmTargetStore, dm_target_payload,
-};
 use crate::extension_host::channel_outbound_targets::{
     ChannelOutboundTargetIdentity, GenericChannelOutboundTargetDeps,
     GenericChannelOutboundTargetProvider,
 };
 use crate::extension_host::channel_triggered_delivery::GenericTriggeredRunDeliveryHook;
 use crate::outbound::OutboundDeliveryTargetProvider;
+use ironclaw_extension_host::{FilesystemChannelDmTargetStore, dm_target_payload};
 use ironclaw_outbound::{OutboundDeliveryTargetScope, TriggeredRunDeliveryStore};
 use ironclaw_product::PreferenceTargetCodec as _;
 

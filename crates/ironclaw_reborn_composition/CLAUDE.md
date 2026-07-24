@@ -67,7 +67,7 @@
 The Reborn-side host composition for the WebChat v2 HTTP gateway lives
 in this crate. Implements Path A of
 `docs/reborn/how-to-port-channel-to-reborn.md` (native host-owned
-surface entering `ProductWorkflow` directly) without sharing any
+surface entering `ProductSurface` directly) without sharing any
 middleware with v1's `src/channels/web/`.
 
 ### Surface

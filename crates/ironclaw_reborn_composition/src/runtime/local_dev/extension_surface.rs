@@ -10,7 +10,7 @@ use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, Trust
 use crate::extension_host::extension_lifecycle::{
     ActiveExtensionCapability, RebornLocalExtensionManagementPort,
 };
-use ironclaw_product::ProductWorkflowError;
+use ironclaw_product::ProductSurfaceFailure;
 
 #[derive(Clone, Default)]
 pub(in crate::runtime) struct ExtensionCapabilitySurfaceSource {
@@ -40,7 +40,7 @@ impl ExtensionCapabilitySurfaceSource {
 
     pub(in crate::runtime) async fn snapshot(
         &self,
-    ) -> Result<ExtensionCapabilitySurface, ProductWorkflowError> {
+    ) -> Result<ExtensionCapabilitySurface, ProductSurfaceFailure> {
         #[cfg(test)]
         if let Some(surface) = &self.static_surface {
             return Ok(surface.clone());
@@ -69,7 +69,7 @@ impl ExtensionCapabilitySurface {
 
     pub(super) async fn from_extension_management(
         extension_management: &RebornLocalExtensionManagementPort,
-    ) -> Result<Self, ProductWorkflowError> {
+    ) -> Result<Self, ProductSurfaceFailure> {
         Ok(Self {
             active_capabilities: extension_management
                 .active_model_visible_capabilities()

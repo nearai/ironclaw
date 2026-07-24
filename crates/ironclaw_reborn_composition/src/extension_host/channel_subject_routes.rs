@@ -30,7 +30,7 @@ use ironclaw_host_api::{ExtensionId, RecipeSecretField, TenantId, UserId};
 use ironclaw_product::{AdapterInstallationId, ProductAdapterId};
 use ironclaw_product::{
     ProductConversationSubjectRouteResolutionRequest, ProductConversationSubjectRouteResolver,
-    ProductWorkflowError,
+    ProductSurfaceFailure,
 };
 use sha2::{Digest, Sha256};
 
@@ -142,11 +142,11 @@ impl ChannelConfigSubjectRouteResolver {
         }
     }
 
-    async fn config_value(&self, handle: &str) -> Result<Option<String>, ProductWorkflowError> {
+    async fn config_value(&self, handle: &str) -> Result<Option<String>, ProductSurfaceFailure> {
         self.channel_config
             .non_secret_value(&self.extension_id, handle)
             .await
-            .map_err(|error| ProductWorkflowError::Transient {
+            .map_err(|error| ProductSurfaceFailure::Transient {
                 reason: format!("channel admission config unavailable: {error}"),
             })
     }
@@ -167,7 +167,7 @@ impl ProductConversationSubjectRouteResolver for ChannelConfigSubjectRouteResolv
     async fn resolve_product_conversation_subject_route(
         &self,
         request: ProductConversationSubjectRouteResolutionRequest,
-    ) -> Result<Option<UserId>, ProductWorkflowError> {
+    ) -> Result<Option<UserId>, ProductSurfaceFailure> {
         if request.adapter_id != self.adapter_id || request.installation_id != self.installation_id
         {
             return Ok(None);
@@ -180,7 +180,7 @@ impl ProductConversationSubjectRouteResolver for ChannelConfigSubjectRouteResolv
                 Ok(routes) => {
                     if let Some(subject) = routes.get(conversation_id) {
                         return UserId::new(subject.clone()).map(Some).map_err(|error| {
-                            ProductWorkflowError::InvalidBindingRequest {
+                            ProductSurfaceFailure::InvalidBindingRequest {
                                 reason: format!("configured subject route is invalid: {error}"),
                             }
                         });
@@ -213,7 +213,7 @@ impl ProductConversationSubjectRouteResolver for ChannelConfigSubjectRouteResolv
                             conversation_id,
                         )
                         .map(Some)
-                        .map_err(|reason| ProductWorkflowError::InvalidBindingRequest { reason });
+                        .map_err(|reason| ProductSurfaceFailure::InvalidBindingRequest { reason });
                     }
                 }
                 Err(error) => {
@@ -303,7 +303,8 @@ supports_threads = false
         async fn reactivate_if_active(
             &self,
             _extension_id: &ExtensionId,
-        ) -> Result<(), ProductWorkflowError> {
+        ) -> Result<(), crate::extension_host::channel_config::ChannelConfigReactivationError>
+        {
             Ok(())
         }
     }

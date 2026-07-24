@@ -9,7 +9,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ironclaw_extensions::ResolvedExtensionManifest;
-use ironclaw_host_api::{CapabilityId, ToolAdapter};
+use ironclaw_host_api::{
+    CapabilityDescriptor, CapabilityId, Extension, ExtensionContract, ExtensionInstanceId,
+    ExtensionRuntimeIdentity, RequestedTrustClass, ToolAdapter, TrustClass,
+};
 use ironclaw_product::ChannelAdapter;
 
 /// One activated extension's bound behavior plus its resolved contract.
@@ -17,8 +20,88 @@ pub struct ActiveExtension {
     pub extension_id: String,
     pub installation_id: String,
     pub resolved: Arc<ResolvedExtensionManifest>,
+    pub extension: Arc<dyn Extension>,
     pub tools: Option<Arc<dyn ToolAdapter>>,
     pub channel: Option<Arc<dyn ChannelAdapter>>,
+}
+
+/// Default live-extension wrapper published by the active snapshot.
+pub struct BoundExtension {
+    contract: ExtensionContract,
+    tools: Option<Arc<dyn ToolAdapter>>,
+    channel: Option<Arc<dyn ChannelAdapter>>,
+}
+
+impl BoundExtension {
+    pub fn new(
+        resolved: &ResolvedExtensionManifest,
+        installation_id: &str,
+        tools: Option<Arc<dyn ToolAdapter>>,
+        channel: Option<Arc<dyn ChannelAdapter>>,
+    ) -> Result<Self, ironclaw_host_api::HostApiError> {
+        Ok(Self {
+            contract: ExtensionContract {
+                identity: ExtensionRuntimeIdentity {
+                    extension_id: resolved.id.clone(),
+                    instance_id: ExtensionInstanceId::new(installation_id.to_string())?,
+                },
+                display_name: resolved.name.clone(),
+                capabilities: capability_descriptors(resolved),
+                channel: resolved.channel.clone(),
+            },
+            tools,
+            channel,
+        })
+    }
+}
+
+fn capability_descriptors(resolved: &ResolvedExtensionManifest) -> Vec<CapabilityDescriptor> {
+    let trust_ceiling = requested_trust_to_descriptor_trust(resolved.requested_trust);
+    let runtime = resolved.runtime.kind();
+    resolved
+        .tools
+        .iter()
+        .map(|tool| CapabilityDescriptor {
+            id: tool.id.clone(),
+            provider: resolved.id.clone(),
+            runtime,
+            trust_ceiling,
+            description: tool.description.clone(),
+            parameters_schema: serde_json::json!({
+                "$ref": tool.input_schema_ref.as_str(),
+            }),
+            effects: tool.effects.clone(),
+            default_permission: tool.default_permission,
+            runtime_credentials: tool.runtime_credentials.clone(),
+            network_targets: tool.network_targets.clone(),
+            max_egress_bytes: tool.max_egress_bytes,
+            resource_profile: tool.resource_profile.clone(),
+            origin_gate_matrix: tool.origin_gate_matrix.clone(),
+        })
+        .collect()
+}
+
+fn requested_trust_to_descriptor_trust(requested: RequestedTrustClass) -> TrustClass {
+    match requested {
+        RequestedTrustClass::ThirdParty => TrustClass::UserTrusted,
+        RequestedTrustClass::Untrusted
+        | RequestedTrustClass::FirstPartyRequested
+        | RequestedTrustClass::SystemRequested => TrustClass::Sandbox,
+    }
+}
+
+impl Extension for BoundExtension {
+    fn contract(&self) -> &ExtensionContract {
+        &self.contract
+    }
+
+    fn capability_adapter(&self) -> Option<Arc<dyn ToolAdapter>> {
+        self.tools.clone()
+    }
+
+    fn channel_adapter(&self) -> Option<Arc<dyn ChannelAdapter>> {
+        self.channel.clone()
+    }
 }
 
 /// A monotonically increasing snapshot generation.
@@ -112,7 +195,7 @@ impl ActiveSnapshot {
     pub fn resolve_tool(&self, capability_id: &CapabilityId) -> Option<ResolvedToolBinding> {
         let owner = self.capability_owner.get(capability_id)?;
         let extension = self.extensions.get(owner)?;
-        let adapter = extension.tools.clone()?;
+        let adapter = extension.extension.capability_adapter()?;
         Some(ResolvedToolBinding {
             adapter,
             declaration: Arc::clone(&extension.resolved),

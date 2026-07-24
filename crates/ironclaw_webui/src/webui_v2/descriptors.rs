@@ -377,7 +377,7 @@ fn create_thread_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(16),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -408,7 +408,7 @@ fn admin_list_users_descriptor() -> IngressRouteDescriptor {
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
             StreamingMode::None,
         ),
     )
@@ -423,7 +423,7 @@ fn admin_create_user_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(16),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -436,7 +436,7 @@ fn admin_get_user_descriptor() -> IngressRouteDescriptor {
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
             StreamingMode::None,
         ),
     )
@@ -451,7 +451,7 @@ fn admin_update_user_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(16),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -465,7 +465,7 @@ fn admin_delete_user_descriptor() -> IngressRouteDescriptor {
             BodyLimitPolicy::NoBody,
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -479,7 +479,7 @@ fn admin_set_user_status_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(4),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -493,7 +493,7 @@ fn admin_set_user_role_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(4),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -506,7 +506,7 @@ fn admin_list_user_secrets_descriptor() -> IngressRouteDescriptor {
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
             StreamingMode::None,
         ),
     )
@@ -521,7 +521,7 @@ fn admin_put_user_secret_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(16),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -535,7 +535,7 @@ fn admin_delete_user_secret_descriptor() -> IngressRouteDescriptor {
             BodyLimitPolicy::NoBody,
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -549,7 +549,7 @@ fn delete_thread_descriptor() -> IngressRouteDescriptor {
             BodyLimitPolicy::NoBody,
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -562,7 +562,7 @@ fn list_project_files_descriptor() -> IngressRouteDescriptor {
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
             StreamingMode::None,
         ),
     )
@@ -576,7 +576,7 @@ fn stat_project_file_descriptor() -> IngressRouteDescriptor {
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
             StreamingMode::None,
         ),
     )
@@ -590,7 +590,7 @@ fn read_project_file_descriptor() -> IngressRouteDescriptor {
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
             StreamingMode::None,
         ),
     )
@@ -604,7 +604,7 @@ fn list_fs_mounts_descriptor() -> IngressRouteDescriptor {
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
             StreamingMode::None,
         ),
     )
@@ -618,7 +618,7 @@ fn list_projects_descriptor() -> IngressRouteDescriptor {
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
             StreamingMode::None,
         ),
     )
@@ -632,7 +632,7 @@ fn browse_fs_dir_descriptor() -> IngressRouteDescriptor {
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
             StreamingMode::None,
         ),
     )
@@ -647,7 +647,7 @@ fn create_project_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(16),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -660,7 +660,7 @@ fn get_project_descriptor() -> IngressRouteDescriptor {
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
             StreamingMode::None,
         ),
     )
@@ -674,7 +674,7 @@ fn stat_fs_path_descriptor() -> IngressRouteDescriptor {
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
             StreamingMode::None,
         ),
     )
@@ -689,7 +689,7 @@ fn update_project_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(16),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -703,7 +703,7 @@ fn delete_project_descriptor() -> IngressRouteDescriptor {
             BodyLimitPolicy::NoBody,
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -716,7 +716,7 @@ fn list_project_members_descriptor() -> IngressRouteDescriptor {
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
             StreamingMode::None,
         ),
     )
@@ -730,7 +730,7 @@ fn read_fs_file_descriptor() -> IngressRouteDescriptor {
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
             StreamingMode::None,
         ),
     )
@@ -745,7 +745,7 @@ fn add_project_member_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(16),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -759,7 +759,7 @@ fn update_project_member_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(16),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -773,7 +773,7 @@ fn remove_project_member_descriptor() -> IngressRouteDescriptor {
             BodyLimitPolicy::NoBody,
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -816,8 +816,8 @@ fn get_attachment_descriptor() -> IngressRouteDescriptor {
             AuditTraceClass::UserAction,
             // Reads workspace-backed attachment bytes through the product
             // facade — more than a projection read, so the effect path is
-            // ProductWorkflow to keep the fail-closed ingress boundary honest.
-            AllowedEffectPath::ProductWorkflow,
+            // ProductSurface to keep the fail-closed ingress boundary honest.
+            AllowedEffectPath::ProductSurface,
             StreamingMode::None,
         ),
     )
@@ -872,7 +872,7 @@ fn list_automations_descriptor() -> IngressRouteDescriptor {
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
             StreamingMode::None,
         ),
     )
@@ -887,7 +887,7 @@ fn pause_automation_descriptor() -> IngressRouteDescriptor {
             BodyLimitPolicy::NoBody,
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -901,7 +901,7 @@ fn resume_automation_descriptor() -> IngressRouteDescriptor {
             BodyLimitPolicy::NoBody,
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -915,7 +915,7 @@ fn rename_automation_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(4),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -929,7 +929,7 @@ fn delete_automation_descriptor() -> IngressRouteDescriptor {
             BodyLimitPolicy::NoBody,
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -942,7 +942,7 @@ fn trace_credits_descriptor() -> IngressRouteDescriptor {
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
             StreamingMode::None,
         ),
     )
@@ -956,7 +956,7 @@ fn trace_account_traces_descriptor() -> IngressRouteDescriptor {
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
             StreamingMode::None,
         ),
     )
@@ -972,7 +972,7 @@ fn authorize_trace_hold_descriptor() -> IngressRouteDescriptor {
             BodyLimitPolicy::NoBody,
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -989,7 +989,7 @@ fn trace_account_login_link_descriptor() -> IngressRouteDescriptor {
             // call mints a one-time account-access credential server-side.
             rate_limit_per_caller(10, 60),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -1002,7 +1002,7 @@ fn get_outbound_preferences_descriptor() -> IngressRouteDescriptor {
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
             StreamingMode::None,
         ),
     )
@@ -1017,7 +1017,7 @@ fn set_outbound_preferences_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(4),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -1030,7 +1030,7 @@ fn list_outbound_delivery_targets_descriptor() -> IngressRouteDescriptor {
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
             StreamingMode::None,
         ),
     )
@@ -1073,7 +1073,7 @@ fn install_extension_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(16),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -1089,7 +1089,7 @@ fn import_extension_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(8192),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -1103,7 +1103,7 @@ fn activate_extension_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(4),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -1117,7 +1117,7 @@ fn remove_extension_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(4),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -1145,7 +1145,7 @@ fn setup_extension_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(16),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -1173,7 +1173,7 @@ fn search_skills_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(4),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -1187,7 +1187,7 @@ fn install_skill_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(128),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -1200,7 +1200,7 @@ fn get_skill_descriptor() -> IngressRouteDescriptor {
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
             StreamingMode::None,
         ),
     )
@@ -1215,7 +1215,7 @@ fn update_skill_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(128),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -1229,7 +1229,7 @@ fn remove_skill_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(4),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -1243,7 +1243,7 @@ fn set_skill_auto_activate_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(4),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -1257,7 +1257,7 @@ fn set_auto_activate_learned_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(4),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -1285,7 +1285,7 @@ fn set_settings_tools_auto_approve_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(4),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -1299,7 +1299,7 @@ fn set_settings_tool_permission_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(4),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -1327,7 +1327,7 @@ fn upsert_llm_provider_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(16),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -1341,7 +1341,7 @@ fn delete_llm_provider_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(4),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -1355,7 +1355,7 @@ fn set_active_llm_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(4),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -1369,7 +1369,7 @@ fn test_llm_connection_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(16),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -1383,7 +1383,7 @@ fn list_llm_models_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(16),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -1397,7 +1397,7 @@ fn start_nearai_login_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(4),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -1411,7 +1411,7 @@ fn complete_nearai_wallet_login_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(4),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -1425,7 +1425,7 @@ fn start_codex_login_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(4),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -1453,7 +1453,7 @@ fn operator_run_setup_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(16),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -1495,7 +1495,7 @@ fn operator_set_config_key_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(16),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -1509,7 +1509,7 @@ fn operator_validate_config_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(16),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -1579,7 +1579,7 @@ fn operator_service_lifecycle_descriptor() -> IngressRouteDescriptor {
             body_limit_kib(4),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -1607,7 +1607,7 @@ fn operator_replace_extension_configuration_descriptor() -> IngressRouteDescript
             body_limit_kib(16),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }

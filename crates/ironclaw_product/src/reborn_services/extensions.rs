@@ -27,7 +27,7 @@ use super::{
         ExtensionCredentialReadiness, credential_scope, readiness_for_requirements,
     },
     extension_onboarding,
-    lifecycle_setup::{map_lifecycle_error, validation_error},
+    lifecycle_setup::validation_error,
 };
 
 const EXTENSION_READINESS_CONCURRENCY: usize = 8;
@@ -63,10 +63,7 @@ pub(super) async fn list_extensions(
         .await?;
     // Redacted per-extension activation errors from the durable installation
     // records, projected onto `RebornExtensionInfo::activation_error`.
-    let activation_errors = facade
-        .installed_activation_errors(context)
-        .await
-        .map_err(map_lifecycle_error)?;
+    let activation_errors = facade.installed_activation_errors(context).await?;
     Ok(RebornExtensionListResponse {
         extensions: lifecycle_extension_infos(
             installed,
@@ -143,10 +140,7 @@ pub(super) async fn import_extension_capability(
         validation_error("bundle_base64", ProductSurfaceValidationCode::InvalidValue)
     })?;
     let context = lifecycle_surface_context(caller);
-    facade
-        .import_extension_bundle(context, bundle)
-        .await
-        .map_err(map_lifecycle_error)?;
+    facade.import_extension_bundle(context, bundle).await?;
     Ok(())
 }
 
@@ -155,10 +149,7 @@ async fn execute_lifecycle(
     context: LifecycleProductContext,
     action: LifecycleProductAction,
 ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
-    facade
-        .execute(context, action)
-        .await
-        .map_err(map_lifecycle_error)
+    facade.execute(context, action).await
 }
 
 fn lifecycle_surface_context(caller: ProductSurfaceCaller) -> LifecycleProductContext {
@@ -474,7 +465,7 @@ mod tests {
         LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding,
         LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
         LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
-        LifecycleSearchExtensionSummary, ProductWorkflowError, RebornExtensionOnboardingState,
+        LifecycleSearchExtensionSummary, RebornExtensionOnboardingState,
     };
     use ironclaw_host_api::{
         ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
@@ -960,7 +951,7 @@ mod tests {
             &self,
             _context: LifecycleProductContext,
             action: LifecycleProductAction,
-        ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
             assert!(matches!(action, LifecycleProductAction::ExtensionList));
             Ok(LifecycleProductResponse {
                 package_ref: None,
@@ -978,7 +969,7 @@ mod tests {
             &self,
             _context: LifecycleProductContext,
             _package_ref: LifecyclePackageRef,
-        ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
             panic!("list_extensions should execute the list action, not project one package")
         }
     }
@@ -993,7 +984,7 @@ mod tests {
             &self,
             _context: LifecycleProductContext,
             action: LifecycleProductAction,
-        ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
             assert!(matches!(action, LifecycleProductAction::ExtensionList));
             Ok(LifecycleProductResponse {
                 package_ref: None,
@@ -1011,7 +1002,7 @@ mod tests {
             &self,
             _context: LifecycleProductContext,
             _package_ref: LifecyclePackageRef,
-        ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
             panic!("list_extensions should execute the list action, not project one package")
         }
     }
@@ -1028,7 +1019,7 @@ mod tests {
             &self,
             context: LifecycleProductContext,
             action: LifecycleProductAction,
-        ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
             self.calls
                 .lock()
                 .expect("lock")
@@ -1065,7 +1056,7 @@ mod tests {
             &self,
             _context: LifecycleProductContext,
             _package_ref: LifecyclePackageRef,
-        ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
             panic!("list_extension_registry should not project one package")
         }
     }

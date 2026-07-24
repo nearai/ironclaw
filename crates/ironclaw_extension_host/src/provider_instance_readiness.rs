@@ -16,14 +16,14 @@ use std::collections::BTreeMap;
 use ironclaw_host_api::VendorId;
 
 /// One build-time host-owned signal used for provider-instance readiness.
-pub(crate) struct ProviderInstanceReadinessInput {
-    pub(crate) provider: VendorId,
-    pub(crate) configured: bool,
-    pub(crate) remediation: String,
+pub struct ProviderInstanceReadinessInput {
+    pub provider: VendorId,
+    pub configured: bool,
+    pub remediation: String,
 }
 
 /// Return remediation for providers whose host-level configuration is absent.
-pub(crate) fn provider_instance_readiness_map(
+pub fn provider_instance_readiness_map(
     inputs: impl IntoIterator<Item = ProviderInstanceReadinessInput>,
 ) -> BTreeMap<VendorId, String> {
     let mut map = BTreeMap::new();

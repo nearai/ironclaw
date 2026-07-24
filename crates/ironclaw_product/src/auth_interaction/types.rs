@@ -1,4 +1,4 @@
-use crate::ProductWorkflowRejectionKind;
+use crate::ProductSurfaceRejectionKind;
 use ironclaw_auth::{
     AuthChallenge, AuthContinuationRef, AuthFlowId, AuthFlowRecord, AuthFlowStatus,
     AuthProductScope, CredentialAccountId, CredentialAccountStatus, Timestamp,
@@ -8,7 +8,7 @@ use ironclaw_turns::{TurnRunId, TurnScope};
 use serde::{Deserialize, Serialize};
 
 use super::auth_rejected;
-use crate::error::ProductWorkflowError;
+use crate::error::ProductSurfaceFailure;
 
 const FALLBACK_AUTH_SUMMARY: &str = "Authentication required";
 
@@ -48,18 +48,18 @@ impl AuthInteractionRejectionKind {
         }
     }
 
-    pub fn workflow_rejection_kind(self) -> ProductWorkflowRejectionKind {
+    pub fn surface_rejection_kind(self) -> ProductSurfaceRejectionKind {
         match self {
-            Self::MissingAuth => ProductWorkflowRejectionKind::ScopeNotFound,
-            Self::AmbiguousAuth => ProductWorkflowRejectionKind::Ambiguous,
-            Self::StaleAuth => ProductWorkflowRejectionKind::Conflict,
-            Self::CrossScopeDenied => ProductWorkflowRejectionKind::Unauthorized,
+            Self::MissingAuth => ProductSurfaceRejectionKind::ScopeNotFound,
+            Self::AmbiguousAuth => ProductSurfaceRejectionKind::Ambiguous,
+            Self::StaleAuth => ProductSurfaceRejectionKind::Conflict,
+            Self::CrossScopeDenied => ProductSurfaceRejectionKind::Unauthorized,
             Self::InvalidGateRef
             | Self::InvalidCredentialRef
             | Self::InvalidCallbackRef
             | Self::UnsupportedResult
-            | Self::InvalidBindingRef => ProductWorkflowRejectionKind::InvalidRequest,
-            Self::FlowUnavailable => ProductWorkflowRejectionKind::Unavailable,
+            | Self::InvalidBindingRef => ProductSurfaceRejectionKind::InvalidRequest,
+            Self::FlowUnavailable => ProductSurfaceRejectionKind::Unavailable,
         }
     }
 
@@ -109,7 +109,7 @@ impl AuthInteractionScope {
         }
     }
 
-    fn from_auth_scope(scope: &AuthProductScope) -> Result<Self, ProductWorkflowError> {
+    fn from_auth_scope(scope: &AuthProductScope) -> Result<Self, ProductSurfaceFailure> {
         let Some(thread_id) = scope.resource.thread_id.clone() else {
             return Err(auth_rejected(
                 AuthInteractionRejectionKind::CrossScopeDenied,
@@ -250,7 +250,7 @@ impl AuthGateRecord {
         run_id: TurnRunId,
         gate_ref: GateRef,
         flow: AuthFlowRecord,
-    ) -> Result<Self, ProductWorkflowError> {
+    ) -> Result<Self, ProductSurfaceFailure> {
         let scope = AuthInteractionScope::from_auth_scope(&flow.scope)?;
         let AuthContinuationRef::TurnGateResume {
             turn_run_ref,

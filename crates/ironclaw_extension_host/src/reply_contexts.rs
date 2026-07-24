@@ -11,8 +11,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
-use ironclaw_extension_host::ingress::{IngressPortError, ReplyContextKey, ReplyContextStore};
 use ironclaw_filesystem::{
     CasApply, ContentType, Entry, FilesystemError, RootFilesystem, ScopedFilesystem, cas_update,
 };
@@ -22,7 +22,7 @@ use ironclaw_host_api::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::extension_host::channel_identity_store::path_segment;
+use crate::ingress::{IngressPortError, ReplyContextKey, ReplyContextStore};
 
 const REPLY_CONTEXT_ALIAS: &str = "/tenant-shared/reply-contexts";
 
@@ -34,12 +34,24 @@ const REPLY_CONTEXT_CAP: usize = 1024;
 /// The per-scope mount view: one alias onto the tenant's shared
 /// `reply-contexts` root.
 fn reply_context_mount_view(scope: &ResourceScope) -> Result<MountView, HostApiError> {
-    let tenant = crate::resource_scope_path_segment(scope.tenant_id.as_str());
+    let tenant = resource_scope_path_segment(scope.tenant_id.as_str());
     MountView::new(vec![MountGrant::new(
         MountAlias::new(REPLY_CONTEXT_ALIAS)?,
         VirtualPath::new(format!("/tenants/{tenant}/shared/reply-contexts"))?,
         MountPermissions::read_write_list_delete(),
     )])
+}
+
+fn resource_scope_path_segment(value: &str) -> &str {
+    if value == ironclaw_host_api::SYSTEM_RESERVED_ID {
+        "__system__"
+    } else {
+        value
+    }
+}
+
+fn path_segment(value: &str) -> String {
+    URL_SAFE_NO_PAD.encode(value.as_bytes())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,7 +68,7 @@ struct ReplyContextSnapshot {
 
 /// Filesystem-backed [`ReplyContextStore`] shared by the ingress router
 /// (write half) and the delivery coordinator (read half).
-pub(crate) struct FilesystemReplyContextStore {
+pub struct FilesystemReplyContextStore {
     filesystem: Arc<ScopedFilesystem<dyn RootFilesystem>>,
     scope: ResourceScope,
 }
@@ -71,11 +83,7 @@ impl std::fmt::Debug for FilesystemReplyContextStore {
 }
 
 impl FilesystemReplyContextStore {
-    pub(crate) fn new(
-        filesystem: Arc<dyn RootFilesystem>,
-        tenant_id: TenantId,
-        user_id: UserId,
-    ) -> Self {
+    pub fn new(filesystem: Arc<dyn RootFilesystem>, tenant_id: TenantId, user_id: UserId) -> Self {
         let scoped = Arc::new(ScopedFilesystem::new(filesystem, reply_context_mount_view));
         Self {
             filesystem: scoped,

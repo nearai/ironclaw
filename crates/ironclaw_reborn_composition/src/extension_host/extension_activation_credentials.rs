@@ -3,12 +3,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_extensions::ExtensionPackage;
 use ironclaw_host_api::{CredentialStageError, ResourceScope, RuntimeCredentialAuthRequirement};
-use ironclaw_product::ProductWorkflowError;
+use ironclaw_product::ProductSurfaceFailure;
 
-use crate::extension_host::extension_credential_requirements::package_runtime_credential_auth_requirements;
 use crate::product_auth::credentials::runtime_credentials::{
     RuntimeCredentialAccountSelectionService, missing_runtime_credential_auth_requirements,
 };
+use ironclaw_extension_host::package_runtime_credential_auth_requirements;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ExtensionActivationCredentialReadiness {
@@ -21,12 +21,12 @@ pub(crate) trait ExtensionActivationCredentialGate: Send + Sync {
     async fn ensure_credentials(
         &self,
         package: &ExtensionPackage,
-    ) -> Result<(), ProductWorkflowError>;
+    ) -> Result<(), ProductSurfaceFailure>;
 
     async fn credential_readiness(
         &self,
         package: &ExtensionPackage,
-    ) -> Result<ExtensionActivationCredentialReadiness, ProductWorkflowError> {
+    ) -> Result<ExtensionActivationCredentialReadiness, ProductSurfaceFailure> {
         self.ensure_credentials(package).await?;
         Ok(ExtensionActivationCredentialReadiness::Ready)
     }
@@ -67,7 +67,7 @@ impl ExtensionActivationCredentialGate for RuntimeExtensionActivationCredentialG
     async fn ensure_credentials(
         &self,
         package: &ExtensionPackage,
-    ) -> Result<(), ProductWorkflowError> {
+    ) -> Result<(), ProductSurfaceFailure> {
         match self.credential_readiness(package).await? {
             ExtensionActivationCredentialReadiness::Ready => Ok(()),
             ExtensionActivationCredentialReadiness::Missing(_) => {
@@ -79,7 +79,7 @@ impl ExtensionActivationCredentialGate for RuntimeExtensionActivationCredentialG
     async fn credential_readiness(
         &self,
         package: &ExtensionPackage,
-    ) -> Result<ExtensionActivationCredentialReadiness, ProductWorkflowError> {
+    ) -> Result<ExtensionActivationCredentialReadiness, ProductSurfaceFailure> {
         let missing = self
             .missing_requirements(package_runtime_credential_auth_requirements(package))
             .await
@@ -99,7 +99,7 @@ impl ExtensionActivationCredentialGate for UnavailableExtensionActivationCredent
     async fn ensure_credentials(
         &self,
         package: &ExtensionPackage,
-    ) -> Result<(), ProductWorkflowError> {
+    ) -> Result<(), ProductSurfaceFailure> {
         if package_runtime_credential_auth_requirements(package).is_empty() {
             return Ok(());
         }
@@ -109,7 +109,7 @@ impl ExtensionActivationCredentialGate for UnavailableExtensionActivationCredent
     async fn credential_readiness(
         &self,
         package: &ExtensionPackage,
-    ) -> Result<ExtensionActivationCredentialReadiness, ProductWorkflowError> {
+    ) -> Result<ExtensionActivationCredentialReadiness, ProductSurfaceFailure> {
         let missing = package_runtime_credential_auth_requirements(package);
         if missing.is_empty() {
             Ok(ExtensionActivationCredentialReadiness::Ready)
@@ -128,13 +128,13 @@ impl ExtensionActivationCredentialGate for PrecheckedExtensionActivationCredenti
     async fn ensure_credentials(
         &self,
         _package: &ExtensionPackage,
-    ) -> Result<(), ProductWorkflowError> {
+    ) -> Result<(), ProductSurfaceFailure> {
         Ok(())
     }
 }
 
-fn missing_activation_credentials_error(package: &ExtensionPackage) -> ProductWorkflowError {
-    ProductWorkflowError::InvalidBindingRequest {
+fn missing_activation_credentials_error(package: &ExtensionPackage) -> ProductSurfaceFailure {
+    ProductSurfaceFailure::InvalidBindingRequest {
         reason: format!(
             "extension {} requires product auth credentials before activation",
             package.manifest.id.as_str()
@@ -142,12 +142,12 @@ fn missing_activation_credentials_error(package: &ExtensionPackage) -> ProductWo
     }
 }
 
-fn map_activation_credential_stage_error(error: CredentialStageError) -> ProductWorkflowError {
+fn map_activation_credential_stage_error(error: CredentialStageError) -> ProductSurfaceFailure {
     match error {
-        CredentialStageError::AuthRequired => ProductWorkflowError::InvalidBindingRequest {
+        CredentialStageError::AuthRequired => ProductSurfaceFailure::InvalidBindingRequest {
             reason: "extension requires product auth credentials before activation".to_string(),
         },
-        CredentialStageError::Backend => ProductWorkflowError::Transient {
+        CredentialStageError::Backend => ProductSurfaceFailure::Transient {
             reason: "extension product auth credential state is temporarily unavailable"
                 .to_string(),
         },

@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 
 use crate::{
-    ConversationBindingService, ProductConversationRouteKind, ProductWorkflowError,
+    ConversationBindingService, ProductConversationRouteKind, ProductSurfaceFailure,
     ResolveBindingRequest, ResolvedBinding,
 };
 
@@ -34,9 +34,9 @@ impl ProductConversationRouteKey {
     pub fn new(
         space_id: Option<String>,
         conversation_id: String,
-    ) -> Result<Self, ProductWorkflowError> {
+    ) -> Result<Self, ProductSurfaceFailure> {
         ExternalConversationRef::new(space_id.as_deref(), conversation_id.as_str(), None, None)
-            .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+            .map_err(|error| ProductSurfaceFailure::InvalidBindingRequest {
                 reason: format!("invalid conversation route key: {error}"),
             })?;
         Ok(Self {
@@ -123,13 +123,13 @@ pub trait ProductActorUserResolver: Send + Sync {
     async fn resolve_product_actor_user(
         &self,
         request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<ResolvedProductActorUser>, ProductWorkflowError>;
+    ) -> Result<Option<ResolvedProductActorUser>, ProductSurfaceFailure>;
 
     async fn resolved_product_actor_user_is_current(
         &self,
         request: &ProductActorUserResolutionRequest,
         expected: &ResolvedProductActorUser,
-    ) -> Result<bool, ProductWorkflowError> {
+    ) -> Result<bool, ProductSurfaceFailure> {
         Ok(self
             .resolve_product_actor_user(request.clone())
             .await?
@@ -163,7 +163,7 @@ pub trait ProductConversationSubjectRouteResolver: Send + Sync + std::fmt::Debug
     async fn resolve_product_conversation_subject_route(
         &self,
         request: ProductConversationSubjectRouteResolutionRequest,
-    ) -> Result<Option<UserId>, ProductWorkflowError>;
+    ) -> Result<Option<UserId>, ProductSurfaceFailure>;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -184,7 +184,7 @@ impl ProductActorUserResolver for StaticProductActorUserResolver {
     async fn resolve_product_actor_user(
         &self,
         request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<ResolvedProductActorUser>, ProductWorkflowError> {
+    ) -> Result<Option<ResolvedProductActorUser>, ProductSurfaceFailure> {
         Ok(self
             .bindings
             .get(&request.external_actor_ref)
@@ -342,7 +342,7 @@ impl ProductInstallationScope {
     async fn shared_subject_user_id_for(
         &self,
         request: &ResolveBindingRequest,
-    ) -> Result<Option<UserId>, ProductWorkflowError> {
+    ) -> Result<Option<UserId>, ProductSurfaceFailure> {
         if let Some(resolver) = &self.conversation_subject_route_resolver
             && let Some(subject_user_id) = resolver
                 .resolve_product_conversation_subject_route(
@@ -374,7 +374,7 @@ impl ProductInstallationScope {
     async fn configured_subject_user_id_for_route(
         &self,
         request: &ResolveBindingRequest,
-    ) -> Result<Option<UserId>, ProductWorkflowError> {
+    ) -> Result<Option<UserId>, ProductSurfaceFailure> {
         match request.route_kind {
             ProductConversationRouteKind::Direct => Ok(None),
             ProductConversationRouteKind::Shared => self.shared_subject_user_id_for(request).await,
@@ -390,7 +390,7 @@ impl ProductInstallationScope {
     async fn current_subject_for_existing_shared_binding(
         &self,
         request: &ResolveBindingRequest,
-    ) -> Result<Option<UserId>, ProductWorkflowError> {
+    ) -> Result<Option<UserId>, ProductSurfaceFailure> {
         if request.route_kind != ProductConversationRouteKind::Shared
             || !self.requires_current_subject_route_for_existing_shared_binding()
         {
@@ -431,14 +431,14 @@ impl StaticProductInstallationResolver {
         &self,
         adapter_id: &ProductAdapterId,
         installation_id: &AdapterInstallationId,
-    ) -> Result<Arc<ProductInstallationScope>, ProductWorkflowError> {
+    ) -> Result<Arc<ProductInstallationScope>, ProductSurfaceFailure> {
         self.scopes
             .get(&ProductInstallationKey::new(
                 adapter_id.clone(),
                 installation_id.clone(),
             ))
             .cloned()
-            .ok_or(ProductWorkflowError::UnknownInstallation)
+            .ok_or(ProductSurfaceFailure::UnknownInstallation)
     }
 }
 
@@ -466,7 +466,7 @@ impl ProductConversationBindingService {
         installation_scope: &ProductInstallationScope,
         request: &ResolveBindingRequest,
         resolved_actor: &ResolvedProductActorUser,
-    ) -> Result<(), ProductWorkflowError> {
+    ) -> Result<(), ProductSurfaceFailure> {
         let ProductActorBindingPolicy::ResolveActor { actor_pairings, .. } =
             &installation_scope.actor_binding_policy
         else {
@@ -511,7 +511,7 @@ impl ProductConversationBindingService {
         installation_scope: &ProductInstallationScope,
         request: &ResolveBindingRequest,
         expected_actor: Option<&ResolvedProductActorUser>,
-    ) -> Result<(), ProductWorkflowError> {
+    ) -> Result<(), ProductSurfaceFailure> {
         let Some(expected_actor) = expected_actor else {
             return Ok(());
         };
@@ -544,7 +544,7 @@ impl ProductConversationBindingService {
             )
             .await
             .map_err(map_conversation_error)?;
-        Err(ProductWorkflowError::BindingRequired {
+        Err(ProductSurfaceFailure::BindingRequired {
             reason: "external actor binding was revoked while resolving this message".into(),
         })
     }
@@ -563,14 +563,14 @@ fn actor_user_resolution_request(
 async fn resolve_actor_user(
     installation_scope: &ProductInstallationScope,
     request: &ResolveBindingRequest,
-) -> Result<Option<ResolvedProductActorUser>, ProductWorkflowError> {
+) -> Result<Option<ResolvedProductActorUser>, ProductSurfaceFailure> {
     match &installation_scope.actor_binding_policy {
         ProductActorBindingPolicy::ExistingConversationPairings => Ok(None),
         ProductActorBindingPolicy::ResolveActor { resolver, .. } => resolver
             .resolve_product_actor_user(actor_user_resolution_request(request))
             .await?
             .map(Some)
-            .ok_or_else(|| ProductWorkflowError::BindingRequired {
+            .ok_or_else(|| ProductSurfaceFailure::BindingRequired {
                 reason: "external actor is not bound for this adapter installation".into(),
             }),
     }
@@ -579,12 +579,12 @@ async fn resolve_actor_user(
 fn ensure_resolved_actor_matches_expected_user(
     expected_actor: Option<&ResolvedProductActorUser>,
     resolution: &ironclaw_conversations::ConversationBindingResolution,
-) -> Result<(), ProductWorkflowError> {
+) -> Result<(), ProductSurfaceFailure> {
     if let Some(expected_actor) = expected_actor
         && (resolution.actor.user_id != expected_actor.user_id
             || resolution.binding_epoch != expected_actor.binding_epoch)
     {
-        return Err(ProductWorkflowError::BindingAccessDenied);
+        return Err(ProductSurfaceFailure::BindingAccessDenied);
     }
     Ok(())
 }
@@ -594,7 +594,7 @@ impl ConversationBindingService for ProductConversationBindingService {
     async fn resolve_binding(
         &self,
         request: ResolveBindingRequest,
-    ) -> Result<ResolvedBinding, ProductWorkflowError> {
+    ) -> Result<ResolvedBinding, ProductSurfaceFailure> {
         let installation_scope = self
             .installations
             .resolve(&request.adapter_id, &request.installation_id)?;
@@ -691,7 +691,7 @@ impl ConversationBindingService for ProductConversationBindingService {
     async fn lookup_binding(
         &self,
         request: ResolveBindingRequest,
-    ) -> Result<ResolvedBinding, ProductWorkflowError> {
+    ) -> Result<ResolvedBinding, ProductSurfaceFailure> {
         let installation_scope = self
             .installations
             .resolve(&request.adapter_id, &request.installation_id)?;
@@ -722,12 +722,12 @@ impl ConversationBindingService for ProductConversationBindingService {
 fn ensure_existing_shared_binding_matches_current_subject(
     current_subject_user_id: Option<&UserId>,
     resolution: &ironclaw_conversations::ConversationBindingResolution,
-) -> Result<(), ProductWorkflowError> {
+) -> Result<(), ProductSurfaceFailure> {
     let Some(current_subject_user_id) = current_subject_user_id else {
         return Ok(());
     };
     if resolution.turn_scope.explicit_owner_user_id() != Some(current_subject_user_id) {
-        return Err(ProductWorkflowError::BindingAccessDenied);
+        return Err(ProductSurfaceFailure::BindingAccessDenied);
     }
     Ok(())
 }
@@ -735,7 +735,7 @@ fn ensure_existing_shared_binding_matches_current_subject(
 fn resolved_binding_from_resolution(
     resolution: ironclaw_conversations::ConversationBindingResolution,
     route_kind: ProductConversationRouteKind,
-) -> Result<ResolvedBinding, ProductWorkflowError> {
+) -> Result<ResolvedBinding, ProductSurfaceFailure> {
     let actor_user_id = resolution.actor.user_id;
     let subject_user_id = match route_kind {
         ProductConversationRouteKind::Direct => Some(actor_user_id.clone()),
@@ -760,27 +760,27 @@ fn resolved_binding_from_resolution(
 fn ensure_shared_route_has_configured_subject(
     route_kind: ProductConversationRouteKind,
     configured_subject_user_id: Option<&UserId>,
-) -> Result<(), ProductWorkflowError> {
+) -> Result<(), ProductSurfaceFailure> {
     if route_kind == ProductConversationRouteKind::Shared && configured_subject_user_id.is_none() {
         return Err(shared_route_requires_subject_error());
     }
     Ok(())
 }
 
-fn shared_route_requires_subject_error() -> ProductWorkflowError {
-    ProductWorkflowError::BindingRequired {
+fn shared_route_requires_subject_error() -> ProductSurfaceFailure {
+    ProductSurfaceFailure::BindingRequired {
         reason: "shared product route requires a configured subject user".into(),
     }
 }
 
-fn shared_route_missing_persisted_subject_error() -> ProductWorkflowError {
-    ProductWorkflowError::BindingAccessDenied
+fn shared_route_missing_persisted_subject_error() -> ProductSurfaceFailure {
+    ProductSurfaceFailure::BindingAccessDenied
 }
 
 fn conversation_request(
     request: &ResolveBindingRequest,
     tenant_id: TenantId,
-) -> Result<ironclaw_conversations::ResolveConversationRequest, ProductWorkflowError> {
+) -> Result<ironclaw_conversations::ResolveConversationRequest, ProductSurfaceFailure> {
     Ok(ironclaw_conversations::ResolveConversationRequest {
         tenant_id,
         adapter_kind: conversation_adapter_kind(&request.adapter_id)?,
@@ -798,33 +798,33 @@ fn conversation_request(
 
 fn conversation_adapter_kind(
     adapter_id: &ProductAdapterId,
-) -> Result<ironclaw_conversations::AdapterKind, ProductWorkflowError> {
+) -> Result<ironclaw_conversations::AdapterKind, ProductSurfaceFailure> {
     ironclaw_conversations::AdapterKind::new(adapter_id.as_str()).map_err(map_conversation_error)
 }
 
 fn conversation_installation_id(
     installation_id: &AdapterInstallationId,
-) -> Result<ironclaw_conversations::AdapterInstallationId, ProductWorkflowError> {
+) -> Result<ironclaw_conversations::AdapterInstallationId, ProductSurfaceFailure> {
     ironclaw_conversations::AdapterInstallationId::new(installation_id.as_str())
         .map_err(map_conversation_error)
 }
 
 fn conversation_event_id(
     event_id: &crate::ExternalEventId,
-) -> Result<ironclaw_conversations::ExternalEventId, ProductWorkflowError> {
+) -> Result<ironclaw_conversations::ExternalEventId, ProductSurfaceFailure> {
     ironclaw_conversations::ExternalEventId::new(event_id.as_str()).map_err(map_conversation_error)
 }
 
 fn conversation_actor_ref(
     actor_ref: &crate::ExternalActorRef,
-) -> Result<ironclaw_conversations::ExternalActorRef, ProductWorkflowError> {
+) -> Result<ironclaw_conversations::ExternalActorRef, ProductSurfaceFailure> {
     ironclaw_conversations::ExternalActorRef::new(actor_ref.kind(), actor_ref.id())
         .map_err(map_conversation_error)
 }
 
 fn conversation_conversation_ref(
     conversation_ref: &crate::ExternalConversationRef,
-) -> Result<ironclaw_conversations::ExternalConversationRef, ProductWorkflowError> {
+) -> Result<ironclaw_conversations::ExternalConversationRef, ProductSurfaceFailure> {
     ironclaw_conversations::ExternalConversationRef::new(
         conversation_ref.space_id(),
         conversation_ref.conversation_id(),
@@ -847,30 +847,32 @@ fn conversation_route_kind(
     }
 }
 
-fn map_conversation_error(error: ironclaw_conversations::InboundTurnError) -> ProductWorkflowError {
+fn map_conversation_error(
+    error: ironclaw_conversations::InboundTurnError,
+) -> ProductSurfaceFailure {
     match error {
         ironclaw_conversations::InboundTurnError::InvalidExternalRef { reason, .. }
         | ironclaw_conversations::InboundTurnError::InvalidCanonicalRef { reason } => {
-            ProductWorkflowError::InvalidBindingRequest { reason }
+            ProductSurfaceFailure::InvalidBindingRequest { reason }
         }
         ironclaw_conversations::InboundTurnError::BindingRequired { .. } => {
-            ProductWorkflowError::BindingRequired {
+            ProductSurfaceFailure::BindingRequired {
                 reason: "external actor is not paired with a canonical user".into(),
             }
         }
         ironclaw_conversations::InboundTurnError::AccessDenied { .. }
         | ironclaw_conversations::InboundTurnError::BindingConflict { .. }
         | ironclaw_conversations::InboundTurnError::ThreadNotFound { .. } => {
-            ProductWorkflowError::BindingAccessDenied
+            ProductSurfaceFailure::BindingAccessDenied
         }
         ironclaw_conversations::InboundTurnError::StatePoisoned
         | ironclaw_conversations::InboundTurnError::DurableState { .. } => {
-            ProductWorkflowError::Transient {
+            ProductSurfaceFailure::Transient {
                 reason: "conversation binding store unavailable".into(),
             }
         }
         ironclaw_conversations::InboundTurnError::TurnSubmissionFailed { error } => {
-            ProductWorkflowError::TurnSubmissionFailed { error }
+            ProductSurfaceFailure::TurnSubmissionFailed { error }
         }
     }
 }

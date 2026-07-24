@@ -17,7 +17,7 @@
 //! over the configured filesystem backend.
 //!
 //! Returns the raw `ironclaw_turns::TurnError`; each consumer maps it into
-//! its own domain error at its own boundary (`ProductWorkflowError` for the
+//! its own domain error at its own boundary (`ProductSurfaceFailure` for the
 //! approval/auth locators, `TriggerError` for the trigger poller) rather than
 //! this shared substrate trait picking a consumer's error type.
 

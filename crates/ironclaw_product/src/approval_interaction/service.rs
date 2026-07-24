@@ -20,7 +20,7 @@ use super::{
     ApprovalResolutionPort, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
     ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse, approval_rejected,
 };
-use crate::error::ProductWorkflowError;
+use crate::error::ProductSurfaceFailure;
 use crate::gate_state::{BlockedGateState, BlockedGateStateError, blocked_gate_state};
 
 /// Approval-only service consumed by product/WebUI surfaces.
@@ -29,12 +29,12 @@ pub trait ApprovalInteractionService: Send + Sync {
     async fn list_pending(
         &self,
         request: ListPendingApprovalsRequest,
-    ) -> Result<ListPendingApprovalsResponse, ProductWorkflowError>;
+    ) -> Result<ListPendingApprovalsResponse, ProductSurfaceFailure>;
 
     async fn resolve(
         &self,
         request: ResolveApprovalInteractionRequest,
-    ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError>;
+    ) -> Result<ResolveApprovalInteractionResponse, ProductSurfaceFailure>;
 }
 
 pub(crate) struct RejectingApprovalInteractionService;
@@ -44,7 +44,7 @@ impl ApprovalInteractionService for RejectingApprovalInteractionService {
     async fn list_pending(
         &self,
         _request: ListPendingApprovalsRequest,
-    ) -> Result<ListPendingApprovalsResponse, ProductWorkflowError> {
+    ) -> Result<ListPendingApprovalsResponse, ProductSurfaceFailure> {
         Err(approval_rejected(
             ApprovalInteractionRejectionKind::ResolverUnavailable,
         ))
@@ -53,7 +53,7 @@ impl ApprovalInteractionService for RejectingApprovalInteractionService {
     async fn resolve(
         &self,
         _request: ResolveApprovalInteractionRequest,
-    ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
+    ) -> Result<ResolveApprovalInteractionResponse, ProductSurfaceFailure> {
         Err(approval_rejected(
             ApprovalInteractionRejectionKind::ResolverUnavailable,
         ))
@@ -89,7 +89,7 @@ struct PreparedAllowPolicy {
 }
 
 impl ApprovalCapabilityAction {
-    fn from_action(action: &Action) -> Result<Self, ProductWorkflowError> {
+    fn from_action(action: &Action) -> Result<Self, ProductSurfaceFailure> {
         match action {
             Action::Dispatch { .. } => Ok(Self::Dispatch),
             Action::SpawnCapability { .. } => Ok(Self::Spawn),
@@ -147,7 +147,7 @@ impl DefaultApprovalInteractionService {
         scope: &ApprovalInteractionScope,
         run_id_hint: Option<TurnRunId>,
         gate_ref: &GateRef,
-    ) -> Result<ApprovalGateRecord, ProductWorkflowError> {
+    ) -> Result<ApprovalGateRecord, ProductSurfaceFailure> {
         self.read_model
             .approval_gate(scope, run_id_hint, gate_ref)
             .await?
@@ -158,7 +158,7 @@ impl DefaultApprovalInteractionService {
         &self,
         request: &ResolveApprovalInteractionRequest,
         run_id: TurnRunId,
-    ) -> Result<BlockedGateState, ProductWorkflowError> {
+    ) -> Result<BlockedGateState, ProductSurfaceFailure> {
         blocked_gate_state(
             self.turn_coordinator.as_ref(),
             &request.scope,
@@ -177,7 +177,7 @@ impl DefaultApprovalInteractionService {
         gate: ApprovalGateRecord,
         run_id: TurnRunId,
         persistent: bool,
-    ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
+    ) -> Result<ResolveApprovalInteractionResponse, ProductSurfaceFailure> {
         let action = ApprovalCapabilityAction::from_action(gate.request().action.as_ref())?;
         let status = gate.status();
         if matches!(
@@ -262,7 +262,7 @@ impl DefaultApprovalInteractionService {
         request: &ResolveApprovalInteractionRequest,
         gate: &ApprovalGateRecord,
         terms: LeaseApproval,
-    ) -> Result<PreparedAllowPolicy, ProductWorkflowError> {
+    ) -> Result<PreparedAllowPolicy, ProductSurfaceFailure> {
         if self.persistent_policies.is_none() {
             return Err(approval_rejected(
                 ApprovalInteractionRejectionKind::AlwaysAllowUnsupported,
@@ -336,7 +336,7 @@ impl DefaultApprovalInteractionService {
         request: ResolveApprovalInteractionRequest,
         gate: ApprovalGateRecord,
         run_id: TurnRunId,
-    ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
+    ) -> Result<ResolveApprovalInteractionResponse, ProductSurfaceFailure> {
         match gate.status() {
             ApprovalStatus::Pending => {
                 self.resolver
@@ -371,7 +371,7 @@ impl DefaultApprovalInteractionService {
         &self,
         request: ResolveApprovalInteractionRequest,
         run_id: TurnRunId,
-    ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
+    ) -> Result<ResolveApprovalInteractionResponse, ProductSurfaceFailure> {
         let response = self
             .turn_coordinator
             .resume_turn(ResumeTurnRequest {
@@ -394,7 +394,7 @@ impl DefaultApprovalInteractionService {
         &self,
         request: ResolveApprovalInteractionRequest,
         run_id: TurnRunId,
-    ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
+    ) -> Result<ResolveApprovalInteractionResponse, ProductSurfaceFailure> {
         let response = self
             .turn_coordinator
             .resume_turn(ResumeTurnRequest {
@@ -417,7 +417,7 @@ impl DefaultApprovalInteractionService {
         &self,
         request: ResolveApprovalInteractionRequest,
         run_id: TurnRunId,
-    ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
+    ) -> Result<ResolveApprovalInteractionResponse, ProductSurfaceFailure> {
         // Idempotent replay: the SAME idempotency key as the first Deny.
         // TurnCoordinator::resume_turn returns the cached ResumeTurnResponse for
         // a repeated key before running the precondition check, so this is
@@ -432,7 +432,7 @@ impl ApprovalInteractionService for DefaultApprovalInteractionService {
     async fn list_pending(
         &self,
         request: ListPendingApprovalsRequest,
-    ) -> Result<ListPendingApprovalsResponse, ProductWorkflowError> {
+    ) -> Result<ListPendingApprovalsResponse, ProductSurfaceFailure> {
         let scope = ApprovalInteractionScope::from_turn(&request.scope, &request.actor);
         let mut approvals = self
             .read_model
@@ -454,7 +454,7 @@ impl ApprovalInteractionService for DefaultApprovalInteractionService {
     async fn resolve(
         &self,
         request: ResolveApprovalInteractionRequest,
-    ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
+    ) -> Result<ResolveApprovalInteractionResponse, ProductSurfaceFailure> {
         let scope = ApprovalInteractionScope::from_turn(&request.scope, &request.actor);
         let gate = self
             .find_gate(&scope, request.run_id_hint, &request.gate_ref)
@@ -498,7 +498,7 @@ impl ApprovalInteractionService for DefaultApprovalInteractionService {
     }
 }
 
-fn map_blocked_gate_state_error(error: BlockedGateStateError) -> ProductWorkflowError {
+fn map_blocked_gate_state_error(error: BlockedGateStateError) -> ProductSurfaceFailure {
     match error {
         BlockedGateStateError::Turn(error) => map_gate_state_error(error),
         BlockedGateStateError::ActorMismatch => {
@@ -507,7 +507,7 @@ fn map_blocked_gate_state_error(error: BlockedGateStateError) -> ProductWorkflow
     }
 }
 
-fn map_gate_state_error(error: TurnError) -> ProductWorkflowError {
+fn map_gate_state_error(error: TurnError) -> ProductSurfaceFailure {
     match error.category() {
         TurnErrorCategory::ScopeNotFound => {
             approval_rejected(ApprovalInteractionRejectionKind::MissingGate)
@@ -515,14 +515,14 @@ fn map_gate_state_error(error: TurnError) -> ProductWorkflowError {
         TurnErrorCategory::Unauthorized => {
             approval_rejected(ApprovalInteractionRejectionKind::CrossScopeDenied)
         }
-        TurnErrorCategory::Unavailable => ProductWorkflowError::Transient {
+        TurnErrorCategory::Unavailable => ProductSurfaceFailure::Transient {
             reason: "approval gate state unavailable".to_string(),
         },
-        _ => ProductWorkflowError::TurnResumeDenied { error },
+        _ => ProductSurfaceFailure::TurnResumeDenied { error },
     }
 }
 
-fn map_approval_resume_error(error: TurnError) -> ProductWorkflowError {
+fn map_approval_resume_error(error: TurnError) -> ProductSurfaceFailure {
     match error.category() {
         TurnErrorCategory::ScopeNotFound => {
             approval_rejected(ApprovalInteractionRejectionKind::MissingGate)
@@ -533,10 +533,10 @@ fn map_approval_resume_error(error: TurnError) -> ProductWorkflowError {
         TurnErrorCategory::InvalidRequest | TurnErrorCategory::Conflict => {
             approval_rejected(ApprovalInteractionRejectionKind::StaleGate)
         }
-        TurnErrorCategory::Unavailable => ProductWorkflowError::Transient {
+        TurnErrorCategory::Unavailable => ProductSurfaceFailure::Transient {
             reason: "approval gate resume unavailable".to_string(),
         },
-        _ => ProductWorkflowError::TurnResumeDenied { error },
+        _ => ProductSurfaceFailure::TurnResumeDenied { error },
     }
 }
 
@@ -554,13 +554,13 @@ mod tests {
     fn map_gate_state_error_covers_turn_error_categories() {
         assert!(matches!(
             map_gate_state_error(TurnError::ScopeNotFound),
-            ProductWorkflowError::ApprovalInteractionRejected {
+            ProductSurfaceFailure::ApprovalInteractionRejected {
                 kind: ApprovalInteractionRejectionKind::MissingGate
             }
         ));
         assert!(matches!(
             map_gate_state_error(TurnError::Unauthorized),
-            ProductWorkflowError::ApprovalInteractionRejected {
+            ProductSurfaceFailure::ApprovalInteractionRejected {
                 kind: ApprovalInteractionRejectionKind::CrossScopeDenied
             }
         ));
@@ -568,20 +568,20 @@ mod tests {
             map_gate_state_error(TurnError::Unavailable {
                 reason: "store down".to_string()
             }),
-            ProductWorkflowError::Transient { .. }
+            ProductSurfaceFailure::Transient { .. }
         ));
         assert!(matches!(
             map_gate_state_error(TurnError::InvalidRequest {
                 reason: "bad state".to_string()
             }),
-            ProductWorkflowError::TurnResumeDenied { .. }
+            ProductSurfaceFailure::TurnResumeDenied { .. }
         ));
         assert!(matches!(
             map_gate_state_error(TurnError::capacity_exceeded(
                 TurnCapacityResource::SubmitTurn,
                 1
             )),
-            ProductWorkflowError::TurnResumeDenied { .. }
+            ProductSurfaceFailure::TurnResumeDenied { .. }
         ));
     }
 
@@ -589,13 +589,13 @@ mod tests {
     fn map_approval_resume_error_covers_turn_error_categories() {
         assert!(matches!(
             map_approval_resume_error(TurnError::ScopeNotFound),
-            ProductWorkflowError::ApprovalInteractionRejected {
+            ProductSurfaceFailure::ApprovalInteractionRejected {
                 kind: ApprovalInteractionRejectionKind::MissingGate
             }
         ));
         assert!(matches!(
             map_approval_resume_error(TurnError::Unauthorized),
-            ProductWorkflowError::ApprovalInteractionRejected {
+            ProductSurfaceFailure::ApprovalInteractionRejected {
                 kind: ApprovalInteractionRejectionKind::CrossScopeDenied
             }
         ));
@@ -603,7 +603,7 @@ mod tests {
             map_approval_resume_error(TurnError::InvalidRequest {
                 reason: "stale".to_string()
             }),
-            ProductWorkflowError::ApprovalInteractionRejected {
+            ProductSurfaceFailure::ApprovalInteractionRejected {
                 kind: ApprovalInteractionRejectionKind::StaleGate
             }
         ));
@@ -611,7 +611,7 @@ mod tests {
             map_approval_resume_error(TurnError::Conflict {
                 reason: "stale".to_string()
             }),
-            ProductWorkflowError::ApprovalInteractionRejected {
+            ProductSurfaceFailure::ApprovalInteractionRejected {
                 kind: ApprovalInteractionRejectionKind::StaleGate
             }
         ));
@@ -619,14 +619,14 @@ mod tests {
             map_approval_resume_error(TurnError::Unavailable {
                 reason: "store down".to_string()
             }),
-            ProductWorkflowError::Transient { .. }
+            ProductSurfaceFailure::Transient { .. }
         ));
         assert!(matches!(
             map_approval_resume_error(TurnError::capacity_exceeded(
                 TurnCapacityResource::SubmitTurn,
                 1
             )),
-            ProductWorkflowError::TurnResumeDenied { .. }
+            ProductSurfaceFailure::TurnResumeDenied { .. }
         ));
     }
 }

@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 
 use crate::action::{ActionFingerprintKey, ProductInboundAction};
-use crate::error::ProductWorkflowError;
+use crate::error::ProductSurfaceFailure;
 
 /// Port for the durable inbound action idempotency ledger.
 ///
@@ -44,16 +44,16 @@ pub trait IdempotencyLedger: Send + Sync {
         &self,
         fingerprint: ActionFingerprintKey,
         received_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<IdempotencyDecision, ProductWorkflowError>;
+    ) -> Result<IdempotencyDecision, ProductSurfaceFailure>;
 
     /// Settle an in-progress action with a terminal outcome.
-    async fn settle(&self, action: ProductInboundAction) -> Result<(), ProductWorkflowError>;
+    async fn settle(&self, action: ProductInboundAction) -> Result<(), ProductSurfaceFailure>;
 
     /// Release a non-terminal reservation after downstream handling produced a
     /// retryable outcome. The downstream side effect must be independently
     /// idempotent before callers use this path; for user messages, the thread
     /// service replays the accepted message before live binding resolution.
-    async fn release(&self, action: ProductInboundAction) -> Result<(), ProductWorkflowError>;
+    async fn release(&self, action: ProductInboundAction) -> Result<(), ProductSurfaceFailure>;
 }
 
 /// Result of an idempotency check.

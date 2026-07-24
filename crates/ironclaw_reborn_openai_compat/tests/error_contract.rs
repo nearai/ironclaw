@@ -1,5 +1,5 @@
 use ironclaw_product::{
-    ProductAdapterError, ProductWorkflowRejectionKind, ProtocolAuthFailure, RedactedString,
+    ProductAdapterError, ProductSurfaceRejectionKind, ProtocolAuthFailure, RedactedString,
 };
 use ironclaw_reborn_openai_compat::{
     OpenAiCompatErrorCode, OpenAiCompatErrorKind, OpenAiCompatErrorResponse, OpenAiCompatErrorType,
@@ -10,7 +10,7 @@ use serde_json::json;
 #[test]
 fn workflow_rejection_maps_to_stable_openai_error_envelope() {
     let error = OpenAiCompatHttpError::from_workflow_rejection(
-        ProductWorkflowRejectionKind::Unauthorized,
+        ProductSurfaceRejectionKind::Unauthorized,
         403,
         false,
         Some("response_id".to_string()),
@@ -36,7 +36,7 @@ fn workflow_rejection_maps_to_stable_openai_error_envelope() {
 #[test]
 fn busy_and_transient_failures_keep_retryable_status_mapping() {
     let busy = OpenAiCompatHttpError::from_workflow_rejection(
-        ProductWorkflowRejectionKind::ThreadBusy,
+        ProductSurfaceRejectionKind::ThreadBusy,
         429,
         true,
         None,
@@ -49,7 +49,7 @@ fn busy_and_transient_failures_keep_retryable_status_mapping() {
     );
 
     let transient =
-        OpenAiCompatHttpError::from_product_adapter_error(ProductAdapterError::WorkflowTransient {
+        OpenAiCompatHttpError::from_product_adapter_error(ProductAdapterError::SurfaceTransient {
             reason: RedactedString::new("store down /host/path secret-token"),
         });
     assert_eq!(transient.status_code(), 503);
@@ -154,7 +154,7 @@ fn suspicious_error_params_are_dropped_instead_of_normalized() {
 
 #[test]
 fn workflow_rejection_maps_each_kind_to_stable_openai_error() {
-    use ProductWorkflowRejectionKind as K;
+    use ProductSurfaceRejectionKind as K;
 
     let cases = [
         (
@@ -257,8 +257,8 @@ fn product_adapter_error_variants_map_to_sanitized_openai_errors() {
             OpenAiCompatErrorCode::AuthenticationRequired,
         ),
         (
-            ProductAdapterError::WorkflowRejected {
-                kind: ProductWorkflowRejectionKind::Conflict,
+            ProductAdapterError::SurfaceRejected {
+                kind: ProductSurfaceRejectionKind::Conflict,
                 status_code: 409,
                 retryable: false,
                 reason: RedactedString::new("duplicate"),
@@ -268,7 +268,7 @@ fn product_adapter_error_variants_map_to_sanitized_openai_errors() {
             OpenAiCompatErrorCode::Conflict,
         ),
         (
-            ProductAdapterError::WorkflowTransient {
+            ProductAdapterError::SurfaceTransient {
                 reason: RedactedString::new("store down"),
             },
             503,

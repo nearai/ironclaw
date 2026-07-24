@@ -589,7 +589,7 @@ pub struct ExtensionIngressParts {
 /// Build the generic ingress router over deployment bindings and the generic
 /// host's compatibility snapshot watch.
 /// `reply_context` is the durable ING-11 store (production: the
-/// filesystem-backed [`crate::extension_host::reply_contexts::FilesystemReplyContextStore`],
+/// filesystem-backed [`ironclaw_extension_host::FilesystemReplyContextStore`],
 /// so contexts stored before admission survive a restart to delivery time).
 pub(crate) fn build_extension_ingress(
     watch: ironclaw_extension_host::SnapshotWatch,
@@ -706,7 +706,7 @@ mod serve_mount {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::PublicCallback,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         })
         .map_err(|error| crate::RebornBuildError::InvalidConfig {
             reason: format!("extension ingress policy invalid: {error}"),
@@ -1037,7 +1037,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pairing_not_handled_continues_to_the_product_workflow() {
+    async fn pairing_not_handled_continues_to_the_product_surface() {
         let (sink, workflow, observer) = pairing_sink(ChannelPairingInterception::NotHandled);
 
         let ack = sink.admit(admission_for("hello")).await.expect("admitted");

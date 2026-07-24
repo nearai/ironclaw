@@ -475,7 +475,7 @@ pub(crate) struct ChannelPairingService {
     conversation_actor_pairings: Arc<dyn ConversationActorPairingService>,
     /// The canonical DM-target store outbound delivery reads: pairing
     /// completion records the direct conversation here.
-    dm_targets: Arc<crate::extension_host::channel_dm_targets::FilesystemChannelDmTargetStore>,
+    dm_targets: Arc<ironclaw_extension_host::FilesystemChannelDmTargetStore>,
 }
 
 impl std::fmt::Debug for ChannelPairingService {
@@ -502,8 +502,7 @@ pub(crate) struct ChannelPairingServiceParts {
     pub(crate) identity_delete: Arc<dyn RebornUserIdentityBindingDeleteStore>,
     pub(crate) continuation: Arc<dyn RebornAuthContinuationDispatcher>,
     pub(crate) conversation_actor_pairings: Arc<dyn ConversationActorPairingService>,
-    pub(crate) dm_targets:
-        Arc<crate::extension_host::channel_dm_targets::FilesystemChannelDmTargetStore>,
+    pub(crate) dm_targets: Arc<ironclaw_extension_host::FilesystemChannelDmTargetStore>,
 }
 
 impl ChannelPairingService {
@@ -809,7 +808,7 @@ impl ChannelPairingService {
                 self.extension_id.as_str(),
                 &completion.user_id,
                 completion.external_actor_id.clone(),
-                crate::extension_host::channel_dm_targets::dm_target_payload(
+                ironclaw_extension_host::dm_target_payload(
                     completion.conversation_space_id.as_deref(),
                     &completion.conversation_id,
                 ),

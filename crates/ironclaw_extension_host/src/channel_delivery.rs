@@ -8,27 +8,26 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_extension_host::egress::{
-    ChannelEgressTransport, DeclaredChannelEgress, PolicyEnforcedChannelEgress,
-};
-use ironclaw_extension_host::ingress::{ReplyContextKey, ReplyContextStore};
-use ironclaw_extension_host::{DeploymentChannelRegistry, SnapshotWatch};
 use ironclaw_product::{
     ChannelDeliveryResolver, DeliveryReplyContextSource, ResolvedChannelDelivery,
 };
+
+use crate::egress::{ChannelEgressTransport, DeclaredChannelEgress, PolicyEnforcedChannelEgress};
+use crate::ingress::{ReplyContextKey, ReplyContextStore};
+use crate::{DeploymentChannelRegistry, SnapshotWatch};
 
 /// Resolves one extension's delivery half from its deployment binding, or
 /// from the active snapshot for compatibility with dynamically supplied
 /// channels. Both paths return owned `Arc`s so in-flight delivery survives a
 /// later registry or snapshot change.
-pub(crate) struct SnapshotChannelDeliveryResolver {
+pub struct SnapshotChannelDeliveryResolver {
     watch: SnapshotWatch,
     deployment_channels: Arc<DeploymentChannelRegistry>,
     transport: Arc<dyn ChannelEgressTransport>,
 }
 
 impl SnapshotChannelDeliveryResolver {
-    pub(crate) fn new(watch: SnapshotWatch, transport: Arc<dyn ChannelEgressTransport>) -> Self {
+    pub fn new(watch: SnapshotWatch, transport: Arc<dyn ChannelEgressTransport>) -> Self {
         Self {
             watch,
             deployment_channels: Arc::new(DeploymentChannelRegistry::default()),
@@ -36,7 +35,7 @@ impl SnapshotChannelDeliveryResolver {
         }
     }
 
-    pub(crate) fn with_deployment_channels(
+    pub fn with_deployment_channels(
         mut self,
         deployment_channels: Arc<DeploymentChannelRegistry>,
     ) -> Self {
@@ -106,12 +105,12 @@ impl ChannelDeliveryResolver for SnapshotChannelDeliveryResolver {
 /// The delivery-time read half of the ingress router's `reply_context`
 /// storage: the opaque vendor context an adapter attached to the originating
 /// inbound message, keyed by conversation fingerprint.
-pub(crate) struct IngressReplyContextSource {
+pub struct IngressReplyContextSource {
     store: Arc<dyn ReplyContextStore>,
 }
 
 impl IngressReplyContextSource {
-    pub(crate) fn new(store: Arc<dyn ReplyContextStore>) -> Self {
+    pub fn new(store: Arc<dyn ReplyContextStore>) -> Self {
         Self { store }
     }
 }

@@ -363,7 +363,7 @@ impl VendorIngress {
         harness: &RebornIntegrationHarness,
         observer: Arc<RecordingForwardObserver>,
     ) -> Self {
-        let surface = harness.product_workflow_for_test() as Arc<dyn ChannelInboundProductSurface>;
+        let surface = harness.product_surface_for_test() as Arc<dyn ChannelInboundProductSurface>;
         let sink = Arc::new(GenericChannelInboundSink::new(ChannelInboundSinkConfig {
             adapter_id: ProductAdapterId::new(extension_id).expect("adapter id"),
             evidence,

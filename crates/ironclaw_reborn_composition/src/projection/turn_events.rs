@@ -15,7 +15,7 @@ use ironclaw_product::{
     ApprovalPromptActionView, ApprovalPromptContextView, ApprovalPromptDestinationView,
     ApprovalPromptDetailView, ApprovalPromptScopeView, AuthPromptContextView, GatePromptView,
     ProductAdapterError, ProductGateKind, ProductOutboundPayload, ProductProjectionItem,
-    ProductProjectionState, ProductWorkflowRejectionKind, RedactedString,
+    ProductProjectionState, ProductSurfaceRejectionKind, RedactedString,
 };
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_turns::{
@@ -392,7 +392,7 @@ async fn blocked_prompt_payload(
                 run_id = %event.run_id,
                 "turn gate state lookup failed during WebUI projection"
             );
-            return Err(ProductAdapterError::WorkflowTransient {
+            return Err(ProductAdapterError::SurfaceTransient {
                 reason: RedactedString::new("turn gate state lookup failed"),
             });
         }
@@ -479,7 +479,7 @@ async fn approval_gate_prompt(
                 run_id = %event.run_id,
                 "approval request lookup failed during gate projection"
             );
-            ProductAdapterError::WorkflowTransient {
+            ProductAdapterError::SurfaceTransient {
                 reason: RedactedString::new("approval request lookup failed"),
             }
         })?;
@@ -1075,14 +1075,14 @@ fn map_turn_event_projection_error(error: TurnEventProjectionError) -> ProductAd
             kind: "projection_cursor",
             reason: "turn cursor scope does not match subscription scope".to_string(),
         },
-        TurnEventProjectionError::RebaseRequired { .. } => ProductAdapterError::WorkflowRejected {
-            kind: ProductWorkflowRejectionKind::Unavailable,
+        TurnEventProjectionError::RebaseRequired { .. } => ProductAdapterError::SurfaceRejected {
+            kind: ProductSurfaceRejectionKind::Unavailable,
             status_code: 503,
             retryable: true,
             reason: RedactedString::new("turn event projection rebase required; reconnect"),
         },
-        TurnEventProjectionError::Source { .. } => ProductAdapterError::WorkflowRejected {
-            kind: ProductWorkflowRejectionKind::Unavailable,
+        TurnEventProjectionError::Source { .. } => ProductAdapterError::SurfaceRejected {
+            kind: ProductSurfaceRejectionKind::Unavailable,
             status_code: 503,
             retryable: true,
             reason: RedactedString::new("turn event projection source unavailable"),

@@ -15,7 +15,7 @@ use std::{
 };
 
 use crate::{
-    ProductAdapterError, ProductWorkflowRejectionKind, ProjectionCursor, ProjectionStream,
+    ProductAdapterError, ProductSurfaceRejectionKind, ProjectionCursor, ProjectionStream,
     ProjectionSubscriptionRequest,
 };
 use async_trait::async_trait;
@@ -59,7 +59,7 @@ use crate::{
     ListPendingApprovalsRequest, ProductCancelRunRequest, ProductCreateThreadRequest,
     ProductGateResolution, ProductInboundCommand, ProductListAutomationsRequest,
     ProductListThreadsRequest, ProductRenameAutomationRequest, ProductResolveGateRequest,
-    ProductRetryRunRequest, ProductSubmitTurnRequest, ProductWorkflowError,
+    ProductRetryRunRequest, ProductSubmitTurnRequest, ProductSurfaceFailure,
     ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
     UnsupportedLifecycleProductFacade,
@@ -138,6 +138,7 @@ use ironclaw_approvals::{
     ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStore,
     ToolPermissionState, permission_mode_allows_persistent_approval,
 };
+pub use ironclaw_host_api::ChannelConnectStrategy as RebornChannelConnectStrategy;
 pub use lifecycle_setup::EXTENSION_SETUP_VIEW;
 pub use llm_config::{
     ActiveModelReader, CodexLoginStart, LLM_CONFIG_VIEW, LlmActiveSelection, LlmConfigService,
@@ -189,17 +190,17 @@ pub use types::{
     RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunStatus,
     RebornAutomationSource, RebornAutomationState, RebornCancelRunResponse,
-    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornCreateThreadResponse,
-    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionCredentialSetup, RebornExtensionInfo, RebornExtensionListResponse,
-    RebornExtensionOnboardingPayload, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
-    RebornExtensionRegistryResponse, RebornExtensionSetupField, RebornExtensionSetupSecret,
-    RebornExtensionSurface, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse, RebornListAutomationsResponse,
-    RebornListThreadsResponse, RebornLogEntry, RebornLogLevel, RebornLogQueryRequest,
-    RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
-    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornChannelConnectAction, RebornCreateThreadResponse, RebornDeleteThreadRequest,
+    RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionCredentialSetup,
+    RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionOnboardingPayload,
+    RebornExtensionOnboardingState, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
+    RebornExtensionSetupField, RebornExtensionSetupSecret, RebornExtensionSurface,
+    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornGlobalAutoApproveRequest,
+    RebornGlobalAutoApproveResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
+    RebornLogEntry, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
+    RebornOperatorArea, RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
+    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
+    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetProductRequest, RebornOperatorConfigSetRequest,
     RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
     RebornOperatorLogsQuery, RebornOperatorServiceLifecycleAction,
@@ -627,17 +628,7 @@ impl ChannelConnectionFacade for StaticChannelConnectionFacade {
     }
 }
 
-/// Presence-only projection of one manifest-declared channel-config field.
-/// Secret fields report `provided` only; stored values are never echoed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RebornChannelConfigField {
-    /// The manifest-declared field handle (the submit key).
-    pub name: String,
-    /// Operator-facing label from the manifest.
-    pub label: String,
-    pub secret: bool,
-    pub provided: bool,
-}
+pub use ironclaw_host_api::ChannelConfigField as RebornChannelConfigField;
 
 /// The generic channel-config configure port: per-extension operator config
 /// declared by the extension manifest's channel-config fields. Host
@@ -2827,7 +2818,7 @@ where
     /// implicit owner; otherwise the caller's persisted role must be admin or
     /// owner. The role is read from the directory on EVERY call (never cached),
     /// so a demoted admin loses access immediately — see
-    /// `product_workflow/CLAUDE.md` ("No caching. Caching the authz result is
+    /// `product_surface/CLAUDE.md` ("No caching. Caching the authz result is
     /// explicitly forbidden").
     async fn authorize_admin(
         &self,
@@ -6094,10 +6085,10 @@ async fn reject_generic_auth_gate_resolution(
     Ok(())
 }
 
-fn parse_credential_account_id(value: &str) -> Result<CredentialAccountId, ProductWorkflowError> {
+fn parse_credential_account_id(value: &str) -> Result<CredentialAccountId, ProductSurfaceFailure> {
     uuid::Uuid::parse_str(value)
         .map(CredentialAccountId::from_uuid)
-        .map_err(|_| ProductWorkflowError::AuthInteractionRejected {
+        .map_err(|_| ProductSurfaceFailure::AuthInteractionRejected {
             kind: AuthInteractionRejectionKind::InvalidCredentialRef,
         })
 }
@@ -6611,18 +6602,18 @@ fn map_turn_error(error: TurnError) -> ProductSurfaceError {
 
 fn map_adapter_error(error: ProductAdapterError) -> ProductSurfaceError {
     match error {
-        ProductAdapterError::WorkflowRejected {
+        ProductAdapterError::SurfaceRejected {
             kind,
             status_code,
             retryable,
             ..
         } => ProductSurfaceError::from_status_kind(
             code_for_status(status_code),
-            kind_for_workflow_rejection(kind),
+            kind_for_surface_rejection(kind),
             status_code,
             retryable,
         ),
-        ProductAdapterError::WorkflowTransient { .. }
+        ProductAdapterError::SurfaceTransient { .. }
         | ProductAdapterError::EgressTransient { .. } => {
             ProductSurfaceError::service_unavailable(true)
         }
@@ -6648,9 +6639,9 @@ fn map_adapter_error(error: ProductAdapterError) -> ProductSurfaceError {
     }
 }
 
-fn map_auth_interaction_error(error: ProductWorkflowError) -> ProductSurfaceError {
+fn map_auth_interaction_error(error: ProductSurfaceFailure) -> ProductSurfaceError {
     match error {
-        ProductWorkflowError::AuthInteractionRejected { kind } => {
+        ProductSurfaceFailure::AuthInteractionRejected { kind } => {
             ProductSurfaceError::from_status_kind(
                 code_for_status(kind.status_code()),
                 ProductSurfaceErrorKind::BlockedAuthentication,
@@ -6664,8 +6655,8 @@ fn map_auth_interaction_error(error: ProductWorkflowError) -> ProductSurfaceErro
 
 fn map_projection_error(error: ProductAdapterError) -> ProductSurfaceError {
     match error {
-        ProductAdapterError::WorkflowRejected {
-            kind: ProductWorkflowRejectionKind::Unavailable,
+        ProductAdapterError::SurfaceRejected {
+            kind: ProductSurfaceRejectionKind::Unavailable,
             status_code,
             retryable,
             ..
@@ -6675,7 +6666,7 @@ fn map_projection_error(error: ProductAdapterError) -> ProductSurfaceError {
             status_code,
             retryable,
         ),
-        ProductAdapterError::WorkflowTransient { .. }
+        ProductAdapterError::SurfaceTransient { .. }
         | ProductAdapterError::EgressTransient { .. } => ProductSurfaceError::from_status_kind(
             ProductSurfaceErrorCode::Unavailable,
             ProductSurfaceErrorKind::ReplayUnavailable,
@@ -6699,15 +6690,15 @@ fn code_for_status(status_code: u16) -> ProductSurfaceErrorCode {
     }
 }
 
-fn kind_for_workflow_rejection(kind: ProductWorkflowRejectionKind) -> ProductSurfaceErrorKind {
+fn kind_for_surface_rejection(kind: ProductSurfaceRejectionKind) -> ProductSurfaceErrorKind {
     match kind {
-        ProductWorkflowRejectionKind::ThreadBusy
-        | ProductWorkflowRejectionKind::AdmissionRejected => ProductSurfaceErrorKind::Busy,
-        ProductWorkflowRejectionKind::ScopeNotFound => ProductSurfaceErrorKind::NotFound,
-        ProductWorkflowRejectionKind::Unauthorized => ProductSurfaceErrorKind::ParticipantDenied,
-        ProductWorkflowRejectionKind::InvalidRequest => ProductSurfaceErrorKind::Validation,
-        ProductWorkflowRejectionKind::Unavailable => ProductSurfaceErrorKind::ServiceUnavailable,
-        ProductWorkflowRejectionKind::Conflict | ProductWorkflowRejectionKind::Ambiguous => {
+        ProductSurfaceRejectionKind::ThreadBusy
+        | ProductSurfaceRejectionKind::AdmissionRejected => ProductSurfaceErrorKind::Busy,
+        ProductSurfaceRejectionKind::ScopeNotFound => ProductSurfaceErrorKind::NotFound,
+        ProductSurfaceRejectionKind::Unauthorized => ProductSurfaceErrorKind::ParticipantDenied,
+        ProductSurfaceRejectionKind::InvalidRequest => ProductSurfaceErrorKind::Validation,
+        ProductSurfaceRejectionKind::Unavailable => ProductSurfaceErrorKind::ServiceUnavailable,
+        ProductSurfaceRejectionKind::Conflict | ProductSurfaceRejectionKind::Ambiguous => {
             ProductSurfaceErrorKind::Conflict
         }
     }

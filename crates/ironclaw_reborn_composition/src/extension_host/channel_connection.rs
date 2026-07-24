@@ -30,12 +30,12 @@ use ironclaw_host_api::{
 };
 use ironclaw_product::{ChannelAuthAccountState, ChannelConnectionFacade};
 
-use crate::extension_host::channel_dm_targets::FilesystemChannelDmTargetStore;
 use crate::extension_host::channel_identity::{
     ChannelConnectionScope, ChannelConnectionScopeSource, channel_config_connection_scope_source,
     discover_channel_extensions,
 };
 use crate::provider_identity::{RebornUserIdentityBindingDeleteStore, RebornUserIdentityLookup};
+use ironclaw_extension_host::FilesystemChannelDmTargetStore;
 
 /// Narrow disconnect-side port over product-auth lifecycle cleanup, so the
 /// per-user channel disconnect can revoke the caller's personal vendor
@@ -1039,7 +1039,7 @@ team_id = "/team/id"
                 EXTENSION,
                 &caller.user_id,
                 "U123".to_string(),
-                crate::extension_host::channel_dm_targets::dm_target_payload(Some("T123"), "DM-9"),
+                ironclaw_extension_host::dm_target_payload(Some("T123"), "DM-9"),
             )
             .await
             .expect("seed DM target");

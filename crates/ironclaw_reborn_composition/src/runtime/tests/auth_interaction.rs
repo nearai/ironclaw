@@ -13,7 +13,7 @@ use ironclaw_loop_host::{
     HostManagedModelResponse,
 };
 use ironclaw_product::{
-    AuthInteractionRejectionKind, ListPendingAuthInteractionsRequest, ProductWorkflowError,
+    AuthInteractionRejectionKind, ListPendingAuthInteractionsRequest, ProductSurfaceFailure,
 };
 use ironclaw_turns::{TurnActor, TurnScope};
 
@@ -72,7 +72,7 @@ async fn local_dev_runtime_auth_interactions_are_unavailable_without_flow_record
 
     assert!(matches!(
         error,
-        ProductWorkflowError::AuthInteractionRejected {
+        ProductSurfaceFailure::AuthInteractionRejected {
             kind: AuthInteractionRejectionKind::FlowUnavailable
         }
     ));

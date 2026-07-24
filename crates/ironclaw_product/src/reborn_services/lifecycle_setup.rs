@@ -2,16 +2,16 @@ use std::collections::BTreeSet;
 
 use ironclaw_auth::AuthProductScope;
 use ironclaw_host_api::{
-    ExtensionId, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
-    ProductSurfaceValidationCode,
+    ExtensionId, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceValidationCode,
 };
 
 use crate::{
     ChannelConfigFacade, LifecycleExtensionCredentialRequirement, LifecyclePackageKind,
     LifecyclePackageRef, LifecycleProductContext, LifecycleProductFacade, LifecycleProductResponse,
-    LifecycleProductSurfaceContext, ProductSetupExtensionRequest, ProductWorkflowError,
+    LifecycleProductSurfaceContext, ProductSetupExtensionRequest, ProductSurfaceFailure,
     RebornChannelConfigField, RebornExtensionCredentialSetup, RebornExtensionSetupField,
     RebornExtensionSetupSecret, RebornSetupExtensionResponse, RebornViewDescriptor,
+    lifecycle_product_surface_error,
 };
 
 use super::{
@@ -39,6 +39,7 @@ pub(super) async fn setup_extension_view(
 ) -> Result<RebornSetupExtensionResponse, ProductSurfaceError> {
     let package_id = views::required_string_view_param(params, "package_id")?;
     let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id)
+        .map_err(ProductSurfaceFailure::from)
         .map_err(map_lifecycle_error)?;
     setup_extension(
         facade,
@@ -75,6 +76,7 @@ pub(super) async fn submit_extension_setup_capability(
             validation_error("extension_id", ProductSurfaceValidationCode::MissingField)
         })?;
     let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id)
+        .map_err(ProductSurfaceFailure::from)
         .map_err(map_lifecycle_error)?;
     let request = serde_json::from_value(serde_json::Value::Object(object))
         .map_err(|_| validation_error("input", ProductSurfaceValidationCode::InvalidValue))?;
@@ -159,10 +161,7 @@ async fn project_package(
     context: LifecycleProductContext,
     package_ref: LifecyclePackageRef,
 ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
-    facade
-        .project_package(context, package_ref)
-        .await
-        .map_err(map_lifecycle_error)
+    facade.project_package(context, package_ref).await
 }
 
 async fn channel_field_status(
@@ -294,47 +293,14 @@ pub(super) fn validation_error(
     ProductSurfaceError::validation(field, code)
 }
 
-pub(super) fn map_lifecycle_error(error: ProductWorkflowError) -> ProductSurfaceError {
-    match error {
-        ProductWorkflowError::InvalidBindingRequest { .. }
-        | ProductWorkflowError::UnsupportedActionKind { .. } => {
-            ProductSurfaceError::from_status(ProductSurfaceErrorCode::InvalidRequest, 400, false)
-        }
-        // WebUI gets a plain 400 with no free text (the wire contract has no
-        // free-text field): the exact `config set` remediation reaches users
-        // via the LLM tool path and `ironclaw status`; bespoke WebUI
-        // messaging is a deliberately deferred scope-cut.
-        ProductWorkflowError::ProviderInstanceNotConfigured { .. } => {
-            ProductSurfaceError::from_status(ProductSurfaceErrorCode::InvalidRequest, 400, false)
-        }
-        ProductWorkflowError::BindingAccessDenied => {
-            ProductSurfaceError::from_status(ProductSurfaceErrorCode::Forbidden, 403, false)
-        }
-        ProductWorkflowError::Transient { ref reason } => {
-            // The 503 body is sanitized; without this line the cause is
-            // dropped entirely and the failure is undiagnosable from logs.
-            tracing::warn!(reason = %reason, "lifecycle action failed with a transient error");
-            ProductSurfaceError::service_unavailable(true)
-        }
-        ProductWorkflowError::BindingResolutionFailed { .. }
-        | ProductWorkflowError::BindingRequired { .. }
-        | ProductWorkflowError::TurnSubmissionRejected { .. }
-        | ProductWorkflowError::TurnSubmissionFailed { .. }
-        | ProductWorkflowError::TurnResumeRejected { .. }
-        | ProductWorkflowError::TurnResumeDenied { .. }
-        | ProductWorkflowError::ApprovalInteractionRejected { .. }
-        | ProductWorkflowError::AuthInteractionRejected { .. }
-        | ProductWorkflowError::AuthContinuationRejected { .. }
-        | ProductWorkflowError::BeforeInboundPolicyFailed { .. }
-        | ProductWorkflowError::DuplicateAction { .. }
-        | ProductWorkflowError::OutboundTargetNotDirectMessage
-        | ProductWorkflowError::UnknownInstallation => ProductSurfaceError::internal_invariant(),
-    }
+pub(super) fn map_lifecycle_error(error: ProductSurfaceFailure) -> ProductSurfaceError {
+    lifecycle_product_surface_error(error)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_host_api::ProductSurfaceErrorCode;
 
     /// Scope-cut: the WebUI facade gets a plain sanitized 400, never the
     /// host-authored `reason` text — no free-text field exists on the wire
@@ -342,7 +308,7 @@ mod tests {
     /// `ironclaw_product::error`).
     #[test]
     fn provider_instance_not_configured_maps_to_sanitized_400() {
-        let error = ProductWorkflowError::ProviderInstanceNotConfigured {
+        let error = ProductSurfaceFailure::ProviderInstanceNotConfigured {
             reason: "ironclaw config set google.client_id <id>.apps.googleusercontent.com"
                 .to_string(),
         };

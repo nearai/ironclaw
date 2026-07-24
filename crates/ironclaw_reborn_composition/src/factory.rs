@@ -13,7 +13,6 @@ use crate::builtin_capability_policy::builtin_capability_policy;
 use crate::deployment::TrafficPolicy;
 use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
 use crate::extension_host::lifecycle::RebornLocalSkillManagementPort;
-use crate::extension_host::mcp::hosted_http_mcp_runtime;
 use crate::extension_host::{
     admin_configuration::ComposedAdminConfigurationService,
     admin_configuration_capability::{
@@ -33,9 +32,6 @@ use crate::extension_host::{
     operator_config_capability::{
         extend_builtin_first_party_package as extend_builtin_operator_config_package,
         insert_handler as insert_operator_config_handler,
-    },
-    provider_instance_readiness::{
-        ProviderInstanceReadinessInput, provider_instance_readiness_map,
     },
     skill_auto_activate_capability::{
         extend_builtin_first_party_package as extend_builtin_skill_auto_activate_package,
@@ -85,7 +81,10 @@ use ironclaw_conversations::{
     AdapterInstallationId, AdapterKind, ConversationActorPairingService, ExternalActorRef,
 };
 use ironclaw_events::{DurableAuditLog, DurableEventLog};
-use ironclaw_extension_host::{AdminConfigurationService, FilesystemAdminConfigurationStore};
+use ironclaw_extension_host::{
+    AdminConfigurationService, FilesystemAdminConfigurationStore, ProviderInstanceReadinessInput,
+    hosted_http_mcp_runtime, provider_instance_readiness_map,
+};
 use ironclaw_extensions::{
     ExtensionInstallationStore, ExtensionLifecycleService, ExtensionRegistry,
     FilesystemExtensionInstallationStore, SharedExtensionRegistry,
@@ -404,7 +403,7 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) channel_identity_store:
         Arc<crate::extension_host::channel_identity_store::FilesystemChannelIdentityStore>,
     pub(crate) channel_dm_target_store:
-        Arc<crate::extension_host::channel_dm_targets::FilesystemChannelDmTargetStore>,
+        Arc<ironclaw_extension_host::FilesystemChannelDmTargetStore>,
     pub(crate) channel_disconnect_slot:
         Arc<std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionFacade>>>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
@@ -4106,7 +4105,7 @@ async fn build_backend_production(
         ),
     );
     let channel_dm_target_store = Arc::new(
-        crate::extension_host::channel_dm_targets::FilesystemChannelDmTargetStore::new(
+        ironclaw_extension_host::FilesystemChannelDmTargetStore::new(
             Arc::clone(&fold_filesystem),
             channel_egress_scope.tenant_id.clone(),
             channel_egress_scope.user_id.clone(),
@@ -4228,6 +4227,11 @@ async fn build_backend_production(
         });
         let generic_installation_store = extension_management.installation_store_handle();
         let pairing_installation_store = Arc::clone(&generic_installation_store);
+        let boot_installations = crate::extension_host::generic_host::boot_installation_records(
+            &generic_installation_store,
+            Some(&channel_config_for_generic),
+        )
+        .await?;
         let generic = crate::extension_host::generic_host::build_generic_extension_host(
             crate::extension_host::generic_host::GenericExtensionHostParams {
                 binder: services.extension_lane_tool_binder(),
@@ -4237,16 +4241,18 @@ async fn build_backend_production(
                     .map(|binding| (binding.extension_id.clone(), Arc::clone(&binding.adapter)))
                     .collect(),
                 installation_store: generic_installation_store,
-                channel_config: Some(Arc::clone(&channel_config_for_generic)),
+                boot_installations,
                 governor: Arc::clone(&resource_governor)
                     as Arc<dyn ironclaw_resources::ResourceGovernor>,
-                reserved_capability_ids,
-                reserved_ingress_routes:
+                assembly: ironclaw_host_api::ExtensionHostAssemblyConfig::new(
+                    reserved_capability_ids,
                     crate::extension_host::extension_ingress::reserved_fixed_ingress_routes(),
+                    std::time::Duration::from_secs(30),
+                ),
                 channel_egress_transport: channel_egress_transport.clone(),
             },
         )
-        .await?;
+        .await;
         extension_management.attach_generic_host(Arc::clone(&generic.host));
         if let Some(ports) = services.product_auth_provider_runtime_ports() {
             extension_management.attach_discovery_runtime_ports(ports);
@@ -4255,13 +4261,11 @@ async fn build_backend_production(
         let ingress_parts = crate::extension_host::extension_ingress::build_extension_ingress(
             generic.host.snapshot_watch(),
             Arc::clone(&deployment_channels),
-            Arc::new(
-                crate::extension_host::reply_contexts::FilesystemReplyContextStore::new(
-                    Arc::clone(&fold_filesystem),
-                    channel_egress_scope.tenant_id.clone(),
-                    channel_egress_scope.user_id.clone(),
-                ),
-            ),
+            Arc::new(ironclaw_extension_host::FilesystemReplyContextStore::new(
+                Arc::clone(&fold_filesystem),
+                channel_egress_scope.tenant_id.clone(),
+                channel_egress_scope.user_id.clone(),
+            )),
         );
         let channel_pairing_registry_built = {
             let registry =
@@ -4382,7 +4386,7 @@ async fn build_backend_production(
         let (delivery_coordinator, channel_delivery_resolver) = match channel_egress_transport {
             Some(transport) => {
                 let resolver: Arc<dyn ironclaw_product::ChannelDeliveryResolver> = Arc::new(
-                    crate::extension_host::channel_delivery::SnapshotChannelDeliveryResolver::new(
+                    ironclaw_extension_host::SnapshotChannelDeliveryResolver::new(
                         generic.host.snapshot_watch(),
                         transport,
                     )
@@ -4392,11 +4396,9 @@ async fn build_backend_production(
                     Arc::clone(&outbound_stores.outbound_state)
                         as Arc<dyn ironclaw_outbound::OutboundStateStore>,
                     Arc::clone(&resolver),
-                    Arc::new(
-                        crate::extension_host::channel_delivery::IngressReplyContextSource::new(
-                            Arc::clone(&ingress_parts.reply_context),
-                        ),
-                    ),
+                    Arc::new(ironclaw_extension_host::IngressReplyContextSource::new(
+                        Arc::clone(&ingress_parts.reply_context),
+                    )),
                     ironclaw_product::DeliveryRetryPolicy::default(),
                 ));
                 (Some(coordinator), Some(resolver))

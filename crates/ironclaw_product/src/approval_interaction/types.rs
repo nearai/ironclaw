@@ -1,4 +1,4 @@
-use crate::ProductWorkflowRejectionKind;
+use crate::ProductSurfaceRejectionKind;
 use ironclaw_host_api::{
     Action, ApprovalRequest, ApprovalRequestId, CapabilityId, InvocationId, ResourceScope,
 };
@@ -9,7 +9,7 @@ use ironclaw_turns::{
 use serde::{Deserialize, Serialize};
 
 use super::{approval_gate_ref, approval_rejected};
-use crate::error::ProductWorkflowError;
+use crate::error::ProductSurfaceFailure;
 
 const FALLBACK_APPROVAL_SUMMARY: &str = "Approval required";
 
@@ -44,40 +44,40 @@ impl ApprovalInteractionRejectionKind {
         }
     }
 
-    pub fn workflow_rejection_kind(self) -> ProductWorkflowRejectionKind {
+    pub fn surface_rejection_kind(self) -> ProductSurfaceRejectionKind {
         match self {
-            Self::MissingGate => ProductWorkflowRejectionKind::ScopeNotFound,
-            Self::AmbiguousGate => ProductWorkflowRejectionKind::Ambiguous,
-            Self::StaleGate => ProductWorkflowRejectionKind::Conflict,
-            Self::CrossScopeDenied => ProductWorkflowRejectionKind::Unauthorized,
+            Self::MissingGate => ProductSurfaceRejectionKind::ScopeNotFound,
+            Self::AmbiguousGate => ProductSurfaceRejectionKind::Ambiguous,
+            Self::StaleGate => ProductSurfaceRejectionKind::Conflict,
+            Self::CrossScopeDenied => ProductSurfaceRejectionKind::Unauthorized,
             Self::InvalidGateRef
             | Self::AlwaysAllowUnsupported
             | Self::UnsupportedAction
-            | Self::InvalidBindingRef => ProductWorkflowRejectionKind::InvalidRequest,
+            | Self::InvalidBindingRef => ProductSurfaceRejectionKind::InvalidRequest,
             Self::LeaseTermsUnavailable | Self::ResolverUnavailable => {
-                ProductWorkflowRejectionKind::Unavailable
+                ProductSurfaceRejectionKind::Unavailable
             }
         }
     }
 
     pub fn status_code(self) -> u16 {
-        match self.workflow_rejection_kind() {
-            ProductWorkflowRejectionKind::ScopeNotFound => 404,
-            ProductWorkflowRejectionKind::Unauthorized => 403,
-            ProductWorkflowRejectionKind::Conflict | ProductWorkflowRejectionKind::Ambiguous => 409,
-            ProductWorkflowRejectionKind::Unavailable => 503,
-            ProductWorkflowRejectionKind::InvalidRequest => 400,
-            ProductWorkflowRejectionKind::ThreadBusy
-            | ProductWorkflowRejectionKind::AdmissionRejected => 429,
+        match self.surface_rejection_kind() {
+            ProductSurfaceRejectionKind::ScopeNotFound => 404,
+            ProductSurfaceRejectionKind::Unauthorized => 403,
+            ProductSurfaceRejectionKind::Conflict | ProductSurfaceRejectionKind::Ambiguous => 409,
+            ProductSurfaceRejectionKind::Unavailable => 503,
+            ProductSurfaceRejectionKind::InvalidRequest => 400,
+            ProductSurfaceRejectionKind::ThreadBusy
+            | ProductSurfaceRejectionKind::AdmissionRejected => 429,
         }
     }
 
     pub fn retryable(self) -> bool {
         matches!(
-            self.workflow_rejection_kind(),
-            ProductWorkflowRejectionKind::Unavailable
-                | ProductWorkflowRejectionKind::AdmissionRejected
-                | ProductWorkflowRejectionKind::ThreadBusy
+            self.surface_rejection_kind(),
+            ProductSurfaceRejectionKind::Unavailable
+                | ProductSurfaceRejectionKind::AdmissionRejected
+                | ProductSurfaceRejectionKind::ThreadBusy
         )
     }
 }
@@ -172,7 +172,7 @@ impl ApprovalGateRecord {
         run_id: TurnRunId,
         gate_ref: GateRef,
         request: ApprovalRequest,
-    ) -> Result<Self, ProductWorkflowError> {
+    ) -> Result<Self, ProductSurfaceFailure> {
         Self::with_status(
             resource_scope,
             run_id,
@@ -188,7 +188,7 @@ impl ApprovalGateRecord {
         gate_ref: GateRef,
         request: ApprovalRequest,
         status: ApprovalStatus,
-    ) -> Result<Self, ProductWorkflowError> {
+    ) -> Result<Self, ProductSurfaceFailure> {
         let scope = ApprovalInteractionScope {
             tenant_id: resource_scope.tenant_id.clone(),
             user_id: resource_scope.user_id.clone(),
@@ -344,7 +344,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            ProductWorkflowError::ApprovalInteractionRejected {
+            ProductSurfaceFailure::ApprovalInteractionRejected {
                 kind: ApprovalInteractionRejectionKind::CrossScopeDenied
             }
         ));
@@ -370,7 +370,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            ProductWorkflowError::ApprovalInteractionRejected {
+            ProductSurfaceFailure::ApprovalInteractionRejected {
                 kind: ApprovalInteractionRejectionKind::InvalidGateRef
             }
         ));

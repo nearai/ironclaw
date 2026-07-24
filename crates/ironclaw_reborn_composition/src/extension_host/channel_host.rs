@@ -51,7 +51,7 @@ use ironclaw_product::{
     DeliveryCoordinator, IdempotencyLedger, PreferenceTargetCodec,
     ProductActorUserResolutionRequest, ProductActorUserResolver,
     ProductConversationSubjectRouteResolver, ProductInstallationKey, ProductInstallationScope,
-    ProductWorkflowError, RebornFilesystemIdempotencyLedger, ResolvedProductActorUser,
+    ProductSurfaceFailure, RebornFilesystemIdempotencyLedger, ResolvedProductActorUser,
     RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
     StaticProductInstallationResolver,
 };
@@ -140,7 +140,7 @@ pub(crate) trait ChannelWorkflowStateFactory: Send + Sync {
 
 /// [`ChannelWorkflowStateFactory`] over a root filesystem: the storage roots
 /// are mounted at the fixed aliases the durable ledger and conversation
-/// store resolve (`/engine/product_workflow/idempotency`, `/conversations`).
+/// store resolve (`/engine/product_surface/idempotency`, `/conversations`).
 pub(crate) struct FilesystemChannelWorkflowStateFactory<F>
 where
     F: RootFilesystem + 'static,
@@ -176,7 +176,7 @@ where
             ))
         };
         let view = MountView::new(vec![
-            mount("/engine/product_workflow/idempotency", &roots.idempotency)?,
+            mount("/engine/product_surface/idempotency", &roots.idempotency)?,
             mount("/conversations", &roots.conversations)?,
         ])
         .map_err(|error| format!("invalid workflow state mount view: {error}"))?;
@@ -973,8 +973,8 @@ impl ConversationBindingService for TriggeredNoopConversationBindingService {
     async fn resolve_binding(
         &self,
         _request: ironclaw_product::ResolveBindingRequest,
-    ) -> Result<ironclaw_product::ResolvedBinding, ProductWorkflowError> {
-        Err(ProductWorkflowError::BindingResolutionFailed {
+    ) -> Result<ironclaw_product::ResolvedBinding, ProductSurfaceFailure> {
+        Err(ProductSurfaceFailure::BindingResolutionFailed {
             reason: "conversation bindings are not supported in triggered delivery".to_string(),
         })
     }
@@ -982,8 +982,8 @@ impl ConversationBindingService for TriggeredNoopConversationBindingService {
     async fn lookup_binding(
         &self,
         _request: ironclaw_product::ResolveBindingRequest,
-    ) -> Result<ironclaw_product::ResolvedBinding, ProductWorkflowError> {
-        Err(ProductWorkflowError::BindingResolutionFailed {
+    ) -> Result<ironclaw_product::ResolvedBinding, ProductSurfaceFailure> {
+        Err(ProductSurfaceFailure::BindingResolutionFailed {
             reason: "conversation bindings are not supported in triggered delivery".to_string(),
         })
     }
@@ -1001,7 +1001,7 @@ impl ProductActorUserResolver for OperatorActorUserResolver {
     async fn resolve_product_actor_user(
         &self,
         _request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<ResolvedProductActorUser>, ProductWorkflowError> {
+    ) -> Result<Option<ResolvedProductActorUser>, ProductSurfaceFailure> {
         Ok(Some(ResolvedProductActorUser::new(
             self.operator_user_id.clone(),
         )))

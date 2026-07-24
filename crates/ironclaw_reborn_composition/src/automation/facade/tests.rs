@@ -15,7 +15,7 @@ use ironclaw_product::{
     ApprovalInteractionActionView, ApprovalInteractionScope, ApprovalInteractionService,
     AutomationListRequest, AutomationProductFacade, ListPendingApprovalsRequest,
     ListPendingApprovalsResponse, PendingApprovalInteractionView, ProductAgentBoundCaller,
-    ProductListThreadsRequest, ProductWorkflowError, RebornAutomationHoldReason,
+    ProductListThreadsRequest, ProductSurfaceFailure, RebornAutomationHoldReason,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
     RebornAutomationState, RebornListThreadsResponse, RebornServices,
     ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse, THREADS_VIEW,
@@ -217,7 +217,7 @@ impl ApprovalInteractionService for ActorFallbackApprovalInteractionService {
     async fn list_pending(
         &self,
         request: ListPendingApprovalsRequest,
-    ) -> Result<ListPendingApprovalsResponse, ProductWorkflowError> {
+    ) -> Result<ListPendingApprovalsResponse, ProductSurfaceFailure> {
         let is_expected_scope = request.scope.thread_id == self.pending_thread_id
             && request.scope.tenant_id == self.tenant_id
             && request.scope.agent_id.as_ref() == Some(&self.agent_id)
@@ -245,7 +245,7 @@ impl ApprovalInteractionService for ActorFallbackApprovalInteractionService {
     async fn resolve(
         &self,
         _request: ResolveApprovalInteractionRequest,
-    ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
+    ) -> Result<ResolveApprovalInteractionResponse, ProductSurfaceFailure> {
         panic!("resolve is not used by notification list tests")
     }
 }

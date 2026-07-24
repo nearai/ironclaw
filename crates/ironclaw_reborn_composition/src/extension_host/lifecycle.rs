@@ -4,14 +4,14 @@ use crate::local_dev_mounts::scoped_skill_management_mount_view;
 use async_trait::async_trait;
 use ironclaw_filesystem::{DiskFilesystem, RootFilesystem};
 use ironclaw_host_api::{
-    ExtensionId, HostApiError, HostPath, InstallationState, InvocationId, MountView, ResourceScope,
-    RuntimeHttpEgress, UserId, VirtualPath,
+    ExtensionId, HostApiError, HostPath, InstallationState, InvocationId, MountView,
+    ProductSurfaceError, ResourceScope, RuntimeHttpEgress, UserId, VirtualPath,
 };
 use ironclaw_product::{
     LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction,
     LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleReadinessBlocker, LifecycleSkillSource,
-    LifecycleSkillSummary, ProductWorkflowError,
+    LifecycleSkillSummary, ProductSurfaceFailure, lifecycle_product_surface_error,
 };
 use ironclaw_skills::{
     SkillInstallRequest, SkillInstallSource, SkillManagementContext, SkillManagementError,
@@ -278,7 +278,7 @@ impl RebornLocalLifecycleFacade {
         &self,
         context: LifecycleProductContext,
         action: LifecycleProductAction,
-    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
         match action {
             LifecycleProductAction::SkillSearch { query } => {
                 let scope = self
@@ -403,7 +403,7 @@ impl RebornLocalLifecycleFacade {
                     .await?
                 {
                     let Some(runtime_http_egress) = self.runtime_http_egress.clone() else {
-                        return Err(ProductWorkflowError::InvalidBindingRequest {
+                        return Err(ProductSurfaceFailure::InvalidBindingRequest {
                             reason: format!(
                                 "extension {} requires hosted MCP schema discovery and cannot be activated through the static lifecycle facade",
                                 package_ref.id
@@ -483,7 +483,7 @@ impl RebornLocalLifecycleFacade {
                     return unsupported_extension_auth_configure_projection(Some(package_ref));
                 };
                 let extension_id = ExtensionId::new(package_ref.id.as_str()).map_err(|error| {
-                    ProductWorkflowError::InvalidBindingRequest {
+                    ProductSurfaceFailure::InvalidBindingRequest {
                         reason: format!("invalid extension id: {error}"),
                     }
                 })?;
@@ -506,7 +506,7 @@ impl RebornLocalLifecycleFacade {
         extension_management: &RebornLocalExtensionManagementPort,
         package_ref: &LifecyclePackageRef,
         caller: &UserId,
-    ) -> Result<Option<RuntimeExtensionActivationCredentialGate>, ProductWorkflowError> {
+    ) -> Result<Option<RuntimeExtensionActivationCredentialGate>, ProductSurfaceFailure> {
         // The requirements preflight checks ownership first, so a non-owner
         // exits here with the masked "is not installed" denial before any
         // credential or hosted-MCP probing can leak the install's existence.
@@ -536,36 +536,46 @@ impl LifecycleProductFacade for RebornLocalLifecycleFacade {
         &self,
         context: LifecycleProductContext,
         action: LifecycleProductAction,
-    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        self.execute_action(context, action).await
+    ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
+        self.execute_action(context, action)
+            .await
+            .map_err(lifecycle_product_surface_error)
     }
 
     async fn project_package(
         &self,
         context: LifecycleProductContext,
         package_ref: LifecyclePackageRef,
-    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        if package_ref.kind == LifecyclePackageKind::Extension {
-            let Some(extension_management) = &self.extension_management else {
-                return unsupported_projection(Some(package_ref));
-            };
-            let caller = lifecycle_caller(&context)?;
-            return extension_management.project(package_ref, &caller).await;
+    ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
+        let result = async {
+            if package_ref.kind == LifecyclePackageKind::Extension {
+                let Some(extension_management) = &self.extension_management else {
+                    return unsupported_projection(Some(package_ref));
+                };
+                let caller = lifecycle_caller(&context)?;
+                return extension_management.project(package_ref, &caller).await;
+            }
+            unsupported_projection(Some(package_ref))
         }
-        unsupported_projection(Some(package_ref))
+        .await;
+        result.map_err(lifecycle_product_surface_error)
     }
 
     async fn import_extension_bundle(
         &self,
         _context: LifecycleProductContext,
         bundle: Vec<u8>,
-    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        let Some(extension_management) = &self.extension_management else {
-            return Err(ProductWorkflowError::InvalidBindingRequest {
-                reason: "extension management is not available in this runtime".to_string(),
-            });
-        };
-        extension_management.import_bundle(bundle).await
+    ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
+        let result = async {
+            let Some(extension_management) = &self.extension_management else {
+                return Err(ProductSurfaceFailure::InvalidBindingRequest {
+                    reason: "extension management is not available in this runtime".to_string(),
+                });
+            };
+            extension_management.import_bundle(bundle).await
+        }
+        .await;
+        result.map_err(lifecycle_product_surface_error)
     }
 
     /// Project the durable installation records' redacted `last_error` so the
@@ -576,23 +586,24 @@ impl LifecycleProductFacade for RebornLocalLifecycleFacade {
     async fn installed_activation_errors(
         &self,
         _context: LifecycleProductContext,
-    ) -> Result<std::collections::HashMap<String, String>, ProductWorkflowError> {
-        match &self.extension_management {
+    ) -> Result<std::collections::HashMap<String, String>, ProductSurfaceError> {
+        let result = match &self.extension_management {
             Some(extension_management) => {
                 extension_management.installation_activation_errors().await
             }
             None => Ok(std::collections::HashMap::new()),
-        }
+        };
+        result.map_err(lifecycle_product_surface_error)
     }
 }
 
-fn skill_package_ref(name: &str) -> Result<LifecyclePackageRef, ProductWorkflowError> {
-    LifecyclePackageRef::new(LifecyclePackageKind::Skill, name)
+fn skill_package_ref(name: &str) -> Result<LifecyclePackageRef, ProductSurfaceFailure> {
+    Ok(LifecyclePackageRef::new(LifecyclePackageKind::Skill, name)?)
 }
 
 fn lifecycle_resource_scope(
     context: &LifecycleProductContext,
-) -> Result<ResourceScope, ProductWorkflowError> {
+) -> Result<ResourceScope, ProductSurfaceFailure> {
     match context {
         LifecycleProductContext::Surface(context) => Ok(ResourceScope {
             tenant_id: context.tenant_id.clone(),
@@ -613,7 +624,7 @@ fn lifecycle_resource_scope(
             let caller = lifecycle_caller(context)?;
             let mut scope =
                 ResourceScope::local_default(caller, InvocationId::new()).map_err(|error| {
-                    ProductWorkflowError::InvalidBindingRequest {
+                    ProductSurfaceFailure::InvalidBindingRequest {
                         reason: format!("command lifecycle scope is invalid: {error}"),
                     }
                 })?;
@@ -630,11 +641,11 @@ fn lifecycle_resource_scope(
 /// Surface callers carry a typed [`UserId`]; command callers derive it from
 /// the verified auth claim minted by host authentication — commands must stay
 /// owner-attributed, not fall back to an ownerless path.
-fn lifecycle_caller(context: &LifecycleProductContext) -> Result<UserId, ProductWorkflowError> {
+fn lifecycle_caller(context: &LifecycleProductContext) -> Result<UserId, ProductSurfaceFailure> {
     match context {
         LifecycleProductContext::Surface(context) => Ok(context.user_id.clone()),
         LifecycleProductContext::Command(context) => UserId::new(context.auth_claim.subject())
-            .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+            .map_err(|error| ProductSurfaceFailure::InvalidBindingRequest {
                 reason: format!(
                     "command auth subject is not a valid lifecycle caller identity: {error}"
                 ),
@@ -658,7 +669,7 @@ pub(crate) fn response_with_payload(
 
 fn skill_summary(
     skill: ironclaw_skills::SkillSummary,
-) -> Result<LifecycleSkillSummary, ProductWorkflowError> {
+) -> Result<LifecycleSkillSummary, ProductSurfaceFailure> {
     Ok(LifecycleSkillSummary {
         name: LifecyclePackageId::new(skill.name)?,
         version: skill.version,
@@ -676,7 +687,7 @@ fn skill_summary(
 
 fn unsupported_projection(
     package_ref: Option<LifecyclePackageRef>,
-) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
     Ok(LifecycleProductResponse::projection(
         package_ref,
         InstallationState::Unsupported,
@@ -688,7 +699,7 @@ fn unsupported_projection(
 
 fn unsupported_extension_auth_configure_projection(
     package_ref: Option<LifecyclePackageRef>,
-) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
     Ok(LifecycleProductResponse::projection(
         package_ref,
         InstallationState::Unsupported,
@@ -703,7 +714,7 @@ fn unsupported_extension_auth_configure_projection(
 /// by its manifest descriptor, so which map a value rode in is advisory).
 fn parse_channel_config_payload(
     payload: Option<&serde_json::Value>,
-) -> Result<Vec<(String, String)>, ProductWorkflowError> {
+) -> Result<Vec<(String, String)>, ProductSurfaceFailure> {
     #[derive(Default, serde::Deserialize)]
     struct ConfigurePayload {
         #[serde(default)]
@@ -714,7 +725,7 @@ fn parse_channel_config_payload(
     let decoded = match payload {
         Some(payload) => {
             serde_json::from_value::<ConfigurePayload>(payload.clone()).map_err(|error| {
-                ProductWorkflowError::InvalidBindingRequest {
+                ProductSurfaceFailure::InvalidBindingRequest {
                     reason: format!("invalid extension configure payload: {error}"),
                 }
             })?
@@ -726,31 +737,31 @@ fn parse_channel_config_payload(
 
 fn map_channel_config_error(
     error: crate::extension_host::channel_config::ChannelConfigError,
-) -> ProductWorkflowError {
+) -> ProductSurfaceFailure {
     use crate::extension_host::channel_config::ChannelConfigError;
     match error {
-        ChannelConfigError::Storage { reason } => ProductWorkflowError::Transient { reason },
+        ChannelConfigError::Storage { reason } => ProductSurfaceFailure::Transient { reason },
         ChannelConfigError::NotInstalled { .. }
         | ChannelConfigError::UnknownField { .. }
-        | ChannelConfigError::Reactivation { .. } => ProductWorkflowError::InvalidBindingRequest {
+        | ChannelConfigError::Reactivation { .. } => ProductSurfaceFailure::InvalidBindingRequest {
             reason: error.to_string(),
         },
     }
 }
 
-fn map_skill_error(error: SkillManagementError) -> ProductWorkflowError {
+fn map_skill_error(error: SkillManagementError) -> ProductSurfaceFailure {
     match error.kind() {
         SkillManagementErrorKind::InvalidInput
         | SkillManagementErrorKind::NotFound
         | SkillManagementErrorKind::Conflict
-        | SkillManagementErrorKind::InvalidSkill => ProductWorkflowError::InvalidBindingRequest {
+        | SkillManagementErrorKind::InvalidSkill => ProductSurfaceFailure::InvalidBindingRequest {
             reason: error
                 .reason()
                 .unwrap_or("skill management request rejected")
                 .to_string(),
         },
-        SkillManagementErrorKind::FilesystemDenied => ProductWorkflowError::BindingAccessDenied,
-        SkillManagementErrorKind::Resource => ProductWorkflowError::Transient {
+        SkillManagementErrorKind::FilesystemDenied => ProductSurfaceFailure::BindingAccessDenied,
+        SkillManagementErrorKind::Resource => ProductSurfaceFailure::Transient {
             reason: "skill management resource unavailable".to_string(),
         },
     }
@@ -758,10 +769,10 @@ fn map_skill_error(error: SkillManagementError) -> ProductWorkflowError {
 
 fn map_local_skill_management_error(
     error: RebornLocalSkillManagementError,
-) -> ProductWorkflowError {
+) -> ProductSurfaceFailure {
     match error {
         RebornLocalSkillManagementError::InvalidContext { reason } => {
-            ProductWorkflowError::InvalidBindingRequest { reason }
+            ProductSurfaceFailure::InvalidBindingRequest { reason }
         }
         RebornLocalSkillManagementError::Skill(error) => map_skill_error(error),
     }
@@ -872,7 +883,7 @@ mod tests {
             .expect_err("skill remove must reject non-skill package refs");
         assert!(matches!(
             wrong_kind,
-            ProductWorkflowError::InvalidBindingRequest { .. }
+            ProductSurfaceFailure::InvalidBindingRequest { .. }
         ));
         assert!(
             storage_root
@@ -1053,7 +1064,7 @@ mod tests {
             .expect_err("invalid skill content should fail");
         assert!(matches!(
             invalid_install,
-            ProductWorkflowError::InvalidBindingRequest { .. }
+            ProductSurfaceFailure::InvalidBindingRequest { .. }
         ));
 
         let missing_remove = facade
@@ -1071,7 +1082,7 @@ mod tests {
             .expect_err("missing skill remove should fail");
         assert!(matches!(
             missing_remove,
-            ProductWorkflowError::InvalidBindingRequest { .. }
+            ProductSurfaceFailure::InvalidBindingRequest { .. }
         ));
     }
 

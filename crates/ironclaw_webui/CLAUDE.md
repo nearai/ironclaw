@@ -80,9 +80,9 @@ closed (`500`) if that layer is missing (locked by
 | Route ID | Method | Pattern | Streaming | Effect path |
 |---|---|---|---|---|
 | `webui.v2.get_session` | GET | `/api/webchat/v2/session` | — | `ProjectionOnly` |
-| `webui.v2.create_thread` | POST | `/api/webchat/v2/threads` | — | `ProductWorkflow` |
+| `webui.v2.create_thread` | POST | `/api/webchat/v2/threads` | — | `ProductSurface` |
 | `webui.v2.list_threads` | GET | `/api/webchat/v2/threads` (`?limit&cursor`) | — | `ProjectionOnly` |
-| `webui.v2.delete_thread` | DELETE | `/api/webchat/v2/threads/{thread_id}` | — | `ProductWorkflow` |
+| `webui.v2.delete_thread` | DELETE | `/api/webchat/v2/threads/{thread_id}` | — | `ProductSurface` |
 | `webui.v2.send_message` | POST | `/api/webchat/v2/threads/{thread_id}/messages` | — | `TurnCoordinator` |
 | `webui.v2.get_timeline` | GET | `/api/webchat/v2/threads/{thread_id}/timeline` (`?limit&cursor`) | — | `ProjectionOnly` |
 | `webui.v2.get_run_artifact` | GET | `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/artifact` | — | `ProjectionOnly` |
@@ -90,13 +90,13 @@ closed (`500`) if that layer is missing (locked by
 | `webui.v2.stream_events` | GET | `/api/webchat/v2/threads/{thread_id}/events` | **SSE** | `ProjectionOnly` |
 | `webui.v2.stream_events_ws` | GET | `/api/webchat/v2/threads/{thread_id}/ws` | **WebSocket** | `ProjectionOnly` |
 | `webui.v2.cancel_run` / `retry_run` / `resolve_gate` | POST | `…/runs/{run_id}/…` | — | `TurnCoordinator` |
-| `webui.v2.list/pause/resume/rename/delete_automation` | GET/POST/DELETE | `/api/webchat/v2/automations…` | — | `ProductWorkflow` |
-| `webui.v2.list/install/import/activate/remove/get_setup/setup_extension` | GET/POST | `/api/webchat/v2/extensions…` | — | `ProjectionOnly` / `ProductWorkflow` |
-| `webui.v2.*_llm_*` | GET/POST | `/api/webchat/v2/llm/…` | — | `ProjectionOnly` / `ProductWorkflow` |
-| `webui.v2.settings.list_tools` / `set_tools_auto_approve` / `set_tool_permission` | GET/POST | `/api/webchat/v2/settings/tools…` | — | `ProjectionOnly` / `ProductWorkflow` |
-| `webui.v2.operator.*` (setup, config, config/{key}, validate, diagnostics, status, logs, service) | GET/POST | `/api/webchat/v2/operator/…` | — | `ProjectionOnly` / `ProductWorkflow` |
-| `webui.v2.admin.*` (users CRUD, status, role, secrets) | GET/POST/PATCH/PUT/DELETE | `/api/webchat/v2/admin/users…` | — | `ProductWorkflow` |
-| `webui.v2.trace_*` (credit, account, account-login-link, holds/authorize) | GET/POST | `/api/webchat/v2/traces/…` | — | `ProductWorkflow` |
+| `webui.v2.list/pause/resume/rename/delete_automation` | GET/POST/DELETE | `/api/webchat/v2/automations…` | — | `ProductSurface` |
+| `webui.v2.list/install/import/activate/remove/get_setup/setup_extension` | GET/POST | `/api/webchat/v2/extensions…` | — | `ProjectionOnly` / `ProductSurface` |
+| `webui.v2.*_llm_*` | GET/POST | `/api/webchat/v2/llm/…` | — | `ProjectionOnly` / `ProductSurface` |
+| `webui.v2.settings.list_tools` / `set_tools_auto_approve` / `set_tool_permission` | GET/POST | `/api/webchat/v2/settings/tools…` | — | `ProjectionOnly` / `ProductSurface` |
+| `webui.v2.operator.*` (setup, config, config/{key}, validate, diagnostics, status, logs, service) | GET/POST | `/api/webchat/v2/operator/…` | — | `ProjectionOnly` / `ProductSurface` |
+| `webui.v2.admin.*` (users CRUD, status, role, secrets) | GET/POST/PATCH/PUT/DELETE | `/api/webchat/v2/admin/users…` | — | `ProductSurface` |
+| `webui.v2.trace_*` (credit, account, account-login-link, holds/authorize) | GET/POST | `/api/webchat/v2/traces/…` | — | `ProductSurface` |
 
 The exact per-route set (methods, query params, auth, rate/body limits) is the
 descriptor table in `src/webui_v2/descriptors.rs`; the count/shape is locked by

@@ -3436,7 +3436,6 @@ dependencies = [
  "chrono",
  "ironclaw_approvals",
  "ironclaw_authorization",
- "ironclaw_dispatcher",
  "ironclaw_events",
  "ironclaw_extensions",
  "ironclaw_filesystem",
@@ -3499,6 +3498,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "ironclaw_capabilities",
  "ironclaw_events",
  "ironclaw_host_api",
  "ironclaw_resources",
@@ -3589,14 +3589,20 @@ name = "ironclaw_extension_host"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "hmac 0.13.0",
  "ironclaw_auth",
- "ironclaw_dispatcher",
+ "ironclaw_authorization",
+ "ironclaw_capabilities",
  "ironclaw_extensions",
  "ironclaw_filesystem",
  "ironclaw_host_api",
+ "ironclaw_host_runtime",
+ "ironclaw_mcp",
+ "ironclaw_processes",
  "ironclaw_product",
+ "ironclaw_resources",
  "ironclaw_secrets",
  "secrecy",
  "serde",
@@ -3608,6 +3614,7 @@ dependencies = [
  "toml 1.1.2+spec-1.1.0",
  "tracing",
  "url",
+ "zip",
 ]
 
 [[package]]
@@ -3775,7 +3782,6 @@ dependencies = [
  "ironclaw_approvals",
  "ironclaw_authorization",
  "ironclaw_capabilities",
- "ironclaw_dispatcher",
  "ironclaw_event_projections",
  "ironclaw_events",
  "ironclaw_extensions",
@@ -4146,7 +4152,6 @@ dependencies = [
  "ironclaw_host_runtime",
  "ironclaw_llm",
  "ironclaw_loop_host",
- "ironclaw_mcp",
  "ironclaw_memory",
  "ironclaw_network",
  "ironclaw_observability",
@@ -4198,7 +4203,6 @@ dependencies = [
  "tracing-test",
  "url",
  "uuid",
- "zip",
 ]
 
 [[package]]

@@ -339,7 +339,7 @@ async fn binder_invokes_a_discovered_mcp_tool_through_the_tool_adapter() {
 
 #[tokio::test]
 async fn registry_resolver_allowlist_restricts_to_builtin_provider() {
-    use ironclaw_dispatcher::ToolResolver;
+    use ironclaw_capabilities::ToolResolver;
     use ironclaw_extensions::SharedExtensionRegistry;
 
     let mut registry = ExtensionRegistry::new();

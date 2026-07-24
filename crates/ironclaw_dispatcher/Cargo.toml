@@ -12,16 +12,17 @@ layer = "kernel"
 test-support = ["ironclaw_host_api/test-support"]
 
 [dependencies]
+ironclaw_capabilities = { path = "../ironclaw_capabilities" }
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+
+[dev-dependencies]
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 ironclaw_events = { path = "../ironclaw_events" }
-ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_host_api = { path = "../ironclaw_host_api", features = ["test-support"] }
 ironclaw_resources = { path = "../ironclaw_resources" }
 serde_json = "1"
-tracing = "0.1"
-
-[dev-dependencies]
-ironclaw_host_api = { path = "../ironclaw_host_api", features = ["test-support"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt"] }
+tracing = "0.1"
 tracing-test = { version = "0.2", features = ["no-env-filter"] }

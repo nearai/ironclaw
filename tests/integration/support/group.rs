@@ -120,7 +120,7 @@ use super::harness::{
 use super::planned_runtime_parts_shape::{
     DefaultPlannedRuntimePartsShape, harness_planned_runtime_parts_shape,
 };
-use super::product_workflow::RebornProductWorkflowHarness;
+use super::product_surface::RebornProductSurfaceHarness;
 use super::reply::RebornScriptedReply;
 use super::scope_gateway::ScopeRegistryGateway;
 use super::scripted_provider::{
@@ -176,7 +176,7 @@ pub(crate) struct GroupSharedStorage {
     /// Product-workflow harness (binding service + idempotency ledger).
     /// Shared so all threads resolve bindings within the same product context.
     /// `product_harness.scope` is the single-source `ResourceScope` (R5).
-    pub(crate) product_harness: RebornProductWorkflowHarness,
+    pub(crate) product_harness: RebornProductSurfaceHarness,
     /// Capability backend. Groups use `HostRuntime`; the degenerate single-shot
     /// path may use `Recording`.
     pub(crate) capability: GroupCapability,
@@ -571,7 +571,7 @@ impl RebornIntegrationGroup {
 
 /// Shared base data produced by [`RebornIntegrationGroupBuilder::build_base`].
 ///
-/// Replaces the 4-tuple `(RebornProductWorkflowHarness, Arc<CompositeRootFilesystem>,
+/// Replaces the 4-tuple `(RebornProductSurfaceHarness, Arc<CompositeRootFilesystem>,
 /// Option<PathBuf>, Arc<TempDir>)` so each constructor can name fields rather than
 /// position-destructure a tuple.
 ///
@@ -584,7 +584,7 @@ impl RebornIntegrationGroup {
 /// between `build_base` and `into_group`; `build_base`/`into_group` themselves
 /// stay module-private too.
 struct GroupBaseData {
-    product_harness: RebornProductWorkflowHarness,
+    product_harness: RebornProductSurfaceHarness,
     composite: Arc<CompositeRootFilesystem>,
     storage_reopen: super::builder::StorageReopen,
     turn_root: Arc<tempfile::TempDir>,
@@ -688,7 +688,7 @@ impl RebornIntegrationGroupBuilder {
             "agent-itest",
             Some("project-itest"),
         );
-        let product_harness = RebornProductWorkflowHarness::filesystem_temp(scope)?;
+        let product_harness = RebornProductSurfaceHarness::filesystem_temp(scope)?;
         let turn_root = Arc::new(tempfile::tempdir()?);
         let (composite, storage_reopen) =
             build_storage_composite(self.storage, turn_root.path()).await?;

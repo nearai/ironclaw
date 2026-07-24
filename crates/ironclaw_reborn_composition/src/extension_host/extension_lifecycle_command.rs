@@ -1,7 +1,8 @@
+use ironclaw_host_api::ProductSurfaceError;
 use ironclaw_product::{
     LifecycleExtensionSource, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction,
     LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
-    LifecycleProductResponse, LifecycleSearchExtensionSummary, ProductWorkflowError,
+    LifecycleProductResponse, LifecycleSearchExtensionSummary, ProductSurfaceFailure,
 };
 use std::sync::Arc;
 use thiserror::Error;
@@ -21,8 +22,10 @@ pub enum RebornExtensionLifecycleCommand {
 pub enum RebornExtensionLifecycleCommandError {
     #[error("extension lifecycle is available only for local-dev Reborn services")]
     LocalRuntimeUnavailable,
+    #[error("extension lifecycle command is invalid: {0}")]
+    ProductCommand(#[from] ProductSurfaceFailure),
     #[error("extension lifecycle failed: {0}")]
-    Product(#[from] ProductWorkflowError),
+    ProductSurface(#[from] ProductSurfaceError),
 }
 
 pub async fn execute_reborn_extension_lifecycle_command(
@@ -94,7 +97,7 @@ pub fn render_reborn_extension_lifecycle_response(
 }
 
 impl RebornExtensionLifecycleCommand {
-    fn into_action(self) -> Result<LifecycleProductAction, ProductWorkflowError> {
+    fn into_action(self) -> Result<LifecycleProductAction, ProductSurfaceFailure> {
         Ok(match self {
             Self::Search { query } => LifecycleProductAction::ExtensionSearch { query },
             Self::Install { id } => LifecycleProductAction::ExtensionInstall {
@@ -112,8 +115,11 @@ impl RebornExtensionLifecycleCommand {
 
 fn extension_package_ref(
     id: impl Into<String>,
-) -> Result<LifecyclePackageRef, ProductWorkflowError> {
-    LifecyclePackageRef::new(LifecyclePackageKind::Extension, id)
+) -> Result<LifecyclePackageRef, ProductSurfaceFailure> {
+    Ok(LifecyclePackageRef::new(
+        LifecyclePackageKind::Extension,
+        id,
+    )?)
 }
 
 fn render_search_payload(

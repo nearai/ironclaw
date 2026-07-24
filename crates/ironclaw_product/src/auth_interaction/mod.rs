@@ -20,8 +20,8 @@ pub use types::{
     PendingAuthInteractionView, ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
 };
 
-use crate::error::ProductWorkflowError;
+use crate::error::ProductSurfaceFailure;
 
-fn auth_rejected(kind: AuthInteractionRejectionKind) -> ProductWorkflowError {
-    ProductWorkflowError::AuthInteractionRejected { kind }
+fn auth_rejected(kind: AuthInteractionRejectionKind) -> ProductSurfaceFailure {
+    ProductSurfaceFailure::AuthInteractionRejected { kind }
 }

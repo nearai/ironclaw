@@ -18,7 +18,7 @@ use uuid::Uuid;
 use crate::binding_ref::{
     AUTH_CONTINUATION_BINDING_REF_RAW_MAX_BYTES, binding_ref_segment, bounded_idempotency_key,
 };
-use crate::{AuthContinuationRejectionKind, ProductWorkflowError};
+use crate::{AuthContinuationRejectionKind, ProductSurfaceFailure};
 
 #[derive(Clone)]
 pub struct ProductAuthTurnGateResumeDispatcher {
@@ -47,7 +47,7 @@ impl ProductAuthTurnGateResumeDispatcher {
                     tracing::debug!(
                         %flow_id,
                         auth_error_code = ?auth_error.code(),
-                        workflow_error_kind = workflow_error_kind(&error),
+                        surface_error_kind = surface_error_kind(&error),
                         "product auth turn-gate continuation dispatch failed"
                     );
                     auth_error
@@ -79,7 +79,7 @@ impl ProductAuthTurnGateResumeDispatcher {
                     tracing::debug!(
                         %flow_id,
                         auth_error_code = ?auth_error.code(),
-                        workflow_error_kind = workflow_error_kind(&error),
+                        surface_error_kind = surface_error_kind(&error),
                         "canceled product-auth turn-gate denial failed"
                     );
                     auth_error
@@ -92,7 +92,7 @@ impl ProductAuthTurnGateResumeDispatcher {
     pub async fn dispatch_turn_gate_resume(
         &self,
         event: AuthContinuationEvent,
-    ) -> Result<TurnRunId, ProductWorkflowError> {
+    ) -> Result<TurnRunId, ProductSurfaceFailure> {
         // Tolerate an already-settled gate exactly like the deny path does:
         // a completed continuation is re-dispatched whenever the durable
         // `continuation_emitted_at` fence was not stamped (e.g. the fan-out
@@ -108,13 +108,13 @@ impl ProductAuthTurnGateResumeDispatcher {
         event: AuthContinuationEvent,
         resume_disposition: Option<GateResumeDisposition>,
         ignore_stale_gate: bool,
-    ) -> Result<TurnRunId, ProductWorkflowError> {
+    ) -> Result<TurnRunId, ProductSurfaceFailure> {
         let AuthContinuationRef::TurnGateResume {
             turn_run_ref,
             gate_ref,
         } = &event.continuation
         else {
-            return Err(ProductWorkflowError::AuthContinuationRejected {
+            return Err(ProductSurfaceFailure::AuthContinuationRejected {
                 kind: AuthContinuationRejectionKind::NotTurnGateResume,
             });
         };
@@ -138,7 +138,7 @@ impl ProductAuthTurnGateResumeDispatcher {
         }
         let actor = state
             .actor
-            .ok_or(ProductWorkflowError::AuthContinuationRejected {
+            .ok_or(ProductSurfaceFailure::AuthContinuationRejected {
                 kind: AuthContinuationRejectionKind::UnauthorizedBlockedGate,
             })?;
         let source_binding_ref = state.source_binding_ref;
@@ -178,57 +178,59 @@ fn continuation_kind(continuation: &AuthContinuationRef) -> &'static str {
     }
 }
 
-fn auth_error_for_continuation_dispatch(error: &ProductWorkflowError) -> AuthProductError {
+fn auth_error_for_continuation_dispatch(error: &ProductSurfaceFailure) -> AuthProductError {
     match error {
-        ProductWorkflowError::TurnSubmissionFailed { error }
-        | ProductWorkflowError::TurnResumeDenied { error }
+        ProductSurfaceFailure::TurnSubmissionFailed { error }
+        | ProductSurfaceFailure::TurnResumeDenied { error }
             if error.category() == TurnErrorCategory::Unavailable =>
         {
             AuthProductError::BackendUnavailable
         }
-        ProductWorkflowError::TurnResumeDenied { error }
+        ProductSurfaceFailure::TurnResumeDenied { error }
             if error.category() == TurnErrorCategory::Conflict =>
         {
             AuthProductError::BackendUnavailable
         }
-        ProductWorkflowError::TurnSubmissionFailed { error }
-        | ProductWorkflowError::TurnResumeDenied { error }
+        ProductSurfaceFailure::TurnSubmissionFailed { error }
+        | ProductSurfaceFailure::TurnResumeDenied { error }
             if error.category() == TurnErrorCategory::Unauthorized =>
         {
             AuthProductError::CrossScopeDenied
         }
-        ProductWorkflowError::TurnSubmissionFailed { error }
-        | ProductWorkflowError::TurnResumeDenied { error }
+        ProductSurfaceFailure::TurnSubmissionFailed { error }
+        | ProductSurfaceFailure::TurnResumeDenied { error }
             if error.category() == TurnErrorCategory::ScopeNotFound =>
         {
             AuthProductError::UnknownOrExpiredFlow
         }
-        ProductWorkflowError::TurnSubmissionFailed { .. } => AuthProductError::InvalidRequest {
+        ProductSurfaceFailure::TurnSubmissionFailed { .. } => AuthProductError::InvalidRequest {
             reason: "auth continuation turn resume failed".to_string(),
         },
-        ProductWorkflowError::Transient { .. } => AuthProductError::BackendUnavailable,
-        ProductWorkflowError::TurnResumeDenied { .. } => AuthProductError::InvalidRequest {
+        ProductSurfaceFailure::Transient { .. } => AuthProductError::BackendUnavailable,
+        ProductSurfaceFailure::TurnResumeDenied { .. } => AuthProductError::InvalidRequest {
             reason: "auth continuation turn resume denied".to_string(),
         },
-        ProductWorkflowError::AuthContinuationRejected { kind } => {
+        ProductSurfaceFailure::AuthContinuationRejected { kind } => {
             AuthProductError::InvalidRequest {
                 reason: kind.sanitized_reason().to_string(),
             }
         }
-        ProductWorkflowError::TurnResumeRejected { .. }
-        | ProductWorkflowError::TurnSubmissionRejected { .. } => AuthProductError::InvalidRequest {
-            reason: "auth continuation rejected".to_string(),
-        },
+        ProductSurfaceFailure::TurnResumeRejected { .. }
+        | ProductSurfaceFailure::TurnSubmissionRejected { .. } => {
+            AuthProductError::InvalidRequest {
+                reason: "auth continuation rejected".to_string(),
+            }
+        }
         _ => AuthProductError::InvalidRequest {
             reason: "auth continuation dispatch failed".to_string(),
         },
     }
 }
 
-fn workflow_error_kind(error: &ProductWorkflowError) -> &'static str {
+fn surface_error_kind(error: &ProductSurfaceFailure) -> &'static str {
     match error {
-        ProductWorkflowError::TurnSubmissionRejected { .. } => "turn_submission_rejected",
-        ProductWorkflowError::TurnSubmissionFailed { error } => match error.category() {
+        ProductSurfaceFailure::TurnSubmissionRejected { .. } => "turn_submission_rejected",
+        ProductSurfaceFailure::TurnSubmissionFailed { error } => match error.category() {
             TurnErrorCategory::ThreadBusy => "turn_thread_busy",
             TurnErrorCategory::AdmissionRejected => "turn_admission_rejected",
             TurnErrorCategory::CapacityExceeded => "turn_capacity_exceeded",
@@ -238,8 +240,8 @@ fn workflow_error_kind(error: &ProductWorkflowError) -> &'static str {
             TurnErrorCategory::Unavailable => "turn_unavailable",
             TurnErrorCategory::Conflict => "turn_conflict",
         },
-        ProductWorkflowError::TurnResumeRejected { .. } => "turn_resume_rejected",
-        ProductWorkflowError::AuthContinuationRejected { kind } => match kind {
+        ProductSurfaceFailure::TurnResumeRejected { .. } => "turn_resume_rejected",
+        ProductSurfaceFailure::AuthContinuationRejected { kind } => match kind {
             AuthContinuationRejectionKind::NotTurnGateResume => {
                 "auth_continuation_not_turn_gate_resume"
             }
@@ -260,7 +262,7 @@ fn workflow_error_kind(error: &ProductWorkflowError) -> &'static str {
                 "auth_continuation_unauthorized_blocked_gate"
             }
         },
-        ProductWorkflowError::TurnResumeDenied { error } => match error.category() {
+        ProductSurfaceFailure::TurnResumeDenied { error } => match error.category() {
             TurnErrorCategory::ThreadBusy => "turn_resume_thread_busy",
             TurnErrorCategory::AdmissionRejected => "turn_resume_admission_rejected",
             TurnErrorCategory::CapacityExceeded => "turn_resume_capacity_exceeded",
@@ -270,22 +272,22 @@ fn workflow_error_kind(error: &ProductWorkflowError) -> &'static str {
             TurnErrorCategory::Unavailable => "turn_resume_unavailable",
             TurnErrorCategory::Conflict => "turn_resume_conflict",
         },
-        ProductWorkflowError::Transient { .. } => "transient",
+        ProductSurfaceFailure::Transient { .. } => "transient",
         _ => "workflow_error",
     }
 }
 
-fn map_auth_resume_error(error: TurnError) -> ProductWorkflowError {
+fn map_auth_resume_error(error: TurnError) -> ProductSurfaceFailure {
     match error {
         TurnError::InvalidTransition { .. } | TurnError::InvalidRequest { .. } => {
-            ProductWorkflowError::AuthContinuationRejected {
+            ProductSurfaceFailure::AuthContinuationRejected {
                 kind: AuthContinuationRejectionKind::UnauthorizedBlockedGate,
             }
         }
         TurnError::Unauthorized | TurnError::ScopeNotFound | TurnError::LeaseMismatch => {
-            ProductWorkflowError::TurnResumeDenied { error }
+            ProductSurfaceFailure::TurnResumeDenied { error }
         }
-        error => ProductWorkflowError::TurnSubmissionFailed { error },
+        error => ProductSurfaceFailure::TurnSubmissionFailed { error },
     }
 }
 
@@ -305,9 +307,9 @@ fn auth_continuation_binding_id(
 
 fn turn_scope_from_auth_event(
     event: &AuthContinuationEvent,
-) -> Result<TurnScope, ProductWorkflowError> {
+) -> Result<TurnScope, ProductSurfaceFailure> {
     let Some(thread_id) = event.scope.resource.thread_id.clone() else {
-        return Err(ProductWorkflowError::AuthContinuationRejected {
+        return Err(ProductSurfaceFailure::AuthContinuationRejected {
             kind: AuthContinuationRejectionKind::MissingThreadScope,
         });
     };
@@ -320,27 +322,27 @@ fn turn_scope_from_auth_event(
     ))
 }
 
-fn parse_turn_run_id(value: &str) -> Result<TurnRunId, ProductWorkflowError> {
+fn parse_turn_run_id(value: &str) -> Result<TurnRunId, ProductSurfaceFailure> {
     Uuid::parse_str(value)
         .map(TurnRunId::from_uuid)
-        .map_err(|_| ProductWorkflowError::AuthContinuationRejected {
+        .map_err(|_| ProductSurfaceFailure::AuthContinuationRejected {
             kind: AuthContinuationRejectionKind::InvalidTurnRunRef,
         })
 }
 
-fn parse_gate_ref(value: &str) -> Result<GateRef, ProductWorkflowError> {
-    GateRef::new(value.to_string()).map_err(|_| ProductWorkflowError::AuthContinuationRejected {
+fn parse_gate_ref(value: &str) -> Result<GateRef, ProductSurfaceFailure> {
+    GateRef::new(value.to_string()).map_err(|_| ProductSurfaceFailure::AuthContinuationRejected {
         kind: AuthContinuationRejectionKind::InvalidGateRef,
     })
 }
 
-fn idempotency_key_for_binding(binding_id: &str) -> Result<IdempotencyKey, ProductWorkflowError> {
+fn idempotency_key_for_binding(binding_id: &str) -> Result<IdempotencyKey, ProductSurfaceFailure> {
     bounded_idempotency_key(
         "auth-continuation",
         binding_id,
         AUTH_CONTINUATION_BINDING_REF_RAW_MAX_BYTES,
     )
-    .map_err(|_| ProductWorkflowError::AuthContinuationRejected {
+    .map_err(|_| ProductSurfaceFailure::AuthContinuationRejected {
         kind: AuthContinuationRejectionKind::InvalidIdempotencyKey,
     })
 }
@@ -892,7 +894,10 @@ mod tests {
             .await
             .expect_err("cross-scope continuation must not resume");
 
-        assert!(matches!(err, ProductWorkflowError::TurnResumeDenied { .. }));
+        assert!(matches!(
+            err,
+            ProductSurfaceFailure::TurnResumeDenied { .. }
+        ));
     }
 
     #[tokio::test]
@@ -920,7 +925,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            ProductWorkflowError::TurnSubmissionFailed { .. }
+            ProductSurfaceFailure::TurnSubmissionFailed { .. }
         ));
     }
 
@@ -933,7 +938,7 @@ mod tests {
             TurnError::LeaseMismatch,
         ] {
             let auth_error =
-                auth_error_for_continuation_dispatch(&ProductWorkflowError::TurnResumeDenied {
+                auth_error_for_continuation_dispatch(&ProductSurfaceFailure::TurnResumeDenied {
                     error,
                 });
 
@@ -943,13 +948,13 @@ mod tests {
 
     #[test]
     fn auth_error_for_continuation_dispatch_maps_transient_and_catch_all() {
-        let transient = auth_error_for_continuation_dispatch(&ProductWorkflowError::Transient {
+        let transient = auth_error_for_continuation_dispatch(&ProductSurfaceFailure::Transient {
             reason: "store timeout".to_string(),
         });
         assert_eq!(transient.code(), AuthErrorCode::BackendUnavailable);
 
         let catch_all =
-            auth_error_for_continuation_dispatch(&ProductWorkflowError::UnknownInstallation);
+            auth_error_for_continuation_dispatch(&ProductSurfaceFailure::UnknownInstallation);
         assert_eq!(catch_all.code(), AuthErrorCode::InvalidRequest);
         assert!(matches!(
             catch_all,
@@ -991,7 +996,7 @@ mod tests {
             ),
         ] {
             let auth_error = auth_error_for_continuation_dispatch(
-                &ProductWorkflowError::AuthContinuationRejected { kind },
+                &ProductSurfaceFailure::AuthContinuationRejected { kind },
             );
 
             assert!(matches!(
@@ -1017,7 +1022,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            ProductWorkflowError::AuthContinuationRejected {
+            ProductSurfaceFailure::AuthContinuationRejected {
                 kind: AuthContinuationRejectionKind::InvalidTurnRunRef
             }
         ));
@@ -1039,7 +1044,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            ProductWorkflowError::AuthContinuationRejected {
+            ProductSurfaceFailure::AuthContinuationRejected {
                 kind: AuthContinuationRejectionKind::NotTurnGateResume
             }
         ));
@@ -1064,7 +1069,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            ProductWorkflowError::AuthContinuationRejected {
+            ProductSurfaceFailure::AuthContinuationRejected {
                 kind: AuthContinuationRejectionKind::MissingThreadScope
             }
         ));
@@ -1105,24 +1110,21 @@ mod tests {
     }
 
     #[test]
-    fn workflow_error_kind_capacity_exceeded_returns_expected_strings() {
-        let submission = ProductWorkflowError::TurnSubmissionFailed {
+    fn surface_error_kind_capacity_exceeded_returns_expected_strings() {
+        let submission = ProductSurfaceFailure::TurnSubmissionFailed {
             error: TurnError::capacity_exceeded(
                 ironclaw_turns::TurnCapacityResource::SpawnTreeDescendants,
                 4,
             ),
         };
-        assert_eq!(workflow_error_kind(&submission), "turn_capacity_exceeded");
+        assert_eq!(surface_error_kind(&submission), "turn_capacity_exceeded");
 
-        let resume = ProductWorkflowError::TurnResumeDenied {
+        let resume = ProductSurfaceFailure::TurnResumeDenied {
             error: TurnError::capacity_exceeded(
                 ironclaw_turns::TurnCapacityResource::SubmitTurn,
                 7,
             ),
         };
-        assert_eq!(
-            workflow_error_kind(&resume),
-            "turn_resume_capacity_exceeded"
-        );
+        assert_eq!(surface_error_kind(&resume), "turn_resume_capacity_exceeded");
     }
 }

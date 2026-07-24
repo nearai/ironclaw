@@ -150,7 +150,7 @@ pub async fn auth_prompt_view_for_blocked_auth(
                     %run_id,
                     "auth challenge lookup failed during auth prompt rendering"
                 );
-                ProductAdapterError::WorkflowTransient {
+                ProductAdapterError::SurfaceTransient {
                     reason: RedactedString::new("auth challenge lookup failed"),
                 }
             })?,

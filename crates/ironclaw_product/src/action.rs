@@ -13,7 +13,7 @@ use ironclaw_turns::{LoopGateRef, TurnRunId};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::error::ProductWorkflowError;
+use crate::error::ProductSurfaceFailure;
 
 /// Unique identifier for a product inbound action ledger entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -196,32 +196,34 @@ pub enum ActionDispatchKind {
 impl ActionDispatchKind {
     /// Derive the dispatch kind from a product inbound payload while preserving
     /// typed internal identifiers after boundary validation.
-    pub fn try_from_payload(payload: &ProductInboundPayload) -> Result<Self, ProductWorkflowError> {
+    pub fn try_from_payload(
+        payload: &ProductInboundPayload,
+    ) -> Result<Self, ProductSurfaceFailure> {
         match payload {
             ProductInboundPayload::UserMessage(_) => Ok(Self::UserMessageTurn {
                 run_id: TurnRunId::new(),
             }),
             ProductInboundPayload::Command(cmd) => Ok(Self::Command {
                 command: ProductCommandName::new(cmd.command.clone())
-                    .map_err(|reason| ProductWorkflowError::TurnSubmissionRejected { reason })?,
+                    .map_err(|reason| ProductSurfaceFailure::TurnSubmissionRejected { reason })?,
             }),
             ProductInboundPayload::ApprovalResolution(res) => Ok(Self::ApprovalResolution {
                 gate_ref: LoopGateRef::new(res.gate_ref.clone())
-                    .map_err(|reason| ProductWorkflowError::TurnSubmissionRejected { reason })?,
+                    .map_err(|reason| ProductSurfaceFailure::TurnSubmissionRejected { reason })?,
             }),
             ProductInboundPayload::ScopedApprovalResolution(_) => {
                 Ok(Self::ScopedApprovalResolution)
             }
             ProductInboundPayload::AuthResolution(res) => Ok(Self::AuthResolution {
                 auth_request_ref: AuthRequestRef::new(res.auth_request_ref.clone())
-                    .map_err(|reason| ProductWorkflowError::TurnSubmissionRejected { reason })?,
+                    .map_err(|reason| ProductSurfaceFailure::TurnSubmissionRejected { reason })?,
             }),
             ProductInboundPayload::ProjectionRead(_) => Ok(Self::ProjectionRead),
             ProductInboundPayload::SubscriptionRequest(_) => Ok(Self::ProjectionSubscription),
             ProductInboundPayload::ControlAction(_) => Ok(Self::ControlAction),
             ProductInboundPayload::LinkedThreadAction(lta) => Ok(Self::LinkedThreadAction {
                 action_id: LinkedThreadActionId::new(lta.action_id.clone())
-                    .map_err(|reason| ProductWorkflowError::TurnSubmissionRejected { reason })?,
+                    .map_err(|reason| ProductSurfaceFailure::TurnSubmissionRejected { reason })?,
             }),
             ProductInboundPayload::NoOp => Ok(Self::NoOp),
         }

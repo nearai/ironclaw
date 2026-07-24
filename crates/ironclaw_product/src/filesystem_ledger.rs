@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::{
     ActionFingerprintKey, ActionPhase, IdempotencyDecision, IdempotencyLedger,
-    ProductInboundAction, ProductWorkflowError,
+    ProductInboundAction, ProductSurfaceFailure,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
@@ -28,8 +28,8 @@ use path::{
 };
 
 const DEFAULT_IN_FLIGHT_LEASE: Duration = Duration::seconds(60);
-const ACTION_RECORD_KIND: &str = "product_workflow_action";
-const PRUNE_LEASE_RECORD_KIND: &str = "product_workflow_prune_lease";
+const ACTION_RECORD_KIND: &str = "product_surface_action";
+const PRUNE_LEASE_RECORD_KIND: &str = "product_surface_prune_lease";
 const PRUNE_LEASE_SECONDS: i64 = 30;
 const PRUNE_DELETE_CONCURRENCY: usize = 16;
 
@@ -128,7 +128,7 @@ where
         &self,
         fingerprint: ActionFingerprintKey,
         received_at: DateTime<Utc>,
-    ) -> Result<IdempotencyDecision, ProductWorkflowError> {
+    ) -> Result<IdempotencyDecision, ProductSurfaceFailure> {
         let path = action_path(&self.root, &fingerprint)?;
         let action = ProductInboundAction::begin(fingerprint, received_at);
         match self
@@ -176,7 +176,7 @@ where
         }
     }
 
-    async fn settle(&self, action: ProductInboundAction) -> Result<(), ProductWorkflowError> {
+    async fn settle(&self, action: ProductInboundAction) -> Result<(), ProductSurfaceFailure> {
         let path = action_path(&self.root, &action.fingerprint)?;
         loop {
             let Some((current, version)) =
@@ -228,7 +228,7 @@ where
         }
     }
 
-    async fn release(&self, action: ProductInboundAction) -> Result<(), ProductWorkflowError> {
+    async fn release(&self, action: ProductInboundAction) -> Result<(), ProductSurfaceFailure> {
         let path = action_path(&self.root, &action.fingerprint)?;
         loop {
             let Some((current, version)) =
@@ -259,7 +259,7 @@ where
         }
     }
 
-    async fn prune_settled_entries(&self) -> Result<(), ProductWorkflowError> {
+    async fn prune_settled_entries(&self) -> Result<(), ProductSurfaceFailure> {
         let Some(limit) = self.settled_entry_limit else {
             return Ok(());
         };
@@ -297,7 +297,7 @@ where
             .is_multiple_of(interval)
     }
 
-    async fn try_acquire_prune_lease(&self) -> Result<bool, ProductWorkflowError> {
+    async fn try_acquire_prune_lease(&self) -> Result<bool, ProductSurfaceFailure> {
         let path = prune_lease_path(&self.root)?;
         let entry = prune_lease_entry(Utc::now() + Duration::seconds(PRUNE_LEASE_SECONDS))?;
         match self
@@ -340,7 +340,7 @@ where
     async fn terminal_actions_may_exceed(
         &self,
         limit: NonZeroUsize,
-    ) -> Result<bool, ProductWorkflowError> {
+    ) -> Result<bool, ProductSurfaceFailure> {
         let mut seen = 0usize;
         let mut offset = 0;
         let filter = terminal_action_filter()?;
@@ -375,7 +375,7 @@ where
     async fn prune_terminal_actions(
         &self,
         actions: Vec<ProductInboundAction>,
-    ) -> Result<(), ProductWorkflowError> {
+    ) -> Result<(), ProductSurfaceFailure> {
         let results = futures::stream::iter(
             actions
                 .into_iter()
@@ -393,7 +393,7 @@ where
     async fn prune_terminal_action_if_current(
         &self,
         action: &ProductInboundAction,
-    ) -> Result<(), ProductWorkflowError> {
+    ) -> Result<(), ProductSurfaceFailure> {
         let path = action_path(&self.root, &action.fingerprint)?;
         let Some((current, _version)) = load_action(&self.filesystem, &self.scope, &path).await?
         else {
@@ -411,7 +411,7 @@ where
     async fn load_actions(
         &self,
         filter: &Filter,
-    ) -> Result<Vec<ProductInboundAction>, ProductWorkflowError> {
+    ) -> Result<Vec<ProductInboundAction>, ProductSurfaceFailure> {
         let mut actions = Vec::new();
         let mut offset = 0;
         loop {
@@ -503,15 +503,15 @@ where
         &self,
         fingerprint: ActionFingerprintKey,
         received_at: DateTime<Utc>,
-    ) -> Result<IdempotencyDecision, ProductWorkflowError> {
+    ) -> Result<IdempotencyDecision, ProductSurfaceFailure> {
         self.inner.begin_or_replay(fingerprint, received_at).await
     }
 
-    async fn settle(&self, action: ProductInboundAction) -> Result<(), ProductWorkflowError> {
+    async fn settle(&self, action: ProductInboundAction) -> Result<(), ProductSurfaceFailure> {
         self.inner.settle(action).await
     }
 
-    async fn release(&self, action: ProductInboundAction) -> Result<(), ProductWorkflowError> {
+    async fn release(&self, action: ProductInboundAction) -> Result<(), ProductSurfaceFailure> {
         self.inner.release(action).await
     }
 }
@@ -563,15 +563,15 @@ impl IdempotencyLedger for RebornLibSqlIdempotencyLedger {
         &self,
         fingerprint: ActionFingerprintKey,
         received_at: DateTime<Utc>,
-    ) -> Result<IdempotencyDecision, ProductWorkflowError> {
+    ) -> Result<IdempotencyDecision, ProductSurfaceFailure> {
         self.inner.begin_or_replay(fingerprint, received_at).await
     }
 
-    async fn settle(&self, action: ProductInboundAction) -> Result<(), ProductWorkflowError> {
+    async fn settle(&self, action: ProductInboundAction) -> Result<(), ProductSurfaceFailure> {
         self.inner.settle(action).await
     }
 
-    async fn release(&self, action: ProductInboundAction) -> Result<(), ProductWorkflowError> {
+    async fn release(&self, action: ProductInboundAction) -> Result<(), ProductSurfaceFailure> {
         self.inner.release(action).await
     }
 }
@@ -623,15 +623,15 @@ impl IdempotencyLedger for RebornPostgresIdempotencyLedger {
         &self,
         fingerprint: ActionFingerprintKey,
         received_at: DateTime<Utc>,
-    ) -> Result<IdempotencyDecision, ProductWorkflowError> {
+    ) -> Result<IdempotencyDecision, ProductSurfaceFailure> {
         self.inner.begin_or_replay(fingerprint, received_at).await
     }
 
-    async fn settle(&self, action: ProductInboundAction) -> Result<(), ProductWorkflowError> {
+    async fn settle(&self, action: ProductInboundAction) -> Result<(), ProductSurfaceFailure> {
         self.inner.settle(action).await
     }
 
-    async fn release(&self, action: ProductInboundAction) -> Result<(), ProductWorkflowError> {
+    async fn release(&self, action: ProductInboundAction) -> Result<(), ProductSurfaceFailure> {
         self.inner.release(action).await
     }
 }
@@ -678,13 +678,13 @@ fn root_scope() -> ResourceScope {
     }
 }
 
-fn transient(reason: impl Into<String>) -> ProductWorkflowError {
-    ProductWorkflowError::Transient {
+fn transient(reason: impl Into<String>) -> ProductSurfaceFailure {
+    ProductSurfaceFailure::Transient {
         reason: reason.into(),
     }
 }
 
-fn durable_error(operation: &'static str, error: impl std::fmt::Display) -> ProductWorkflowError {
+fn durable_error(operation: &'static str, error: impl std::fmt::Display) -> ProductSurfaceFailure {
     let error_type = std::any::type_name_of_val(&error);
     tracing::error!(
         operation,
@@ -694,7 +694,7 @@ fn durable_error(operation: &'static str, error: impl std::fmt::Display) -> Prod
     transient(format!("idempotency ledger failed to {operation}"))
 }
 
-fn filesystem_error(operation: &'static str, error: FilesystemError) -> ProductWorkflowError {
+fn filesystem_error(operation: &'static str, error: FilesystemError) -> ProductSurfaceFailure {
     durable_error(operation, error)
 }
 
@@ -706,7 +706,7 @@ fn fresh_in_flight(
     !action.is_terminal() && action.received_at + lease > received_at
 }
 
-fn in_flight_error() -> ProductWorkflowError {
+fn in_flight_error() -> ProductSurfaceFailure {
     transient("idempotency fingerprint already in flight; retry after recovery lease")
 }
 
@@ -718,7 +718,7 @@ async fn load_action<F>(
     filesystem: &ScopedFilesystem<F>,
     scope: &ResourceScope,
     path: &ScopedPath,
-) -> Result<Option<(ProductInboundAction, RecordVersion)>, ProductWorkflowError>
+) -> Result<Option<(ProductInboundAction, RecordVersion)>, ProductSurfaceFailure>
 where
     F: RootFilesystem + ?Sized,
 {
@@ -736,7 +736,7 @@ where
     Ok(Some((action, entry.version)))
 }
 
-fn entry_for_action(action: &ProductInboundAction) -> Result<Entry, ProductWorkflowError> {
+fn entry_for_action(action: &ProductInboundAction) -> Result<Entry, ProductSurfaceFailure> {
     let payload =
         serde_json::to_value(action).map_err(|error| durable_error("serialize action", error))?;
     let kind = RecordKind::new(ACTION_RECORD_KIND)
@@ -775,21 +775,21 @@ fn entry_for_action(action: &ProductInboundAction) -> Result<Entry, ProductWorkf
     Ok(entry)
 }
 
-fn terminal_action_filter() -> Result<Filter, ProductWorkflowError> {
+fn terminal_action_filter() -> Result<Filter, ProductSurfaceFailure> {
     Ok(Filter::Or(vec![
         phase_filter(ActionPhase::Settled)?,
         phase_filter(ActionPhase::DeduplicatedReplay)?,
     ]))
 }
 
-fn phase_filter(phase: ActionPhase) -> Result<Filter, ProductWorkflowError> {
+fn phase_filter(phase: ActionPhase) -> Result<Filter, ProductSurfaceFailure> {
     Ok(Filter::Eq {
         key: index_key("phase")?,
         value: text(phase_label(phase)),
     })
 }
 
-fn prune_lease_entry(expires_at: DateTime<Utc>) -> Result<Entry, ProductWorkflowError> {
+fn prune_lease_entry(expires_at: DateTime<Utc>) -> Result<Entry, ProductSurfaceFailure> {
     let payload = serde_json::json!({
         "expires_at_ms": expires_at.timestamp_millis(),
     });
@@ -799,7 +799,7 @@ fn prune_lease_entry(expires_at: DateTime<Utc>) -> Result<Entry, ProductWorkflow
         .map_err(|error| durable_error("serialize prune lease entry", error))
 }
 
-fn prune_lease_is_fresh(entry: &Entry) -> Result<bool, ProductWorkflowError> {
+fn prune_lease_is_fresh(entry: &Entry) -> Result<bool, ProductSurfaceFailure> {
     let payload: serde_json::Value = entry
         .parse_json()
         .map_err(|error| durable_error("deserialize prune lease", error))?;
@@ -815,7 +815,7 @@ fn prune_lease_is_fresh(entry: &Entry) -> Result<bool, ProductWorkflowError> {
     Ok(expires_at_ms > Utc::now().timestamp_millis())
 }
 
-fn index_key(value: &'static str) -> Result<IndexKey, ProductWorkflowError> {
+fn index_key(value: &'static str) -> Result<IndexKey, ProductSurfaceFailure> {
     IndexKey::new(value).map_err(|error| durable_error("construct action index key", error))
 }
 

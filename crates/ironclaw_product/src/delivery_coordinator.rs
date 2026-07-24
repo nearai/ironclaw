@@ -41,7 +41,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracing::debug;
 
-use crate::ProductWorkflowError;
+use crate::ProductSurfaceFailure;
 use crate::outbound_delivery::{
     ProductOutboundTargetResolver, VerifiedProductOutboundTargetMetadata,
 };
@@ -211,7 +211,7 @@ pub enum CoordinatedDeliveryError {
     #[error("outbound policy failed: {0}")]
     Outbound(#[from] ironclaw_outbound::OutboundError),
     #[error("product workflow failed: {0}")]
-    Workflow(#[from] ProductWorkflowError),
+    Workflow(#[from] ProductSurfaceFailure),
     #[error("no active channel for extension `{extension_id}`")]
     ChannelUnavailable { extension_id: String },
     #[error("delivery is already in flight for this attempt")]
@@ -492,7 +492,7 @@ impl DeliveryCoordinator {
             Ok(metadata) => metadata,
             Err(error) => {
                 let kind =
-                    crate::outbound_delivery::delivery_failure_kind_for_workflow_error(&error);
+                    crate::outbound_delivery::delivery_failure_kind_for_surface_error(&error);
                 self.mark_terminal(&attempt, OutboundDeliveryStatus::Failed, Some(kind))
                     .await;
                 return Err(CoordinatedDeliveryError::Workflow(error));

@@ -1730,7 +1730,7 @@ fn term_collision_carve_outs_stay_documented_and_narrow() {
         .collect();
     for fragment in &carved_paths {
         assert!(
-            !fragment.contains("composition") && !fragment.contains("product_workflow"),
+            !fragment.contains("composition") && !fragment.contains("product_surface"),
             "carve-outs must never cover the product assembly/workflow crates — those are \
              debt, not collisions: {fragment}"
         );

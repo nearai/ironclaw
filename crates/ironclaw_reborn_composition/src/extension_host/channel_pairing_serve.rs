@@ -118,7 +118,7 @@ fn mutation_policy() -> IngressPolicy {
         websocket_origin: WebSocketOriginPolicy::NotApplicable,
         streaming: StreamingMode::None,
         audit: AuditTraceClass::UserAction,
-        effect_path: AllowedEffectPath::ProductWorkflow,
+        effect_path: AllowedEffectPath::ProductSurface,
     })
     .expect("channel pairing mutation policy must validate") // safety: same authenticated local product-workflow shape the product-auth mutations use.
 }
@@ -140,7 +140,7 @@ fn read_policy() -> IngressPolicy {
         websocket_origin: WebSocketOriginPolicy::NotApplicable,
         streaming: StreamingMode::None,
         audit: AuditTraceClass::UserAction,
-        effect_path: AllowedEffectPath::ProductWorkflow,
+        effect_path: AllowedEffectPath::ProductSurface,
     })
     .expect("channel pairing read policy must validate") // safety: bearer-authed NoBody read, the flow-status shape.
 }

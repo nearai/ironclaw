@@ -624,7 +624,7 @@ impl RebornRuntimeStores {
         &self,
         package: &ironclaw_extensions::ExtensionPackage,
         resolved: Option<&ironclaw_extensions::ResolvedExtensionManifest>,
-    ) -> Option<Result<(), ironclaw_product::ProductWorkflowError>> {
+    ) -> Option<Result<(), ironclaw_product::ProductSurfaceFailure>> {
         let extension_management = &self.extension_management;
         Some(
             extension_management
@@ -685,7 +685,7 @@ impl RebornRuntimeStores {
     pub(crate) async fn local_dev_active_extension_authority_for_test(
         &self,
         grantee: &ExtensionId,
-    ) -> Option<Result<ActiveExtensionAuthorityForTest, ironclaw_product::ProductWorkflowError>>
+    ) -> Option<Result<ActiveExtensionAuthorityForTest, ironclaw_product::ProductSurfaceFailure>>
     {
         let extension_management = &self.extension_management;
         Some(active_extension_authority_for_test(extension_management, grantee).await)
@@ -702,7 +702,7 @@ pub struct ActiveExtensionAuthorityForTest {
 pub(crate) async fn active_extension_authority_for_test(
     extension_management: &RebornLocalExtensionManagementPort,
     grantee: &ExtensionId,
-) -> Result<ActiveExtensionAuthorityForTest, ironclaw_product::ProductWorkflowError> {
+) -> Result<ActiveExtensionAuthorityForTest, ironclaw_product::ProductSurfaceFailure> {
     let active_capabilities = extension_management
         .active_model_visible_capabilities()
         .await?;

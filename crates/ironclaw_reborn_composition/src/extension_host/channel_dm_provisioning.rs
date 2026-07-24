@@ -20,12 +20,10 @@ use ironclaw_host_api::UserId;
 use ironclaw_product::ChannelDeliveryResolver;
 use ironclaw_product::TargetQuery;
 
-use crate::extension_host::channel_dm_targets::{
-    FilesystemChannelDmTargetStore, dm_target_payload,
-};
 use crate::extension_host::channel_identity::{
     ChannelIdentityPostBind, ChannelIdentityPostBindFactory,
 };
+use ironclaw_extension_host::{FilesystemChannelDmTargetStore, dm_target_payload};
 
 const ACTIVATION_PUBLICATION_TIMEOUT: Duration = Duration::from_secs(10);
 

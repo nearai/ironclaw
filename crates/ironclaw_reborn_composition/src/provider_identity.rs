@@ -18,7 +18,7 @@ use std::{
 use ironclaw_host_api::UserId;
 use ironclaw_product::AdapterInstallationId;
 use ironclaw_product::{
-    ProductActorUserResolutionRequest, ProductActorUserResolver, ProductWorkflowError,
+    ProductActorUserResolutionRequest, ProductActorUserResolver, ProductSurfaceFailure,
     ResolvedProductActorUser,
 };
 use thiserror::Error;
@@ -225,9 +225,9 @@ impl ProviderIdentityActorResolver {
         }
     }
 
-    fn cached_user(&self, provider_user_id: &str) -> Result<Option<UserId>, ProductWorkflowError> {
+    fn cached_user(&self, provider_user_id: &str) -> Result<Option<UserId>, ProductSurfaceFailure> {
         let mut cache = self.resolved_user_cache.lock().map_err(|_| {
-            ProductWorkflowError::BindingResolutionFailed {
+            ProductSurfaceFailure::BindingResolutionFailed {
                 reason: "provider identity cache lock poisoned".into(),
             }
         })?;
@@ -245,10 +245,10 @@ impl ProviderIdentityActorResolver {
         &self,
         provider_user_id: String,
         user_id: UserId,
-    ) -> Result<(), ProductWorkflowError> {
+    ) -> Result<(), ProductSurfaceFailure> {
         self.resolved_user_cache
             .lock()
-            .map_err(|_| ProductWorkflowError::BindingResolutionFailed {
+            .map_err(|_| ProductSurfaceFailure::BindingResolutionFailed {
                 reason: "provider identity cache lock poisoned".into(),
             })?
             .insert(
@@ -282,11 +282,11 @@ impl ProviderIdentityActorResolver {
     async fn lookup_user(
         &self,
         provider_user_id: &str,
-    ) -> Result<Option<UserId>, ProductWorkflowError> {
+    ) -> Result<Option<UserId>, ProductSurfaceFailure> {
         self.lookup
             .resolve_user_identity(&self.provider, provider_user_id)
             .await
-            .map_err(|error| ProductWorkflowError::BindingResolutionFailed {
+            .map_err(|error| ProductSurfaceFailure::BindingResolutionFailed {
                 reason: error.to_string(),
             })
     }
@@ -314,7 +314,7 @@ impl ProductActorUserResolver for ProviderIdentityActorResolver {
     async fn resolve_product_actor_user(
         &self,
         request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<ResolvedProductActorUser>, ProductWorkflowError> {
+    ) -> Result<Option<ResolvedProductActorUser>, ProductSurfaceFailure> {
         let Some(provider_user_id) = self.provider_user_id_for_request(&request) else {
             return Ok(None);
         };
@@ -332,7 +332,7 @@ impl ProductActorUserResolver for ProviderIdentityActorResolver {
         &self,
         request: &ProductActorUserResolutionRequest,
         expected: &ResolvedProductActorUser,
-    ) -> Result<bool, ProductWorkflowError> {
+    ) -> Result<bool, ProductSurfaceFailure> {
         let Some(provider_user_id) = self.provider_user_id_for_request(request) else {
             return Ok(false);
         };
@@ -458,7 +458,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            ProductWorkflowError::BindingResolutionFailed { .. }
+            ProductSurfaceFailure::BindingResolutionFailed { .. }
         ));
     }
 

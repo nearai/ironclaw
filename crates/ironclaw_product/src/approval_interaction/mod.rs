@@ -29,8 +29,8 @@ pub use types::{
     ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
 };
 
-use crate::error::ProductWorkflowError;
+use crate::error::ProductSurfaceFailure;
 
-fn approval_rejected(kind: ApprovalInteractionRejectionKind) -> ProductWorkflowError {
-    ProductWorkflowError::ApprovalInteractionRejected { kind }
+fn approval_rejected(kind: ApprovalInteractionRejectionKind) -> ProductSurfaceFailure {
+    ProductSurfaceFailure::ApprovalInteractionRejected { kind }
 }

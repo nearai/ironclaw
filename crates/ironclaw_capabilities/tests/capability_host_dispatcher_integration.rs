@@ -5,7 +5,7 @@ use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_approvals::{ApprovalResolver, LeaseApproval};
 use ironclaw_authorization::*;
 use ironclaw_capabilities::*;
-use ironclaw_dispatcher::{
+use ironclaw_capabilities::{
     BoundCapabilityAdapter, CapabilityDispatchRequest, ResolvedCapability, RuntimeAdapterResult,
     RuntimeDispatcher, ToolResolver,
 };

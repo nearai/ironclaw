@@ -8,7 +8,7 @@ use ironclaw_loop_host::{
 };
 use ironclaw_product::{
     ApprovalInteractionService, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
-    ProductWorkflowError, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ProductSurfaceFailure, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
 };
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, LoopCapabilityPort,
@@ -105,8 +105,8 @@ impl ApprovalInteractionService for UnavailableApprovalInteractionService {
     async fn list_pending(
         &self,
         _request: ListPendingApprovalsRequest,
-    ) -> Result<ListPendingApprovalsResponse, ProductWorkflowError> {
-        Err(ProductWorkflowError::BeforeInboundPolicyFailed {
+    ) -> Result<ListPendingApprovalsResponse, ProductSurfaceFailure> {
+        Err(ProductSurfaceFailure::BeforeInboundPolicyFailed {
             reason: "approval interaction service is not wired for production runtime launch"
                 .to_string(),
             permanent: true,
@@ -116,8 +116,8 @@ impl ApprovalInteractionService for UnavailableApprovalInteractionService {
     async fn resolve(
         &self,
         _request: ResolveApprovalInteractionRequest,
-    ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
-        Err(ProductWorkflowError::BeforeInboundPolicyFailed {
+    ) -> Result<ResolveApprovalInteractionResponse, ProductSurfaceFailure> {
+        Err(ProductSurfaceFailure::BeforeInboundPolicyFailed {
             reason: "approval interaction service is not wired for production runtime launch"
                 .to_string(),
             permanent: true,

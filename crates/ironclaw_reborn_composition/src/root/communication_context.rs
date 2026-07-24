@@ -240,10 +240,9 @@ mod tests {
         LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
         LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
         LifecycleProductPayload, LifecycleProductResponse, OutboundPreferencesProductFacade,
-        ProductWorkflowError, RebornOutboundDeliveryTargetId,
-        RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetStatus,
-        RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
-        RebornSetOutboundPreferencesRequest,
+        RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
+        RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
+        RebornOutboundPreferencesResponse, RebornSetOutboundPreferencesRequest,
     };
     use ironclaw_turns::{
         run_profile::{CommunicationContextProvider, ConnectedChannelsState, DeliveryTargetState},
@@ -356,7 +355,7 @@ mod tests {
             &self,
             _context: LifecycleProductContext,
             _action: LifecycleProductAction,
-        ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
             Ok(LifecycleProductResponse {
                 phase: InstallationState::Active,
                 package_ref: None,
@@ -373,10 +372,8 @@ mod tests {
             &self,
             _context: LifecycleProductContext,
             _package_ref: LifecyclePackageRef,
-        ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-            Err(ProductWorkflowError::BindingResolutionFailed {
-                reason: "not supported".to_string(),
-            })
+        ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
+            Err(test_service_error())
         }
     }
 
@@ -390,7 +387,7 @@ mod tests {
             &self,
             _context: LifecycleProductContext,
             _action: LifecycleProductAction,
-        ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
             let count = self.extensions.len();
             Ok(LifecycleProductResponse {
                 phase: InstallationState::Active,
@@ -408,10 +405,8 @@ mod tests {
             &self,
             _context: LifecycleProductContext,
             _package_ref: LifecyclePackageRef,
-        ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-            Err(ProductWorkflowError::BindingResolutionFailed {
-                reason: "not supported".to_string(),
-            })
+        ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
+            Err(test_service_error())
         }
     }
 
@@ -423,20 +418,16 @@ mod tests {
             &self,
             _context: LifecycleProductContext,
             _action: LifecycleProductAction,
-        ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-            Err(ProductWorkflowError::BindingResolutionFailed {
-                reason: "test error".to_string(),
-            })
+        ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
+            Err(test_service_error())
         }
 
         async fn project_package(
             &self,
             _context: LifecycleProductContext,
             _package_ref: LifecyclePackageRef,
-        ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-            Err(ProductWorkflowError::BindingResolutionFailed {
-                reason: "not supported".to_string(),
-            })
+        ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
+            Err(test_service_error())
         }
     }
 

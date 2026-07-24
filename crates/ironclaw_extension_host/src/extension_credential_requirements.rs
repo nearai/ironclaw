@@ -7,13 +7,13 @@ use ironclaw_host_api::{
 };
 use ironclaw_product::LifecycleExtensionCredentialSetup;
 
-pub(crate) fn package_runtime_credential_auth_requirements(
+pub fn package_runtime_credential_auth_requirements(
     package: &ExtensionPackage,
 ) -> Vec<RuntimeCredentialAuthRequirement> {
     manifest_runtime_credential_auth_requirements(&package.manifest)
 }
 
-pub(crate) fn manifest_runtime_credential_auth_requirements(
+pub fn manifest_runtime_credential_auth_requirements(
     manifest: &ExtensionManifest,
 ) -> Vec<RuntimeCredentialAuthRequirement> {
     let mut requirements: Vec<RuntimeCredentialAuthRequirement> = Vec::new();
@@ -44,7 +44,7 @@ pub(crate) fn manifest_runtime_credential_auth_requirements(
     requirements
 }
 
-pub(crate) fn lifecycle_credential_setup(
+pub fn lifecycle_credential_setup(
     setup: &RuntimeCredentialAccountSetup,
 ) -> LifecycleExtensionCredentialSetup {
     match setup {
@@ -65,7 +65,7 @@ pub(crate) fn lifecycle_credential_setup(
     }
 }
 
-pub(crate) fn product_auth_credential_source(
+pub fn product_auth_credential_source(
     credential: &ironclaw_host_api::RuntimeCredentialRequirement,
 ) -> Option<(VendorId, LifecycleExtensionCredentialSetup)> {
     let RuntimeCredentialRequirementSource::ProductAuthAccount { provider, setup } =
@@ -76,7 +76,7 @@ pub(crate) fn product_auth_credential_source(
     Some((provider.clone(), lifecycle_credential_setup(setup)))
 }
 
-pub(crate) fn can_merge_lifecycle_credential_setup(
+pub fn can_merge_lifecycle_credential_setup(
     existing: &LifecycleExtensionCredentialSetup,
     candidate: &LifecycleExtensionCredentialSetup,
 ) -> bool {
@@ -92,7 +92,7 @@ pub(crate) fn can_merge_lifecycle_credential_setup(
     )
 }
 
-pub(crate) fn merge_lifecycle_credential_setup(
+pub fn merge_lifecycle_credential_setup(
     existing: &mut LifecycleExtensionCredentialSetup,
     candidate: LifecycleExtensionCredentialSetup,
 ) {

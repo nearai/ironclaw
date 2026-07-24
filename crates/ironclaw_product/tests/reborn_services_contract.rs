@@ -80,7 +80,7 @@ use ironclaw_product::{
     ProductAgentBoundCaller, ProductCancelRunRequest, ProductCapabilityInvoker,
     ProductCreateThreadRequest, ProductListAutomationsRequest, ProductListThreadsRequest,
     ProductRenameAutomationRequest, ProductResolveGateRequest, ProductRetryRunRequest,
-    ProductSetupExtensionRequest, ProductSubmitTurnRequest, ProductWorkflowError, ProjectCaller,
+    ProductSetupExtensionRequest, ProductSubmitTurnRequest, ProductSurfaceFailure, ProjectCaller,
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,
     ProjectFsStat, ProjectService, ProjectServiceError, RUN_ARTIFACT_VIEW,
     RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentRequest,
@@ -136,7 +136,7 @@ use ironclaw_product::{
     RebornAdminUserSecretsListResponse,
 };
 use ironclaw_product::{
-    ProductAdapterError, ProductOutboundEnvelope, ProductWorkflowRejectionKind, ProjectionCursor,
+    ProductAdapterError, ProductOutboundEnvelope, ProductSurfaceRejectionKind, ProjectionCursor,
     ProjectionStream, ProjectionSubscriptionRequest, ProtocolAuthFailure, RedactedString,
 };
 use ironclaw_threads::{
@@ -741,14 +741,14 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
     async fn list_pending(
         &self,
         _request: ListPendingApprovalsRequest,
-    ) -> Result<ListPendingApprovalsResponse, ironclaw_product::ProductWorkflowError> {
+    ) -> Result<ListPendingApprovalsResponse, ironclaw_product::ProductSurfaceFailure> {
         Ok(ListPendingApprovalsResponse { approvals: vec![] })
     }
 
     async fn resolve(
         &self,
         request: ResolveApprovalInteractionRequest,
-    ) -> Result<ResolveApprovalInteractionResponse, ironclaw_product::ProductWorkflowError> {
+    ) -> Result<ResolveApprovalInteractionResponse, ironclaw_product::ProductSurfaceFailure> {
         let run_id = request.run_id_hint.expect("webui passes run_id");
         let decision = request.decision;
         self.resolutions.lock().expect("lock").push(request);
@@ -780,7 +780,7 @@ impl ApprovalInteractionService for ThreadScopedApprovalInteractionService {
     async fn list_pending(
         &self,
         request: ListPendingApprovalsRequest,
-    ) -> Result<ListPendingApprovalsResponse, ProductWorkflowError> {
+    ) -> Result<ListPendingApprovalsResponse, ProductSurfaceFailure> {
         if !self.pending_thread_ids.contains(&request.scope.thread_id) {
             return Ok(ListPendingApprovalsResponse { approvals: vec![] });
         }
@@ -802,7 +802,7 @@ impl ApprovalInteractionService for ThreadScopedApprovalInteractionService {
     async fn resolve(
         &self,
         _request: ResolveApprovalInteractionRequest,
-    ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
+    ) -> Result<ResolveApprovalInteractionResponse, ProductSurfaceFailure> {
         panic!("resolve is not used by thread approval filter tests")
     }
 }
@@ -820,7 +820,7 @@ impl ApprovalInteractionService for ActorFallbackApprovalInteractionService {
     async fn list_pending(
         &self,
         request: ListPendingApprovalsRequest,
-    ) -> Result<ListPendingApprovalsResponse, ProductWorkflowError> {
+    ) -> Result<ListPendingApprovalsResponse, ProductSurfaceFailure> {
         let is_expected_scope = request.scope.thread_id == self.pending_thread_id
             && request.scope.tenant_id == self.tenant_id
             && request.scope.agent_id.as_ref() == Some(&self.agent_id)
@@ -848,7 +848,7 @@ impl ApprovalInteractionService for ActorFallbackApprovalInteractionService {
     async fn resolve(
         &self,
         _request: ResolveApprovalInteractionRequest,
-    ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
+    ) -> Result<ResolveApprovalInteractionResponse, ProductSurfaceFailure> {
         panic!("resolve is not used by actor-fallback approval list tests")
     }
 }
@@ -873,7 +873,7 @@ impl AuthInteractionService for RecordingAuthInteractionService {
     async fn list_pending(
         &self,
         _request: ListPendingAuthInteractionsRequest,
-    ) -> Result<ListPendingAuthInteractionsResponse, ironclaw_product::ProductWorkflowError> {
+    ) -> Result<ListPendingAuthInteractionsResponse, ironclaw_product::ProductSurfaceFailure> {
         Ok(ListPendingAuthInteractionsResponse {
             auth_interactions: vec![],
         })
@@ -882,7 +882,7 @@ impl AuthInteractionService for RecordingAuthInteractionService {
     async fn resolve(
         &self,
         request: ResolveAuthInteractionRequest,
-    ) -> Result<ResolveAuthInteractionResponse, ironclaw_product::ProductWorkflowError> {
+    ) -> Result<ResolveAuthInteractionResponse, ironclaw_product::ProductSurfaceFailure> {
         let run_id = request.run_id_hint.expect("webui passes run_id");
         let decision = request.decision.clone();
         self.resolutions.lock().expect("lock").push(request);
@@ -996,7 +996,7 @@ impl LifecycleProductFacade for RecordingLifecycleFacade {
         &self,
         _context: LifecycleProductContext,
         _action: ironclaw_product::LifecycleProductAction,
-    ) -> Result<LifecycleProductResponse, ironclaw_product::ProductWorkflowError> {
+    ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
         panic!("setup_extension should project package state, not execute lifecycle actions")
     }
 
@@ -1004,7 +1004,7 @@ impl LifecycleProductFacade for RecordingLifecycleFacade {
         &self,
         _context: LifecycleProductContext,
         package_ref: LifecyclePackageRef,
-    ) -> Result<LifecycleProductResponse, ironclaw_product::ProductWorkflowError> {
+    ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
         self.package_refs
             .lock()
             .expect("lock")
@@ -1017,9 +1017,12 @@ impl LifecycleProductFacade for RecordingLifecycleFacade {
         let mut response = LifecycleProductResponse::projection(
             Some(package_ref),
             phase,
-            vec![LifecycleReadinessBlocker::runtime(Some(
-                "extension_lifecycle_store_unwired".to_string(),
-            ))?],
+            vec![
+                LifecycleReadinessBlocker::runtime(Some(
+                    "extension_lifecycle_store_unwired".to_string(),
+                ))
+                .map_err(ProductSurfaceError::internal_from)?,
+            ],
         );
         response.payload = self.extension_list_payload(response.package_ref.as_ref().expect("ref"));
         Ok(response)
@@ -1029,7 +1032,7 @@ impl LifecycleProductFacade for RecordingLifecycleFacade {
         &self,
         _context: LifecycleProductContext,
         bundle: Vec<u8>,
-    ) -> Result<LifecycleProductResponse, ironclaw_product::ProductWorkflowError> {
+    ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
         self.imported_bundles.lock().expect("lock").push(bundle);
         Ok(LifecycleProductResponse {
             package_ref: None,
@@ -1051,7 +1054,7 @@ impl LifecycleProductFacade for ListingLifecycleFacade {
         &self,
         _context: LifecycleProductContext,
         action: LifecycleProductAction,
-    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+    ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
         assert!(matches!(action, LifecycleProductAction::ExtensionList));
         Ok(LifecycleProductResponse {
             package_ref: None,
@@ -1069,7 +1072,7 @@ impl LifecycleProductFacade for ListingLifecycleFacade {
         &self,
         _context: LifecycleProductContext,
         _package_ref: LifecyclePackageRef,
-    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+    ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
         panic!("list_extensions should execute the list action, not project one package")
     }
 }
@@ -4499,7 +4502,7 @@ async fn projection_transient_maps_to_replay_unavailable_taxonomy() {
         Arc::new(FakeTurnCoordinator::default()),
     )
     .with_event_stream(Arc::new(StaticErrorProjectionStream {
-        error: ProductAdapterError::WorkflowTransient {
+        error: ProductAdapterError::SurfaceTransient {
             reason: RedactedString::new("provider stack trace with /host/path and secret-token"),
         },
     }));
@@ -4558,46 +4561,46 @@ async fn projection_egress_denied_maps_to_blocked_resource_taxonomy() {
 }
 
 #[tokio::test]
-async fn workflow_rejection_kinds_map_to_facade_taxonomy() {
+async fn surface_rejection_kinds_map_to_facade_taxonomy() {
     let cases = [
         (
-            ProductWorkflowRejectionKind::ThreadBusy,
+            ProductSurfaceRejectionKind::ThreadBusy,
             409,
             ProductSurfaceErrorCode::Conflict,
             ProductSurfaceErrorKind::Busy,
         ),
         (
-            ProductWorkflowRejectionKind::AdmissionRejected,
+            ProductSurfaceRejectionKind::AdmissionRejected,
             429,
             ProductSurfaceErrorCode::RateLimited,
             ProductSurfaceErrorKind::Busy,
         ),
         (
-            ProductWorkflowRejectionKind::ScopeNotFound,
+            ProductSurfaceRejectionKind::ScopeNotFound,
             404,
             ProductSurfaceErrorCode::NotFound,
             ProductSurfaceErrorKind::NotFound,
         ),
         (
-            ProductWorkflowRejectionKind::Unauthorized,
+            ProductSurfaceRejectionKind::Unauthorized,
             403,
             ProductSurfaceErrorCode::Forbidden,
             ProductSurfaceErrorKind::ParticipantDenied,
         ),
         (
-            ProductWorkflowRejectionKind::InvalidRequest,
+            ProductSurfaceRejectionKind::InvalidRequest,
             400,
             ProductSurfaceErrorCode::InvalidRequest,
             ProductSurfaceErrorKind::Validation,
         ),
         (
-            ProductWorkflowRejectionKind::Unavailable,
+            ProductSurfaceRejectionKind::Unavailable,
             503,
             ProductSurfaceErrorCode::Unavailable,
             ProductSurfaceErrorKind::ReplayUnavailable,
         ),
         (
-            ProductWorkflowRejectionKind::Conflict,
+            ProductSurfaceRejectionKind::Conflict,
             409,
             ProductSurfaceErrorCode::Conflict,
             ProductSurfaceErrorKind::Conflict,
@@ -4610,7 +4613,7 @@ async fn workflow_rejection_kinds_map_to_facade_taxonomy() {
             Arc::new(FakeTurnCoordinator::default()),
         )
         .with_event_stream(Arc::new(StaticErrorProjectionStream {
-            error: ProductAdapterError::WorkflowRejected {
+            error: ProductAdapterError::SurfaceRejected {
                 kind: workflow_kind,
                 status_code,
                 retryable: false,
@@ -5360,7 +5363,7 @@ impl AuthInteractionService for DeniedResumedAuthInteractionService {
     async fn list_pending(
         &self,
         _request: ListPendingAuthInteractionsRequest,
-    ) -> Result<ListPendingAuthInteractionsResponse, ProductWorkflowError> {
+    ) -> Result<ListPendingAuthInteractionsResponse, ProductSurfaceFailure> {
         Ok(ListPendingAuthInteractionsResponse {
             auth_interactions: vec![],
         })
@@ -5369,7 +5372,7 @@ impl AuthInteractionService for DeniedResumedAuthInteractionService {
     async fn resolve(
         &self,
         request: ResolveAuthInteractionRequest,
-    ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
+    ) -> Result<ResolveAuthInteractionResponse, ProductSurfaceFailure> {
         let run_id = request.run_id_hint.expect("webui passes run_id");
         Ok(ResolveAuthInteractionResponse::Resumed(
             ResumeTurnResponse {
@@ -6203,7 +6206,7 @@ impl LifecycleProductFacade for FailedStateLifecycleFacade {
         &self,
         _context: LifecycleProductContext,
         action: LifecycleProductAction,
-    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+    ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
         assert!(matches!(action, LifecycleProductAction::ExtensionList));
         Ok(LifecycleProductResponse {
             package_ref: None,
@@ -6221,14 +6224,14 @@ impl LifecycleProductFacade for FailedStateLifecycleFacade {
         &self,
         _context: LifecycleProductContext,
         _package_ref: LifecyclePackageRef,
-    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+    ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
         panic!("list_extensions should execute the list action, not project one package")
     }
 
     async fn installed_activation_errors(
         &self,
         _context: LifecycleProductContext,
-    ) -> Result<std::collections::HashMap<String, String>, ProductWorkflowError> {
+    ) -> Result<std::collections::HashMap<String, String>, ProductSurfaceError> {
         Ok(self.activation_errors.clone())
     }
 }

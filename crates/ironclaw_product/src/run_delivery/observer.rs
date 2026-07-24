@@ -9,7 +9,7 @@ use tokio::time::Instant;
 use crate::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId, OutboundPart, ProductAdapterError,
     ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductRejection,
-    ProductRejectionKind, ProductTriggerReason, ProductWorkflowRejectionKind,
+    ProductRejectionKind, ProductSurfaceRejectionKind, ProductTriggerReason,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -39,7 +39,7 @@ use crate::delivery_coordinator::{
     CoordinatedDeliveryOutcome, CoordinatedDeliveryRequest, DeliveryIntent,
 };
 use crate::{
-    ChannelConnectionNoticePolicy, ProductWorkflowError, ResolveBindingRequest, ResolvedBinding,
+    ChannelConnectionNoticePolicy, ProductSurfaceFailure, ResolveBindingRequest, ResolvedBinding,
 };
 
 const CONNECT_NOTICE_THROTTLE_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
@@ -311,7 +311,7 @@ impl RunDeliveryObserver {
         envelope: ProductInboundEnvelope,
         error: ProductAdapterError,
     ) {
-        let Some(ack) = rejection_ack_for_workflow_error(&error) else {
+        let Some(ack) = rejection_ack_for_surface_error(&error) else {
             return;
         };
         // An unbound user's first inbound resolves as a `BindingRequired`
@@ -1122,15 +1122,15 @@ impl crate::ProductOutboundTargetResolver for ObservedReplyTargetAuthority {
         &self,
         target: &ironclaw_outbound::ValidatedReplyTargetBinding,
         require_direct_message: bool,
-    ) -> Result<crate::VerifiedProductOutboundTargetMetadata, ProductWorkflowError> {
+    ) -> Result<crate::VerifiedProductOutboundTargetMetadata, ProductSurfaceFailure> {
         if target.target() != &self.expected_target {
-            return Err(ProductWorkflowError::BindingAccessDenied);
+            return Err(ProductSurfaceFailure::BindingAccessDenied);
         }
         // The live path carries no DM classification for the raw source
         // conversation; DM-only payloads never set the flag here (the OAuth
         // URL is stripped upstream instead).
         if require_direct_message {
-            return Err(ProductWorkflowError::OutboundTargetNotDirectMessage);
+            return Err(ProductSurfaceFailure::OutboundTargetNotDirectMessage);
         }
         Ok(crate::VerifiedProductOutboundTargetMetadata {
             external_conversation_ref: self.external_conversation_ref.clone(),
@@ -1246,32 +1246,32 @@ fn busy_hint_user_message_run_id(
     }
 }
 
-fn rejection_ack_for_workflow_error(error: &ProductAdapterError) -> Option<ProductInboundAck> {
+fn rejection_ack_for_surface_error(error: &ProductAdapterError) -> Option<ProductInboundAck> {
     match error {
-        ProductAdapterError::WorkflowRejected {
+        ProductAdapterError::SurfaceRejected {
             kind,
             retryable: false,
             ..
         } => Some(ProductInboundAck::Rejected(ProductRejection::permanent(
-            product_rejection_kind_for_workflow_rejection(*kind),
+            product_rejection_kind_for_surface_rejection(*kind),
             "workflow rejected resolution",
         ))),
         _ => None,
     }
 }
 
-fn product_rejection_kind_for_workflow_rejection(
-    kind: ProductWorkflowRejectionKind,
+fn product_rejection_kind_for_surface_rejection(
+    kind: ProductSurfaceRejectionKind,
 ) -> ProductRejectionKind {
     match kind {
-        ProductWorkflowRejectionKind::ScopeNotFound => ProductRejectionKind::BindingRequired,
-        ProductWorkflowRejectionKind::Unauthorized => ProductRejectionKind::AccessDenied,
-        ProductWorkflowRejectionKind::InvalidRequest => ProductRejectionKind::InvalidRequest,
-        ProductWorkflowRejectionKind::Ambiguous => ProductRejectionKind::AmbiguousResolution,
-        ProductWorkflowRejectionKind::ThreadBusy
-        | ProductWorkflowRejectionKind::AdmissionRejected
-        | ProductWorkflowRejectionKind::Unavailable
-        | ProductWorkflowRejectionKind::Conflict => ProductRejectionKind::PolicyDenied,
+        ProductSurfaceRejectionKind::ScopeNotFound => ProductRejectionKind::BindingRequired,
+        ProductSurfaceRejectionKind::Unauthorized => ProductRejectionKind::AccessDenied,
+        ProductSurfaceRejectionKind::InvalidRequest => ProductRejectionKind::InvalidRequest,
+        ProductSurfaceRejectionKind::Ambiguous => ProductRejectionKind::AmbiguousResolution,
+        ProductSurfaceRejectionKind::ThreadBusy
+        | ProductSurfaceRejectionKind::AdmissionRejected
+        | ProductSurfaceRejectionKind::Unavailable
+        | ProductSurfaceRejectionKind::Conflict => ProductRejectionKind::PolicyDenied,
     }
 }
 

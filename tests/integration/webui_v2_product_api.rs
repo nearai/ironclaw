@@ -974,7 +974,7 @@ async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_thro
     );
 
     // 5: carol attempting to remove the member-private id gets the masked
-    // "is not installed" denial (`ProductWorkflowError::InvalidBindingRequest`
+    // "is not installed" denial (`ProductSurfaceFailure::InvalidBindingRequest`
     // via `install_policy::ensure_caller_may_operate`, mapped to 400 by
     // `map_lifecycle_error` in `lifecycle_setup.rs`) rather than a 403/404 that
     // would let a non-member distinguish "not installed" from "not yours".

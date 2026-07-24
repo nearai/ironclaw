@@ -620,7 +620,7 @@ pub(super) fn protected_mutation_policy() -> IngressPolicy {
         websocket_origin: WebSocketOriginPolicy::NotApplicable,
         streaming: StreamingMode::None,
         audit: AuditTraceClass::UserAction,
-        effect_path: AllowedEffectPath::ProductWorkflow,
+        effect_path: AllowedEffectPath::ProductSurface,
     })
     .expect("product-auth OAuth start policy must validate") // safety: LocalGateway + bearer + AuthenticatedCaller is the same authenticated local product workflow shape used by WebUI mutations.
 }
@@ -643,7 +643,7 @@ pub(super) fn flow_status_policy() -> IngressPolicy {
         websocket_origin: WebSocketOriginPolicy::NotApplicable,
         streaming: StreamingMode::None,
         audit: AuditTraceClass::UserAction,
-        effect_path: AllowedEffectPath::ProductWorkflow,
+        effect_path: AllowedEffectPath::ProductSurface,
     })
     .expect("product-auth OAuth flow-status policy must validate") // safety: same authenticated LocalGateway shape as the OAuth start mutation, but NoBody + read-only per-caller poll cadence.
 }
@@ -667,7 +667,7 @@ pub(super) fn accounts_refresh_policy() -> IngressPolicy {
         websocket_origin: WebSocketOriginPolicy::NotApplicable,
         streaming: StreamingMode::None,
         audit: AuditTraceClass::UserAction,
-        effect_path: AllowedEffectPath::ProductWorkflow,
+        effect_path: AllowedEffectPath::ProductSurface,
     })
     .expect("product-auth accounts refresh policy must validate") // safety: same shape as protected_mutation_policy but with tighter rate cap to guard against fan-out to provider refresh calls.
 }
@@ -689,7 +689,7 @@ pub(super) fn callback_policy() -> IngressPolicy {
         websocket_origin: WebSocketOriginPolicy::NotApplicable,
         streaming: StreamingMode::None,
         audit: AuditTraceClass::PublicCallback,
-        effect_path: AllowedEffectPath::ProductWorkflow,
+        effect_path: AllowedEffectPath::ProductSurface,
     })
     .expect("product-auth OAuth callback policy must validate") // safety: OAuthCallback + OAuthState + HostResolved is the host callback shape; handler/service validation enforces state before product effects.
 }

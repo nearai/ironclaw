@@ -97,7 +97,7 @@ pub enum ProtocolHttpEgressError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProductWorkflowRejectionKind {
+pub enum ProductSurfaceRejectionKind {
     ThreadBusy,
     AdmissionRejected,
     ScopeNotFound,
@@ -129,11 +129,11 @@ pub enum ProductAdapterError {
     EgressTransient { reason: RedactedString },
 
     #[error("workflow transient failure: {reason}")]
-    WorkflowTransient { reason: RedactedString },
+    SurfaceTransient { reason: RedactedString },
 
     #[error("workflow rejected request ({kind:?}, status {status_code}): {reason}")]
-    WorkflowRejected {
-        kind: ProductWorkflowRejectionKind,
+    SurfaceRejected {
+        kind: ProductSurfaceRejectionKind,
         status_code: u16,
         retryable: bool,
         reason: RedactedString,
@@ -147,9 +147,9 @@ impl ProductAdapterError {
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
-            ProductAdapterError::WorkflowTransient { .. }
+            ProductAdapterError::SurfaceTransient { .. }
                 | ProductAdapterError::EgressTransient { .. }
-                | ProductAdapterError::WorkflowRejected {
+                | ProductAdapterError::SurfaceRejected {
                     retryable: true,
                     ..
                 }

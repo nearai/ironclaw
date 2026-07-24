@@ -58,8 +58,8 @@ use ironclaw_product::{
     ProductCapabilityDescriptor, ProductCreateThreadRequest, ProductListAutomationsRequest,
     ProductListThreadsRequest, ProductOutboundEnvelope, ProductRenameAutomationRequest,
     ProductResolveGateRequest, ProductRetryRunRequest, ProductSetupExtensionRequest,
-    ProductSubmitTurnRequest, ProductSurfaceCommandDescriptor, ProductWorkflowError, ProjectFsFile,
-    ProjectionCursor, RESOLVE_GATE_COMMAND, RETRY_RUN_COMMAND, RebornAccountLoginLinkResponse,
+    ProductSubmitTurnRequest, ProductSurfaceCommandDescriptor, ProjectFsFile, ProjectionCursor,
+    RESOLVE_GATE_COMMAND, RETRY_RUN_COMMAND, RebornAccountLoginLinkResponse,
     RebornAccountTracesResponse, RebornAddMemberRequest, RebornAdminCreateUserRequest,
     RebornAdminDeleteSecretProductRequest, RebornAdminPutSecretProductRequest,
     RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse, RebornAdminSecretResponse,
@@ -2127,7 +2127,10 @@ pub async fn install_extension(
     Extension(caller): Extension<ProductSurfaceCaller>,
     Json(body): Json<InstallExtensionBody>,
 ) -> Result<Json<RebornExtensionActionResponse>, WebUiV2HttpError> {
-    let package_ref = extension_package_ref_for_request(Ok(body.package_ref), "package_ref")?;
+    let package_ref = extension_package_ref_for_request(
+        Ok::<LifecyclePackageRef, std::convert::Infallible>(body.package_ref),
+        "package_ref",
+    )?;
     let resolution = invoke_product_capability(
         state.services(),
         caller,
@@ -3612,11 +3615,14 @@ pub struct SetSkillAutoActivateBody {
 }
 
 fn extension_package_ref_for_request(
-    package_ref: Result<LifecyclePackageRef, ProductWorkflowError>,
+    package_ref: Result<LifecyclePackageRef, impl std::fmt::Display>,
     field: &'static str,
 ) -> Result<LifecyclePackageRef, ProductSurfaceError> {
     package_ref
-        .and_then(LifecyclePackageRef::require_extension)
+        .map_err(|_| {
+            ProductSurfaceError::validation(field, ProductSurfaceValidationCode::InvalidId)
+        })?
+        .require_extension()
         .map_err(|_| {
             ProductSurfaceError::validation(field, ProductSurfaceValidationCode::InvalidId)
         })

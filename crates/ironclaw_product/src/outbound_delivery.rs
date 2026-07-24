@@ -13,7 +13,7 @@ use crate::{ExternalActorRef, ExternalConversationRef};
 use async_trait::async_trait;
 use ironclaw_outbound::{DeliveryFailureKind, ValidatedReplyTargetBinding};
 
-use crate::ProductWorkflowError;
+use crate::ProductSurfaceFailure;
 
 /// Product-owned metadata from a trusted conversation-binding lookup for an
 /// already validated outbound target.
@@ -31,27 +31,27 @@ pub trait ProductOutboundTargetResolver: Send + Sync {
     /// the sealed target. They must not choose or substitute a reply target.
     ///
     /// When `require_direct_message` is true, implementations must return
-    /// [`ProductWorkflowError::OutboundTargetNotDirectMessage`] if the resolved
+    /// [`ProductSurfaceFailure::OutboundTargetNotDirectMessage`] if the resolved
     /// target is not a personal direct message.
     async fn resolve_product_outbound_target_metadata(
         &self,
         target: &ValidatedReplyTargetBinding,
         require_direct_message: bool,
-    ) -> Result<VerifiedProductOutboundTargetMetadata, ProductWorkflowError>;
+    ) -> Result<VerifiedProductOutboundTargetMetadata, ProductSurfaceFailure>;
 }
 
 /// Classify a workflow error into the delivery-failure kind the coordinator
 /// records when reply-target resolution fails before render.
-pub(crate) fn delivery_failure_kind_for_workflow_error(
-    error: &ProductWorkflowError,
+pub(crate) fn delivery_failure_kind_for_surface_error(
+    error: &ProductSurfaceFailure,
 ) -> DeliveryFailureKind {
     match error {
-        ProductWorkflowError::Transient { .. } => DeliveryFailureKind::TransportUnavailable,
-        ProductWorkflowError::BindingAccessDenied
-        | ProductWorkflowError::BindingRequired { .. }
-        | ProductWorkflowError::UnknownInstallation
-        | ProductWorkflowError::InvalidBindingRequest { .. }
-        | ProductWorkflowError::OutboundTargetNotDirectMessage => DeliveryFailureKind::Rejected,
+        ProductSurfaceFailure::Transient { .. } => DeliveryFailureKind::TransportUnavailable,
+        ProductSurfaceFailure::BindingAccessDenied
+        | ProductSurfaceFailure::BindingRequired { .. }
+        | ProductSurfaceFailure::UnknownInstallation
+        | ProductSurfaceFailure::InvalidBindingRequest { .. }
+        | ProductSurfaceFailure::OutboundTargetNotDirectMessage => DeliveryFailureKind::Rejected,
         _ => DeliveryFailureKind::Unknown,
     }
 }

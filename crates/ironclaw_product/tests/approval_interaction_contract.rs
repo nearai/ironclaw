@@ -87,7 +87,7 @@ impl ApprovalTurnRunLocator for FakeTurnRunLocator {
     async fn blocked_approval_runs(
         &self,
         _scope: &ApprovalInteractionScope,
-    ) -> Result<Vec<ApprovalBlockedTurnRun>, ironclaw_product::ProductWorkflowError> {
+    ) -> Result<Vec<ApprovalBlockedTurnRun>, ironclaw_product::ProductSurfaceFailure> {
         Ok(self.runs.lock().expect("lock").clone())
     }
 
@@ -95,7 +95,7 @@ impl ApprovalTurnRunLocator for FakeTurnRunLocator {
         &self,
         _scope: &ApprovalInteractionScope,
         gate_ref: &GateRef,
-    ) -> Result<Option<TurnRunId>, ironclaw_product::ProductWorkflowError> {
+    ) -> Result<Option<TurnRunId>, ironclaw_product::ProductSurfaceFailure> {
         Ok(self
             .runs
             .lock()
@@ -112,7 +112,7 @@ impl ApprovalInteractionReadModel for FakeReadModel {
     async fn approval_gates(
         &self,
         scope: &ApprovalInteractionScope,
-    ) -> Result<Vec<ApprovalGateRecord>, ironclaw_product::ProductWorkflowError> {
+    ) -> Result<Vec<ApprovalGateRecord>, ironclaw_product::ProductSurfaceFailure> {
         Ok(self
             .gates
             .lock()
@@ -128,7 +128,7 @@ impl ApprovalInteractionReadModel for FakeReadModel {
         scope: &ApprovalInteractionScope,
         run_id_hint: Option<TurnRunId>,
         gate_ref: &GateRef,
-    ) -> Result<Option<ApprovalGateRecord>, ironclaw_product::ProductWorkflowError> {
+    ) -> Result<Option<ApprovalGateRecord>, ironclaw_product::ProductSurfaceFailure> {
         Ok(self
             .gates
             .lock()
@@ -151,14 +151,14 @@ impl ApprovalLeaseTermsProvider for FixedLeaseTermsProvider {
     async fn lease_terms_for(
         &self,
         _gate: &ApprovalGateRecord,
-    ) -> Result<LeaseApproval, ironclaw_product::ProductWorkflowError> {
+    ) -> Result<LeaseApproval, ironclaw_product::ProductSurfaceFailure> {
         Ok(dispatch_lease_approval(Principal::HostRuntime))
     }
 
     async fn persistent_approval_allowed(
         &self,
         _gate: &ApprovalGateRecord,
-    ) -> Result<(), ironclaw_product::ProductWorkflowError> {
+    ) -> Result<(), ironclaw_product::ProductSurfaceFailure> {
         Ok(())
     }
 }
@@ -171,16 +171,16 @@ impl ApprovalLeaseTermsProvider for RejectingPersistentLeaseTermsProvider {
     async fn lease_terms_for(
         &self,
         _gate: &ApprovalGateRecord,
-    ) -> Result<LeaseApproval, ironclaw_product::ProductWorkflowError> {
+    ) -> Result<LeaseApproval, ironclaw_product::ProductSurfaceFailure> {
         Ok(dispatch_lease_approval(Principal::HostRuntime))
     }
 
     async fn persistent_approval_allowed(
         &self,
         _gate: &ApprovalGateRecord,
-    ) -> Result<(), ironclaw_product::ProductWorkflowError> {
+    ) -> Result<(), ironclaw_product::ProductSurfaceFailure> {
         Err(
-            ironclaw_product::ProductWorkflowError::ApprovalInteractionRejected {
+            ironclaw_product::ProductSurfaceFailure::ApprovalInteractionRejected {
                 kind: ApprovalInteractionRejectionKind::AlwaysAllowUnsupported,
             },
         )
@@ -254,7 +254,7 @@ impl ApprovalResolutionPort for RecordingApprovalResolver {
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
         approval: LeaseApproval,
-    ) -> Result<(), ironclaw_product::ProductWorkflowError> {
+    ) -> Result<(), ironclaw_product::ProductSurfaceFailure> {
         self.approvals.lock().expect("lock").push(RecordedApproval {
             scope: scope.clone(),
             request_id,
@@ -269,7 +269,7 @@ impl ApprovalResolutionPort for RecordingApprovalResolver {
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
         approval: LeaseApproval,
-    ) -> Result<(), ironclaw_product::ProductWorkflowError> {
+    ) -> Result<(), ironclaw_product::ProductSurfaceFailure> {
         self.spawn_approvals
             .lock()
             .expect("lock")
@@ -287,7 +287,7 @@ impl ApprovalResolutionPort for RecordingApprovalResolver {
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
         approval: LeaseApproval,
-    ) -> Result<(), ironclaw_product::ProductWorkflowError> {
+    ) -> Result<(), ironclaw_product::ProductSurfaceFailure> {
         self.dispatch_lease_retries
             .lock()
             .expect("lock")
@@ -305,7 +305,7 @@ impl ApprovalResolutionPort for RecordingApprovalResolver {
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
         approval: LeaseApproval,
-    ) -> Result<(), ironclaw_product::ProductWorkflowError> {
+    ) -> Result<(), ironclaw_product::ProductSurfaceFailure> {
         self.spawn_lease_retries
             .lock()
             .expect("lock")
@@ -323,7 +323,7 @@ impl ApprovalResolutionPort for RecordingApprovalResolver {
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
         denial: DenyApproval,
-    ) -> Result<(), ironclaw_product::ProductWorkflowError> {
+    ) -> Result<(), ironclaw_product::ProductSurfaceFailure> {
         self.denials
             .lock()
             .expect("lock")
@@ -344,7 +344,7 @@ impl ApprovalResolutionPort for FailingApprovalResolver {
         _scope: &ResourceScope,
         _request_id: ApprovalRequestId,
         _approval: LeaseApproval,
-    ) -> Result<(), ironclaw_product::ProductWorkflowError> {
+    ) -> Result<(), ironclaw_product::ProductSurfaceFailure> {
         Err(resolver_failure())
     }
 
@@ -353,7 +353,7 @@ impl ApprovalResolutionPort for FailingApprovalResolver {
         _scope: &ResourceScope,
         _request_id: ApprovalRequestId,
         _approval: LeaseApproval,
-    ) -> Result<(), ironclaw_product::ProductWorkflowError> {
+    ) -> Result<(), ironclaw_product::ProductSurfaceFailure> {
         Err(resolver_failure())
     }
 
@@ -362,7 +362,7 @@ impl ApprovalResolutionPort for FailingApprovalResolver {
         _scope: &ResourceScope,
         _request_id: ApprovalRequestId,
         _approval: LeaseApproval,
-    ) -> Result<(), ironclaw_product::ProductWorkflowError> {
+    ) -> Result<(), ironclaw_product::ProductSurfaceFailure> {
         Err(resolver_failure())
     }
 
@@ -371,7 +371,7 @@ impl ApprovalResolutionPort for FailingApprovalResolver {
         _scope: &ResourceScope,
         _request_id: ApprovalRequestId,
         _approval: LeaseApproval,
-    ) -> Result<(), ironclaw_product::ProductWorkflowError> {
+    ) -> Result<(), ironclaw_product::ProductSurfaceFailure> {
         Err(resolver_failure())
     }
 
@@ -380,7 +380,7 @@ impl ApprovalResolutionPort for FailingApprovalResolver {
         _scope: &ResourceScope,
         _request_id: ApprovalRequestId,
         _denial: DenyApproval,
-    ) -> Result<(), ironclaw_product::ProductWorkflowError> {
+    ) -> Result<(), ironclaw_product::ProductSurfaceFailure> {
         Err(resolver_failure())
     }
 }
@@ -421,8 +421,8 @@ impl PersistentApprovalPolicyStore for FailingPersistentApprovalPolicyStore {
     }
 }
 
-fn resolver_failure() -> ironclaw_product::ProductWorkflowError {
-    ironclaw_product::ProductWorkflowError::Transient {
+fn resolver_failure() -> ironclaw_product::ProductSurfaceFailure {
+    ironclaw_product::ProductSurfaceFailure::Transient {
         reason: "approval resolver unavailable".to_string(),
     }
 }
@@ -1337,7 +1337,7 @@ async fn always_allow_without_policy_store_rejects_before_approval_side_effects(
 
     assert!(matches!(
         err,
-        ironclaw_product::ProductWorkflowError::ApprovalInteractionRejected {
+        ironclaw_product::ProductSurfaceFailure::ApprovalInteractionRejected {
             kind: ApprovalInteractionRejectionKind::AlwaysAllowUnsupported
         }
     ));
@@ -1428,7 +1428,7 @@ async fn always_allow_disallowed_by_policy_rejects_without_persisting_or_approvi
 
     assert!(matches!(
         err,
-        ironclaw_product::ProductWorkflowError::ApprovalInteractionRejected {
+        ironclaw_product::ProductSurfaceFailure::ApprovalInteractionRejected {
             kind: ApprovalInteractionRejectionKind::AlwaysAllowUnsupported
         }
     ));
@@ -1498,7 +1498,7 @@ async fn always_allow_does_not_persist_policy_when_resolution_fails() {
 
     assert!(matches!(
         err,
-        ironclaw_product::ProductWorkflowError::Transient { .. }
+        ironclaw_product::ProductSurfaceFailure::Transient { .. }
     ));
     assert_eq!(coordinator.resumption_count(), 0);
     assert!(
@@ -1585,7 +1585,7 @@ async fn always_allow_resolution_failure_preserves_existing_policy() {
 
     assert!(matches!(
         err,
-        ironclaw_product::ProductWorkflowError::Transient { .. }
+        ironclaw_product::ProductSurfaceFailure::Transient { .. }
     ));
     assert_eq!(coordinator.resumption_count(), 0);
     let policy = policies
@@ -1659,7 +1659,7 @@ async fn unsupported_approval_action_returns_invalid_request_without_resolution(
 
     assert!(matches!(
         err,
-        ironclaw_product::ProductWorkflowError::ApprovalInteractionRejected {
+        ironclaw_product::ProductSurfaceFailure::ApprovalInteractionRejected {
             kind: ApprovalInteractionRejectionKind::UnsupportedAction
         }
     ));
@@ -1760,7 +1760,7 @@ async fn already_approved_always_allow_replay_rejects_without_persisting_policy(
 
     assert!(matches!(
         err,
-        ironclaw_product::ProductWorkflowError::ApprovalInteractionRejected {
+        ironclaw_product::ProductSurfaceFailure::ApprovalInteractionRejected {
             kind: ApprovalInteractionRejectionKind::AlwaysAllowUnsupported
         }
     ));
@@ -1899,7 +1899,7 @@ async fn already_denied_replay_returns_stale_when_resume_turn_fails_precondition
     // map_approval_resume_error maps InvalidRequest → StaleGate.
     assert!(matches!(
         error,
-        ironclaw_product::ProductWorkflowError::ApprovalInteractionRejected {
+        ironclaw_product::ProductSurfaceFailure::ApprovalInteractionRejected {
             kind: ApprovalInteractionRejectionKind::StaleGate
         }
     ));
@@ -1982,7 +1982,7 @@ async fn already_denied_replay_returns_stale_when_run_is_other_terminal_state() 
 
     assert!(matches!(
         error,
-        ironclaw_product::ProductWorkflowError::ApprovalInteractionRejected {
+        ironclaw_product::ProductSurfaceFailure::ApprovalInteractionRejected {
             kind: ApprovalInteractionRejectionKind::StaleGate
         }
     ));
@@ -2030,7 +2030,7 @@ async fn discarded_gate_returns_stale_without_resolution() {
         assert!(
             matches!(
                 error,
-                ironclaw_product::ProductWorkflowError::ApprovalInteractionRejected {
+                ironclaw_product::ProductSurfaceFailure::ApprovalInteractionRejected {
                     kind: ApprovalInteractionRejectionKind::StaleGate
                 }
             ),
@@ -2079,7 +2079,7 @@ async fn expired_gate_returns_stale_without_resolution() {
         assert!(
             matches!(
                 error,
-                ironclaw_product::ProductWorkflowError::ApprovalInteractionRejected {
+                ironclaw_product::ProductSurfaceFailure::ApprovalInteractionRejected {
                     kind: ApprovalInteractionRejectionKind::StaleGate
                 }
             ),
@@ -2254,7 +2254,7 @@ async fn replay_denied_gate_returns_transient_when_resume_turn_errors() {
     assert!(
         matches!(
             error,
-            ironclaw_product::ProductWorkflowError::Transient { .. }
+            ironclaw_product::ProductSurfaceFailure::Transient { .. }
         ),
         "expected Transient, got: {error:?}"
     );
@@ -2296,7 +2296,7 @@ async fn deny_marks_pending_gate_denied_then_propagates_resume_error_without_can
     assert!(
         matches!(
             error,
-            ironclaw_product::ProductWorkflowError::Transient { .. }
+            ironclaw_product::ProductSurfaceFailure::Transient { .. }
         ),
         "expected Transient, got {error:?}"
     );
@@ -2346,7 +2346,7 @@ async fn missing_gate_returns_deterministic_not_found_without_resolution() {
 
     assert!(matches!(
         err,
-        ironclaw_product::ProductWorkflowError::ApprovalInteractionRejected {
+        ironclaw_product::ProductSurfaceFailure::ApprovalInteractionRejected {
             kind: ApprovalInteractionRejectionKind::MissingGate
         }
     ));
@@ -2388,7 +2388,7 @@ async fn resolve_rejects_malformed_approval_gate_ref_without_side_effects() {
 
     assert!(matches!(
         err,
-        ironclaw_product::ProductWorkflowError::ApprovalInteractionRejected {
+        ironclaw_product::ProductSurfaceFailure::ApprovalInteractionRejected {
             kind: ApprovalInteractionRejectionKind::InvalidGateRef
         }
     ));
@@ -2417,7 +2417,7 @@ async fn stale_gate_returns_conflict_without_resolution() {
 
     assert!(matches!(
         err,
-        ironclaw_product::ProductWorkflowError::ApprovalInteractionRejected {
+        ironclaw_product::ProductSurfaceFailure::ApprovalInteractionRejected {
             kind: ApprovalInteractionRejectionKind::StaleGate
         }
     ));
@@ -2463,7 +2463,7 @@ async fn cross_scope_actor_is_rejected_before_resolution() {
 
     assert!(matches!(
         err,
-        ironclaw_product::ProductWorkflowError::ApprovalInteractionRejected {
+        ironclaw_product::ProductSurfaceFailure::ApprovalInteractionRejected {
             kind: ApprovalInteractionRejectionKind::CrossScopeDenied
         }
     ));

@@ -11,15 +11,15 @@ use crate::{
     ProductRejectionKind,
 };
 use async_trait::async_trait;
+use ironclaw_host_api::{HostApiError, ProductSurfaceError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    ProductCommandContext, ProductCommandService, ProductWorkflowError,
+    ProductCommandContext, ProductCommandService,
     lifecycle::{
         LifecycleCommandKind, LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef,
         LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
-        validate_lifecycle_text,
     },
 };
 
@@ -205,7 +205,7 @@ impl ProductCommandService for LifecycleProductCommandService {
         &self,
         context: ProductCommandContext,
         command: ProductCommand,
-    ) -> Result<ProductInboundAck, ProductWorkflowError> {
+    ) -> Result<ProductInboundAck, ProductSurfaceError> {
         let ProductCommand::Lifecycle { action } = command else {
             return Ok(ProductInboundAck::Rejected(ProductRejection::permanent(
                 ProductRejectionKind::PolicyDenied,
@@ -217,10 +217,7 @@ impl ProductCommandService for LifecycleProductCommandService {
             .facade
             .execute(LifecycleProductContext::Command(Box::new(context)), action)
             .await?;
-        let payload =
-            serde_json::to_value(response).map_err(|error| ProductWorkflowError::Transient {
-                reason: format!("lifecycle command response serialization failed: {error}"),
-            })?;
+        let payload = serde_json::to_value(response).map_err(ProductSurfaceError::internal_from)?;
         Ok(ProductInboundAck::CommandResult {
             command: command_name,
             payload: ProductCommandResultPayload::new(payload),
@@ -301,10 +298,7 @@ fn parse_skill_install_command(payload: &InboundCommandPayload) -> ProductComman
         Some(content) => content,
         None => return invalid_lifecycle_command("skill_install.content is required"),
     };
-    let content = match validate_lifecycle_text(content.to_string(), "skill content", 64 * 1024) {
-        Ok(content) => content,
-        Err(error) => return invalid_lifecycle_command(error.to_string()),
-    };
+    let content = validate_lifecycle_text(content.to_string(), "skill content", 64 * 1024)?;
     let name = match json.get("name").and_then(Value::as_str) {
         Some(name) => match LifecyclePackageId::new(name) {
             Ok(name) => Some(name),
@@ -389,9 +383,33 @@ fn invalid_lifecycle_command(reason: impl Into<String>) -> ProductCommandParseRe
     ))
 }
 
+fn validate_lifecycle_text(
+    value: String,
+    label: &'static str,
+    max_bytes: usize,
+) -> Result<String, ProductRejection> {
+    if value.trim().is_empty() {
+        return invalid_lifecycle_rejection(format!("{label} must not be empty"));
+    }
+    if value.len() > max_bytes {
+        return invalid_lifecycle_rejection(format!("{label} must be at most {max_bytes} bytes"));
+    }
+    if value.chars().any(|c| c == '\0') {
+        return invalid_lifecycle_rejection(format!("{label} must not contain NUL characters"));
+    }
+    Ok(value)
+}
+
+fn invalid_lifecycle_rejection(reason: impl Into<String>) -> Result<String, ProductRejection> {
+    Err(ProductRejection::permanent(
+        ProductRejectionKind::InvalidRequest,
+        reason,
+    ))
+}
+
 fn lifecycle_package_ref(
     kind: LifecyclePackageKind,
     id: impl Into<String>,
-) -> Result<LifecyclePackageRef, ProductWorkflowError> {
+) -> Result<LifecyclePackageRef, HostApiError> {
     LifecyclePackageRef::new(kind, id)
 }

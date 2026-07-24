@@ -21,7 +21,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use super::{filesystem::BlockingTurnStatePutFilesystem, product_workflow::resource_scope};
+use super::{filesystem::BlockingTurnStatePutFilesystem, product_surface::resource_scope};
 use ironclaw_approvals::{ApprovalResolver, AutoApproveSettingInput, DenyApproval, LeaseApproval};
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel, CredentialAccountStatus,

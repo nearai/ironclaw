@@ -1,10 +1,11 @@
 //! Workflow-layer error vocabulary.
 //!
-//! [`ProductWorkflowError`] is the internal error type used within the workflow
+//! [`ProductSurfaceFailure`] is the internal error type used within the workflow
 //! crate. It converts to [`ProductAdapterError`] at the facade boundary so
 //! adapters never see host-layer details.
 
-use crate::{ProductAdapterError, ProductWorkflowRejectionKind, RedactedString};
+use crate::{ProductAdapterError, ProductSurfaceRejectionKind, RedactedString};
+use ironclaw_host_api::{HostApiError, ProductSurfaceError, ProductSurfaceErrorCode};
 use ironclaw_turns::{TurnError, TurnErrorCategory};
 use thiserror::Error;
 
@@ -41,7 +42,7 @@ impl AuthContinuationRejectionKind {
 
 /// Internal error type for the product workflow facade.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum ProductWorkflowError {
+pub enum ProductSurfaceFailure {
     /// The adapter installation is not mapped to a tenant.
     #[error("unknown adapter installation")]
     UnknownInstallation,
@@ -70,7 +71,7 @@ pub enum ProductWorkflowError {
     /// dependency graph) carrying the exact remediation text (e.g. the
     /// `ironclaw config set` commands to run). Two independent consumers read
     /// this variant differently: the WebUI facade
-    /// (`reborn_services::map_lifecycle_error`) discards `reason` and maps
+    /// (`lifecycle_product_surface_error`) discards `reason` and maps
     /// the DISCRIMINANT alone to a sanitized 400 (no free text crosses the
     /// wire contract); the LLM tool path
     /// (`extension_lifecycle_capabilities::lifecycle_error`) forwards
@@ -133,142 +134,190 @@ pub enum ProductWorkflowError {
     OutboundTargetNotDirectMessage,
 }
 
-fn workflow_rejection_kind(category: TurnErrorCategory) -> ProductWorkflowRejectionKind {
-    match category {
-        TurnErrorCategory::ThreadBusy => ProductWorkflowRejectionKind::ThreadBusy,
-        TurnErrorCategory::AdmissionRejected => ProductWorkflowRejectionKind::AdmissionRejected,
-        TurnErrorCategory::ScopeNotFound => ProductWorkflowRejectionKind::ScopeNotFound,
-        TurnErrorCategory::Unauthorized => ProductWorkflowRejectionKind::Unauthorized,
-        TurnErrorCategory::InvalidRequest => ProductWorkflowRejectionKind::InvalidRequest,
-        TurnErrorCategory::Unavailable => ProductWorkflowRejectionKind::Unavailable,
-        TurnErrorCategory::CapacityExceeded => ProductWorkflowRejectionKind::AdmissionRejected,
-        TurnErrorCategory::Conflict => ProductWorkflowRejectionKind::Conflict,
+impl From<HostApiError> for ProductSurfaceFailure {
+    fn from(error: HostApiError) -> Self {
+        ProductSurfaceFailure::InvalidBindingRequest {
+            reason: error.to_string(),
+        }
     }
 }
 
-impl From<ProductWorkflowError> for ProductAdapterError {
-    fn from(value: ProductWorkflowError) -> Self {
+fn surface_rejection_kind(category: TurnErrorCategory) -> ProductSurfaceRejectionKind {
+    match category {
+        TurnErrorCategory::ThreadBusy => ProductSurfaceRejectionKind::ThreadBusy,
+        TurnErrorCategory::AdmissionRejected => ProductSurfaceRejectionKind::AdmissionRejected,
+        TurnErrorCategory::ScopeNotFound => ProductSurfaceRejectionKind::ScopeNotFound,
+        TurnErrorCategory::Unauthorized => ProductSurfaceRejectionKind::Unauthorized,
+        TurnErrorCategory::InvalidRequest => ProductSurfaceRejectionKind::InvalidRequest,
+        TurnErrorCategory::Unavailable => ProductSurfaceRejectionKind::Unavailable,
+        TurnErrorCategory::CapacityExceeded => ProductSurfaceRejectionKind::AdmissionRejected,
+        TurnErrorCategory::Conflict => ProductSurfaceRejectionKind::Conflict,
+    }
+}
+
+pub fn lifecycle_product_surface_error(error: ProductSurfaceFailure) -> ProductSurfaceError {
+    match error {
+        ProductSurfaceFailure::InvalidBindingRequest { .. }
+        | ProductSurfaceFailure::UnsupportedActionKind { .. } => {
+            ProductSurfaceError::from_status(ProductSurfaceErrorCode::InvalidRequest, 400, false)
+        }
+        // WebUI gets a plain 400 with no free text (the wire contract has no
+        // free-text field): the exact `config set` remediation reaches users
+        // via the LLM tool path and `ironclaw status`; bespoke WebUI
+        // messaging is a deliberately deferred scope-cut.
+        ProductSurfaceFailure::ProviderInstanceNotConfigured { .. } => {
+            ProductSurfaceError::from_status(ProductSurfaceErrorCode::InvalidRequest, 400, false)
+        }
+        ProductSurfaceFailure::BindingAccessDenied => {
+            ProductSurfaceError::from_status(ProductSurfaceErrorCode::Forbidden, 403, false)
+        }
+        ProductSurfaceFailure::Transient { ref reason } => {
+            // The 503 body is sanitized; without this line the cause is
+            // dropped entirely and the failure is diagnosable from logs.
+            tracing::warn!(reason = %reason, "lifecycle action failed with a transient error");
+            ProductSurfaceError::service_unavailable(true)
+        }
+        ProductSurfaceFailure::BindingResolutionFailed { .. }
+        | ProductSurfaceFailure::BindingRequired { .. }
+        | ProductSurfaceFailure::TurnSubmissionRejected { .. }
+        | ProductSurfaceFailure::TurnSubmissionFailed { .. }
+        | ProductSurfaceFailure::TurnResumeRejected { .. }
+        | ProductSurfaceFailure::TurnResumeDenied { .. }
+        | ProductSurfaceFailure::ApprovalInteractionRejected { .. }
+        | ProductSurfaceFailure::AuthInteractionRejected { .. }
+        | ProductSurfaceFailure::AuthContinuationRejected { .. }
+        | ProductSurfaceFailure::BeforeInboundPolicyFailed { .. }
+        | ProductSurfaceFailure::DuplicateAction { .. }
+        | ProductSurfaceFailure::OutboundTargetNotDirectMessage
+        | ProductSurfaceFailure::UnknownInstallation => ProductSurfaceError::internal_invariant(),
+    }
+}
+
+impl From<ProductSurfaceFailure> for ProductAdapterError {
+    fn from(value: ProductSurfaceFailure) -> Self {
         match value {
-            ProductWorkflowError::UnknownInstallation => ProductAdapterError::WorkflowRejected {
-                kind: ProductWorkflowRejectionKind::Unauthorized,
+            ProductSurfaceFailure::UnknownInstallation => ProductAdapterError::SurfaceRejected {
+                kind: ProductSurfaceRejectionKind::Unauthorized,
                 status_code: 403,
                 retryable: false,
                 reason: RedactedString::new("unknown adapter installation"),
             },
-            ProductWorkflowError::BindingResolutionFailed { reason } => {
+            ProductSurfaceFailure::BindingResolutionFailed { reason } => {
                 ProductAdapterError::Internal {
                     detail: RedactedString::new(reason),
                 }
             }
-            ProductWorkflowError::BindingRequired { reason } => {
-                ProductAdapterError::WorkflowRejected {
-                    kind: ProductWorkflowRejectionKind::ScopeNotFound,
+            ProductSurfaceFailure::BindingRequired { reason } => {
+                ProductAdapterError::SurfaceRejected {
+                    kind: ProductSurfaceRejectionKind::ScopeNotFound,
                     status_code: 404,
                     retryable: false,
                     reason: RedactedString::new(reason),
                 }
             }
-            ProductWorkflowError::BindingAccessDenied => ProductAdapterError::WorkflowRejected {
-                kind: ProductWorkflowRejectionKind::Unauthorized,
+            ProductSurfaceFailure::BindingAccessDenied => ProductAdapterError::SurfaceRejected {
+                kind: ProductSurfaceRejectionKind::Unauthorized,
                 status_code: 403,
                 retryable: false,
                 reason: RedactedString::new("binding access denied"),
             },
-            ProductWorkflowError::InvalidBindingRequest { reason } => {
-                ProductAdapterError::WorkflowRejected {
-                    kind: ProductWorkflowRejectionKind::InvalidRequest,
+            ProductSurfaceFailure::InvalidBindingRequest { reason } => {
+                ProductAdapterError::SurfaceRejected {
+                    kind: ProductSurfaceRejectionKind::InvalidRequest,
                     status_code: 400,
                     retryable: false,
                     reason: RedactedString::new(reason),
                 }
             }
-            ProductWorkflowError::ProviderInstanceNotConfigured { reason } => {
-                ProductAdapterError::WorkflowRejected {
-                    kind: ProductWorkflowRejectionKind::InvalidRequest,
+            ProductSurfaceFailure::ProviderInstanceNotConfigured { reason } => {
+                ProductAdapterError::SurfaceRejected {
+                    kind: ProductSurfaceRejectionKind::InvalidRequest,
                     status_code: 400,
                     retryable: false,
                     reason: RedactedString::new(reason),
                 }
             }
-            ProductWorkflowError::TurnSubmissionRejected { reason } => {
+            ProductSurfaceFailure::TurnSubmissionRejected { reason } => {
                 ProductAdapterError::Internal {
                     detail: RedactedString::new(reason),
                 }
             }
-            ProductWorkflowError::TurnSubmissionFailed { error } => {
+            ProductSurfaceFailure::TurnSubmissionFailed { error } => {
                 let status_code = error.adapter_status_code();
-                ProductAdapterError::WorkflowRejected {
-                    kind: workflow_rejection_kind(error.category()),
+                ProductAdapterError::SurfaceRejected {
+                    kind: surface_rejection_kind(error.category()),
                     status_code,
                     retryable: matches!(status_code, 429 | 503),
                     reason: RedactedString::new(error.to_string()),
                 }
             }
-            ProductWorkflowError::TurnResumeRejected { reason } => ProductAdapterError::Internal {
+            ProductSurfaceFailure::TurnResumeRejected { reason } => ProductAdapterError::Internal {
                 detail: RedactedString::new(reason),
             },
-            ProductWorkflowError::AuthContinuationRejected { kind } => {
-                ProductAdapterError::WorkflowRejected {
-                    kind: ProductWorkflowRejectionKind::InvalidRequest,
+            ProductSurfaceFailure::AuthContinuationRejected { kind } => {
+                ProductAdapterError::SurfaceRejected {
+                    kind: ProductSurfaceRejectionKind::InvalidRequest,
                     status_code: 400,
                     retryable: false,
                     reason: RedactedString::new(kind.sanitized_reason()),
                 }
             }
-            ProductWorkflowError::ApprovalInteractionRejected { kind } => {
-                ProductAdapterError::WorkflowRejected {
-                    kind: kind.workflow_rejection_kind(),
+            ProductSurfaceFailure::ApprovalInteractionRejected { kind } => {
+                ProductAdapterError::SurfaceRejected {
+                    kind: kind.surface_rejection_kind(),
                     status_code: kind.status_code(),
                     retryable: kind.retryable(),
                     reason: RedactedString::new(kind.sanitized_reason()),
                 }
             }
-            ProductWorkflowError::AuthInteractionRejected { kind } => {
-                ProductAdapterError::WorkflowRejected {
-                    kind: kind.workflow_rejection_kind(),
+            ProductSurfaceFailure::AuthInteractionRejected { kind } => {
+                ProductAdapterError::SurfaceRejected {
+                    kind: kind.surface_rejection_kind(),
                     status_code: kind.status_code(),
                     retryable: kind.retryable(),
                     reason: RedactedString::new(kind.sanitized_reason()),
                 }
             }
-            ProductWorkflowError::TurnResumeDenied { error } => {
+            ProductSurfaceFailure::TurnResumeDenied { error } => {
                 let status_code = error.adapter_status_code();
-                ProductAdapterError::WorkflowRejected {
-                    kind: workflow_rejection_kind(error.category()),
+                ProductAdapterError::SurfaceRejected {
+                    kind: surface_rejection_kind(error.category()),
                     status_code,
                     retryable: matches!(status_code, 429 | 503),
                     reason: RedactedString::new(error.to_string()),
                 }
             }
-            ProductWorkflowError::Transient { reason } => ProductAdapterError::WorkflowTransient {
+            ProductSurfaceFailure::Transient { reason } => ProductAdapterError::SurfaceTransient {
                 reason: RedactedString::new(reason),
             },
-            ProductWorkflowError::BeforeInboundPolicyFailed { reason, permanent } => {
+            ProductSurfaceFailure::BeforeInboundPolicyFailed { reason, permanent } => {
                 // Adapter error surfaces wrap the reason in RedactedString, so
                 // diagnostics remain available internally without leaking to
                 // public protocol output.
                 if permanent {
-                    ProductAdapterError::WorkflowRejected {
-                        kind: ProductWorkflowRejectionKind::AdmissionRejected,
+                    ProductAdapterError::SurfaceRejected {
+                        kind: ProductSurfaceRejectionKind::AdmissionRejected,
                         status_code: 403,
                         retryable: false,
                         reason: RedactedString::new(reason),
                     }
                 } else {
-                    ProductAdapterError::WorkflowTransient {
+                    ProductAdapterError::SurfaceTransient {
                         reason: RedactedString::new(reason),
                     }
                 }
             }
-            ProductWorkflowError::DuplicateAction { .. } => ProductAdapterError::Internal {
+            ProductSurfaceFailure::DuplicateAction { .. } => ProductAdapterError::Internal {
                 detail: RedactedString::new("duplicate action escaped workflow layer"),
             },
-            ProductWorkflowError::UnsupportedActionKind { kind } => ProductAdapterError::Internal {
-                detail: RedactedString::new(format!("unsupported action kind: {kind}")),
-            },
-            ProductWorkflowError::OutboundTargetNotDirectMessage => {
-                ProductAdapterError::WorkflowRejected {
-                    kind: ProductWorkflowRejectionKind::Unauthorized,
+            ProductSurfaceFailure::UnsupportedActionKind { kind } => {
+                ProductAdapterError::Internal {
+                    detail: RedactedString::new(format!("unsupported action kind: {kind}")),
+                }
+            }
+            ProductSurfaceFailure::OutboundTargetNotDirectMessage => {
+                ProductAdapterError::SurfaceRejected {
+                    kind: ProductSurfaceRejectionKind::Unauthorized,
                     status_code: 403,
                     retryable: false,
                     reason: RedactedString::new(
@@ -286,7 +335,7 @@ mod tests {
 
     #[test]
     fn transient_maps_to_retryable() {
-        let err: ProductAdapterError = ProductWorkflowError::Transient {
+        let err: ProductAdapterError = ProductSurfaceFailure::Transient {
             reason: "db timeout".into(),
         }
         .into();
@@ -295,7 +344,7 @@ mod tests {
 
     #[test]
     fn binding_failure_maps_to_internal() {
-        let err: ProductAdapterError = ProductWorkflowError::BindingResolutionFailed {
+        let err: ProductAdapterError = ProductSurfaceFailure::BindingResolutionFailed {
             reason: "no tenant".into(),
         }
         .into();
@@ -304,13 +353,13 @@ mod tests {
 
     #[test]
     fn permanent_before_inbound_policy_failure_maps_to_rejection() {
-        let err: ProductAdapterError = ProductWorkflowError::BeforeInboundPolicyFailed {
+        let err: ProductAdapterError = ProductSurfaceFailure::BeforeInboundPolicyFailed {
             reason: "classifier misconfigured".into(),
             permanent: true,
         }
         .into();
         assert!(!err.is_retryable());
-        assert!(matches!(err, ProductAdapterError::WorkflowRejected { .. }));
+        assert!(matches!(err, ProductAdapterError::SurfaceRejected { .. }));
     }
 
     #[test]
@@ -318,13 +367,13 @@ mod tests {
         for (error, expected_kind, expected_status, expected_retryable) in [
             (
                 TurnError::Unauthorized,
-                ProductWorkflowRejectionKind::Unauthorized,
+                ProductSurfaceRejectionKind::Unauthorized,
                 403,
                 false,
             ),
             (
                 TurnError::ScopeNotFound,
-                ProductWorkflowRejectionKind::ScopeNotFound,
+                ProductSurfaceRejectionKind::ScopeNotFound,
                 404,
                 false,
             ),
@@ -332,7 +381,7 @@ mod tests {
                 TurnError::Unavailable {
                     reason: "turn store offline".to_string(),
                 },
-                ProductWorkflowRejectionKind::Unavailable,
+                ProductSurfaceRejectionKind::Unavailable,
                 503,
                 true,
             ),
@@ -341,15 +390,15 @@ mod tests {
                     ironclaw_turns::TurnCapacityResource::SpawnTreeDescendants,
                     3,
                 ),
-                ProductWorkflowRejectionKind::AdmissionRejected,
+                ProductSurfaceRejectionKind::AdmissionRejected,
                 429,
                 true,
             ),
         ] {
-            let err: ProductAdapterError = ProductWorkflowError::TurnResumeDenied { error }.into();
+            let err: ProductAdapterError = ProductSurfaceFailure::TurnResumeDenied { error }.into();
 
             match err {
-                ProductAdapterError::WorkflowRejected {
+                ProductAdapterError::SurfaceRejected {
                     kind,
                     status_code,
                     retryable,
@@ -368,18 +417,18 @@ mod tests {
     fn provider_instance_not_configured_maps_to_workflow_rejected() {
         let reason =
             "ironclaw config set google.client_id <id>.apps.googleusercontent.com".to_string();
-        let err: ProductAdapterError = ProductWorkflowError::ProviderInstanceNotConfigured {
+        let err: ProductAdapterError = ProductSurfaceFailure::ProviderInstanceNotConfigured {
             reason: reason.clone(),
         }
         .into();
         match err {
-            ProductAdapterError::WorkflowRejected {
+            ProductAdapterError::SurfaceRejected {
                 kind,
                 status_code,
                 retryable,
                 reason: mapped_reason,
             } => {
-                assert_eq!(kind, ProductWorkflowRejectionKind::InvalidRequest);
+                assert_eq!(kind, ProductSurfaceRejectionKind::InvalidRequest);
                 assert_eq!(status_code, 400);
                 assert!(!retryable);
                 assert_eq!(mapped_reason, RedactedString::new(reason));
@@ -390,15 +439,15 @@ mod tests {
 
     #[test]
     fn outbound_target_not_direct_message_maps_to_workflow_rejected() {
-        let err: ProductAdapterError = ProductWorkflowError::OutboundTargetNotDirectMessage.into();
+        let err: ProductAdapterError = ProductSurfaceFailure::OutboundTargetNotDirectMessage.into();
         match err {
-            ProductAdapterError::WorkflowRejected {
+            ProductAdapterError::SurfaceRejected {
                 kind,
                 status_code,
                 retryable,
                 ..
             } => {
-                assert_eq!(kind, ProductWorkflowRejectionKind::Unauthorized);
+                assert_eq!(kind, ProductSurfaceRejectionKind::Unauthorized);
                 assert_eq!(status_code, 403);
                 assert!(!retryable);
             }

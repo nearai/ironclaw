@@ -5,525 +5,27 @@
 //! dedicated services; lifecycle projections may only carry redacted refs to
 //! the owning interaction.
 
-use std::fmt;
-
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    AgentId, CapabilitySurfaceKind, ChannelPresentation, InstallationState, ProjectId, TenantId,
+    AgentId, InstallationState, ProductSurfaceError, ProductSurfaceErrorCode, ProjectId, TenantId,
     UserId,
 };
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
-use serde_json::Value;
+use serde::Serialize;
 
-use crate::{ProductCommandContext, ProductWorkflowError, RebornChannelConnectStrategy};
+use crate::ProductCommandContext;
 
-pub(crate) const LIFECYCLE_ID_MAX_BYTES: usize = 256;
+pub use ironclaw_host_api::{
+    ChannelConnectionRequirement, LifecycleBlockerRef, LifecycleChannelDirections,
+    LifecycleCommandKind, LifecycleExtensionCredentialRequirement,
+    LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
+    LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstallScope,
+    LifecycleInstalledExtensionSummary, LifecyclePackageId, LifecyclePackageKind,
+    LifecyclePackageRef, LifecycleProductAction, LifecycleProductPayload, LifecycleProductResponse,
+    LifecycleReadinessBlocker, LifecycleSearchExtensionSummary, LifecycleSkillSource,
+    LifecycleSkillSummary,
+};
+
 const LIFECYCLE_REF_MAX_BYTES: usize = 512;
-
-macro_rules! bounded_lifecycle_string {
-    ($name:ident, $label:literal, $max:expr) => {
-        #[derive(Debug, Clone, PartialEq, Eq)]
-        pub struct $name(String);
-
-        impl $name {
-            pub fn new(value: impl Into<String>) -> Result<Self, ProductWorkflowError> {
-                validate_lifecycle_string(value.into(), $label, $max).map(Self)
-            }
-
-            pub fn as_str(&self) -> &str {
-                &self.0
-            }
-
-            pub fn into_inner(self) -> String {
-                self.0
-            }
-        }
-
-        impl AsRef<str> for $name {
-            fn as_ref(&self) -> &str {
-                self.as_str()
-            }
-        }
-
-        impl fmt::Display for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str(self.as_str())
-            }
-        }
-
-        impl Serialize for $name {
-            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-            where
-                S: Serializer,
-            {
-                serializer.serialize_str(self.as_str())
-            }
-        }
-
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-            where
-                D: Deserializer<'de>,
-            {
-                let value = String::deserialize(deserializer)?;
-                Self::new(value).map_err(de::Error::custom)
-            }
-        }
-    };
-}
-
-bounded_lifecycle_string!(
-    LifecyclePackageId,
-    "lifecycle package id",
-    LIFECYCLE_ID_MAX_BYTES
-);
-bounded_lifecycle_string!(
-    LifecycleBlockerRef,
-    "lifecycle blocker ref",
-    LIFECYCLE_REF_MAX_BYTES
-);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LifecyclePackageKind {
-    Extension,
-    Skill,
-    Mcp,
-    Wasm,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LifecyclePackageRef {
-    pub kind: LifecyclePackageKind,
-    pub id: LifecyclePackageId,
-}
-
-impl LifecyclePackageRef {
-    pub fn new(
-        kind: LifecyclePackageKind,
-        id: impl Into<String>,
-    ) -> Result<Self, ProductWorkflowError> {
-        Ok(Self {
-            kind,
-            id: LifecyclePackageId::new(id)?,
-        })
-    }
-
-    pub fn require_kind(&self, expected: LifecyclePackageKind) -> Result<(), ProductWorkflowError> {
-        if self.kind == expected {
-            return Ok(());
-        }
-        Err(ProductWorkflowError::InvalidBindingRequest {
-            reason: format!(
-                "lifecycle package kind mismatch: expected {:?}, got {:?}",
-                expected, self.kind
-            ),
-        })
-    }
-
-    pub fn require_extension(self) -> Result<Self, ProductWorkflowError> {
-        self.require_kind(LifecyclePackageKind::Extension)?;
-        Ok(self)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum LifecycleReadinessBlocker {
-    Setup { ref_id: Option<LifecycleBlockerRef> },
-    Auth { ref_id: Option<LifecycleBlockerRef> },
-    Pairing { ref_id: Option<LifecycleBlockerRef> },
-    Approval { ref_id: Option<LifecycleBlockerRef> },
-    Policy { ref_id: Option<LifecycleBlockerRef> },
-    Credential { ref_id: Option<LifecycleBlockerRef> },
-    Runtime { ref_id: Option<LifecycleBlockerRef> },
-}
-
-impl LifecycleReadinessBlocker {
-    pub fn runtime(ref_id: impl Into<Option<String>>) -> Result<Self, ProductWorkflowError> {
-        Ok(Self::Runtime {
-            ref_id: validate_optional_ref(ref_id.into())?,
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case")]
-pub enum LifecycleProductAction {
-    ExtensionSearch {
-        query: String,
-    },
-    ExtensionList,
-    ExtensionInstall {
-        package_ref: LifecyclePackageRef,
-    },
-    ExtensionAuth {
-        package_ref: LifecyclePackageRef,
-    },
-    ExtensionActivate {
-        package_ref: LifecyclePackageRef,
-    },
-    ExtensionConfigure {
-        package_ref: LifecyclePackageRef,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        payload: Option<Value>,
-    },
-    ExtensionRemove {
-        package_ref: LifecyclePackageRef,
-    },
-    SkillSearch {
-        query: String,
-    },
-    SkillInstall {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        name: Option<LifecyclePackageId>,
-        content: String,
-    },
-    SkillRemove {
-        package_ref: LifecyclePackageRef,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LifecycleCommandKind {
-    ExtensionSearch,
-    ExtensionList,
-    ExtensionInstall,
-    ExtensionAuth,
-    ExtensionActivate,
-    ExtensionConfigure,
-    ExtensionRemove,
-    SkillSearch,
-    SkillInstall,
-    SkillRemove,
-}
-
-impl LifecycleCommandKind {
-    pub const ALL: [Self; 10] = [
-        Self::ExtensionSearch,
-        Self::ExtensionList,
-        Self::ExtensionInstall,
-        Self::ExtensionAuth,
-        Self::ExtensionActivate,
-        Self::ExtensionConfigure,
-        Self::ExtensionRemove,
-        Self::SkillSearch,
-        Self::SkillInstall,
-        Self::SkillRemove,
-    ];
-
-    pub const fn command_name(self) -> &'static str {
-        match self {
-            Self::ExtensionSearch => "extension_search",
-            Self::ExtensionList => "extension_list",
-            Self::ExtensionInstall => "extension_install",
-            Self::ExtensionAuth => "extension_auth",
-            Self::ExtensionActivate => "extension_activate",
-            Self::ExtensionConfigure => "extension_configure",
-            Self::ExtensionRemove => "extension_remove",
-            Self::SkillSearch => "skill_search",
-            Self::SkillInstall => "skill_install",
-            Self::SkillRemove => "skill_remove",
-        }
-    }
-
-    pub fn from_command_name(name: &str) -> Option<Self> {
-        Self::ALL
-            .iter()
-            .copied()
-            .find(|kind| kind.command_name() == name)
-    }
-}
-
-impl LifecycleProductAction {
-    pub fn command_kind(&self) -> LifecycleCommandKind {
-        match self {
-            Self::ExtensionSearch { .. } => LifecycleCommandKind::ExtensionSearch,
-            Self::ExtensionList => LifecycleCommandKind::ExtensionList,
-            Self::ExtensionInstall { .. } => LifecycleCommandKind::ExtensionInstall,
-            Self::ExtensionAuth { .. } => LifecycleCommandKind::ExtensionAuth,
-            Self::ExtensionActivate { .. } => LifecycleCommandKind::ExtensionActivate,
-            Self::ExtensionConfigure { .. } => LifecycleCommandKind::ExtensionConfigure,
-            Self::ExtensionRemove { .. } => LifecycleCommandKind::ExtensionRemove,
-            Self::SkillSearch { .. } => LifecycleCommandKind::SkillSearch,
-            Self::SkillInstall { .. } => LifecycleCommandKind::SkillInstall,
-            Self::SkillRemove { .. } => LifecycleCommandKind::SkillRemove,
-        }
-    }
-
-    pub fn command_name(&self) -> &'static str {
-        self.command_kind().command_name()
-    }
-
-    /// Returns the `LifecyclePackageRef` when this action targets a single
-    /// package, otherwise `None`.
-    pub fn package_ref(&self) -> Option<&LifecyclePackageRef> {
-        match self {
-            Self::ExtensionInstall { package_ref }
-            | Self::ExtensionAuth { package_ref }
-            | Self::ExtensionActivate { package_ref }
-            | Self::ExtensionConfigure { package_ref, .. }
-            | Self::ExtensionRemove { package_ref }
-            | Self::SkillRemove { package_ref } => Some(package_ref),
-            Self::ExtensionSearch { .. } | Self::SkillSearch { .. } | Self::SkillInstall { .. } => {
-                None
-            }
-            Self::ExtensionList => None,
-        }
-    }
-}
-
-/// Structured "the caller must connect this channel" affordance attached to a
-/// channel-extension activation result. Carried verbatim (snake_case) to the
-/// WebChat as a capability display preview so the in-chat pairing panel is
-/// driven by structured state, never by parsing the activation message.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ChannelConnectionRequirement {
-    pub channel: String,
-    /// User-facing channel name from the manifest (S5 wire gap). The frontend
-    /// renders this instead of deriving a label from the channel id, so the
-    /// connect affordance carries no per-extension copy.
-    pub display_name: String,
-    pub strategy: RebornChannelConnectStrategy,
-    pub instructions: String,
-    pub input_placeholder: String,
-    pub submit_label: String,
-    pub error_message: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum LifecycleProductPayload {
-    ExtensionSearch {
-        extensions: Vec<LifecycleSearchExtensionSummary>,
-        count: usize,
-    },
-    ExtensionList {
-        extensions: Vec<LifecycleInstalledExtensionSummary>,
-        count: usize,
-    },
-    ExtensionInstall {
-        installed: bool,
-        visible_capability_ids: Vec<String>,
-        #[serde(default)]
-        next_step: String,
-    },
-    ExtensionActivate {
-        activated: bool,
-        #[serde(default)]
-        visible_capability_ids: Vec<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        connection_required: Option<ChannelConnectionRequirement>,
-    },
-    ExtensionRemove {
-        removed: bool,
-    },
-    SkillSearch {
-        skills: Vec<LifecycleSkillSummary>,
-        count: usize,
-        limit: usize,
-        truncated: bool,
-    },
-    SkillInstall {
-        installed: bool,
-        name: LifecyclePackageId,
-    },
-    SkillRemove {
-        removed: bool,
-        name: LifecyclePackageId,
-    },
-}
-
-/// Directional shape of an extension's channel surface, derived from the
-/// manifest's product-adapter capability flags: `inbound` when the surface
-/// receives external messages (`inbound_messages`), `outbound` when the host
-/// can push final replies/notifications to it (`external_final_reply_push`).
-/// The agent-facing rule this pins: final answers are delivered by the host
-/// on outbound channel surfaces; model tools never deliver them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LifecycleChannelDirections {
-    pub inbound: bool,
-    pub outbound: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LifecycleExtensionSummary {
-    pub package_ref: LifecyclePackageRef,
-    pub name: String,
-    pub version: String,
-    pub description: String,
-    pub source: LifecycleExtensionSource,
-    pub runtime_kind: LifecycleExtensionRuntimeKind,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub surface_kinds: Vec<CapabilitySurfaceKind>,
-    /// Present iff `surface_kinds` contains [`CapabilitySurfaceKind::Channel`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub channel_directions: Option<LifecycleChannelDirections>,
-    /// Connect affordance for the channel surface (strategy + copy), present
-    /// when the surface requires a caller-scoped account binding.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub channel_connection: Option<ChannelConnectionRequirement>,
-    /// The channel surface's declared `[channel.presentation]` facts (markdown
-    /// support, message length cap), present iff `surface_kinds` contains
-    /// `Channel`. Fed into prompt construction so the model formats replies to
-    /// fit the channel it is answering on (OUT-11).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub channel_presentation: Option<ChannelPresentation>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub visible_capability_ids: Vec<String>,
-    pub visible_read_only_capability_ids: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub credential_requirements: Vec<LifecycleExtensionCredentialRequirement>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub onboarding: Option<LifecycleExtensionOnboarding>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LifecycleSearchExtensionSummary {
-    #[serde(flatten)]
-    pub summary: LifecycleExtensionSummary,
-    /// The installed state of this catalog result for the caller, or `None`
-    /// when the caller has no visible installation of it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub installation_phase: Option<InstallationState>,
-}
-
-/// Whether an installed extension is tenant-shared or private to the caller
-/// (#5459 P1). Serialized on the wire; `#[serde(default)]`-friendly via
-/// `Option` on the summary so pre-#5459 payloads keep deserializing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LifecycleInstallScope {
-    /// Installed for the whole tenant (admin install) — visible to every user.
-    Shared,
-    /// Installed privately by the caller — visible only to them.
-    Private,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LifecycleInstalledExtensionSummary {
-    pub summary: LifecycleExtensionSummary,
-    /// The projected installation state (§6.1) for the caller's installation.
-    pub phase: InstallationState,
-    /// `None` only when the caller has no visible installation (projection of
-    /// an uninstalled package); list responses always carry `Some`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub install_scope: Option<LifecycleInstallScope>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LifecycleExtensionCredentialRequirement {
-    pub name: String,
-    pub provider: String,
-    pub required: bool,
-    pub setup: LifecycleExtensionCredentialSetup,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LifecycleExtensionOnboarding {
-    pub instructions: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credential_instructions: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub setup_url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credential_next_step: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum LifecycleExtensionCredentialSetup {
-    ManualToken,
-    #[serde(rename = "oauth")]
-    OAuth {
-        scopes: Vec<String>,
-    },
-    /// Channel pairing (host-issued code consumed on the external side).
-    Pairing,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LifecycleExtensionSource {
-    HostBundled,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LifecycleExtensionRuntimeKind {
-    WasmTool,
-    McpServer,
-    FirstParty,
-    System,
-    Script,
-}
-
-impl LifecycleExtensionRuntimeKind {
-    /// Honest runtime name for the wire: implementation detail, clearly
-    /// labeled — never product taxonomy (surfaces carry that).
-    pub fn runtime_wire_name(self) -> &'static str {
-        match self {
-            Self::McpServer => "mcp",
-            Self::FirstParty => "first_party",
-            Self::System => "system",
-            Self::WasmTool => "wasm",
-            Self::Script => "script",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LifecycleSkillSummary {
-    pub name: LifecyclePackageId,
-    pub version: String,
-    pub description: String,
-    pub source: LifecycleSkillSource,
-    pub keywords: Vec<String>,
-    pub tags: Vec<String>,
-    pub requires_skills: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LifecycleSkillSource {
-    System,
-    User,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LifecycleProductResponse {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub package_ref: Option<LifecyclePackageRef>,
-    /// The package's resting installation state for a single-package action
-    /// (install → `Installed`, activate → `Active`, remove → `Removed`,
-    /// failure → `Failed` / `Unsupported`). For multi-item responses (search /
-    /// list) this is a neutral `Installed`; the per-item states ride the
-    /// payload.
-    pub phase: InstallationState,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub blockers: Vec<LifecycleReadinessBlocker>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub payload: Option<LifecycleProductPayload>,
-}
-
-impl LifecycleProductResponse {
-    pub fn projection(
-        package_ref: Option<LifecyclePackageRef>,
-        phase: InstallationState,
-        blockers: Vec<LifecycleReadinessBlocker>,
-    ) -> Self {
-        Self {
-            package_ref,
-            phase,
-            blockers,
-            message: None,
-            payload: None,
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LifecycleProductSurfaceContext {
@@ -548,13 +50,13 @@ pub trait LifecycleProductFacade: Send + Sync {
         &self,
         context: LifecycleProductContext,
         action: LifecycleProductAction,
-    ) -> Result<LifecycleProductResponse, ProductWorkflowError>;
+    ) -> Result<LifecycleProductResponse, ProductSurfaceError>;
 
     async fn project_package(
         &self,
         context: LifecycleProductContext,
         package_ref: LifecyclePackageRef,
-    ) -> Result<LifecycleProductResponse, ProductWorkflowError>;
+    ) -> Result<LifecycleProductResponse, ProductSurfaceError>;
 
     /// Import a standalone extension from an uploaded bundle (zip bytes) — the
     /// WebUI "Install Tool" path. Default is unavailable; only the local runtime
@@ -563,10 +65,12 @@ pub trait LifecycleProductFacade: Send + Sync {
         &self,
         _context: LifecycleProductContext,
         _bundle: Vec<u8>,
-    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        Err(ProductWorkflowError::InvalidBindingRequest {
-            reason: "extension import is not supported by this runtime".to_string(),
-        })
+    ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
+        Err(ProductSurfaceError::from_status(
+            ProductSurfaceErrorCode::InvalidRequest,
+            400,
+            false,
+        ))
     }
 
     /// Redacted activation error for each installed extension whose activation
@@ -583,7 +87,7 @@ pub trait LifecycleProductFacade: Send + Sync {
     async fn installed_activation_errors(
         &self,
         _context: LifecycleProductContext,
-    ) -> Result<std::collections::HashMap<String, String>, ProductWorkflowError> {
+    ) -> Result<std::collections::HashMap<String, String>, ProductSurfaceError> {
         Ok(std::collections::HashMap::new())
     }
 }
@@ -594,7 +98,7 @@ pub struct UnsupportedLifecycleProductFacade {
 }
 
 impl UnsupportedLifecycleProductFacade {
-    pub fn new(runtime_ref: impl Into<String>) -> Result<Self, ProductWorkflowError> {
+    pub fn new(runtime_ref: impl Into<String>) -> Result<Self, ProductSurfaceError> {
         Ok(Self {
             runtime_ref: validate_lifecycle_string(
                 runtime_ref.into(),
@@ -621,13 +125,14 @@ impl UnsupportedLifecycleProductFacade {
     fn unsupported_projection(
         &self,
         package_ref: Option<LifecyclePackageRef>,
-    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+    ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
         Ok(LifecycleProductResponse::projection(
             package_ref,
             InstallationState::Unsupported,
-            vec![LifecycleReadinessBlocker::runtime(Some(
-                self.runtime_ref.clone(),
-            ))?],
+            vec![
+                LifecycleReadinessBlocker::runtime(Some(self.runtime_ref.clone()))
+                    .map_err(ProductSurfaceError::internal_from)?,
+            ],
         ))
     }
 }
@@ -638,7 +143,7 @@ impl LifecycleProductFacade for UnsupportedLifecycleProductFacade {
         &self,
         _context: LifecycleProductContext,
         action: LifecycleProductAction,
-    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+    ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
         self.unsupported_projection(action.package_ref().cloned())
     }
 
@@ -646,64 +151,32 @@ impl LifecycleProductFacade for UnsupportedLifecycleProductFacade {
         &self,
         _context: LifecycleProductContext,
         package_ref: LifecyclePackageRef,
-    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+    ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
         self.unsupported_projection(Some(package_ref))
     }
 }
 
 /// Validates a lifecycle string: non-empty, within byte limit, with optional
 /// control-character filtering.
-pub(crate) fn validate_lifecycle_string(
+fn validate_lifecycle_string(
     value: String,
     label: &'static str,
     max_bytes: usize,
-) -> Result<String, ProductWorkflowError> {
+) -> Result<String, ProductSurfaceError> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
-        return Err(ProductWorkflowError::InvalidBindingRequest {
-            reason: format!("{label} must not be empty"),
-        });
+        return Err(lifecycle_invalid_request(label));
     }
     if value.len() > max_bytes {
-        return Err(ProductWorkflowError::InvalidBindingRequest {
-            reason: format!("{label} must be at most {max_bytes} bytes"),
-        });
+        return Err(lifecycle_invalid_request(label));
     }
     if trimmed.chars().any(|c| c == '\0' || c.is_control()) {
-        return Err(ProductWorkflowError::InvalidBindingRequest {
-            reason: format!("{label} must not contain NUL/control characters"),
-        });
+        return Err(lifecycle_invalid_request(label));
     }
     Ok(trimmed.to_string())
 }
 
-/// Validates free-form lifecycle text that may contain control characters
-/// (e.g. newlines in skill markdown) but still blocks NUL.
-pub(crate) fn validate_lifecycle_text(
-    value: String,
-    label: &'static str,
-    max_bytes: usize,
-) -> Result<String, ProductWorkflowError> {
-    if value.trim().is_empty() {
-        return Err(ProductWorkflowError::InvalidBindingRequest {
-            reason: format!("{label} must not be empty"),
-        });
-    }
-    if value.len() > max_bytes {
-        return Err(ProductWorkflowError::InvalidBindingRequest {
-            reason: format!("{label} must be at most {max_bytes} bytes"),
-        });
-    }
-    if value.chars().any(|c| c == '\0') {
-        return Err(ProductWorkflowError::InvalidBindingRequest {
-            reason: format!("{label} must not contain NUL characters"),
-        });
-    }
-    Ok(value)
-}
-
-fn validate_optional_ref(
-    value: Option<String>,
-) -> Result<Option<LifecycleBlockerRef>, ProductWorkflowError> {
-    value.map(LifecycleBlockerRef::new).transpose()
+fn lifecycle_invalid_request(label: &'static str) -> ProductSurfaceError {
+    tracing::debug!(field = label, "invalid lifecycle value");
+    ProductSurfaceError::from_status(ProductSurfaceErrorCode::InvalidRequest, 400, false)
 }

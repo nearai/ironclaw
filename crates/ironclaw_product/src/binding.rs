@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use serde::{Deserialize, Serialize};
 
-use crate::error::ProductWorkflowError;
+use crate::error::ProductSurfaceFailure;
 
 /// Resolved canonical binding for a product inbound action.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -174,13 +174,13 @@ pub trait ConversationBindingService: Send + Sync {
     async fn resolve_binding(
         &self,
         request: ResolveBindingRequest,
-    ) -> Result<ResolvedBinding, ProductWorkflowError>;
+    ) -> Result<ResolvedBinding, ProductSurfaceFailure>;
 
     /// Look up an existing binding without creating conversation/thread state.
     async fn lookup_binding(
         &self,
         request: ResolveBindingRequest,
-    ) -> Result<ResolvedBinding, ProductWorkflowError>;
+    ) -> Result<ResolvedBinding, ProductSurfaceFailure>;
 }
 
 #[async_trait]
@@ -191,14 +191,14 @@ where
     async fn resolve_binding(
         &self,
         request: ResolveBindingRequest,
-    ) -> Result<ResolvedBinding, ProductWorkflowError> {
+    ) -> Result<ResolvedBinding, ProductSurfaceFailure> {
         self.as_ref().resolve_binding(request).await
     }
 
     async fn lookup_binding(
         &self,
         request: ResolveBindingRequest,
-    ) -> Result<ResolvedBinding, ProductWorkflowError> {
+    ) -> Result<ResolvedBinding, ProductSurfaceFailure> {
         self.as_ref().lookup_binding(request).await
     }
 }

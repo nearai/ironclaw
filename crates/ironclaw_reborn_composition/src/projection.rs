@@ -29,7 +29,7 @@ use ironclaw_product::{
     AdapterInstallationId, CapabilityActivityStatusView, CapabilityActivityView,
     CapabilityActivityViewInput, ExternalActorRef, ExternalConversationRef, ProductAdapterError,
     ProductAdapterId, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
-    ProductProjectionItem, ProductProjectionState, ProductWorkflowRejectionKind,
+    ProductProjectionItem, ProductProjectionState, ProductSurfaceRejectionKind,
     ProjectionCursor as ProductProjectionCursor, ProjectionStream, ProjectionStreamSubscription,
     ProjectionSubscriptionRequest, RedactedString,
 };
@@ -1233,8 +1233,8 @@ async fn item_to_payloads(
             )
             .await
         }
-        ProjectionStreamItem::Lagged { .. } => Err(ProductAdapterError::WorkflowRejected {
-            kind: ProductWorkflowRejectionKind::Unavailable,
+        ProjectionStreamItem::Lagged { .. } => Err(ProductAdapterError::SurfaceRejected {
+            kind: ProductSurfaceRejectionKind::Unavailable,
             status_code: 503,
             retryable: true,
             reason: RedactedString::new("projection stream lagged; reconnect from origin"),
@@ -1759,19 +1759,19 @@ fn map_event_stream_error(error: EventProjectionStreamError) -> ProductAdapterEr
                 reason: reason.to_string(),
             }
         }
-        EventProjectionStreamError::AccessDenied => ProductAdapterError::WorkflowRejected {
-            kind: ProductWorkflowRejectionKind::Unauthorized,
+        EventProjectionStreamError::AccessDenied => ProductAdapterError::SurfaceRejected {
+            kind: ProductSurfaceRejectionKind::Unauthorized,
             status_code: 403,
             retryable: false,
             reason: RedactedString::new("projection stream access denied"),
         },
-        EventProjectionStreamError::AdmissionDenied => ProductAdapterError::WorkflowRejected {
-            kind: ProductWorkflowRejectionKind::Unavailable,
+        EventProjectionStreamError::AdmissionDenied => ProductAdapterError::SurfaceRejected {
+            kind: ProductSurfaceRejectionKind::Unavailable,
             status_code: 429,
             retryable: true,
             reason: RedactedString::new("projection stream admission denied"),
         },
-        EventProjectionStreamError::Source => ProductAdapterError::WorkflowTransient {
+        EventProjectionStreamError::Source => ProductAdapterError::SurfaceTransient {
             reason: RedactedString::new("projection stream source failed"),
         },
         EventProjectionStreamError::Redaction | EventProjectionStreamError::Outbound => {

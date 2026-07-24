@@ -13,10 +13,10 @@ use ironclaw_product::{
 };
 
 use super::*;
-use crate::extension_host::channel_dm_targets::FilesystemChannelDmTargetStore;
 use crate::extension_host::extension_ingress::{
     ChannelPairingInterception, ChannelPairingInterceptor,
 };
+use ironclaw_extension_host::FilesystemChannelDmTargetStore;
 
 const EXT: &str = "vendorx";
 const INSTALL: &str = "install-1";

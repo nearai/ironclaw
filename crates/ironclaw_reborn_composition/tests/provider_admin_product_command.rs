@@ -1,16 +1,17 @@
 use std::sync::Arc;
 
 use chrono::Utc;
+use ironclaw_host_api::ProductSurfaceError;
 use ironclaw_product::{
     AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
     ExternalEventId, InboundCommandPayload, ProductAdapterError, ProductAdapterId,
-    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason,
-    ProductWorkflowRejectionKind, ProtocolAuthEvidence, TrustedInboundContext,
+    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductSurfaceRejectionKind,
+    ProductTriggerReason, ProtocolAuthEvidence, TrustedInboundContext,
 };
 use ironclaw_product::{
     DefaultProductSurface, FakeConversationBindingService, FakeIdempotencyLedger,
     FakeInboundTurnService, ProductCommandAdmission, ProductCommandAdmissionService,
-    ProductCommandContext, ProductWorkflowError,
+    ProductCommandContext,
 };
 use ironclaw_reborn_composition::{RebornProviderAdmin, RebornProviderAdminProductCommandService};
 use ironclaw_reborn_config::{RebornBootConfig, RebornHome, RebornProfile};
@@ -57,7 +58,7 @@ impl ProductCommandAdmissionService for AllowingCommandAdmissionService {
         &self,
         _context: &ProductCommandContext,
         _command: &ironclaw_product::ProductCommand,
-    ) -> Result<ProductCommandAdmission, ProductWorkflowError> {
+    ) -> Result<ProductCommandAdmission, ProductSurfaceError> {
         Ok(ProductCommandAdmission::Allowed)
     }
 }
@@ -170,8 +171,8 @@ async fn model_provider_command_rejects_unknown_provider_as_invalid_binding() {
 
     assert!(matches!(
         err,
-        ProductAdapterError::WorkflowRejected {
-            kind: ProductWorkflowRejectionKind::InvalidRequest,
+        ProductAdapterError::SurfaceRejected {
+            kind: ProductSurfaceRejectionKind::InvalidRequest,
             status_code: 400,
             retryable: false,
             ..

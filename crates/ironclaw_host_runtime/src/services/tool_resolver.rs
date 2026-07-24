@@ -13,7 +13,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use async_trait::async_trait;
-use ironclaw_dispatcher::{
+use ironclaw_capabilities::{
     BoundCapabilityAdapter, CapabilityDispatchRequest, ResolvedCapability, RuntimeAdapterResult,
     ToolResolver,
 };

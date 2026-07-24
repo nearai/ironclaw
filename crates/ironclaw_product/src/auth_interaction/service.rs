@@ -16,7 +16,7 @@ use super::{
     ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, auth_rejected,
 };
-use crate::error::ProductWorkflowError;
+use crate::error::ProductSurfaceFailure;
 use crate::gate_state::{BlockedGateState, BlockedGateStateError, blocked_gate_state};
 
 #[async_trait]
@@ -24,14 +24,14 @@ pub trait AuthInteractionReadModel: Send + Sync {
     async fn auth_gates(
         &self,
         scope: &AuthInteractionScope,
-    ) -> Result<Vec<AuthGateRecord>, ProductWorkflowError>;
+    ) -> Result<Vec<AuthGateRecord>, ProductSurfaceFailure>;
 
     async fn auth_gate(
         &self,
         scope: &AuthInteractionScope,
         run_id_hint: Option<TurnRunId>,
         gate_ref: &GateRef,
-    ) -> Result<Option<AuthGateRecord>, ProductWorkflowError>;
+    ) -> Result<Option<AuthGateRecord>, ProductSurfaceFailure>;
 }
 
 /// Auth-required service consumed by product/WebUI surfaces.
@@ -40,12 +40,12 @@ pub trait AuthInteractionService: Send + Sync {
     async fn list_pending(
         &self,
         request: ListPendingAuthInteractionsRequest,
-    ) -> Result<ListPendingAuthInteractionsResponse, ProductWorkflowError>;
+    ) -> Result<ListPendingAuthInteractionsResponse, ProductSurfaceFailure>;
 
     async fn resolve(
         &self,
         request: ResolveAuthInteractionRequest,
-    ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError>;
+    ) -> Result<ResolveAuthInteractionResponse, ProductSurfaceFailure>;
 }
 
 pub(crate) struct RejectingAuthInteractionService;
@@ -55,14 +55,14 @@ impl AuthInteractionService for RejectingAuthInteractionService {
     async fn list_pending(
         &self,
         _request: ListPendingAuthInteractionsRequest,
-    ) -> Result<ListPendingAuthInteractionsResponse, ProductWorkflowError> {
+    ) -> Result<ListPendingAuthInteractionsResponse, ProductSurfaceFailure> {
         Err(auth_rejected(AuthInteractionRejectionKind::FlowUnavailable))
     }
 
     async fn resolve(
         &self,
         _request: ResolveAuthInteractionRequest,
-    ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
+    ) -> Result<ResolveAuthInteractionResponse, ProductSurfaceFailure> {
         Err(auth_rejected(AuthInteractionRejectionKind::FlowUnavailable))
     }
 }
@@ -91,7 +91,7 @@ impl DefaultAuthInteractionService {
         scope: &AuthInteractionScope,
         run_id_hint: Option<TurnRunId>,
         gate_ref: &GateRef,
-    ) -> Result<AuthGateRecord, ProductWorkflowError> {
+    ) -> Result<AuthGateRecord, ProductSurfaceFailure> {
         let gate = self
             .read_model
             .auth_gate(scope, run_id_hint, gate_ref)
@@ -108,7 +108,7 @@ impl DefaultAuthInteractionService {
     async fn refresh_gate(
         &self,
         gate: &AuthGateRecord,
-    ) -> Result<AuthGateRecord, ProductWorkflowError> {
+    ) -> Result<AuthGateRecord, ProductSurfaceFailure> {
         let Some(flow) = self
             .flow_manager
             .get_flow(&gate.flow().scope, gate.flow().id)
@@ -124,7 +124,7 @@ impl DefaultAuthInteractionService {
         &self,
         request: &ResolveAuthInteractionRequest,
         run_id: TurnRunId,
-    ) -> Result<BlockedGateState, ProductWorkflowError> {
+    ) -> Result<BlockedGateState, ProductSurfaceFailure> {
         blocked_gate_state(
             self.turn_coordinator.as_ref(),
             &request.scope,
@@ -142,7 +142,7 @@ impl DefaultAuthInteractionService {
         request: ResolveAuthInteractionRequest,
         gate: AuthGateRecord,
         run_id: TurnRunId,
-    ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
+    ) -> Result<ResolveAuthInteractionResponse, ProductSurfaceFailure> {
         let completion = match &request.decision {
             AuthInteractionDecision::CredentialProvided { credential_ref } => {
                 AuthCompletionRef::CredentialProvided(credential_ref)
@@ -165,7 +165,7 @@ impl DefaultAuthInteractionService {
         request: ResolveAuthInteractionRequest,
         run_id: TurnRunId,
         resume_disposition: Option<GateResumeDisposition>,
-    ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
+    ) -> Result<ResolveAuthInteractionResponse, ProductSurfaceFailure> {
         let state = self
             .turn_coordinator
             .get_run_state(GetRunStateRequest {
@@ -196,7 +196,7 @@ impl DefaultAuthInteractionService {
         &self,
         gate: AuthGateRecord,
         credential_ref: CredentialAccountId,
-    ) -> Result<AuthGateRecord, ProductWorkflowError> {
+    ) -> Result<AuthGateRecord, ProductSurfaceFailure> {
         if gate.status() == AuthFlowStatus::Completed {
             return Ok(gate);
         }
@@ -224,7 +224,7 @@ impl DefaultAuthInteractionService {
     async fn cancel_auth_flow_if_active(
         &self,
         gate: &AuthGateRecord,
-    ) -> Result<(), ProductWorkflowError> {
+    ) -> Result<(), ProductSurfaceFailure> {
         match gate.status() {
             AuthFlowStatus::Pending
             | AuthFlowStatus::AwaitingUser
@@ -262,7 +262,7 @@ impl DefaultAuthInteractionService {
         request: ResolveAuthInteractionRequest,
         gate: AuthGateRecord,
         run_id: TurnRunId,
-    ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
+    ) -> Result<ResolveAuthInteractionResponse, ProductSurfaceFailure> {
         self.cancel_auth_flow_if_active(&gate).await?;
         self.resume_auth_gate(request, run_id, Some(GateResumeDisposition::Denied))
             .await
@@ -272,7 +272,7 @@ impl DefaultAuthInteractionService {
         &self,
         request: ResolveAuthInteractionRequest,
         run_id: TurnRunId,
-    ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
+    ) -> Result<ResolveAuthInteractionResponse, ProductSurfaceFailure> {
         // Route through resume_turn with the SAME idempotency key as the first
         // Deny.  TurnCoordinator::resume_turn returns the cached
         // ResumeTurnResponse for a repeated key before running the precondition
@@ -287,7 +287,7 @@ impl DefaultAuthInteractionService {
         &self,
         request: ResolveAuthInteractionRequest,
         run_id: TurnRunId,
-    ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
+    ) -> Result<ResolveAuthInteractionResponse, ProductSurfaceFailure> {
         match self.turn_gate_state(&request, run_id).await? {
             BlockedGateState::ParkedOnGate => {}
             BlockedGateState::NotParkedOnGate => {
@@ -304,7 +304,7 @@ impl AuthInteractionService for DefaultAuthInteractionService {
     async fn list_pending(
         &self,
         request: ListPendingAuthInteractionsRequest,
-    ) -> Result<ListPendingAuthInteractionsResponse, ProductWorkflowError> {
+    ) -> Result<ListPendingAuthInteractionsResponse, ProductSurfaceFailure> {
         let scope = AuthInteractionScope::from_turn(&request.scope, &request.actor);
         let gates = self.read_model.auth_gates(&scope).await?;
         // Capture `now` after the read: a slow read with a pre-read timestamp
@@ -333,14 +333,14 @@ impl AuthInteractionService for DefaultAuthInteractionService {
     async fn resolve(
         &self,
         request: ResolveAuthInteractionRequest,
-    ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
+    ) -> Result<ResolveAuthInteractionResponse, ProductSurfaceFailure> {
         let scope = AuthInteractionScope::from_turn(&request.scope, &request.actor);
         let gate = match self
             .find_gate(&scope, request.run_id_hint, &request.gate_ref)
             .await
         {
             Ok(gate) => gate,
-            Err(ProductWorkflowError::AuthInteractionRejected {
+            Err(ProductSurfaceFailure::AuthInteractionRejected {
                 kind: AuthInteractionRejectionKind::MissingAuth,
             }) if matches!(request.decision, AuthInteractionDecision::Deny) => {
                 let Some(run_id) = request.run_id_hint else {
@@ -392,7 +392,7 @@ impl AuthInteractionService for DefaultAuthInteractionService {
     }
 }
 
-fn map_blocked_gate_state_error(error: BlockedGateStateError) -> ProductWorkflowError {
+fn map_blocked_gate_state_error(error: BlockedGateStateError) -> ProductSurfaceFailure {
     match error {
         BlockedGateStateError::Turn(error) => map_gate_state_error(error),
         BlockedGateStateError::ActorMismatch => {
@@ -409,7 +409,7 @@ enum AuthCompletionRef<'a> {
 fn validate_completion_ref(
     gate: &AuthGateRecord,
     completion: AuthCompletionRef<'_>,
-) -> Result<(), ProductWorkflowError> {
+) -> Result<(), ProductSurfaceFailure> {
     if gate.status() != AuthFlowStatus::Completed {
         return Err(auth_rejected(AuthInteractionRejectionKind::StaleAuth));
     }
@@ -436,7 +436,7 @@ fn validate_completion_ref(
     }
 }
 
-fn map_auth_product_error(error: AuthProductError) -> ProductWorkflowError {
+fn map_auth_product_error(error: AuthProductError) -> ProductSurfaceFailure {
     match error {
         AuthProductError::UnknownOrExpiredFlow => {
             auth_rejected(AuthInteractionRejectionKind::MissingAuth)
@@ -465,7 +465,7 @@ fn map_auth_product_error(error: AuthProductError) -> ProductWorkflowError {
     }
 }
 
-fn map_credential_selection_error(error: AuthProductError) -> ProductWorkflowError {
+fn map_credential_selection_error(error: AuthProductError) -> ProductSurfaceFailure {
     match error {
         AuthProductError::UnknownOrExpiredFlow => {
             auth_rejected(AuthInteractionRejectionKind::MissingAuth)
@@ -496,7 +496,7 @@ fn map_credential_selection_error(error: AuthProductError) -> ProductWorkflowErr
     }
 }
 
-fn map_gate_state_error(error: TurnError) -> ProductWorkflowError {
+fn map_gate_state_error(error: TurnError) -> ProductSurfaceFailure {
     match error.category() {
         TurnErrorCategory::ScopeNotFound => {
             auth_rejected(AuthInteractionRejectionKind::MissingAuth)
@@ -507,11 +507,11 @@ fn map_gate_state_error(error: TurnError) -> ProductWorkflowError {
         TurnErrorCategory::Unavailable => {
             auth_rejected(AuthInteractionRejectionKind::FlowUnavailable)
         }
-        _ => ProductWorkflowError::TurnResumeDenied { error },
+        _ => ProductSurfaceFailure::TurnResumeDenied { error },
     }
 }
 
-fn map_auth_resume_error(error: TurnError) -> ProductWorkflowError {
+fn map_auth_resume_error(error: TurnError) -> ProductSurfaceFailure {
     match error.category() {
         TurnErrorCategory::ScopeNotFound => {
             auth_rejected(AuthInteractionRejectionKind::MissingAuth)
@@ -525,6 +525,6 @@ fn map_auth_resume_error(error: TurnError) -> ProductWorkflowError {
         TurnErrorCategory::Unavailable => {
             auth_rejected(AuthInteractionRejectionKind::FlowUnavailable)
         }
-        _ => ProductWorkflowError::TurnResumeDenied { error },
+        _ => ProductSurfaceFailure::TurnResumeDenied { error },
     }
 }

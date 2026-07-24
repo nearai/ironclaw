@@ -6,7 +6,7 @@ use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_host_api::{EffectKind, MountView, Principal};
 use ironclaw_product::{
     ApprovalGateRecord, ApprovalInteractionRejectionKind, ApprovalLeaseTermsProvider,
-    ProductWorkflowError,
+    ProductSurfaceFailure,
 };
 
 use crate::builtin_capability_policy::{
@@ -52,7 +52,7 @@ impl PolicyApprovalLeaseTermsProvider {
         &self,
         gate: &ApprovalGateRecord,
         action: BuiltinApprovalPolicyAction<'_>,
-    ) -> Result<LeaseApproval, ProductWorkflowError> {
+    ) -> Result<LeaseApproval, ProductSurfaceFailure> {
         self.extension_lease_terms_for_active_capability(gate, action)
             .await?
             .ok_or_else(lease_terms_unavailable)
@@ -62,7 +62,7 @@ impl PolicyApprovalLeaseTermsProvider {
         &self,
         gate: &ApprovalGateRecord,
         action: BuiltinApprovalPolicyAction<'_>,
-    ) -> Result<Option<LeaseApproval>, ProductWorkflowError> {
+    ) -> Result<Option<LeaseApproval>, ProductSurfaceFailure> {
         let capability = action.capability();
         let Principal::Extension(extension_id) = &gate.request().requested_by else {
             return Ok(None);
@@ -104,7 +104,7 @@ impl PolicyApprovalLeaseTermsProvider {
     async fn active_extension_persistent_approval_allowed(
         &self,
         action: BuiltinApprovalPolicyAction<'_>,
-    ) -> Result<bool, ProductWorkflowError> {
+    ) -> Result<bool, ProductSurfaceFailure> {
         let surface = self
             .extension_surface_source
             .snapshot()
@@ -134,9 +134,9 @@ impl ApprovalLeaseTermsProvider for PolicyApprovalLeaseTermsProvider {
     async fn lease_terms_for(
         &self,
         gate: &ApprovalGateRecord,
-    ) -> Result<ironclaw_approvals::LeaseApproval, ProductWorkflowError> {
+    ) -> Result<ironclaw_approvals::LeaseApproval, ProductSurfaceFailure> {
         let action = BuiltinApprovalPolicyAction::from_host_action(gate.request().action.as_ref())
-            .ok_or(ProductWorkflowError::ApprovalInteractionRejected {
+            .ok_or(ProductSurfaceFailure::ApprovalInteractionRejected {
                 kind: ApprovalInteractionRejectionKind::UnsupportedAction,
             })?;
         if action.is_spawn_capability()
@@ -167,16 +167,16 @@ impl ApprovalLeaseTermsProvider for PolicyApprovalLeaseTermsProvider {
     async fn persistent_approval_allowed(
         &self,
         gate: &ApprovalGateRecord,
-    ) -> Result<(), ProductWorkflowError> {
+    ) -> Result<(), ProductSurfaceFailure> {
         let action = BuiltinApprovalPolicyAction::from_host_action(gate.request().action.as_ref())
-            .ok_or(ProductWorkflowError::ApprovalInteractionRejected {
+            .ok_or(ProductSurfaceFailure::ApprovalInteractionRejected {
                 kind: ApprovalInteractionRejectionKind::UnsupportedAction,
             })?;
         if let Some(descriptor) = self.registry.get_capability(action.capability_id()) {
             if permission_mode_allows_persistent_approval(descriptor.default_permission) {
                 return Ok(());
             }
-            return Err(ProductWorkflowError::ApprovalInteractionRejected {
+            return Err(ProductSurfaceFailure::ApprovalInteractionRejected {
                 kind: ApprovalInteractionRejectionKind::AlwaysAllowUnsupported,
             });
         }
@@ -205,15 +205,15 @@ impl ApprovalLeaseTermsProvider for PolicyApprovalLeaseTermsProvider {
         {
             Ok(())
         } else {
-            Err(ProductWorkflowError::ApprovalInteractionRejected {
+            Err(ProductSurfaceFailure::ApprovalInteractionRejected {
                 kind: ApprovalInteractionRejectionKind::AlwaysAllowUnsupported,
             })
         }
     }
 }
 
-fn lease_terms_unavailable() -> ProductWorkflowError {
-    ProductWorkflowError::ApprovalInteractionRejected {
+fn lease_terms_unavailable() -> ProductSurfaceFailure {
+    ProductSurfaceFailure::ApprovalInteractionRejected {
         kind: ApprovalInteractionRejectionKind::LeaseTermsUnavailable,
     }
 }
@@ -518,7 +518,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            ProductWorkflowError::ApprovalInteractionRejected {
+            ProductSurfaceFailure::ApprovalInteractionRejected {
                 kind: ApprovalInteractionRejectionKind::AlwaysAllowUnsupported
             }
         ));

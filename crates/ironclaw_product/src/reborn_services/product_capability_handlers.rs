@@ -480,7 +480,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_covers_product_workflow_capability_operations() {
+    fn registry_covers_product_surface_capability_operations() {
         for id in [
             OPERATOR_SETUP_RUN_CAPABILITY_ID,
             LLM_PROVIDER_UPSERT_CAPABILITY_ID,

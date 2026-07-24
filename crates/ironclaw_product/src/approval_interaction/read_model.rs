@@ -7,7 +7,7 @@ use ironclaw_turns::{GateRef, TurnRunId};
 
 use super::gate_ref::{approval_gate_ref, approval_request_id_from_gate_ref};
 use super::{ApprovalGateRecord, ApprovalInteractionScope};
-use crate::error::ProductWorkflowError;
+use crate::error::ProductSurfaceFailure;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalBlockedTurnRun {
@@ -20,13 +20,13 @@ pub trait ApprovalTurnRunLocator: Send + Sync {
     async fn blocked_approval_runs(
         &self,
         scope: &ApprovalInteractionScope,
-    ) -> Result<Vec<ApprovalBlockedTurnRun>, ProductWorkflowError>;
+    ) -> Result<Vec<ApprovalBlockedTurnRun>, ProductSurfaceFailure>;
 
     async fn blocked_approval_run(
         &self,
         scope: &ApprovalInteractionScope,
         gate_ref: &GateRef,
-    ) -> Result<Option<TurnRunId>, ProductWorkflowError> {
+    ) -> Result<Option<TurnRunId>, ProductSurfaceFailure> {
         Ok(self
             .blocked_approval_runs(scope)
             .await?
@@ -39,7 +39,7 @@ pub trait ApprovalTurnRunLocator: Send + Sync {
         &self,
         scope: &ApprovalInteractionScope,
         gate_ref: &GateRef,
-    ) -> Result<Option<TurnRunId>, ProductWorkflowError> {
+    ) -> Result<Option<TurnRunId>, ProductSurfaceFailure> {
         self.blocked_approval_run(scope, gate_ref).await
     }
 }
@@ -49,14 +49,14 @@ pub trait ApprovalInteractionReadModel: Send + Sync {
     async fn approval_gates(
         &self,
         scope: &ApprovalInteractionScope,
-    ) -> Result<Vec<ApprovalGateRecord>, ProductWorkflowError>;
+    ) -> Result<Vec<ApprovalGateRecord>, ProductSurfaceFailure>;
 
     async fn approval_gate(
         &self,
         scope: &ApprovalInteractionScope,
         run_id_hint: Option<TurnRunId>,
         gate_ref: &GateRef,
-    ) -> Result<Option<ApprovalGateRecord>, ProductWorkflowError>;
+    ) -> Result<Option<ApprovalGateRecord>, ProductSurfaceFailure>;
 }
 
 /// Read-model backed by canonical approval records and parked turn state.
@@ -82,7 +82,7 @@ impl ApprovalInteractionReadModel for RunStateApprovalInteractionReadModel {
     async fn approval_gates(
         &self,
         scope: &ApprovalInteractionScope,
-    ) -> Result<Vec<ApprovalGateRecord>, ProductWorkflowError> {
+    ) -> Result<Vec<ApprovalGateRecord>, ProductSurfaceFailure> {
         let owner_scope = resource_scope_for_interaction(scope);
         let mut gates = Vec::new();
         for run in self.turn_runs.blocked_approval_runs(scope).await? {
@@ -114,7 +114,7 @@ impl ApprovalInteractionReadModel for RunStateApprovalInteractionReadModel {
         scope: &ApprovalInteractionScope,
         run_id_hint: Option<TurnRunId>,
         gate_ref: &GateRef,
-    ) -> Result<Option<ApprovalGateRecord>, ProductWorkflowError> {
+    ) -> Result<Option<ApprovalGateRecord>, ProductSurfaceFailure> {
         let request_id = approval_request_id_from_gate_ref(gate_ref)?;
         let owner_scope = resource_scope_for_interaction(scope);
         let Some(approval) = self
@@ -164,8 +164,8 @@ fn same_interaction_owner(left: &ResourceScope, right: &ResourceScope) -> bool {
         && left.thread_id == right.thread_id
 }
 
-fn map_approval_read_error(_error: RunStateError) -> ProductWorkflowError {
-    ProductWorkflowError::Transient {
+fn map_approval_read_error(_error: RunStateError) -> ProductSurfaceFailure {
+    ProductSurfaceFailure::Transient {
         reason: "approval read model unavailable".to_string(),
     }
 }

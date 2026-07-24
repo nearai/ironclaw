@@ -30,7 +30,7 @@ use ironclaw_product::{
 };
 use ironclaw_product::{
     DefaultInboundTurnService, FakeConversationBindingService, InboundTurnOutcome,
-    InboundTurnService, ProductWorkflowError,
+    InboundTurnService, ProductSurfaceFailure,
 };
 use ironclaw_reborn_composition::ProductLiveCapabilityIo;
 use ironclaw_runner::loop_exit_applier::ThreadCheckpointLoopExitEvidencePort;
@@ -1227,7 +1227,7 @@ async fn retry_validates_live_binding_before_accepted_message_replay() {
         .expect_err("first submit fails after message acceptance");
     assert!(matches!(
         first_err,
-        ProductWorkflowError::TurnSubmissionFailed { .. }
+        ProductSurfaceFailure::TurnSubmissionFailed { .. }
     ));
     assert_eq!(binding_handle.resolve_count(), 1);
 
@@ -1510,7 +1510,7 @@ async fn overflowing_turn_ref_inputs_hash_deterministically() {
 #[tokio::test]
 async fn binding_failure_surfaces_workflow_error() {
     let binding_service = FakeConversationBindingService::new();
-    binding_service.force_failure(ProductWorkflowError::BindingResolutionFailed {
+    binding_service.force_failure(ProductSurfaceFailure::BindingResolutionFailed {
         reason: "no tenant found".into(),
     });
 
@@ -1527,7 +1527,7 @@ async fn binding_failure_surfaces_workflow_error() {
 
     assert!(matches!(
         err,
-        ProductWorkflowError::BindingResolutionFailed { .. }
+        ProductSurfaceFailure::BindingResolutionFailed { .. }
     ));
 }
 

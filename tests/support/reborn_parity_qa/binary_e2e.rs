@@ -84,7 +84,7 @@ use crate::reborn_support::harness::{
     HarnessCapabilityMode, HarnessCapabilityRecorder, HarnessResult, HarnessTurnBackend,
     HarnessTurnStorageBackend, RecordedCapabilityResult, product_scope, scoped_turns_fs,
 };
-use crate::reborn_support::product_workflow::RebornProductWorkflowHarness;
+use crate::reborn_support::product_surface::RebornProductSurfaceHarness;
 use crate::reborn_support::session_thread::RebornThreadHarness;
 use crate::reborn_support::test_adapter::RebornTestIngress;
 
@@ -101,7 +101,7 @@ pub struct RebornBinaryE2EHarness {
     turn_scope: TurnScope,
     turn_store: Arc<FilesystemTurnStateRowStore<HarnessTurnBackend>>,
     coordinator: Arc<dyn TurnCoordinator>,
-    _product_harness: RebornProductWorkflowHarness,
+    _product_harness: RebornProductSurfaceHarness,
     thread_harness: RebornThreadHarness,
     model_gateway: RebornTraceReplayModelGateway,
     capability_recorder: HarnessCapabilityRecorder,
@@ -477,7 +477,7 @@ impl RebornBinaryE2EHarness {
             ProductTriggerReason::DirectChat,
         )?;
         let binding_request = binding_request_from_envelope(&envelope);
-        let product_harness = RebornProductWorkflowHarness::filesystem_temp(product_scope())?;
+        let product_harness = RebornProductSurfaceHarness::filesystem_temp(product_scope())?;
         let binding = product_harness
             .binding_service()?
             .resolve_binding(binding_request)
@@ -726,13 +726,13 @@ impl RebornBinaryE2EHarness {
     ) -> HarnessResult<Self> {
         let ingress = RebornTestIngress::new(adapter_id, installation_id)?;
         let product_harness = if let Some(storage) = shared_storage.as_ref() {
-            RebornProductWorkflowHarness::filesystem_shared_backend(
+            RebornProductSurfaceHarness::filesystem_shared_backend(
                 product_scope.clone(),
                 Arc::clone(&storage.product_backend),
                 Arc::clone(&storage.product_root),
             )?
         } else {
-            RebornProductWorkflowHarness::filesystem_temp(product_scope)?
+            RebornProductSurfaceHarness::filesystem_temp(product_scope)?
         };
         let binding = product_harness
             .binding_service()?
@@ -930,7 +930,7 @@ impl RebornBinaryE2EHarness {
         thread_scope: ThreadScope,
         turn_scope: TurnScope,
         turn_store: Arc<FilesystemTurnStateRowStore<HarnessTurnBackend>>,
-        product_harness: RebornProductWorkflowHarness,
+        product_harness: RebornProductSurfaceHarness,
         thread_harness: RebornThreadHarness,
         model_gateway: RebornTraceReplayModelGateway,
         capability_recorder: HarnessCapabilityRecorder,

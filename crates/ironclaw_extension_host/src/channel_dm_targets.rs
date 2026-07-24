@@ -10,6 +10,7 @@
 
 use std::sync::Arc;
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 use ironclaw_filesystem::{
     CasExpectation, ContentType, Entry, FilesystemError, FilesystemOperation, RootFilesystem,
@@ -21,22 +22,17 @@ use ironclaw_host_api::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::extension_host::channel_identity_store::path_segment;
-
 const CHANNEL_DM_TARGET_ALIAS: &str = "/tenant-shared/channel-dm-targets";
 
 /// Canonical DM-target payload keys: the direct conversation's external
 /// ref. One shape for folded and freshly-provisioned records — vendor
 /// knowledge stays in the adapters that produce the ref and the codecs
 /// that encode reply-target binding refs from it.
-pub(crate) const DM_TARGET_SPACE_ID_KEY: &str = "space_id";
-pub(crate) const DM_TARGET_CONVERSATION_ID_KEY: &str = "conversation_id";
+pub const DM_TARGET_SPACE_ID_KEY: &str = "space_id";
+pub const DM_TARGET_CONVERSATION_ID_KEY: &str = "conversation_id";
 
 /// Build the canonical DM-target payload for one direct conversation.
-pub(crate) fn dm_target_payload(
-    space_id: Option<&str>,
-    conversation_id: &str,
-) -> serde_json::Value {
+pub fn dm_target_payload(space_id: Option<&str>, conversation_id: &str) -> serde_json::Value {
     let mut payload = serde_json::Map::new();
     if let Some(space_id) = space_id {
         payload.insert(
@@ -53,31 +49,29 @@ pub(crate) fn dm_target_payload(
 
 /// One user's DM target for one channel extension.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ChannelDmTargetRecord {
-    pub(crate) extension_id: String,
-    pub(crate) user_id: String,
+pub struct ChannelDmTargetRecord {
+    pub extension_id: String,
+    pub user_id: String,
     /// The proven external actor id the target was provisioned for.
-    pub(crate) external_actor_id: String,
+    pub external_actor_id: String,
     /// The direct conversation's external ref in the canonical
     /// [`dm_target_payload`] shape.
-    pub(crate) target: serde_json::Value,
-    pub(crate) created_at: DateTime<Utc>,
-    pub(crate) updated_at: DateTime<Utc>,
+    pub target: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 /// Typed store failures. Never carries payload material.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum ChannelDmTargetError {
+pub enum ChannelDmTargetError {
     #[error("channel DM-target store unavailable")]
     StoreUnavailable,
 }
 
 /// The per-scope mount view: one alias onto the tenant's shared
 /// `channel-dm-targets` root.
-pub(crate) fn channel_dm_target_mount_view(
-    scope: &ResourceScope,
-) -> Result<MountView, HostApiError> {
-    let tenant = crate::resource_scope_path_segment(scope.tenant_id.as_str());
+pub fn channel_dm_target_mount_view(scope: &ResourceScope) -> Result<MountView, HostApiError> {
+    let tenant = resource_scope_path_segment(scope.tenant_id.as_str());
     MountView::new(vec![MountGrant::new(
         MountAlias::new(CHANNEL_DM_TARGET_ALIAS)?,
         VirtualPath::new(format!("/tenants/{tenant}/shared/channel-dm-targets"))?,
@@ -85,8 +79,20 @@ pub(crate) fn channel_dm_target_mount_view(
     )])
 }
 
+fn resource_scope_path_segment(value: &str) -> &str {
+    if value == ironclaw_host_api::SYSTEM_RESERVED_ID {
+        "__system__"
+    } else {
+        value
+    }
+}
+
+fn path_segment(value: &str) -> String {
+    URL_SAFE_NO_PAD.encode(value.as_bytes())
+}
+
 /// The generic filesystem-backed channel DM-target store.
-pub(crate) struct FilesystemChannelDmTargetStore {
+pub struct FilesystemChannelDmTargetStore {
     filesystem: Arc<ScopedFilesystem<dyn RootFilesystem>>,
     scope: ResourceScope,
 }
@@ -101,11 +107,7 @@ impl std::fmt::Debug for FilesystemChannelDmTargetStore {
 }
 
 impl FilesystemChannelDmTargetStore {
-    pub(crate) fn new(
-        filesystem: Arc<dyn RootFilesystem>,
-        tenant_id: TenantId,
-        user_id: UserId,
-    ) -> Self {
+    pub fn new(filesystem: Arc<dyn RootFilesystem>, tenant_id: TenantId, user_id: UserId) -> Self {
         let scoped = Arc::new(ScopedFilesystem::new(
             filesystem,
             channel_dm_target_mount_view,
@@ -136,7 +138,7 @@ impl FilesystemChannelDmTargetStore {
         })
     }
 
-    pub(crate) async fn load(
+    pub async fn load(
         &self,
         extension_id: &str,
         user_id: &UserId,
@@ -161,7 +163,7 @@ impl FilesystemChannelDmTargetStore {
 
     /// Upsert one user's DM target for an extension. `created_at` is
     /// preserved across updates.
-    pub(crate) async fn upsert(
+    pub async fn upsert(
         &self,
         extension_id: &str,
         user_id: &UserId,
@@ -199,7 +201,7 @@ impl FilesystemChannelDmTargetStore {
     /// Delete one user's DM target for an extension (idempotent) — the
     /// generic disconnect cleanup drops the caller's provisioned target so
     /// outbound targets never offer a stale direct conversation.
-    pub(crate) async fn delete(
+    pub async fn delete(
         &self,
         extension_id: &str,
         user_id: &UserId,

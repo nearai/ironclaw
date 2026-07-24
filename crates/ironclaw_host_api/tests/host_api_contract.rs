@@ -1390,7 +1390,7 @@ fn host_api_contract_types_reject_unknown_fields_on_deserialize() {
         "streaming": "none",
         "audit": "user_action",
         "effect_path": {
-            "type": "product_workflow",
+            "type": "product_surface",
         },
     });
 

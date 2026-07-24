@@ -414,7 +414,7 @@ async fn product_event_stream_surfaces_auth_challenge_lookup_failure() {
 
     assert!(matches!(
         error,
-        ProductAdapterError::WorkflowTransient { .. }
+        ProductAdapterError::SurfaceTransient { .. }
     ));
 }
 

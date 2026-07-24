@@ -18,7 +18,7 @@ use ironclaw_outbound::{
 };
 use ironclaw_product::{ExternalActorRef, ExternalConversationRef};
 use ironclaw_product::{
-    ProductOutboundTargetResolver, ProductWorkflowError, VerifiedProductOutboundTargetMetadata,
+    ProductOutboundTargetResolver, ProductSurfaceFailure, VerifiedProductOutboundTargetMetadata,
 };
 use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 
@@ -137,7 +137,7 @@ impl ProductOutboundTargetResolver for FakeProductOutboundTargetResolver {
         &self,
         _target: &ironclaw_outbound::ValidatedReplyTargetBinding,
         _require_direct_message: bool,
-    ) -> Result<VerifiedProductOutboundTargetMetadata, ProductWorkflowError> {
+    ) -> Result<VerifiedProductOutboundTargetMetadata, ProductSurfaceFailure> {
         Ok(VerifiedProductOutboundTargetMetadata {
             external_conversation_ref: ExternalConversationRef::new(
                 None,
@@ -407,9 +407,9 @@ impl ProductOutboundTargetResolver for DmRequiringTargetResolver {
         &self,
         _target: &ironclaw_outbound::ValidatedReplyTargetBinding,
         require_direct_message: bool,
-    ) -> Result<VerifiedProductOutboundTargetMetadata, ProductWorkflowError> {
+    ) -> Result<VerifiedProductOutboundTargetMetadata, ProductSurfaceFailure> {
         if require_direct_message {
-            return Err(ProductWorkflowError::OutboundTargetNotDirectMessage);
+            return Err(ProductSurfaceFailure::OutboundTargetNotDirectMessage);
         }
         Ok(VerifiedProductOutboundTargetMetadata {
             external_conversation_ref: ExternalConversationRef::new(None, "tg-chat-dm", None, None)
@@ -545,7 +545,7 @@ async fn coordinator_require_direct_message_rejects_non_dm_target_without_egress
         matches!(
             error,
             CoordinatedDeliveryError::Workflow(
-                ProductWorkflowError::OutboundTargetNotDirectMessage
+                ProductSurfaceFailure::OutboundTargetNotDirectMessage
             )
         ),
         "unexpected error: {error:?}"
@@ -553,7 +553,7 @@ async fn coordinator_require_direct_message_rejects_non_dm_target_without_egress
     // Fail-closed BEFORE any vendor egress: the channel adapter never delivered.
     assert_eq!(adapter.deliver_calls(), 0);
     // Audit records Rejected (not Unknown) — the #4953 failure-kind mapping,
-    // via `delivery_failure_kind_for_workflow_error`.
+    // via `delivery_failure_kind_for_surface_error`.
     let attempts = store.list_delivery_attempts(scope).await.unwrap();
     assert_eq!(attempts.len(), 1);
     assert_eq!(

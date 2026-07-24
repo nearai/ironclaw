@@ -9,7 +9,7 @@ pub(crate) use ironclaw_extensions::{
     ExtensionRemovalCleanupRequirement,
 };
 use ironclaw_host_api::{ProductSurfaceError, ResourceScope, UserId};
-use ironclaw_product::ProductWorkflowError;
+use ironclaw_product::ProductSurfaceFailure;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExtensionRemovalCleanupContext {
@@ -59,12 +59,12 @@ impl ExtensionRemovalCleanupRegistry {
 
     pub(crate) fn try_from_adapters(
         adapters: Vec<Arc<dyn ExtensionRemovalCleanupAdapter>>,
-    ) -> Result<Self, ProductWorkflowError> {
+    ) -> Result<Self, ProductSurfaceFailure> {
         let mut by_id = BTreeMap::new();
         for adapter in adapters {
             let adapter_id = adapter.adapter_id();
             if by_id.insert(adapter_id.clone(), adapter).is_some() {
-                return Err(ProductWorkflowError::InvalidBindingRequest {
+                return Err(ProductSurfaceFailure::InvalidBindingRequest {
                     reason: format!(
                         "duplicate extension removal cleanup adapter: {}",
                         adapter_id.as_str()
@@ -79,12 +79,12 @@ impl ExtensionRemovalCleanupRegistry {
         &self,
         requirements: &[ExtensionRemovalCleanupRequirement],
         context: &ExtensionRemovalCleanupContext,
-    ) -> Result<(), ProductWorkflowError> {
+    ) -> Result<(), ProductSurfaceFailure> {
         let mut ordered_requirements = requirements.iter().collect::<Vec<_>>();
         ordered_requirements.sort();
         for requirement in ordered_requirements {
             let adapter = self.adapters.get(&requirement.adapter_id).ok_or_else(|| {
-                ProductWorkflowError::Transient {
+                ProductSurfaceFailure::Transient {
                     reason: format!(
                         "required extension removal cleanup adapter is unavailable: {}",
                         requirement.adapter_id.as_str()
@@ -94,7 +94,7 @@ impl ExtensionRemovalCleanupRegistry {
             adapter
                 .cleanup(context, &requirement.binding)
                 .await
-                .map_err(|error| ProductWorkflowError::Transient {
+                .map_err(|error| ProductSurfaceFailure::Transient {
                     reason: format!(
                         "extension removal cleanup adapter {} failed: {:?}",
                         requirement.adapter_id.as_str(),
@@ -114,7 +114,7 @@ mod tests {
     use ironclaw_host_api::{
         AgentId, InvocationId, ProductSurfaceError, ProjectId, ResourceScope, TenantId, UserId,
     };
-    use ironclaw_product::ProductWorkflowError;
+    use ironclaw_product::ProductSurfaceFailure;
 
     use super::*;
 
@@ -236,7 +236,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            ProductWorkflowError::InvalidBindingRequest { reason }
+            ProductSurfaceFailure::InvalidBindingRequest { reason }
                 if reason.contains("duplicate extension removal cleanup adapter")
         ));
     }
@@ -256,7 +256,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            ProductWorkflowError::Transient { reason }
+            ProductSurfaceFailure::Transient { reason }
                 if reason.contains("required extension removal cleanup adapter is unavailable")
                     && reason.contains("missing.cleanup")
         ));
@@ -281,7 +281,7 @@ mod tests {
             .await
             .expect_err("adapter failure must fail cleanup");
 
-        let ProductWorkflowError::Transient { reason } = error else {
+        let ProductSurfaceFailure::Transient { reason } = error else {
             panic!("adapter failure should be retryable");
         };
         assert!(reason.contains("failing.cleanup"));

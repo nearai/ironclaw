@@ -20,14 +20,18 @@ test-support = []
 
 [dependencies]
 async-trait = "0.1"
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 hmac = "0.13"
 ironclaw_auth = { path = "../ironclaw_auth" }
-ironclaw_dispatcher = { path = "../ironclaw_dispatcher" }
+ironclaw_capabilities = { path = "../ironclaw_capabilities" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
+ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
+ironclaw_mcp = { path = "../ironclaw_mcp" }
 ironclaw_product = { path = "../ironclaw_product" }
+ironclaw_resources = { path = "../ironclaw_resources" }
 ironclaw_secrets = { path = "../ironclaw_secrets" }
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
@@ -38,8 +42,12 @@ thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 tracing = "0.1"
 url = "2"
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
+ironclaw_authorization = { path = "../ironclaw_authorization" }
+ironclaw_processes = { path = "../ironclaw_processes", features = ["test-support"] }
+ironclaw_resources = { path = "../ironclaw_resources", features = ["test-support"] }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 toml = "1.1"
 

@@ -12,11 +12,11 @@ use ironclaw_mcp::{
     McpHostHttpEgressPlanner, McpRuntime, McpRuntimeConfig, McpRuntimeHttpAdapter,
 };
 
-pub(crate) const MCP_RESPONSE_BODY_LIMIT: u64 = 2 * 1024 * 1024;
+pub const MCP_RESPONSE_BODY_LIMIT: u64 = 2 * 1024 * 1024;
 const MCP_NETWORK_EGRESS_LIMIT: u64 = 2 * 1024 * 1024;
 const MCP_TIMEOUT_MS: u32 = 60_000;
 
-pub(crate) fn hosted_http_mcp_runtime(
+pub fn hosted_http_mcp_runtime(
     registry: Arc<SharedExtensionRegistry>,
     runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
 ) -> McpRuntime<
@@ -30,12 +30,12 @@ pub(crate) fn hosted_http_mcp_runtime(
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct RegistryMcpEgressPlanner {
+pub struct RegistryMcpEgressPlanner {
     registry: Arc<SharedExtensionRegistry>,
 }
 
 impl RegistryMcpEgressPlanner {
-    pub(crate) fn new(registry: Arc<SharedExtensionRegistry>) -> Self {
+    pub fn new(registry: Arc<SharedExtensionRegistry>) -> Self {
         Self { registry }
     }
 
@@ -103,7 +103,7 @@ impl McpHostHttpEgressPlanner for RegistryMcpEgressPlanner {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HostedMcpEndpoint {
+pub struct HostedMcpEndpoint {
     host_pattern: String,
     port: Option<u16>,
     path: String,
@@ -138,7 +138,7 @@ impl HostedMcpEndpoint {
     }
 }
 
-pub(crate) fn hosted_http_mcp_endpoint(package: &ExtensionPackage) -> Option<HostedMcpEndpoint> {
+pub fn hosted_http_mcp_endpoint(package: &ExtensionPackage) -> Option<HostedMcpEndpoint> {
     if package.manifest.source != ManifestSource::HostBundled {
         return None;
     }

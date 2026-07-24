@@ -7,15 +7,15 @@ use ironclaw_extensions::{
 use ironclaw_host_api::{ResourceScope, RuntimeHttpEgress};
 use ironclaw_mcp::{McpClient, McpClientRequest, McpHostHttpClient, McpRuntimeHttpAdapter};
 
-use crate::extension_host::mcp::{MCP_RESPONSE_BODY_LIMIT, RegistryMcpEgressPlanner};
+use crate::mcp::{MCP_RESPONSE_BODY_LIMIT, RegistryMcpEgressPlanner};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HostedMcpDiscoveryError {
+pub enum HostedMcpDiscoveryError {
     Transient(String),
     Permanent(String),
 }
 
-pub(crate) async fn discover_hosted_mcp_package(
+pub async fn discover_hosted_mcp_package(
     package: &ExtensionPackage,
     scope: ResourceScope,
     runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
@@ -84,4 +84,4 @@ pub(crate) async fn discover_hosted_mcp_package(
         .map_err(|error| HostedMcpDiscoveryError::Permanent(error.to_string()))
 }
 
-pub(crate) use ironclaw_extensions::is_hosted_http_mcp_package;
+pub use ironclaw_extensions::is_hosted_http_mcp_package;

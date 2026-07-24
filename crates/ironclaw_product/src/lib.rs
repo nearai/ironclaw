@@ -114,7 +114,9 @@ pub use conversation_binding::{
     ProductInstallationKey, ProductInstallationScope, ResolvedProductActorUser,
     StaticProductActorUserResolver, StaticProductInstallationResolver,
 };
-pub use error::{AuthContinuationRejectionKind, ProductWorkflowError};
+pub use error::{
+    AuthContinuationRejectionKind, ProductSurfaceFailure, lifecycle_product_surface_error,
+};
 pub use extension_account_setup::{
     AccountConnectionStatusError, AccountConnectionStatusSource, ChannelConnectionNoticePolicy,
     ExtensionAccountSetupDescriptor, ExtensionAccountSetupError, ExtensionAccountSetupRegistry,
@@ -159,8 +161,8 @@ pub use ironclaw_host_api::product_adapter::{
     ProductProjectionSubject, ProductProjectionSubscribeInput, ProductRejection,
     ProductRejectionDisposition, ProductRejectionKind, ProductRenderOutcome,
     ProductSlashCommandParseError, ProductSourceChannel, ProductSurfaceKind,
-    ProductSynchronousResponse, ProductTriggerReason, ProductWorkSummaryPhase,
-    ProductWorkflowRejectionKind, ProgressKind, ProgressUpdateView, ProjectionCursor,
+    ProductSurfaceRejectionKind, ProductSynchronousResponse, ProductTriggerReason,
+    ProductWorkSummaryPhase, ProgressKind, ProgressUpdateView, ProjectionCursor,
     ProjectionReadPayload, ProjectionReadRequest, ProjectionStream, ProjectionStreamSubscription,
     ProjectionSubscriptionPayload, ProjectionSubscriptionRequest, ProtocolAuthEvidence,
     ProtocolAuthFailure, ProtocolHttpEgress, ProtocolHttpEgressError, REDACTED_PLACEHOLDER,

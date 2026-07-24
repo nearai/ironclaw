@@ -13,7 +13,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_product::{
     ActionFingerprintKey, ActionPhase, ConversationBindingService, IdempotencyDecision,
-    IdempotencyLedger, ProductConversationRouteKind, ProductInboundAction, ProductWorkflowError,
+    IdempotencyLedger, ProductConversationRouteKind, ProductInboundAction, ProductSurfaceFailure,
     ResolveBindingRequest, ResolvedBinding,
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -24,7 +24,7 @@ use tokio::sync::Mutex;
 use super::filesystem::local_filesystem;
 
 #[derive(Debug, Error)]
-pub enum RebornProductWorkflowHarnessError {
+pub enum RebornProductSurfaceHarnessError {
     #[error("failed to create product workflow harness tempdir: {0}")]
     Tempdir(#[from] std::io::Error),
     #[error("failed to configure local filesystem: {0}")]
@@ -35,7 +35,7 @@ pub enum RebornProductWorkflowHarnessError {
     MissingAgentScope,
 }
 
-pub struct RebornProductWorkflowHarness {
+pub struct RebornProductSurfaceHarness {
     pub scope: ResourceScope,
     filesystem: Arc<ScopedFilesystem<DiskFilesystem>>,
     backend: Arc<DiskFilesystem>,
@@ -43,10 +43,8 @@ pub struct RebornProductWorkflowHarness {
     idempotency_lock: Arc<Mutex<()>>,
 }
 
-impl RebornProductWorkflowHarness {
-    pub fn filesystem_temp(
-        scope: ResourceScope,
-    ) -> Result<Self, RebornProductWorkflowHarnessError> {
+impl RebornProductSurfaceHarness {
+    pub fn filesystem_temp(scope: ResourceScope) -> Result<Self, RebornProductSurfaceHarnessError> {
         let root = Arc::new(tempfile::tempdir()?);
         let backend = Arc::new(local_filesystem(root.path())?);
         Self::filesystem_shared_backend(scope, backend, root)
@@ -56,7 +54,7 @@ impl RebornProductWorkflowHarness {
         scope: ResourceScope,
         backend: Arc<DiskFilesystem>,
         root: Arc<tempfile::TempDir>,
-    ) -> Result<Self, RebornProductWorkflowHarnessError> {
+    ) -> Result<Self, RebornProductSurfaceHarnessError> {
         let idempotency_lock = idempotency_lock_for_workflow_root(&root, &scope);
         Self::filesystem_shared_backend_with_lock(scope, backend, root, idempotency_lock)
     }
@@ -66,8 +64,8 @@ impl RebornProductWorkflowHarness {
         backend: Arc<DiskFilesystem>,
         root: Arc<tempfile::TempDir>,
         idempotency_lock: Arc<Mutex<()>>,
-    ) -> Result<Self, RebornProductWorkflowHarnessError> {
-        let filesystem = scoped_product_workflow_fs_at(Arc::clone(&backend), &scope)?;
+    ) -> Result<Self, RebornProductSurfaceHarnessError> {
+        let filesystem = scoped_product_surface_fs_at(Arc::clone(&backend), &scope)?;
         Ok(Self {
             scope,
             filesystem,
@@ -77,7 +75,7 @@ impl RebornProductWorkflowHarness {
         })
     }
 
-    pub fn reopened(&self) -> Result<Self, RebornProductWorkflowHarnessError> {
+    pub fn reopened(&self) -> Result<Self, RebornProductSurfaceHarnessError> {
         Self::filesystem_shared_backend_with_lock(
             self.scope.clone(),
             Arc::clone(&self.backend),
@@ -89,7 +87,7 @@ impl RebornProductWorkflowHarness {
     pub fn with_scope(
         &self,
         scope: ResourceScope,
-    ) -> Result<Self, RebornProductWorkflowHarnessError> {
+    ) -> Result<Self, RebornProductSurfaceHarnessError> {
         Self::filesystem_shared_backend_with_lock(
             scope,
             Arc::clone(&self.backend),
@@ -102,13 +100,13 @@ impl RebornProductWorkflowHarness {
         &self,
     ) -> Result<
         FilesystemConversationBindingService<DiskFilesystem>,
-        RebornProductWorkflowHarnessError,
+        RebornProductSurfaceHarnessError,
     > {
         let agent_id = self
             .scope
             .agent_id
             .clone()
-            .ok_or(RebornProductWorkflowHarnessError::MissingAgentScope)?;
+            .ok_or(RebornProductSurfaceHarnessError::MissingAgentScope)?;
         Ok(FilesystemConversationBindingService::new(
             Arc::clone(&self.filesystem),
             self.scope.clone(),
@@ -142,7 +140,7 @@ impl RebornProductWorkflowHarness {
         &self,
         request: &ResolveBindingRequest,
         bytes: Vec<u8>,
-    ) -> Result<(), ProductWorkflowError> {
+    ) -> Result<(), ProductSurfaceFailure> {
         let path = binding_path(&self.scope, request)?;
         self.filesystem
             .write_bytes(&self.scope, &path, bytes)
@@ -186,7 +184,7 @@ where
     async fn resolve_binding(
         &self,
         request: ResolveBindingRequest,
-    ) -> Result<ResolvedBinding, ProductWorkflowError> {
+    ) -> Result<ResolvedBinding, ProductSurfaceFailure> {
         let path = binding_path(&self.scope, &request)?;
         if let Some(stored) =
             read_json::<F, StoredConversationBinding>(&self.filesystem, &self.scope, &path).await?
@@ -217,12 +215,12 @@ where
     async fn lookup_binding(
         &self,
         request: ResolveBindingRequest,
-    ) -> Result<ResolvedBinding, ProductWorkflowError> {
+    ) -> Result<ResolvedBinding, ProductSurfaceFailure> {
         let path = binding_path(&self.scope, &request)?;
         read_json::<F, StoredConversationBinding>(&self.filesystem, &self.scope, &path)
             .await?
             .map(|stored| stored.binding)
-            .ok_or_else(|| ProductWorkflowError::BindingRequired {
+            .ok_or_else(|| ProductSurfaceFailure::BindingRequired {
                 reason: "product conversation binding not found".to_string(),
             })
     }
@@ -274,7 +272,7 @@ where
         &self,
         fingerprint: ActionFingerprintKey,
         received_at: DateTime<Utc>,
-    ) -> Result<IdempotencyDecision, ProductWorkflowError> {
+    ) -> Result<IdempotencyDecision, ProductSurfaceFailure> {
         let path = ledger_path(&self.scope, &fingerprint)?;
         let _guard = self.lock.lock().await;
         let Some(stored) =
@@ -296,23 +294,23 @@ where
             return Ok(IdempotencyDecision::New(action));
         }
 
-        Err(ProductWorkflowError::Transient {
+        Err(ProductSurfaceFailure::Transient {
             reason: "idempotency fingerprint already in flight; retry after recovery lease".into(),
         })
     }
 
-    async fn settle(&self, action: ProductInboundAction) -> Result<(), ProductWorkflowError> {
+    async fn settle(&self, action: ProductInboundAction) -> Result<(), ProductSurfaceFailure> {
         let path = ledger_path(&self.scope, &action.fingerprint)?;
         let _guard = self.lock.lock().await;
         let Some(stored) =
             read_json::<F, StoredIdempotencyAction>(&self.filesystem, &self.scope, &path).await?
         else {
-            return Err(ProductWorkflowError::Transient {
+            return Err(ProductSurfaceFailure::Transient {
                 reason: "cannot settle missing idempotency reservation".into(),
             });
         };
         if stored.action.action_id != action.action_id {
-            return Err(ProductWorkflowError::Transient {
+            return Err(ProductSurfaceFailure::Transient {
                 reason: "cannot settle stale idempotency reservation".into(),
             });
         }
@@ -325,7 +323,7 @@ where
         .await
     }
 
-    async fn release(&self, action: ProductInboundAction) -> Result<(), ProductWorkflowError> {
+    async fn release(&self, action: ProductInboundAction) -> Result<(), ProductSurfaceFailure> {
         let path = ledger_path(&self.scope, &action.fingerprint)?;
         let _guard = self.lock.lock().await;
         let Some(stored) =
@@ -353,7 +351,7 @@ fn idempotency_lock_for_workflow_root(
     idempotency_lock_for_key(format!(
         "workflow-root:{}:{}",
         root.path().display(),
-        product_workflow_mount_target(scope)
+        product_surface_mount_target(scope)
     ))
 }
 
@@ -393,9 +391,9 @@ impl StoredIdempotencyAction {
     fn reserved(
         action: ProductInboundAction,
         lease_ttl: Duration,
-    ) -> Result<Self, ProductWorkflowError> {
+    ) -> Result<Self, ProductSurfaceFailure> {
         let ttl = chrono::Duration::from_std(lease_ttl).map_err(|error| {
-            ProductWorkflowError::Transient {
+            ProductSurfaceFailure::Transient {
                 reason: format!("invalid idempotency lease ttl: {error}"),
             }
         })?;
@@ -422,7 +420,7 @@ async fn read_json<F, T>(
     filesystem: &ScopedFilesystem<F>,
     scope: &ResourceScope,
     path: &ScopedPath,
-) -> Result<Option<T>, ProductWorkflowError>
+) -> Result<Option<T>, ProductSurfaceFailure>
 where
     F: RootFilesystem,
     T: DeserializeOwned,
@@ -435,7 +433,7 @@ where
         return Ok(None);
     };
     let value = serde_json::from_slice(&versioned.entry.body).map_err(|error| {
-        ProductWorkflowError::Transient {
+        ProductSurfaceFailure::Transient {
             reason: format!("failed to parse product workflow record: {error}"),
         }
     })?;
@@ -447,13 +445,13 @@ async fn write_json<F, T>(
     scope: &ResourceScope,
     path: &ScopedPath,
     value: &T,
-) -> Result<(), ProductWorkflowError>
+) -> Result<(), ProductSurfaceFailure>
 where
     F: RootFilesystem,
     T: Serialize,
 {
     let body =
-        serde_json::to_vec_pretty(value).map_err(|error| ProductWorkflowError::Transient {
+        serde_json::to_vec_pretty(value).map_err(|error| ProductSurfaceFailure::Transient {
             reason: format!("failed to serialize product workflow record: {error}"),
         })?;
     filesystem
@@ -465,12 +463,12 @@ where
 fn binding_path(
     scope: &ResourceScope,
     request: &ResolveBindingRequest,
-) -> Result<ScopedPath, ProductWorkflowError> {
+) -> Result<ScopedPath, ProductSurfaceFailure> {
     let agent_id =
         scope
             .agent_id
             .as_ref()
-            .ok_or_else(|| ProductWorkflowError::BindingResolutionFailed {
+            .ok_or_else(|| ProductSurfaceFailure::BindingResolutionFailed {
                 reason: "missing agent id in binding scope".to_string(),
             })?;
     let project_id = scope.project_id.as_ref().map_or("", ProjectId::as_str);
@@ -491,7 +489,7 @@ fn binding_path(
 fn ledger_path(
     scope: &ResourceScope,
     fingerprint: &ActionFingerprintKey,
-) -> Result<ScopedPath, ProductWorkflowError> {
+) -> Result<ScopedPath, ProductSurfaceFailure> {
     let agent_id = scope.agent_id.as_ref().map_or("", AgentId::as_str);
     let project_id = scope.project_id.as_ref().map_or("", ProjectId::as_str);
     hashed_scoped_path(
@@ -509,7 +507,7 @@ fn ledger_path(
     )
 }
 
-fn hashed_scoped_path(prefix: &str, parts: &[&str]) -> Result<ScopedPath, ProductWorkflowError> {
+fn hashed_scoped_path(prefix: &str, parts: &[&str]) -> Result<ScopedPath, ProductSurfaceFailure> {
     let mut hasher = Sha256::new();
     for part in parts {
         hasher.update((part.len() as u64).to_be_bytes());
@@ -517,7 +515,7 @@ fn hashed_scoped_path(prefix: &str, parts: &[&str]) -> Result<ScopedPath, Produc
     }
     let digest = hex::encode(hasher.finalize());
     ScopedPath::new(format!("{prefix}/{digest}.json")).map_err(|error| {
-        ProductWorkflowError::BindingResolutionFailed {
+        ProductSurfaceFailure::BindingResolutionFailed {
             reason: format!("invalid product workflow scoped path: {error}"),
         }
     })
@@ -526,7 +524,7 @@ fn hashed_scoped_path(prefix: &str, parts: &[&str]) -> Result<ScopedPath, Produc
 fn user_id_for_binding(
     tenant_id: &TenantId,
     request: &ResolveBindingRequest,
-) -> Result<UserId, ProductWorkflowError> {
+) -> Result<UserId, ProductSurfaceFailure> {
     scoped_id(
         "user",
         &[
@@ -542,7 +540,7 @@ fn user_id_for_binding(
 fn thread_id_for_binding(
     scope: &ResourceScope,
     request: &ResolveBindingRequest,
-) -> Result<ThreadId, ProductWorkflowError> {
+) -> Result<ThreadId, ProductSurfaceFailure> {
     let agent_id = scope.agent_id.as_ref().map_or("", AgentId::as_str);
     let project_id = scope.project_id.as_ref().map_or("", ProjectId::as_str);
     scoped_id(
@@ -562,7 +560,7 @@ fn scoped_id<T>(
     prefix: &str,
     parts: &[&str],
     construct: impl FnOnce(String) -> Result<T, HostApiError>,
-) -> Result<T, ProductWorkflowError> {
+) -> Result<T, ProductSurfaceFailure> {
     let mut hasher = Sha256::new();
     for part in parts {
         hasher.update((part.len() as u64).to_be_bytes());
@@ -570,20 +568,20 @@ fn scoped_id<T>(
     }
     let digest = hex::encode(hasher.finalize());
     construct(format!("{prefix}-{}", &digest[..32])).map_err(|error| {
-        ProductWorkflowError::BindingResolutionFailed {
+        ProductSurfaceFailure::BindingResolutionFailed {
             reason: format!("invalid derived {prefix} id: {error}"),
         }
     })
 }
 
-fn scoped_product_workflow_fs_at<F>(
+fn scoped_product_surface_fs_at<F>(
     backend: Arc<F>,
     scope: &ResourceScope,
 ) -> Result<Arc<ScopedFilesystem<F>>, HostApiError>
 where
     F: RootFilesystem,
 {
-    let target = product_workflow_mount_target(scope);
+    let target = product_surface_mount_target(scope);
     let mounts = MountView::new(vec![MountGrant::new(
         MountAlias::new("/workflow").expect("valid product workflow alias"),
         VirtualPath::new(target).expect("valid product workflow target"),
@@ -592,15 +590,15 @@ where
     Ok(Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts)))
 }
 
-fn product_workflow_mount_target(scope: &ResourceScope) -> String {
+fn product_surface_mount_target(scope: &ResourceScope) -> String {
     format!(
         "/engine/tenants/{}/users/{}/product-workflow",
         scope.tenant_id, scope.user_id
     )
 }
 
-fn fs_error(operation: &str, error: FilesystemError) -> ProductWorkflowError {
-    ProductWorkflowError::Transient {
+fn fs_error(operation: &str, error: FilesystemError) -> ProductSurfaceFailure {
+    ProductSurfaceFailure::Transient {
         reason: format!("{operation} failed: {error}"),
     }
 }

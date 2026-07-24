@@ -167,6 +167,14 @@ fn extension_host_cluster_stays_internal() {
             "{module} must not be reintroduced as a crate-root module"
         );
     }
+
+    for module in EXTENSION_HOST_EXTERNALIZED_GENERIC_MODULES {
+        let composition_decl = format!("pub(crate) mod {module};");
+        assert!(
+            !has_module_decl(&extension_host, &composition_decl),
+            "{module} must stay owned by ironclaw_extension_host, not composition"
+        );
+    }
 }
 
 #[test]
@@ -297,18 +305,25 @@ const EXTENSION_HOST_INTERNAL_MODULES: &[&str] = &[
     "available_extensions",
     "bundled_skills",
     "extension_activation_credentials",
-    "extension_credential_requirements",
     "extension_lifecycle",
     "extension_lifecycle_capabilities",
     "extension_lifecycle_capabilities_auth_tests",
     "extension_lifecycle_command",
     "first_party",
     "lifecycle",
-    "mcp",
-    "mcp_discovery",
     "skill_learning",
     "skill_listing",
     "webui_extension_credentials",
+];
+
+const EXTENSION_HOST_EXTERNALIZED_GENERIC_MODULES: &[&str] = &[
+    "channel_delivery",
+    "channel_dm_targets",
+    "extension_credential_requirements",
+    "mcp",
+    "mcp_discovery",
+    "provider_instance_readiness",
+    "reply_contexts",
 ];
 
 fn composition_src_path() -> PathBuf {

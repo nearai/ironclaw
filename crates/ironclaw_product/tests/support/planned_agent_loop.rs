@@ -516,7 +516,7 @@ impl ProductLiveAgentLoopHarness {
     pub async fn accept_user_message(
         &self,
         envelope: &ProductInboundEnvelope,
-    ) -> Result<InboundTurnOutcome, ironclaw_product::ProductWorkflowError> {
+    ) -> Result<InboundTurnOutcome, ironclaw_product::ProductSurfaceFailure> {
         let service = DefaultInboundTurnService::new(
             self.binding_service.clone(),
             self.thread_service.clone(),

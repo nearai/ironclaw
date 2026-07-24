@@ -46,7 +46,7 @@ use crate::delivery_coordinator::{
     CoordinatedDeliveryError, CoordinatedDeliveryOutcome, DeliveryCoordinator, DeliveryIntent,
     NoticeDeliveryRequest,
 };
-use crate::{ConversationBindingService, ProductWorkflowError, ResolvedBinding};
+use crate::{ConversationBindingService, ProductSurfaceFailure, ResolvedBinding};
 
 mod gate_routes;
 mod observer;
@@ -188,7 +188,7 @@ pub(crate) fn delivered_messages_from_outcome(
 #[derive(Debug, thiserror::Error)]
 pub enum RunDeliveryError {
     #[error("workflow binding failed: {0}")]
-    Workflow(#[from] ProductWorkflowError),
+    Workflow(#[from] ProductSurfaceFailure),
     #[error("turn coordinator failed: {0}")]
     Turn(#[from] ironclaw_turns::TurnError),
     #[error("thread service failed: {0}")]
@@ -347,9 +347,9 @@ pub(crate) async fn cancel_auth_blocked_run(
 
 pub(crate) fn thread_scope_from_binding(
     binding: &ResolvedBinding,
-) -> Result<ironclaw_threads::ThreadScope, ProductWorkflowError> {
+) -> Result<ironclaw_threads::ThreadScope, ProductSurfaceFailure> {
     let Some(agent_id) = binding.agent_id.clone() else {
-        return Err(ProductWorkflowError::BindingResolutionFailed {
+        return Err(ProductSurfaceFailure::BindingResolutionFailed {
             reason: "resolved binding missing agent_id required for thread scope".to_string(),
         });
     };
@@ -365,9 +365,9 @@ pub(crate) fn thread_scope_from_binding(
 pub(crate) fn turn_scope_from_thread_scope(
     binding: &ResolvedBinding,
     thread_scope: &ironclaw_threads::ThreadScope,
-) -> Result<TurnScope, ProductWorkflowError> {
+) -> Result<TurnScope, ProductSurfaceFailure> {
     let Some(agent_id) = binding.agent_id.clone() else {
-        return Err(ProductWorkflowError::BindingResolutionFailed {
+        return Err(ProductSurfaceFailure::BindingResolutionFailed {
             reason: "resolved binding missing agent_id required for turn scope".to_string(),
         });
     };

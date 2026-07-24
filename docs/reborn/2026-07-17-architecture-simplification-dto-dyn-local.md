@@ -133,6 +133,32 @@ annotations and `.claude/rules/architecture.md` cite them; additions get
   `host_api::BoundProductSurface`, and WebUI-specific ProductSurface DTO names
   were renamed to the neutral `Product*` vocabulary. File/attachment command
   bytes remain JSON/base64 for now.
+- **r16** 2026-07-23 — implementation status update: product consumers now share
+  host-owned `ProductSurface`, `BoundProductSurface`, `ProductSurfaceCaller`,
+  and `ProductSurfaceError` vocabulary; product-owned descriptors and DTOs stay
+  in `ironclaw_product`.
+- **r17** 2026-07-23 — extension/capability dispatch status update:
+  `host_api::Extension` and `ExtensionHostAssemblyConfig` are live, dispatch
+  routing moved into `ironclaw_capabilities`, `ironclaw_dispatcher` is a
+  compatibility re-export shim, and generic host assembly moved from
+  composition into `ironclaw_extension_host`.
+- **r18** 2026-07-23 — extension-host shrink follow-up: generic hosted MCP
+  runtime/discovery, provider readiness projection, channel delivery resolver,
+  reply-context and DM-target stores, extension bundle decoding, and credential
+  requirement projection moved from composition into `ironclaw_extension_host`.
+- **r19** 2026-07-24 — extension/channel vocabulary follow-up: lifecycle package
+  refs, lifecycle projections, channel connection/config vocabulary, extension
+  summaries, install-scope/onboarding DTOs, and channel connect strategy moved
+  to `ironclaw_host_api`; channel configuration service moved to
+  `ironclaw_extension_host`. `LifecycleProductFacade` now returns
+  host-owned `ProductSurfaceError`; workflow errors remain only in command and
+  internal adapter plumbing.
+- **r20** 2026-07-24 — product command-service boundary moved off workflow
+  errors: `ProductCommandAdmissionService`, `ProductCommandService`, lifecycle
+  command execution, and provider-admin command execution now return
+  `ProductSurfaceError`. The older inbound workflow still adapts command
+  surface failures internally while binding, ledger, auth/approval, policy, and
+  turn admission complete their separate `ProductSurfaceFailure` retirement.
 
 This note proposes a **fundamental** simplification of the Reborn host/runtime
 internals. The goal is to remove three recurring costs without weakening any
@@ -2317,7 +2343,7 @@ knobs to calibrate against measured latency, not open architectural questions.
 
 ---
 
-## 14. Implementation status (as of 2026-07-22)
+## 14. Implementation status (as of 2026-07-23)
 
 This section tracks what has landed against the slices (§9) and axes (§10). It is
 the **mutable status log** — the design in §1–§13 is the frozen contract; this
@@ -2334,7 +2360,7 @@ open PR not yet on `main`.
 | Pre-flight authority fold | **Done** — trust, grants, approvals, credentials, resources, and lane resolution are folded through `authorize()`. | `crates/ironclaw_capabilities/src/host.rs::CapabilityHost::authorize`, including `evaluate_trust`, `enforce_runtime_policy`, `apply_persistent_approval`, credential pre-flight, obligation preparation, and `seal_authorization`. |
 | Origin→gate matrix | **Live, tightening remains** — matrices are descriptor data and ratcheted; `LoopRun` ungated set is a reviewed 17-id seed to shrink. | `crates/ironclaw_host_api/src/capability.rs` (`OriginGatePolicy`, `OriginGateMatrix`, `UNGATED_LOOP_RUN_CAPABILITIES`); `crates/ironclaw_architecture/tests/reborn_origin_gate_matrix_ratchet.rs`. |
 | `InMemory*Store` mirror deletion | **Done for tracked domain stores** — the ratchet was deleted after the allowlist reached empty. | Deletion landed in #6430; replacement write sites include `crates/ironclaw_secrets/src/filesystem_store.rs`, `crates/ironclaw_resources/src/gate.rs`, `crates/ironclaw_authorization/src/lib.rs`, and `crates/ironclaw_outbound/src/delivered_gate_routes.rs`. |
-| Generic extension/channel runtime | **Landed** — `ChannelAdapter` + `ironclaw_extension_host`; Slack/Telegram are extension adapters, not bespoke product trees. | `crates/ironclaw_product/src/lib.rs::ChannelAdapter`; `crates/ironclaw_extension_host/src/lib.rs::ExtensionHost`; `crates/ironclaw_slack_extension/src/channel.rs::SlackChannelAdapter`; `crates/ironclaw_telegram_extension/src/channel.rs::TelegramChannelAdapter`; `crates/ironclaw_architecture/tests/reborn_extension_specificity.rs`. |
+| Generic extension/channel runtime | **Landed, shrinking composition** — `ChannelAdapter` + `ironclaw_extension_host`; Slack/Telegram are extension adapters, not bespoke product trees. Generic host assembly, lane/native/channel binding, active snapshot publication, hosted MCP runtime/discovery, provider readiness projection, channel delivery, reply-context/DM-target stores, bundle decoding, credential requirement projection, and channel configuration now live in `ironclaw_extension_host`; composition prepares boot records and supplies product factories/adapters/config. Common lifecycle/channel vocabulary lives in `ironclaw_host_api`, and lifecycle product facades return `ProductSurfaceError` instead of workflow errors. Composition `src/extension_host` is still large (~38.9k Rust LOC) but is now primarily production wiring, local lifecycle management, and compatibility shims. | `crates/ironclaw_product/src/lib.rs::ChannelAdapter`; `crates/ironclaw_host_api/src/extension.rs` (`Extension`, `ExtensionHostAssemblyConfig`); `crates/ironclaw_host_api/src/package_lifecycle.rs`; `crates/ironclaw_extension_host/src/generic_host.rs`; `crates/ironclaw_extension_host/src/channel_config.rs`; `crates/ironclaw_extension_host/src/channel_delivery.rs`; `crates/ironclaw_extension_host/src/mcp.rs`; `crates/ironclaw_reborn_composition/src/extension_host/generic_host.rs`; `crates/ironclaw_architecture/tests/reborn_extension_specificity.rs`; `crates/ironclaw_architecture/tests/reborn_composition_boundaries.rs`. |
 | Product facade collapse | **Done for the method collapse** — consumers use `host_api::ProductSurface::{invoke, query, stream_events}`; former typed WebUI/product methods are command descriptors or capability descriptors; `execute_command`, product-operation wrappers, `ProductCapabilityInput`, compatibility trait-object methods, the product-local `ProductSurface`, and the subscription extension are gone. Consumers bind caller authority once with `BoundProductSurface`; file/attachment command bytes remain JSON/base64 pending a later byte-response refinement. | `crates/ironclaw_host_api/src/product_surface.rs` (`ProductSurface`, `BoundProductSurface`, `ProductSurfaceCaller`, `ChannelInboundProductSurface`, `ProductSurfaceError`); `crates/ironclaw_product/src/reborn_services.rs` (`ProductSurfaceCommandDescriptor`, `ProductView`, `ProductCapabilityDescriptor`); `crates/ironclaw_architecture/tests/reborn_facade_method_freeze_ratchet.rs`. |
 | Deployment mode as data | **Partial** — renames/ratchets are live, but profile enums and profile-edge branching still exist. | `crates/ironclaw_architecture/tests/reborn_localdev_typename_ratchet.rs`; remaining mode vocabulary in `crates/ironclaw_host_api/src/runtime_policy.rs`. |
 | Causal routing / product terminal path | **Design added here, implementation pending** — no first-class duct/path contract yet. | §5.2.10 is the design target; no event-schema/path-contract/conformance write site exists yet. |
@@ -2404,6 +2430,22 @@ open PR not yet on `main`.
   `ironclaw_slack_extension` / `ironclaw_telegram_extension` adapters with
   conformance tests. Composition still has generic extension/channel host glue,
   but the concrete `slack/` and `telegram/` product trees are gone.
+- **Extension/capability dispatch ownership moved closer to target.**
+  `host_api::Extension` is the neutral live-extension contract for descriptors
+  plus callable tool/channel facets; active snapshots publish that contract.
+  The dispatcher implementation and new `CapabilityDispatchRegistry` live in
+  `ironclaw_capabilities`; `ironclaw_dispatcher` remains only as a compatibility
+  re-export shim. Generic extension-host assembly (`build_generic_extension_host`,
+  runtime-lane/native factory/channel adapter binding, resolver publication, and
+  boot activation over prepared records) moved into `ironclaw_extension_host`.
+  Generic hosted MCP runtime/discovery, provider readiness, channel delivery,
+  reply-context and DM-target stores, bundle decoding, and credential
+  requirement projection also moved there. Channel configuration service is now
+  in `ironclaw_extension_host`, while lifecycle/channel DTO vocabulary is
+  host-owned in `ironclaw_host_api::package_lifecycle`. Composition's
+  `extension_host/generic_host.rs` is now a thin boot-record preparation shim
+  over product-owned channel config, and `LifecycleProductFacade` exposes
+  `ProductSurfaceError` rather than `ProductSurfaceFailure`.
 - **§10 ratchets live, updated for current shape.** The active architecture
   ratchets include LocalDev/deployment-mode type and branching guards,
   capability-DTO collapse, `Authorized` seal, origin→gate matrix, facade-method

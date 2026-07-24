@@ -1,14 +1,14 @@
-use crate::{ActionFingerprintKey, ProductWorkflowError};
+use crate::{ActionFingerprintKey, ProductSurfaceFailure};
 use ironclaw_host_api::{ResourceScope, ScopedPath};
 
 use super::durable_error;
 
-const DEFAULT_LEDGER_ROOT: &str = "/engine/product_workflow/idempotency/actions";
+const DEFAULT_LEDGER_ROOT: &str = "/engine/product_surface/idempotency/actions";
 
 pub(super) fn action_path(
     root: &ScopedPath,
     fingerprint: &ActionFingerprintKey,
-) -> Result<ScopedPath, ProductWorkflowError> {
+) -> Result<ScopedPath, ProductSurfaceFailure> {
     let path = format!(
         "{}/{}/{}/{}/{}/{}/{}.json",
         root.as_str().trim_end_matches('/'),
@@ -22,7 +22,7 @@ pub(super) fn action_path(
     ScopedPath::new(path).map_err(|error| durable_error("construct action path", error))
 }
 
-pub(super) fn prune_lease_path(root: &ScopedPath) -> Result<ScopedPath, ProductWorkflowError> {
+pub(super) fn prune_lease_path(root: &ScopedPath) -> Result<ScopedPath, ProductSurfaceFailure> {
     let path = format!(
         "{}/_control/prune_lease.json",
         root.as_str().trim_end_matches('/')

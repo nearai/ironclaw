@@ -113,7 +113,7 @@ fn nearai_callback_descriptor() -> IngressRouteDescriptor {
         websocket_origin: WebSocketOriginPolicy::NotApplicable,
         streaming: StreamingMode::None,
         audit: AuditTraceClass::PublicCallback,
-        effect_path: AllowedEffectPath::ProductWorkflow,
+        effect_path: AllowedEffectPath::ProductSurface,
     })
     .expect("nearai login callback policy must validate"); // safety: OAuthCallback + OAuthState + HostResolved is the host callback shape; handler validation consumes one-time login state before credential/provider mutation.
     IngressRouteDescriptor::new(
@@ -183,7 +183,7 @@ mod tests {
                 if schemes.as_slice() == [IngressAuthScheme::OAuthState]
         ));
         assert_eq!(policy.scope_source(), IngressScopeSource::HostResolved);
-        assert_eq!(policy.effect_path(), &AllowedEffectPath::ProductWorkflow);
+        assert_eq!(policy.effect_path(), &AllowedEffectPath::ProductSurface);
     }
 
     #[tokio::test]

@@ -33,7 +33,7 @@ use ironclaw_product::{
     PendingAuthInteractionView, ProductActorUserResolutionRequest, ProductActorUserResolver,
     ProductCommandName, ProductConversationBindingService, ProductConversationRouteKey,
     ProductConversationSubjectRouteResolutionRequest, ProductConversationSubjectRouteResolver,
-    ProductInstallationKey, ProductInstallationScope, ProductWorkflowError,
+    ProductInstallationKey, ProductInstallationScope, ProductSurfaceFailure,
     RebornFilesystemIdempotencyLedger, ResolveApprovalInteractionRequest,
     ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
     ResolveAuthInteractionResponse, ResolveBindingRequest, ResolvedBinding,
@@ -47,10 +47,10 @@ use ironclaw_product::{
     ProductAdapterError, ProductAdapterId, ProductControlActionPayload, ProductInboundAck,
     ProductInboundEnvelope, ProductInboundPayload, ProductProjectionReadInput,
     ProductProjectionSubject, ProductProjectionSubscribeInput, ProductRejection,
-    ProductRejectionDisposition, ProductRejectionKind, ProductTriggerReason,
-    ProductWorkflowRejectionKind, ProjectionCursor, ProjectionReadPayload,
-    ProjectionSubscriptionPayload, ProtocolAuthEvidence, ScopedApprovalResolutionPayload,
-    TrustedInboundContext, UserMessagePayload,
+    ProductRejectionDisposition, ProductRejectionKind, ProductSurfaceRejectionKind,
+    ProductTriggerReason, ProjectionCursor, ProjectionReadPayload, ProjectionSubscriptionPayload,
+    ProtocolAuthEvidence, ScopedApprovalResolutionPayload, TrustedInboundContext,
+    UserMessagePayload,
 };
 use ironclaw_threads::InMemorySessionThreadService;
 use ironclaw_turns::{
@@ -228,7 +228,7 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
     async fn list_pending(
         &self,
         request: ListPendingApprovalsRequest,
-    ) -> Result<ListPendingApprovalsResponse, ProductWorkflowError> {
+    ) -> Result<ListPendingApprovalsResponse, ProductSurfaceFailure> {
         let scope = ApprovalInteractionScope::from_turn(&request.scope, &request.actor);
         Ok(ListPendingApprovalsResponse {
             approvals: self
@@ -249,7 +249,7 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
     async fn resolve(
         &self,
         request: ResolveApprovalInteractionRequest,
-    ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
+    ) -> Result<ResolveApprovalInteractionResponse, ProductSurfaceFailure> {
         let run_id = request.run_id_hint.unwrap_or(self.fallback_run_id);
         self.resolutions.lock().expect("lock").push(request);
         Ok(
@@ -312,7 +312,7 @@ impl ApprovalInteractionService for ScopedPendingApprovalInteractionService {
     async fn list_pending(
         &self,
         request: ListPendingApprovalsRequest,
-    ) -> Result<ListPendingApprovalsResponse, ProductWorkflowError> {
+    ) -> Result<ListPendingApprovalsResponse, ProductSurfaceFailure> {
         let scope = ApprovalInteractionScope::from_turn(&request.scope, &request.actor);
         let matches_thread =
             request.scope.to_resource_scope().thread_id.as_ref() == Some(&self.pending_thread);
@@ -337,7 +337,7 @@ impl ApprovalInteractionService for ScopedPendingApprovalInteractionService {
     async fn resolve(
         &self,
         request: ResolveApprovalInteractionRequest,
-    ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
+    ) -> Result<ResolveApprovalInteractionResponse, ProductSurfaceFailure> {
         // Model staleness via the authoritative resolve path: a gate that is no
         // longer in the pending set has already resolved, so report StaleGate
         // (mirrors DefaultApprovalInteractionService's `_ => StaleGate` arm).
@@ -352,7 +352,7 @@ impl ApprovalInteractionService for ScopedPendingApprovalInteractionService {
         });
         self.resolutions.lock().expect("lock").push(request);
         let Some(run_id) = run_id else {
-            return Err(ProductWorkflowError::ApprovalInteractionRejected {
+            return Err(ProductSurfaceFailure::ApprovalInteractionRejected {
                 kind: ironclaw_product::ApprovalInteractionRejectionKind::StaleGate,
             });
         };
@@ -391,7 +391,7 @@ impl AuthInteractionService for RecordingAuthInteractionService {
     async fn list_pending(
         &self,
         request: ListPendingAuthInteractionsRequest,
-    ) -> Result<ListPendingAuthInteractionsResponse, ProductWorkflowError> {
+    ) -> Result<ListPendingAuthInteractionsResponse, ProductSurfaceFailure> {
         let scope = AuthInteractionScope::from_turn(&request.scope, &request.actor);
         Ok(ListPendingAuthInteractionsResponse {
             auth_interactions: vec![PendingAuthInteractionView {
@@ -411,7 +411,7 @@ impl AuthInteractionService for RecordingAuthInteractionService {
     async fn resolve(
         &self,
         request: ResolveAuthInteractionRequest,
-    ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
+    ) -> Result<ResolveAuthInteractionResponse, ProductSurfaceFailure> {
         let run_id = request.run_id_hint.unwrap_or(self.run_id);
         let decision = request.decision.clone();
         self.resolutions.lock().expect("lock").push(request);
@@ -453,7 +453,7 @@ impl ApprovalInteractionService for MissingGateThenRecordingApprovalService {
     async fn list_pending(
         &self,
         _request: ListPendingApprovalsRequest,
-    ) -> Result<ListPendingApprovalsResponse, ProductWorkflowError> {
+    ) -> Result<ListPendingApprovalsResponse, ProductSurfaceFailure> {
         Ok(ListPendingApprovalsResponse {
             approvals: Vec::new(),
         })
@@ -462,11 +462,11 @@ impl ApprovalInteractionService for MissingGateThenRecordingApprovalService {
     async fn resolve(
         &self,
         request: ResolveApprovalInteractionRequest,
-    ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
+    ) -> Result<ResolveApprovalInteractionResponse, ProductSurfaceFailure> {
         let run_id_hint = request.run_id_hint;
         self.resolutions.lock().expect("lock").push(request);
         let Some(run_id) = run_id_hint else {
-            return Err(ProductWorkflowError::ApprovalInteractionRejected {
+            return Err(ProductSurfaceFailure::ApprovalInteractionRejected {
                 kind: ironclaw_product::ApprovalInteractionRejectionKind::MissingGate,
             });
         };
@@ -496,7 +496,7 @@ impl AuthInteractionService for MissingAuthThenRecordingAuthService {
     async fn list_pending(
         &self,
         _request: ListPendingAuthInteractionsRequest,
-    ) -> Result<ListPendingAuthInteractionsResponse, ProductWorkflowError> {
+    ) -> Result<ListPendingAuthInteractionsResponse, ProductSurfaceFailure> {
         Ok(ListPendingAuthInteractionsResponse {
             auth_interactions: Vec::new(),
         })
@@ -505,12 +505,12 @@ impl AuthInteractionService for MissingAuthThenRecordingAuthService {
     async fn resolve(
         &self,
         request: ResolveAuthInteractionRequest,
-    ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
+    ) -> Result<ResolveAuthInteractionResponse, ProductSurfaceFailure> {
         let run_id_hint = request.run_id_hint;
         let decision = request.decision.clone();
         self.resolutions.lock().expect("lock").push(request);
         let Some(run_id) = run_id_hint else {
-            return Err(ProductWorkflowError::AuthInteractionRejected {
+            return Err(ProductSurfaceFailure::AuthInteractionRejected {
                 kind: ironclaw_product::AuthInteractionRejectionKind::MissingAuth,
             });
         };
@@ -702,17 +702,17 @@ impl ConversationBindingService for BindingRequiredThenSucceedingService {
     async fn resolve_binding(
         &self,
         request: ResolveBindingRequest,
-    ) -> Result<ResolvedBinding, ProductWorkflowError> {
+    ) -> Result<ResolvedBinding, ProductSurfaceFailure> {
         self.lookup_binding(request).await
     }
 
     async fn lookup_binding(
         &self,
         request: ResolveBindingRequest,
-    ) -> Result<ResolvedBinding, ProductWorkflowError> {
+    ) -> Result<ResolvedBinding, ProductSurfaceFailure> {
         let n = self.call_count.fetch_add(1, Ordering::SeqCst);
         if n < self.fail_count {
-            return Err(ProductWorkflowError::BindingRequired {
+            return Err(ProductSurfaceFailure::BindingRequired {
                 reason: format!("injected failure #{n}"),
             });
         }
@@ -747,19 +747,19 @@ fn action_fingerprint_retains_typed_identifiers() {
 
 #[test]
 fn turn_submission_error_maps_to_stable_product_category() {
-    let err: ProductAdapterError = ProductWorkflowError::TurnSubmissionFailed {
+    let err: ProductAdapterError = ProductSurfaceFailure::TurnSubmissionFailed {
         error: TurnError::Unauthorized,
     }
     .into();
 
     match err {
-        ProductAdapterError::WorkflowRejected {
+        ProductAdapterError::SurfaceRejected {
             kind,
             status_code,
             retryable,
             ..
         } => {
-            assert_eq!(kind, ProductWorkflowRejectionKind::Unauthorized);
+            assert_eq!(kind, ProductSurfaceRejectionKind::Unauthorized);
             assert_eq!(status_code, 403);
             assert!(!retryable);
         }
@@ -850,7 +850,7 @@ impl ReplayCountingInboundTurnService {
     fn accept_fresh_user_message(
         &self,
         envelope: &ProductInboundEnvelope,
-    ) -> Result<InboundTurnOutcome, ProductWorkflowError> {
+    ) -> Result<InboundTurnOutcome, ProductSurfaceFailure> {
         *self.attempts.lock().expect("attempt counter lock poisoned") += 1;
         self.accepted
             .lock()
@@ -873,7 +873,7 @@ impl InboundTurnService for ReplayCountingInboundTurnService {
     async fn replay_accepted_user_message(
         &self,
         _envelope: &ProductInboundEnvelope,
-    ) -> Result<Option<InboundTurnOutcome>, ProductWorkflowError> {
+    ) -> Result<Option<InboundTurnOutcome>, ProductSurfaceFailure> {
         *self
             .replay_attempts
             .lock()
@@ -884,7 +884,7 @@ impl InboundTurnService for ReplayCountingInboundTurnService {
     async fn accept_user_message(
         &self,
         envelope: &ProductInboundEnvelope,
-    ) -> Result<InboundTurnOutcome, ProductWorkflowError> {
+    ) -> Result<InboundTurnOutcome, ProductSurfaceFailure> {
         if let Some(outcome) = self.replay_accepted_user_message(envelope).await? {
             return Ok(outcome);
         }
@@ -895,13 +895,13 @@ impl InboundTurnService for ReplayCountingInboundTurnService {
         &self,
         envelope: &ProductInboundEnvelope,
         before_inbound_policy: &dyn BeforeInboundPolicy,
-    ) -> Result<InboundUserMessageDispatch, ProductWorkflowError> {
+    ) -> Result<InboundUserMessageDispatch, ProductSurfaceFailure> {
         if let Some(outcome) = self.replay_accepted_user_message(envelope).await? {
             return Ok(InboundUserMessageDispatch::Accepted(outcome));
         }
 
         let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
-            return Err(ProductWorkflowError::UnsupportedActionKind {
+            return Err(ProductSurfaceFailure::UnsupportedActionKind {
                 kind: "non_user_message".into(),
             });
         };
@@ -914,7 +914,7 @@ impl InboundTurnService for ReplayCountingInboundTurnService {
             BeforeInboundPolicyOutcome::RewriteUserMessage(payload) => {
                 dispatch_envelope =
                     envelope.with_rewritten_user_message(payload).map_err(|_| {
-                        ProductWorkflowError::TurnSubmissionRejected {
+                        ProductSurfaceFailure::TurnSubmissionRejected {
                             reason: "invalid policy-rewritten user message".into(),
                         }
                     })?;
@@ -924,7 +924,7 @@ impl InboundTurnService for ReplayCountingInboundTurnService {
                 return Ok(InboundUserMessageDispatch::Rejected(rejection));
             }
             _ => {
-                return Err(ProductWorkflowError::Transient {
+                return Err(ProductSurfaceFailure::Transient {
                     reason: "unsupported before-inbound policy outcome".into(),
                 });
             }
@@ -1096,8 +1096,8 @@ async fn record_scoped_approval_conversation_route(
 fn assert_scoped_approval_missing_gate(error: ProductAdapterError) {
     assert!(matches!(
         error,
-        ProductAdapterError::WorkflowRejected {
-            kind: ProductWorkflowRejectionKind::ScopeNotFound,
+        ProductAdapterError::SurfaceRejected {
+            kind: ProductSurfaceRejectionKind::ScopeNotFound,
             status_code: 404,
             retryable: false,
             ..
@@ -1192,8 +1192,8 @@ async fn concrete_approval_resolution_rejects_unknown_installation_via_product_b
 
     assert!(matches!(
         err,
-        ProductAdapterError::WorkflowRejected {
-            kind: ProductWorkflowRejectionKind::Unauthorized,
+        ProductAdapterError::SurfaceRejected {
+            kind: ProductSurfaceRejectionKind::Unauthorized,
             status_code: 403,
             retryable: false,
             ..
@@ -1548,8 +1548,8 @@ async fn scoped_approval_resolution_rejects_ambiguous_gate() {
 
     assert!(matches!(
         err,
-        ProductAdapterError::WorkflowRejected {
-            kind: ProductWorkflowRejectionKind::Ambiguous,
+        ProductAdapterError::SurfaceRejected {
+            kind: ProductSurfaceRejectionKind::Ambiguous,
             status_code: 409,
             retryable: false,
             ..
@@ -2262,8 +2262,8 @@ async fn auth_two_live_routes_same_conversation_rejects_ambiguous() {
     assert!(
         matches!(
             err,
-            ProductAdapterError::WorkflowRejected {
-                kind: ProductWorkflowRejectionKind::Ambiguous,
+            ProductAdapterError::SurfaceRejected {
+                kind: ProductSurfaceRejectionKind::Ambiguous,
                 status_code: 409,
                 retryable: false,
                 ..
@@ -2356,8 +2356,8 @@ async fn bare_auth_deny_with_stale_approval_route_selects_auth_route_not_approva
     assert!(
         matches!(
             err,
-            ProductAdapterError::WorkflowRejected {
-                kind: ProductWorkflowRejectionKind::ScopeNotFound,
+            ProductAdapterError::SurfaceRejected {
+                kind: ProductSurfaceRejectionKind::ScopeNotFound,
                 status_code: 404,
                 ..
             }
@@ -2412,7 +2412,7 @@ impl AuthInteractionService for StaleAuthReturningAuthService {
     async fn list_pending(
         &self,
         _request: ListPendingAuthInteractionsRequest,
-    ) -> Result<ListPendingAuthInteractionsResponse, ProductWorkflowError> {
+    ) -> Result<ListPendingAuthInteractionsResponse, ProductSurfaceFailure> {
         Ok(ListPendingAuthInteractionsResponse {
             auth_interactions: Vec::new(),
         })
@@ -2421,9 +2421,9 @@ impl AuthInteractionService for StaleAuthReturningAuthService {
     async fn resolve(
         &self,
         request: ResolveAuthInteractionRequest,
-    ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
+    ) -> Result<ResolveAuthInteractionResponse, ProductSurfaceFailure> {
         self.resolutions.lock().expect("lock").push(request);
-        Err(ProductWorkflowError::AuthInteractionRejected {
+        Err(ProductSurfaceFailure::AuthInteractionRejected {
             kind: ironclaw_product::AuthInteractionRejectionKind::StaleAuth,
         })
     }
@@ -2449,7 +2449,7 @@ impl ApprovalInteractionService for StaleGateReturningApprovalService {
     async fn list_pending(
         &self,
         _request: ListPendingApprovalsRequest,
-    ) -> Result<ListPendingApprovalsResponse, ProductWorkflowError> {
+    ) -> Result<ListPendingApprovalsResponse, ProductSurfaceFailure> {
         Ok(ListPendingApprovalsResponse {
             approvals: Vec::new(),
         })
@@ -2458,9 +2458,9 @@ impl ApprovalInteractionService for StaleGateReturningApprovalService {
     async fn resolve(
         &self,
         request: ResolveApprovalInteractionRequest,
-    ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
+    ) -> Result<ResolveApprovalInteractionResponse, ProductSurfaceFailure> {
         self.resolutions.lock().expect("lock").push(request);
-        Err(ProductWorkflowError::ApprovalInteractionRejected {
+        Err(ProductSurfaceFailure::ApprovalInteractionRejected {
             kind: ironclaw_product::ApprovalInteractionRejectionKind::StaleGate,
         })
     }
@@ -2504,8 +2504,8 @@ async fn auth_resolution_stale_auth_does_not_fall_back_to_delivered_route() {
     assert!(
         matches!(
             err,
-            ProductAdapterError::WorkflowRejected {
-                kind: ProductWorkflowRejectionKind::Conflict,
+            ProductAdapterError::SurfaceRejected {
+                kind: ProductSurfaceRejectionKind::Conflict,
                 ..
             }
         ),
@@ -2551,15 +2551,15 @@ async fn explicit_approval_stale_gate_surfaces_without_fallback() {
         .await
         .expect_err("StaleGate on explicit approve gate:<ref> must surface immediately");
 
-    // StaleGate maps to ProductWorkflowRejectionKind::Conflict (409) via
-    // `ApprovalInteractionRejectionKind::workflow_rejection_kind()`.  The key
+    // StaleGate maps to ProductSurfaceRejectionKind::Conflict (409) via
+    // `ApprovalInteractionRejectionKind::surface_rejection_kind()`.  The key
     // invariant is that it does NOT fall through to a different candidate
     // (which would produce Accepted or a different kind of rejection).
     assert!(
         matches!(
             err,
-            ProductAdapterError::WorkflowRejected {
-                kind: ProductWorkflowRejectionKind::Conflict,
+            ProductAdapterError::SurfaceRejected {
+                kind: ProductSurfaceRejectionKind::Conflict,
                 status_code: 409,
                 retryable: false,
                 ..
@@ -2787,8 +2787,8 @@ async fn bare_approve_with_invalid_stored_approval_route_rejects_invalid_gate_re
     assert!(
         matches!(
             err,
-            ProductAdapterError::WorkflowRejected {
-                kind: ProductWorkflowRejectionKind::InvalidRequest,
+            ProductAdapterError::SurfaceRejected {
+                kind: ProductSurfaceRejectionKind::InvalidRequest,
                 status_code: 400,
                 retryable: false,
                 ..
@@ -2873,8 +2873,8 @@ async fn bare_auth_deny_with_invalid_stored_auth_route_rejects_invalid_gate_ref(
     assert!(
         matches!(
             err,
-            ProductAdapterError::WorkflowRejected {
-                kind: ProductWorkflowRejectionKind::InvalidRequest,
+            ProductAdapterError::SurfaceRejected {
+                kind: ProductSurfaceRejectionKind::InvalidRequest,
                 status_code: 400,
                 retryable: false,
                 ..
@@ -2912,8 +2912,8 @@ async fn approval_resolution_without_interaction_service_returns_retryable_unava
 
     assert!(matches!(
         err,
-        ProductAdapterError::WorkflowRejected {
-            kind: ProductWorkflowRejectionKind::Unavailable,
+        ProductAdapterError::SurfaceRejected {
+            kind: ProductSurfaceRejectionKind::Unavailable,
             status_code: 503,
             retryable: true,
             ..
@@ -3246,7 +3246,7 @@ async fn rejected_busy_is_settled_and_transport_retry_gets_duplicate() {
 #[tokio::test]
 async fn before_inbound_policy_transient_failure_releases_fingerprint() {
     let (workflow, inbound, ledger, policy) = build_workflow_with_policy();
-    policy.force_failure(ProductWorkflowError::Transient {
+    policy.force_failure(ProductSurfaceFailure::Transient {
         reason: "policy store unavailable".into(),
     });
     let envelope = sample_envelope("policy-transient");
@@ -3273,7 +3273,7 @@ async fn before_inbound_policy_transient_failure_releases_fingerprint() {
 #[tokio::test]
 async fn before_inbound_policy_retryable_failure_releases_fingerprint() {
     let (workflow, inbound, ledger, policy) = build_workflow_with_policy();
-    policy.force_failure(ProductWorkflowError::BeforeInboundPolicyFailed {
+    policy.force_failure(ProductSurfaceFailure::BeforeInboundPolicyFailed {
         reason: "policy cache miss".into(),
         permanent: false,
     });
@@ -3337,7 +3337,7 @@ async fn before_inbound_policy_timeout_releases_fingerprint_for_retry() {
 #[tokio::test]
 async fn before_inbound_policy_permanent_failure_settles_terminal_rejection() {
     let (workflow, inbound, ledger, policy) = build_workflow_with_policy();
-    policy.force_failure(ProductWorkflowError::BeforeInboundPolicyFailed {
+    policy.force_failure(ProductSurfaceFailure::BeforeInboundPolicyFailed {
         reason: "policy configuration is invalid".into(),
         permanent: true,
     });
@@ -3527,8 +3527,8 @@ async fn subscription_request_via_accept_inbound_rejects_before_mutating_ledger(
 
     assert!(matches!(
         err,
-        ProductAdapterError::WorkflowRejected {
-            kind: ProductWorkflowRejectionKind::InvalidRequest,
+        ProductAdapterError::SurfaceRejected {
+            kind: ProductSurfaceRejectionKind::InvalidRequest,
             status_code: 400,
             retryable: false,
             ..
@@ -3557,8 +3557,8 @@ async fn subscription_request_via_submit_inbound_rejects_before_mutating_ledger(
 
     assert!(matches!(
         err,
-        ProductAdapterError::WorkflowRejected {
-            kind: ProductWorkflowRejectionKind::InvalidRequest,
+        ProductAdapterError::SurfaceRejected {
+            kind: ProductSurfaceRejectionKind::InvalidRequest,
             status_code: 400,
             retryable: false,
             ..
@@ -3592,8 +3592,8 @@ async fn submit_inbound_with_attachments_rejects_non_user_message_before_mutatin
 
     assert!(matches!(
         err,
-        ProductAdapterError::WorkflowRejected {
-            kind: ProductWorkflowRejectionKind::InvalidRequest,
+        ProductAdapterError::SurfaceRejected {
+            kind: ProductSurfaceRejectionKind::InvalidRequest,
             status_code: 400,
             retryable: false,
             ..
@@ -3623,8 +3623,8 @@ async fn projection_read_via_submit_inbound_rejects_before_mutating_ledger() {
 
     assert!(matches!(
         err,
-        ProductAdapterError::WorkflowRejected {
-            kind: ProductWorkflowRejectionKind::InvalidRequest,
+        ProductAdapterError::SurfaceRejected {
+            kind: ProductSurfaceRejectionKind::InvalidRequest,
             status_code: 400,
             retryable: false,
             ..
@@ -3816,13 +3816,13 @@ async fn projection_subscription_rejects_mismatched_thread_hint() {
         .expect_err("mismatched hint rejects");
 
     match err {
-        ProductAdapterError::WorkflowRejected {
+        ProductAdapterError::SurfaceRejected {
             kind,
             status_code,
             retryable,
             ..
         } => {
-            assert_eq!(kind, ProductWorkflowRejectionKind::InvalidRequest);
+            assert_eq!(kind, ProductSurfaceRejectionKind::InvalidRequest);
             assert_eq!(status_code, 400);
             assert!(!retryable);
         }
@@ -3901,8 +3901,8 @@ async fn projection_subscription_requires_existing_conversation_binding() {
 
     assert!(matches!(
         err,
-        ProductAdapterError::WorkflowRejected {
-            kind: ProductWorkflowRejectionKind::ScopeNotFound,
+        ProductAdapterError::SurfaceRejected {
+            kind: ProductSurfaceRejectionKind::ScopeNotFound,
             status_code: 404,
             retryable: false,
             ..
@@ -3986,8 +3986,8 @@ async fn preconfigured_actor_binding_rejects_unconfigured_actor() {
 
     assert!(matches!(
         err,
-        ProductAdapterError::WorkflowRejected {
-            kind: ProductWorkflowRejectionKind::ScopeNotFound,
+        ProductAdapterError::SurfaceRejected {
+            kind: ProductSurfaceRejectionKind::ScopeNotFound,
             status_code: 404,
             retryable: false,
             ..
@@ -4098,8 +4098,8 @@ async fn actor_user_resolver_rejects_unknown_actor_before_turn_submission() {
     assert_eq!(actor_resolver.calls().len(), 1);
     assert!(matches!(
         err,
-        ProductAdapterError::WorkflowRejected {
-            kind: ProductWorkflowRejectionKind::ScopeNotFound,
+        ProductAdapterError::SurfaceRejected {
+            kind: ProductSurfaceRejectionKind::ScopeNotFound,
             status_code: 404,
             retryable: false,
             ..
@@ -4143,8 +4143,8 @@ async fn actor_user_resolver_rechecks_revocation_before_turn_submission() {
     );
     assert!(matches!(
         err,
-        ProductAdapterError::WorkflowRejected {
-            kind: ProductWorkflowRejectionKind::ScopeNotFound,
+        ProductAdapterError::SurfaceRejected {
+            kind: ProductSurfaceRejectionKind::ScopeNotFound,
             status_code: 404,
             retryable: false,
             ..
@@ -4280,7 +4280,7 @@ async fn lookup_binding_with_actor_user_resolver_uses_existing_pairings_only() {
         actor_resolver.calls().is_empty(),
         "lookup cannot revalidate until a durable pairing and route exist"
     );
-    assert!(matches!(err, ProductWorkflowError::BindingRequired { .. }));
+    assert!(matches!(err, ProductSurfaceFailure::BindingRequired { .. }));
 }
 
 #[tokio::test]
@@ -4298,7 +4298,7 @@ async fn lookup_binding_with_actor_user_resolver_ignores_resolver_failures_befor
         .await
         .expect_err("missing durable pairing fails before resolver revalidation");
 
-    assert!(matches!(err, ProductWorkflowError::BindingRequired { .. }));
+    assert!(matches!(err, ProductSurfaceFailure::BindingRequired { .. }));
 }
 
 #[tokio::test]
@@ -4342,7 +4342,7 @@ async fn lookup_binding_with_actor_user_resolver_rejects_a_stale_actor_pairing()
         .expect_err("lookup must reject a durable pairing that no longer matches the resolver");
 
     assert_eq!(actor_resolver.calls().len(), 1);
-    assert!(matches!(error, ProductWorkflowError::BindingAccessDenied));
+    assert!(matches!(error, ProductSurfaceFailure::BindingAccessDenied));
 }
 
 #[tokio::test]
@@ -4371,7 +4371,7 @@ async fn lookup_binding_rechecks_direct_actor_revocation_after_the_route_was_cre
 
     assert!(matches!(
         error,
-        ProductWorkflowError::BindingRequired { .. } | ProductWorkflowError::BindingAccessDenied
+        ProductSurfaceFailure::BindingRequired { .. } | ProductSurfaceFailure::BindingAccessDenied
     ));
 }
 
@@ -4405,12 +4405,12 @@ async fn lookup_binding_rechecks_direct_actor_revocation_when_the_epoch_changes(
 
     assert!(matches!(
         error,
-        ProductWorkflowError::BindingRequired { .. } | ProductWorkflowError::BindingAccessDenied
+        ProductSurfaceFailure::BindingRequired { .. } | ProductSurfaceFailure::BindingAccessDenied
     ));
 }
 
 #[tokio::test]
-async fn concrete_product_workflow_accepts_user_message_for_trusted_installation() {
+async fn concrete_product_surface_accepts_user_message_for_trusted_installation() {
     let conversations = Arc::new(InMemoryConversationServices::default());
     conversations
         .pair_external_actor(
@@ -4474,7 +4474,7 @@ async fn concrete_product_workflow_accepts_user_message_for_trusted_installation
 }
 
 #[tokio::test]
-async fn concrete_product_workflow_accepts_shared_route_participant_on_existing_thread() {
+async fn concrete_product_surface_accepts_shared_route_participant_on_existing_thread() {
     let tenant_id = TenantId::new("tenant:alpha").expect("tenant");
     let adapter_kind = ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter");
     let installation_id =
@@ -4574,7 +4574,7 @@ async fn concrete_product_workflow_accepts_shared_route_participant_on_existing_
 }
 
 #[tokio::test]
-async fn concrete_product_workflow_persists_first_bind_default_scope() {
+async fn concrete_product_surface_persists_first_bind_default_scope() {
     let conversations = Arc::new(InMemoryConversationServices::default());
     conversations
         .pair_external_actor(
@@ -4652,7 +4652,7 @@ async fn concrete_product_workflow_persists_first_bind_default_scope() {
 }
 
 #[tokio::test]
-async fn concrete_product_workflow_keeps_installations_tenant_isolated() {
+async fn concrete_product_surface_keeps_installations_tenant_isolated() {
     let conversations = Arc::new(InMemoryConversationServices::default());
     for (install, tenant, user) in [
         ("install_alpha", "tenant:alpha", "user:alice"),
@@ -4775,7 +4775,7 @@ async fn shared_route_without_configured_subject_requires_binding() {
 
     assert!(matches!(
         error,
-        ProductWorkflowError::BindingRequired { reason }
+        ProductSurfaceFailure::BindingRequired { reason }
             if reason == "shared product route requires a configured subject user"
     ));
 }
@@ -4957,7 +4957,7 @@ async fn shared_route_uses_dynamic_subject_route_resolver_without_rebuilding_sco
         .expect_err("shared binding must require a configured subject");
     assert!(matches!(
         error,
-        ProductWorkflowError::BindingRequired { reason }
+        ProductSurfaceFailure::BindingRequired { reason }
             if reason == "shared product route requires a configured subject user"
     ));
 
@@ -5057,7 +5057,7 @@ async fn shared_route_uses_dynamic_subject_route_resolver_without_rebuilding_sco
         .expect_err("existing shared binding must record the external event route");
     assert!(matches!(
         route_mismatch,
-        ProductWorkflowError::BindingAccessDenied
+        ProductSurfaceFailure::BindingAccessDenied
     ));
     assert_eq!(failing_subject_resolver.call_count(), 0);
     let calls = subject_resolver.calls();
@@ -5230,7 +5230,7 @@ async fn shared_route_can_disable_default_subject_for_unrouted_conversations() {
         .expect_err("unrouted shared binding must not fall back to default subject");
     assert!(matches!(
         error,
-        ProductWorkflowError::BindingRequired { reason }
+        ProductSurfaceFailure::BindingRequired { reason }
             if reason == "shared product route requires a configured subject user"
     ));
     assert!(
@@ -5309,7 +5309,7 @@ async fn shared_route_can_disable_default_subject_for_unrouted_conversations() {
         .expect_err("existing shared binding must not switch subjects without rebinding");
     assert!(matches!(
         reassigned_error,
-        ProductWorkflowError::BindingAccessDenied
+        ProductSurfaceFailure::BindingAccessDenied
     ));
 
     subject_resolver.clear_subject();
@@ -5335,7 +5335,7 @@ async fn shared_route_can_disable_default_subject_for_unrouted_conversations() {
         .expect_err("existing shared binding must stop resolving after route removal");
     assert!(matches!(
         error,
-        ProductWorkflowError::BindingRequired { reason }
+        ProductSurfaceFailure::BindingRequired { reason }
             if reason == "shared product route requires a configured subject user"
     ));
 
@@ -5364,7 +5364,7 @@ async fn shared_route_can_disable_default_subject_for_unrouted_conversations() {
         .expect_err("existing shared binding lookup must stop after route removal");
     assert!(matches!(
         lookup_error,
-        ProductWorkflowError::BindingRequired { reason }
+        ProductSurfaceFailure::BindingRequired { reason }
             if reason == "shared product route requires a configured subject user"
     ));
 }
@@ -5454,7 +5454,7 @@ async fn shared_lookup_binding_rejects_existing_binding_when_resolved_actor_diff
         .await
         .expect_err("lookup should reject mismatched resolved actor");
 
-    assert!(matches!(error, ProductWorkflowError::BindingAccessDenied));
+    assert!(matches!(error, ProductSurfaceFailure::BindingAccessDenied));
 }
 
 #[tokio::test]
@@ -5543,7 +5543,7 @@ async fn lookup_binding_does_not_backfill_legacy_ownerless_shared_route() {
         .await
         .expect_err("lookup must not backfill legacy ownerless shared routes");
 
-    assert!(matches!(error, ProductWorkflowError::BindingAccessDenied));
+    assert!(matches!(error, ProductSurfaceFailure::BindingAccessDenied));
     assert!(
         subject_resolver.calls().is_empty(),
         "existing-only lookup must stay read-only and must not invoke route subject resolution"
@@ -5643,13 +5643,13 @@ async fn shared_route_propagates_dynamic_subject_route_resolver_error() {
 
     assert!(matches!(
         error,
-        ProductWorkflowError::Transient { reason }
+        ProductSurfaceFailure::Transient { reason }
             if reason == "subject resolver backend down"
     ));
 }
 
 #[tokio::test]
-async fn concrete_product_workflow_bot_mention_uses_shared_route() {
+async fn concrete_product_surface_bot_mention_uses_shared_route() {
     let binding = Arc::new(FakeConversationBindingService::new());
     let coordinator = Arc::new(RecordingTurnCoordinator::default());
     let inbound = Arc::new(DefaultInboundTurnService::new(
@@ -5683,7 +5683,7 @@ async fn concrete_product_workflow_bot_mention_uses_shared_route() {
 }
 
 #[tokio::test]
-async fn concrete_product_workflow_reply_to_bot_requires_existing_binding() {
+async fn concrete_product_surface_reply_to_bot_requires_existing_binding() {
     let conversations = Arc::new(InMemoryConversationServices::default());
     conversations
         .pair_external_actor(
@@ -5743,8 +5743,8 @@ async fn concrete_product_workflow_reply_to_bot_requires_existing_binding() {
 
     assert!(matches!(
         err,
-        ProductAdapterError::WorkflowRejected {
-            kind: ProductWorkflowRejectionKind::ScopeNotFound,
+        ProductAdapterError::SurfaceRejected {
+            kind: ProductSurfaceRejectionKind::ScopeNotFound,
             ..
         }
     ));
@@ -5755,7 +5755,7 @@ async fn concrete_product_workflow_reply_to_bot_requires_existing_binding() {
 }
 
 #[tokio::test]
-async fn concrete_product_workflow_reuses_prepared_binding_for_content_only_policy_rewrite() {
+async fn concrete_product_surface_reuses_prepared_binding_for_content_only_policy_rewrite() {
     let binding = Arc::new(FakeConversationBindingService::new());
     let coordinator = Arc::new(RecordingTurnCoordinator::default());
     let inbound = Arc::new(DefaultInboundTurnService::new(
@@ -5805,7 +5805,7 @@ async fn concrete_product_workflow_reuses_prepared_binding_for_content_only_poli
 }
 
 #[tokio::test]
-async fn concrete_product_workflow_recomputes_route_after_policy_rewrites_trigger() {
+async fn concrete_product_surface_recomputes_route_after_policy_rewrites_trigger() {
     let binding = Arc::new(FakeConversationBindingService::new());
     let coordinator = Arc::new(RecordingTurnCoordinator::default());
     let inbound = Arc::new(DefaultInboundTurnService::new(
@@ -5848,7 +5848,7 @@ async fn concrete_product_workflow_recomputes_route_after_policy_rewrites_trigge
 }
 
 #[tokio::test]
-async fn concrete_product_workflow_rejects_unknown_installation_as_terminal() {
+async fn concrete_product_surface_rejects_unknown_installation_as_terminal() {
     let conversations = Arc::new(InMemoryConversationServices::default());
     conversations
         .pair_external_actor(
@@ -5879,8 +5879,8 @@ async fn concrete_product_workflow_rejects_unknown_installation_as_terminal() {
         .expect_err("unknown installation rejected");
     assert!(matches!(
         err,
-        ProductAdapterError::WorkflowRejected {
-            kind: ProductWorkflowRejectionKind::Unauthorized,
+        ProductAdapterError::SurfaceRejected {
+            kind: ProductSurfaceRejectionKind::Unauthorized,
             status_code: 403,
             retryable: false,
             ..
@@ -5895,7 +5895,7 @@ async fn concrete_product_workflow_rejects_unknown_installation_as_terminal() {
 }
 
 #[tokio::test]
-async fn concrete_product_workflow_rejects_unpaired_actor_before_turn_submission() {
+async fn concrete_product_surface_rejects_unpaired_actor_before_turn_submission() {
     let conversations = Arc::new(InMemoryConversationServices::default());
     let binding = product_binding_service(
         conversations,
@@ -5926,8 +5926,8 @@ async fn concrete_product_workflow_rejects_unpaired_actor_before_turn_submission
         .expect_err("unpaired actor rejected");
     assert!(matches!(
         err,
-        ProductAdapterError::WorkflowRejected {
-            kind: ProductWorkflowRejectionKind::ScopeNotFound,
+        ProductAdapterError::SurfaceRejected {
+            kind: ProductSurfaceRejectionKind::ScopeNotFound,
             status_code: 404,
             retryable: false,
             ..
@@ -5993,8 +5993,8 @@ async fn terminal_rejection_for_unpaired_actor_does_not_poison_other_actor_event
         .expect_err("unpaired actor rejected");
     assert!(matches!(
         err,
-        ProductAdapterError::WorkflowRejected {
-            kind: ProductWorkflowRejectionKind::ScopeNotFound,
+        ProductAdapterError::SurfaceRejected {
+            kind: ProductSurfaceRejectionKind::ScopeNotFound,
             ..
         }
     ));
@@ -6074,8 +6074,8 @@ async fn accepted_message_replay_validates_current_actor_before_submit() {
         .expect_err("unpaired retry must not replay accepted message");
     assert!(matches!(
         err,
-        ProductAdapterError::WorkflowRejected {
-            kind: ProductWorkflowRejectionKind::ScopeNotFound,
+        ProductAdapterError::SurfaceRejected {
+            kind: ProductSurfaceRejectionKind::ScopeNotFound,
             ..
         }
     ));
@@ -6083,7 +6083,7 @@ async fn accepted_message_replay_validates_current_actor_before_submit() {
 }
 
 #[tokio::test]
-async fn concrete_product_workflow_replays_binding_access_denied_rejection() {
+async fn concrete_product_surface_replays_binding_access_denied_rejection() {
     let conversations = Arc::new(InMemoryConversationServices::default());
     conversations
         .pair_external_actor(
@@ -6159,8 +6159,8 @@ async fn concrete_product_workflow_replays_binding_access_denied_rejection() {
         .expect_err("direct participant rejected");
     assert!(matches!(
         err,
-        ProductAdapterError::WorkflowRejected {
-            kind: ProductWorkflowRejectionKind::Unauthorized,
+        ProductAdapterError::SurfaceRejected {
+            kind: ProductSurfaceRejectionKind::Unauthorized,
             status_code: 403,
             retryable: false,
             ..
@@ -6257,7 +6257,7 @@ async fn in_memory_idempotency_ledger_allows_only_one_concurrent_reservation() {
     assert_eq!(
         results
             .iter()
-            .filter(|result| matches!(result, Err(ProductWorkflowError::Transient { .. })))
+            .filter(|result| matches!(result, Err(ProductSurfaceFailure::Transient { .. })))
             .count(),
         1
     );
@@ -6503,7 +6503,7 @@ impl ProductActorUserResolver for MutableProductActorUserResolver {
     async fn resolve_product_actor_user(
         &self,
         _request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<ResolvedProductActorUser>, ProductWorkflowError> {
+    ) -> Result<Option<ResolvedProductActorUser>, ProductSurfaceFailure> {
         Ok(self
             .current
             .lock()
@@ -6533,7 +6533,7 @@ impl ProductActorUserResolver for RecordingProductActorUserResolver {
     async fn resolve_product_actor_user(
         &self,
         request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<ResolvedProductActorUser>, ProductWorkflowError> {
+    ) -> Result<Option<ResolvedProductActorUser>, ProductSurfaceFailure> {
         self.calls
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -6580,7 +6580,7 @@ impl ProductActorUserResolver for ReplacingProductActorUserResolver {
     async fn resolve_product_actor_user(
         &self,
         request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<ResolvedProductActorUser>, ProductWorkflowError> {
+    ) -> Result<Option<ResolvedProductActorUser>, ProductSurfaceFailure> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         if request.external_actor_ref != self.actor_ref {
             return Ok(None);
@@ -6629,7 +6629,7 @@ impl ProductActorUserResolver for RevokingProductActorUserResolver {
     async fn resolve_product_actor_user(
         &self,
         request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<ResolvedProductActorUser>, ProductWorkflowError> {
+    ) -> Result<Option<ResolvedProductActorUser>, ProductSurfaceFailure> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         if call == 0 && request.external_actor_ref == self.actor_ref {
             Ok(Some(ResolvedProductActorUser::new(self.user_id.clone())))
@@ -6760,7 +6760,7 @@ impl ProductConversationSubjectRouteResolver for RecordingSubjectRouteResolver {
     async fn resolve_product_conversation_subject_route(
         &self,
         request: ProductConversationSubjectRouteResolutionRequest,
-    ) -> Result<Option<UserId>, ProductWorkflowError> {
+    ) -> Result<Option<UserId>, ProductSurfaceFailure> {
         self.calls
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -6792,12 +6792,12 @@ impl ProductConversationSubjectRouteResolver for FailingSubjectRouteResolver {
     async fn resolve_product_conversation_subject_route(
         &self,
         _request: ProductConversationSubjectRouteResolutionRequest,
-    ) -> Result<Option<UserId>, ProductWorkflowError> {
+    ) -> Result<Option<UserId>, ProductSurfaceFailure> {
         *self
             .calls
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) += 1;
-        Err(ProductWorkflowError::Transient {
+        Err(ProductSurfaceFailure::Transient {
             reason: "subject resolver backend down".into(),
         })
     }
@@ -6811,8 +6811,8 @@ impl ProductActorUserResolver for FailingProductActorUserResolver {
     async fn resolve_product_actor_user(
         &self,
         _request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<ResolvedProductActorUser>, ProductWorkflowError> {
-        Err(ProductWorkflowError::BindingResolutionFailed {
+    ) -> Result<Option<ResolvedProductActorUser>, ProductSurfaceFailure> {
+        Err(ProductSurfaceFailure::BindingResolutionFailed {
             reason: "actor resolver backend down".into(),
         })
     }
@@ -6866,7 +6866,7 @@ async fn settled_user_message_records_actual_submitted_run_id() {
 #[tokio::test]
 async fn retryable_dispatch_failure_releases_fingerprint_for_recovery() {
     let (workflow, inbound, ledger) = build_workflow();
-    inbound.force_failure(ProductWorkflowError::Transient {
+    inbound.force_failure(ProductSurfaceFailure::Transient {
         reason: "turn coordinator unavailable".into(),
     });
 
@@ -6943,7 +6943,7 @@ async fn fake_ledger_expiration_reclaims_in_flight_fingerprint() {
         .begin_or_replay(fingerprint.clone(), received_at)
         .await
         .expect_err("fresh in-flight action blocks duplicate dispatch");
-    assert!(matches!(duplicate, ProductWorkflowError::Transient { .. }));
+    assert!(matches!(duplicate, ProductSurfaceFailure::Transient { .. }));
 
     assert_eq!(
         ledger.expire_in_flight_before(received_at + Duration::seconds(1)),
@@ -6959,7 +6959,7 @@ async fn fake_ledger_expiration_reclaims_in_flight_fingerprint() {
 #[tokio::test]
 async fn permanent_turn_submission_failure_settles_terminal_rejection() {
     let (workflow, inbound, ledger) = build_workflow();
-    inbound.force_failure(ProductWorkflowError::TurnSubmissionFailed {
+    inbound.force_failure(ProductSurfaceFailure::TurnSubmissionFailed {
         error: TurnError::Unauthorized,
     });
 
@@ -6990,7 +6990,7 @@ async fn permanent_turn_submission_failure_settles_terminal_rejection() {
 #[tokio::test]
 async fn retryable_turn_submission_failure_releases_for_retry() {
     let (workflow, inbound, ledger) = build_workflow();
-    inbound.force_failure(ProductWorkflowError::TurnSubmissionFailed {
+    inbound.force_failure(ProductSurfaceFailure::TurnSubmissionFailed {
         error: TurnError::Unavailable {
             reason: "turn store unavailable".into(),
         },
@@ -7016,7 +7016,7 @@ async fn retryable_turn_submission_failure_releases_for_retry() {
 #[tokio::test]
 async fn settle_failure_does_not_return_success_ack() {
     let (workflow, inbound, ledger) = build_workflow();
-    ledger.force_settle_failure(ironclaw_product::ProductWorkflowError::Transient {
+    ledger.force_settle_failure(ironclaw_product::ProductSurfaceFailure::Transient {
         reason: "settle timeout".into(),
     });
 
@@ -7075,7 +7075,7 @@ async fn unsupported_action_is_settled_as_terminal_rejection() {
 #[tokio::test]
 async fn ledger_transient_failure_surfaces_retryable_error() {
     let (workflow, _inbound, ledger) = build_workflow();
-    ledger.force_failure(ironclaw_product::ProductWorkflowError::Transient {
+    ledger.force_failure(ironclaw_product::ProductSurfaceFailure::Transient {
         reason: "db timeout".into(),
     });
 

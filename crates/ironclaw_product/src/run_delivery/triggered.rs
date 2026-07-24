@@ -32,7 +32,7 @@ use crate::delivery_coordinator::{
     CoordinatedDeliveryError, CoordinatedDeliveryOutcome, CoordinatedDeliveryRequest,
     DeliveryIntent,
 };
-use crate::{ProductOutboundTargetResolver, ProductWorkflowError};
+use crate::{ProductOutboundTargetResolver, ProductSurfaceFailure};
 
 // The codec contract lives in `ironclaw_product` (the vendor half
 // is implemented by channel extension crates, which never depend on this
@@ -769,7 +769,7 @@ async fn deliver_triggered_notification(
 fn classify_delivery_error(error: CoordinatedDeliveryError) -> TriggeredNotificationFailure {
     match &error {
         CoordinatedDeliveryError::Workflow(
-            ProductWorkflowError::OutboundTargetNotDirectMessage,
+            ProductSurfaceFailure::OutboundTargetNotDirectMessage,
         ) => TriggeredNotificationFailure::OAuthTargetNotDm,
         CoordinatedDeliveryError::Outbound(OutboundError::PreferenceTargetMissing { .. }) => {
             TriggeredNotificationFailure::NoDefaultConfigured
@@ -830,17 +830,17 @@ impl ProductOutboundTargetResolver for TriggeredReplyTargetAuthority<'_> {
         &self,
         target: &ValidatedReplyTargetBinding,
         require_direct_message: bool,
-    ) -> Result<crate::VerifiedProductOutboundTargetMetadata, ProductWorkflowError> {
+    ) -> Result<crate::VerifiedProductOutboundTargetMetadata, ProductSurfaceFailure> {
         // Single enforcement point for the OAuth DM rule, checked against
         // the binding resolved NOW (at send time) — race-free against a
         // stale preference snapshot.
         if require_direct_message && !self.codec.is_personal_direct_message(target.target()) {
-            return Err(ProductWorkflowError::OutboundTargetNotDirectMessage);
+            return Err(ProductSurfaceFailure::OutboundTargetNotDirectMessage);
         }
         let external_conversation_ref = self
             .codec
             .conversation_for_target(target.target())
-            .ok_or_else(|| ProductWorkflowError::BindingResolutionFailed {
+            .ok_or_else(|| ProductSurfaceFailure::BindingResolutionFailed {
                 reason: format!(
                     "triggered delivery: cannot decode conversation from binding ref '{}'",
                     target.target().as_str()

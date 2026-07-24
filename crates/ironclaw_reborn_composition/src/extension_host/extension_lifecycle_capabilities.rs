@@ -16,7 +16,7 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_product::{
     LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
-    ProductWorkflowError,
+    ProductSurfaceFailure,
 };
 use serde::Deserialize;
 
@@ -363,7 +363,7 @@ fn extension_package_ref(
 const PROVIDER_INSTANCE_NOT_CONFIGURED_SAFE_SUMMARY: &str =
     "extension activation requires host instance configuration";
 
-fn lifecycle_error(error: ProductWorkflowError) -> FirstPartyCapabilityError {
+fn lifecycle_error(error: ProductSurfaceFailure) -> FirstPartyCapabilityError {
     match error {
         // UNTRUSTED on purpose. `InvalidBindingRequest` has ~40 construction
         // sites and several interpolate externally-influenced text: a hosted
@@ -379,7 +379,7 @@ fn lifecycle_error(error: ProductWorkflowError) -> FirstPartyCapabilityError {
         // `ironclaw_threads` applies to untrusted output. The trusted channel
         // is reserved for reasons built entirely from host-authored constants
         // (the `ProviderInstanceNotConfigured` arm below).
-        ProductWorkflowError::InvalidBindingRequest { reason } => {
+        ProductSurfaceFailure::InvalidBindingRequest { reason } => {
             FirstPartyCapabilityError::dispatch_with_diagnostic(
                 RuntimeDispatchErrorKind::InputEncode,
                 None,
@@ -398,17 +398,17 @@ fn lifecycle_error(error: ProductWorkflowError) -> FirstPartyCapabilityError {
         // arm is the one exception routed onto the TRUSTED channel
         // (`dispatch_with_host_remediation`), because its `reason` is built
         // entirely from host-authored constants.
-        ProductWorkflowError::ProviderInstanceNotConfigured { reason } => {
+        ProductSurfaceFailure::ProviderInstanceNotConfigured { reason } => {
             FirstPartyCapabilityError::dispatch_with_host_remediation(
                 RuntimeDispatchErrorKind::OperationFailed,
                 Some(PROVIDER_INSTANCE_NOT_CONFIGURED_SAFE_SUMMARY.to_string()),
                 reason,
             )
         }
-        ProductWorkflowError::UnsupportedActionKind { .. } => {
+        ProductSurfaceFailure::UnsupportedActionKind { .. } => {
             FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode)
         }
-        ProductWorkflowError::Transient { .. } => {
+        ProductSurfaceFailure::Transient { .. } => {
             FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
         }
         _ => FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed),
@@ -1701,7 +1701,7 @@ mod tests {
             ironclaw_reborn_config::google_remediation_text(),
             ironclaw_reborn_config::apply_step_text()
         );
-        let mapped = lifecycle_error(ProductWorkflowError::ProviderInstanceNotConfigured {
+        let mapped = lifecycle_error(ProductSurfaceFailure::ProviderInstanceNotConfigured {
             reason: reason.clone(),
         });
 
@@ -1738,7 +1738,7 @@ mod tests {
     /// entirely from host-authored constants may ride the trusted channel.
     #[test]
     fn invalid_binding_request_carries_reason_on_the_untrusted_diagnostic_channel() {
-        let mapped = lifecycle_error(ProductWorkflowError::InvalidBindingRequest {
+        let mapped = lifecycle_error(ProductSurfaceFailure::InvalidBindingRequest {
             reason: "telegram account setup was declared without a mounted host".to_string(),
         });
 
@@ -1755,7 +1755,7 @@ mod tests {
 
     #[test]
     fn transient_lifecycle_errors_map_to_retryable_backend_failure() {
-        let mapped = lifecycle_error(ProductWorkflowError::Transient {
+        let mapped = lifecycle_error(ProductSurfaceFailure::Transient {
             reason: "temporary lifecycle store outage".to_string(),
         });
 
@@ -1772,7 +1772,7 @@ mod tests {
     /// credential-vocabulary scan.
     #[test]
     fn model_influenced_invalid_binding_reason_never_reaches_the_trusted_channel() {
-        let mapped = lifecycle_error(ProductWorkflowError::InvalidBindingRequest {
+        let mapped = lifecycle_error(ProductSurfaceFailure::InvalidBindingRequest {
             reason: "extension api_key is not installed".to_string(),
         });
 

@@ -4,14 +4,14 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::InstallationState;
+use ironclaw_host_api::{InstallationState, ProductSurfaceError};
 use ironclaw_product::{
     ActionDispatchKind, DefaultProductSurface, FakeConversationBindingService,
     FakeIdempotencyLedger, FakeInboundTurnService, LifecyclePackageKind, LifecyclePackageRef,
     LifecycleProductAction, LifecycleProductCommandService, LifecycleProductContext,
     LifecycleProductFacade, LifecycleProductResponse, ProductCommand, ProductCommandAdmission,
     ProductCommandAdmissionService, ProductCommandContext, ProductCommandService,
-    ProductModelCommand, ProductWorkflowError,
+    ProductModelCommand,
 };
 use ironclaw_product::{
     AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
@@ -57,11 +57,11 @@ fn sample_command_envelope(
 
 struct RecordingProductCommandAdmissionService {
     records: Mutex<Vec<(ProductCommandContext, ProductCommand)>>,
-    result: Result<ProductCommandAdmission, ProductWorkflowError>,
+    result: Result<ProductCommandAdmission, ProductSurfaceError>,
 }
 
 impl RecordingProductCommandAdmissionService {
-    fn new(result: Result<ProductCommandAdmission, ProductWorkflowError>) -> Self {
+    fn new(result: Result<ProductCommandAdmission, ProductSurfaceError>) -> Self {
         Self {
             records: Mutex::new(Vec::new()),
             result,
@@ -72,7 +72,7 @@ impl RecordingProductCommandAdmissionService {
         Self::new(Ok(ProductCommandAdmission::Allowed))
     }
 
-    fn failing(error: ProductWorkflowError) -> Self {
+    fn failing(error: ProductSurfaceError) -> Self {
         Self::new(Err(error))
     }
 
@@ -87,7 +87,7 @@ impl ProductCommandAdmissionService for RecordingProductCommandAdmissionService 
         &self,
         context: &ProductCommandContext,
         command: &ProductCommand,
-    ) -> Result<ProductCommandAdmission, ProductWorkflowError> {
+    ) -> Result<ProductCommandAdmission, ProductSurfaceError> {
         self.records
             .lock()
             .expect("lock")
@@ -98,7 +98,7 @@ impl ProductCommandAdmissionService for RecordingProductCommandAdmissionService 
 
 struct RecordingProductCommandService {
     commands: Mutex<Vec<ProductCommand>>,
-    result: Result<ProductInboundAck, ProductWorkflowError>,
+    result: Result<ProductInboundAck, ProductSurfaceError>,
 }
 
 #[derive(Default)]
@@ -118,7 +118,7 @@ impl LifecycleProductFacade for RecordingLifecycleProductFacade {
         &self,
         _context: LifecycleProductContext,
         action: LifecycleProductAction,
-    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+    ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
         self.commands.lock().expect("lock").push(action.clone());
         Ok(LifecycleProductResponse::projection(
             action.package_ref().cloned(),
@@ -131,7 +131,7 @@ impl LifecycleProductFacade for RecordingLifecycleProductFacade {
         &self,
         _context: LifecycleProductContext,
         package_ref: LifecyclePackageRef,
-    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+    ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
         Ok(LifecycleProductResponse::projection(
             Some(package_ref),
             InstallationState::Unsupported,
@@ -141,7 +141,7 @@ impl LifecycleProductFacade for RecordingLifecycleProductFacade {
 }
 
 struct FailingLifecycleProductFacade {
-    error: ProductWorkflowError,
+    error: ProductSurfaceError,
 }
 
 #[async_trait]
@@ -150,7 +150,7 @@ impl LifecycleProductFacade for FailingLifecycleProductFacade {
         &self,
         _context: LifecycleProductContext,
         _action: LifecycleProductAction,
-    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+    ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
         Err(self.error.clone())
     }
 
@@ -158,13 +158,13 @@ impl LifecycleProductFacade for FailingLifecycleProductFacade {
         &self,
         _context: LifecycleProductContext,
         _package_ref: LifecyclePackageRef,
-    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+    ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
         Err(self.error.clone())
     }
 }
 
 impl RecordingProductCommandService {
-    fn new(result: Result<ProductInboundAck, ProductWorkflowError>) -> Self {
+    fn new(result: Result<ProductInboundAck, ProductSurfaceError>) -> Self {
         Self {
             commands: Mutex::new(Vec::new()),
             result,
@@ -175,7 +175,7 @@ impl RecordingProductCommandService {
         Self::new(Ok(ack))
     }
 
-    fn failing(error: ProductWorkflowError) -> Self {
+    fn failing(error: ProductSurfaceError) -> Self {
         Self::new(Err(error))
     }
 
@@ -190,7 +190,7 @@ impl ProductCommandService for RecordingProductCommandService {
         &self,
         _context: ProductCommandContext,
         command: ProductCommand,
-    ) -> Result<ProductInboundAck, ProductWorkflowError> {
+    ) -> Result<ProductInboundAck, ProductSurfaceError> {
         self.commands.lock().expect("lock").push(command);
         self.result.clone()
     }
@@ -365,9 +365,7 @@ async fn lifecycle_facade_error_bubbles_and_releases_idempotency_lease() {
     let admission_service = Arc::new(RecordingProductCommandAdmissionService::allowing());
     let command_service = Arc::new(LifecycleProductCommandService::new(Arc::new(
         FailingLifecycleProductFacade {
-            error: ProductWorkflowError::Transient {
-                reason: "lifecycle backend unavailable".to_string(),
-            },
+            error: ProductSurfaceError::service_unavailable(true),
         },
     )));
     let workflow = DefaultProductSurface::new(inbound.clone(), ledger.clone(), binding)
@@ -461,9 +459,7 @@ async fn command_admission_error_releases_idempotency_lease() {
     let ledger = Arc::new(FakeIdempotencyLedger::new());
     let binding = Arc::new(FakeConversationBindingService::new());
     let admission_service = Arc::new(RecordingProductCommandAdmissionService::failing(
-        ProductWorkflowError::Transient {
-            reason: "admission backend unavailable".into(),
-        },
+        ProductSurfaceError::service_unavailable(true),
     ));
     let command_service = Arc::new(RecordingProductCommandService::with_ack(
         ProductInboundAck::NoOp,
@@ -492,9 +488,7 @@ async fn command_service_error_releases_idempotency_lease() {
     let binding = Arc::new(FakeConversationBindingService::new());
     let admission_service = Arc::new(RecordingProductCommandAdmissionService::allowing());
     let command_service = Arc::new(RecordingProductCommandService::failing(
-        ProductWorkflowError::Transient {
-            reason: "command backend unavailable".into(),
-        },
+        ProductSurfaceError::service_unavailable(true),
     ));
     let workflow = DefaultProductSurface::new(inbound.clone(), ledger.clone(), binding)
         .with_product_command_admission_service(admission_service)

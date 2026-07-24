@@ -19,7 +19,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_dispatcher::{
+use ironclaw_capabilities::{
     BoundCapabilityAdapter, CapabilityDispatchRequest, ResolvedCapability, RuntimeAdapterResult,
     ToolResolver,
 };

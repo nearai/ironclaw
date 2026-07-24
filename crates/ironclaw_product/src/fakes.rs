@@ -18,7 +18,7 @@ use crate::binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
     ResolvedBinding,
 };
-use crate::error::ProductWorkflowError;
+use crate::error::ProductSurfaceFailure;
 use crate::inbound_turn::{InboundTurnOutcome, InboundTurnService, check_before_inbound_policy};
 use crate::ledger::{IdempotencyDecision, IdempotencyLedger};
 use crate::policy::{BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest};
@@ -48,7 +48,7 @@ pub struct FakeConversationBindingService {
 #[derive(Default)]
 struct FakeBindingState {
     programmed: HashMap<String, ResolvedBinding>,
-    fail_with: Option<ProductWorkflowError>,
+    fail_with: Option<ProductSurfaceFailure>,
     resolve_count: usize,
     route_kinds: Vec<ProductConversationRouteKind>,
 }
@@ -67,7 +67,7 @@ impl FakeConversationBindingService {
     }
 
     /// Force all resolutions to fail.
-    pub fn force_failure(&self, error: ProductWorkflowError) {
+    pub fn force_failure(&self, error: ProductSurfaceFailure) {
         let mut state = self.state.lock().expect("fake binding state lock poisoned"); // safety: test-support fake
         state.fail_with = Some(error);
     }
@@ -96,14 +96,14 @@ impl ConversationBindingService for FakeConversationBindingService {
     async fn resolve_binding(
         &self,
         request: ResolveBindingRequest,
-    ) -> Result<ResolvedBinding, ProductWorkflowError> {
+    ) -> Result<ResolvedBinding, ProductSurfaceFailure> {
         self.resolve_programmed_or_default(request)
     }
 
     async fn lookup_binding(
         &self,
         request: ResolveBindingRequest,
-    ) -> Result<ResolvedBinding, ProductWorkflowError> {
+    ) -> Result<ResolvedBinding, ProductSurfaceFailure> {
         self.resolve_programmed_or_default(request)
     }
 }
@@ -112,7 +112,7 @@ impl FakeConversationBindingService {
     fn resolve_programmed_or_default(
         &self,
         request: ResolveBindingRequest,
-    ) -> Result<ResolvedBinding, ProductWorkflowError> {
+    ) -> Result<ResolvedBinding, ProductSurfaceFailure> {
         let mut state = self.state.lock().expect("fake binding state lock poisoned"); // safety: test-support fake
         state.resolve_count += 1;
         state.route_kinds.push(request.route_kind);
@@ -126,16 +126,16 @@ impl FakeConversationBindingService {
         // Default: deterministic binding from external refs.
         Ok(ResolvedBinding {
             tenant_id: TenantId::new(format!("tenant:{}", request.installation_id.as_str()))
-                .map_err(|e| ProductWorkflowError::BindingResolutionFailed {
+                .map_err(|e| ProductSurfaceFailure::BindingResolutionFailed {
                     reason: e.to_string(),
                 })?,
             actor_user_id: UserId::new(format!("user:{}", request.external_actor_ref.id()))
-                .map_err(|e| ProductWorkflowError::BindingResolutionFailed {
+                .map_err(|e| ProductSurfaceFailure::BindingResolutionFailed {
                     reason: e.to_string(),
                 })?,
             subject_user_id: Some(
                 UserId::new(format!("user:{}", request.external_actor_ref.id())).map_err(|e| {
-                    ProductWorkflowError::BindingResolutionFailed {
+                    ProductSurfaceFailure::BindingResolutionFailed {
                         reason: e.to_string(),
                     }
                 })?,
@@ -145,11 +145,11 @@ impl FakeConversationBindingService {
                 request.installation_id.as_str(),
                 request.external_conversation_ref.conversation_fingerprint()
             ))
-            .map_err(|e| ProductWorkflowError::BindingResolutionFailed {
+            .map_err(|e| ProductSurfaceFailure::BindingResolutionFailed {
                 reason: e.to_string(),
             })?,
             agent_id: Some(AgentId::new("agent:fake").map_err(|e| {
-                ProductWorkflowError::BindingResolutionFailed {
+                ProductSurfaceFailure::BindingResolutionFailed {
                     reason: e.to_string(),
                 }
             })?),
@@ -173,8 +173,8 @@ struct FakeIdempotencyState {
     settled: HashMap<ActionFingerprintKey, ProductInboundAction>,
     released_count: usize,
     last_released: Option<ProductInboundAction>,
-    fail_with: Option<ProductWorkflowError>,
-    settle_fail_with: Option<ProductWorkflowError>,
+    fail_with: Option<ProductSurfaceFailure>,
+    settle_fail_with: Option<ProductSurfaceFailure>,
 }
 
 impl FakeIdempotencyLedger {
@@ -185,13 +185,13 @@ impl FakeIdempotencyLedger {
     }
 
     /// Force all operations to fail.
-    pub fn force_failure(&self, error: ProductWorkflowError) {
+    pub fn force_failure(&self, error: ProductSurfaceFailure) {
         let mut state = self.state.lock().expect("fake ledger state lock poisoned"); // safety: test-support fake
         state.fail_with = Some(error);
     }
 
     /// Force settle operations to fail while begin/replay still succeeds.
-    pub fn force_settle_failure(&self, error: ProductWorkflowError) {
+    pub fn force_settle_failure(&self, error: ProductSurfaceFailure) {
         let mut state = self.state.lock().expect("fake ledger state lock poisoned"); // safety: test-support fake
         state.settle_fail_with = Some(error);
     }
@@ -250,7 +250,7 @@ impl IdempotencyLedger for FakeIdempotencyLedger {
         &self,
         fingerprint: ActionFingerprintKey,
         received_at: DateTime<Utc>,
-    ) -> Result<IdempotencyDecision, ProductWorkflowError> {
+    ) -> Result<IdempotencyDecision, ProductSurfaceFailure> {
         let mut state = self.state.lock().expect("fake ledger state lock poisoned"); // safety: test-support fake
         if let Some(error) = state.fail_with.clone() {
             return Err(error);
@@ -259,7 +259,7 @@ impl IdempotencyLedger for FakeIdempotencyLedger {
             return Ok(IdempotencyDecision::Replay(prior.clone()));
         }
         if state.in_flight.contains_key(&fingerprint) {
-            return Err(ProductWorkflowError::Transient {
+            return Err(ProductSurfaceFailure::Transient {
                 reason: "idempotency fingerprint already in flight; retry after recovery lease"
                     .into(),
             });
@@ -269,7 +269,7 @@ impl IdempotencyLedger for FakeIdempotencyLedger {
         Ok(IdempotencyDecision::New(action))
     }
 
-    async fn settle(&self, action: ProductInboundAction) -> Result<(), ProductWorkflowError> {
+    async fn settle(&self, action: ProductInboundAction) -> Result<(), ProductSurfaceFailure> {
         let mut state = self.state.lock().expect("fake ledger state lock poisoned"); // safety: test-support fake
         if let Some(error) = state.fail_with.clone() {
             return Err(error);
@@ -282,7 +282,7 @@ impl IdempotencyLedger for FakeIdempotencyLedger {
         Ok(())
     }
 
-    async fn release(&self, action: ProductInboundAction) -> Result<(), ProductWorkflowError> {
+    async fn release(&self, action: ProductInboundAction) -> Result<(), ProductSurfaceFailure> {
         let mut state = self.state.lock().expect("fake ledger state lock poisoned"); // safety: test-support fake
         if let Some(error) = state.fail_with.clone() {
             return Err(error);
@@ -313,8 +313,8 @@ pub struct FakeBeforeInboundPolicy {
 #[derive(Default)]
 struct FakeBeforeInboundPolicyState {
     requests: Vec<BeforeInboundPolicyRequest>,
-    programmed_outcomes: VecDeque<Result<BeforeInboundPolicyOutcome, ProductWorkflowError>>,
-    fallback_outcome: Option<Result<BeforeInboundPolicyOutcome, ProductWorkflowError>>,
+    programmed_outcomes: VecDeque<Result<BeforeInboundPolicyOutcome, ProductSurfaceFailure>>,
+    fallback_outcome: Option<Result<BeforeInboundPolicyOutcome, ProductSurfaceFailure>>,
     response_delay: Option<Duration>,
 }
 
@@ -365,7 +365,7 @@ impl FakeBeforeInboundPolicy {
     ///
     /// This does not clear `delay_responses_by`; delayed fakes continue to
     /// delay failure outcomes.
-    pub fn force_failure(&self, error: ProductWorkflowError) {
+    pub fn force_failure(&self, error: ProductSurfaceFailure) {
         let mut state = self
             .state
             .lock()
@@ -376,7 +376,7 @@ impl FakeBeforeInboundPolicy {
     /// Append one policy result consumed by the next request before fallback.
     pub fn program_outcome(
         &self,
-        outcome: Result<BeforeInboundPolicyOutcome, ProductWorkflowError>,
+        outcome: Result<BeforeInboundPolicyOutcome, ProductSurfaceFailure>,
     ) {
         let mut state = self
             .state
@@ -388,7 +388,7 @@ impl FakeBeforeInboundPolicy {
     /// Append policy results consumed in order before the fallback outcome.
     pub fn program_outcomes(
         &self,
-        outcomes: impl IntoIterator<Item = Result<BeforeInboundPolicyOutcome, ProductWorkflowError>>,
+        outcomes: impl IntoIterator<Item = Result<BeforeInboundPolicyOutcome, ProductSurfaceFailure>>,
     ) {
         let mut state = self
             .state
@@ -444,7 +444,7 @@ impl BeforeInboundPolicy for FakeBeforeInboundPolicy {
     async fn check_user_message(
         &self,
         request: BeforeInboundPolicyRequest,
-    ) -> Result<BeforeInboundPolicyOutcome, ProductWorkflowError> {
+    ) -> Result<BeforeInboundPolicyOutcome, ProductSurfaceFailure> {
         let (delay, outcome) = {
             let mut state = self
                 .state
@@ -482,7 +482,7 @@ struct FakeInboundTurnState {
     attempts: usize,
     replay_attempts: usize,
     accepted: Vec<ProductInboundEnvelope>,
-    fail_with: Option<ProductWorkflowError>,
+    fail_with: Option<ProductSurfaceFailure>,
     programmed_replay: VecDeque<InboundTurnOutcome>,
     programmed_outcome: Option<InboundTurnOutcome>,
 }
@@ -522,7 +522,7 @@ impl FakeInboundTurnService {
     }
 
     /// Force all submissions to fail.
-    pub fn force_failure(&self, error: ProductWorkflowError) {
+    pub fn force_failure(&self, error: ProductSurfaceFailure) {
         let mut state = self
             .state
             .lock()
@@ -565,7 +565,7 @@ impl FakeInboundTurnService {
     fn accept_fresh_user_message(
         &self,
         envelope: &ProductInboundEnvelope,
-    ) -> Result<InboundTurnOutcome, ProductWorkflowError> {
+    ) -> Result<InboundTurnOutcome, ProductSurfaceFailure> {
         let mut state = self
             .state
             .lock()
@@ -581,27 +581,27 @@ impl FakeInboundTurnService {
         // Default: successful submission.
         let binding = ResolvedBinding {
             tenant_id: TenantId::new("tenant:fake").map_err(|e| {
-                ProductWorkflowError::BindingResolutionFailed {
+                ProductSurfaceFailure::BindingResolutionFailed {
                     reason: e.to_string(),
                 }
             })?,
             actor_user_id: UserId::new("user:fake").map_err(|e| {
-                ProductWorkflowError::BindingResolutionFailed {
+                ProductSurfaceFailure::BindingResolutionFailed {
                     reason: e.to_string(),
                 }
             })?,
             subject_user_id: Some(UserId::new("user:fake").map_err(|e| {
-                ProductWorkflowError::BindingResolutionFailed {
+                ProductSurfaceFailure::BindingResolutionFailed {
                     reason: e.to_string(),
                 }
             })?),
             thread_id: ThreadId::new("thread:fake").map_err(|e| {
-                ProductWorkflowError::BindingResolutionFailed {
+                ProductSurfaceFailure::BindingResolutionFailed {
                     reason: e.to_string(),
                 }
             })?,
             agent_id: Some(AgentId::new("agent:fake").map_err(|e| {
-                ProductWorkflowError::BindingResolutionFailed {
+                ProductSurfaceFailure::BindingResolutionFailed {
                     reason: e.to_string(),
                 }
             })?),
@@ -609,7 +609,7 @@ impl FakeInboundTurnService {
         };
         let accepted_message_ref =
             AcceptedMessageRef::new(format!("msg:{}", envelope.external_event_id()))
-                .map_err(|e: String| ProductWorkflowError::TurnSubmissionRejected { reason: e })?;
+                .map_err(|e: String| ProductSurfaceFailure::TurnSubmissionRejected { reason: e })?;
         Ok(InboundTurnOutcome::Submitted {
             accepted_message_ref,
             submitted_run_id: TurnRunId::new(),
@@ -629,7 +629,7 @@ impl InboundTurnService for FakeInboundTurnService {
     async fn replay_accepted_user_message(
         &self,
         _envelope: &ProductInboundEnvelope,
-    ) -> Result<Option<InboundTurnOutcome>, ProductWorkflowError> {
+    ) -> Result<Option<InboundTurnOutcome>, ProductSurfaceFailure> {
         let mut state = self
             .state
             .lock()
@@ -641,7 +641,7 @@ impl InboundTurnService for FakeInboundTurnService {
     async fn accept_user_message(
         &self,
         envelope: &ProductInboundEnvelope,
-    ) -> Result<InboundTurnOutcome, ProductWorkflowError> {
+    ) -> Result<InboundTurnOutcome, ProductSurfaceFailure> {
         if let Some(outcome) = self.replay_accepted_user_message(envelope).await? {
             return Ok(outcome);
         }
@@ -652,7 +652,7 @@ impl InboundTurnService for FakeInboundTurnService {
         &self,
         envelope: &ProductInboundEnvelope,
         before_inbound_policy: &dyn BeforeInboundPolicy,
-    ) -> Result<crate::inbound_turn::InboundUserMessageDispatch, ProductWorkflowError> {
+    ) -> Result<crate::inbound_turn::InboundUserMessageDispatch, ProductSurfaceFailure> {
         if let Some(outcome) = self.replay_accepted_user_message(envelope).await? {
             return Ok(crate::inbound_turn::InboundUserMessageDispatch::Accepted(
                 outcome,
@@ -660,7 +660,7 @@ impl InboundTurnService for FakeInboundTurnService {
         }
 
         let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
-            return Err(ProductWorkflowError::UnsupportedActionKind {
+            return Err(ProductSurfaceFailure::UnsupportedActionKind {
                 kind: "non_user_message".into(),
             });
         };
@@ -675,7 +675,7 @@ impl InboundTurnService for FakeInboundTurnService {
             BeforeInboundPolicyOutcome::RewriteUserMessage(payload) => {
                 dispatch_envelope =
                     envelope.with_rewritten_user_message(payload).map_err(|_| {
-                        ProductWorkflowError::TurnSubmissionRejected {
+                        ProductSurfaceFailure::TurnSubmissionRejected {
                             reason: "invalid policy-rewritten user message".into(),
                         }
                     })?;

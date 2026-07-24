@@ -8,7 +8,7 @@ use ironclaw_auth::{
 use ironclaw_product::{
     AuthGateRecord, AuthInteractionReadModel, AuthInteractionRejectionKind, AuthInteractionScope,
     AuthInteractionService, ListPendingAuthInteractionsRequest,
-    ListPendingAuthInteractionsResponse, ProductWorkflowError, ResolveAuthInteractionRequest,
+    ListPendingAuthInteractionsResponse, ProductSurfaceFailure, ResolveAuthInteractionRequest,
     ResolveAuthInteractionResponse,
 };
 use ironclaw_turns::{GateRef, TurnPersistenceSnapshot, TurnRunId, TurnScope, TurnStatus};
@@ -37,14 +37,14 @@ impl AuthInteractionService for UnavailableAuthInteractionService {
     async fn list_pending(
         &self,
         _request: ListPendingAuthInteractionsRequest,
-    ) -> Result<ListPendingAuthInteractionsResponse, ProductWorkflowError> {
+    ) -> Result<ListPendingAuthInteractionsResponse, ProductSurfaceFailure> {
         Err(auth_read_model_unavailable())
     }
 
     async fn resolve(
         &self,
         _request: ResolveAuthInteractionRequest,
-    ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
+    ) -> Result<ResolveAuthInteractionResponse, ProductSurfaceFailure> {
         Err(auth_read_model_unavailable())
     }
 }
@@ -60,7 +60,7 @@ impl SnapshotAuthInteractionReadModel {
         }
     }
 
-    async fn snapshot(&self) -> Result<TurnPersistenceSnapshot, ProductWorkflowError> {
+    async fn snapshot(&self) -> Result<TurnPersistenceSnapshot, ProductSurfaceFailure> {
         self.turn_state.turn_run_snapshot().await.map_err(|error| {
             tracing::debug!(
                 %error,
@@ -73,7 +73,7 @@ impl SnapshotAuthInteractionReadModel {
     async fn blocked_auth_runs(
         &self,
         scope: &AuthInteractionScope,
-    ) -> Result<Vec<BlockedAuthRun>, ProductWorkflowError> {
+    ) -> Result<Vec<BlockedAuthRun>, ProductSurfaceFailure> {
         let turn_scope = turn_scope_for_interaction(scope);
         let snapshot = self.snapshot().await?;
         let mut runs = snapshot
@@ -99,7 +99,7 @@ impl SnapshotAuthInteractionReadModel {
         &self,
         scope: &AuthInteractionScope,
         gate_ref: &GateRef,
-    ) -> Result<Option<TurnRunId>, ProductWorkflowError> {
+    ) -> Result<Option<TurnRunId>, ProductSurfaceFailure> {
         let turn_scope = turn_scope_for_interaction(scope);
         let snapshot = self.snapshot().await?;
         let active = snapshot
@@ -144,7 +144,7 @@ impl SnapshotAuthInteractionReadModel {
         scope: &AuthInteractionScope,
         run_id: TurnRunId,
         gate_ref: &GateRef,
-    ) -> Result<Option<AuthFlowRecord>, ProductWorkflowError> {
+    ) -> Result<Option<AuthFlowRecord>, ProductSurfaceFailure> {
         self.flow_records
             .flow_for_turn_gate(turn_gate_query(scope, run_id, gate_ref)?)
             .await
@@ -174,7 +174,7 @@ fn turn_gate_query(
     scope: &AuthInteractionScope,
     run_id: TurnRunId,
     gate_ref: &GateRef,
-) -> Result<TurnGateAuthFlowQuery, ProductWorkflowError> {
+) -> Result<TurnGateAuthFlowQuery, ProductSurfaceFailure> {
     Ok(TurnGateAuthFlowQuery {
         owner: owner_scope_for_interaction(scope),
         turn_run_ref: TurnRunRef::new(run_id.to_string())
@@ -187,7 +187,7 @@ fn turn_gate_query(
 async fn flows_for_owner(
     source: &Arc<dyn AuthFlowRecordSource>,
     scope: &AuthInteractionScope,
-) -> Result<Vec<AuthFlowRecord>, ProductWorkflowError> {
+) -> Result<Vec<AuthFlowRecord>, ProductSurfaceFailure> {
     source
         .flows_for_owner(owner_scope_for_interaction(scope))
         .await
@@ -208,7 +208,7 @@ fn matching_flow_for_run(
     scope: &AuthInteractionScope,
     run_id: TurnRunId,
     gate_ref: &GateRef,
-) -> Result<Option<AuthFlowRecord>, ProductWorkflowError> {
+) -> Result<Option<AuthFlowRecord>, ProductSurfaceFailure> {
     let query = turn_gate_query(scope, run_id, gate_ref)?;
     Ok(flows
         .iter()
@@ -220,7 +220,7 @@ impl SnapshotAuthInteractionReadModel {
     async fn owner_flows(
         &self,
         scope: &AuthInteractionScope,
-    ) -> Result<Vec<AuthFlowRecord>, ProductWorkflowError> {
+    ) -> Result<Vec<AuthFlowRecord>, ProductSurfaceFailure> {
         flows_for_owner(&self.flow_records, scope).await
     }
 }
@@ -230,7 +230,7 @@ impl AuthInteractionReadModel for SnapshotAuthInteractionReadModel {
     async fn auth_gates(
         &self,
         scope: &AuthInteractionScope,
-    ) -> Result<Vec<AuthGateRecord>, ProductWorkflowError> {
+    ) -> Result<Vec<AuthGateRecord>, ProductSurfaceFailure> {
         let mut gates = Vec::new();
         let flows = self.owner_flows(scope).await?;
         for run in self.blocked_auth_runs(scope).await? {
@@ -246,7 +246,7 @@ impl AuthInteractionReadModel for SnapshotAuthInteractionReadModel {
         scope: &AuthInteractionScope,
         run_id_hint: Option<TurnRunId>,
         gate_ref: &GateRef,
-    ) -> Result<Option<AuthGateRecord>, ProductWorkflowError> {
+    ) -> Result<Option<AuthGateRecord>, ProductSurfaceFailure> {
         let run_id = match run_id_hint {
             Some(run_id) => run_id,
             None => {
@@ -273,8 +273,8 @@ fn turn_scope_for_interaction(scope: &AuthInteractionScope) -> TurnScope {
     )
 }
 
-fn auth_read_model_unavailable() -> ProductWorkflowError {
-    ProductWorkflowError::AuthInteractionRejected {
+fn auth_read_model_unavailable() -> ProductSurfaceFailure {
+    ProductSurfaceFailure::AuthInteractionRejected {
         kind: AuthInteractionRejectionKind::FlowUnavailable,
     }
 }

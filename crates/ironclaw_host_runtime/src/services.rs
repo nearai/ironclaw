@@ -13,8 +13,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use ironclaw_approvals::{ApprovalResolver, PersistentApprovalPolicyStore};
 use ironclaw_authorization::{CapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer};
-use ironclaw_capabilities::CapabilityObligationHandler;
-use ironclaw_dispatcher::{RuntimeAdapterResult, RuntimeDispatcher, ToolResolver};
+use ironclaw_capabilities::{
+    CapabilityObligationHandler, RuntimeAdapterResult, RuntimeDispatcher, ToolResolver,
+};
 use ironclaw_events::{
     AuditSink, DurableAuditLog, DurableAuditSink, DurableEventLog, DurableEventSink, EventSink,
     InMemoryAuditSink, InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink,
@@ -111,7 +112,7 @@ use tool_resolver::RegistryLaneToolResolver;
 
 use extension_tool_binder::ServiceLanePackageBinder;
 pub use extension_tool_binder::{ExtensionLaneToolBinder, ExtensionToolBindError};
-use ironclaw_dispatcher::ChainToolResolver;
+use ironclaw_capabilities::ChainToolResolver;
 
 /// Concrete composition bundle for one Reborn host-runtime vertical slice.
 ///

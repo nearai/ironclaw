@@ -1,1 +1,1 @@
-pub use crate::{ProductAdapterError, ProductWorkflowRejectionKind};
+pub use crate::{ProductAdapterError, ProductSurfaceRejectionKind};

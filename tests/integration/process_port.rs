@@ -125,7 +125,7 @@ async fn shell_timeout_surfaces_recoverable_failed() {
 /// `tests/reborn_qa_smoke_scenarios_e2e.rs::run_async_test_with_stack`): the
 /// real `HostProcessPort` subprocess path (spawn + piped-stream capture)
 /// adds enough async-state-machine depth on top of the full
-/// `product_workflow → composition → webui_v2 → runtime` chain to overflow
+/// `product_surface → composition → webui_v2 → runtime` chain to overflow
 /// the default `#[tokio::test]` thread stack in a debug build.
 #[test]
 fn live_shell_uses_local_process_port() {

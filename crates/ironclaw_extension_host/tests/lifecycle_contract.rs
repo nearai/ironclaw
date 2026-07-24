@@ -312,7 +312,7 @@ async fn snapshot_watch_subscription_observes_every_publish() {
 
 #[tokio::test]
 async fn snapshot_resolver_serves_activated_tools_and_stops_after_deactivate() {
-    use ironclaw_dispatcher::ToolResolver;
+    use ironclaw_capabilities::ToolResolver;
     use ironclaw_host_api::CapabilityId;
 
     let channel = Arc::new(FakeChannelAdapter::default());
@@ -349,7 +349,7 @@ async fn snapshot_resolver_serves_activated_tools_and_stops_after_deactivate() {
     );
     let outcome = in_flight
         .adapter
-        .dispatch_json(ironclaw_dispatcher::CapabilityDispatchRequest {
+        .dispatch_json(ironclaw_capabilities::CapabilityDispatchRequest {
             run_id: None,
             capability_id: ping.clone(),
             scope: sample_scope(),
@@ -367,7 +367,7 @@ async fn snapshot_resolver_serves_activated_tools_and_stops_after_deactivate() {
 
 #[tokio::test]
 async fn snapshot_resolver_maps_tool_auth_required_to_the_generic_gate() {
-    use ironclaw_dispatcher::ToolResolver;
+    use ironclaw_capabilities::ToolResolver;
     use ironclaw_host_api::{
         CapabilityId, DispatchError, SecretHandle, ToolAdapter, ToolCall, ToolError, ToolPorts,
         ToolResult,
@@ -410,7 +410,7 @@ async fn snapshot_resolver_maps_tool_auth_required_to_the_generic_gate() {
         .expect("resolves");
     let err = resolved
         .adapter
-        .dispatch_json(ironclaw_dispatcher::CapabilityDispatchRequest {
+        .dispatch_json(ironclaw_capabilities::CapabilityDispatchRequest {
             run_id: None,
             capability_id: CapabilityId::new("acme.ping").unwrap(),
             scope: sample_scope(),

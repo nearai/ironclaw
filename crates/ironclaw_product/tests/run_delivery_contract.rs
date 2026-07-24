@@ -320,10 +320,10 @@ impl ironclaw_product::ConversationBindingService for StaticBindingService {
     async fn resolve_binding(
         &self,
         _request: ironclaw_product::ResolveBindingRequest,
-    ) -> Result<ironclaw_product::ResolvedBinding, ironclaw_product::ProductWorkflowError> {
+    ) -> Result<ironclaw_product::ResolvedBinding, ironclaw_product::ProductSurfaceFailure> {
         if self.fail {
             return Err(
-                ironclaw_product::ProductWorkflowError::BindingResolutionFailed {
+                ironclaw_product::ProductSurfaceFailure::BindingResolutionFailed {
                     reason: "unbound".to_string(),
                 },
             );
@@ -334,10 +334,10 @@ impl ironclaw_product::ConversationBindingService for StaticBindingService {
     async fn lookup_binding(
         &self,
         _request: ironclaw_product::ResolveBindingRequest,
-    ) -> Result<ironclaw_product::ResolvedBinding, ironclaw_product::ProductWorkflowError> {
+    ) -> Result<ironclaw_product::ResolvedBinding, ironclaw_product::ProductSurfaceFailure> {
         if self.fail {
             return Err(
-                ironclaw_product::ProductWorkflowError::BindingResolutionFailed {
+                ironclaw_product::ProductSurfaceFailure::BindingResolutionFailed {
                     reason: "unbound".to_string(),
                 },
             );

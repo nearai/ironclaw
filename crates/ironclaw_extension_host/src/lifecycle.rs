@@ -20,7 +20,9 @@ use async_trait::async_trait;
 use ironclaw_host_api::{CapabilityId, RestrictedEgress};
 use tokio::sync::Mutex;
 
-use crate::active::{ActiveExtension, ActiveSnapshot, Generation, SnapshotConflict};
+use crate::active::{
+    ActiveExtension, ActiveSnapshot, BoundExtension, Generation, SnapshotConflict,
+};
 use crate::entrypoint::{BindError, check_binding};
 use crate::loaders::{ExtensionLoader, LoadContext};
 use crate::state::InstallationState;
@@ -380,10 +382,22 @@ impl ExtensionHost {
                 }));
             }
         }
+        let extension = Arc::new(
+            BoundExtension::new(
+                &resolved,
+                &record.installation_id,
+                bindings.tools.clone(),
+                bindings.channel.clone(),
+            )
+            .map_err(|error| BindError::Load {
+                reason: format!("extension runtime identity invalid: {error}"),
+            })?,
+        );
         Ok(ActiveExtension {
             extension_id: record.extension_id.clone(),
             installation_id: record.installation_id.clone(),
             resolved,
+            extension,
             tools: bindings.tools,
             channel: bindings.channel,
         })
