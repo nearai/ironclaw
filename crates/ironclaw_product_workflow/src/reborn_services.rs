@@ -7713,6 +7713,56 @@ fn map_attested_continuation_rejection(
 mod tests {
     use super::*;
 
+    /// `map_attested_continuation_rejection` translates every sanitized
+    /// continuation-rejection category into the WebUI error surface. Pin the
+    /// status/kind for ALL variants (not just one) so the mapping cannot drift:
+    /// a wiring/infra failure must never regress into a 400 that reads as a
+    /// client proof rejection, and the IDOR `MissingBinding` must stay a 404.
+    /// Every category is non-retryable (the resume guard already consumed the
+    /// one-shot). See `resolve_attested_gate` for the broadcast-stage rationale.
+    #[test]
+    fn map_attested_continuation_rejection_covers_all_variants() {
+        use AttestedContinuationRejection as R;
+        let cases = [
+            // IDOR / missing binding is a 404 (no existence oracle).
+            (R::MissingBinding, RebornServicesErrorCode::NotFound, 404u16),
+            // Client-input failures (bad/mismatched/malformed proof) are 400.
+            (
+                R::ProviderMismatch,
+                RebornServicesErrorCode::InvalidRequest,
+                400,
+            ),
+            (
+                R::ProofRejected,
+                RebornServicesErrorCode::InvalidRequest,
+                400,
+            ),
+            (
+                R::MalformedProof,
+                RebornServicesErrorCode::InvalidRequest,
+                400,
+            ),
+            // One-shot idempotency guard fires -> 409 conflict.
+            (R::LedgerGuard, RebornServicesErrorCode::Conflict, 409),
+            // Service-health failures are 503, never a misleading 400.
+            (R::Unavailable, RebornServicesErrorCode::Unavailable, 503),
+            (
+                R::BackendUnavailable,
+                RebornServicesErrorCode::Unavailable,
+                503,
+            ),
+        ];
+        for (rejection, expected_code, expected_status) in cases {
+            let err = map_attested_continuation_rejection(rejection.clone());
+            assert_eq!(err.code, expected_code, "code for {rejection:?}");
+            assert_eq!(err.status_code, expected_status, "status for {rejection:?}");
+            assert!(
+                !err.retryable,
+                "every continuation rejection is non-retryable ({rejection:?})"
+            );
+        }
+    }
+
     /// The WebUI settings/tools request enum must use the exact wire strings
     /// the operator-config storage parser accepts and the entry writer emits.
     /// This pins the type link so the request vocabulary cannot drift from
