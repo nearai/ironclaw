@@ -27,7 +27,7 @@ construction. They bypass the existing `ScopedFilesystem` /
 Two reviewer findings on commit `4eccad56d` (`serrrfirat`) made this
 concrete:
 
-1. **HIGH**: `ironclaw_engine::FilesystemStore` is not tenant-scoped.
+1. **HIGH**: `ironclaw_engine::Store` is not tenant-scoped.
    Path layout omits tenant; engine record types omit `tenant_id`;
    composition builds a single shared root. Two tenants with the
    same `user_id`/`project_id` collide on `/engine/projects/<id>` etc.
@@ -63,7 +63,7 @@ ScopedFilesystem<F>                              # wraps RootFilesystem + MountV
 
 **1. Consumer stores accept `Arc<ScopedFilesystem<F>>`, not `Arc<F>`.**
 
-Each migrated consumer crate's `FilesystemXxxStore::new` changes:
+Each migrated consumer crate's `XxxStore::new` changes:
 
 ```rust
 // Before
@@ -181,13 +181,13 @@ invocation in composition) handles tenant prefixing and ACL.
 
 | Crate | Status | PR |
 |---|---|---|
-| `ironclaw_engine` | **Done** — FilesystemStore takes `Arc<ScopedFilesystem<F>>`; paths return `ScopedPath`; cross-tenant isolation regression test | #3679 (ac8e677f9) |
+| `ironclaw_engine` | **Done** — Store takes `Arc<ScopedFilesystem<F>>`; paths return `ScopedPath`; cross-tenant isolation regression test | #3679 (ac8e677f9) |
 | `ironclaw_processes` | **Done** — drops manual `/engine/tenants/.../users/...` prefixing; `ScopedFilesystem` does the rewriting | #3679 (81664dd29) |
 | `ironclaw_secrets` | **Done** — drops manual `/secrets/tenants/.../users/...` prefixing; AAD owner-scope aligned with path | #3679 (4ae56769b) |
 | `ironclaw_outbound` | **Done** — paths alias-relative under `/outbound`; tenant_id moves to MountView | #3679 (6ecca195d) |
 | `ironclaw_authorization` | **Done** — drops manual tenant prefix; CAS-Version retry + Unsupported→Any fallback preserved | #3679 (5e7688d3b) |
 | `ironclaw_threads` | **Done** — `FilesystemSessionThreadService` takes `Arc<ScopedFilesystem<F>>`; per-thread/message/summary/idempotency records under `/threads` alias; cross-tenant isolation regression test | #3679 (9a8aacab1) |
-| `ironclaw_conversations` | **Done** — `FilesystemConversationStateStore` wraps `Arc<ScopedFilesystem<F>>`; state persists under `/conversations/state.json`; cross-tenant isolation regression test | #3679 (a46edd88c) |
+| `ironclaw_conversations` | **Done** — `ConversationStateStore` wraps `Arc<ScopedFilesystem<F>>`; state persists under `/conversations/state.json`; cross-tenant isolation regression test | #3679 (a46edd88c) |
 | `ironclaw_reborn_composition` | **Done** — wires `default_singleton_mount_view()` for long-lived composition; `invocation_mount_view(scope)` helper available for per-invocation construction | #3679 (c60ff0af5) |
 | `MountPermissions::read_write_list_delete()` helper | **Done** — `ironclaw_host_api::mount` | #3679 (0a51286d1) |
 | `/tenant-shared` and `/system` mount aliases | **Done** — wired in both `default_singleton_mount_view` and `invocation_mount_view`; `read_only()` permissions on `/system` | #3679 |
@@ -202,14 +202,14 @@ per-backend `Filesystem*Store` siblings (`LibSql*Store`,
 | Crate | Legacy stores | Status |
 |---|---|---|
 | `ironclaw_outbound` | `LibSqlOutboundStateStore`, `PostgresOutboundStateStore` | **Deleted** in `d4bf7b3c2` — no production callers, contract tests removed because durability across reopen is now a `RootFilesystem` property. |
-| `ironclaw_secrets` | `LibSqlSecretsStore`, `PostgresSecretsStore` | **Deleted** in `f0abb79d6` — composition rewired to `FilesystemSecretStore` and the master-key decryptability check ported to `FilesystemSecretStore::verify_can_decrypt_existing_secrets`. |
-| `ironclaw_authorization` | `LibSqlCapabilityLeaseStore`, `PostgresCapabilityLeaseStore` | **Deleted** in `251f6fa5d` — composition routes leases through `Arc<FilesystemCapabilityLeaseStore<F>>`. |
-| `ironclaw_run_state` | `LibSqlRunStateStore`, `PostgresRunStateStore`, `LibSqlApprovalRequestStore`, `PostgresApprovalRequestStore` | **Deleted** in `a238050a2` — run-state is now FS-scoped via `FilesystemRunStateStore` / `FilesystemApprovalRequestStore`. |
+| `ironclaw_secrets` | `LibSqlSecretsStore`, `PostgresSecretsStore` | **Deleted** in `f0abb79d6` — composition rewired to `SecretStore` and the master-key decryptability check ported to `SecretStore::verify_can_decrypt_existing_secrets`. |
+| `ironclaw_authorization` | `LibSqlCapabilityLeaseStore`, `PostgresCapabilityLeaseStore` | **Deleted** in `251f6fa5d` — composition routes leases through `Arc<CapabilityLeaseStore<F>>`. |
+| `ironclaw_run_state` | `LibSqlRunStateStore`, `PostgresRunStateStore`, `LibSqlApprovalRequestStore`, `PostgresApprovalRequestStore` | **Deleted** in `a238050a2` — run-state is now FS-scoped via `RunStateStore` / `ApprovalRequestStore`. |
 | `ironclaw_memory` | `LibSqlMemoryDocumentRepository`, `PostgresMemoryDocumentRepository` | **Deleted** in `440be242c` — no production callers (composition already used `FilesystemMemoryDocumentRepository`). Substrate semantics keep coverage via `FilesystemMemoryDocumentRepository` over `InMemoryBackend`; backend-specific durability moves to `ironclaw_filesystem`'s own backend contract tests. The `libsql` / `postgres` features and `deadpool-postgres` / `libsql` / `pgvector` / `tokio-postgres` deps drop off `ironclaw_memory/Cargo.toml`. |
 | `ironclaw_reborn_event_store` | `LibSqlDurableEventLog`, `LibSqlDurableAuditLog`, `PostgresDurableEventLog`, `PostgresDurableAuditLog` | **Deleted** in `22fec6715` — `RebornEventStoreConfig::Libsql{...}` / `::Postgres{...}` variants now build a `LibSqlRootFilesystem` / `PostgresRootFilesystem` and route the durable log through `FilesystemDurableEventLog` / `FilesystemDurableAuditLog`. SQL-table corruption fixtures dropped; durable-log contract coverage shifts to the backend-agnostic `FilesystemDurableEventLog` contract suite plus the public-surface `RebornEventStoreConfig` rebuild tests. |
 | `ironclaw_threads` | `LibSqlSessionThreadService`, `PostgresSessionThreadService` | **Deleted** in `9a8aacab1` — `FilesystemSessionThreadService` is the sole impl; the `libsql`/`postgres` features on `ironclaw_threads` are gone. The restart regression in `crates/ironclaw_runner/tests/loop_driver_host.rs` constructs the filesystem service over a `LibSqlRootFilesystem`. |
 | `ironclaw_conversations` | `RebornLibSqlConversationStateStore`, `RebornLibSqlConversationServices`, `RebornPostgresConversationStateStore`, `RebornPostgresConversationServices` | **Deleted** in `6fc685f1e` — `RebornFilesystemConversationServices` is the sole impl. |
-| `ironclaw_turns` | `LibSqlTurnStateStore`, `PostgresTurnStateStore` | **Deleted** in `30c6a3203`; hardened in this branch — `FilesystemTurnStateStore<F: RootFilesystem>` is the sole impl. Persistence is a single `/turns/state.json` snapshot wrapped by `Arc<ScopedFilesystem<F>>`, and turn state now fails closed in the CAS write path when the backend does not honor `Absent` / `Version` writes. The old byte-only `Unsupported -> Any` fallback is intentionally not allowed for turn state because stale snapshots would become blind overwrites. Composition's `with_libsql_turn_state_store` / `with_postgres_turn_state_store` builder methods replaced by a single `with_filesystem_turn_state_store`. The restart regression in `crates/ironclaw_runner/tests/loop_driver_host.rs` constructs the filesystem store over a `LibSqlRootFilesystem`. |
+| `ironclaw_turns` | `LibSqlTurnStateStore`, `PostgresTurnStateStore` | **Deleted** in `30c6a3203`; hardened in this branch — `TurnStateRowStore<F: RootFilesystem>` is the sole impl. Persistence is a single `/turns/state.json` snapshot wrapped by `Arc<ScopedFilesystem<F>>`, and turn state now fails closed in the CAS write path when the backend does not honor `Absent` / `Version` writes. The old byte-only `Unsupported -> Any` fallback is intentionally not allowed for turn state because stale snapshots would become blind overwrites. Composition's `with_libsql_turn_state_store` / `with_postgres_turn_state_store` builder methods replaced by a single `with_filesystem_turn_state_store`. The restart regression in `crates/ironclaw_runner/tests/loop_driver_host.rs` constructs the filesystem store over a `LibSqlRootFilesystem`. |
 
 The remaining three cleanups are each independent and each requires
 ~200-400 lines (migration + composition rewiring + deleting the SQL
@@ -224,7 +224,7 @@ exactly one `XxxStore` impl (`Filesystem*Store`). At that point the
 `HostRuntimeServices` to hold `Arc<dyn XxxStore>` without taking on
 additional generic parameters. Collapsing the trait means:
 
-- Renaming `FilesystemXxxStore<F>` → `XxxStore<F>` (concrete struct).
+- Renaming `XxxStore<F>` → `XxxStore<F>` (concrete struct).
 - Deleting the trait.
 - Threading `F` (or each store's concrete type) through
   `HostRuntimeServices` as additional generic parameters, OR using
@@ -271,8 +271,8 @@ async fn store_isolates_two_tenants_with_same_user_project_ids() {
         invocation_mount_view(&scope_with(tenant_id_b(), "u1", "p1"))?,
     ));
 
-    let store_a = FilesystemStore::new(scoped_a);
-    let store_b = FilesystemStore::new(scoped_b);
+    let store_a = Store::new(scoped_a);
+    let store_b = Store::new(scoped_b);
 
     store_a.save_thread(&thread_with_id(thread_id())).await?;
     assert!(store_b.load_thread(thread_id()).await?.is_none());
@@ -281,8 +281,8 @@ async fn store_isolates_two_tenants_with_same_user_project_ids() {
 
 ## Open Questions
 
-1. **Per-tenant `FilesystemStore` lifetime.** Engine `ThreadManager`
-   currently holds one `FilesystemStore`. With ScopedFilesystem,
+1. **Per-tenant `Store` lifetime.** Engine `ThreadManager`
+   currently holds one `Store`. With ScopedFilesystem,
    each invocation has a different MountView. Two options:
    - Per-tenant long-lived: `HashMap<TenantId, Arc<ThreadManager>>`
      in the host, one ThreadManager per tenant.

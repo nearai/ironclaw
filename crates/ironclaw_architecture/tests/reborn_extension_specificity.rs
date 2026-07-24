@@ -364,7 +364,7 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
         "Gemini OAuth scope host in the multi-provider LLM crate",
     ),
     (
-        "crates/ironclaw_reborn_identity/src/filesystem_store.rs",
+        "crates/ironclaw_reborn_identity/src/identity_store.rs",
         "slack",
         "credential-authority ProviderKind vocabulary (persisted identity keys), not the extensions vendor",
     ),
@@ -481,11 +481,6 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
          model-facing source of that hint stays tracked as lane-4 debt at \
          host_runtime/first_party_tools/http.rs; localized user copy must name the \
          provider/source it refers to",
-    ),
-    (
-        "crates/ironclaw_webui/frontend/src/pages/chat/lib/gates.ts",
-        "github",
-        "WebUI browser-login SSO provider button/route, not the extensions vendor",
     ),
     (
         "crates/ironclaw_webui/frontend/src/pages/login/components/oauth-provider-buttons.tsx",
@@ -1045,6 +1040,14 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_host_runtime/src/first_party_tools/http.rs",
         "github",
     ),
+    // Presentation-only brand casing: the auth-gate card's display-name table
+    // must key on the wire vendor id to function (the prior `git_hub` key
+    // never matched and rendered "Github"). Same class as the table's
+    // carved-out `nearai` row; behavior stays manifest-generic.
+    (
+        "crates/ironclaw_webui/frontend/src/pages/chat/components/auth-oauth-card.tsx",
+        "github",
+    ),
     ("crates/ironclaw_product/src/adapter_registry.rs", "github"),
     ("crates/ironclaw_product/src/adapter_registry.rs", "slack"),
     (
@@ -1070,10 +1073,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     (
         "crates/ironclaw_host_api/src/product_adapter/outbound.rs",
         "notion",
-    ),
-    (
-        "crates/ironclaw_host_api/src/product_adapter/outbound.rs",
-        "slack",
     ),
     (
         "crates/ironclaw_host_api/src/product_adapter/outbound.rs",
@@ -1129,6 +1128,10 @@ const ALLOWLIST: &[(&str, &str)] = &[
     (
         "crates/ironclaw_extension_host/src/available_extensions.rs",
         "google",
+    ),
+    (
+        "crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs",
+        "github",
     ),
     (
         "crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs",
@@ -1225,14 +1228,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
     // lane-4: migration — one-time forward-migration call sites naming the v1 vocabulary they fold forward — correct-by-design (same pattern the retired-taxonomy gate sanctions); would become a SANCTIONED_PATHS carve if the sites move into a dedicated migration module
     ("crates/ironclaw_reborn_composition/src/factory.rs", "slack"),
-    // DEL-7: the `google_oauth_configured` build-time signal on the neutral
-    // first-party registrar context (a field name, not an extension branch —
-    // the concrete GSuite handler lives in the binary). `nearaimcp` is the
-    // deferred nearai-slice concern above, folded forward in factory wiring.
-    (
-        "crates/ironclaw_reborn_composition/src/extension_host/first_party.rs",
-        "google",
-    ),
     (
         "crates/ironclaw_reborn_composition/src/factory.rs",
         "nearaimcp",
@@ -1264,10 +1259,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "slack",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs",
-        "github",
-    ),
-    (
         "crates/ironclaw_reborn_composition/src/factory.rs",
         "google",
     ),
@@ -1280,7 +1271,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "google",
     ),
     ("crates/ironclaw_reborn_composition/src/lib.rs", "google"),
-    ("crates/ironclaw_reborn_composition/src/lib.rs", "slack"),
     (
         "crates/ironclaw_reborn_composition/src/llm_admin/nearai_login_serve.rs",
         "github",
@@ -1339,7 +1329,9 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("crates/ironclaw_reborn_config/src/lib.rs", "google"),
     ("crates/ironclaw_reborn_config/src/lib.rs", "slack"),
     ("crates/ironclaw_reborn_config/src/lib.rs", "telegram"),
-    // lane-4: dev-dep — the sanctioned DEL-7 dev-dependency on the concrete slack crate (test linkage only); the scanner sees the crate name in Cargo.toml
+    // lane-4: dev-deps — sanctioned DEL-7 linkage of concrete channel crates
+    // for the production-shaped channel-host E2E suite; the scanner sees the
+    // crate names in Cargo.toml even though Rust test sources are excluded.
     ("crates/ironclaw_reborn_composition/Cargo.toml", "slack"),
     // lane-4: branch — the provider catalog names github_copilot (an LLM
     // provider id, not the github extension); degenericize with the catalog
@@ -1376,10 +1368,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
     (
         "crates/ironclaw_webui/frontend/src/lib/telegram-setup-api.ts",
-        "telegram",
-    ),
-    (
-        "crates/ironclaw_webui/frontend/src/pages/chat/chat.tsx",
         "telegram",
     ),
     ("crates/ironclaw_webui/frontend/src/i18n/ar.ts", "slack"),

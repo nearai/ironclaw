@@ -12,11 +12,9 @@ fn extension_search_json_reads_reborn_home_local_dev_packages() {
 
     let json = run_extension_json(&reborn_home, &["search", "zztest", "--json"]);
 
-    // Option A honest projection: search/list responses carry the neutral
-    // multi-item `installed` phase; per-item states ride the payload
-    // (`LifecycleProductResponse.phase` contract). Main's `discovered`
-    // variant is retired.
-    assert_eq!(json["phase"], "installed");
+    // Multi-item search keeps a neutral public phase; per-item membership
+    // states ride `installation_phase` and never expose host checkpoints.
+    assert_eq!(json["phase"], "setup_needed");
     assert_eq!(json["payload"]["kind"], "extension_search");
     assert_eq!(json["payload"]["count"], 1);
     assert_eq!(
@@ -41,11 +39,9 @@ fn extension_search_json_without_query_lists_local_dev_packages() {
         .filter_map(|extension| extension["package_ref"]["id"].as_str())
         .collect::<Vec<_>>();
 
-    // Option A honest projection: search/list responses carry the neutral
-    // multi-item `installed` phase; per-item states ride the payload
-    // (`LifecycleProductResponse.phase` contract). Main's `discovered`
-    // variant is retired.
-    assert_eq!(json["phase"], "installed");
+    // Multi-item search keeps a neutral public phase; per-item membership
+    // states ride `installation_phase` and never expose host checkpoints.
+    assert_eq!(json["phase"], "setup_needed");
     assert_eq!(json["payload"]["kind"], "extension_search");
     assert!(ids.contains(&"zztest-alpha"), "ids: {ids:?}");
     assert!(ids.contains(&"zztest-beta"), "ids: {ids:?}");
@@ -65,7 +61,9 @@ fn extension_search_json_finds_binary_bundled_first_party_package() {
         .filter_map(|extension| extension["package_ref"]["id"].as_str())
         .collect::<Vec<_>>();
 
-    assert_eq!(json["phase"], "installed");
+    // Search envelopes keep the neutral public phase (#6520 three-state
+    // lifecycle retired the "installed" wire literal).
+    assert_eq!(json["phase"], "setup_needed");
     assert_eq!(json["payload"]["kind"], "extension_search");
     assert!(
         ids.contains(&"github"),
@@ -99,7 +97,11 @@ fn extension_install_json_uses_reborn_home_without_v1_state() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
-    assert_eq!(json["phase"], "installed");
+    assert_eq!(json["phase"], "active");
+    assert!(
+        json["payload"].get("activated").is_none(),
+        "the retired activation projection must not reappear"
+    );
     assert_eq!(json["package_ref"]["id"], "zztest-mcp");
     assert_eq!(json["payload"]["kind"], "extension_install");
     assert_eq!(json["payload"]["installed"], true);
@@ -149,21 +151,21 @@ fn extension_search_human_output_escapes_control_characters() {
 }
 
 #[test]
-fn extension_activate_and_remove_json_use_persisted_installation_state() {
+fn extension_install_auto_advances_and_remove_uses_persisted_installation_state() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
     write_extension_fixture(&reborn_home, "zztest-mcp");
 
     let install = run_extension_json(&reborn_home, &["install", "zztest-mcp", "--json"]);
-    assert_eq!(install["phase"], "installed");
-
-    let activate = run_extension_json(&reborn_home, &["activate", "zztest-mcp", "--json"]);
-    assert_eq!(activate["phase"], "active");
-    assert_eq!(activate["payload"]["kind"], "extension_activate");
-    assert_eq!(activate["payload"]["activated"], true);
+    assert_eq!(install["phase"], "active");
+    assert_eq!(install["payload"]["kind"], "extension_install");
+    assert!(
+        install["payload"].get("activated").is_none(),
+        "install completion is expressed by phase=active, not a second projection"
+    );
 
     let remove = run_extension_json(&reborn_home, &["remove", "zztest-mcp", "--json"]);
-    assert_eq!(remove["phase"], "removed");
+    assert_eq!(remove["phase"], "uninstalled");
     assert_eq!(remove["payload"]["kind"], "extension_remove");
     assert_eq!(remove["payload"]["removed"], true);
     assert!(

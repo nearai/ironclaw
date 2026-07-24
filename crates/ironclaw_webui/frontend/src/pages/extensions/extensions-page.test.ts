@@ -100,7 +100,6 @@ function renderExtensionsPage(tab, extensionState = {}) {
       actionResult: null,
       clearResult: () => {},
       install: () => {},
-      activate: () => {},
       remove: (...args) => removeCalls.push(args),
       isRemoving: false,
       invalidate: () => {},

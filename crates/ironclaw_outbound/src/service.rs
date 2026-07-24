@@ -5,7 +5,7 @@ use crate::validation::validate_delivery_scope_candidate;
 use crate::{
     CommunicationDeliveryResolution, CommunicationPreferenceRepository, DeliveryFailureKind,
     OutboundDeliveryAttempt, OutboundDeliveryDecision, OutboundDeliveryId, OutboundDeliveryStatus,
-    OutboundError, OutboundPushCandidate, OutboundPushKind, OutboundStateStore,
+    OutboundError, OutboundPushCandidate, OutboundPushKind, OutboundStateStorePort,
     PrepareCommunicationDeliveryRequest, PrepareOutboundDeliveryRequest,
     ProjectionSubscriptionRecord, ProjectionSubscriptionRequest, ReplyTargetBindingClaim,
     ReplyTargetValidationRequest, ThreadProjectionAccessClaim, ThreadProjectionAccessGrant,
@@ -39,14 +39,14 @@ pub trait ReplyTargetBindingValidator: Send + Sync {
 }
 
 pub struct OutboundPolicyService<'a> {
-    store: &'a dyn OutboundStateStore,
+    store: &'a dyn OutboundStateStorePort,
     projection_access_policy: &'a dyn ThreadProjectionAccessPolicy,
     reply_target_validator: &'a dyn ReplyTargetBindingValidator,
 }
 
 impl<'a> OutboundPolicyService<'a> {
     pub fn new(
-        store: &'a dyn OutboundStateStore,
+        store: &'a dyn OutboundStateStorePort,
         projection_access_policy: &'a dyn ThreadProjectionAccessPolicy,
         reply_target_validator: &'a dyn ReplyTargetBindingValidator,
     ) -> Self {
@@ -93,6 +93,7 @@ impl<'a> OutboundPolicyService<'a> {
             });
         }
         validate_delivery_scope_candidate(&request.scope, &request.candidate)?;
+        let delivery_id = OutboundDeliveryId::for_policy_request(&request)?;
 
         let validation = self
             .reply_target_validator
@@ -109,7 +110,7 @@ impl<'a> OutboundPolicyService<'a> {
                 claim.validate_against(&request.candidate)?;
                 let target = ValidatedReplyTargetBinding::from_claim(claim);
                 let attempt = OutboundDeliveryAttempt {
-                    delivery_id: OutboundDeliveryId::new(),
+                    delivery_id,
                     scope: request.scope,
                     candidate: request.candidate,
                     // Coordinator lifecycle: persisted before any vendor
@@ -125,7 +126,7 @@ impl<'a> OutboundPolicyService<'a> {
             }
             Err(OutboundError::AccessDenied) => {
                 let attempt = OutboundDeliveryAttempt {
-                    delivery_id: OutboundDeliveryId::new(),
+                    delivery_id,
                     scope: request.scope,
                     candidate: request.candidate,
                     status: OutboundDeliveryStatus::Failed,
@@ -137,6 +138,10 @@ impl<'a> OutboundPolicyService<'a> {
             }
             Err(error) if is_transient_validator_error(&error) => {
                 let attempt = OutboundDeliveryAttempt {
+                    // A validator backend outage has not authorized vendor
+                    // egress, so it is safe and necessary for a replay to
+                    // reserve the stable policy delivery later. Keep this
+                    // audit row distinct instead of consuming that identity.
                     delivery_id: OutboundDeliveryId::new(),
                     scope: request.scope,
                     candidate: request.candidate,

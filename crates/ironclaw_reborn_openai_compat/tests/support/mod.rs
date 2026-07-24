@@ -20,13 +20,13 @@ use ironclaw_product::{
     ProductInboundAck, ProductInboundPayload, ProductRejection, ProductRejectionKind,
     ProductTriggerReason, ProjectionReadRequest, UserMessagePayload,
 };
-use ironclaw_reborn_openai_compat::{FilesystemOpenAiCompatRefStore, OPENAI_COMPAT_ADAPTER_ID};
+use ironclaw_reborn_openai_compat::{OPENAI_COMPAT_ADAPTER_ID, OpenAiCompatRefStore};
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use ironclaw_turns::{AcceptedMessageRef, EventCursor, TurnRunId, TurnStatus};
 
-pub(crate) fn in_memory_openai_compat_ref_store() -> Arc<FilesystemOpenAiCompatRefStore> {
+pub(crate) fn in_memory_openai_compat_ref_store() -> Arc<OpenAiCompatRefStore> {
     let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
-    Arc::new(FilesystemOpenAiCompatRefStore::new(filesystem))
+    Arc::new(OpenAiCompatRefStore::new(filesystem))
 }
 
 pub(crate) struct FakeProductSurface {

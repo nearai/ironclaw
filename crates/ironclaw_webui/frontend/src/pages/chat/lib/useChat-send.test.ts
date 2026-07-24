@@ -120,9 +120,6 @@ function runUseChatSource(context) {
         : "request failed";
   }
   if (!context.notifyChannelConnected) context.notifyChannelConnected = async () => {};
-  if (!context.redeemPairingCode) {
-    context.redeemPairingCode = async () => ({ success: true });
-  }
   if (!context.fetchExtensionSetup) {
     context.fetchExtensionSetup = async () => ({ secrets: [] });
   }
@@ -2595,252 +2592,6 @@ test("useChat.send: routine setup prompts mentioning Slack submit to the model",
   assert.equal(response.thread_id, "thread-created");
 });
 
-// A channel-pairing gate rides the standard auth rail: a `manual_token`
-// challenge whose gate also carries a `connection` requirement. `gates.ts`
-// normalizes that into `pendingGate.connection`, and the pairing card submits
-// through `submitChannelConnectionPairing`.
-function pairingGate(channel = "slack") {
-  return {
-    runId: "run-pairing",
-    gateRef: "gate-auth-pairing",
-    kind: "auth_required",
-    challengeKind: "manual_token",
-    connection: {
-      channel,
-      strategy: "inbound_proof_code",
-      instructions: "Message the app to get a pairing code, then paste it here.",
-      inputPlaceholder: "Enter pairing code",
-      submitLabel: "Connect",
-      errorMessage: "Invalid or expired code.",
-    },
-  };
-}
-
-test("useChat.submitChannelConnectionPairing: Slack gate redeems through the generic channel endpoint", async () => {
-  const threadId = "thread-slack-pairing-gate";
-  const stateUpdates = [];
-  const pairingCalls = [];
-  let resolveGateCalls = 0;
-
-  const context = {
-    AbortController,
-    Date,
-    Error,
-    Map,
-    Math,
-    React: createReactStub({
-      initialByIndex: new Map([[STATE_SLOT.pendingGate, pairingGate("slack")]]),
-      setCalls: stateUpdates,
-    }),
-    addPending,
-    toRenderAttachment,
-    toWireAttachment,
-    cancelRunRequest: async () => {},
-    clearTimeout,
-    createThreadRequest: async () => {
-      throw new Error("thread should already exist");
-    },
-    globalThis: {},
-    queryClient: {
-      getQueryData: () => ({
-        threads: [{ thread_id: threadId, title: "Slack pairing thread" }],
-      }),
-      invalidateQueries: () => {},
-    },
-    recordAcceptedMessageRef,
-    redeemPairingCode: async (channel, code, options) => {
-      pairingCalls.push({ channel, code, options });
-      return { success: true };
-    },
-    removePending,
-    resolveGateRequest: async () => {
-      resolveGateCalls += 1;
-      throw new Error("a successful pairing redeem must NOT resolve the gate");
-    },
-    sendMessage: async () => {
-      throw new Error("pairing redeem must not post a continuation message");
-    },
-    setInterval,
-    setTimeout,
-    submitManualToken: async () => {},
-    useChatEvents: () => () => {},
-    useHistory: () => ({
-      messages: [],
-      hasMore: false,
-      nextCursor: null,
-      isLoading: false,
-      loadHistory: () => {},
-      seedThreadMessages: () => {},
-      setMessages: () => {},
-    }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
-  };
-
-  runUseChatSource(context);
-
-  const chat = context.globalThis.__testExports.useChat(threadId);
-  const response = await chat.submitChannelConnectionPairing(" A1B2C3 ");
-
-  assert.equal(response.success, true);
-  assert.deepEqual(JSON.parse(JSON.stringify(pairingCalls)), [
-    { channel: "slack", code: "A1B2C3", options: { threadId } },
-  ]);
-  assert.equal(
-    resolveGateCalls,
-    0,
-    "redeeming the channel connection resumes the parked turn server-side",
-  );
-  assert.deepEqual(
-    stateUpdates
-      .filter((update) => update.index === STATE_SLOT.pendingGate)
-      .map((update) => update.value),
-    [null],
-    "successful redemption clears the local pending gate",
-  );
-  assert.deepEqual(
-    stateUpdates
-      .filter((update) => update.index === STATE_SLOT.isProcessing)
-      .map((update) => update.value),
-    [true],
-    "the resumed turn is shown as processing while SSE catches up",
-  );
-});
-
-test("useChat.submitChannelConnectionPairing: generic channel gate redeems via redeemPairingCode", async () => {
-  const threadId = "thread-telegram-pairing-gate";
-  const pairingCalls = [];
-
-  const context = {
-    AbortController,
-    Date,
-    Error,
-    Map,
-    Math,
-    React: createReactStub({
-      initialByIndex: new Map([[STATE_SLOT.pendingGate, pairingGate("telegram")]]),
-    }),
-    addPending,
-    toRenderAttachment,
-    toWireAttachment,
-    cancelRunRequest: async () => {},
-    clearTimeout,
-    createThreadRequest: async () => {
-      throw new Error("thread should already exist");
-    },
-    globalThis: {},
-    queryClient: {
-      getQueryData: () => ({ threads: [{ thread_id: threadId }] }),
-      invalidateQueries: () => {},
-    },
-    recordAcceptedMessageRef,
-    redeemPairingCode: async (channel, code, options) => {
-      pairingCalls.push({ channel, code, options });
-      return { success: true };
-    },
-    removePending,
-    resolveGateRequest: async () => {
-      throw new Error("pairing redeem must not resolve the gate");
-    },
-    sendMessage: async () => {
-      throw new Error("pairing redeem must not post a continuation message");
-    },
-    setInterval,
-    setTimeout,
-    submitManualToken: async () => {},
-    useChatEvents: () => () => {},
-    useHistory: () => ({
-      messages: [],
-      hasMore: false,
-      nextCursor: null,
-      isLoading: false,
-      loadHistory: () => {},
-      seedThreadMessages: () => {},
-      setMessages: () => {},
-    }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
-  };
-
-  runUseChatSource(context);
-
-  const chat = context.globalThis.__testExports.useChat(threadId);
-  await chat.submitChannelConnectionPairing("PAIR42");
-
-  assert.deepEqual(JSON.parse(JSON.stringify(pairingCalls)), [
-    { channel: "telegram", code: "PAIR42", options: { threadId } },
-  ]);
-});
-
-test("useChat.submitChannelConnectionPairing: a failed redeem surfaces the error and leaves the gate open", async () => {
-  const threadId = "thread-stale-pairing-gate";
-  const stateUpdates = [];
-
-  const context = {
-    AbortController,
-    Date,
-    Error,
-    Map,
-    Math,
-    React: createReactStub({
-      initialByIndex: new Map([[STATE_SLOT.pendingGate, pairingGate("slack")]]),
-      setCalls: stateUpdates,
-    }),
-    addPending,
-    toRenderAttachment,
-    toWireAttachment,
-    cancelRunRequest: async () => {},
-    clearTimeout,
-    createThreadRequest: async () => {
-      throw new Error("thread should already exist");
-    },
-    globalThis: {},
-    queryClient: {
-      getQueryData: () => ({ threads: [{ thread_id: threadId }] }),
-      invalidateQueries: () => {},
-    },
-    recordAcceptedMessageRef,
-    redeemPairingCode: async () => {
-      throw new Error("Invalid or expired pairing code.");
-    },
-    removePending,
-    resolveGateRequest: async () => {
-      throw new Error("a failed pairing redeem must not resolve the gate");
-    },
-    sendMessage: async () => {
-      throw new Error("send should not run");
-    },
-    setInterval,
-    setTimeout,
-    submitManualToken: async () => {},
-    useChatEvents: () => () => {},
-    useHistory: () => ({
-      messages: [],
-      hasMore: false,
-      nextCursor: null,
-      isLoading: false,
-      loadHistory: () => {},
-      seedThreadMessages: () => {},
-      setMessages: () => {},
-    }),
-    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
-  };
-
-  runUseChatSource(context);
-
-  const chat = context.globalThis.__testExports.useChat(threadId);
-  await assert.rejects(
-    () => chat.submitChannelConnectionPairing("STALE123"),
-    /Invalid or expired pairing code\./,
-  );
-
-  assert.deepEqual(
-    stateUpdates
-      .filter((update) => update.index === STATE_SLOT.pendingGate)
-      .map((update) => update.value),
-    [],
-    "a failed redeem keeps the pairing gate open so the user can retry",
-  );
-});
-
 test("useChat: a channel-connected event refreshes the connection caches without touching the gate", async () => {
   const threadId = "thread-cache-refresh";
   const stateUpdates = [];
@@ -2883,7 +2634,18 @@ test("useChat: a channel-connected event refreshes the connection caches without
       React: createReactStub({
         runEffects: true,
         setCalls: stateUpdates,
-        initialByIndex: new Map([[STATE_SLOT.pendingGate, pairingGate("slack")]]),
+        initialByIndex: new Map([
+          [
+            STATE_SLOT.pendingGate,
+            {
+              kind: "auth_required",
+              gateKind: "auth",
+              challengeKind: "oauth_url",
+              runId: "run-auth",
+              gateRef: "gate:auth",
+            },
+          ],
+        ]),
       }),
       addPending,
       toRenderAttachment,
@@ -2953,498 +2715,6 @@ test("useChat: a channel-connected event refreshes the connection caches without
   }
 });
 
-test("useChat.submitOnboardingPairing: generic redemption resumes chat without leaking code", async () => {
-  const threadId = "thread-telegram-pairing";
-  const stateUpdates = [];
-  const pairingCalls = [];
-  const sendBodies = [];
-  let renderedMessages = [];
-
-  const context = {
-    AbortController,
-    Date,
-    Error,
-    Map,
-    Math,
-    React: createReactStub({
-      initialByIndex: new Map([
-        [
-          5,
-          {
-            state: "pairing_required",
-            extensionName: "telegram",
-            threadId,
-            requestId: null,
-          },
-        ],
-      ]),
-      setCalls: stateUpdates,
-    }),
-    addPending,
-    toRenderAttachment,
-    toWireAttachment,
-    cancelRunRequest: async () => {},
-    clearTimeout,
-    createThreadRequest: async () => {
-      throw new Error("thread should already exist");
-    },
-    globalThis: {},
-    queryClient: {
-      getQueryData: () => ({
-        threads: [{ thread_id: threadId, title: "Telegram pairing thread" }],
-      }),
-      invalidateQueries: () => {},
-    },
-    recordAcceptedMessageRef,
-    redeemPairingCode: async (channel, code, options) => {
-      pairingCalls.push({ channel, code, options });
-      return { success: true };
-    },
-    removePending,
-    resolveGateRequest: async () => {},
-    sendMessage: async (body) => {
-      sendBodies.push(body);
-      return {
-        accepted_message_ref: "msg:message-continue",
-        run_id: "run-continue",
-        status: "queued",
-        thread_id: body.threadId,
-      };
-    },
-    setInterval,
-    setTimeout,
-    submitManualToken: async () => {},
-    useChatEvents: () => () => {},
-    useHistory: () => ({
-      messages: renderedMessages,
-      hasMore: false,
-      nextCursor: null,
-      isLoading: false,
-      loadHistory: () => {},
-      seedThreadMessages: () => {},
-      setMessages: (updater) => {
-        renderedMessages =
-          typeof updater === "function" ? updater(renderedMessages) : updater;
-      },
-    }),
-    useSSE: () => ({ status: "idle" }),
-  };
-
-  runUseChatSource(context);
-
-  const chat = context.globalThis.__testExports.useChat(threadId);
-  const response = await chat.submitOnboardingPairing(" A1B2C3 ");
-
-  assert.equal(pairingCalls.length, 1);
-  assert.equal(pairingCalls[0].channel, "telegram");
-  assert.equal(pairingCalls[0].code, "A1B2C3");
-  assert.equal(pairingCalls[0].options.threadId, threadId);
-  assert.equal(pairingCalls[0].options.requestId, null);
-  assert.equal(sendBodies.length, 1);
-  assert.equal(sendBodies[0].threadId, threadId);
-  assert.equal(
-    sendBodies[0].content,
-    "Telegram is connected. Continue the previous request.",
-  );
-  assert.doesNotMatch(JSON.stringify(sendBodies), /A1B2C3/);
-  assert.equal(response.success, true);
-  assert.ok(
-    stateUpdates.some((update) => update.index === 5 && update.value === null),
-    "the pairing panel should clear after the continuation send succeeds",
-  );
-});
-
-test("useChat.submitOnboardingPairing: failed local resume keeps pairing panel retryable", async () => {
-  const threadId = "thread-telegram-pairing-retry";
-  const sourceMessageId = "tool-telegram-activation";
-  const stateUpdates = [];
-  const storageValues = new Map();
-
-  const context = {
-    AbortController,
-    Date,
-    Error,
-    Map,
-    Math,
-    React: createReactStub({
-      initialByIndex: new Map([
-        [
-          5,
-          {
-            state: "pairing_required",
-            extensionName: "telegram",
-            threadId,
-            requestId: null,
-            sourceMessageId,
-          },
-        ],
-      ]),
-      setCalls: stateUpdates,
-    }),
-    addPending,
-    toRenderAttachment,
-    toWireAttachment,
-    cancelRunRequest: async () => {},
-    clearTimeout,
-    createThreadRequest: async () => {
-      throw new Error("thread should already exist");
-    },
-    globalThis: {
-      localStorage: {
-        getItem: (key) => (storageValues.has(key) ? storageValues.get(key) : null),
-        setItem: (key, value) => storageValues.set(key, String(value)),
-      },
-    },
-    queryClient: {
-      getQueryData: () => ({
-        threads: [{ thread_id: threadId, title: "Telegram pairing thread" }],
-      }),
-      invalidateQueries: () => {},
-    },
-    recordAcceptedMessageRef,
-    removePending,
-    resolveGateRequest: async () => {},
-    sendMessage: async () => {
-      throw new Error("transient continuation failure");
-    },
-    setInterval,
-    setTimeout,
-    submitManualToken: async () => {},
-    useChatEvents: () => () => {},
-    useHistory: () => ({
-      messages: [],
-      hasMore: false,
-      nextCursor: null,
-      isLoading: false,
-      loadHistory: () => {},
-      seedThreadMessages: () => {},
-      setMessages: () => {},
-    }),
-    useSSE: () => ({ status: "idle" }),
-  };
-
-  runUseChatSource(context);
-
-  const chat = context.globalThis.__testExports.useChat(threadId);
-  await assert.rejects(
-    () => chat.submitOnboardingPairing("A1B2C3"),
-    /transient continuation failure/,
-  );
-
-  assert.equal(
-    stateUpdates.some((update) => update.index === 5 && update.value === null),
-    false,
-    "failed continuation must not clear the pairing panel",
-  );
-  assert.equal(
-    storageValues.has(`ironclaw.chat.dismissedOnboarding.v1:${threadId}`),
-    false,
-    "failed continuation must not persist a durable dismissal",
-  );
-});
-
-test("useChat.submitOnboardingPairing: admission-blocked resume keeps the pairing panel and waiter", async () => {
-  const threadId = "thread-telegram-pairing-busy";
-  const sourceMessageId = "tool-telegram-activation";
-  const stateUpdates = [];
-  const storageValues = new Map();
-  const sentContents = [];
-
-  const context = {
-    AbortController,
-    Date,
-    Error,
-    Map,
-    Math,
-    React: createReactStub({
-      initialByIndex: new Map([
-        [
-          5,
-          {
-            state: "pairing_required",
-            extensionName: "telegram",
-            threadId,
-            requestId: null,
-            sourceMessageId,
-          },
-        ],
-      ]),
-      setCalls: stateUpdates,
-    }),
-    addPending,
-    toRenderAttachment,
-    toWireAttachment,
-    cancelRunRequest: async () => {},
-    clearTimeout,
-    createThreadRequest: async () => {
-      throw new Error("thread should already exist");
-    },
-    globalThis: {
-      localStorage: {
-        getItem: (key) => (storageValues.has(key) ? storageValues.get(key) : null),
-        setItem: (key, value) => storageValues.set(key, String(value)),
-      },
-    },
-    queryClient: {
-      getQueryData: () => ({
-        threads: [{ thread_id: threadId, title: "Telegram pairing thread" }],
-      }),
-      invalidateQueries: () => {},
-    },
-    recordAcceptedMessageRef,
-    removePending,
-    resolveGateRequest: async () => {},
-    sendMessage: ({ content }) => {
-      sentContents.push(content);
-      // Never settles: keeps the submit re-entrancy guard held so the
-      // pairing continuation hits the admission block, not the network.
-      return new Promise(() => {});
-    },
-    setInterval,
-    setTimeout,
-    submitManualToken: async () => {},
-    useChatEvents: () => () => {},
-    useHistory: () => ({
-      messages: [],
-      hasMore: false,
-      nextCursor: null,
-      isLoading: false,
-      loadHistory: () => {},
-      seedThreadMessages: () => {},
-      setMessages: () => {},
-    }),
-    useSSE: () => ({ status: "idle" }),
-  };
-
-  runUseChatSource(context);
-
-  const chat = context.globalThis.__testExports.useChat(threadId);
-  // Occupy the submit guard with a send to another thread whose POST never
-  // settles, so the pairing continuation is admission-blocked (send → null).
-  chat.send("occupy the submit guard", { threadId: "thread-other" });
-  await Promise.resolve();
-  assert.deepEqual(sentContents, ["occupy the submit guard"]);
-
-  const response = await chat.submitOnboardingPairing("A1B2C3");
-  assert.equal(response?.success, true, "the redemption itself succeeded");
-
-  assert.deepEqual(
-    sentContents,
-    ["occupy the submit guard"],
-    "the blocked continuation must not reach the network",
-  );
-  assert.equal(
-    stateUpdates.some((update) => update.index === 5 && update.value === null),
-    false,
-    "an admission-blocked continuation must not clear the pairing panel",
-  );
-  assert.equal(
-    storageValues.has(`ironclaw.chat.dismissedOnboarding.v1:${threadId}`),
-    false,
-    "an admission-blocked continuation must not persist a durable dismissal",
-  );
-});
-
-test("useChat.submitOnboardingPairing: stale generic code stays local and does not resume chat", async () => {
-  const threadId = "thread-stale-telegram-pairing";
-  const stateUpdates = [];
-  const pairingCalls = [];
-  const sendBodies = [];
-
-  const context = {
-    AbortController,
-    Date,
-    Error,
-    Map,
-    Math,
-    React: createReactStub({
-      initialByIndex: new Map([
-        [
-          5,
-          {
-            state: "pairing_required",
-            extensionName: "telegram",
-            threadId,
-            requestId: null,
-          },
-        ],
-      ]),
-      setCalls: stateUpdates,
-    }),
-    addPending,
-    toRenderAttachment,
-    toWireAttachment,
-    cancelRunRequest: async () => {},
-    clearTimeout,
-    createThreadRequest: async () => {
-      throw new Error("thread should already exist");
-    },
-    globalThis: {},
-    queryClient: {
-      getQueryData: () => ({
-        threads: [{ thread_id: threadId, title: "Telegram pairing thread" }],
-      }),
-      invalidateQueries: () => {},
-    },
-    recordAcceptedMessageRef,
-    redeemPairingCode: async (channel, code, options) => {
-      pairingCalls.push({ channel, code, options });
-      throw new Error("Invalid or expired pairing code.");
-    },
-    removePending,
-    resolveGateRequest: async () => {},
-    sendMessage: async (body) => {
-      sendBodies.push(body);
-      throw new Error("stale pairing code must not resume chat");
-    },
-    setInterval,
-    setTimeout,
-    submitManualToken: async () => {},
-    useChatEvents: () => () => {},
-    useHistory: () => ({
-      messages: [],
-      hasMore: false,
-      nextCursor: null,
-      isLoading: false,
-      loadHistory: () => {},
-      seedThreadMessages: () => {},
-      setMessages: () => {},
-    }),
-    useSSE: () => ({ status: "idle" }),
-  };
-
-  runUseChatSource(context);
-
-  const chat = context.globalThis.__testExports.useChat(threadId);
-  await assert.rejects(
-    () => chat.submitOnboardingPairing(" STALE123 "),
-    /Invalid or expired pairing code\./,
-  );
-
-  assert.equal(pairingCalls.length, 1);
-  assert.equal(pairingCalls[0].channel, "telegram");
-  assert.equal(pairingCalls[0].code, "STALE123");
-  assert.deepEqual(JSON.parse(JSON.stringify(pairingCalls[0].options)), {
-    threadId,
-    requestId: null,
-  });
-  assert.equal(sendBodies.length, 0);
-  assert.ok(
-    !stateUpdates.some((update) => update.index === 5 && update.value === null),
-    "failed redemption must keep the pairing panel open",
-  );
-  assert.doesNotMatch(JSON.stringify(sendBodies), /STALE123/);
-});
-
-test("useChat.submitOnboardingPairing: resumes the generic pairing panel's thread, not another open chat", async () => {
-  const viewedThreadId = "thread-viewed";
-  const pairingThreadId = "thread-needs-telegram";
-  const sourceMessageId = "tool-telegram-activation-thread-needs-telegram";
-  const stateUpdates = [];
-  const sendBodies = [];
-  const storageValues = new Map();
-
-  const context = {
-    AbortController,
-    Date,
-    Error,
-    Map,
-    Math,
-    React: createReactStub({
-      initialByIndex: new Map([
-        [
-          5,
-          {
-            state: "pairing_required",
-            extensionName: "telegram",
-            threadId: pairingThreadId,
-            requestId: null,
-            sourceMessageId,
-          },
-        ],
-      ]),
-      setCalls: stateUpdates,
-    }),
-    addPending,
-    toRenderAttachment,
-    toWireAttachment,
-    approvePairingCode: async () => {},
-    cancelRunRequest: async () => {},
-    clearTimeout,
-    createThreadRequest: async () => {
-      throw new Error("thread should already exist");
-    },
-    globalThis: {
-      localStorage: {
-        getItem: (key) => (storageValues.has(key) ? storageValues.get(key) : null),
-        setItem: (key, value) => storageValues.set(key, String(value)),
-      },
-    },
-    queryClient: {
-      getQueryData: () => ({
-        threads: [
-          { thread_id: viewedThreadId, title: "Viewed chat" },
-          { thread_id: pairingThreadId, title: "Telegram-needed chat" },
-        ],
-      }),
-      invalidateQueries: () => {},
-    },
-    recordAcceptedMessageRef,
-    redeemPairingCode: async (channel) => {
-      assert.equal(channel, "telegram");
-      return { success: true };
-    },
-    removePending,
-    resolveGateRequest: async () => {},
-    sendMessage: async (body) => {
-      sendBodies.push(body);
-      return {
-        accepted_message_ref: "msg:message-continue",
-        run_id: "run-continue",
-        status: "queued",
-        thread_id: body.threadId,
-      };
-    },
-    setInterval,
-    setTimeout,
-    submitManualToken: async () => {},
-    useChatEvents: () => () => {},
-    useHistory: () => ({
-      messages: [],
-      hasMore: false,
-      nextCursor: null,
-      isLoading: false,
-      loadHistory: () => {},
-      seedThreadMessages: () => {},
-      setMessages: () => {},
-    }),
-    useSSE: () => ({ status: "idle" }),
-  };
-
-  runUseChatSource(context);
-
-  const chat = context.globalThis.__testExports.useChat(viewedThreadId);
-  await chat.submitOnboardingPairing("BTHREAD1");
-
-  assert.equal(sendBodies.length, 1);
-  assert.equal(sendBodies[0].threadId, pairingThreadId);
-  assert.equal(
-    sendBodies[0].content,
-    "Telegram is connected. Continue the previous request.",
-  );
-  assert.equal(
-    storageValues.has(`ironclaw.chat.dismissedOnboarding.v1:${viewedThreadId}`),
-    false,
-    "submitting one thread's panel must not dismiss the viewed thread",
-  );
-  assert.deepEqual(
-    JSON.parse(
-      storageValues.get(`ironclaw.chat.dismissedOnboarding.v1:${pairingThreadId}`),
-    ),
-    [sourceMessageId],
-  );
-});
-
 test("useChat: channel-connected event from extensions clears a mounted waiting generic channel chat", async () => {
   const threadId = "thread-waiting-for-telegram";
   const sourceMessageId = "tool-telegram-activation";
@@ -3479,7 +2749,6 @@ test("useChat: channel-connected event from extensions clears a mounted waiting 
     addPending,
     toRenderAttachment,
     toWireAttachment,
-    approvePairingCode: async () => {},
     cancelRunRequest: async () => {},
     clearInterval,
     clearTimeout,
@@ -3590,7 +2859,6 @@ test("useChat: channel-connected event from same chat does not duplicate the con
     addPending,
     toRenderAttachment,
     toWireAttachment,
-    approvePairingCode: async () => {},
     cancelRunRequest: async () => {},
     clearInterval,
     clearTimeout,
@@ -3653,22 +2921,22 @@ test("useChat: channel-connected event from same chat does not duplicate the con
   );
 });
 
-test("useChat: timeline Slack OAuth activation guidance does not open a connection panel from prose", async () => {
-  const threadId = "thread-slack-oauth-activation";
+test("useChat: timeline Slack OAuth install guidance does not open a connection panel from prose", async () => {
+  const threadId = "thread-slack-oauth-install";
   const stateUpdates = [];
   const renderedMessages = [
     {
-      id: "tool-extension-activate",
+      id: "tool-extension-install",
       role: "tool_activity",
-      capabilityId: "builtin.extension_activate",
+      capabilityId: "builtin.extension_install",
       toolStatus: "success",
       toolResultPreview: JSON.stringify({
         message:
           "Slack is installed as an inbound channel. Configure Slack OAuth from the extension settings, then message the Slack bot directly. If the user's Slack account is already connected, continue the user's original request. Do not claim Slack message-reading tools are available unless a separate Slack read capability is installed.",
         package_ref: { id: "slack", kind: "extension" },
         payload: {
-          activated: true,
-          kind: "extension_activate",
+          kind: "extension_install",
+          installed: true,
           visible_capability_ids: [],
         },
         phase: "active",
@@ -3686,7 +2954,6 @@ test("useChat: timeline Slack OAuth activation guidance does not open a connecti
     addPending,
     toRenderAttachment,
     toWireAttachment,
-    approvePairingCode: async () => {},
     cancelRunRequest: async () => {},
     clearInterval,
     clearTimeout,
@@ -3696,7 +2963,7 @@ test("useChat: timeline Slack OAuth activation guidance does not open a connecti
     globalThis: {},
     queryClient: {
       getQueryData: () => ({
-        threads: [{ thread_id: threadId, title: "Slack OAuth activation thread" }],
+        threads: [{ thread_id: threadId, title: "Slack OAuth install thread" }],
       }),
       invalidateQueries: () => {},
     },
@@ -3731,7 +2998,7 @@ test("useChat: timeline Slack OAuth activation guidance does not open a connecti
   );
 });
 
-test("useChat: Slack-read package activation guidance does not render a connection panel from prose", async () => {
+test("useChat: Slack-read package install guidance does not render a connection panel from prose", async () => {
   const threadId = "thread-slack-read-no-tool";
   const stateUpdates = [];
   const renderedMessages = [
@@ -3741,17 +3008,17 @@ test("useChat: Slack-read package activation guidance does not render a connecti
       content: "any new slack messages?",
     },
     {
-      id: "tool-extension-activate",
+      id: "tool-extension-install",
       role: "tool_activity",
-      capabilityId: "builtin.extension_activate",
+      capabilityId: "builtin.extension_install",
       toolStatus: "success",
       toolResultPreview: JSON.stringify({
         message:
           "Slack is installed as an inbound channel. Configure Slack OAuth from the extension settings, then message the Slack bot directly. If the user's Slack account is already connected, continue the user's original request. Do not claim Slack message-reading tools are available unless a separate Slack read capability is installed.",
         package_ref: { id: "slack", kind: "extension" },
         payload: {
-          activated: true,
-          kind: "extension_activate",
+          kind: "extension_install",
+          installed: true,
           visible_capability_ids: [],
         },
         phase: "active",
@@ -3776,7 +3043,6 @@ test("useChat: Slack-read package activation guidance does not render a connecti
     addPending,
     toRenderAttachment,
     toWireAttachment,
-    approvePairingCode: async () => {},
     cancelRunRequest: async () => {},
     clearInterval,
     clearTimeout,
@@ -3845,7 +3111,6 @@ test("useChat: blank unconnected Slack chat does NOT auto-open a connection pane
     addPending,
     toRenderAttachment,
     toWireAttachment,
-    approvePairingCode: async () => {},
     cancelRunRequest: async () => {},
     clearInterval,
     clearTimeout,
@@ -3861,7 +3126,6 @@ test("useChat: blank unconnected Slack chat does NOT auto-open a connection pane
             display_name: "Slack",
             kind: "channel",
             installation_state: "active",
-            onboarding_state: "setup_required",
           },
         ],
       };
@@ -3918,9 +3182,9 @@ test("useChat: blank unconnected Slack chat does NOT auto-open a connection pane
 // (timeline), so the in-chat panel derives from it in both cases.
 function channelConnectionRequiredCard(overrides = {}) {
   return {
-    id: "tool-activate-1",
+    id: "tool-install-1",
     role: "tool_activity",
-    capabilityId: "builtin.extension_activate",
+    capabilityId: "builtin.extension_install",
     outputKind: "channel_connection_required",
     toolStatus: "success",
     toolResultPreview: JSON.stringify({
@@ -3963,7 +3227,6 @@ function channelConnectionContext({
     addPending,
     toRenderAttachment,
     toWireAttachment,
-    approvePairingCode: async () => {},
     cancelRunRequest: async () => {},
     clearInterval,
     clearTimeout,
@@ -4019,9 +3282,7 @@ test("useChat: a channel-connection-required tool card opens the Slack OAuth pan
     slackExtension: {
       package_ref: { id: "slack", kind: "extension" },
       kind: "channel",
-      authenticated: false,
-      needs_setup: true,
-      onboarding_state: "setup_required",
+      installation_state: "setup_needed",
     },
     stateUpdates,
   });
@@ -4035,7 +3296,7 @@ test("useChat: a channel-connection-required tool card opens the Slack OAuth pan
   );
   assert.equal(onboardingUpdate?.value?.extensionName, "slack");
   assert.equal(onboardingUpdate?.value?.threadId, threadId);
-  assert.equal(onboardingUpdate?.value?.sourceMessageId, "tool-activate-1");
+  assert.equal(onboardingUpdate?.value?.sourceMessageId, "tool-install-1");
   assert.equal(onboardingUpdate?.value?.strategy, "oauth");
   assert.match(onboardingUpdate?.value?.instructions, /Connect Slack with OAuth/);
   assert.equal(onboardingUpdate?.value?.inputPlaceholder, "");
@@ -4062,7 +3323,7 @@ test("useChat: a channel-connection-required tool card opens the pairing panel w
   );
   assert.equal(onboardingUpdate?.value?.extensionName, "slack");
   assert.equal(onboardingUpdate?.value?.threadId, threadId);
-  assert.equal(onboardingUpdate?.value?.sourceMessageId, "tool-activate-1");
+  assert.equal(onboardingUpdate?.value?.sourceMessageId, "tool-install-1");
 });
 
 test("useChat: a channel-connection-required tool card does NOT open the panel when Slack is already connected", async () => {
@@ -4077,9 +3338,7 @@ test("useChat: a channel-connection-required tool card does NOT open the panel w
     slackExtension: {
       package_ref: { id: "slack", kind: "extension" },
       kind: "channel",
-      authenticated: true,
-      needs_setup: false,
-      onboarding_state: "active",
+      installation_state: "active",
     },
     stateUpdates,
   });
@@ -4144,13 +3403,11 @@ test("useChat: a dismissed channel-connection-required tool card stays closed", 
     slackExtension: {
       package_ref: { id: "slack", kind: "extension" },
       kind: "channel",
-      authenticated: false,
-      needs_setup: true,
-      onboarding_state: "setup_required",
+      installation_state: "setup_needed",
     },
     stateUpdates,
     storage: {
-      getItem: (key) => (key === dismissedKey ? JSON.stringify(["tool-activate-1"]) : null),
+      getItem: (key) => (key === dismissedKey ? JSON.stringify(["tool-install-1"]) : null),
       setItem: () => {},
     },
   });
@@ -4184,9 +3441,7 @@ test("useChat: a connection-required card from another thread's still-loaded tim
     slackExtension: {
       package_ref: { id: "slack", kind: "extension" },
       kind: "channel",
-      authenticated: false,
-      needs_setup: true,
-      onboarding_state: "setup_required",
+      installation_state: "setup_needed",
     },
     stateUpdates,
   });
@@ -4255,7 +3510,6 @@ test("useChat: a channel-connected event from elsewhere clears the panel and ref
       addPending,
       toRenderAttachment,
       toWireAttachment,
-      approvePairingCode: async () => {},
       cancelRunRequest: async () => {},
       clearInterval,
       clearTimeout,
@@ -4879,9 +4133,7 @@ test("useChat: Slack OAuth completion polls per-user extension state when callba
   let extensionState = {
     package_ref: { id: "slack", kind: "extension" },
     kind: "channel",
-    authenticated: false,
-    needs_setup: true,
-    onboarding_state: "setup_required",
+    installation_state: "setup_needed",
   };
   const popup = { closed: true, location: { href: "about:blank" }, opener: "test" };
   const windowObject = {
@@ -4942,9 +4194,7 @@ test("useChat: Slack OAuth completion polls per-user extension state when callba
   extensionState = {
     package_ref: { id: "slack", kind: "extension" },
     kind: "channel",
-    authenticated: true,
-    needs_setup: false,
-    onboarding_state: "active",
+    installation_state: "active",
   };
   for (const callback of intervalCallbacks) callback();
   await new Promise((resolve) => setTimeout(resolve, 0));

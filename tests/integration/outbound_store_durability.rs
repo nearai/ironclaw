@@ -1,4 +1,4 @@
-//! W6-COLD-SPOTS: `FilesystemOutboundStateStore` (`outbound_preferences`
+//! W6-COLD-SPOTS: `OutboundStateStore` (`outbound_preferences`
 //! role) survives a real process-level reopen. Mirrors `local_dev_outbound_store` (factory.rs);
 //! see docs/plans/2026-07-04-w6-cold-spots-plan.md.
 //!

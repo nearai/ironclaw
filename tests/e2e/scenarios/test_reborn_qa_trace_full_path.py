@@ -16,13 +16,20 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
-
-from emulate_provider import google_headers, github_headers, slack_headers, slack_post
+from emulate_provider import (
+    github_headers,
+    github_json,
+    google_headers,
+    slack_headers,
+    slack_post,
+)
 from helpers import EMULATE_GITHUB_BEARER, EMULATE_SLACK_BEARER
 from provider_capability_inventory import (
     EMULATE_SUPPORTED_TOOLS,
     capability_id_to_wire_name,
 )
+from provider_fault_cases import PROVIDER_FAULT_CASES
+from provider_fault_proxy import PROVIDER_FAULT_PROFILES
 from provider_operation_cases import PROVIDER_OPERATION_CASES
 from provider_operation_types import ProviderOperationCase
 from reborn_webui_harness import (
@@ -32,6 +39,7 @@ from reborn_webui_harness import (
     close_reborn_server,
     create_thread,
     enable_reborn_global_auto_approve,
+    fetch_extension_oauth_requirement,
     reborn_bearer_headers,
     send_message,
     start_reborn_webui_v2_server,
@@ -114,9 +122,12 @@ MUTATING_PROVIDER_TOOLS = {
 def _provider_journey_cases() -> tuple[str, ...]:
     manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
     no_model = set(manifest["no_model_cases"])
+    # Quarantined traces encode the retired activation flow; their fixtures
+    # live under quarantined_retired_activation/ and are not replayable here.
+    quarantined = set(manifest.get("quarantined_model_cases", []))
     cases = []
     for case in manifest["selected_cases"]:
-        if case in no_model:
+        if case in no_model or case in quarantined:
             continue
         trace = json.loads((TRACE_DIR / f"{case}.json").read_text(encoding="utf-8"))
         if any(
@@ -165,35 +176,54 @@ async def reborn_qa_emulate_runtime(
     ironclaw_reborn_binary,
     mock_llm_server,
     resettable_emulate_provider_world,
+    provider_fault_proxy_world,
     tmp_path_factory,
 ):
     """Start one Reborn process against resettable provider URLs."""
     provider_servers = resettable_emulate_provider_world.servers
+    provider_proxy_servers = provider_fault_proxy_world.servers
     emulate_google_server = provider_servers["google"]
     emulate_github_server = provider_servers["github"]
     emulate_slack_server = provider_servers["slack"]
+    google_proxy_server = provider_proxy_servers["google"]
+    github_proxy_server = provider_proxy_servers["github"]
+    slack_proxy_server = provider_proxy_servers["slack"]
     home_dir = tmp_path_factory.mktemp("reborn-qa-emulate-provider-home")
     mock_llm_address = urlparse(mock_llm_server)
-    emulate_google_address = urlparse(emulate_google_server["url"])
-    emulate_github_address = urlparse(emulate_github_server["url"])
-    emulate_slack_address = urlparse(emulate_slack_server["url"])
+    emulate_google_address = urlparse(google_proxy_server["url"])
+    emulate_github_address = urlparse(github_proxy_server["url"])
+    emulate_slack_address = urlparse(slack_proxy_server["url"])
     rewrite_map = ",".join(
         (
             f"oauth2.googleapis.com={mock_llm_address.hostname}:{mock_llm_address.port}",
-            f"www.googleapis.com={emulate_google_address.hostname}:"
-            f"{emulate_google_address.port}",
-            f"gmail.googleapis.com={emulate_google_address.hostname}:"
-            f"{emulate_google_address.port}",
-            f"docs.googleapis.com={emulate_google_address.hostname}:"
-            f"{emulate_google_address.port}",
-            f"sheets.googleapis.com={emulate_google_address.hostname}:"
-            f"{emulate_google_address.port}",
-            f"slides.googleapis.com={emulate_google_address.hostname}:"
-            f"{emulate_google_address.port}",
-            f"api.github.com={emulate_github_address.hostname}:"
-            f"{emulate_github_address.port}",
-            f"slack.com={emulate_slack_address.hostname}:"
-            f"{emulate_slack_address.port}",
+            (
+                f"www.googleapis.com={emulate_google_address.hostname}:"
+                f"{emulate_google_address.port}"
+            ),
+            (
+                f"gmail.googleapis.com={emulate_google_address.hostname}:"
+                f"{emulate_google_address.port}"
+            ),
+            (
+                f"docs.googleapis.com={emulate_google_address.hostname}:"
+                f"{emulate_google_address.port}"
+            ),
+            (
+                f"sheets.googleapis.com={emulate_google_address.hostname}:"
+                f"{emulate_google_address.port}"
+            ),
+            (
+                f"slides.googleapis.com={emulate_google_address.hostname}:"
+                f"{emulate_google_address.port}"
+            ),
+            (
+                f"api.github.com={emulate_github_address.hostname}:"
+                f"{emulate_github_address.port}"
+            ),
+            (
+                f"slack.com={emulate_slack_address.hostname}:"
+                f"{emulate_slack_address.port}"
+            ),
         )
     )
     proc, base_url = await start_reborn_webui_v2_server(
@@ -208,28 +238,24 @@ async def reborn_qa_emulate_runtime(
             "IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI": (
                 "http://127.0.0.1/api/reborn/product-auth/oauth/google/callback"
             ),
-            "IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI": (
-                "http://127.0.0.1/api/reborn/product-auth/oauth/slack/callback"
-            ),
         },
     )
     await enable_reborn_global_auto_approve(base_url)
     slack_state = await _seed_slack_workspace(emulate_slack_server["url"])
     await _configure_slack(base_url, slack_state)
     await _install_extensions(base_url, ALL_EXTENSIONS)
-    for extension_id, scopes in GOOGLE_EXTENSION_SCOPES.items():
-        await _seed_google_account(base_url, extension_id, scopes)
-        await _activate_extensions(base_url, (extension_id,))
+    for extension_id in GOOGLE_EXTENSION_SCOPES:
+        await _seed_google_account(base_url, extension_id)
     await _seed_github_account(base_url)
-    await _activate_extensions(base_url, ("github",))
     await _seed_slack_account(base_url, emulate_slack_server["url"], slack_state)
-    await _activate_extensions(base_url, ("slack",))
+    await _assert_extensions_active(base_url, ALL_EXTENSIONS)
     try:
         yield {
             "base_url": base_url,
             "emulate_google_url": emulate_google_server["url"],
             "emulate_github_url": emulate_github_server["url"],
             "emulate_slack_url": emulate_slack_server["url"],
+            "provider_fault_proxies": provider_fault_proxy_world.proxies,
             "slack_state": slack_state,
         }
     finally:
@@ -273,21 +299,41 @@ async def reborn_provider_operation_server(
         )
 
 
+@pytest.fixture
+async def reborn_provider_fault_server(
+    reborn_qa_emulate_runtime,
+    resettable_emulate_provider_world,
+    provider_fault_proxy_world,
+    fault_case,
+):
+    """Reset fault and provider state around one representative failure."""
+    provider_fault_proxy_world.reset()
+    try:
+        yield reborn_qa_emulate_runtime
+    finally:
+        provider_fault_proxy_world.reset()
+        await resettable_emulate_provider_world.reset(
+            {fault_case.operation.provider_service}
+        )
+
+
 async def _seed_google_account(
     base_url: str,
     extension_id: str,
-    scopes: tuple[str, ...],
 ) -> None:
     expires_at = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
     async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
+        requirement = await fetch_extension_oauth_requirement(
+            client,
+            base_url,
+            extension_id,
+        )
         started = await client.post(
             f"{base_url}/api/webchat/v2/extensions/{extension_id}/setup/oauth/start",
             json={
-                "provider": "google",
-                "account_label": f"Emulate Google account for {extension_id}",
-                "scopes": list(scopes),
+                "requirement": requirement["name"],
                 "expires_at": expires_at,
-                "invocation_id": str(uuid.uuid4()),
+                "invocation_id": requirement["setup"].get("invocation_id"),
             },
             timeout=15,
         )
@@ -475,18 +521,21 @@ async def _seed_slack_account(
 ) -> None:
     expires_at = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
     async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
+        requirement = await fetch_extension_oauth_requirement(
+            client,
+            base_url,
+            "slack",
+        )
         started = await client.post(
             f"{base_url}/api/webchat/v2/extensions/slack/setup/oauth/start",
             json={
-                "provider": "slack",
-                "account_label": "Emulate Slack account",
-                "scopes": [],
+                "requirement": requirement["name"],
                 "expires_at": expires_at,
-                "invocation_id": str(uuid.uuid4()),
+                "invocation_id": requirement["setup"].get("invocation_id"),
             },
             timeout=30,
         )
-        started.raise_for_status()
+        assert started.is_success, started.text
         body = started.json()
         query = parse_qs(urlparse(body["authorization_url"]).query)
         consent = await client.post(
@@ -534,17 +583,25 @@ async def _install_extensions(base_url: str, extension_ids: tuple[str, ...]) -> 
             installed.raise_for_status()
 
 
-async def _activate_extensions(base_url: str, extension_ids: tuple[str, ...]) -> None:
+async def _assert_extensions_active(
+    base_url: str, extension_ids: tuple[str, ...]
+) -> None:
     async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
+        listed = await client.get(
+            f"{base_url}/api/webchat/v2/extensions",
+            timeout=30,
+        )
+        listed.raise_for_status()
+        by_id = {
+            extension["package_ref"]["id"]: extension
+            for extension in listed.json()["extensions"]
+        }
         for extension_id in extension_ids:
-            activated = await client.post(
-                f"{base_url}/api/webchat/v2/extensions/{extension_id}/activate",
-                json={"client_action_id": client_action_id()},
-                timeout=30,
+            extension = by_id.get(extension_id)
+            assert extension is not None, (
+                f"{extension_id} disappeared after completing its manifest-declared setup"
             )
-            activated.raise_for_status()
-            body = activated.json()
-            assert body.get("activated") is True, body
+            assert extension["installation_state"] == "active", extension
 
 
 def _provider_leg(trace: dict, provider_tools: frozenset[str]) -> dict:
@@ -1437,6 +1494,102 @@ async def test_provider_operation_case_executes_with_provider_readback(
     assert len(matches) == 1, matches
     assert matches[0]["status"] == "completed", matches[0]
     await operation_case.assert_outcome(emulate_url, matches[0])
+    assert replay == {
+        "source": source,
+        "next_response": 3,
+        "response_count": 3,
+        "complete": True,
+        "error": None,
+    }
+
+
+@pytest.mark.parametrize(
+    "fault_case",
+    PROVIDER_FAULT_CASES,
+    ids=lambda case: case.case_id,
+)
+async def test_provider_fault_profile_preserves_safe_operation_outcomes(
+    reborn_provider_fault_server,
+    mock_llm_server,
+    fault_case,
+):
+    """Faults stay model-visible and never create an unproven duplicate effect."""
+    operation = fault_case.operation
+    server = reborn_provider_fault_server["base_url"]
+    emulate_url = reborn_provider_fault_server[
+        f"emulate_{operation.provider_service}_url"
+    ]
+    proxy = reborn_provider_fault_server["provider_fault_proxies"][
+        operation.provider_service
+    ]
+
+    await operation.assert_baseline(emulate_url)
+    arguments = await operation.resolve_arguments(emulate_url)
+    trace = _provider_operation_trace(operation, arguments)
+    trace["steps"][-1]["request_hint"] = {
+        "expected_failed_tool_result_contains": fault_case.expected_tool_result
+    }
+    source = f"provider-fault-{fault_case.case_id}.json"
+    await _install_inline_trace(mock_llm_server, source, trace)
+    profile = PROVIDER_FAULT_PROFILES[fault_case.profile]
+    proxy.arm(
+        profile,
+        method=fault_case.method,
+        path=fault_case.path,
+    )
+
+    async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
+        thread_id = await create_thread(client, server)
+        await send_message(
+            client,
+            server,
+            thread_id,
+            trace["steps"][0]["response"]["content"],
+        )
+        replay = await _wait_for_trace_replay(mock_llm_server, timeout=120)
+        await wait_for_assistant_message(client, server, thread_id, timeout=120)
+        timeline = await _fetch_all_timeline_pages_with_retry(
+            client, server, thread_id
+        )
+
+    matches = [
+        preview
+        for message in timeline.get("messages", [])
+        if (preview := capability_preview_payload(message)) is not None
+        and preview["capability_id"] == operation.capability_id
+    ]
+    assert len(matches) == 1, matches
+    assert matches[0]["status"] == "failed", matches[0]
+    if fault_case.expected_preview_error is not None:
+        assert fault_case.expected_preview_error in json.dumps(matches[0]), matches[0]
+
+    attempts = [
+        attempt
+        for attempt in proxy.state["requests"]
+        if attempt["method"] == fault_case.method
+        and attempt["path"] == fault_case.path
+    ]
+    assert len(attempts) == 1, attempts
+    assert attempts[0]["forwarded"] is fault_case.expected_forwarded
+    assert attempts[0]["responded"] is (profile.action == "respond")
+
+    async with httpx.AsyncClient(timeout=15) as provider_client:
+        issues = await github_json(
+            provider_client,
+            emulate_url,
+            "GET",
+            "/repos/nearai/ironclaw/issues",
+        )
+    assert isinstance(issues, list)
+    if fault_case.expected_outcome == "committed_without_ack":
+        expected_title = arguments["title"]
+        assert [issue["title"] for issue in issues].count(expected_title) == 1, issues
+    else:
+        assert len(issues) == 1, issues
+        attempted_title = arguments.get("title")
+        if attempted_title is not None:
+            assert issues[0]["title"] != attempted_title, issues
+
     assert replay == {
         "source": source,
         "next_response": 3,

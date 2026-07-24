@@ -24,7 +24,6 @@ use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountStatus, SecretCleanupAction,
     SecretCleanupReport, SecretCleanupRequest,
 };
-use ironclaw_extensions::ExtensionInstallationStore;
 use ironclaw_host_api::{
     ExtensionId, InvocationId, ProductSurfaceCaller, ProductSurfaceError, ResourceScope, TenantId,
 };
@@ -158,7 +157,7 @@ pub(crate) struct GenericChannelConnectionService {
     entries: Vec<ChannelConnectionEntry>,
     /// Generic discovery + scope source. `None` when the composed runtime
     /// has no durable installation store — only lane entries report then.
-    installation_store: Option<Arc<dyn ExtensionInstallationStore>>,
+    installation_store: Option<Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>>,
     identity_lookup: Arc<dyn RebornUserIdentityLookup>,
     identity_delete_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
     /// Genuinely optional: compositions without product auth cannot have
@@ -186,7 +185,7 @@ impl GenericChannelConnectionService {
     pub(crate) fn new(
         tenant_id: TenantId,
         entries: Vec<ChannelConnectionEntry>,
-        installation_store: Option<Arc<dyn ExtensionInstallationStore>>,
+        installation_store: Option<Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>>,
         identity_lookup: Arc<dyn RebornUserIdentityLookup>,
         identity_delete_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
         credential_cleanup: Option<Arc<dyn ChannelCredentialCleanup>>,
@@ -917,7 +916,7 @@ mod tests {
     #[tokio::test]
     async fn discovered_extension_disconnect_drops_the_callers_dm_target() {
         use ironclaw_extensions::{
-            ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
+            ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStorePort as _,
             ExtensionManifestRecord, ExtensionManifestRef, ManifestSource,
         };
         use ironclaw_filesystem::InMemoryBackend;
@@ -1010,7 +1009,6 @@ team_id = "/team/id"
                     ExtensionInstallationId::new("install-alpha".to_string())
                         .expect("installation id"),
                     extension_id.clone(),
-                    ExtensionActivationState::Enabled,
                     ExtensionManifestRef::new(extension_id.clone(), None),
                     Vec::new(),
                     chrono::Utc::now(),
@@ -1020,15 +1018,6 @@ team_id = "/team/id"
             )
             .await
             .expect("persist install");
-        // Connection scoping is configured (fail-closed otherwise).
-        installation_store
-            .set_channel_config(
-                &extension_id,
-                vec![("acmechat_team_id".to_string(), "T123".to_string())],
-            )
-            .await
-            .expect("save scoping value");
-
         let identity_store = bound_identity_store("install-alpha");
         let dm_store = Arc::new(FilesystemChannelDmTargetStore::new(
             Arc::new(InMemoryBackend::new()),
@@ -1049,7 +1038,9 @@ team_id = "/team/id"
         let service = GenericChannelConnectionService::new(
             tenant(),
             Vec::new(),
-            Some(installation_store as Arc<dyn ExtensionInstallationStore>),
+            Some(
+                installation_store as Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>,
+            ),
             identity_store.clone(),
             identity_store.clone(),
             None,
@@ -1098,7 +1089,7 @@ team_id = "/team/id"
     #[tokio::test]
     async fn connection_discovery_includes_channel_without_auth_vendor() {
         use ironclaw_extensions::{
-            ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
+            ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStorePort as _,
             ExtensionManifestRecord, ExtensionManifestRef, ManifestSource,
         };
 
@@ -1162,7 +1153,6 @@ injection = { type = "header", name = "authorization", prefix = "Bearer " }
                 ExtensionInstallation::new(
                     ExtensionInstallationId::new("pairchat-install").expect("installation id"),
                     extension_id.clone(),
-                    ExtensionActivationState::Enabled,
                     ExtensionManifestRef::new(extension_id, None),
                     Vec::new(),
                     chrono::Utc::now(),
@@ -1177,7 +1167,9 @@ injection = { type = "header", name = "authorization", prefix = "Bearer " }
         let service = GenericChannelConnectionService::new(
             tenant(),
             Vec::new(),
-            Some(installation_store as Arc<dyn ExtensionInstallationStore>),
+            Some(
+                installation_store as Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>,
+            ),
             identity_store.clone(),
             identity_store,
             None,

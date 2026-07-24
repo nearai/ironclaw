@@ -10,7 +10,7 @@ use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
     CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
     CommunicationPreferenceVersion, DeliveryDefaultScope, FilesystemOutboundStateStore,
-    OutboundDeliveryAttempt, OutboundError, OutboundPolicyService, OutboundStateStore,
+    OutboundDeliveryAttempt, OutboundError, OutboundPolicyService, OutboundStateStorePort,
     ReplyTargetBindingClaim, ReplyTargetBindingValidator, RunNotificationContext,
     RunNotificationEventKind, RunNotificationOrigin, ThreadProjectionAccessClaim,
     ThreadProjectionAccessPolicy, ThreadProjectionAccessRequest, TriggerFireSlot, TriggerOriginRef,
@@ -379,7 +379,7 @@ fn coordinator_over(
     adapter: &Arc<ScriptedChannelAdapter>,
 ) -> DeliveryCoordinator {
     DeliveryCoordinator::new(
-        Arc::clone(store) as Arc<dyn ironclaw_outbound::OutboundStateStore>,
+        Arc::clone(store) as Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
         Arc::new(StaticChannelResolver {
             adapter: Arc::clone(adapter),
             unavailable: false,
@@ -773,7 +773,7 @@ async fn coordinator_fails_closed_when_the_channel_is_unavailable() {
         Vec::new(),
     ));
     let coordinator = DeliveryCoordinator::new(
-        Arc::clone(&store) as Arc<dyn ironclaw_outbound::OutboundStateStore>,
+        Arc::clone(&store) as Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
         Arc::new(StaticChannelResolver {
             adapter: Arc::clone(&adapter),
             unavailable: true,
@@ -1062,7 +1062,7 @@ async fn coordinator_notice_fails_closed_when_the_channel_is_unavailable() {
         Vec::new(),
     ));
     let coordinator = DeliveryCoordinator::new(
-        Arc::clone(&store) as Arc<dyn ironclaw_outbound::OutboundStateStore>,
+        Arc::clone(&store) as Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
         Arc::new(StaticChannelResolver {
             adapter: Arc::clone(&adapter),
             unavailable: true,

@@ -12,6 +12,7 @@ all received tokens so tests can assert credential injection behavior.
 """
 
 import asyncio
+import json
 import os
 import signal
 import socket
@@ -139,36 +140,105 @@ async def _start_mock_google_api():
 # ---------------------------------------------------------------------------
 
 def _install_google_drive_wasm(wasm_dir: str):
-    """Copy the real google-drive WASM tool binary + capabilities into the test dir.
-
-    Requires: `cd tools-src/google-drive && cargo build --target wasm32-wasip2 --release`
-    """
+    """Copy the checked-in google-drive WASM artifact into the legacy test dir."""
     import shutil
 
-    # Find the built WASM binary (shared-target or local target)
     wasm_src = None
+    asset_root = (
+        ROOT
+        / "crates"
+        / "ironclaw_first_party_extensions"
+        / "assets"
+        / "google-drive"
+    )
     candidates = [
-        ROOT / ".cargo" / "shared-target" / "wasm32-wasip2" / "release" / "google_drive_tool.wasm",
-        Path.home() / ".cargo" / "shared-target" / "wasm32-wasip2" / "release" / "google_drive_tool.wasm",
-        ROOT / "tools-src" / "google-drive" / "target" / "wasm32-wasip2" / "release" / "google_drive_tool.wasm",
+        asset_root / "wasm" / "google_drive_tool.wasm",
+        asset_root
+        / "wasm-src"
+        / "target"
+        / "wasm32-wasip2"
+        / "release"
+        / "google_drive_tool.wasm",
+        ROOT
+        / ".cargo"
+        / "shared-target"
+        / "wasm32-wasip2"
+        / "release"
+        / "google_drive_tool.wasm",
+        Path.home()
+        / ".cargo"
+        / "shared-target"
+        / "wasm32-wasip2"
+        / "release"
+        / "google_drive_tool.wasm",
     ]
-    for c in candidates:
-        if c.exists():
-            wasm_src = c
+    for wasm_candidate in candidates:
+        if wasm_candidate.exists():
+            wasm_src = wasm_candidate
             break
 
     if wasm_src is None:
         return False  # caller should skip
 
-    # Copy WASM binary as google_drive.wasm (extension name format)
-    shutil.copy2(str(wasm_src), os.path.join(wasm_dir, "google_drive.wasm"))
-
-    # Copy real capabilities.json
-    cap_src = ROOT / "tools-src" / "google-drive" / "google-drive-tool.capabilities.json"
-    if cap_src.exists():
-        shutil.copy2(str(cap_src), os.path.join(wasm_dir, "google_drive.capabilities.json"))
-    else:
-        return False
+    wasm_dir_path = Path(wasm_dir)
+    shutil.copy2(str(wasm_src), wasm_dir_path / "google_drive.wasm")
+    (wasm_dir_path / "google_drive.capabilities.json").write_text(
+        json.dumps(
+            {
+                "version": "0.2.1",
+                "wit_version": "0.3.0",
+                "description": (
+                    "Search, access, upload, share, and organize files and "
+                    "folders in Google Drive."
+                ),
+                "http": {
+                    "allowlist": [
+                        {
+                            "host": "www.googleapis.com",
+                            "path_prefix": "/drive/v3/",
+                            "methods": ["GET", "POST", "PATCH", "DELETE"],
+                        },
+                        {
+                            "host": "www.googleapis.com",
+                            "path_prefix": "/upload/drive/v3/",
+                            "methods": ["POST", "PUT"],
+                        },
+                    ],
+                    "credentials": {
+                        "google_oauth_token": {
+                            "secret_name": "google_oauth_token",
+                            "location": {"type": "bearer"},
+                            "host_patterns": ["www.googleapis.com"],
+                        }
+                    },
+                    "timeout_secs": 60,
+                },
+                "secrets": {"allowed_names": ["google_oauth_token"]},
+                "auth": {
+                    "secret_name": "google_oauth_token",
+                    "display_name": "Google",
+                    "oauth": {
+                        "authorization_url": (
+                            "https://accounts.google.com/o/oauth2/v2/auth"
+                        ),
+                        "token_url": "https://oauth2.googleapis.com/token",
+                        "client_id_env": "GOOGLE_OAUTH_CLIENT_ID",
+                        "client_secret_env": "GOOGLE_OAUTH_CLIENT_SECRET",
+                        "scopes": ["https://www.googleapis.com/auth/drive"],
+                        "use_pkce": False,
+                        "extra_params": {
+                            "access_type": "offline",
+                            "prompt": "consent",
+                        },
+                    },
+                    "env_var": "GOOGLE_OAUTH_TOKEN",
+                },
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     return True
 
@@ -372,7 +442,9 @@ async def v2_google_server(ironclaw_binary, mock_llm_server, mock_google_api):
     # Install real google-drive WASM tool for OAuth redirect test
     wasm_tools_dir = os.path.join(home_dir, ".ironclaw", "wasm_tools")
     os.makedirs(wasm_tools_dir, exist_ok=True)
-    _install_google_drive_wasm(wasm_tools_dir)
+    assert _install_google_drive_wasm(wasm_tools_dir), (
+        "checked-in first-party google-drive WASM artifact is missing"
+    )
 
     # Find two free ports
     socks = []
@@ -425,6 +497,7 @@ async def v2_google_server(ironclaw_binary, mock_llm_server, mock_google_api):
         # succeeds on the expired-token path. Other E2E fixtures use the
         # same value (see tests/e2e/conftest.py:600, :901).
         "GOOGLE_OAUTH_CLIENT_ID": EXPECTED_GOOGLE_CLIENT_ID,
+        "GOOGLE_OAUTH_CLIENT_SECRET": "hosted-google-client-secret",
         # Refresh proxy URL is the mock_llm server on 127.0.0.1; the
         # production SSRF guard blocks loopback by default. Mock-based
         # E2E tests opt in to the loopback path via this env var
@@ -521,7 +594,7 @@ async def test_oauth_redirect_flow(v2_google_server):
     if not setup_data.get("auth_url"):
         pytest.skip(
             "OAuth redirect requires google-drive WASM binary. "
-            "Build with: cd tools-src/google-drive && cargo build --target wasm32-wasip2 --release"
+            "Legacy google-drive WASM source is no longer checked in."
         )
     auth_url = setup_data.get("auth_url")
     assert auth_url, f"Expected auth_url in setup response: {setup_data}"
@@ -772,8 +845,7 @@ async def test_oauth_token_refresh_on_expiry(v2_google_server, mock_google_api):
         pytest.skip(
             f"No {refresh_secret_name} stored; refresh requires a prior "
             "OAuth callback flow (needs the google-drive WASM binary — "
-            "build with: cd tools-src/google-drive && "
-            "cargo build --target wasm32-wasip2 --release)"
+            "legacy google-drive WASM source is no longer checked in)"
         )
         return  # unreachable, satisfies type checkers
 

@@ -46,7 +46,7 @@ Not generic yet — the work:
 | Installed records persist raw TOML and reproject from it | `crates/ironclaw_extensions/src/installations.rs` |
 | Hosted MCP mutates capabilities from live `tools/list` | `crates/ironclaw_extensions/src/hosted_mcp_discovery.rs` |
 | Lifecycle emits Slack-specific connection copy; workflow has Slack cleanup literals | `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs`, `crates/ironclaw_product/src/reborn_services/extensions.rs` |
-| Slack-only frontend components and branches | `crates/ironclaw_webui_v2/frontend/src/pages/extensions/components/{slack-setup-panel,slack-channel-picker,channels-tab,configure-modal}.tsx`, `lib/slack-{setup,channels}-api.ts`, `pages/chat/components/auth-oauth-card.tsx`, `lib/channel-connection-events.ts` |
+| Slack-only frontend components and branches | `crates/ironclaw_webui/frontend/src/pages/extensions/components/{slack-setup-panel,slack-channel-picker,channels-tab,configure-modal}.tsx`, `lib/slack-{setup,channels}-api.ts`, `pages/chat/components/auth-oauth-card.tsx`, `lib/channel-connection-events.ts` |
 | Concrete channel formatting in LLM prompt construction | `crates/ironclaw_llm/src/reasoning.rs` |
 | Concrete channel variants in trace contributions | `crates/ironclaw_reborn_traces/src/contribution.rs` |
 | Slack CLI command, cargo feature, config types | `crates/ironclaw_reborn_cli/src/commands/serve_slack.rs`, `slack-v2-host-beta` feature, `crates/ironclaw_reborn_config` |
@@ -58,8 +58,8 @@ Not generic yet — the work:
 
 | Crate | Owns |
 | --- | --- |
-| `ironclaw_extension_host` | `ExtensionEntrypoint`, `ExtensionBindings`, binding check, loaders (native/wasm/mcp), immutable active snapshot + resolver views, installation state machine, activation/deactivation/removal/upgrade, generic ingress router module, restricted-egress implementation |
-| `ironclaw_slack_extension` | All Slack protocol behavior: tool adapters (wrapping the existing WASM artifact initially), channel adapter (parse, render, deliver, targets, activate/cleanup), fixtures. Absorbs `ironclaw_slack_extension` and everything Slack in composition |
+| `ironclaw_extension_host` | `ExtensionEntrypoint`, `ExtensionBindings`, binding check, loaders (native/wasm/mcp), immutable active snapshot + resolver views, internal publication/removal/upgrade, generic ingress router module, restricted-egress implementation |
+| `ironclaw_slack_extension` | All Slack protocol behavior: tool adapters (wrapping the existing WASM artifact initially), channel adapter (parse, render, deliver, targets, internal provisioning/cleanup), fixtures. Absorbs `ironclaw_slack_extension` and everything Slack in composition |
 | `ironclaw_telegram_extension` | Telegram channel adapter (updates parsing, Bot API rendering, `setWebhook`/`deleteWebhook` hooks). Absorbs `ironclaw_telegram_extension` |
 
 **Changed crates:**
@@ -94,8 +94,10 @@ engine, or the router.
 **Changes** (`crates/ironclaw_extensions`, `crates/ironclaw_host_api`):
 
 - Add v3 schema: top-level `[[tools]]`, `[mcp]`, `[channel]`
-  (ingress + verification + config + egress + presentation +
-  `conversation_model`), `[auth.<vendor>]` recipes. Exact shapes:
+  (ingress + verification + egress + presentation + `conversation_model`),
+  `[auth.<vendor>]` recipes, and optional `[admin_configuration]`. The latter
+  declares a reusable deployment-owned form keyed by `group_id`; it is not a
+  channel sub-section or an installation-owned record. Exact shapes:
   `overview.md` §3.
 - **Vendor rename:** rename `RuntimeCredentialAccountProviderId` → `VendorId`
   in `ironclaw_host_api` (temporary deprecation alias until callers migrate,
@@ -172,21 +174,21 @@ already exists.
     Resolver ports are defined in consumer crates and implemented here:
     `ToolResolver` (dispatcher), `ChannelResolver` (workflow/router),
     `AuthRecipeResolver` (auth engine — returns data, not adapters). Duplicate
-    capability id or ingress route across active extensions → activation
+    capability id or ingress route across published extensions → publication
     conflict (no scope-based disambiguation in this version).
-  - `lifecycle.rs` — the installation state machine and pipeline exactly as
-    `overview.md` §6.1–6.2: the honest projection enum (persisted
-    `Installed | Active | Failed`; `Configured | Disabled | Unsupported`
-    derived at projection time), activation atomicity (publish-or-nothing on
-    failure), and the fixed, host-owned removal order with typed-quarantine
-    retry on failure — no persisted transient state, no `RemovalPending`. This
-    is the **only** writer of installation state and the active snapshot; a
-    single async mutex serializes lifecycle operations (single serving
-    process assumption).
-    `BindContext`/`ChannelContext` carry installation identity, the resolved
-    declaration, and non-secret config values (secrets only behind injection);
-    adapter hooks run under bounded deadlines; editing `[channel.config]`
-    while `Active` performs an automatic deactivate → reactivate cycle.
+  - `lifecycle.rs` — the membership/readiness pipeline exactly as
+    `overview.md` §6.1–6.2. Product state is only `uninstalled |
+    setup_needed | active`: absence/presence of caller membership plus derived
+    tenant-admin and caller-auth readiness. Internal host checkpoints and
+    publish-or-nothing failures are not public states or actions. The host owns
+    the fixed removal order with typed-quarantine retry and the active snapshot;
+    a single async mutex serializes internal publication operations (single
+    serving process assumption).
+    `BindContext`/`ChannelContext` carry runtime identity, the resolved
+    declaration, and non-secret tenant configuration values (secrets only
+    behind injection); adapter hooks run under bounded deadlines. Saving one
+    `[admin_configuration]` group refreshes every tenant runtime consumer of
+    that group; it never creates per-installation configuration.
   - `egress.rs` — `RestrictedEgress` implementation: scheme/host/method
     allowlist from the resolved contract, credential injection by handle
     (adapter-supplied `Authorization` rejected where injection is declared),
@@ -201,16 +203,18 @@ already exists.
   in P6 after its callers cut over.
 
 **Tests first:** `binding_contract.rs` (missing/extra/undeclared binding,
-declared-but-`None`, auth-never-binds); `lifecycle_contract.rs` (state machine:
-every legal transition, activation failure publishes nothing and records a
-typed redacted error, upgrade drains old `Arc`); the facade-owned removal
+declared-but-`None`, auth-never-binds); `lifecycle_contract.rs` (caller
+membership isolation, derived three-state projection, internal publication
+failure remains `setup_needed` with a typed redacted error, upgrade drains old
+`Arc`); the facade-owned removal
 order (unpublish → drain → vendor cleanup → auth cleanup → config/identity
 delete) with typed-quarantine retry on failure, observed via scripted
 adapter + engine at the composition tier; loader tests (unknown
 service, wasm lane invoke, mcp discovery ceiling violations); snapshot tests
-(no mixed generation under concurrent activate/resolve; readers never observe
+(no mixed generation under concurrent publish/resolve; readers never observe
 partial state). Integration tier: `tests/integration/extension_runtime.rs` —
-acme fixture install → activate → resolve → remove on both DBs.
+acme fixture admin-configure → install → setup/connect → active → resolve →
+remove on both DBs, with a second user proving membership isolation.
 
 ## 6. Workstream C — Tool dispatch cutover
 
@@ -221,7 +225,7 @@ acme fixture install → activate → resolve → remove on both DBs.
   reservation, events, and audit behavior are unchanged and proven unchanged.
 - Host built-in capabilities stay in the host's built-in registry and resolve
   through the same lookup, running the identical pipeline; an extension
-  capability id colliding with a built-in is an activation conflict (tested).
+  capability id colliding with a built-in is a publication conflict (tested).
 - Existing WASM/MCP/script execution code becomes adapter implementations or
   helpers behind the loaders; credential injection and host-port enforcement
   stay host-side (ports built from the resolved declaration per call).
@@ -235,7 +239,7 @@ acme fixture install → activate → resolve → remove on both DBs.
 **Tests first:** dispatcher contract tests updated to drive resolution through
 a scripted resolver (unknown capability fails before adapter work; policy
 pipeline still runs; adapter cannot reach undeclared egress/credential).
-Integration: activate the real Slack package and invoke all five capability
+Integration: reconcile the real Slack package to readiness and invoke all five capability
 ids through the production dispatcher with recorded egress — asserts no Slack
 branch anywhere in dispatch (`tests/integration/extension_runtime.rs`).
 
@@ -265,7 +269,7 @@ branch anywhere in dispatch (`tests/integration/extension_runtime.rs`).
   it once as a generic, vendor-blind background sweep (leader-locked per
   deployment tick, due at half the declared lifetime, soonest-death-first
   under the per-tick cap). There is no per-vendor refresher code.
-- Shared vendors: unify recipes at activation (identical except
+- Shared vendors: unify recipes during internal publication (identical except
   `scopes`/`display_name`, else conflict); scope union and incremental
   re-consent keep today's behavior; grants are vendor-scoped and survive
   removal of one consumer while another active extension shares the vendor.
@@ -305,7 +309,7 @@ oauth-connect integration test rather than adding a parallel one).
 
 - Generic router mounted once by composition into the existing webhook server:
   routes `/webhooks/extensions/{extension_id}/{route_suffix}` from the active
-  snapshot's channel descriptors (activation rejects collisions with fixed
+  snapshot's channel descriptors (publication rejects collisions with fixed
   host routes and other extensions; route table updates on snapshot swap, no
   Axum rebuild).
 - Order per request: match → method/body-limit/rate/deadline enforcement →
@@ -336,7 +340,7 @@ oauth-connect integration test rather than adding a parallel one).
   execution moves to the generic verifier via the manifest recipe. Delete the
   Slack route mount and installation resolver from composition.
 - **Telegram:** `TelegramChannelAdapter::inbound` parses updates; manifest
-  declares `shared_secret_header` verification; `activate()` calls
+  declares `shared_secret_header` verification; its internal `activate()` hook calls
   `setWebhook` (with the secret token), `cleanup()` calls `deleteWebhook`.
   Activate the real package through the same router — the second production
   proof.
@@ -396,12 +400,12 @@ their crates; one outbound integration proof each through the real coordinator.
 
 | Current file(s) | Disposition |
 | --- | --- |
-| `slack_host_beta.rs`, `slack_host_beta/runtime_setup.rs` | Delete — `ExtensionHost::activate` + factory registry replace manual construction |
+| `slack_host_beta.rs`, `slack_host_beta/runtime_setup.rs` | Delete — generic internal publication + factory registry replace manual construction |
 | `slack_serve.rs`, `slack_serve/installation.rs` | P8/E: parsing → Slack crate; verification/routing → generic router; delete |
 | `slack_delivery.rs` | P9/F: scheduling/persistence → coordinator; rendering/sending → Slack crate; delete |
 | `slack_egress.rs` | Generic `RestrictedEgress`; request building → Slack crate; delete |
 | `slack_outbound_targets.rs`, `slack_dm_open.rs` | Slack crate (`deliver`/`list_targets`); delete |
-| `slack_channel_connection.rs`, `slack_setup.rs`, `slack_channel_routes*` | `[channel.config]` + generic config/connect endpoints + `activate()` validation; allowed-channel lists become installation config; delete |
+| `slack_channel_connection.rs`, `slack_setup.rs`, `slack_channel_routes*` | manifest `[admin_configuration]` + generic admin/connect endpoints + internal provisioning validation; allowed-channel lists become tenant configuration; delete |
 | `slack_personal_oauth.rs`, `slack_personal_binding*.rs` | Recipe + engine (D); generic parts of binding flow stay generic; delete |
 | `slack_host_state.rs` | Generic scoped state (tenant/extension/surface-keyed); one-time key migration (H); delete |
 | `mod.rs` | Delete last |
@@ -414,22 +418,23 @@ display data); manual Slack scopes/onboarding in `available_extensions.rs`
 config types in `ironclaw_reborn_config`; `serve_slack.rs` and the
 `slack-v2-host-beta` cargo feature.
 
-**Frontend** (`crates/ironclaw_webui_v2/frontend`):
+**Frontend** (`crates/ironclaw_webui/frontend`):
 
 - Wire additions (backend `reborn_services/types.rs`): full surface key per
-  surface; installation state enum (§6.1); auth account state enum (§6.3),
+  surface; three-state public lifecycle projection (§6.1); auth account state enum (§6.3),
   exposed as a per-vendor **accounts list** (`account_id`, `label`, state,
   `is_default`) plus each surface's `resolved_account_id` — length ≤ 1 until
   the post-P7 multi-account follow-up
   (`adr/0001-multiple-accounts-per-vendor.md`), list-first so the golden
-  fixture never breaks; `[channel.config]` field descriptors;
+  fixture never breaks; tenant `[admin_configuration]` group descriptors;
   presentation/display data. Freeze one golden wire fixture with an arbitrary
   channel + a multi-surface extension.
-- Add generic components: `surface-card`, `config-form` (schema-driven,
-  secret-masking, never echoes stored secrets), `connect-card` (renders the
-  auth state enum), optional `target-picker`. The channels tab keys by surface
-  and renders the same components for every extension; affordances derive from
-  the two state enums + config completeness (§6.4).
+- Add generic components: `surface-card`, `connect-card` (renders caller auth
+  state), optional `target-picker`, and a separate admin configuration view
+  that renders each manifest group schema, masks secrets, and never echoes
+  stored values. The channels tab keys by surface and renders the same user
+  components for every extension; it cannot mutate deployment configuration.
+  Affordances derive from membership/readiness plus caller auth (§6.4).
 - Delete: `slack-setup-panel.tsx`, `slack-channel-picker.tsx`,
   `slack-setup-api.ts`, `slack-channels-api.ts` (+ their tests), and Slack
   branches in `channels-tab.tsx`, `configure-modal.tsx`,
@@ -440,8 +445,9 @@ config types in `ironclaw_reborn_config`; `serve_slack.rs` and the
   (`tests/e2e/reborn_webui_harness.py` + `fake_slack_api.py`): one scenario —
   configure, connect, message in, reply out, remove. No new harness.
 
-**CLI:** `extension` command drives install/enable/disable/remove through
-`ExtensionHost` (same pipeline as the UI); `serve` no longer knows channels.
+**CLI:** `extension` command drives install/remove membership through
+`ExtensionHost` (same pipeline as the UI); readiness reconciliation is
+automatic and `serve` no longer knows channels.
 
 ## 11. Workstream H — One-time migration and compatibility
 
@@ -455,12 +461,14 @@ possible.
 2. **Legacy raw-TOML installed records:** compiled once through the v2 reader
    at startup → resolved record persisted (idempotent; A).
 3. **Slack setup slots** (bot token, signing secret, app client credentials) →
-   `[channel.config]` handles + auth `client_credentials` handles.
+   tenant-scoped `[admin_configuration]` handles, including OAuth client
+   credentials consumed by the auth recipe.
 4. **Slack state roots** (`slack_host_state.rs`: identities, allowed channels,
    subject routes, DM targets, outbound preferences) → generic scoped state
-   keys / installation config. After migration no `slack`-named state root is
+   keys / tenant configuration. After migration no `slack`-named state root is
    read outside migration code.
-5. **Installation lifecycle records** → standard state enum backfill.
+5. **Installation lifecycle records** → caller membership backfill; product
+   state is thereafter derived as `uninstalled | setup_needed | active`.
 6. **Webhook URL:** `/webhooks/slack/events` forwarded to
    `/webhooks/extensions/slack/events` for the cutover release and is now
    deleted. OAuth callback paths remain on the generic product-auth route;
@@ -485,8 +493,9 @@ carries a removal note in `checklist.md`.
   - `ironclaw_product_adapters::conformance` — a public test-support module:
     given any `ChannelAdapter` + a scripted vendor server + fixture payloads,
     asserts the contract (inbound outcomes well-formed and bounded; deliver
-    honors the envelope and reports per-part outcomes; activate/cleanup
-    idempotent; unsupported methods error cleanly). Slack, Telegram, and acme
+    honors the envelope and reports per-part outcomes; internal
+    provisioning/cleanup hooks are idempotent; unsupported methods error
+    cleanly). Slack, Telegram, and acme
     all run it.
   - Tool adapter conformance in `ironclaw_host_api` test-support (invoke
     respects deadline/ports; dynamic discovery respects ceilings).

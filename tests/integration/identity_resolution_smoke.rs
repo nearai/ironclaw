@@ -9,7 +9,7 @@
 //! factory mirroring production's
 //! `RebornRuntime::open_reborn_identity_resolver`) plus the re-exported
 //! resolver vocabulary. Composition deliberately keeps the concrete
-//! `FilesystemRebornIdentityStore` private ("keep lower substrate handles
+//! `RebornIdentityStore` private ("keep lower substrate handles
 //! private"), so this suite takes no direct `ironclaw_reborn_identity`
 //! dependency. The factory's in-memory host filesystem replaces the plan's
 //! "tempdir" wording — same store code path, no on-disk state.

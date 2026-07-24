@@ -9,11 +9,11 @@ import {
   authAccountReasonLabelKey,
   channelConnection,
   channelSurface,
-  connectsViaOauth,
   extensionSurfaces,
+  hasAuthSurface,
   hasChannelSurface,
   hasToolSurface,
-  isInboundProofCodeConnection,
+  isWebGeneratedCodeConnection,
   primaryAuthAccount,
 } from "./extensions-schema";
 
@@ -43,6 +43,15 @@ test("hasChannelSurface keys off a declared channel surface only", () => {
   assert.equal(hasChannelSurface(undefined), false);
 });
 
+test("hasAuthSurface keys off the typed auth surface", () => {
+  assert.equal(hasAuthSurface({ surfaces: [{ kind: "auth" }] }), true);
+  assert.equal(
+    hasAuthSurface({ surfaces: [{ kind: "tool" }, { kind: "channel" }] }),
+    false,
+  );
+  assert.equal(hasAuthSurface({}), false);
+});
+
 test("hasToolSurface keys off a declared tool surface only", () => {
   assert.equal(
     hasToolSurface({
@@ -60,7 +69,7 @@ test("hasToolSurface keys off a declared tool surface only", () => {
 });
 
 test("channelSurface and channelConnection extract the typed channel surface", () => {
-  const connection = { channel: "telegram", strategy: "inbound_proof_code" };
+  const connection = { channel: "telegram", strategy: "web_generated_code" };
   const surface = {
     kind: "channel",
     inbound: true,
@@ -83,42 +92,10 @@ test("channelSurface and channelConnection extract the typed channel surface", (
     "a channel surface without a connect affordance yields no connection",
   );
 
-  assert.equal(isInboundProofCodeConnection(connection), true);
-  assert.equal(isInboundProofCodeConnection({ strategy: "oauth" }), false);
-  assert.equal(isInboundProofCodeConnection({ strategy: "admin_managed_channels" }), false);
-  assert.equal(isInboundProofCodeConnection(null), false);
-});
-
-test("connectsViaOauth derives from the wire connection strategy or oauth setup secrets", () => {
-  const oauthConnected = {
-    surfaces: [
-      { kind: "channel", inbound: true, outbound: true, connection: { strategy: "oauth" } },
-    ],
-  };
-  const proofCodeConnected = {
-    surfaces: [
-      {
-        kind: "channel",
-        inbound: true,
-        outbound: true,
-        connection: { strategy: "inbound_proof_code" },
-      },
-    ],
-  };
-  const bare = { surfaces: [{ kind: "channel", inbound: true, outbound: true }] };
-
-  assert.equal(connectsViaOauth(oauthConnected), true);
-  assert.equal(connectsViaOauth(proofCodeConnected), false);
-  assert.equal(connectsViaOauth(bare), false);
-  assert.equal(connectsViaOauth(undefined), false);
-
-  // An oauth-kind setup secret marks the extension OAuth-connecting even when
-  // the surface carries no connection requirement.
-  const oauthSecret = { name: "vendor_oauth", setup: { kind: "oauth" } };
-  const manualSecret = { name: "vendor_token", setup: { kind: "manual_token" } };
-  assert.equal(connectsViaOauth(bare, [oauthSecret]), true);
-  assert.equal(connectsViaOauth(bare, [manualSecret]), false);
-  assert.equal(connectsViaOauth(bare, [null]), false);
+  assert.equal(isWebGeneratedCodeConnection(connection), true);
+  assert.equal(isWebGeneratedCodeConnection({ strategy: "oauth" }), false);
+  assert.equal(isWebGeneratedCodeConnection({ strategy: "admin_managed_channels" }), false);
+  assert.equal(isWebGeneratedCodeConnection(null), false);
 });
 
 test("RUNTIME_LABELS covers exactly the honest runtime wire values", () => {
@@ -131,27 +108,11 @@ test("RUNTIME_LABELS covers exactly the honest runtime wire values", () => {
   ]);
 });
 
-test("STATE_TONES/STATE_LABELS contain exactly the honest wire states (§6.1 installation + §6.2 onboarding) — G5", () => {
-  // The installation-state axis (§6.1, `ironclaw_host_api::InstallationState`)
-  // has six resting states on a *listed* extension — `removed` is an
-  // action-response signal only and never appears there. The onboarding-state
-  // axis (§6.2, `RebornExtensionOnboardingState`) layers `auth_required` /
-  // `setup_required` on top (its `installed` / `failed` values are shared with
-  // the installation axis). The old transient installation states
-  // (`activating` / `deactivating` / `removing` / `removal_pending`) no longer
-  // exist on the wire — the host persists only `installed` / `active` /
-  // `failed` and derives the rest at projection time — so they must not be
-  // known states here.
-  const expectedKeys = [
-    "active",
-    "auth_required",
-    "configured",
-    "disabled",
-    "failed",
-    "installed",
-    "setup_required",
-    "unsupported",
-  ];
+test("STATE_TONES/STATE_LABELS expose only the two listed public lifecycle states", () => {
+  // Absence from the installed response is `uninstalled`; a present extension
+  // is either waiting on manifest-declared setup or active. Internal
+  // install/discovery/publication checkpoints never become card states.
+  const expectedKeys = ["active", "setup_needed"];
   assert.deepEqual(Object.keys(STATE_LABELS).sort(), expectedKeys);
   assert.deepEqual(Object.keys(STATE_TONES).sort(), expectedKeys);
 
@@ -159,10 +120,27 @@ test("STATE_TONES/STATE_LABELS contain exactly the honest wire states (§6.1 ins
     assert.ok(STATE_LABELS[state], `${state} must have a label (known-state check)`);
     assert.ok(STATE_TONES[state], `${state} must have a tone, not the muted default`);
   }
-  assert.equal(STATE_TONES.failed, "danger", "a terminal activation failure must read as danger");
   assert.equal(STATE_TONES.active, "success");
+  assert.equal(
+    STATE_TONES.setup_needed,
+    "warning",
+    "setup-needed extensions must use the yellow warning pill",
+  );
 
-  for (const dead of ["activating", "deactivating", "removing", "removal_pending", "removed"]) {
+  for (const dead of [
+    "auth_required",
+    "configured",
+    "disabled",
+    "failed",
+    "installed",
+    "setup_required",
+    "unsupported",
+    "activating",
+    "deactivating",
+    "removing",
+    "removal_pending",
+    "removed",
+  ]) {
     assert.equal(STATE_LABELS[dead], undefined, `${dead} is retired and must not be a known state`);
     assert.equal(STATE_TONES[dead], undefined, `${dead} is retired and must not be a known state`);
   }

@@ -1,8 +1,8 @@
 //! Scenario 7 (T3 of issue #6105; the #6029/#6049 failure shapes): EXIT EDGES
 //! for a credential-injection (OAuth-backed) extension — GitHub — through the
-//! real lifecycle capabilities: activate → use → **remove** (the edge #6029
+//! real lifecycle capabilities: install-and-reconcile → use → **remove** (the edge #6029
 //! reports as missing/wedged) → surfaces flip together → reconfigure (fresh
-//! credential — the model-tool analog of the Configure card) → reactivate →
+//! credential — the model-tool analog of the Configure card) → reinstall →
 //! use again.
 //!
 //! Differs from the Slack scenario (scenario 6) on the axis that matters:
@@ -14,22 +14,24 @@
 //!
 //! Runs after every earlier scenario that reads "github": scenario 1 leaves
 //! it installed (a same-member reinstall is rejected "already installed" by
-//! design — `install_policy.rs`), so phase 1 activates the existing install —
+//! design — `install_policy.rs`), so phase 1 reconciles the existing member —
 //! the state a real user's Extensions page is in when #6029 bites. The fresh
-//! install→activate arm is pinned in phase 5, after the full remove.
+//! single-install arm is pinned in phase 5, after the full remove.
 //! (Scenarios 8 and 9 run later but touch only slack/notion state.)
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
 
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
-    // ── Phase 1: activate the existing install; tools get published ─────────
+pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
+    let isolated = RebornIntegrationGroup::extension_lifecycle().await?;
+    let g = &isolated;
+    // ── Phase 1: install/reconcile the member; tools get published ──────────
     let lifecycle = g
         .thread("gh-lifecycle-install")
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.extension_activate",
+                "builtin.extension_install",
                 json!({"extension_id": "github"}),
             ),
             RebornScriptedReply::text("github ready"),
@@ -37,17 +39,17 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .build()
         .await?;
     // Real secret material through the production manual-token flow —
-    // activation's credential gate and dispatch-time staging both select this
+    // install reconciliation and dispatch-time staging both select this
     // account (same seed shape as scenario 6's slack_personal account).
     lifecycle
         .seed_capability_credential_account("github", "itest github", &[])
         .await?;
-    lifecycle.submit_turn("activate github").await?;
+    lifecycle.submit_turn("install github").await?;
     lifecycle
-        .assert_tool_result_contains("\"activated\":true")
+        .assert_tool_result_contains("\"phase\":\"active\"")
         .await?;
     lifecycle
-        .assert_model_message_content_contains(r#"\"activated\":true"#)
+        .assert_model_message_content_contains(r#"\"phase\":\"active\""#)
         .await?;
     lifecycle
         .assert_tool_result_contains(r#""github.get_repo""#)
@@ -145,7 +147,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         })?;
     caller.assert_reply_contains("github unavailable").await?;
 
-    // ── Phase 5: reconfigure (fresh credential) + reactivate restores use ───
+    // ── Phase 5: reconfigure (fresh credential) + reinstall restores use ───
     // The model-tool analog of the Extensions page's Configure card: a new
     // credential account for the same provider, then reactivation.
     let restorer = g
@@ -155,10 +157,6 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
                 "builtin.extension_install",
                 json!({"extension_id": "github"}),
             ),
-            RebornScriptedReply::tool_call(
-                "builtin.extension_activate",
-                json!({"extension_id": "github"}),
-            ),
             RebornScriptedReply::text("github restored"),
         ])
         .build()
@@ -166,20 +164,18 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     restorer
         .seed_capability_credential_account("github", "itest github reconfigure", &[])
         .await?;
-    restorer
-        .submit_turn("reinstall and activate github")
-        .await?;
+    restorer.submit_turn("reinstall github").await?;
     restorer
         .assert_tool_result_contains("\"installed\":true")
         .await?;
     restorer
-        .assert_tool_result_contains("\"activated\":true")
+        .assert_tool_result_contains("\"phase\":\"active\"")
         .await?;
     restorer
         .assert_model_message_content_contains(r#"\"installed\":true"#)
         .await?;
     restorer
-        .assert_model_message_content_contains(r#"\"activated\":true"#)
+        .assert_model_message_content_contains(r#"\"phase\":\"active\""#)
         .await?;
 
     // ── Phase 6: the exact call that was rejected now dispatches ────────────

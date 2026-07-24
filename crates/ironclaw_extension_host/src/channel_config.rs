@@ -21,19 +21,19 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_extensions::{
-    ExtensionInstallationStore, ExtensionManifestRecord, ResolvedExtensionManifest,
+    ExtensionInstallationStorePort, ExtensionManifestRecord, ResolvedExtensionManifest,
 };
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     ExtensionId, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
     RecipeSecretField, ResourceScope, SecretHandle,
 };
-use ironclaw_secrets::{SecretMaterial, SecretStore};
+use ironclaw_secrets::{SecretMaterial, SecretStorePort};
 
 use crate::AdminConfigurationService;
 
 type ChannelAdminConfigurationService =
-    AdminConfigurationService<dyn RootFilesystem, dyn SecretStore>;
+    AdminConfigurationService<dyn RootFilesystem, dyn SecretStorePort>;
 
 /// Presence-only projection of one `[channel.config]` field (§6.4 config
 /// completeness input). Secret fields never carry their stored value.
@@ -91,8 +91,8 @@ pub trait ChannelConfigReactivation: Send + Sync {
 /// The generic configure surface over the durable installation store and
 /// the shared scoped secret store.
 pub struct ChannelConfigService {
-    installation_store: Arc<dyn ExtensionInstallationStore>,
-    secrets: Arc<dyn SecretStore>,
+    installation_store: Arc<dyn ExtensionInstallationStorePort>,
+    secrets: Arc<dyn SecretStorePort>,
     /// The channel-egress credential scope: secrets stored here resolve
     /// through the egress credential fallback with no bridging.
     secret_scope: ResourceScope,
@@ -107,10 +107,23 @@ struct AdminConfigurationConsumer {
     scope: ResourceScope,
 }
 
+fn channel_config_fields(manifest: &ResolvedExtensionManifest) -> Vec<RecipeSecretField> {
+    manifest
+        .admin_configuration
+        .iter()
+        .flat_map(|descriptor| descriptor.fields.iter())
+        .map(|field| RecipeSecretField {
+            handle: field.handle.clone(),
+            label: field.label.clone(),
+            secret: field.secret,
+        })
+        .collect()
+}
+
 impl ChannelConfigService {
     pub fn new(
-        installation_store: Arc<dyn ExtensionInstallationStore>,
-        secrets: Arc<dyn SecretStore>,
+        installation_store: Arc<dyn ExtensionInstallationStorePort>,
+        secrets: Arc<dyn SecretStorePort>,
         secret_scope: ResourceScope,
         reactivation: Arc<dyn ChannelConfigReactivation>,
     ) -> Self {
@@ -168,12 +181,7 @@ impl ChannelConfigService {
         extension_id: &ExtensionId,
     ) -> Result<Vec<RecipeSecretField>, ChannelConfigError> {
         let record = self.manifest(extension_id).await?;
-        Ok(record
-            .resolved()
-            .channel
-            .as_ref()
-            .map(|channel| channel.config.fields.clone())
-            .unwrap_or_default())
+        Ok(channel_config_fields(record.resolved()))
     }
 
     async fn resolved_manifest(
@@ -223,11 +231,7 @@ impl ChannelConfigService {
             }
         }
 
-        let mut non_secret = self
-            .installation_store
-            .channel_config(extension_id)
-            .await
-            .map_err(storage_error)?;
+        let mut non_secret = Vec::new();
         let mut non_secret_changed = false;
         let mut secret_stored = false;
         for (handle, value) in values {
@@ -266,12 +270,6 @@ impl ChannelConfigService {
                     }
                 }
             }
-        }
-        if non_secret_changed {
-            self.installation_store
-                .set_channel_config(extension_id, non_secret)
-                .await
-                .map_err(storage_error)?;
         }
         if non_secret_changed || secret_stored {
             self.reactivation
@@ -349,15 +347,7 @@ impl ChannelConfigService {
                 return Ok(Some(value));
             }
         }
-        let values = self
-            .installation_store
-            .channel_config(extension_id)
-            .await
-            .map_err(storage_error)?;
-        Ok(values
-            .into_iter()
-            .find(|(stored, _)| stored == handle)
-            .map(|(_, value)| value))
+        Ok(None)
     }
 
     /// Resolve one auth-recipe client-credential handle from manifest-declared
@@ -414,13 +404,8 @@ impl ChannelConfigService {
             }
         }
         for record in installed_manifests {
-            let Some(channel) = record.resolved().channel.as_ref() else {
-                continue;
-            };
-            let Some(field) = channel
-                .config
-                .fields
-                .iter()
+            let Some(field) = channel_config_fields(record.resolved())
+                .into_iter()
                 .find(|field| field.handle.as_str() == handle)
             else {
                 continue;
@@ -452,23 +437,15 @@ impl ChannelConfigService {
         extension_id: &ExtensionId,
     ) -> Result<Vec<(String, String)>, ChannelConfigError> {
         let manifest = self.resolved_manifest(extension_id).await?;
-        let mut effective = self
-            .installation_store
-            .channel_config(extension_id)
-            .await
-            .map_err(storage_error)?;
+        let mut effective = Vec::new();
         let Some(admin) = &self.admin_configuration else {
             return Ok(effective);
         };
-        let Some(channel) = manifest.channel.as_ref() else {
-            return Ok(effective);
-        };
+        let channel_fields = channel_config_fields(&manifest);
         for descriptor in &manifest.admin_configuration {
             for field in descriptor.fields.iter().filter(|field| {
                 !field.secret
-                    && channel
-                        .config
-                        .fields
+                    && channel_fields
                         .iter()
                         .any(|channel_field| channel_field.handle == field.handle)
             }) {
@@ -501,18 +478,19 @@ impl ChannelConfigService {
     ) -> Result<Vec<ChannelConfigFieldStatus>, ChannelConfigError> {
         let manifest = self.resolved_manifest(extension_id).await?;
         let descriptors = manifest
-            .channel
-            .as_ref()
-            .map(|channel| channel.config.fields.clone())
-            .unwrap_or_default();
+            .admin_configuration
+            .iter()
+            .flat_map(|descriptor| descriptor.fields.iter())
+            .map(|field| RecipeSecretField {
+                handle: field.handle.clone(),
+                label: field.label.clone(),
+                secret: field.secret,
+            })
+            .collect::<Vec<_>>();
         if descriptors.is_empty() {
             return Ok(Vec::new());
         }
-        let stored = self
-            .installation_store
-            .channel_config(extension_id)
-            .await
-            .map_err(storage_error)?;
+        let stored = Vec::<(String, String)>::new();
         let mut statuses = Vec::with_capacity(descriptors.len());
         for field in descriptors {
             let admin_provided = if let Some(admin) = &self.admin_configuration
@@ -663,16 +641,15 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use ironclaw_extensions::{
-        ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
-        ExtensionManifestRecord, ExtensionManifestRef, FilesystemExtensionInstallationStore,
-        ManifestSource,
+        ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStore,
+        ExtensionManifestRecord, ExtensionManifestRef, ManifestSource,
     };
     use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{
         InvocationId, MountAlias, MountGrant, MountPermissions, MountView, SecretHandle, UserId,
         VirtualPath,
     };
-    use ironclaw_secrets::FilesystemSecretStore;
+    use ironclaw_secrets::SecretStore;
 
     use super::*;
     use crate::{
@@ -793,12 +770,9 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
         }
     }
 
-    async fn installed_store(
-        manifest_toml: &str,
-        id: &str,
-    ) -> Arc<FilesystemExtensionInstallationStore> {
+    async fn installed_store(manifest_toml: &str, id: &str) -> Arc<ExtensionInstallationStore> {
         let store = Arc::new(
-            FilesystemExtensionInstallationStore::load_at(
+            ExtensionInstallationStore::load_at(
                 Arc::new(InMemoryBackend::new()),
                 ironclaw_host_api::VirtualPath::new("/system/extensions/.installations/test")
                     .expect("valid test path"),
@@ -823,7 +797,6 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
                 ExtensionInstallation::new(
                     ExtensionInstallationId::new(id.to_string()).expect("installation id"),
                     extension_id.clone(),
-                    ExtensionActivationState::Installed,
                     ExtensionManifestRef::new(extension_id, None),
                     Vec::new(),
                     chrono::Utc::now(),
@@ -846,8 +819,7 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
 
     struct Fixture {
         service: ChannelConfigService,
-        installation_store: Arc<FilesystemExtensionInstallationStore>,
-        secrets: Arc<FilesystemSecretStore<ironclaw_filesystem::InMemoryBackend>>,
+        secrets: Arc<SecretStore<ironclaw_filesystem::InMemoryBackend>>,
         scope: ResourceScope,
         reactivation: Arc<RecordingReactivation>,
         extension_id: ExtensionId,
@@ -855,18 +827,17 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
 
     async fn channel_fixture(reactivation: RecordingReactivation) -> Fixture {
         let installation_store = installed_store(CHANNEL_FIXTURE_MANIFEST, "acmechat").await;
-        let secrets = Arc::new(FilesystemSecretStore::ephemeral());
+        let secrets = Arc::new(SecretStore::ephemeral());
         let scope = test_scope();
         let reactivation = Arc::new(reactivation);
         let service = ChannelConfigService::new(
-            Arc::clone(&installation_store) as Arc<dyn ExtensionInstallationStore>,
-            Arc::clone(&secrets) as Arc<dyn SecretStore>,
+            Arc::clone(&installation_store) as Arc<dyn ExtensionInstallationStorePort>,
+            Arc::clone(&secrets) as Arc<dyn SecretStorePort>,
             scope.clone(),
             Arc::clone(&reactivation) as Arc<dyn ChannelConfigReactivation>,
         );
         Fixture {
             service,
-            installation_store,
             secrets,
             scope,
             reactivation,
@@ -886,7 +857,7 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
         assert!(!manifest.resolved().admin_configuration.is_empty());
 
         let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
-        let secrets: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+        let secrets: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
         let admin = Arc::new(
             AdminConfigurationService::new(
                 FilesystemAdminConfigurationStore::new(Arc::new(ScopedFilesystem::new(
@@ -928,7 +899,7 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
             .await
             .unwrap();
         let service = ChannelConfigService::new(
-            Arc::clone(&installation_store) as Arc<dyn ExtensionInstallationStore>,
+            Arc::clone(&installation_store) as Arc<dyn ExtensionInstallationStorePort>,
             Arc::clone(&secrets),
             scope.clone(),
             Arc::new(RecordingReactivation::new()),
@@ -974,8 +945,8 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
         );
         assert!(
             fixture
-                .installation_store
-                .channel_config(&fixture.extension_id)
+                .service
+                .effective_non_secret_config(&fixture.extension_id)
                 .await
                 .expect("read config")
                 .is_empty(),
@@ -1012,18 +983,15 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
             .await
             .expect("save succeeds");
 
-        // Non-secret value → durable installation config.
+        // Non-secret legacy values no longer write into the installation store.
         assert_eq!(
             fixture
-                .installation_store
-                .channel_config(&fixture.extension_id)
+                .service
+                .effective_non_secret_config(&fixture.extension_id)
                 .await
                 .expect("read config"),
-            vec![(
-                "acmechat_public_url".to_string(),
-                "https://x.example".to_string()
-            )],
-            "secret values must never reach the durable installation config"
+            Vec::<(String, String)>::new(),
+            "secret values must never reach durable non-secret config"
         );
         // Secret value → the scoped secret store under the manifest handle,
         // where the channel egress credential fallback resolves it.
@@ -1144,16 +1112,16 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
             }
             other => panic!("expected Reactivation error, got {other:?}"),
         }
-        // The new value IS stored (the record is left per §6.1 with a typed
-        // error; the operator fixes the value and saves again).
+        // The removed legacy installation config store is not written when
+        // reactivation fails.
         assert_eq!(
             fixture
-                .installation_store
-                .channel_config(&fixture.extension_id)
+                .service
+                .effective_non_secret_config(&fixture.extension_id)
                 .await
                 .expect("read config")
                 .len(),
-            1
+            0
         );
     }
 
@@ -1222,11 +1190,11 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
     #[tokio::test]
     async fn extensions_without_a_channel_surface_have_nothing_to_configure() {
         let installation_store = installed_store(TOOLS_ONLY_FIXTURE_MANIFEST, "zephyrite").await;
-        let secrets = Arc::new(FilesystemSecretStore::ephemeral());
+        let secrets = Arc::new(SecretStore::ephemeral());
         let reactivation = Arc::new(RecordingReactivation::new());
         let service = ChannelConfigService::new(
-            installation_store as Arc<dyn ExtensionInstallationStore>,
-            secrets as Arc<dyn SecretStore>,
+            installation_store as Arc<dyn ExtensionInstallationStorePort>,
+            secrets as Arc<dyn SecretStorePort>,
             test_scope(),
             reactivation as Arc<dyn ChannelConfigReactivation>,
         );

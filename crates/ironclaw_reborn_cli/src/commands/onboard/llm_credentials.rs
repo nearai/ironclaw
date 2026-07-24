@@ -859,7 +859,7 @@ mod tests {
     /// prove `provision_llm_credentials` writes the secret store BEFORE
     /// `config.toml`: a `put` failure must leave `config.toml` untouched.
     ///
-    /// The store is the real [`ironclaw_secrets::FilesystemSecretStore`] over a
+    /// The store is the real [`ironclaw_secrets::SecretStore`] over a
     /// [`ironclaw_filesystem::FaultInjecting`] backend armed to fail every
     /// secret write. This replaces the former whole-trait `FailingSecretStore`
     /// fake: the store now runs its genuine encryption, CAS write, and
@@ -885,9 +885,7 @@ mod tests {
                     .backend("simulated failure for write-ordering RED test"),
                 ),
             );
-            let store = Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral_over(
-                backend,
-            ));
+            let store = Arc::new(ironclaw_secrets::SecretStore::ephemeral_over(backend));
             Ok(ironclaw_reborn_composition::LlmKeyStore::new(store))
         }
     }

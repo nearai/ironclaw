@@ -25,8 +25,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_extension_host::SnapshotWatch;
 use ironclaw_extension_host::active::ActiveExtension;
-use ironclaw_host_api::{AgentId, ExtensionId, ProjectId, TenantId, UserId};
-use ironclaw_outbound::OutboundError;
+use ironclaw_host_api::{AgentId, ExtensionId, ProjectId, RecipeSecretField, TenantId, UserId};
+use ironclaw_outbound::{OutboundError, RunFinalReplyDestination};
 use ironclaw_product::PreferenceTargetCodec;
 use ironclaw_product::{
     AdapterInstallationId, ExternalConversationRef, PreferenceTargetEncodeRequest,
@@ -45,6 +45,20 @@ use ironclaw_extension_host::{
     FilesystemChannelDmTargetStore,
 };
 use ironclaw_extension_host::{handle_declares_field, shared_channel_admission_handles};
+
+fn admin_configuration_fields(active: &ActiveExtension) -> Vec<RecipeSecretField> {
+    active
+        .resolved
+        .admin_configuration
+        .iter()
+        .flat_map(|descriptor| descriptor.fields.iter())
+        .map(|field| RecipeSecretField {
+            handle: field.handle.clone(),
+            label: field.label.clone(),
+            secret: field.secret,
+        })
+        .collect()
+}
 
 /// The deployment identity every encoded binding ref carries (the same
 /// identity the assembly binds per-extension workflows under).
@@ -140,9 +154,8 @@ impl GenericChannelOutboundTargetProvider {
         // The `*_team_id` connection-scoping claim (same handle-suffix
         // convention as the identity hook) supplies the space id.
         let mut space_id = None;
-        if let Some(field) = channel
-            .config
-            .fields
+        let fields = admin_configuration_fields(active);
+        if let Some(field) = fields
             .iter()
             .filter(|field| !field.secret)
             .find(|field| handle_declares_field(field.handle.as_str(), "team_id"))
@@ -154,7 +167,7 @@ impl GenericChannelOutboundTargetProvider {
         }
 
         let mut subject_routes = BTreeMap::new();
-        let handles = shared_channel_admission_handles(&channel.config.fields);
+        let handles = shared_channel_admission_handles(&fields);
         if let Some(handle) = handles.subject_routes.as_deref()
             && let Some(raw) = self.config_value(&extension_id, handle).await?
         {
@@ -258,7 +271,9 @@ impl GenericChannelOutboundTargetProvider {
         Some(OutboundDeliveryTargetEntry {
             summary,
             capabilities: full_capabilities(),
-            reply_target_binding_ref,
+            destination: RunFinalReplyDestination::External {
+                reply_target_binding_ref,
+            },
             owner: OutboundDeliveryTargetOwner::new(
                 self.deps.identity.tenant_id.clone(),
                 owner_user,
@@ -301,7 +316,9 @@ impl GenericChannelOutboundTargetProvider {
         Some(OutboundDeliveryTargetEntry {
             summary,
             capabilities: full_capabilities(),
-            reply_target_binding_ref,
+            destination: RunFinalReplyDestination::External {
+                reply_target_binding_ref,
+            },
             // The owner is the record's provisioned user (the resolved
             // resource), never echoed from the caller.
             owner: OutboundDeliveryTargetOwner::new(

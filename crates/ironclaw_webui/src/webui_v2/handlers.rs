@@ -36,22 +36,21 @@ use ironclaw_product::{
     ADMIN_USER_SET_STATUS_CAPABILITY, ADMIN_USER_UPDATE_CAPABILITY, ADMIN_USER_VIEW,
     ADMIN_USERS_VIEW, ATTACHMENT_READ_COMMAND, AUTOMATION_DELETE_COMMAND, AUTOMATION_PAUSE_COMMAND,
     AUTOMATION_RENAME_COMMAND, AUTOMATION_RESUME_COMMAND, AUTOMATIONS_VIEW, CANCEL_RUN_COMMAND,
-    CREATE_THREAD_COMMAND, CodexLoginStart, EXTENSION_ACTIVATE_CAPABILITY,
-    EXTENSION_IMPORT_CAPABILITY, EXTENSION_INSTALL_CAPABILITY, EXTENSION_REGISTRY_VIEW,
-    EXTENSION_REMOVE_CAPABILITY, EXTENSION_SETUP_SUBMIT_CAPABILITY, EXTENSION_SETUP_VIEW,
-    EXTENSIONS_VIEW, EmptyProductCommandInput, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_READ_COMMAND,
-    FS_STAT_VIEW, FsMount, GLOBAL_AUTO_APPROVE_VIEW, LLM_ACTIVE_SET_CAPABILITY,
-    LLM_CODEX_LOGIN_COMMAND, LLM_CONFIG_VIEW, LLM_LIST_MODELS_COMMAND, LLM_NEARAI_LOGIN_COMMAND,
-    LLM_NEARAI_WALLET_LOGIN_COMMAND, LLM_PROVIDER_DELETE_CAPABILITY,
-    LLM_PROVIDER_UPSERT_CAPABILITY, LLM_TEST_CONNECTION_COMMAND, LOGS_VIEW, LifecyclePackageKind,
-    LifecyclePackageRef, LlmConfigSnapshot, LlmModelsResult, LlmProbeResult, NearAiLoginStart,
-    NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
-    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY, OPERATOR_CONFIG_SET_KEY_COMMAND,
-    OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
-    OPERATOR_SERVICE_LIFECYCLE_COMMAND, OPERATOR_SETUP_RUN_CAPABILITY, OPERATOR_SETUP_VIEW,
-    OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_SET_CAPABILITY,
-    OUTBOUND_PREFERENCES_VIEW, PROJECT_CREATE_COMMAND, PROJECT_DELETE_CAPABILITY,
-    PROJECT_FS_LIST_VIEW, PROJECT_FS_READ_COMMAND, PROJECT_FS_STAT_VIEW,
+    CREATE_THREAD_COMMAND, CodexLoginStart, EXTENSION_IMPORT_CAPABILITY,
+    EXTENSION_INSTALL_CAPABILITY, EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY,
+    EXTENSION_SETUP_SUBMIT_CAPABILITY, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW,
+    EmptyProductCommandInput, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_READ_COMMAND, FS_STAT_VIEW, FsMount,
+    GLOBAL_AUTO_APPROVE_VIEW, LLM_ACTIVE_SET_CAPABILITY, LLM_CODEX_LOGIN_COMMAND, LLM_CONFIG_VIEW,
+    LLM_LIST_MODELS_COMMAND, LLM_NEARAI_LOGIN_COMMAND, LLM_NEARAI_WALLET_LOGIN_COMMAND,
+    LLM_PROVIDER_DELETE_CAPABILITY, LLM_PROVIDER_UPSERT_CAPABILITY, LLM_TEST_CONNECTION_COMMAND,
+    LOGS_VIEW, LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot, LlmModelsResult,
+    LlmProbeResult, NearAiLoginStart, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
+    OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY,
+    OPERATOR_CONFIG_SET_KEY_COMMAND, OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW,
+    OPERATOR_LOGS_VIEW, OPERATOR_SERVICE_LIFECYCLE_COMMAND, OPERATOR_SETUP_RUN_CAPABILITY,
+    OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
+    OUTBOUND_PREFERENCES_SET_CAPABILITY, OUTBOUND_PREFERENCES_VIEW, PROJECT_CREATE_COMMAND,
+    PROJECT_DELETE_CAPABILITY, PROJECT_FS_LIST_VIEW, PROJECT_FS_READ_COMMAND, PROJECT_FS_STAT_VIEW,
     PROJECT_MEMBER_ADD_CAPABILITY, PROJECT_MEMBER_REMOVE_CAPABILITY,
     PROJECT_MEMBER_UPDATE_CAPABILITY, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY,
     PROJECT_VIEW, PROJECTS_VIEW, ProductAttachmentCapabilities, ProductCancelRunRequest,
@@ -72,17 +71,16 @@ use ironclaw_product::{
     RebornAutomationRequest, RebornCancelRunResponse, RebornCreateProjectRequest,
     RebornCreateThreadResponse, RebornDeleteProjectRequest, RebornDeleteThreadRequest,
     RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionListResponse,
-    RebornExtensionOnboardingState, RebornExtensionRegistryResponse, RebornFsListRequest,
-    RebornFsListResponse, RebornFsMountsRequest, RebornFsMountsResponse, RebornFsReadRequest,
-    RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest,
-    RebornGlobalAutoApproveRequest, RebornListAutomationsResponse, RebornListMembersRequest,
-    RebornListMembersResponse, RebornListProjectsRequest, RebornListProjectsResponse,
-    RebornListThreadsResponse, RebornLogQueryRequest, RebornLogQueryResponse,
-    RebornOperatorCommandPlaneResponse, RebornOperatorConfigGetResponse,
-    RebornOperatorConfigListResponse, RebornOperatorConfigSetProductRequest,
-    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
-    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
-    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupResponse,
+    RebornExtensionRegistryResponse, RebornFsListRequest, RebornFsListResponse,
+    RebornFsMountsRequest, RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest,
+    RebornFsStatResponse, RebornGetProjectRequest, RebornGlobalAutoApproveRequest,
+    RebornListAutomationsResponse, RebornListMembersRequest, RebornListMembersResponse,
+    RebornListProjectsRequest, RebornListProjectsResponse, RebornListThreadsResponse,
+    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornOperatorConfigSetProductRequest, RebornOperatorConfigSetRequest,
+    RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
+    RebornOperatorLogsQuery, RebornOperatorServiceLifecycleRequest, RebornOperatorSetupResponse,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
     RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsReadRequest,
     RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectMemberInfo,
@@ -105,6 +103,7 @@ use secrecy::ExposeSecret;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use ironclaw_host_api::turn::IdempotencyKey;
 use ironclaw_host_api::{
     ActivityId, Blocked, FailureKind, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
     ProductSurfaceErrorCode, ProductSurfaceErrorKind, ProductSurfaceValidationCode, Resolution,
@@ -125,6 +124,7 @@ const SETTINGS_TOOLS_AUTO_APPROVE_KEY: &str = "agent.auto_approve_tools";
 const SETTINGS_TOOL_CONFIG_PREFIX: &str = "tool.";
 const SETTINGS_TOOL_CAPABILITY_ID_MAX_BYTES: usize =
     OPERATOR_CONFIG_KEY_MAX_BYTES - SETTINGS_TOOL_CONFIG_PREFIX.len();
+const CLIENT_ACTION_ID_MAX_BYTES: usize = 256;
 const ADMIN_CONFIGURATION_IDEMPOTENCY_KEY_MAX_BYTES: usize = 256;
 
 #[derive(Debug, Clone, Serialize)]
@@ -2139,7 +2139,7 @@ pub async fn install_extension(
     )
     .await?;
     extension_lifecycle_mutation_succeeded(resolution)?;
-    let response = extension_action_completed("Extension installed.", None);
+    let response = extension_action_completed("Extension installed.");
     Ok(Json(response))
 }
 
@@ -2162,29 +2162,7 @@ pub async fn import_extension(
     )
     .await?;
     extension_lifecycle_mutation_succeeded(resolution)?;
-    let response = extension_action_completed("Extension imported.", None);
-    Ok(Json(response))
-}
-
-/// `POST /api/webchat/v2/extensions/{package_id}/activate`
-pub async fn activate_extension(
-    State(state): State<WebUiV2State>,
-    Extension(caller): Extension<ProductSurfaceCaller>,
-    Path(ExtensionPackagePath { package_id }): Path<ExtensionPackagePath>,
-) -> Result<Json<RebornExtensionActionResponse>, WebUiV2HttpError> {
-    let package_ref = extension_package_ref_for_request(
-        LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id),
-        "package_id",
-    )?;
-    let resolution = invoke_product_capability(
-        state.services(),
-        caller.clone(),
-        EXTENSION_ACTIVATE_CAPABILITY,
-        serde_json::json!({ "extension_id": package_ref.id.as_str() }),
-    )
-    .await?;
-    let response =
-        extension_activation_response(state.services(), caller, package_ref, resolution).await?;
+    let response = extension_action_completed("Extension imported.");
     Ok(Json(response))
 }
 
@@ -2193,20 +2171,34 @@ pub async fn remove_extension(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<ProductSurfaceCaller>,
     Path(ExtensionPackagePath { package_id }): Path<ExtensionPackagePath>,
+    Json(body): Json<RemoveExtensionBody>,
 ) -> Result<Json<RebornExtensionActionResponse>, WebUiV2HttpError> {
     let package_ref = extension_package_ref_for_request(
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id),
         "package_id",
     )?;
-    let resolution = invoke_product_capability(
+    // #6520 gesture idempotency: the activity id MUST carry the client
+    // gesture. An input-derived id is permanent input deduplication — a
+    // second remove of the same extension (e.g. after a reinstall) would
+    // silently replay the first remove's recorded success without
+    // dispatching, leaving the durable membership installed.
+    let client_action_id = parse_client_action_id(body.client_action_id)?;
+    let activity_id = extension_lifecycle_activity_id(
+        &caller,
+        EXTENSION_REMOVE_CAPABILITY,
+        &package_ref,
+        &client_action_id,
+    )?;
+    let resolution = invoke_product_capability_with_activity_id(
         state.services(),
         caller,
         EXTENSION_REMOVE_CAPABILITY,
         serde_json::json!({ "extension_id": package_ref.id.as_str() }),
+        activity_id,
     )
     .await?;
     extension_lifecycle_mutation_succeeded(resolution)?;
-    let response = extension_action_completed("Extension removed.", None);
+    let response = extension_action_completed("Extension removed.");
     Ok(Json(response))
 }
 
@@ -2249,67 +2241,6 @@ fn extension_lifecycle_mutation_succeeded(
     }
 }
 
-async fn extension_activation_response(
-    services: &std::sync::Arc<dyn ProductSurface>,
-    caller: ProductSurfaceCaller,
-    package_ref: LifecyclePackageRef,
-    resolution: Resolution,
-) -> Result<RebornExtensionActionResponse, ProductSurfaceError> {
-    match resolution {
-        Resolution::Done(outcome) if outcome.verdict.is_success() => {
-            let activated = query_extension_active_state(services, caller, &package_ref).await?;
-            Ok(extension_action_completed(
-                "Extension activated.",
-                Some(activated),
-            ))
-        }
-        Resolution::Blocked(Blocked::Auth(_)) => Ok(RebornExtensionActionResponse {
-            success: true,
-            message: "Extension authentication required.".to_string(),
-            activated: Some(false),
-            auth_url: None,
-            awaiting_token: None,
-            instructions: Some(
-                "Configure the extension credentials, then activate it again.".to_string(),
-            ),
-            onboarding_state: Some(RebornExtensionOnboardingState::AuthRequired),
-            onboarding: None,
-        }),
-        other => {
-            extension_lifecycle_mutation_succeeded(other)?;
-            Ok(extension_action_completed(
-                "Extension activated.",
-                Some(false),
-            ))
-        }
-    }
-}
-
-async fn query_extension_active_state(
-    services: &std::sync::Arc<dyn ProductSurface>,
-    caller: ProductSurfaceCaller,
-    package_ref: &LifecyclePackageRef,
-) -> Result<bool, ProductSurfaceError> {
-    let page = query_product_page(
-        services,
-        caller,
-        RebornViewQuery {
-            view_id: EXTENSIONS_VIEW.id.to_string(),
-            params: serde_json::json!({}),
-            cursor: None,
-        },
-    )
-    .await?;
-    let response: RebornExtensionListResponse =
-        serde_json::from_value(page.payload).map_err(ProductSurfaceError::internal_from)?;
-    response
-        .extensions
-        .iter()
-        .find(|extension| extension.package_ref == *package_ref)
-        .map(|extension| extension.active)
-        .ok_or_else(|| extension_lifecycle_unavailable(true))
-}
-
 fn extension_lifecycle_forbidden() -> ProductSurfaceError {
     ProductSurfaceError {
         code: ProductSurfaceErrorCode::Forbidden,
@@ -2332,14 +2263,11 @@ fn extension_lifecycle_unavailable(retryable: bool) -> ProductSurfaceError {
     }
 }
 
-fn extension_action_completed(
-    message: impl Into<String>,
-    activated: Option<bool>,
-) -> RebornExtensionActionResponse {
+fn extension_action_completed(message: impl Into<String>) -> RebornExtensionActionResponse {
     RebornExtensionActionResponse {
         success: true,
         message: message.into(),
-        activated,
+        activated: None,
         auth_url: None,
         awaiting_token: None,
         instructions: None,
@@ -2633,6 +2561,37 @@ fn product_surface_activity_id(
     )))
 }
 
+fn extension_lifecycle_activity_id(
+    caller: &ProductSurfaceCaller,
+    capability: ProductCapabilityDescriptor,
+    package_ref: &LifecyclePackageRef,
+    client_action_id: &IdempotencyKey,
+) -> Result<ActivityId, ProductSurfaceError> {
+    let capability_id = capability.capability_id()?;
+    let mut seed = Vec::new();
+    for segment in [
+        "webui-extension-lifecycle",
+        caller.tenant_id.as_str(),
+        caller.user_id.as_str(),
+        caller.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        caller
+            .project_id
+            .as_ref()
+            .map(|id| id.as_str())
+            .unwrap_or(""),
+        capability_id.as_str(),
+        package_ref.id.as_str(),
+        client_action_id.as_str(),
+    ] {
+        seed.extend_from_slice(&(segment.len() as u64).to_be_bytes());
+        seed.extend_from_slice(segment.as_bytes());
+    }
+    Ok(ActivityId::from_uuid(Uuid::new_v5(
+        &Uuid::NAMESPACE_OID,
+        &seed,
+    )))
+}
+
 fn llm_provider_upsert_activity_id(
     caller: &ProductSurfaceCaller,
     request: &UpsertLlmProviderRequest,
@@ -2789,27 +2748,7 @@ fn admin_configuration_activity_id(
     group_id: &str,
     idempotency_key: &str,
 ) -> Result<ActivityId, ProductSurfaceError> {
-    let validation_code = if idempotency_key.is_empty() {
-        Some(ProductSurfaceValidationCode::Blank)
-    } else if idempotency_key.len() > ADMIN_CONFIGURATION_IDEMPOTENCY_KEY_MAX_BYTES {
-        Some(ProductSurfaceValidationCode::TooLong)
-    } else if idempotency_key.trim() != idempotency_key {
-        Some(ProductSurfaceValidationCode::InvalidId)
-    } else if idempotency_key.chars().any(char::is_control) {
-        Some(ProductSurfaceValidationCode::InvalidControlCharacter)
-    } else {
-        None
-    };
-    if let Some(validation_code) = validation_code {
-        return Err(ProductSurfaceError {
-            code: ProductSurfaceErrorCode::InvalidRequest,
-            kind: ProductSurfaceErrorKind::Validation,
-            status_code: 400,
-            retryable: false,
-            field: Some("idempotency_key".to_string()),
-            validation_code: Some(validation_code),
-        });
-    }
+    validate_idempotency_key(idempotency_key)?;
 
     let mut seed = Vec::new();
     for segment in [
@@ -2832,6 +2771,60 @@ fn admin_configuration_activity_id(
         &Uuid::NAMESPACE_OID,
         &seed,
     )))
+}
+
+fn validate_idempotency_key(idempotency_key: &str) -> Result<(), ProductSurfaceError> {
+    let validation_code = if idempotency_key.is_empty() {
+        Some(ProductSurfaceValidationCode::Blank)
+    } else if idempotency_key.len() > ADMIN_CONFIGURATION_IDEMPOTENCY_KEY_MAX_BYTES {
+        Some(ProductSurfaceValidationCode::TooLong)
+    } else if idempotency_key.trim() != idempotency_key {
+        Some(ProductSurfaceValidationCode::InvalidId)
+    } else if idempotency_key.chars().any(char::is_control) {
+        Some(ProductSurfaceValidationCode::InvalidControlCharacter)
+    } else {
+        None
+    };
+    if let Some(validation_code) = validation_code {
+        return Err(ProductSurfaceError {
+            code: ProductSurfaceErrorCode::InvalidRequest,
+            kind: ProductSurfaceErrorKind::Validation,
+            status_code: 400,
+            retryable: false,
+            field: Some("idempotency_key".to_string()),
+            validation_code: Some(validation_code),
+        });
+    }
+    Ok(())
+}
+
+fn parse_client_action_id(value: Option<String>) -> Result<IdempotencyKey, ProductSurfaceError> {
+    let value = value.ok_or_else(|| {
+        ProductSurfaceError::validation(
+            "client_action_id",
+            ProductSurfaceValidationCode::MissingField,
+        )
+    })?;
+    let validation_code = if value.is_empty() {
+        Some(ProductSurfaceValidationCode::Blank)
+    } else if value.len() > CLIENT_ACTION_ID_MAX_BYTES {
+        Some(ProductSurfaceValidationCode::TooLong)
+    } else if value.trim() != value {
+        Some(ProductSurfaceValidationCode::InvalidId)
+    } else if value.chars().any(char::is_control) {
+        Some(ProductSurfaceValidationCode::InvalidControlCharacter)
+    } else {
+        None
+    };
+    if let Some(validation_code) = validation_code {
+        return Err(ProductSurfaceError::validation(
+            "client_action_id",
+            validation_code,
+        ));
+    }
+    IdempotencyKey::new(value).map_err(|_| {
+        ProductSurfaceError::validation("client_action_id", ProductSurfaceValidationCode::InvalidId)
+    })
 }
 
 fn admin_configuration_conflict() -> ProductSurfaceError {
@@ -3586,6 +3579,18 @@ pub struct ExtensionPackagePath {
 #[derive(Debug, Deserialize)]
 pub struct InstallExtensionBody {
     pub package_ref: LifecyclePackageRef,
+    /// Client gesture id (#6520): one distinct install gesture = one stable
+    /// ActivityId; a response-lost retry replays the same gesture.
+    pub client_action_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RemoveExtensionBody {
+    /// Client gesture id (#6520): one distinct remove gesture = one stable
+    /// ActivityId; a response-lost retry replays the same gesture. Required —
+    /// an input-derived fallback would permanently deduplicate every remove
+    /// of the same extension.
+    pub client_action_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

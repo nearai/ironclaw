@@ -43,17 +43,16 @@ use ironclaw_runner::{
     },
     subagent::{
         await_edge::{
-            boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver,
-            store::FilesystemAwaitEdgeStore,
+            boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver, store::AwaitEdgeStore,
         },
         flavors::StaticSubagentDefinitionResolver,
-        goal_store::{FilesystemSubagentGoalStore, in_memory_backed_subagent_goal_store},
+        goal_store::{SubagentGoalStore, in_memory_backed_subagent_goal_store},
     },
 };
 use ironclaw_threads::{InMemorySessionThreadService, SessionThreadService, ThreadScope};
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use ironclaw_turns::{
-    CheckpointStateStore, LoopCheckpointStore, LoopResultRef, RunProfileResolutionRequest,
+    CheckpointStateStorePort, LoopCheckpointStore, LoopResultRef, RunProfileResolutionRequest,
     RunProfileResolver, TurnId, TurnRunId, TurnScope, TurnStateStore,
     run_profile::{
         AgentLoopHostError, CapabilityInputRef, InMemoryLoopHostMilestoneSink,
@@ -84,7 +83,7 @@ fn adapters_from_runtime(
     )
 }
 
-fn in_memory_subagent_goal_store() -> Arc<FilesystemSubagentGoalStore<InMemoryBackend>> {
+fn in_memory_subagent_goal_store() -> Arc<SubagentGoalStore<InMemoryBackend>> {
     Arc::new(in_memory_backed_subagent_goal_store())
 }
 
@@ -1380,7 +1379,7 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
         MountPermissions::read_write_list_delete(),
     )])
     .unwrap();
-    let await_edge_store = Arc::new(FilesystemAwaitEdgeStore::new(Arc::new(
+    let await_edge_store = Arc::new(AwaitEdgeStore::new(Arc::new(
         ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), await_edge_mounts),
     )));
     let subagent_goal_store = in_memory_subagent_goal_store();
@@ -1402,7 +1401,7 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
         thread_service: Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,
         thread_scope: thread_scope.clone(),
         model_gateway: Arc::new(StubModelGateway),
-        checkpoint_state_store: checkpoint_state_store as Arc<dyn CheckpointStateStore>,
+        checkpoint_state_store: checkpoint_state_store as Arc<dyn CheckpointStateStorePort>,
         loop_checkpoint_store,
         milestone_sink,
         capability_factory: adapters.capability_factory,
@@ -1517,14 +1516,14 @@ async fn model_route_settings_respect_selection_mode_override() {
     );
 }
 
-fn test_gate_record_store() -> Arc<dyn ironclaw_run_state::GateRecordStore> {
-    Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+fn test_gate_record_store() -> Arc<dyn ironclaw_run_state::GateRecordStorePort> {
+    Arc::new(ironclaw_run_state::GateRecordStore::new(
         ironclaw_reborn_composition::wrap_scoped(Arc::new(InMemoryBackend::new())),
     ))
 }
 
-fn test_replay_payload_store() -> Arc<dyn ironclaw_capabilities::ReplayPayloadStore> {
-    Arc::new(ironclaw_capabilities::FilesystemReplayPayloadStore::new(
+fn test_replay_payload_store() -> Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort> {
+    Arc::new(ironclaw_capabilities::ReplayPayloadStore::new(
         ironclaw_reborn_composition::wrap_scoped(Arc::new(InMemoryBackend::new())),
     ))
 }

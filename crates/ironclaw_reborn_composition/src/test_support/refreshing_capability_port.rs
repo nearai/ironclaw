@@ -75,20 +75,20 @@ pub struct RefreshingCapabilityPortTestParts {
     /// Per-tool approval-setting overrides; wrapped into the same
     /// `StoreApprovalSettingsProvider` production wires (`local_dev.rs:1002`).
     pub tool_permission_overrides:
-        std::sync::Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore>,
-    pub auto_approve_settings: std::sync::Arc<dyn ironclaw_approvals::AutoApproveSettingStore>,
+        std::sync::Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>,
+    pub auto_approve_settings: std::sync::Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort>,
     pub persistent_approval_policies:
-        std::sync::Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore>,
-    pub approval_requests: std::sync::Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
-    pub capability_leases: std::sync::Arc<dyn ironclaw_authorization::CapabilityLeaseStore>,
+        std::sync::Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStorePort>,
+    pub approval_requests: std::sync::Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>,
+    pub capability_leases: std::sync::Arc<dyn ironclaw_authorization::CapabilityLeaseStorePort>,
     /// Durable model-visible gate-record store the built capability port persists
     /// pending-gate records into (§5.2.9).
-    pub gate_record_store: std::sync::Arc<dyn ironclaw_run_state::GateRecordStore>,
+    pub gate_record_store: std::sync::Arc<dyn ironclaw_run_state::GateRecordStorePort>,
     /// Durable host-private replay-payload store the built capability port
     /// persists gate/auth replay payloads into and reconstitutes on resume
     /// (§5.3 Stage 2a-i). Must be shared across the harness's turns/threads so a
     /// resume finds the payload its raise persisted.
-    pub replay_payload_store: std::sync::Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
+    pub replay_payload_store: std::sync::Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort>,
     /// Test-only config extension (empty = production behavior). See
     /// `RefreshingCapabilityPortConfig::capability_execution_mount_overrides`.
     pub capability_execution_mount_overrides:

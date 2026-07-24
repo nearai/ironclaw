@@ -68,7 +68,11 @@
             "arguments": {
               "name": "NEAR AI Health Check (every 5 min)",
               "prompt": "Ping https://cloud-api.near.ai/health with an HTTP GET request. If the response status code is NOT 200, send me a Slack DM alerting me that the NEAR AI Cloud API health check failed, including the status code and any response body details. If it returns 200, do nothing and stay silent.",
-              "schedule": { "kind": "cron", "expression": "*/5 * * * *", "timezone": "UTC" }
+              "schedule": {
+                "kind": "cron",
+                "expression": "*/5 * * * *",
+                "timezone": "UTC"
+              }
             }
           }
         ],

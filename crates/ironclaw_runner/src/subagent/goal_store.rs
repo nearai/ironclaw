@@ -36,7 +36,7 @@ pub enum SubagentGoalStoreError {
 }
 
 #[async_trait]
-pub trait SubagentGoalStore: Send + Sync {
+pub trait SubagentGoalStorePort: Send + Sync {
     async fn put_goal(
         &self,
         scope: &TurnScope,
@@ -68,14 +68,14 @@ fn validate_goal(goal: &SubagentGoal) -> Result<(), SubagentGoalStoreError> {
     Ok(())
 }
 
-pub struct FilesystemSubagentGoalStore<F>
+pub struct SubagentGoalStore<F>
 where
     F: RootFilesystem,
 {
     filesystem: Arc<ScopedFilesystem<F>>,
 }
 
-impl<F> FilesystemSubagentGoalStore<F>
+impl<F> SubagentGoalStore<F>
 where
     F: RootFilesystem,
 {
@@ -84,14 +84,14 @@ where
     }
 }
 
-// `FilesystemSubagentGoalStore` is the production subagent goal store. In
+// `SubagentGoalStore` is the production subagent goal store. In
 // libSQL and PostgreSQL production composition, the scoped filesystem passed
 // in is backed by the selected database root filesystem — that distinction
 // belongs in the choice of `F` at the call site, not in a separate wrapper
 // type.
 
 #[async_trait]
-impl<F> SubagentGoalStore for FilesystemSubagentGoalStore<F>
+impl<F> SubagentGoalStorePort for SubagentGoalStore<F>
 where
     F: RootFilesystem + 'static,
 {
@@ -164,7 +164,7 @@ where
 }
 
 #[async_trait]
-impl<F> ironclaw_loop_host::SubagentSpawnGoalStore for FilesystemSubagentGoalStore<F>
+impl<F> ironclaw_loop_host::SubagentSpawnGoalStore for SubagentGoalStore<F>
 where
     F: RootFilesystem + 'static,
 {
@@ -174,7 +174,7 @@ where
         run_id: TurnRunId,
         goal: ironclaw_loop_host::SubagentGoalRecord,
     ) -> Result<(), ironclaw_turns::run_profile::AgentLoopHostError> {
-        <Self as SubagentGoalStore>::put_goal(
+        <Self as SubagentGoalStorePort>::put_goal(
             self,
             scope,
             run_id,
@@ -192,7 +192,7 @@ where
         scope: &TurnScope,
         run_id: TurnRunId,
     ) -> Result<(), ironclaw_turns::run_profile::AgentLoopHostError> {
-        <Self as SubagentGoalStore>::delete_goal(self, scope, run_id)
+        <Self as SubagentGoalStorePort>::delete_goal(self, scope, run_id)
             .await
             .map_err(map_goal_error)
     }
@@ -246,8 +246,8 @@ fn map_goal_error(
 
 #[cfg(any(test, feature = "test-support"))]
 pub fn in_memory_backed_subagent_goal_store()
--> FilesystemSubagentGoalStore<ironclaw_filesystem::InMemoryBackend> {
-    FilesystemSubagentGoalStore::new(scoped_goal_filesystem())
+-> SubagentGoalStore<ironclaw_filesystem::InMemoryBackend> {
+    SubagentGoalStore::new(scoped_goal_filesystem())
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -398,7 +398,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn filesystem_store_keys_goals_by_scope_and_run_id() {
+    async fn goal_store_keys_goals_by_scope_and_run_id() {
         let store = in_memory_backed_subagent_goal_store();
         let first_scope = scope("thread-goal-a");
         let second_scope = scope("thread-goal-b");
@@ -421,7 +421,7 @@ mod tests {
         );
     }
 
-    async fn assert_goal_store_contract(store: &dyn SubagentGoalStore) {
+    async fn assert_goal_store_contract(store: &dyn SubagentGoalStorePort) {
         let owner_scope = scope("thread-goal");
         let other_scope = scope("thread-goal-other");
         let run_id = TurnRunId::new();
@@ -474,7 +474,7 @@ mod tests {
 
     #[tokio::test]
     async fn filesystem_goal_store_satisfies_subagent_goal_contract() {
-        let store = FilesystemSubagentGoalStore::new(scoped_goal_filesystem());
+        let store = SubagentGoalStore::new(scoped_goal_filesystem());
         assert_goal_store_contract(&store).await;
     }
 
@@ -501,7 +501,7 @@ mod tests {
     #[tokio::test]
     async fn filesystem_goal_store_reopens_over_same_backend() {
         let filesystem = scoped_goal_filesystem();
-        let first = FilesystemSubagentGoalStore::new(Arc::clone(&filesystem));
+        let first = SubagentGoalStore::new(Arc::clone(&filesystem));
         let owner_scope = scope("thread-goal");
         let run_id = TurnRunId::new();
         let expected = goal("survives reopen");
@@ -510,7 +510,7 @@ mod tests {
             .put_goal(&owner_scope, run_id, expected.clone())
             .await
             .unwrap();
-        let reopened = FilesystemSubagentGoalStore::new(filesystem);
+        let reopened = SubagentGoalStore::new(filesystem);
 
         assert_eq!(
             reopened.get_goal(&owner_scope, run_id).await.unwrap(),
@@ -521,7 +521,7 @@ mod tests {
     #[test]
     fn goal_store_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<Arc<dyn SubagentGoalStore>>();
-        assert_send_sync::<FilesystemSubagentGoalStore<InMemoryBackend>>();
+        assert_send_sync::<Arc<dyn SubagentGoalStorePort>>();
+        assert_send_sync::<SubagentGoalStore<InMemoryBackend>>();
     }
 }

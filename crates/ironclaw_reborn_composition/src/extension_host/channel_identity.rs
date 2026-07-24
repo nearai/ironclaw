@@ -30,7 +30,6 @@ use ironclaw_auth::{AuthProductError, AuthProductScope, OAuthProviderIdentity};
 use ironclaw_extension_host::{
     ChannelConfigService, channel_config_connection_scope_source, discover_channel_extensions,
 };
-use ironclaw_extensions::ExtensionInstallationStore;
 use ironclaw_host_api::{
     ChannelConnectionScopeSource, ChannelIdentityOverride, ChannelIdentityPostBind,
     ChannelIdentityPostBindFactory, ExtensionId, TenantId, UserId,
@@ -65,7 +64,8 @@ pub struct ChannelIdentityBindingConfig {
     pub(crate) tenant_id: TenantId,
     /// Generic discovery + scoping-value source. `None` when the composed
     /// runtime has no durable installation store — only overrides bind then.
-    pub(crate) installation_store: Option<Arc<dyn ExtensionInstallationStore>>,
+    pub(crate) installation_store:
+        Option<Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>>,
     /// Effective manifest-driven channel configuration, including tenant
     /// administrator values. `None` preserves the retired per-installation
     /// configuration source for compatibility and focused test fixtures.
@@ -88,7 +88,7 @@ impl ChannelIdentityBindingConfig {
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_test(
         tenant_id: TenantId,
-        installation_store: Arc<dyn ExtensionInstallationStore>,
+        installation_store: Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>,
         binding_store: Arc<dyn RebornUserIdentityBindingStore>,
         rollback_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
     ) -> Self {
@@ -394,8 +394,8 @@ mod tests {
     use async_trait::async_trait;
     use ironclaw_extension_host::handle_declares_claim;
     use ironclaw_extensions::{
-        ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
-        ExtensionManifestRecord, ExtensionManifestRef, FilesystemExtensionInstallationStore,
+        ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStore,
+        ExtensionInstallationStorePort as _, ExtensionManifestRecord, ExtensionManifestRef,
         ManifestSource,
     };
     use ironclaw_host_api::{
@@ -484,7 +484,7 @@ app_id = "/app_id"
 
     const FIXTURE_INSTALLATION_ID: &str = "acmechat-install-1";
 
-    async fn installed_fixture_store() -> Arc<FilesystemExtensionInstallationStore> {
+    async fn installed_fixture_store() -> Arc<ExtensionInstallationStore> {
         let store = Arc::new(crate::extension_host::filesystem_installation_store_for_test().await);
         let record = ExtensionManifestRecord::from_toml(
             CHANNEL_AUTH_FIXTURE_MANIFEST,
@@ -502,7 +502,6 @@ app_id = "/app_id"
                     ExtensionInstallationId::new(FIXTURE_INSTALLATION_ID.to_string())
                         .expect("installation id"),
                     extension_id.clone(),
-                    ExtensionActivationState::Installed,
                     ExtensionManifestRef::new(extension_id, None),
                     Vec::new(),
                     chrono::Utc::now(),
@@ -513,19 +512,6 @@ app_id = "/app_id"
             .await
             .expect("persist install");
         store
-    }
-
-    async fn store_scoping_values(store: &FilesystemExtensionInstallationStore) {
-        store
-            .set_channel_config(
-                &ExtensionId::new("acmechat").expect("extension id"),
-                vec![
-                    ("acmechat_team_id".to_string(), "T-team".to_string()),
-                    ("acmechat_app_id".to_string(), "A-app".to_string()),
-                ],
-            )
-            .await
-            .expect("store scoping values");
     }
 
     fn identity(team: &str, app: &str) -> OAuthProviderIdentity {
@@ -548,7 +534,22 @@ app_id = "/app_id"
     struct Fixture {
         config: ChannelIdentityBindingConfig,
         identity_store: Arc<RecordingIdentityStore>,
-        installation_store: Arc<FilesystemExtensionInstallationStore>,
+    }
+
+    fn configure_scoping_values(fixture: &mut Fixture, post_bind: Option<Arc<RecordingPostBind>>) {
+        fixture.config.installation_store = None;
+        fixture.config.overrides = vec![ChannelIdentityOverride {
+            extension_id: "acmechat".to_string(),
+            provider: "acmechat".to_string(),
+            scope_source: Arc::new(StaticScopeSource(Some(ChannelConnectionScope {
+                installation_id: AdapterInstallationId::new(FIXTURE_INSTALLATION_ID)
+                    .expect("installation"),
+                expected_team_id: Some("T-team".to_string()),
+                expected_enterprise_id: None,
+                expected_app_id: Some("A-app".to_string()),
+            }))),
+            post_bind: post_bind.map(|post_bind| post_bind as Arc<dyn ChannelIdentityPostBind>),
+        }];
     }
 
     async fn fixture() -> Fixture {
@@ -556,9 +557,8 @@ app_id = "/app_id"
         let identity_store = Arc::new(RecordingIdentityStore::default());
         let config = ChannelIdentityBindingConfig {
             tenant_id: tenant(),
-            installation_store: Some(
-                Arc::clone(&installation_store) as Arc<dyn ExtensionInstallationStore>
-            ),
+            installation_store: Some(Arc::clone(&installation_store)
+                as Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>),
             channel_config: None,
             binding_store: identity_store.clone(),
             rollback_store: identity_store.clone(),
@@ -568,20 +568,16 @@ app_id = "/app_id"
         Fixture {
             config,
             identity_store,
-            installation_store,
         }
     }
 
     #[tokio::test]
     async fn matching_identity_binds_installation_scoped_and_rollback_undoes_it() {
         let mut fixture = fixture().await;
-        store_scoping_values(&fixture.installation_store).await;
         // Generic post-bind provisioning: the factory serves discovered
         // extensions; a successful bind must hand it the caller + subject.
         let post_bind = Arc::new(RecordingPostBind::default());
-        fixture.config.post_bind_factory = Some(Arc::new(StaticPostBindFactory {
-            post_bind: post_bind.clone(),
-        }));
+        configure_scoping_values(&mut fixture, Some(post_bind.clone()));
 
         let rollback = bind_channel_identities_for_callback(
             &fixture.config,
@@ -627,8 +623,8 @@ app_id = "/app_id"
 
     #[tokio::test]
     async fn claim_mismatch_rejects_without_write() {
-        let fixture = fixture().await;
-        store_scoping_values(&fixture.installation_store).await;
+        let mut fixture = fixture().await;
+        configure_scoping_values(&mut fixture, None);
 
         for wrong in [identity("T-other", "A-app"), identity("T-team", "A-other")] {
             let error = expect_reject(
@@ -683,8 +679,8 @@ app_id = "/app_id"
 
     #[tokio::test]
     async fn provider_without_channel_extension_is_a_no_op() {
-        let fixture = fixture().await;
-        store_scoping_values(&fixture.installation_store).await;
+        let mut fixture = fixture().await;
+        configure_scoping_values(&mut fixture, None);
 
         let rollback = bind_channel_identities_for_callback(
             &fixture.config,
@@ -700,8 +696,8 @@ app_id = "/app_id"
 
     #[tokio::test]
     async fn missing_identity_and_foreign_tenant_reject() {
-        let fixture = fixture().await;
-        store_scoping_values(&fixture.installation_store).await;
+        let mut fixture = fixture().await;
+        configure_scoping_values(&mut fixture, None);
 
         let error = expect_reject(
             bind_channel_identities_for_callback(
@@ -732,8 +728,8 @@ app_id = "/app_id"
 
     #[tokio::test]
     async fn already_bound_identity_maps_to_already_connected() {
-        let fixture = fixture().await;
-        store_scoping_values(&fixture.installation_store).await;
+        let mut fixture = fixture().await;
+        configure_scoping_values(&mut fixture, None);
         fixture.identity_store.seed(
             format!("{FIXTURE_INSTALLATION_ID}:U123"),
             UserId::new("user-bob").expect("user"),
@@ -872,20 +868,6 @@ app_id = "/app_id"
     }
 
     struct StaticScopeSource(Option<ChannelConnectionScope>);
-
-    /// Serves one recording post-bind for every discovered extension.
-    struct StaticPostBindFactory {
-        post_bind: Arc<RecordingPostBind>,
-    }
-
-    impl ChannelIdentityPostBindFactory for StaticPostBindFactory {
-        fn post_bind_for_extension(
-            &self,
-            _extension_id: &str,
-        ) -> Option<Arc<dyn ChannelIdentityPostBind>> {
-            Some(Arc::clone(&self.post_bind) as Arc<dyn ChannelIdentityPostBind>)
-        }
-    }
 
     #[async_trait]
     impl ChannelConnectionScopeSource for StaticScopeSource {

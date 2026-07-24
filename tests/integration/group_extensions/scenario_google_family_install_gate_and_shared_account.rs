@@ -55,10 +55,6 @@ pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
                 "builtin.extension_install",
                 json!({"extension_id": "google-calendar"}),
             ),
-            RebornScriptedReply::tool_call(
-                "builtin.extension_activate",
-                json!({"extension_id": "google-calendar"}),
-            ),
             // Consumed by the post-deny resume model call in phase 3.
             RebornScriptedReply::text("calendar needs authorization"),
         ])
@@ -116,10 +112,6 @@ pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .script([
             RebornScriptedReply::tool_call(
                 "builtin.extension_install",
-                json!({"extension_id": "google-drive"}),
-            ),
-            RebornScriptedReply::tool_call(
-                "builtin.extension_activate",
                 json!({"extension_id": "google-drive"}),
             ),
             RebornScriptedReply::text("drive needs authorization"),
@@ -191,19 +183,21 @@ pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
     // Retire the gmail-scoped account so account selection is unambiguous,
     // then connect a fresh google account carrying the calendar+drive scopes
     // (what completing the real popup would have granted).
-    let calendar_restore = g
+    // A fresh composition represents retry after the denied setup-needed
+    // memberships were removed/reset. The credential is present before the
+    // only public lifecycle action, so install can auto-reconcile to active.
+    let restored_group =
+        RebornIntegrationGroup::extension_lifecycle_google_oauth_configured().await?;
+    let calendar_restore = restored_group
         .thread("google-family-calendar-restore")
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.extension_activate",
+                "builtin.extension_install",
                 json!({"extension_id": "google-calendar"}),
             ),
             RebornScriptedReply::text("calendar authorized"),
         ])
         .build()
-        .await?;
-    calendar_restore
-        .revoke_capability_credential_accounts("google")
         .await?;
     calendar_restore
         .seed_capability_credential_account(
@@ -218,32 +212,32 @@ pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
         )
         .await?;
     calendar_restore
-        .submit_turn("activate google calendar again")
+        .submit_turn("install google calendar")
         .await?;
     calendar_restore
-        .assert_tool_result_contains("\"activated\":true")
+        .assert_tool_result_contains("\"phase\":\"active\"")
         .await?;
     calendar_restore
-        .assert_model_message_content_contains(r#"\"activated\":true"#)
+        .assert_model_message_content_contains(r#"\"phase\":\"active\""#)
         .await?;
 
-    let drive_restore = g
+    let drive_restore = restored_group
         .thread("google-family-drive-restore")
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.extension_activate",
+                "builtin.extension_install",
                 json!({"extension_id": "google-drive"}),
             ),
             RebornScriptedReply::text("drive authorized"),
         ])
         .build()
         .await?;
-    drive_restore.submit_turn("activate google drive").await?;
+    drive_restore.submit_turn("install google drive").await?;
     drive_restore
-        .assert_tool_result_contains("\"activated\":true")
+        .assert_tool_result_contains("\"phase\":\"active\"")
         .await?;
     drive_restore
-        .assert_model_message_content_contains(r#"\"activated\":true"#)
+        .assert_model_message_content_contains(r#"\"phase\":\"active\""#)
         .await?;
 
     Ok(())

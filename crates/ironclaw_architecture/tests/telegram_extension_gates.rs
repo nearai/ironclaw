@@ -173,7 +173,7 @@ fn in_memory_store_gate_catches_all_rust_visibility_forms() {
             "missed declaration: {declaration}"
         );
     }
-    assert_eq!(in_memory_store_declaration("struct FilesystemStore;"), None);
+    assert_eq!(in_memory_store_declaration("struct Store;"), None);
 }
 
 #[test]

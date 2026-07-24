@@ -3452,6 +3452,18 @@ async def google_oauth_token(request: web.Request) -> web.Response:
     scope = scopes_by_code.get(code)
     if scope is None:
         return web.json_response({"error": "invalid_grant"}, status=400)
+    live_access = os.environ.get("AUTH_LIVE_GOOGLE_ACCESS_TOKEN", "").strip()
+    live_refresh = os.environ.get("AUTH_LIVE_GOOGLE_REFRESH_TOKEN", "").strip()
+    if live_access:
+        response = {
+            "access_token": live_access,
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "scope": scope,
+        }
+        if live_refresh:
+            response["refresh_token"] = live_refresh
+        return web.json_response(response)
     return web.json_response(
         {
             "access_token": "mock-token-mock_auth_code",

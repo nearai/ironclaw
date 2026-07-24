@@ -286,7 +286,7 @@ const SYNTHETIC_CAPABILITY_SKIP_LIST: &[(&str, &str)] = &[
 /// production truth, not a second test-only source.
 ///
 /// **Deliberately NOT unioned**: `extension_surface::EXTENSION_LIFECYCLE_CAPABILITY_IDS`
-/// (the four `builtin.extension_search`/`_install`/`_activate`/`_remove` ids).
+/// (the three `builtin.extension_search`/`_install`/`_remove` ids).
 /// Their real values are defined in a production crate
 /// (`ironclaw_reborn_composition::extension_lifecycle_capabilities::EXTENSION_LIFECYCLE_CAPABILITY_IDS`),
 /// but as a `pub(crate)` constant with no public accessor — visibility-blocked
@@ -295,7 +295,7 @@ const SYNTHETIC_CAPABILITY_SKIP_LIST: &[(&str, &str)] = &[
 /// exactly the tautology this restructure removes (RHS built from the same
 /// hand-transcribed list LHS grants from). STOP/report, not paper over: see
 /// `profile_capability_ids_by_domain()`'s "extension" row, which excludes
-/// these 4 ids from the check it runs for the same reason, and the PR that
+/// these 3 ids from the check it runs for the same reason, and the PR that
 /// introduced this restructure (W5-WIRING-PARITY finding 1) for the tracked
 /// follow-up (export the list, or add a public accessor, from
 /// `ironclaw_reborn_composition`).

@@ -147,7 +147,7 @@ pub struct GetCheckpointStateRequest {
 }
 
 #[async_trait]
-pub trait CheckpointStateStore: Send + Sync {
+pub trait CheckpointStateStorePort: Send + Sync {
     async fn put_checkpoint_state(
         &self,
         request: PutCheckpointStateRequest,

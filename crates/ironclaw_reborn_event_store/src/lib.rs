@@ -47,10 +47,10 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 
 mod coalescing_sink;
-mod filesystem_store;
+mod durable_log;
 
 pub use coalescing_sink::{CoalescingEventSink, EventBatchConfig};
-pub use filesystem_store::{FilesystemDurableAuditLog, FilesystemDurableEventLog};
+pub use durable_log::{FilesystemDurableAuditLog, FilesystemDurableEventLog};
 pub const DEFAULT_POSTGRES_POOL_MAX_SIZE: usize = 2;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

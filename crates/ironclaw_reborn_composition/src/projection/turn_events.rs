@@ -17,7 +17,6 @@ use ironclaw_product::{
     ProductAdapterError, ProductGateKind, ProductOutboundPayload, ProductProjectionItem,
     ProductProjectionState, ProductSurfaceRejectionKind, RedactedString,
 };
-use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_turns::{
     GateRef, GetRunStateRequest, ModelInvalidOutputDetailReason, SanitizedFailure, TurnActor,
     TurnBlockedGateKind, TurnCoordinator, TurnError, TurnEventKind, TurnEventProjectionCursor,
@@ -82,7 +81,7 @@ pub(super) enum TurnEventBridge {
     Enabled {
         service: Arc<TurnEventReducerService<dyn TurnEventProjectionSource>>,
         coordinator: Arc<dyn TurnCoordinator>,
-        approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
+        approval_requests: Option<Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>>,
         failure_explainer: Arc<dyn FailureExplanationProvider>,
         failure_explanation_cache: Arc<Mutex<FailureExplanationCache>>,
     },
@@ -120,7 +119,7 @@ impl TurnEventBridge {
     pub(super) fn enabled(
         source: Arc<dyn TurnEventProjectionSource>,
         coordinator: Arc<dyn TurnCoordinator>,
-        approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
+        approval_requests: Option<Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>>,
     ) -> Self {
         Self::Enabled {
             service: Arc::new(TurnEventReducerService::new(source)),
@@ -135,7 +134,7 @@ impl TurnEventBridge {
 
     pub(super) fn with_approval_requests(
         mut self,
-        requests: Option<Arc<dyn ApprovalRequestStore>>,
+        requests: Option<Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>>,
     ) -> Self {
         if let Self::Enabled {
             approval_requests, ..
@@ -250,7 +249,7 @@ async fn turn_event_payloads_for_page(
     failure_explainer: &dyn FailureExplanationProvider,
     failure_explanation_cache: &Arc<Mutex<FailureExplanationCache>>,
     auth_challenges: Option<&dyn AuthChallengeProvider>,
-    approval_requests: Option<&dyn ApprovalRequestStore>,
+    approval_requests: Option<&dyn ironclaw_run_state::ApprovalRequestStorePort>,
     events: Vec<TurnLifecycleEvent>,
 ) -> Result<Vec<TurnEventPayload>, ProductAdapterError> {
     let futures = events.into_iter().map(|event| {
@@ -292,7 +291,7 @@ async fn turn_event_payloads(
     failure_explainer: &dyn FailureExplanationProvider,
     failure_explanation_cache: &Arc<Mutex<FailureExplanationCache>>,
     auth_challenges: Option<&dyn AuthChallengeProvider>,
-    approval_requests: Option<&dyn ApprovalRequestStore>,
+    approval_requests: Option<&dyn ironclaw_run_state::ApprovalRequestStorePort>,
     event: &TurnLifecycleEvent,
 ) -> Result<Vec<ProductOutboundPayload>, ProductAdapterError> {
     let mut payloads = Vec::new();
@@ -374,7 +373,7 @@ async fn blocked_prompt_payload(
     caller_user_id: &ironclaw_host_api::UserId,
     coordinator: &dyn TurnCoordinator,
     auth_challenges: Option<&dyn AuthChallengeProvider>,
-    approval_requests: Option<&dyn ApprovalRequestStore>,
+    approval_requests: Option<&dyn ironclaw_run_state::ApprovalRequestStorePort>,
     event: &TurnLifecycleEvent,
 ) -> Result<Option<ProductOutboundPayload>, ProductAdapterError> {
     let state = match coordinator
@@ -463,7 +462,7 @@ async fn blocked_prompt_payload(
 
 async fn approval_gate_prompt(
     caller_user_id: &UserId,
-    approval_requests: Option<&dyn ApprovalRequestStore>,
+    approval_requests: Option<&dyn ironclaw_run_state::ApprovalRequestStorePort>,
     event: &TurnLifecycleEvent,
     gate_ref: &GateRef,
     gate_ref_string: String,
@@ -500,7 +499,7 @@ async fn approval_gate_prompt(
 /// Returns `None` when no store is wired, the gate ref is not an approval ref,
 /// the request is missing, or the lookup fails.
 pub(crate) async fn approval_prompt_context_view(
-    approval_requests: Option<&dyn ApprovalRequestStore>,
+    approval_requests: Option<&dyn ironclaw_run_state::ApprovalRequestStorePort>,
     gate_ref: &GateRef,
     owner_user_id: &UserId,
     turn_scope: &TurnScope,
@@ -518,7 +517,7 @@ struct ApprovalPromptLookup {
 }
 
 async fn approval_prompt_lookup(
-    approval_requests: Option<&dyn ApprovalRequestStore>,
+    approval_requests: Option<&dyn ironclaw_run_state::ApprovalRequestStorePort>,
     gate_ref: &GateRef,
     owner_user_id: &UserId,
     turn_scope: &TurnScope,
@@ -800,7 +799,7 @@ fn gate_projection_item(
             .unwrap_or_else(|| gate_projection_headline(blocked_gate.gate_kind).to_string()),
         body: Some(body),
         allow_always: prompt_context.allow_always.unwrap_or(false),
-        auth_context: prompt_context.auth_context,
+        auth_context: prompt_context.auth_context.map(Box::new),
     }))
 }
 

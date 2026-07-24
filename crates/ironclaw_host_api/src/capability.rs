@@ -123,7 +123,7 @@ impl OriginGateMatrix {
     /// an omitted field is [`OriginGatePolicy::Forbidden`] by default.
     pub fn policy_for(&self, origin: &InvocationOrigin) -> OriginGatePolicy {
         match origin {
-            InvocationOrigin::LoopRun(_) => self.loop_run,
+            InvocationOrigin::LoopRun(_) | InvocationOrigin::ScheduledLoopRun(_) => self.loop_run,
             InvocationOrigin::Product(_) => self.product,
             InvocationOrigin::Automation(_) => self.automation,
         }

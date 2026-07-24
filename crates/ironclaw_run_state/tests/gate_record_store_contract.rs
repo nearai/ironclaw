@@ -1,4 +1,4 @@
-//! Contract tests for [`GateRecordStore`] / [`FilesystemGateRecordStore`].
+//! Contract tests for [`GateRecordStorePort`] / [`GateRecordStore`].
 //!
 //! The gate record is the model-visible content a pending gate renders from
 //! (arch-simplification §5.2.9); it must survive from the turn that blocks to a
@@ -224,8 +224,8 @@ fn engine_filesystem() -> ironclaw_filesystem::InMemoryBackend {
 }
 
 /// The production gate-record store over a fresh in-memory backend.
-fn in_mem_gate_record_store() -> FilesystemGateRecordStore<ironclaw_filesystem::InMemoryBackend> {
-    FilesystemGateRecordStore::new(scoped_gate_record_fs(Arc::new(engine_filesystem())))
+fn in_mem_gate_record_store() -> GateRecordStore<ironclaw_filesystem::InMemoryBackend> {
+    GateRecordStore::new(scoped_gate_record_fs(Arc::new(engine_filesystem())))
 }
 
 /// Build a [`ScopedFilesystem`] exposing the `/gate-records` alias under a single

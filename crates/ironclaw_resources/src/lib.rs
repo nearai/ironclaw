@@ -5,7 +5,7 @@
 //! reserve estimated resources, execute work, then reconcile actual usage or
 //! release the unused hold.
 //!
-//! Durable persistence is provided by [`FilesystemResourceGovernorStore`]
+//! Durable persistence is provided by [`ResourceGovernorStore`]
 //! over a [`ScopedFilesystem`](ironclaw_filesystem::ScopedFilesystem). The
 //! `RootFilesystem` choice (libSQL-backed, PostgreSQL-backed, in-memory, or
 //! local-disk) is made at the filesystem layer — the consumer-store level no
@@ -21,9 +21,9 @@
 mod cas_snapshot;
 mod event;
 mod filesystem_governor;
-mod filesystem_store;
 mod gate;
 mod period;
+mod resource_store;
 // arch-exempt: large_file, +test_support module decl for §4.3 budget-gate store consolidation (delete InMemoryBudgetGateStore), no logic change, plan #6168
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
@@ -33,15 +33,15 @@ pub use event::{
     InMemoryBudgetEventSink, NoOpBudgetEventSink,
 };
 pub use filesystem_governor::FilesystemResourceGovernor;
-pub use filesystem_store::{FilesystemBudgetGateStore, FilesystemResourceGovernorStore};
 pub use gate::{
     BudgetApprovalGate, BudgetGateError, BudgetGateId, BudgetGateOutcome, BudgetGateStatus,
-    BudgetGateStore,
+    BudgetGateStorePort,
 };
 pub use period::{
     BudgetPeriod, BudgetThresholds, BudgetThresholdsError, PeriodUnit, period_bounds,
     period_has_rolled_over,
 };
+pub use resource_store::{BudgetGateStore, ResourceGovernorStore};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
@@ -943,7 +943,7 @@ fn is_zero(value: &u64) -> bool {
 /// under concurrent writers — typically via optimistic compare-and-swap
 /// rather than a mandatory exclusive lock — and re-run `update`'s closure
 /// against a fresh snapshot on each retry.
-pub trait ResourceGovernorStore: Send + Sync + 'static {
+pub trait ResourceGovernorStorePort: Send + Sync + 'static {
     /// Run a read-modify-write transaction against the governor snapshot.
     ///
     /// The closure is `FnMut`, not `FnOnce`: filesystem-backed stores route
@@ -979,7 +979,7 @@ impl JsonFileResourceGovernorStore {
     }
 }
 
-impl ResourceGovernorStore for JsonFileResourceGovernorStore {
+impl ResourceGovernorStorePort for JsonFileResourceGovernorStore {
     fn update<T, F>(&self, update: F) -> Result<T, ResourceError>
     where
         T: Send + 'static,
@@ -1242,11 +1242,11 @@ pub(crate) fn snapshot_decode_error(error: impl std::fmt::Display) -> ResourceEr
     }
 }
 
-/// Durable resource governor backed by a transactional [`ResourceGovernorStore`].
+/// Durable resource governor backed by a transactional [`ResourceGovernorStorePort`].
 #[derive(Debug)]
 pub struct PersistentResourceGovernor<S>
 where
-    S: ResourceGovernorStore,
+    S: ResourceGovernorStorePort,
 {
     store: S,
     clock: Arc<dyn Clock>,
@@ -1262,7 +1262,7 @@ where
 
 impl<S> PersistentResourceGovernor<S>
 where
-    S: ResourceGovernorStore,
+    S: ResourceGovernorStorePort,
 {
     pub fn new(store: S) -> Self {
         Self {
@@ -1395,9 +1395,9 @@ where
     }
 
     /// `update` is `FnMut`, not `FnOnce`: when the fast path is inactive this
-    /// forwards straight into `ResourceGovernorStore::update`, which may
+    /// forwards straight into `ResourceGovernorStorePort::update`, which may
     /// re-run the closure on a CAS retry. Callers must clone captures rather
-    /// than move them out (see `ResourceGovernorStore::update` docs).
+    /// than move them out (see `ResourceGovernorStorePort::update` docs).
     fn update_active_state<T, F>(&self, mut update: F) -> Result<T, ResourceError>
     where
         T: Send + 'static,
@@ -1456,7 +1456,7 @@ where
 
 impl<S> ResourceGovernor for PersistentResourceGovernor<S>
 where
-    S: ResourceGovernorStore,
+    S: ResourceGovernorStorePort,
 {
     fn set_limit(
         &self,

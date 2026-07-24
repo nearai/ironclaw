@@ -31,7 +31,7 @@ use std::sync::Arc;
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
 
-use crate::{FilesystemApprovalRequestStore, FilesystemGateRecordStore, FilesystemRunStateStore};
+use crate::{ApprovalRequestStore, GateRecordStore, RunStateStore};
 
 /// A fresh, volatile `ScopedFilesystem<InMemoryBackend>` mounting `/run-state`,
 /// `/approvals`, and `/gate-records` — the in-memory backend seam the run-state,
@@ -63,18 +63,17 @@ pub fn in_memory_backed_run_state_filesystem() -> Arc<ScopedFilesystem<InMemoryB
 
 /// The production run-state store over a fresh in-memory backend — the drop-in
 /// replacement for the deleted `InMemoryRunStateStore`.
-pub fn in_memory_backed_run_state_store() -> FilesystemRunStateStore<InMemoryBackend> {
-    FilesystemRunStateStore::new(in_memory_backed_run_state_filesystem())
+pub fn in_memory_backed_run_state_store() -> RunStateStore<InMemoryBackend> {
+    RunStateStore::new(in_memory_backed_run_state_filesystem())
 }
 
 /// The production approval-request store over a fresh in-memory backend — the
 /// drop-in replacement for the deleted `InMemoryApprovalRequestStore`.
-pub fn in_memory_backed_approval_request_store() -> FilesystemApprovalRequestStore<InMemoryBackend>
-{
-    FilesystemApprovalRequestStore::new(in_memory_backed_run_state_filesystem())
+pub fn in_memory_backed_approval_request_store() -> ApprovalRequestStore<InMemoryBackend> {
+    ApprovalRequestStore::new(in_memory_backed_run_state_filesystem())
 }
 
 /// The production gate-record store over a fresh in-memory backend.
-pub fn in_memory_backed_gate_record_store() -> FilesystemGateRecordStore<InMemoryBackend> {
-    FilesystemGateRecordStore::new(in_memory_backed_run_state_filesystem())
+pub fn in_memory_backed_gate_record_store() -> GateRecordStore<InMemoryBackend> {
+    GateRecordStore::new(in_memory_backed_run_state_filesystem())
 }

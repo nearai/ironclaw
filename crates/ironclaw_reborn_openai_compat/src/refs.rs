@@ -515,7 +515,7 @@ impl OpenAiCompatMarkExternalToolResumeCompleted {
 }
 
 #[async_trait]
-pub trait OpenAiCompatRefStore: Send + Sync {
+pub trait OpenAiCompatRefStorePort: Send + Sync {
     async fn reserve(
         &self,
         request: OpenAiCompatRefReservation,

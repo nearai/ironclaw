@@ -80,7 +80,11 @@
             "arguments": {
               "name": "Hacker News: IronClaw & NEAR AI mentions (hourly)",
               "prompt": "Fetch the Hacker News Algolia search API for recent posts mentioning 'IronClaw' or 'NEAR AI'.\n\nUse these two URLs:\n- https://hn.algolia.com/api/v1/search_by_date?query=IronClaw&tags=story&hitsPerPage=10\n- https://hn.algolia.com/api/v1/search_by_date?query=NEAR+AI&tags=story&hitsPerPage=10\n\nFilter results to only include posts created within the last 1 hour. For each matching post include: title, author, URL (or HN link: https://news.ycombinator.com/item?id=<objectID>), points, and number of comments.\n\nThen send a concise Slack summary structured like this:\n\n🔍 *Hacker News Mentions – Last Hour*\n\n**IronClaw** (N new posts)\n• [Title](link) by author — X pts, Y comments\n\n**NEAR AI** (N new posts)\n• [Title](link) by author — X pts, Y comments\n\nIf there are no new posts for a keyword in the last hour, say \"No new mentions.\"",
-              "schedule": { "kind": "cron", "expression": "0 * * * *", "timezone": "UTC" }
+              "schedule": {
+                "kind": "cron",
+                "expression": "0 * * * *",
+                "timezone": "UTC"
+              }
             }
           }
         ],

@@ -29,7 +29,6 @@ use ironclaw_auth::{
 use ironclaw_conversations::{
     AdapterKind, ConversationActorPairingService, ExpectedExternalActorOwner, ExternalActorRef,
 };
-use ironclaw_extensions::ExtensionInstallationStore;
 use ironclaw_filesystem::{
     CasApply, ContentType, Entry, FilesystemError, RootFilesystem, ScopedFilesystem, cas_update,
 };
@@ -237,13 +236,13 @@ pub(crate) trait ChannelPairingTemplateValues: Send + Sync {
 /// Pairing is setup work performed after install and before activation, so an
 /// active-host snapshot is intentionally too narrow for this lookup.
 pub(crate) struct StoredPairingInstallationSource {
-    store: Arc<dyn ExtensionInstallationStore>,
+    store: Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>,
     extension_id: ExtensionId,
 }
 
 impl StoredPairingInstallationSource {
     pub(crate) fn new(
-        store: Arc<dyn ExtensionInstallationStore>,
+        store: Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>,
         extension_id: ExtensionId,
     ) -> Self {
         Self {

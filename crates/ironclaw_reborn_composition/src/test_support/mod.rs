@@ -67,6 +67,8 @@ mod budget_gateway;
 #[cfg(feature = "test-support")]
 mod channel_connection;
 mod durable;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) mod first_party_registrars;
 mod local_dev_boot;
 mod local_dev_capability_io;
 mod oauth_product_auth;

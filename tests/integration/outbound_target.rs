@@ -66,10 +66,13 @@ async fn targets_list_capability_dispatches_and_returns_targets() {
     let targets = output["targets"]
         .as_array()
         .expect("targets_list output carries a `targets` array");
+    // #6520: the fake facade mirrors production's always-present host-owned
+    // WebApp destination, so the inventory is the two seeded Slack targets
+    // plus web_app.
     assert_eq!(
         targets.len(),
-        2,
-        "expected exactly the two seeded targets; saw {output}"
+        3,
+        "expected the two seeded targets plus the host-owned web_app; saw {output}"
     );
     let target_ids: Vec<&str> = targets
         .iter()
@@ -86,6 +89,10 @@ async fn targets_list_capability_dispatches_and_returns_targets() {
     assert!(
         target_ids.contains(&"slack:channel:beta"),
         "expected the second seeded target in the returned targets; saw {target_ids:?}"
+    );
+    assert!(
+        target_ids.contains(&"builtin:web_app"),
+        "expected the host-owned web_app destination in the returned targets; saw {target_ids:?}"
     );
 }
 

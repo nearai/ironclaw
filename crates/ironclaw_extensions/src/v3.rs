@@ -331,26 +331,31 @@ pub(crate) fn parse_v3(
             .map_err(|error| ManifestV3Error::InvalidChannel { error })?;
     }
     if let Some(descriptor) = &raw.admin_configuration {
+        // Trust gate: an `[admin_configuration]` group declares deployment-owned,
+        // operator-managed secrets and routing. Only a host-bundled (first-party)
+        // manifest — one compiled into the host binary — may declare one. An
+        // untrusted, filesystem-discovered, or registry-installed manifest must
+        // not: otherwise it could collide with a first-party group id (aborting
+        // boot via a descriptor conflict) or register itself as a consumer of a
+        // first-party group's non-secret routing (a confused-deputy read). This
+        // is the earliest fail-closed point; composition's fold applies the same
+        // source gate as defense in depth.
+        if !source.allows_first_party() {
+            return Err(ManifestV3Error::Invalid {
+                reason:
+                    "[admin_configuration] declares a deployment-owned administrator group, which \
+                     is reserved for host-bundled (first-party) manifests"
+                        .to_string(),
+            });
+        }
         descriptor
             .validate()
             .map_err(|error| ManifestV3Error::Invalid {
                 reason: format!("[admin_configuration] is invalid: {error}"),
             })?;
-        if let Some(channel) = &raw.channel {
-            let aligned = descriptor.fields.len() == channel.config.fields.len()
-                && descriptor.fields.iter().zip(&channel.config.fields).all(
-                    |(admin_field, channel_field)| {
-                        admin_field.handle == channel_field.handle
-                            && admin_field.label == channel_field.label
-                            && admin_field.secret == channel_field.secret
-                    },
-                );
-            if !aligned {
-                return Err(ManifestV3Error::Invalid {
-                    reason: "[admin_configuration].fields must exactly match [channel.config].fields by order, handle, label, and secret flag".to_string(),
-                });
-            }
-        }
+    }
+    if let Some(channel) = &raw.channel {
+        validate_channel_admin_configuration(channel, raw.admin_configuration.as_ref())?;
     }
 
     // Normalize tools (or the synthesized MCP connection template) into the
@@ -580,6 +585,87 @@ pub(crate) fn parse_v3(
     };
 
     Ok((manifest, resolved))
+}
+
+/// Validate every channel runtime reference against the one manifest-owned
+/// deployment configuration schema. The neutral channel contract validates
+/// channel structure; the extension-manifest layer owns this cross-section
+/// relationship because only it can see `[admin_configuration]`.
+fn validate_channel_admin_configuration(
+    channel: &ChannelDescriptor,
+    descriptor: Option<&ExtensionAdminConfigurationDescriptor>,
+) -> Result<(), ManifestV3Error> {
+    let require_field = |handle: &ironclaw_host_api::SecretHandle,
+                         secret: bool,
+                         usage: &str|
+     -> Result<(), ManifestV3Error> {
+        let field = descriptor
+            .and_then(|descriptor| {
+                descriptor
+                    .fields
+                    .iter()
+                    .find(|field| field.handle == *handle)
+            })
+            .ok_or_else(|| ManifestV3Error::Invalid {
+                reason: format!(
+                    "{usage} handle `{}` must be declared in [admin_configuration].fields",
+                    handle.as_str()
+                ),
+            })?;
+        if field.secret != secret {
+            return Err(ManifestV3Error::Invalid {
+                reason: format!(
+                    "{usage} handle `{}` must be declared as secret = {secret} in [admin_configuration].fields",
+                    handle.as_str()
+                ),
+            });
+        }
+        Ok(())
+    };
+
+    if let Some(handle) = channel
+        .ingress
+        .as_ref()
+        .and_then(|ingress| ingress.verification.secret_handle())
+    {
+        require_field(handle, true, "channel ingress verification")?;
+    }
+    for egress in &channel.egress {
+        if let Some(handle) = &egress.credential_handle {
+            require_field(handle, true, "channel egress credential")?;
+        }
+        for body_credential in &egress.body_credentials {
+            require_field(
+                &body_credential.handle,
+                true,
+                "channel egress body credential",
+            )?;
+        }
+    }
+    if let Some(template) = channel
+        .connection
+        .as_ref()
+        .and_then(|connection| connection.deep_link_template.as_deref())
+    {
+        let mut remainder = template;
+        while let Some((_, after_open)) = remainder.split_once('{') {
+            let Some((placeholder, after_close)) = after_open.split_once('}') else {
+                break;
+            };
+            if placeholder != "code" {
+                let handle = ironclaw_host_api::SecretHandle::new(placeholder).map_err(
+                    |error| ManifestV3Error::Invalid {
+                        reason: format!(
+                            "channel connection placeholder `{{{placeholder}}}` is invalid: {error}"
+                        ),
+                    },
+                )?;
+                require_field(&handle, false, "channel connection placeholder")?;
+            }
+            remainder = after_close;
+        }
+    }
+    Ok(())
 }
 
 fn runtime_from_raw(raw: RawRuntimeV3) -> ExtensionRuntimeV2 {

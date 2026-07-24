@@ -566,8 +566,11 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
         &dependencies,
         "ironclaw",
         [
+            "ironclaw_auth",
             "ironclaw_extension_host",
             "ironclaw_first_party_extensions",
+            "ironclaw_host_api",
+            "ironclaw_host_runtime",
             "ironclaw_reborn_composition",
             "ironclaw_reborn_config",
             "ironclaw_reborn_traces",
@@ -575,7 +578,7 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
             "ironclaw_slack_extension",
             "ironclaw_telegram_extension",
         ],
-        "ironclaw should enter Reborn through ironclaw_reborn_composition (assembled-runtime and provider-admin service), ironclaw_reborn_config (boot-config contract), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), and ironclaw_webui (host-owned WebUI serve lifecycle) — plus ironclaw_extension_host (the NativeExtensionFactory contract) and concrete extension crates for the binary-assembled native factory registry (DEL-7: only the binary and tests may link concrete extension crates). Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
+        "ironclaw should enter Reborn through ironclaw_reborn_composition (assembled-runtime and provider-admin service), ironclaw_reborn_config (boot-config contract), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), and ironclaw_webui (host-owned WebUI serve lifecycle) — plus ironclaw_extension_host, ironclaw_host_api, ironclaw_host_runtime, and ironclaw_auth for binary-assembled first-party/native registry wiring (DEL-7: only the binary and tests may link concrete extension crates). Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
     );
     assert_workspace_deps_exactly(
         &dependencies_all_kinds,
@@ -1997,6 +2000,33 @@ fn reborn_runtime_http_egress_has_single_network_boundary() {
 }
 
 #[test]
+fn hosted_mcp_discovery_is_never_driven_by_ambient_startup_composition() {
+    let root = workspace_root();
+    let factory =
+        std::fs::read_to_string(root.join("crates/ironclaw_reborn_composition/src/factory.rs"))
+            .expect("composition factory source must be readable");
+    let owner_discovery =
+        std::fs::read_to_string(root.join("crates/ironclaw_extension_host/src/mcp_discovery.rs"))
+            .expect("extension-host hosted MCP discovery source must be readable");
+
+    for forbidden in [
+        "reconcile_hosted_mcp_runtime_readiness",
+        "reconcile_hosted_mcp_startup",
+    ] {
+        assert!(
+            !factory.contains(forbidden),
+            "composition startup must not invoke hosted-MCP discovery through `{forbidden}`; \
+             discovery requires a real caller/run ResourceScope"
+        );
+        assert!(
+            !owner_discovery.contains(forbidden),
+            "extension-host must not expose ambient hosted-MCP startup probing through \
+             `{forbidden}`"
+        );
+    }
+}
+
+#[test]
 fn reborn_product_api_crates_do_not_bind_http_ingress() {
     let forbidden = [
         ForbiddenUse {
@@ -2595,7 +2625,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_events",
                 "ironclaw_extensions",
                 // `ironclaw_filesystem` is permitted: the durable
-                // FilesystemOpenAiCompatRefStore lives behind the
+                // OpenAiCompatRefStore lives behind the
                 // `storage`/`libsql`/`postgres` features and persists opaque refs
                 // through the universal RootFilesystem port.
                 "ironclaw_gateway",
@@ -2851,7 +2881,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_dispatcher",
                 "ironclaw_events",
                 "ironclaw_extensions",
-                // ironclaw_filesystem is permitted: FilesystemResourceGovernorStore
+                // ironclaw_filesystem is permitted: ResourceGovernorStore
                 // routes the resource-governor snapshot through ScopedFilesystem
                 // under the universal-fs-dispatch rework (plan
                 // 2026-05-14-universal-fs-dispatch).
@@ -3057,7 +3087,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_conversations",
                 "ironclaw_dispatcher",
                 "ironclaw_extensions",
-                // ironclaw_filesystem is permitted: FilesystemOutboundStateStore
+                // ironclaw_filesystem is permitted: OutboundStateStore
                 // routes outbound persistence through ScopedFilesystem under
                 // the universal-fs-dispatch rework (plan
                 // 2026-05-14-universal-fs-dispatch).
@@ -3152,8 +3182,8 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_dispatcher",
                 "ironclaw_events",
                 "ironclaw_extensions",
-                // ironclaw_filesystem is permitted: FilesystemSecretStore /
-                // FilesystemCredentialBroker route secret + credential
+                // ironclaw_filesystem is permitted: SecretStore /
+                // CredentialBroker route secret + credential
                 // persistence through ScopedFilesystem under the
                 // universal-fs-dispatch rework (plan
                 // 2026-05-14-universal-fs-dispatch).
@@ -3297,7 +3327,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_capabilities",
                 "ironclaw_dispatcher",
                 "ironclaw_extensions",
-                // ironclaw_filesystem is permitted: FilesystemTurnStateRowStore
+                // ironclaw_filesystem is permitted: TurnStateRowStore
                 // routes turn-coordination persistence through ScopedFilesystem
                 // under the universal-fs-dispatch rework (plan
                 // 2026-05-14-universal-fs-dispatch).

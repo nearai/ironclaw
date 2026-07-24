@@ -9,6 +9,8 @@ use ironclaw_mcp::{McpClient, McpClientRequest, McpHostHttpClient, McpRuntimeHtt
 
 use crate::mcp::{MCP_RESPONSE_BODY_LIMIT, RegistryMcpEgressPlanner};
 
+const MCP_DISCOVERY_TOOL_LIMIT: u32 = 128;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostedMcpDiscoveryError {
     Transient(String),
@@ -61,17 +63,20 @@ pub async fn discover_hosted_mcp_package(
         RegistryMcpEgressPlanner::new(registry),
     );
     let output = client
-        .discover_tools(McpClientRequest {
-            provider: package.id.clone(),
-            capability_id: planning_capability_id,
-            scope,
-            transport,
-            command,
-            args,
-            url,
-            input: serde_json::Value::Null,
-            max_output_bytes: MCP_RESPONSE_BODY_LIMIT,
-        })
+        .discover_tools(
+            McpClientRequest {
+                provider: package.id.clone(),
+                capability_id: planning_capability_id,
+                scope,
+                transport,
+                command,
+                args,
+                url,
+                input: serde_json::Value::Null,
+                max_output_bytes: MCP_RESPONSE_BODY_LIMIT,
+            },
+            MCP_DISCOVERY_TOOL_LIMIT,
+        )
         .await
         .map_err(|error| HostedMcpDiscoveryError::Transient(error.stable_reason().to_string()))?;
     if output.tools.is_empty() {

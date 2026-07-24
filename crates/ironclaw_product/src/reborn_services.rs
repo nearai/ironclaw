@@ -134,10 +134,10 @@ pub use fs_browse::{
     RebornFsStatResponse,
 };
 use ironclaw_approvals::{
-    AUTO_APPROVE_DEFAULT_ENABLED, AutoApproveSettingKey, AutoApproveSettingStore,
+    AUTO_APPROVE_DEFAULT_ENABLED, AutoApproveSettingKey, AutoApproveSettingStorePort,
     PersistentApprovalAction, PersistentApprovalPolicyError, PersistentApprovalPolicyInput,
-    PersistentApprovalPolicyKey, PersistentApprovalPolicyStore, ToolPermissionOverride,
-    ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStore,
+    PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort, ToolPermissionOverride,
+    ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStorePort,
     ToolPermissionState, permission_mode_allows_persistent_approval,
 };
 pub use ironclaw_host_api::ChannelConnectStrategy as RebornChannelConnectStrategy;
@@ -530,9 +530,9 @@ pub trait RebornOperatorToolCatalog: Send + Sync {
 
 #[derive(Clone)]
 struct RebornOperatorApprovalConfig {
-    overrides: Arc<dyn ToolPermissionOverrideStore>,
-    auto_approve: Arc<dyn AutoApproveSettingStore>,
-    persistent_policies: Arc<dyn PersistentApprovalPolicyStore>,
+    overrides: Arc<dyn ToolPermissionOverrideStorePort>,
+    auto_approve: Arc<dyn AutoApproveSettingStorePort>,
+    persistent_policies: Arc<dyn PersistentApprovalPolicyStorePort>,
     tool_catalog: Arc<dyn RebornOperatorToolCatalog>,
 }
 type ThreadOperationLocks = StdMutex<HashMap<String, Weak<AsyncMutex<()>>>>;
@@ -2467,9 +2467,9 @@ where
 
     pub fn with_operator_approval_config(
         mut self,
-        overrides: Arc<dyn ToolPermissionOverrideStore>,
-        auto_approve: Arc<dyn AutoApproveSettingStore>,
-        persistent_policies: Arc<dyn PersistentApprovalPolicyStore>,
+        overrides: Arc<dyn ToolPermissionOverrideStorePort>,
+        auto_approve: Arc<dyn AutoApproveSettingStorePort>,
+        persistent_policies: Arc<dyn PersistentApprovalPolicyStorePort>,
         tool_catalog: Arc<dyn RebornOperatorToolCatalog>,
     ) -> Self {
         self.operator_approval_config = Some(RebornOperatorApprovalConfig {

@@ -242,6 +242,7 @@ test("locale packs include automation action failure copy", () => {
 
 test("locale packs include extension setup and OAuth failure copy", () => {
   const requiredKeys = [
+    "extensions.state.setup_needed",
     "extensions.setupFailed",
     "extensions.oauthSetupFailed",
     "extensions.oauthInvalidAuthorizationUrl",
@@ -258,6 +259,44 @@ test("locale packs include extension setup and OAuth failure copy", () => {
       assert.notEqual(pack[key].trim(), "", `${locale} ${key} should not be empty`);
     }
   }
+});
+
+test("pairing connect copy drops the removed paste-a-code flow and stays consistent across locales", () => {
+  // Keys retired with the paste-a-code pairing panel / renamed fallbacks — must
+  // be gone from EVERY locale (there is no full key-set parity test, so a
+  // straggler in one locale would otherwise linger silently).
+  const retiredKeys = [
+    "pairing.title",
+    "pairing.instructions",
+    "pairing.placeholder",
+    "pairing.approve",
+    "pairing.success",
+    "pairing.error",
+    "pairing.none",
+    "pairing.resumeFailed",
+    "pairing.web.copyUsername",
+    "pairing.openAndPaste",
+    "pairing.checkCodeAndRetry",
+  ];
+  // Renamed, flow-accurate fallback keys — present in every locale.
+  const requiredKeys = ["pairing.connectInstructions", "pairing.connectFailedRetry"];
+
+  for (const locale of LOCALES) {
+    const pack = loadLocalePack(locale);
+    for (const key of retiredKeys) {
+      assert.equal(pack[key], undefined, `${locale} must not keep retired key ${key}`);
+    }
+    for (const key of requiredKeys) {
+      assert.equal(typeof pack[key], "string", `${locale} missing ${key}`);
+      assert.notEqual(pack[key].trim(), "", `${locale} ${key} should not be empty`);
+    }
+  }
+
+  // The English fallbacks must no longer instruct the user to paste a code the
+  // UI never collects.
+  const en = loadLocalePack("en");
+  assert.doesNotMatch(en["pairing.connectInstructions"], /paste|\bcode\b/i);
+  assert.doesNotMatch(en["pairing.connectFailedRetry"], /paste|\bcode\b/i);
 });
 
 test("locale packs include admin write-only secret management copy", () => {

@@ -1,5 +1,27 @@
 # Telegram Extension Implementation Plan
 
+> **Historical plan — do not execute as a current lifecycle contract.**
+> This document predates the generic extension-correctness work and retains
+> implementation-era names such as `extension_activate`,
+> `activation_credential_requirements`, and “fake activation.” Those names are
+> historical evidence, not supported product behavior. The current public
+> lifecycle is derived, generically and without an Activate action:
+>
+> - no personal membership → `uninstalled`;
+> - membership plus incomplete manifest-declared personal setup → `setup_needed`;
+> - membership plus satisfied setup and proven runtime readiness → `active`.
+>
+> Installing Telegram creates personal membership and, while pairing is
+> incomplete, returns the manifest-declared pairing requirement. Consuming the
+> host-generated code/deep link completes setup, resumes blocked runs, and
+> derives `active`; there is no `extension_activate` tool, route, button, or
+> stored public activation state. Tenant-admin bot configuration remains a
+> separate tenant-scoped authority and never installs Telegram for a user.
+> Use
+> `docs/superpowers/plans/2026-07-22-generic-extension-correctness-merge-readiness.md`
+> and the live manifest/contracts for current implementation and release
+> decisions.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Ship the single `telegram` extension on Reborn main — admin bot setup (Channels tab), webhook-only ingress, WebGeneratedCode pairing with BlockedAuth park/resume, DM-only messaging, proactive delivery, zero tools — per `docs/superpowers/specs/2026-07-16-telegram-extension-design.md`.
@@ -255,7 +277,13 @@ self.continuation.dispatch_auth_continuation(event).await // fan-out resumes Blo
 
 ---
 
-### Task 4: Park the in-chat activation gate on unpaired telegram (`Pairing` setup variant + synthesized requirement)
+### Task 4 (superseded): historical activation-gate implementation sketch
+
+> Current correction: installation establishes membership; the generic
+> manifest-derived readiness projection parks the run on the pairing
+> requirement and derives `active` when pairing completes. The symbols and
+> `extension_activate` scripted call below describe the retired intermediate
+> design and must not be copied into current code or fixtures.
 
 **Files:**
 - Modify: `crates/ironclaw_host_api/src/capability.rs` (~L128-144 `RuntimeCredentialAccountSetup`), `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs` (`activation_credential_requirements` L526-543; connect-strategy fn ~L3143; `channel_connection_requirement` construction ~L2190-2216), `crates/ironclaw_product/src/lifecycle.rs` (`LifecycleExtensionCredentialSetup` — add `Pairing`), `crates/ironclaw_product/src/reborn_services/types.rs` (`RebornExtensionCredentialSetup` — add `Pairing` arm), `crates/ironclaw_reborn_composition/src/extension_host/extension_credential_requirements.rs` (projection arms)
@@ -415,7 +443,7 @@ Connectable channels: operator gets `{channel:"telegram", strategy: AdminManaged
 
 **Files:**
 - Create: `crates/ironclaw_webui_v2/frontend/src/lib/telegram-setup-api.ts`, `src/components/telegram-setup-panel.tsx`, `src/components/telegram-pairing-panel.tsx` (+ `.test.ts` files beside existing patterns)
-- Modify: `frontend/package.json` (+`qrcode` dep + `@types/qrcode` dev), `src/pages/extensions/components/channels-tab.tsx` (branch: `admin_managed_channels`+channel `telegram` → `TelegramAdminManagedSection`; `web_generated_code` → `TelegramPairingPanel`), `src/pages/chat/components/onboarding-pairing-card.tsx` (strategy `web_generated_code` → render `TelegramPairingPanel` display mode instead of the paste box; keep `inbound_proof_code` paste behavior), `src/pages/chat/hooks/useChannelOnboarding.ts` (treat a `BlockedAuth` gate whose requirement setup is `pairing` as the pairing card trigger), i18n keys
+- Modify: `frontend/package.json` (+`qrcode` dep + `@types/qrcode` dev), `src/pages/extensions/components/channels-tab.tsx`, `src/pages/chat/components/onboarding-pairing-card.tsx` (strategy `web_generated_code` → render the generic host-generated code/deep-link/QR panel), `src/pages/chat/hooks/useChannelOnboarding.ts` (treat a `BlockedAuth` gate whose requirement setup is `pairing` as the pairing card trigger), i18n keys
 
 **Interfaces:**
 - `telegram-setup-api.ts`: `getTelegramSetup() GET /api/webchat/v2/channels/telegram/setup`, `saveTelegramSetup({bot_token?, webhook_url?}) PUT`, `clearTelegramSetup() DELETE`, `startTelegramPairing() POST /api/webchat/v2/channels/telegram/pairing -> {code, deep_link, expires_at}`, `getTelegramPairing() GET -> {connected, pending}`, `disconnectTelegramPairing() DELETE`.
@@ -430,7 +458,7 @@ Connectable channels: operator gets `{channel:"telegram", strategy: AdminManaged
 
 **Files:**
 - Rewrite: `docs/reborn/contracts/telegram-v2.md` (new contract: single extension, admin setup pipeline, pairing state machine, DM admission table, honest-delivery mapping; names its test bins + run commands), `tests/telegram_v2_default_off_integration.rs` → new-model gating test (feature posture + `REBORN_TELEGRAM_V2_ENABLED` v1-exclusivity arbitration comment refresh)
-- Modify: telegram legs in `tests/reborn_qa_connect_flows.rs`, `tests/staging_regression_fixes.rs`, `crates/ironclaw_reborn_composition/tests/webui_v2_serve.rs`, `crates/ironclaw_webui_v2/tests/webui_v2_handlers_contract.rs` (WebGeneratedCode payloads), `scripts/reborn_webui_v2_live_qa/case_matrix.py` telegram cases, `scripts/ci/reborn-e2e-rust.sh` (add the telegram contract test mapping), dormant `pairing-api.ts` redeem plumbing (repoint/retire per Task 11's panel; keep `PairingSection` for `inbound_proof_code` only)
+- Modify: telegram legs in `tests/reborn_qa_connect_flows.rs`, `tests/staging_regression_fixes.rs`, `crates/ironclaw_reborn_composition/tests/webui_v2_serve.rs`, `crates/ironclaw_webui_v2/tests/webui_v2_handlers_contract.rs` (WebGeneratedCode payloads), `scripts/reborn_webui_v2_live_qa/case_matrix.py` telegram cases, `scripts/ci/reborn-e2e-rust.sh` (add the telegram contract test mapping); remove dormant pasted-proof redeem plumbing.
 - Do NOT touch: `channels-src/telegram/`, `tools-src/telegram/`, v1 tests, `src/**` (v1 monolith stays working; `validate_telegram_v1_v2_exclusivity` comments updated only if strictly needed)
 
 - [ ] Steps: inventory each file's telegram leg → rewrite to new model → run each touched suite → commit `refactor(reborn): retire legacy-shaped telegram from the reborn context`.

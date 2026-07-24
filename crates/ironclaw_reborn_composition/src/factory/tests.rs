@@ -1,12 +1,14 @@
 // arch-exempt: large_file, pre-existing >1500-line factory test module; this PR only adds the mandatory `owner` field to an outbound-target entry fixture for the registry caller-scoping hardening, plan #6389
 use super::*;
-use ironclaw_approvals::{AutoApproveSettingInput, AutoApproveSettingStore};
+use ironclaw_approvals::{AutoApproveSettingInput, AutoApproveSettingStorePort as _};
 use ironclaw_auth::{
     AuthProductScope, AuthSurface, CredentialAccountLabel, CredentialAccountStatus,
     CredentialOwnership, GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
     NewCredentialAccount, ProviderScope,
 };
-use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStore, GrantAuthorizer};
+use ironclaw_authorization::{
+    CapabilityLeaseStatus, CapabilityLeaseStorePort as _, GrantAuthorizer,
+};
 use ironclaw_filesystem::FilesystemError;
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_filesystem::RootFilesystem;
@@ -29,7 +31,9 @@ use ironclaw_host_runtime::{
     TRIGGER_REMOVE_CAPABILITY_ID,
 };
 use ironclaw_host_runtime::{RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver};
+use ironclaw_outbound::RunFinalReplyDestination;
 use ironclaw_product::{LifecyclePackageKind, LifecyclePackageRef};
+use ironclaw_secrets::SecretStorePort as _;
 
 use rust_decimal_macros::dec;
 use secrecy::ExposeSecret;
@@ -108,7 +112,7 @@ async fn production_turn_state_store_uses_row_layout() {
     ));
 
     // `production_turn_state_store` returns the concrete
-    // `FilesystemTurnStateRowStore` by type, so "production uses the row
+    // `TurnStateRowStore` by type, so "production uses the row
     // layout" is now a compile-time guarantee. This exercises the factory
     // end-to-end and confirms the constructed store answers reads.
     let store =
@@ -192,7 +196,7 @@ fn build_runtime_substrate_uses_filesystem_resource_governor() {
 
 #[test]
 fn extension_installation_state_path_is_single_runtime_default() {
-    let path = FilesystemExtensionInstallationStore::default_state_path().expect("state path");
+    let path = ExtensionInstallationStore::default_state_path().expect("state path");
 
     assert_eq!(path.as_str(), "/system/extensions/.installations");
 }
@@ -285,7 +289,7 @@ async fn trigger_delivery_target_validation_resolves_through_the_outbound_regist
             Ok(vec![OutboundDeliveryTargetEntry {
                 summary: self.entry.summary.clone(),
                 capabilities: self.entry.capabilities.clone(),
-                reply_target_binding_ref: self.entry.reply_target_binding_ref.clone(),
+                destination: self.entry.destination.clone(),
                 owner: OutboundDeliveryTargetOwner::for_scope(caller),
             }])
         }
@@ -332,10 +336,12 @@ async fn trigger_delivery_target_validation_resolves_through_the_outbound_regist
             auth_prompts: true,
             modalities: Vec::new(),
         },
-        reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
-            "reply:registry-validation",
-        )
-        .expect("binding ref"),
+        destination: RunFinalReplyDestination::External {
+            reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
+                "reply:registry-validation",
+            )
+            .expect("binding ref"),
+        },
         // Overwritten with the querying caller by `OneTargetProvider::list`;
         // set to the scope identity here for clarity.
         owner: OutboundDeliveryTargetOwner::new(
@@ -2772,7 +2778,7 @@ fn skill_md(name: &str, description: &str, prompt: &str) -> String {
 }
 
 /// Verify that the durable `local_dev_outbound_store` bundle (libsql or postgres)
-/// shares a single `FilesystemOutboundStateStore` allocation across all four
+/// shares a single `OutboundStateStore` allocation across all four
 /// trait-object roles.
 ///
 /// The assertion reads the four trait-object pointers from the built

@@ -6,7 +6,7 @@
 //! and asserts the state a process restart must reconstruct is actually
 //! there:
 //! - the active Slack identity binding (the durable "connected" evidence),
-//!   read through a fresh generic `FilesystemChannelIdentityStore` composed
+//!   read through a fresh generic `ChannelIdentityStore` composed
 //!   exactly the way production boot composes it;
 //! - the Slack extension installation record (the durable "installed"
 //!   evidence).

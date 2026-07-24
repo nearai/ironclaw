@@ -175,6 +175,13 @@ pub struct OutboundTarget {
 #[derive(Debug, Clone)]
 pub enum OutboundPart {
     Text(String),
+    /// Structured authentication challenge. The coordinator forwards this
+    /// unchanged; each channel adapter owns native rendering while preserving
+    /// the same recipe materialization WebUI consumes.
+    AuthPrompt {
+        view: Box<crate::AuthPromptView>,
+        direct_message: bool,
+    },
     /// Remove an earlier delivery in the target conversation (the `Cleanup`
     /// intent, e.g. deleting a working indicator). `vendor_message_ref` is
     /// the reference a previous [`PartDeliveryOutcome::Sent`] returned; the

@@ -14,7 +14,7 @@ use ironclaw_outbound::{
     CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
     OutboundDeliveryTargetEntry, OutboundDeliveryTargetId, OutboundDeliveryTargetProvider,
     OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary, OutboundError,
-    WriteCommunicationPreferenceRequest,
+    RunFinalReplyDestination, WriteCommunicationPreferenceRequest,
 };
 use ironclaw_turns::ReplyTargetBindingRef;
 
@@ -143,9 +143,15 @@ impl OutboundPreferencesProductService for RebornOutboundPreferencesService {
             Some(target_id) => Some(self.resolve_final_reply_target(&caller, target_id).await?),
             None => None,
         };
-        let final_reply_target = resolved_final_reply_target
-            .as_ref()
-            .map(|entry| entry.reply_target_binding_ref.clone());
+        let final_reply_target =
+            resolved_final_reply_target
+                .as_ref()
+                .and_then(|entry| match &entry.destination {
+                    RunFinalReplyDestination::External {
+                        reply_target_binding_ref,
+                    } => Some(reply_target_binding_ref.clone()),
+                    RunFinalReplyDestination::WebApp => None,
+                });
         let existing = self
             .preferences
             .load_communication_preference(key)
@@ -398,10 +404,14 @@ mod tests {
             _caller: &OutboundDeliveryTargetScope,
             target: &ReplyTargetBindingRef,
         ) -> Result<Option<OutboundDeliveryTargetEntry>, OutboundError> {
-            Ok(
-                (self.entry.reply_target_binding_ref.as_str() == target.as_str())
-                    .then(|| self.entry.clone()),
-            )
+            Ok(match &self.entry.destination {
+                RunFinalReplyDestination::External {
+                    reply_target_binding_ref,
+                } if reply_target_binding_ref.as_str() == target.as_str() => {
+                    Some(self.entry.clone())
+                }
+                _ => None,
+            })
         }
     }
 

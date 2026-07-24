@@ -34,10 +34,20 @@ pub fn strip_wrapping_inline_code(text: &str) -> &str {
 
 /// Parse an already-normalized message text as an in-chat gate command.
 ///
-/// Returns `Ok(None)` when the text is not an interaction command at all
-/// (route it as a normal user message). Returns `Ok(Some(NoOp))` when a
-/// command verb was recognized but its arguments are malformed — the reply
-/// was aimed at a gate, so it must NOT fall through and start a model turn.
+/// Only a *confident* gate command — the reserved shape the system advertises:
+/// a bare `approve`/`deny`, or any verb carrying a `gate:<ref>` (`approve
+/// gate:<ref>`, `auth deny gate:<ref>`) — is pulled out of normal turn handling
+/// and returned as `Some(payload)`.
+///
+/// Returns `Ok(None)` for everything else so it routes as a normal user
+/// message: text that is not an interaction command at all, and — crucially —
+/// ambiguous natural language that merely *starts* with a command verb but is
+/// not the reserved shape (`"approve this design"`, a bare `auth deny` with no
+/// ref, `auth deny gate:x extra`). Falling such text through to a turn is the
+/// safe default; classifying it out of the conversation as a no-op would
+/// silently swallow a real user message. (`Err` is still returned only when a
+/// confident command carries a hostile/invalid ref that fails payload
+/// validation.)
 pub fn parse_interaction_resolution_text(
     text: &str,
     source_trigger: ProductTriggerReason,
@@ -53,21 +63,21 @@ pub fn parse_interaction_resolution_text(
         "deny" => parse_approval_resolution(parts.next(), ApprovalDecision::Deny, source_trigger),
         "auth" => {
             let Some(action) = parts.next() else {
-                return malformed_interaction_noop();
+                return ambiguous_interaction_falls_through();
             };
             if action.eq_ignore_ascii_case("deny") {
                 let Some(auth_request_ref) = parts.next() else {
-                    return malformed_interaction_noop();
+                    return ambiguous_interaction_falls_through();
                 };
                 if parts.next().is_some() {
-                    return malformed_interaction_noop();
+                    return ambiguous_interaction_falls_through();
                 }
                 AuthResolutionPayload::new(auth_request_ref, AuthResolutionResult::Denied)
                     .map(|payload| payload.with_source_trigger(source_trigger))
                     .map(ProductInboundPayload::AuthResolution)
                     .map(Some)
             } else {
-                malformed_interaction_noop()
+                ambiguous_interaction_falls_through()
             }
         }
         _ => Ok(None),
@@ -84,12 +94,13 @@ fn parse_approval_resolution(
             // A well-formed `gate:<ref>` wins even when the user pasted the whole
             // instruction line (e.g. "approve gate:X or deny gate:X") — the
             // leading verb + first gate ref are the intent; trailing tokens are
-            // ignored. Any token that is not a `gate:<ref>` is not a targeted
-            // resolution (a genuine typo like "approve this"), so fall through to
-            // a no-op regardless of whether trailing text follows — keeping
-            // single- and multi-word non-gate replies consistent.
+            // ignored. Any token that is not a `gate:<ref>` means this is not a
+            // targeted resolution but ambiguous natural language that merely
+            // starts with a verb ("approve this design"), so fall through to a
+            // normal user-message turn — never silently swallow it — regardless
+            // of whether trailing text follows.
             if !gate_ref.starts_with("gate:") {
-                return malformed_interaction_noop();
+                return ambiguous_interaction_falls_through();
             }
             ApprovalResolutionPayload::new(gate_ref, decision)
                 .map(|payload| payload.with_source_trigger(source_trigger))
@@ -103,8 +114,14 @@ fn parse_approval_resolution(
     }
 }
 
-fn malformed_interaction_noop() -> Result<Option<ProductInboundPayload>, ProductAdapterError> {
-    Ok(Some(ProductInboundPayload::NoOp))
+/// Ambiguous input — a phrase that merely *starts* with a command verb but is
+/// not the reserved confident gate-command shape (no `gate:<ref>`, or extra /
+/// garbled args) — routes as a normal user message. Returning `Ok(None)` makes
+/// the ingress fall through to normal turn handling instead of pulling the
+/// message out of the conversation as a silent no-op (a lost user message).
+fn ambiguous_interaction_falls_through()
+-> Result<Option<ProductInboundPayload>, ProductAdapterError> {
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -157,18 +174,26 @@ mod tests {
     }
 
     #[test]
-    fn recognized_verb_with_malformed_args_is_noop_never_a_user_message() {
-        // Aimed at a gate but broken — must not start a model turn.
+    fn ambiguous_verb_first_text_falls_through_to_a_user_message() {
+        // A message that merely *starts* with a command verb but is not the
+        // reserved gate-command shape (no `gate:` ref, or extra/garbled args)
+        // is ambiguous natural language, not a confident gate command. It must
+        // fall through to normal turn handling (route as a user message)
+        // rather than being silently pulled out of the conversation as a
+        // no-op — otherwise a real chat message like "approve this design" is
+        // lost with no turn and no user-visible feedback.
         for text in [
             "auth",
             "auth revoke x",
             "auth deny",
             "auth deny gate:x extra",
             "approve this",
+            "approve this design",
+            "deny that idea",
         ] {
             assert!(
-                matches!(parse(text), Some(ProductInboundPayload::NoOp)),
-                "{text:?} must be a NoOp"
+                parse(text).is_none(),
+                "{text:?} is ambiguous natural language and must route as a user message"
             );
         }
     }

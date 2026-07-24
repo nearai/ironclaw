@@ -14,13 +14,13 @@ use ironclaw_turns::run_profile::{AgentLoopHostError, AgentLoopHostErrorKind, Lo
 use crate::subagent::{
     directions::direction_prompt,
     flavors::{SubagentFlavorId, lookup_flavor, parse_flavor_id},
-    goal_store::{SubagentGoalStore, SubagentGoalStoreError},
+    goal_store::{SubagentGoalStoreError, SubagentGoalStorePort},
 };
 
 #[cfg(test)]
 pub struct RebornSubagentPromptMaterialSource<G>
 where
-    G: SubagentGoalStore + ?Sized,
+    G: SubagentGoalStorePort + ?Sized,
 {
     goal_store: Arc<G>,
     flavor_id: SubagentFlavorId,
@@ -29,7 +29,7 @@ where
 #[cfg(test)]
 impl<G> RebornSubagentPromptMaterialSource<G>
 where
-    G: SubagentGoalStore + ?Sized,
+    G: SubagentGoalStorePort + ?Sized,
 {
     pub fn new(goal_store: Arc<G>, flavor_id: SubagentFlavorId) -> Self {
         Self {
@@ -48,7 +48,7 @@ where
 /// longer holds a gate/edge dependency at all.
 pub struct GateBackedSubagentPromptMaterialSource<G>
 where
-    G: SubagentGoalStore + ?Sized,
+    G: SubagentGoalStorePort + ?Sized,
 {
     goal_store: Arc<G>,
     thread_service: Arc<dyn SessionThreadService>,
@@ -56,7 +56,7 @@ where
 
 impl<G> GateBackedSubagentPromptMaterialSource<G>
 where
-    G: SubagentGoalStore + ?Sized,
+    G: SubagentGoalStorePort + ?Sized,
 {
     pub fn new(goal_store: Arc<G>, thread_service: Arc<dyn SessionThreadService>) -> Self {
         Self {
@@ -69,7 +69,7 @@ where
 #[async_trait]
 impl<G> SubagentPromptMaterialSource for GateBackedSubagentPromptMaterialSource<G>
 where
-    G: SubagentGoalStore + Send + Sync + ?Sized,
+    G: SubagentGoalStorePort + Send + Sync + ?Sized,
 {
     async fn material_for_run(
         &self,
@@ -104,7 +104,7 @@ where
 #[async_trait]
 impl<G> SubagentPromptMaterialSource for RebornSubagentPromptMaterialSource<G>
 where
-    G: SubagentGoalStore + Send + Sync + ?Sized,
+    G: SubagentGoalStorePort + Send + Sync + ?Sized,
 {
     async fn material_for_run(
         &self,
@@ -121,7 +121,7 @@ async fn goal_for_run<G>(
     run_context: &LoopRunContext,
 ) -> Result<SubagentPromptGoal, AgentLoopHostError>
 where
-    G: SubagentGoalStore + Send + Sync + ?Sized,
+    G: SubagentGoalStorePort + Send + Sync + ?Sized,
 {
     match goal_store
         .get_goal(&run_context.scope, run_context.run_id)

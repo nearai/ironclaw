@@ -446,6 +446,7 @@ fn map_auth_product_error(error: AuthProductError) -> ProductSurfaceFailure {
         }
         AuthProductError::BackendUnavailable
         | AuthProductError::BackendConflict
+        | AuthProductError::LifecycleActivationFailed
         | AuthProductError::MalformedConfig => {
             auth_rejected(AuthInteractionRejectionKind::FlowUnavailable)
         }
@@ -475,6 +476,7 @@ fn map_credential_selection_error(error: AuthProductError) -> ProductSurfaceFail
         }
         AuthProductError::BackendUnavailable
         | AuthProductError::BackendConflict
+        | AuthProductError::LifecycleActivationFailed
         | AuthProductError::MalformedConfig => {
             auth_rejected(AuthInteractionRejectionKind::FlowUnavailable)
         }

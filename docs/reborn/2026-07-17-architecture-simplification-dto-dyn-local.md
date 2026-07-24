@@ -105,6 +105,20 @@ annotations and `.claude/rules/architecture.md` cite them; additions get
   adapters. §14 refreshed against current `origin/main` after #6386 / #6396 /
   #6430 / #6432 / #6116 / #6438 / #6447.
 - **r12** 2026-07-23 — status-only update for channel ingress: extension/channel
+  ingress now admits verified normalized messages directly through
+  `ProductSurface` as the host-only `channel.admit_inbound` operation instead
+  of using a separate product workflow facade or constructing
+  `ProductInboundPayload` directly. `ProductInboundEnvelope` now carries `source_channel`, so WebUI,
+  CLI, and external channels converge on one source-channel stamp instead of a
+  separate channel-specific envelope. Slack gate/auth interaction classifiers
+  now return the channel-classification DTO consumed by ProductSurface
+  admission.
+- **r13** 2026-07-23 — status-only correction for the unified extension
+  lifecycle. The public product surface no longer exposes a distinct extension
+  activation action. Install establishes per-user membership; the manifest
+  auth recipe and durable credential/pairing readiness derive either
+  `setup_needed` or `active`; remove deletes that membership. This supersedes
+  the activation-specific status wording in r9 and refreshes mutable §14.
   ingress now admits verified normalized messages through
   `host_api::ChannelInboundProductSurface::admit_channel_inbound` instead of a
   generic ProductSurface command escape hatch or direct
@@ -340,10 +354,10 @@ turn store alone is two full implementations of the same semantics:
 
 | Domain | In-memory impl | Durable impl | Reimplemented logic |
 | --- | --- | --- | --- |
-| turns | `InMemoryTurnStateStore` (`memory/mod.rs`, ~4,260 LOC) | `FilesystemTurnStateStore` (~1,710 LOC) | lease, active-lock, checkpoint, idempotency, events |
-| processes | `InMemoryProcessStore` + `InMemoryProcessResultStore` (~230 LOC) | `FilesystemProcessStore` + `FilesystemProcessResultStore` (~920 LOC) | process lifecycle + result store |
+| turns | `InMemoryTurnStateStore` (`memory/mod.rs`, ~4,260 LOC) | `TurnStateRowStore` (~1,710 LOC) | lease, active-lock, checkpoint, idempotency, events |
+| processes | `InMemoryProcessStore` + `InMemoryProcessResultStore` (~230 LOC) | `ProcessStore` + `ProcessResultStore` (~920 LOC) | process lifecycle + result store |
 | approvals | `InMemory{AutoApprove, PersistentApprovalPolicy, CapabilityPermissionOverride}Store` | matching `Filesystem*` (×3) | three separate approval stores |
-| authorization | `InMemoryCapabilityLeaseStore` | `FilesystemCapabilityLeaseStore` | lease store |
+| authorization | `InMemoryCapabilityLeaseStore` | `CapabilityLeaseStore` | lease store |
 | run_state | `InMemory{RunState, ApprovalRequest}Store` | matching `Filesystem*` (×2) | two run-state stores |
 
 Every `InMemory*Store` is a local/test-only parallel implementation of logic that
@@ -355,7 +369,7 @@ libSQL + Postgres on top (2–4× per domain). The `InMemory*` structs are the l
 Two mechanisms:
 
 1. **Storage mechanism and domain logic are not separated.** The turn store's
-   `filesystem_store/row_store/` layer (journal / delta / row materialization) is a
+   `turn_state_row_store/row_store/` layer (journal / delta / row materialization) is a
    *partial* gesture at that split, but it is turns-specific and does not unify
    in-memory vs filesystem vs the other domains. Without a shared backend seam, "what
    the turn state *is*" and "how bytes are persisted" are welded together, so each
@@ -624,20 +638,20 @@ The realization that reshapes this move: **the single storage seam is already in
 the tree — it is `RootFilesystem`** (`ironclaw_filesystem`). It already has four
 production-grade backends — `InMemoryBackend`, on-disk (`LocalFilesystem`),
 `LibSqlRootFilesystem`, `PostgresRootFilesystem` — and the durable stores are
-**already generic over it**: `FilesystemTurnStateStore<F>`,
-`FilesystemProcessStore<F>`, `FilesystemCapabilityLeaseStore<F>`,
-`FilesystemRunStateStore<F>`, `FilesystemAutoApproveSettingStore<F>`, and so on. The
+**already generic over it**: `TurnStateRowStore<F>`,
+`ProcessStore<F>`, `CapabilityLeaseStore<F>`,
+`RunStateStore<F>`, `AutoApproveSettingStore<F>`, and so on. The
 `RowBackend` I earlier proposed inventing already exists and is already wired.
 
 So the move is subtractive, not additive:
 
 1. **Delete every hand-written `InMemory*Store`.** Tests instantiate the *same*
-   store the deployment runs — `FilesystemTurnStateStore<InMemoryBackend>` — so
+   store the deployment runs — `TurnStateRowStore<InMemoryBackend>` — so
    "in-memory" stops being a store and becomes a **filesystem backend**
    (`InMemoryBackend`, which already implements `RootFilesystem`). One store
    implementation per domain, exercised in tests over the in-memory backend and in
    production over libSQL/Postgres. The ~4,260-LOC `InMemoryTurnStateStore` becomes
-   deletable once `FilesystemTurnStateStore<InMemoryBackend>` covers its cases.
+   deletable once `TurnStateRowStore<InMemoryBackend>` covers its cases.
 
 2. **Backend choice is deployment config, not a type.** Which `RootFilesystem`
    impl backs a run is one value in a `DeploymentConfig` fed to a single
@@ -705,7 +719,7 @@ const LOCAL_DEV: DeploymentConfig = DeploymentConfig {
 };
 ```
 
-`build_runtime(LOCAL_DEV)` wires the ordinary `FilesystemTurnStateStore<InMemoryBackend>`,
+`build_runtime(LOCAL_DEV)` wires the ordinary `TurnStateRowStore<InMemoryBackend>`,
 the ordinary approval/capability/lease substrates, and the ordinary ports — with
 these values. The same is true of hosted and enterprise: each is a `DeploymentConfig`
 constant, and the difference between them is data a reviewer can read in one place,
@@ -1976,7 +1990,7 @@ divergent local shape at the seam.
 
 - **The turn store consolidation is the trickiest store case.** The in-memory turn
   store is larger than the filesystem one and the runner-lease uses an in-memory
-  overlay; consolidating onto `FilesystemTurnStateStore<InMemoryBackend>` is
+  overlay; consolidating onto `TurnStateRowStore<InMemoryBackend>` is
   reconcile-then-delete, not a blind delete. Do the small domains (Slice A) first to
   build confidence, turns last.
 - **Closed `RuntimeLane` enum** trades open extensibility for exhaustiveness — a
@@ -2231,7 +2245,7 @@ because centralizing on one seam optimizes everything at once — or bottlenecks
 
 | Path | Frequency | Locking / store ops | Remote-latency exposure | Mitigation |
 | --- | --- | --- | --- | --- |
-| **Per-turn state fan-out** | every transition | ~11 durable collections (turn/run/lock/lease/checkpoint/idempotency/events) | 11 sequential round-trips if unbatched | one batched snapshot/delta write per transition — the `filesystem_store/row_store` journal already does this for turns; §4.3 must make it the norm, not per-domain |
+| **Per-turn state fan-out** | every transition | ~11 durable collections (turn/run/lock/lease/checkpoint/idempotency/events) | 11 sequential round-trips if unbatched | one batched snapshot/delta write per transition — the `turn_state_row_store/row_store` journal already does this for turns; §4.3 must make it the norm, not per-domain |
 | **Lease heartbeat ↔ store lock** | every heartbeat, per active run | heartbeat contends on the *same* store lock as the executor (`turn_scheduler.rs:881`); lease TTL (90s) budgets the write | a slow remote store delays the heartbeat past the TTL → false expiry → killed run (the 2026-06-24 wedge) | heartbeat is a tiny isolated write on its own connection, never behind the executor's store work; TTL ≥ k × backend p99 write latency (not a hardcoded 90s) |
 | **libSQL single-writer** | every write | `BEGIN IMMEDIATE` global write lock + a connection pool (`libsql_pool`; the #5751 `SQLITE_MISUSE` fix) | all writes serialize through one writer; §4.3 funnels *every* domain's writes there | already shipped as pain (#6089 governor contention). Prefer Postgres (row-level locking) for multi-tenant/high-concurrency; or shard the libSQL writer by tenant/scope |
 | **Capability `authorize()` reads** | every tool call | reads trust/approval/mounts; resource reservation is write + reconcile (2 writes) | multiple round-trips before dispatch, per call | the §3 single `authorize()` is where to batch the reads and **cache** the read-mostly ones (trust policy, descriptors), scope-keyed per the safety cache rule |
@@ -2527,10 +2541,11 @@ loop-facing capability result and every result mirror is deleted.
   master switch uses `builtin.skill_auto_activate_learned_set`, an API-only
   product capability over the runtime selector flag. Extension install/remove
   routes now invoke `builtin.extension_install` and `builtin.extension_remove`
-  directly from the WebUI ProductSurface path; activation now invokes
-  `builtin.extension_activate`, reads back `EXTENSIONS_VIEW` for active state
-  after success, and maps auth-blocked outcomes onto the existing extension
-  onboarding response shape. Extension setup read now flows through the
+  directly from the WebUI ProductSurface path. Install establishes per-user
+  membership and returns the manifest-driven onboarding or blocked-auth result;
+  after auth completes, `EXTENSIONS_VIEW` derives `setup_needed` or `active`
+  from durable readiness. There is no separate public extension activation
+  capability or lifecycle transition. Extension setup read now flows through the
   descriptor-backed `extension_setup` view, and setup submit now invokes
   `builtin.extension_setup_submit` before reading back that view. Zip import now
   invokes `builtin.extension_import` with upload bytes encoded into an

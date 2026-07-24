@@ -202,17 +202,12 @@ export function useChat(threadId) {
     messages,
     messagesThreadId,
     pendingGate,
-    pendingGateRef,
-    setPendingGate,
-    setIsProcessing,
     sendRef,
   });
   const {
     pendingOnboarding,
     pendingOnboardingRef,
     setPendingOnboardingState,
-    submitOnboardingPairing,
-    submitChannelConnectionPairing,
     startOnboardingOAuth,
     dismissOnboardingPairing,
   } = channelOnboarding;
@@ -1089,8 +1084,6 @@ export function useChat(threadId) {
     send,
     resolveGate,
     submitAuthToken,
-    submitOnboardingPairing,
-    submitChannelConnectionPairing,
     startOnboardingOAuth,
     dismissOnboardingPairing,
     cancelRun,

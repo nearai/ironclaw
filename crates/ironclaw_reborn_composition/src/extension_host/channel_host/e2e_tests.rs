@@ -33,8 +33,8 @@ use axum::http::{Request, StatusCode};
 use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
 use ironclaw_extensions::{
-    ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
-    ExtensionInstallationStore as _, ExtensionManifestRecord, ExtensionManifestRef, ManifestSource,
+    ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStorePort as _,
+    ExtensionManifestRecord, ExtensionManifestRef, ManifestSource,
 };
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{
@@ -44,7 +44,8 @@ use ironclaw_host_api::{
 use ironclaw_outbound::test_support::in_memory_backed_outbound_state_store;
 use ironclaw_outbound::{
     CommunicationPreferenceRecord, CommunicationPreferenceRepository, DeliveredGateRouteStore,
-    DeliveryDefaultScope, OutboundStateStore, WriteCommunicationPreferenceRequest,
+    DeliveryDefaultScope, OutboundDeliveryTargetEntry, RunFinalReplyDestination,
+    WriteCommunicationPreferenceRequest,
 };
 use ironclaw_product::{
     AdapterInstallationId, AuthRequirement, AuthResolutionPayload, AuthResolutionResult,
@@ -63,7 +64,7 @@ use ironclaw_product::{
     ResolvedBinding, RunDeliveryServices, RunDeliverySettings, TriggeredRunDeliveryDriver,
     TriggeredRunDeliveryRequest,
 };
-use ironclaw_secrets::FilesystemSecretStore;
+use ironclaw_secrets::SecretStore;
 use ironclaw_slack_extension::{
     SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID, SlackPreferenceTargetCodec,
 };
@@ -154,8 +155,7 @@ struct Harness {
     /// The harness's outbound state store — the SAME allocation the
     /// assembly's delivery deps read communication preferences from, so
     /// tests can seed the creator's personal preference.
-    outbound:
-        Arc<ironclaw_outbound::FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    outbound: Arc<ironclaw_outbound::OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     /// Keeps the harness extension host (and its published snapshot) alive.
     _host: Arc<ExtensionHost>,
     /// Keeps the assembly (and its reconcile loop + registrations) alive.
@@ -371,7 +371,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let outbound =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
-    let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
+    let outbound_store: Arc<dyn ironclaw_outbound::OutboundStateStorePort> = outbound.clone();
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound.clone();
     let egress = RecordingEgress::default();
 
@@ -514,7 +514,6 @@ async fn configured_channel_config() -> Arc<ChannelConfigService> {
             ExtensionInstallation::new(
                 ExtensionInstallationId::new(INSTALLATION.to_string()).expect("installation id"), // safety: static id is valid.
                 extension_id.clone(),
-                ExtensionActivationState::Enabled,
                 ExtensionManifestRef::new(extension_id.clone(), None),
                 Vec::new(),
                 chrono::Utc::now(),
@@ -535,7 +534,7 @@ async fn configured_channel_config() -> Arc<ChannelConfigService> {
     };
     let channel_config = Arc::new(ChannelConfigService::new(
         installation_store,
-        Arc::new(FilesystemSecretStore::ephemeral()),
+        Arc::new(SecretStore::ephemeral()),
         scope,
         Arc::new(NoopChannelConfigReactivation),
     ));
@@ -1013,7 +1012,7 @@ struct TriggeredDeliveryFixture {
 }
 
 async fn triggered_delivery_fixture(
-    outbound_store: Arc<dyn OutboundStateStore>,
+    outbound_store: Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
 ) -> TriggeredDeliveryFixture {
     let host = slack_test_extension_host().await;
     let driver_egress = RecordingEgress::default();
@@ -1218,7 +1217,7 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
     );
     let coordinator: Arc<dyn TurnCoordinator> = Arc::new(ScriptedTriggerCoordinator::new(template));
 
-    let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
+    let outbound_store: Arc<dyn ironclaw_outbound::OutboundStateStorePort> = outbound.clone();
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
     let fixture = triggered_delivery_fixture(Arc::clone(&outbound_store)).await;
     let driver_egress = fixture.driver_egress.clone();
@@ -1383,6 +1382,17 @@ fn non_dm_channel_reply_target_binding_ref() -> ReplyTargetBindingRef {
         .expect("channel reply target binding ref") // safety: static test binding ref is valid.
 }
 
+fn external_reply_target(entry: &OutboundDeliveryTargetEntry) -> &ReplyTargetBindingRef {
+    match &entry.destination {
+        RunFinalReplyDestination::External {
+            reply_target_binding_ref,
+        } => reply_target_binding_ref,
+        RunFinalReplyDestination::WebApp => {
+            panic!("test fixture expected an external reply target")
+        }
+    }
+}
+
 /// Poll `egress`'s recorded requests until at least one Slack `chat.postMessage`
 /// matching the auth-prompt shape (JSON `text` field containing "Authentication
 /// required" — the literal body `triggered_notification_for_state` sets for the
@@ -1494,7 +1504,7 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
     let auth_provider = Arc::new(FakeAuthChallengeProvider::default());
     let auth_challenges: Arc<dyn AuthChallengeProvider> = auth_provider.clone();
 
-    let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
+    let outbound_store: Arc<dyn ironclaw_outbound::OutboundStateStorePort> = outbound.clone();
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
     let route_store: Arc<dyn DeliveredGateRouteStore> =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
@@ -1626,7 +1636,7 @@ async fn triggered_auth_prompt_oauth_target_not_dm_suppresses_setup_link_and_can
     let auth_provider = Arc::new(FakeAuthChallengeProvider::default());
     let auth_challenges: Arc<dyn AuthChallengeProvider> = auth_provider.clone();
 
-    let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
+    let outbound_store: Arc<dyn ironclaw_outbound::OutboundStateStorePort> = outbound.clone();
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
     let route_store: Arc<dyn DeliveredGateRouteStore> =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
@@ -4013,12 +4023,13 @@ async fn generic_outbound_targets_list_from_channel_config_and_generic_dm_store(
         format!("slack:shared-channel:{TEAM}:{ROUTED_CHANNEL}"),
         "generic ids keep the retired lane's shape"
     );
+    let shared_reply_target = external_reply_target(shared);
     let shared_conversation = codec
-        .conversation_for_target(&shared.reply_target_binding_ref)
+        .conversation_for_target(shared_reply_target)
         .expect("shared binding ref decodes");
     assert_eq!(shared_conversation.conversation_id(), ROUTED_CHANNEL);
     assert_eq!(shared_conversation.space_id(), Some(TEAM));
-    assert!(!codec.is_personal_direct_message(&shared.reply_target_binding_ref));
+    assert!(!codec.is_personal_direct_message(shared_reply_target));
 
     let dm = listed
         .iter()
@@ -4028,20 +4039,21 @@ async fn generic_outbound_targets_list_from_channel_config_and_generic_dm_store(
         dm.summary.target_id.as_str(),
         format!("slack:personal-dm:{TEAM}:{USER}")
     );
-    assert!(codec.is_personal_direct_message(&dm.reply_target_binding_ref));
+    let dm_reply_target = external_reply_target(dm);
+    assert!(codec.is_personal_direct_message(dm_reply_target));
     assert_eq!(
-        codec.direct_message_actor_for_target(&dm.reply_target_binding_ref),
+        codec.direct_message_actor_for_target(dm_reply_target),
         Some(SLACK_USER.to_string()),
         "the encoded DM ref carries the provisioned actor"
     );
     // The encoded refs carry the DURABLE installation id from the snapshot.
     assert!(
-        dm.reply_target_binding_ref.as_str().contains(&format!(
+        dm_reply_target.as_str().contains(&format!(
             "installation:{}:{INSTALLATION};",
             INSTALLATION.len()
         )),
         "DM ref must embed the durable installation id: {}",
-        dm.reply_target_binding_ref.as_str()
+        dm_reply_target.as_str()
     );
 
     // resolve-by-id round-trips for the owner…
@@ -4133,12 +4145,11 @@ async fn generic_outbound_targets_tolerate_retired_installation_id_binding_refs(
         .expect("resolve succeeds")
         .expect("retired-id shared preference still resolves");
     assert!(
-        resolved_shared
-            .reply_target_binding_ref
+        external_reply_target(&resolved_shared)
             .as_str()
             .contains(&durable_segment),
         "re-resolved ref carries the durable installation id: {}",
-        resolved_shared.reply_target_binding_ref.as_str()
+        external_reply_target(&resolved_shared).as_str()
     );
 
     // Personal-DM preference saved under the retired setup id.
@@ -4157,12 +4168,11 @@ async fn generic_outbound_targets_tolerate_retired_installation_id_binding_refs(
         .expect("resolve succeeds")
         .expect("retired-id DM preference still resolves");
     assert!(
-        resolved_dm
-            .reply_target_binding_ref
+        external_reply_target(&resolved_dm)
             .as_str()
             .contains(&durable_segment),
         "re-resolved DM ref carries the durable installation id: {}",
-        resolved_dm.reply_target_binding_ref.as_str()
+        external_reply_target(&resolved_dm).as_str()
     );
 
     // Fail-closed arms: a tampered actor never resolves; an unrouted

@@ -1,17 +1,19 @@
 //! Binary-assembled web-access first-party capability wiring (extension-runtime
-//! DEL-7). Composition owns the registrar seam; the concrete executor lives here.
+//! DEL-7). `ironclaw_extension_host` owns the registrar seam; the concrete
+//! executor lives here.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_extension_host::{FirstPartyHandlerRegistrar, FirstPartyRegistrarContext};
 use ironclaw_first_party_extensions::{
     WEB_GET_CONTENT_CAPABILITY_ID, WEB_SEARCH_CAPABILITY_ID, WebAccessDispatchError,
     WebAccessDispatchRequest, WebAccessExecutor,
 };
-use ironclaw_reborn_composition::{
-    CapabilityId, FirstPartyCapabilityError, FirstPartyCapabilityHandler,
-    FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
-    FirstPartyHandlerRegistrar, FirstPartyRegistrarContext, HostApiError,
+use ironclaw_host_api::{CapabilityId, HostApiError};
+use ironclaw_host_runtime::{
+    FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
+    FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
 
 /// Installs the web-access first-party capability handlers into the shared

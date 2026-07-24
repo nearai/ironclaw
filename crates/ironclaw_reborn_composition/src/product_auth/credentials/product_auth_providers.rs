@@ -19,7 +19,6 @@ use ironclaw_auth::{
 };
 use ironclaw_host_api::{RecipeClientCredentials, RuntimeHttpEgress};
 use ironclaw_host_runtime::ProductAuthProviderRuntimePorts;
-use ironclaw_secrets::SecretStore;
 use secrecy::SecretString;
 
 use crate::RebornBuildError;
@@ -170,10 +169,10 @@ impl EngineClientCredentialsSource for CompositionClientCredentials {
 pub(crate) fn compose_provider_client(
     configs: Vec<OAuthProviderBackendConfig>,
     dcr_callback: Option<OAuthDcrCallbackConfig>,
-    secret_store: Arc<dyn SecretStore>,
+    secret_store: Arc<dyn ironclaw_secrets::SecretStorePort>,
     runtime_ports: ProductAuthProviderRuntimePorts,
     channel_config_credentials: ChannelConfigCredentialSlot,
-    first_party_bundles: &[crate::extension_host::first_party::FirstPartyPackageBundle],
+    first_party_bundles: &[ironclaw_extension_host::FirstPartyPackageBundle],
 ) -> Result<OAuthProviderComposition, RebornBuildError> {
     let recipes: Arc<dyn AuthRecipeResolver> = Arc::new(StaticAuthRecipeResolver::new(
         ironclaw_extension_host::AvailableExtensionCatalog::bundled_vendor_recipes(
@@ -275,7 +274,7 @@ pub(crate) fn compose_auth_engine(
     recipes: Arc<dyn AuthRecipeResolver>,
     client_credentials: CompositionClientCredentials,
     callback_base: Option<EngineCallbackBase>,
-    secret_store: Arc<dyn SecretStore>,
+    secret_store: Arc<dyn ironclaw_secrets::SecretStorePort>,
     runtime_ports: ProductAuthProviderRuntimePorts,
 ) -> Result<OAuthProviderComposition, RebornBuildError> {
     let Some(callback_base) = callback_base else {

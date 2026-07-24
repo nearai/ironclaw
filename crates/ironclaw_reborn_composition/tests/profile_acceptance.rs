@@ -574,15 +574,15 @@ fn production_wiring_components_keep_host_runtime_stable_names() {
         ProductionWiringComponent::TrustPolicy,
         ProductionWiringComponent::Filesystem,
         ProductionWiringComponent::ResourceGovernor,
-        ProductionWiringComponent::ProcessStore,
-        ProductionWiringComponent::ProcessResultStore,
+        ProductionWiringComponent::ProcessStorePort,
+        ProductionWiringComponent::ProcessResultStorePort,
         ProductionWiringComponent::RunState,
         ProductionWiringComponent::ApprovalRequests,
         ProductionWiringComponent::CapabilityLeases,
         ProductionWiringComponent::PersistentApprovalPolicies,
         ProductionWiringComponent::EventSink,
         ProductionWiringComponent::AuditSink,
-        ProductionWiringComponent::SecretStore,
+        ProductionWiringComponent::SecretStorePort,
         ProductionWiringComponent::CredentialAccountStore,
         ProductionWiringComponent::CredentialSessionStore,
         ProductionWiringComponent::RuntimeHttpEgress,
@@ -621,7 +621,7 @@ fn production_wiring_report_with_no_issues_returns_empty_diagnostics() {
 #[test]
 fn production_wiring_report_skipped_for_disabled_profile_only() {
     let report = ProductionWiringReport::for_test(vec![ProductionWiringIssue::for_test(
-        ProductionWiringComponent::SecretStore,
+        ProductionWiringComponent::SecretStorePort,
         ProductionWiringIssueKind::Missing,
     )]);
 
@@ -638,7 +638,7 @@ fn production_wiring_report_skipped_for_disabled_profile_only() {
 fn production_wiring_report_maps_through_public_readiness_entrypoint() {
     let report = ProductionWiringReport::for_test(vec![
         ProductionWiringIssue::for_test(
-            ProductionWiringComponent::SecretStore,
+            ProductionWiringComponent::SecretStorePort,
             ProductionWiringIssueKind::Missing,
         ),
         ProductionWiringIssue::for_test(

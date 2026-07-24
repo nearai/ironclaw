@@ -18,7 +18,7 @@ mod tests {
         MissionId, ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressRequest,
         RuntimeHttpEgressResponse, SecretHandle, TenantId, ThreadId, UserId, VendorAuthRecipe,
     };
-    use ironclaw_secrets::FilesystemSecretStore;
+    use ironclaw_secrets::SecretStore;
     use serde_json::json;
     use std::sync::Arc;
     use tower::ServiceExt;
@@ -122,7 +122,7 @@ mod tests {
             recipes: Arc::new(StaticAuthRecipeResolver::new(recipes)),
             client_credentials: Arc::new(StaticCredentials),
             egress: Arc::new(PanicEgress),
-            secret_store: Arc::new(FilesystemSecretStore::ephemeral()),
+            secret_store: Arc::new(SecretStore::ephemeral()),
             callback_base: EngineCallbackBase::new(
                 "http://127.0.0.1:3000/api/reborn/product-auth/oauth",
             )

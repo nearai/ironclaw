@@ -1,4 +1,8 @@
-use ironclaw_host_api::EffectKind;
+use std::sync::Arc;
+
+use ironclaw_auth::{CredentialAccountRecordSource, CredentialAccountService};
+use ironclaw_host_api::{EffectKind, HostApiError};
+use ironclaw_host_runtime::{FirstPartyCapabilityRegistry, ProductAuthProviderRuntimePorts};
 
 /// Byte content of one asset shipped inside a first-party package.
 #[derive(Debug, Clone)]
@@ -43,4 +47,24 @@ pub struct FirstPartyPackageBundle {
 /// party bundle set.
 pub fn first_party_reserved_extension_ids(bundles: &[FirstPartyPackageBundle]) -> Vec<String> {
     bundles.iter().map(|bundle| bundle.id.clone()).collect()
+}
+
+/// Host-owned context supplied to host-bundled runtime handler registrars.
+pub struct FirstPartyRegistrarContext {
+    pub credential_account_service: Arc<dyn CredentialAccountService>,
+    pub credential_account_record_source: Arc<dyn CredentialAccountRecordSource>,
+    pub product_auth_runtime_ports: ProductAuthProviderRuntimePorts,
+    /// Whether the registrar's required OAuth backend was registered at build
+    /// time. Gates a pre-dispatch "not configured" tool result for handlers
+    /// that need product-auth mediated accounts.
+    pub oauth_backend_configured: bool,
+}
+
+/// Host-bundled capability handler installer.
+pub trait FirstPartyHandlerRegistrar: Send + Sync {
+    fn register(
+        &self,
+        registry: &mut FirstPartyCapabilityRegistry,
+        context: &FirstPartyRegistrarContext,
+    ) -> Result<(), HostApiError>;
 }

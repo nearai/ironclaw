@@ -120,8 +120,9 @@ pub use extension_credential_requirements::{
     package_runtime_credential_auth_requirements, product_auth_credential_source,
 };
 pub use first_party_package::{
-    FirstPartyPackageAsset, FirstPartyPackageBundle, FirstPartyPackageOAuthSetup,
-    FirstPartyPackageOnboarding, first_party_reserved_extension_ids,
+    FirstPartyHandlerRegistrar, FirstPartyPackageAsset, FirstPartyPackageBundle,
+    FirstPartyPackageOAuthSetup, FirstPartyPackageOnboarding, FirstPartyRegistrarContext,
+    first_party_reserved_extension_ids,
 };
 pub use generic_host::{
     BootInstallationRecordsError, GenericExtensionHost, GenericExtensionHostParams,

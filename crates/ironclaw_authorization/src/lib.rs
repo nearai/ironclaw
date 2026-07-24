@@ -1,4 +1,4 @@
-// arch-exempt: large_file, mechanical lease-store migration only — InMemoryCapabilityLeaseStore deleted (net −187 LOC), test-support helper added over FilesystemCapabilityLeaseStore<InMemoryBackend> (arch-simplification §4.3), plan #6168
+// arch-exempt: large_file, mechanical lease-store migration only — InMemoryCapabilityLeaseStore deleted (net −187 LOC), test-support helper added over CapabilityLeaseStore<InMemoryBackend> (arch-simplification §4.3), plan #6168
 //! Capability authorization contracts for IronClaw Reborn.
 //!
 //! `ironclaw_authorization` evaluates authority-bearing host API contracts. It
@@ -240,7 +240,7 @@ pub enum CapabilityLeaseError {
 
 /// Store of active/revoked capability leases.
 #[async_trait]
-pub trait CapabilityLeaseStore: Send + Sync {
+pub trait CapabilityLeaseStorePort: Send + Sync {
     /// Persists a scoped lease before any approval record is marked approved.
     async fn issue(&self, lease: CapabilityLease) -> Result<CapabilityLease, CapabilityLeaseError>;
 
@@ -322,14 +322,14 @@ pub trait CapabilityLeaseStore: Send + Sync {
 /// before any backend dispatch — so tenant isolation is structural, not a
 /// convention this crate has to remember in its path builders.
 ///
-/// Construct via [`FilesystemCapabilityLeaseStore::new`] with an
+/// Construct via [`CapabilityLeaseStore::new`] with an
 /// `Arc<ScopedFilesystem<F>>`. The `Arc` shape matches the sibling
-/// filesystem-backed stores (`FilesystemSecretStore`,
-/// `FilesystemOutboundStateStore`, `FilesystemProcessStore`) and lets
-/// composition hold this store as `Arc<dyn CapabilityLeaseStore>` without
+/// filesystem-backed stores (`SecretStore`,
+/// `OutboundStateStore`, `ProcessStore`) and lets
+/// composition hold this store as `Arc<dyn CapabilityLeaseStorePort>` without
 /// erasing the lifetime parameter that an `&'a ScopedFilesystem<F>` would
 /// otherwise pin.
-pub struct FilesystemCapabilityLeaseStore<F>
+pub struct CapabilityLeaseStore<F>
 where
     F: RootFilesystem,
 {
@@ -337,7 +337,7 @@ where
     mutation_locks: Mutex<HashMap<CapabilityLeaseOwnerKey, Arc<tokio::sync::Mutex<()>>>>,
 }
 
-impl<F> FilesystemCapabilityLeaseStore<F>
+impl<F> CapabilityLeaseStore<F>
 where
     F: RootFilesystem,
 {
@@ -407,7 +407,7 @@ where
     /// reject `CasExpectation::Version(_)` with `Unsupported`. For those,
     /// fall back to `CasExpectation::Any` and carry the safety invariant
     /// via the per-owner `mutation_lock` — same trade-off documented on
-    /// `FilesystemCapabilityLeaseStore` and matched by sibling crates'
+    /// `CapabilityLeaseStore` and matched by sibling crates'
     /// fallback shape (`ironclaw_processes::put_with_byte_fallback`).
     async fn write_lease_raw(
         &self,
@@ -476,7 +476,7 @@ where
     /// A missing lease maps to [`CapabilityLeaseError::UnknownLease`].
     ///
     /// This closes the multi-process race documented on
-    /// [`FilesystemCapabilityLeaseStore`]: even with a shared backend root,
+    /// [`CapabilityLeaseStore`]: even with a shared backend root,
     /// a concurrent writer that updates the lease between our read and
     /// write fails our CAS, we re-read, and re-apply the mutation against
     /// the new state. Net effect is last-writer-wins among logically
@@ -666,7 +666,7 @@ where
 }
 
 #[async_trait]
-impl<F> CapabilityLeaseStore for FilesystemCapabilityLeaseStore<F>
+impl<F> CapabilityLeaseStorePort for CapabilityLeaseStore<F>
 where
     F: RootFilesystem,
 {
@@ -847,14 +847,14 @@ struct CapabilityLeaseIndex {
 /// Authorizer that combines request-scoped grants with active capability leases.
 pub struct LeaseBackedAuthorizer<'a, S>
 where
-    S: CapabilityLeaseStore + ?Sized,
+    S: CapabilityLeaseStorePort + ?Sized,
 {
     leases: &'a S,
 }
 
 impl<'a, S> LeaseBackedAuthorizer<'a, S>
 where
-    S: CapabilityLeaseStore + ?Sized,
+    S: CapabilityLeaseStorePort + ?Sized,
 {
     pub fn new(leases: &'a S) -> Self {
         Self { leases }
@@ -864,7 +864,7 @@ where
 #[async_trait]
 impl<S> CapabilityDispatchAuthorizer for LeaseBackedAuthorizer<'_, S>
 where
-    S: CapabilityLeaseStore + ?Sized,
+    S: CapabilityLeaseStorePort + ?Sized,
 {
     async fn authorize_dispatch(
         &self,
@@ -912,7 +912,7 @@ where
 #[async_trait]
 impl<S> TrustAwareCapabilityDispatchAuthorizer for LeaseBackedAuthorizer<'_, S>
 where
-    S: CapabilityLeaseStore + ?Sized,
+    S: CapabilityLeaseStorePort + ?Sized,
 {
     async fn authorize_dispatch_with_trust(
         &self,
@@ -1416,7 +1416,7 @@ pub(crate) fn ensure_consumable(lease: &CapabilityLease) -> Result<(), Capabilit
 /// lease is neither expired nor exhausted; on success sets status to
 /// `Dispatching`.
 ///
-/// [`FilesystemCapabilityLeaseStore`] delegates to this function so the
+/// [`CapabilityLeaseStore`] delegates to this function so the
 /// transition predicate has a single source of truth; the store handles its own
 /// persistence / compare-and-swap mechanics around the call.
 pub(crate) fn apply_begin_dispatch_claimed_transition(
@@ -1444,7 +1444,7 @@ pub(crate) fn apply_begin_dispatch_claimed_transition(
 /// `Dispatching → Claimed`; no-op if already `Claimed`; returns
 /// `InactiveLease` for any other status.
 ///
-/// [`FilesystemCapabilityLeaseStore`] delegates to this function so the
+/// [`CapabilityLeaseStore`] delegates to this function so the
 /// transition predicate has a single source of truth; the store handles its own
 /// persistence / compare-and-swap mechanics around the call.
 pub(crate) fn apply_abort_dispatch_claimed_transition(

@@ -308,7 +308,6 @@ const EXTENSION_HOST_INTERNAL_MODULES: &[&str] = &[
     "extension_lifecycle_capabilities",
     "extension_lifecycle_capabilities_auth_tests",
     "extension_lifecycle_command",
-    "first_party",
     "lifecycle",
     "skill_learning",
     "skill_listing",

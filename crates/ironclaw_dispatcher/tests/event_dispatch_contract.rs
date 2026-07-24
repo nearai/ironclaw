@@ -138,6 +138,7 @@ async fn dispatcher_logs_release_failure_without_masking_dispatch_error() {
     let err = dispatcher
         .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
+            origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope,
             authenticated_actor_user_id: None,
@@ -221,6 +222,7 @@ async fn dispatcher_emits_failed_event_for_unknown_capability_without_reserving(
     let err = dispatcher
         .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
+            origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope,
             authenticated_actor_user_id: None,
@@ -405,6 +407,7 @@ fn authorized(request: CapabilityDispatchRequest) -> Authorized {
 fn sample_request(capability_id: &str, input: Value) -> Authorized {
     authorized(CapabilityDispatchRequest {
         run_id: None,
+        origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
         capability_id: CapabilityId::new(capability_id).unwrap(),
         scope: sample_scope(),
         authenticated_actor_user_id: None,

@@ -30,8 +30,16 @@
 //! exist and are still wired. The doc's plan is explicit that the type count rises
 //! before it falls (~14 → ~18 → ~11) while the new vocabulary and the old shapes
 //! coexist; the mirror-DTO ratchet's frozen allowlist is what will make the old
-//! shapes "may only disappear". Nothing in this module is wired into the dispatch
-//! path yet — that is a later slice.
+//! shapes "may only disappear".
+//!
+//! These vocabulary types are now consumed on the live path (the wiring slice has
+//! landed): [`InvocationOrigin`] is sealed at the membrane and read by the
+//! capability authorization fold ([`crate::ExecutionContext::resolved_origin`],
+//! the `origin`→gate matrix) and by the first-party trigger-mutation policy that
+//! denies `ScheduledLoopRun`, and [`Invocation`]/[`Actor`] back the
+//! `ironclaw_capabilities` `authorize()` path. The retired shapes still coexist,
+//! but the earlier "nothing in this module is wired into the dispatch path yet"
+//! note no longer holds.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -63,6 +71,10 @@ pub enum InvocationOrigin {
     /// Model-initiated, trust-attenuated: a tool call from inside an agent loop
     /// turn-run. Gated by default (§5.2.1).
     LoopRun(RunId),
+    /// Model-initiated call from a host-trusted scheduled routine/trigger run.
+    /// It shares loop-run gate semantics with [`Self::LoopRun`] while keeping
+    /// the scheduled lineage typed for stricter capability policy.
+    ScheduledLoopRun(RunId),
     /// A direct, authenticated user action from a product surface (settings
     /// mutation, admin action). The user's gesture is consent evidence bound to
     /// this `(capability, input)` pair, honored per the descriptor's matrix.
@@ -78,6 +90,7 @@ impl InvocationOrigin {
     pub fn kind(&self) -> &'static str {
         match self {
             InvocationOrigin::LoopRun(_) => "loop_run",
+            InvocationOrigin::ScheduledLoopRun(_) => "scheduled_loop_run",
             InvocationOrigin::Product(_) => "product",
             InvocationOrigin::Automation(_) => "automation",
         }
@@ -189,6 +202,16 @@ mod tests {
         let back: InvocationOrigin = serde_json::from_value(json).unwrap();
         assert_eq!(back, origin);
 
+        let scheduled_run = RunId::new();
+        let scheduled = InvocationOrigin::ScheduledLoopRun(scheduled_run);
+        let json = serde_json::to_value(&scheduled).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "scheduled_loop_run": scheduled_run.to_string() })
+        );
+        let back: InvocationOrigin = serde_json::from_value(json).unwrap();
+        assert_eq!(back, scheduled);
+
         let product = InvocationOrigin::Product(ProductKind::new("settings").unwrap());
         assert_eq!(
             serde_json::to_value(&product).unwrap(),
@@ -208,6 +231,10 @@ mod tests {
         // accounting views (§5.3.3) key on it.
         for (origin, tag) in [
             (InvocationOrigin::LoopRun(RunId::new()), "loop_run"),
+            (
+                InvocationOrigin::ScheduledLoopRun(RunId::new()),
+                "scheduled_loop_run",
+            ),
             (
                 InvocationOrigin::Product(ProductKind::new("chat").unwrap()),
                 "product",

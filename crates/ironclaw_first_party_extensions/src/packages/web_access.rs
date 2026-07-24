@@ -49,17 +49,17 @@ pub(super) fn bundle() -> PackageBundle {
             ),
         ],
         onboarding: Some(PackageOnboarding {
-            instructions: "Web Access does not need credentials. Activate it to make web search \
-                and page-content retrieval tools available."
+            instructions: "Web Access does not need credentials and becomes active as soon as it \
+                is installed."
                 .to_string(),
             credential_instructions: Some(
                 "No credentials are required for Web Access.".to_string(),
             ),
             setup_url: None,
-            credential_next_step: "Activate Web Access to publish its tools.".to_string(),
+            credential_next_step:
+                "IronClaw publishes Web Access tools automatically during installation.".to_string(),
         }),
         // No credentials/egress writes: Dispatch + Network only.
-        oauth_setup: None,
         trust_effects: Some(vec![EffectKind::DispatchCapability, EffectKind::Network]),
     }
 }

@@ -67,18 +67,6 @@ pub struct PackageOnboarding {
     pub credential_next_step: String,
 }
 
-/// A bespoke OAuth-*setup* credential requirement a package surfaces instead of
-/// the requirement derived from its manifest tool credentials. Carried as plain
-/// data (provider/name are strings, scopes a list); composition maps it to its
-/// `LifecycleExtensionCredentialRequirement`. Used by packages whose connect
-/// flow authorizes a shared account with setup scopes distinct from the
-/// per-tool runtime scopes (e.g. Slack's personal OAuth connect).
-pub struct PackageOAuthSetup {
-    pub requirement_name: String,
-    pub provider: String,
-    pub scopes: Vec<String>,
-}
-
 /// An opaque, cleanly-built first-party package: identity + display copy +
 /// manifest source + assets + onboarding. Host code consumes this without
 /// naming the package; the concrete identity lives only in the owning package
@@ -90,9 +78,6 @@ pub struct PackageBundle {
     pub assets: Vec<PackageAsset>,
     /// Bespoke onboarding copy, `None` for packages that need no setup guidance.
     pub onboarding: Option<PackageOnboarding>,
-    /// A bespoke OAuth-setup credential requirement that replaces the
-    /// manifest-derived one, `None` when the derived requirement is correct.
-    pub oauth_setup: Option<PackageOAuthSetup>,
     /// Host authority effects this first-party package is granted in the
     /// built-in trust policy, carried as explicit data (not derived from the
     /// manifest — the trust grant is an independent host assertion, defense in

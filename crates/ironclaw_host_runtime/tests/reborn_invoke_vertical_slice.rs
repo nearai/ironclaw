@@ -23,7 +23,7 @@ use ironclaw_host_runtime::{
 use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceGovernor, ResourceTally,
 };
-use ironclaw_run_state::{RunStateStore, RunStatus};
+use ironclaw_run_state::{RunStateStorePort, RunStatus};
 use ironclaw_trust::{
     AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy, TrustDecision,
 };

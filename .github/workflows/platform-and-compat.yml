@@ -99,7 +99,7 @@ jobs:
           printf '%s\n' "$CHANGED_FILES" | scripts/ci/classify-test-scope.sh >> "$GITHUB_OUTPUT"
 
           has_direct_wasm_abi_risk=false
-          if has_match '^(wit/|crates/ironclaw_common/|crates/ironclaw_wasm/|crates/ironclaw_wasm_product_adapters/|crates/ironclaw_first_party_extensions/assets/.*/(manifest\.toml|wasm-src/)|channels-src/|tools-src/|registry/|scripts/build-wasm-extensions\.sh$|scripts/check-version-bumps\.sh$|\.github/workflows/(platform-and-compat|nightly-deep-ci)\.yml$)'; then
+          if has_match '^(wit/|crates/ironclaw_common/|crates/ironclaw_wasm/|crates/ironclaw_wasm_product_adapters/|crates/ironclaw_first_party_extensions/assets/.*/(manifest\.toml|wasm-src/)|registry/|scripts/build-wasm-extensions\.sh$|scripts/check-version-bumps\.sh$|\.github/workflows/(platform-and-compat|nightly-deep-ci)\.yml$)'; then
             has_direct_wasm_abi_risk=true
           fi
           echo "has_direct_wasm_abi_risk=$has_direct_wasm_abi_risk" >> "$GITHUB_OUTPUT"

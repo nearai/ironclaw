@@ -17,12 +17,14 @@ Rules — kept short on purpose:
 
 - [ ] MAN-1 Extension is the only installable product object; tools/channels/
   auth cannot be installed or removed independently.
-- [x] MAN-2 One v3 manifest declares tools, at most one channel, and auth
-  recipes; parsing is a single entry point shared with normalized v2. —
+- [ ] MAN-2 One v3 manifest declares tools, at most one channel, auth recipes,
+  and optional tenant `[admin_configuration]`; parsing is a single entry point
+  shared with normalized v2. Admin fields are not duplicated below `[channel]`. —
   `acme_fixture_parses_through_the_single_entry_point`,
   `v2_and_v3_rewrites_resolve_identically`
   (`crates/ironclaw_extensions/tests/manifest_v3_contract.rs`); both schemas
-  dispatch through `ExtensionManifestRecord::from_toml`.
+  dispatch through `ExtensionManifestRecord::from_toml`. The new
+  admin-configuration-only schema rows await the combined matrix.
 - [x] MAN-3 A v2 manifest and its v3 rewrite resolve to identical surfaces,
   capability ids, scopes, and credentials (projection-equality test over all
   11 first-party packages; the two hosted-MCP packages instead assert their
@@ -58,15 +60,15 @@ Rules — kept short on purpose:
   the runtime discovery-ceiling *rejection* (out-of-namespace/count/schema-size/
   effects) is not pinned by a MAN-6-named test — loader-owned discovery is
   covered structurally under TOOL-9. Ticks with a ceiling-rejection test.
-- [ ] MAN-7 Two extensions with the same vendor id and identical-except-scopes
-  recipes activate and share one vendor record; differing recipes fail
-  activation with a conflict error.
+- [ ] MAN-7 Two published extensions with the same vendor id and
+  identical-except-scopes recipes share one vendor record; differing recipes
+  fail internal publication with a conflict error.
   — PARTIAL: the recipe union/conflict logic is unit-tested
   (`shared_vendor_recipes_union_scopes_and_reject_conflicts`,
   `crates/ironclaw_extension_host/src/recipes.rs`), asserting both extension
-  names in the conflict error; but the *activation-caller* path (two extensions
-  activating → shared record / conflict-fails-activation) is not pinned by a
-  caller-level test. Ticks with that activation-tier test.
+  names in the conflict error; but the publication-caller path (two extensions
+  reconciling → shared record / conflict-fails-publication) is not pinned by a
+  caller-level test. Ticks with that caller-level test.
 - [x] MAN-8 `trigger`/`file` remain reserved kinds with no runtime binding. —
   `CapabilitySurfaceKind::{Trigger,File}` are reserved enum variants
   (`crates/ironclaw_host_api/src/surface.rs`, doc "no manifest section projects
@@ -124,7 +126,7 @@ Rules — kept short on purpose:
   a byte-identical no-op.
 - [ ] REC-4 Upgrade diff classifies equal / narrowed / widened contracts;
   widening (scopes, egress, effects, credentials, route) requires approval
-  before activation; approval denial leaves the old generation active. — Not
+  before publication; approval denial leaves the old generation published. — Not
   built — owner decision 2026-07-13: an upgrade-approval gate is net-new
   functionality, outside the train's consolidation mandate. Upgrades exist only
   as silent boot-time adoption of bundled contracts
@@ -137,65 +139,50 @@ Rules — kept short on purpose:
 ## 3. Binding, loaders, lifecycle (LIFE)
 
 - [x] LIFE-1 Declared `[[tools]]`/`[mcp]` without a bound tool
-  adapter fails activation; same for `[channel]`; undeclared bindings fail;
+  adapter prevents publication; same for `[channel]`; undeclared bindings fail;
   auth never binds.
   — `binding rule` unit tests (`crates/ironclaw_extension_host/src/entrypoint.rs`):
   declared-tool/channel-without-adapter, undeclared-tool/channel adapter, exact
   binding, and `auth_never_binds_is_not_a_binding_field` (the bindings struct
-  has no auth field); driven at the activation caller by
+  has no auth field); driven at the internal publication caller by
   `declared_tool_without_bound_adapter_fails_activation`
   (`tests/lifecycle_contract.rs`).
 - [x] LIFE-2 `bind` is side-effect-free and receives no network/secret/store
-  ports; adapters are parameterized with non-secret config values only.
-  — `BindContext` (`entrypoint.rs`) carries only the installation id, the
-  resolved contract, and non-secret config values; `ExtensionEntrypoint::bind`
+  ports; adapters are parameterized with resolved non-secret tenant
+  configuration only.
+  — `BindContext` (`entrypoint.rs`) carries only runtime identity, the resolved
+  contract, and non-secret tenant values; `ExtensionEntrypoint::bind`
   is a synchronous, port-free signature (secrets exist only behind host
   egress injection).
 - [ ] LIFE-3 Native loader resolves `runtime.service` from the registry the
   binary assembles; unknown service fails with a typed error.
 - [ ] LIFE-4 WASM and MCP runtime extensions load through synthesized
   entrypoints with no extension-authored Rust.
-- [x] LIFE-5 `ExtensionHost` is the only writer of installation state and the
-  active snapshot.
-  — `ExtensionHost` owns the only `InstallationRecordStore` writes and the
-  only `ActiveSnapshot` swaps, serialized under one async mutex
-  (`crates/ironclaw_extension_host/src/lifecycle.rs`).
-- [x] LIFE-6 The installation state machine is one shared enum — an honest
-  projection, not a persisted multi-step machine
-  (`Installed/Configured/Active/Disabled/Failed/Unsupported/Removed`); no
-  extension-specific state value exists anywhere (grep + wire schema test).
-  — one `InstallationState` enum (relocated to
-  `crates/ironclaw_host_api/src/state.rs` in P7a so the product wire and the
-  host both name it without a new dependency edge; re-exported by
-  `ironclaw_extension_host::state`); `installation_state_wire_form_matches_str`
-  (`host_api/src/state.rs`) pins the exact wire vocabulary, now exposed on the
-  extensions wire as `RebornExtensionInfo.installation_state`.
-- [x] LIFE-7 Every persisted installation state is a real resting state — no
-  transient state is ever written, so there is nothing to resume at startup;
-  a crash before an operation's terminal persist call simply leaves the
-  record at its last durable state.
-  — `legal_host_record_transitions_only`
-  (`crates/ironclaw_host_api/src/state.rs`) pins the seven-state transition
-  table with no transient member (e.g. `Configured`/`Disabled`/`Unsupported`
-  cannot transition to `Active` directly — they are derived, not stored
-  transition targets); activation atomicity (nothing published on failure) is
-  LIFE-8's `declared_tool_without_bound_adapter_fails_activation` /
-  `channel_activate_runs_and_its_failure_aborts`
-  (`tests/lifecycle_contract.rs`). NOTE: the prior crash-resume-from-transient-state
-  tests this item used to cite (`transient_states_resume_deterministically`,
-  `restore_resumes_active_and_skips_invalid`) were deleted with the transient
-  states themselves — that machinery was never invoked at real boot.
-- [x] LIFE-8 Activation failure (bind, hook, conflict, store) publishes
-  nothing and records a typed, redacted error.
-  — `declared_tool_without_bound_adapter_fails_activation`,
-  `channel_activate_runs_and_its_failure_aborts`,
-  `duplicate_capability_across_extensions_fails_activation`
-  (`tests/lifecycle_contract.rs`): each leaves the snapshot unchanged and the
-  record at the terminal `Failed` state with a redacted `last_error`.
-- [x] LIFE-9 `channel.activate()` runs during activation; its failure aborts
-  activation.
-  — `channel_activate_runs_and_its_failure_aborts` (activate hook observed to
-  run once; failure aborts with nothing published).
+- [ ] LIFE-5 The generic host is the only writer of caller membership and the
+  active snapshot; an admin configuration write cannot create membership.
+  — `admin_configuration_does_not_install_an_extension_for_any_user`
+  (`tests/integration/extension_user_lifecycle_isolation.rs`), pending the
+  combined matrix.
+- [ ] LIFE-6 The public lifecycle projection has exactly three values:
+  `uninstalled` when the caller is not a member, `setup_needed` when a member
+  has any non-ready typed reconciliation result, and `active` only after the
+  complete readiness contract succeeds: tenant configuration, personal setup,
+  bind, discovery, provisioning, conflict checks, and atomic publication.
+  Internal host checkpoints never cross the product boundary as extra states.
+  — `users_install_and_remove_the_same_extension_independently` plus
+  `webui_v2_gmail_oauth_ready_install_is_immediately_active`, pending the
+  combined matrix.
+- [ ] LIFE-7 Install joins caller membership and automatically reconciles
+  readiness. There is no separate Activate/Disable action; an extension with
+  no setup requirement goes directly from `uninstalled` to `active`.
+  — `users_install_and_remove_the_same_extension_independently`, pending the
+  combined matrix.
+- [ ] LIFE-8 Internal bind, discovery, provisioning, conflict, or publication
+  failure publishes no callable surface and projects `setup_needed` with a
+  typed redacted diagnostic, never a fourth public `failed` state.
+- [x] LIFE-9 Channel provisioning and cleanup hooks are internal host steps.
+  Their historical `activate`/`cleanup` method names do not define user actions
+  or durable lifecycle states.
 - [ ] LIFE-10 Removal follows the fixed order (unpublish → drain → vendor
   cleanup → auth revoke/grant delete → config/identity delete) — observed via
   scripted adapter and engine in one caller-level test.
@@ -209,21 +196,13 @@ Rules — kept short on purpose:
   `ProductWorkflowError::Transient` carrying a typed
   `SecretCleanupQuarantineReason` instead of reporting removal success, and a
   subsequent retry converges (cleanup and removal complete).
-- [ ] LIFE-12 Removing one extension preserves grants of a shared vendor
-  still used by another active extension; removes them when it was the last
-  consumer.
-  — PARTIAL (P6-deferred). The removal *context* carries
-  `other_active_extension_ids` and is unit-pinned
-  (`removal_context_reports_other_active_extensions_for_shared_vendor`), but
-  only for the empty case — that test installs a single extension and asserts
-  the context is empty; it discards the peer binding it builds. The grant
-  *policy* is NOT enforced yet: the production hook
-  `FacadeOwnedRemovalHooks::revoke_and_delete_grants`
-  (`crates/ironclaw_reborn_composition/src/extension_host/generic_host.rs`) is a
-  no-op stub ("grants are facade-owned until the P6 extraction"), so
-  preserve-on-shared-vendor / remove-on-last-consumer is unimplemented and
-  unproven. Ticks when the P6 host-owned removal pipeline lands the policy with
-  a caller-level test exercising a live peer.
+- [ ] LIFE-12 Removing one user's membership preserves other users'
+  memberships, auth/pairing, runtime access, and tenant admin configuration.
+  Caller grants shared by another of that caller's memberships also survive.
+  — `users_install_and_remove_the_same_extension_independently` pins the
+  multi-user and tenant-configuration halves; shared-vendor grant preservation
+  remains covered by the auth-engine ownership suite. Both await the combined
+  matrix.
 - [x] LIFE-13 Conversation/LLM history survives extension removal. — removal
   runs the vendor-blind removable-channel cleanup (grants, integration state,
   identity bindings — `3812d9fe3`) and never touches turn/LLM history stores
@@ -232,47 +211,32 @@ Rules — kept short on purpose:
   (`tests/integration/extension_runtime.rs`) removes the extension through the
   model tool, then asserts the invoke thread's persisted turn (user prompt +
   model reply) is still readable via `assert_conversation_history_contains`.
-- [x] LIFE-14 Duplicate capability id or ingress route across active
-  extensions fails activation.
+- [x] LIFE-14 Duplicate capability id or ingress route across published
+  extensions fails internal publication.
   — `duplicate_capability_across_extensions_fails_activation`
   (`tests/lifecycle_contract.rs`) plus `ActiveSnapshot::build`/`would_conflict`
   conflict detection (`crates/ironclaw_extension_host/src/active.rs`).
 - [x] LIFE-15 Upgrade swaps one immutable snapshot; in-flight work completes
   on its old generation `Arc`; new work resolves the new generation; no mixed
-  generation under concurrent activate/resolve stress.
+  generation under concurrent publish/resolve stress.
   — `in_flight_snapshot_survives_a_later_swap` (`tests/lifecycle_contract.rs`):
   an in-flight `Arc<ActiveSnapshot>` keeps its generation and its extensions
-  after a later deactivate swaps in a new generation.
+  after a later internal snapshot swap.
 - [x] LIFE-16 Startup skips an invalid extension with a typed error and
   publishes the valid rest.
   — `restore_skips_a_load_failure_without_blocking_the_rest`
   (`tests/lifecycle_contract.rs`): a load failure falls to Installed with a
   typed error and does not block the valid restore.
-- [x] LIFE-17 Full lifecycle (install → configure → activate → remove) passes
-  on both DBs through the integration harness with the acme fixture. —
-  `acme_fixture_lifecycle_dispatches_from_the_active_snapshot`
-  (`tests/integration/extension_runtime.rs`) is now an rstest matrix over
-  `#[case(StorageMode::LibSql)]` + `#[case(StorageMode::Postgres)]` (a real
-  PostgreSQL testcontainer; REL-3: a Postgres skip is a failure), driving
-  install → configure (the `seed_capability_credential_account` credential
-  step) → activate → snapshot dispatch → remove through model tool calls on
-  each backend, plus the LIFE-13 history-survives assertion. Both arms green
-  (`case_1` libSQL, `case_2` Postgres). Install persistence is separately
-  matrixed by `extension_install_persists_across_storage_backends`.
-- [x] LIFE-18 Editing channel config while `Active` triggers an automatic
-  deactivate → reactivate; adapters observe the new values; no bespoke
-  reconfigure state exists. — §6.5 cycle: `ChannelConfigService::save` →
-  `ChannelConfigReactivation::reactivate_if_active`
-  (`extension_lifecycle.rs`: generic-host deactivate →
-  `publish_to_generic_host` with the freshly stored config). Pins:
-  `save_triggers_the_reactivate_cycle_only_when_something_changed` +
-  `reactivation_failure_surfaces_as_a_typed_error` (`channel_config.rs`),
-  and the integration proof — the §6.5 leg inside
-  `telegram_update_becomes_a_turn_and_a_coordinated_reply`
-  (`tests/integration/extension_delivery.rs`) edits
-  `telegram_webhook_url` while Active and asserts the rebuilt adapter
-  re-registers the NEW webhook URL over recorded egress. No reconfigure
-  state exists — the cycle reuses the standard deactivate/activate legs.
+- [ ] LIFE-17 The full user journey passes on both DBs: admin config is saved
+  once for the tenant; user A installs, completes personal setup, becomes
+  active, and removes; user B's independent state is unchanged throughout.
+  — `tests/integration/extension_user_lifecycle_isolation.rs` supplies the
+  production-router journey; the PostgreSQL matrix row remains required.
+- [ ] LIFE-18 Saving a manifest `[admin_configuration]` group refreshes every
+  tenant runtime consumer of that group. The values are not copied into an
+  installation record, and refresh failure leaves affected members at
+  `setup_needed` with a redacted diagnostic rather than adding a lifecycle
+  state. Caller-level refresh and failure tests remain required.
 
 ## 4. Tool dispatch (TOOL)
 
@@ -288,7 +252,7 @@ Rules — kept short on purpose:
   `resolver_tracks_registry_mutations_across_versions`
   (`crates/ironclaw_host_runtime/src/services/tests/registry_lane_tool_resolver.rs`
   — bindings rebuilt per registry generation, resolution is a map lookup).
-  The active-snapshot resolver for `ExtensionHost`-activated extensions
+  The active-snapshot resolver for `ExtensionHost`-published extensions
   chains in with the P2 composition cutover.
 - [x] TOOL-2 Unknown capability fails before any adapter work. —
   `dispatcher_fails_unknown_capability_before_any_binding_work` and
@@ -344,11 +308,11 @@ Rules — kept short on purpose:
   same `LaneBackedToolAdapter` and dispatches into the MCP lane, with the
   exact discovered capability id + input reaching the executor and the output
   flowing back — the binder never distinguishes discovered from static.
-- [x] TOOL-7 The five real Slack tools activate and invoke through the generic
+- [x] TOOL-7 The five real Slack tools publish and invoke through the generic
   dispatcher (integration, recorded egress). —
   `slack_tools_invoke_through_the_generic_dispatcher_with_recorded_egress`
   (`tests/integration/extension_runtime.rs`): the real Slack package
-  activates through the facade and all five `slack.*` capabilities dispatch
+  reconcile through the facade and all five `slack.*` capabilities dispatch
   snapshot-first (the registry lane is builtin-restricted) through the WASM
   lane with staged policy + token injection; every recorded transport
   request targets `slack.com` and carries the injected bearer token.
@@ -365,26 +329,34 @@ Rules — kept short on purpose:
   method); validated tool surfaces publish atomically; a refresh replaces the
   set completely or not at all; discovered tools run the same dispatcher
   pipeline as static ones. — structurally loader-owned (`ToolAdapter` has no
-  discovery method; hosted-MCP discovery runs at activation via
-  `discover_hosted_mcp_package` with staged connection authority
+  discovery method; hosted-MCP discovery runs during readiness reconciliation
+  via `discover_hosted_mcp_package` with staged connection authority
   `stage_hosted_mcp_discovery_authority`), and the discovered set publishes
-  through the same snapshot activation as static tools. The all-or-nothing
-  refresh property is pinned by
+  through the same atomic snapshot publication as static tools. The
+  all-or-nothing refresh property is pinned by
   `hosted_mcp_rediscovery_replaces_the_published_tool_set_completely` (a
-  re-activation whose tools/list yields a different tool replaces the set
+  refresh whose tools/list yields a different tool replaces the set
   wholesale — the prior discovered tool is gone, not merged) and
   `hosted_mcp_rediscovery_failure_leaves_the_prior_tool_set_intact` (a refresh
   that fails the post-discovery credential recheck before publish leaves the
-  prior set live, no partial swap) — both in
+  prior set live, no partial swap),
+  `hosted_mcp_activation_without_discovered_or_static_tools_stays_installed`
+  (an initial empty catalog publishes no surface),
+  `hosted_mcp_discovery_failure_never_publishes_bundled_static_tools`
+  (failed initial discovery cannot be masked by static templates),
+  `hosted_mcp_activation_rechecks_credentials_after_discovery_before_publish`,
+  `hosted_mcp_activation_discards_discovery_when_credential_epoch_changes`, and
+  `hosted_mcp_activation_discards_discovery_when_manifest_inputs_change`
+  (changed authority inputs reject the stale generation) — all in
   `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs`.
-  There is no separate refresh API by design: refresh == re-activation →
+  There is no separate public activation API: refresh means reconcile →
   discover → atomic publish.
 - [x] TOOL-10 Host built-in capabilities resolve through the same dispatcher
   pipeline; an extension capability id colliding with a built-in fails
-  activation. — built-ins resolve through the registry-lane resolver in the
+  publication. — built-ins resolve through the registry-lane resolver in the
   same chain (`registry_resolver_allowlist_restricts_to_builtin_provider`,
   `crates/ironclaw_host_runtime/src/services/tests/extension_tool_binder.rs`);
-  the collision conflict is pinned at the activation caller by
+  the collision conflict is pinned at the publication caller by
   `extension_capability_colliding_with_a_host_builtin_fails_activation`
   (`crates/ironclaw_extension_host/tests/lifecycle_contract.rs`), with the
   builtin id set injected by composition
@@ -565,7 +537,7 @@ Rules — kept short on purpose:
 - [x] ING-1 One generic router serves
   `/webhooks/extensions/{extension_id}/{route_suffix}` from the active
   snapshot; extensions cannot mount arbitrary routes; collisions with fixed
-  host routes fail activation. —
+  host routes fail publication. —
   `route_table_follows_snapshot_swaps_without_router_rebuild`,
   `activation_rejects_collision_with_fixed_host_routes`
   (`crates/ironclaw_extension_host/tests/ingress_router_contract.rs`);
@@ -800,7 +772,7 @@ Rules — kept short on purpose:
 
 - [x] DEL-1 `crates/ironclaw_reborn_composition/src/slack/` no longer exists.
   — P6 deleted the lane: the generic channel host assembly +
-  `[channel.config]` + the generic outbound-target provider and
+  manifest `[admin_configuration]` + the generic outbound-target provider and
   triggered-delivery hook replaced every lane surface; the H.3/H.4 folds
   (`channel_state_folds.rs`) carry retired durable state forward.
 - [x] DEL-2 The concrete extension crates are renamed
@@ -915,7 +887,7 @@ Rules — kept short on purpose:
   - **Lane 3 DEFERRED (owner call)** — `nearai_mcp` (13), the last catalog
     package. Its `[mcp].server` is patched from `llm_admin` config at runtime,
     so finishing it is a multi-file composition refactor touching production
-    auth-fallback / boot auto-activation / trust; deferred with a complete
+    auth-fallback / boot auto-publication / trust; deferred with a complete
     execution plan (PR #6065 body + handoff) rather than rushed. bare `nearai`
     stays a global `TERM_COLLISIONS` carve; the compound `nearai_mcp` forms stay
     scanned and tagged lane-4 `nearai-slice`.
@@ -935,8 +907,8 @@ Rules — kept short on purpose:
   CI workflow invokes this script**, so the "in CI" clause and the full
   per-crate isolated-test form are unmet. Wiring the script into a CI job (and
   marking it required) is the remaining step — tracked jointly with REL-5.
-- [x] DEL-10 Telegram runs as a real installed package (manifest +
-  `activate()` webhook registration) — the addition test proven by the second
+- [ ] DEL-10 Telegram runs as a real installed package (manifest + internal
+  webhook provisioning) — the addition test proven by the second
   production channel. — Adapter half (P4):
   `TelegramChannelAdapter::{inbound,activate,cleanup}` with
   `shared_secret_header` verification host-side and `setWebhook`/
@@ -957,35 +929,38 @@ Rules — kept short on purpose:
   `RuntimeCredentialTarget::BodyJsonPointer`,
   `body_json_pointer_credential_is_resolved_into_the_wire_body`; the adapter
   names the handle only), and the
-  install → activate (`setWebhook` over recorded egress, wire body carrying
-  the configured secret value and never the handle) → signed update →
+  install/readiness reconciliation (`setWebhook` over recorded egress, wire
+  body carrying the configured secret value and never the handle) → signed update →
   turn → coordinated reply proof through the production router mount:
   `telegram_update_becomes_a_turn_and_a_coordinated_reply`
   (`tests/integration/extension_delivery.rs`, both DBs). The install's
-  `[channel.config]` values ride a test-support seam until the production
-  configure surface lands (P6/H — flagged owner call).
+  tenant `[admin_configuration]` values resolve through the production admin
+  service; they are not copied into caller installation state. The updated
+  journey awaits the combined matrix.
 
 ## 9. Frontend (UI)
 
-- [x] UI-1 The wire carries surface keys, the installation state enum, the
-  auth state enum, and config field descriptors; one golden fixture pins it.
+- [ ] UI-1 The wire carries surface keys, the three-state public lifecycle
+  projection, the auth state enum, and admin-configuration group descriptors;
+  one golden fixture pins it.
   — the wire carries surfaces (`RebornExtensionSurface`), the §6.1
-  `InstallationState` enum (`RebornExtensionInfo.installation_state`, replacing
-  the `activation_status` string), the §6.3 auth-account enum via the
+  `LifecyclePublicState` projection
+  (`RebornExtensionInfo.installation_state`), the §6.3 auth-account enum via the
   per-vendor accounts list (`RebornAuthAccount.state`, replacing
   `connected: Option<bool>`), and setup field/secret descriptors
   (`reborn_services/types.rs`). One golden fixture pins the full shape:
   `list_extensions_golden_wire_multi_surface_extension_freezes_accounts_list`
   (`reborn_services_contract.rs`) freezes an arbitrary channel on a
   multi-surface (tool + channel + auth) extension — the surface keys, the
-  installation-state string, the accounts list, each surface's
+  public-state string, the accounts list, each surface's
   `resolved_account_id` + binding source, and the connection `display_name`.
-- [ ] UI-2 The channels tab renders every channel surface with the same
-  components; the acme fixture channel renders, configures, and connects with
+  The repinned wire contract awaits the combined matrix.
+- [ ] UI-2 The channels tab renders every channel surface with the same user
+  components; the acme fixture channel installs and connects with
   no frontend source change. — PARTIAL: since P6 S5 every channel surface
   renders through the same generic sections, now driven by the P7a wire —
-  affordances derive from `installation_state` + the accounts-list auth state +
-  config completeness with no per-extension logic (source-scan
+  affordances derive from caller membership/readiness + the accounts-list auth
+  state with no per-extension logic (source-scan
   `chat_omits_connect_action_while_extensions_render_generic_connect_ui`,
   `assets.rs`; frontend `vitest` 639/639 green after the wire swap).
   OWNER-FLAGGED FINDING (verified): the literal "acme fixture channel in the
@@ -998,31 +973,22 @@ Rules — kept short on purpose:
   same components with no per-extension frontend logic) is therefore proven
   with the REAL bundled channels: the wire is frozen by the golden fixture
   (UI-1/AUTH-9), the no-per-extension-logic rendering by the `assets.rs`
-  source-scan + vitest, and the API-level channel configure→connect→remove
+  source-scan + vitest, and the API-level tenant-configure→connect→remove
   flow by `test_reborn_slack_channel_e2e.py` (UI-6, httpx). The remaining gap
   is a *browser* (Playwright) render of the channels tab for a real channel,
   which rides the existing `tests/e2e` Playwright harness
   (`test_extensions.py` / `test_channel_pairing_flow.py`) and was not run this
   session (heavy local Playwright + `serve` setup, frontend/e2e is local-only).
-- [x] UI-3 Config forms are schema-driven; secret fields mask and never echo
-  stored values. — The configure modal renders wire-projected
-  `[channel.config]` field + secret descriptors generically
-  (`c6bb695ec`; `configure-modal.tsx`); secret inputs render
-  `type="password"` and the wire is presence-only — stored values never
-  echo: `save_routes_secrets_to_the_scoped_store_and_status_reports_presence_only`
-  (`channel_config.rs`) and the presence-only secrets projection in
-  `lifecycle_setup.rs` (secret channel-config fields surface as
-  `provided` flags only).
-- [x] UI-4 Connect/Reconnect/Configure/Remove affordances derive from the two
-  state enums + config completeness — no per-extension logic (source-scan
-  test). — Affordances derive from the wire connect strategy + lifecycle
-  state with zero per-extension logic; pinned by the repinned assets.rs
-  source-scan (`5208f7df0`: the channels tab and configure modal carry no
-  concrete package-id condition, pairing-vs-OAuth routing derives from
-  the wire connect strategy, the post-OAuth auto-activate is generic).
-  Note: the wire currently types those states as
-  `activation_status`/`connected` rather than the two shared enums —
-  tracked under UI-1/AUTH-9.
+- [ ] UI-3 Admin configuration forms are manifest-schema-driven, live only in
+  the admin configuration area, mask secret fields, and never echo stored
+  values. Saving a group never installs the extension for the admin. The
+  extension/channel views consume completeness but cannot edit deployment
+  values. The updated frontend and router tests await the combined matrix.
+- [ ] UI-4 Connect/Reconnect/Remove affordances derive from the three-state
+  lifecycle projection plus caller auth/pairing descriptors. There is no
+  Activate/Disable/Configure-deployment action in the user extension UI and no
+  concrete package-id condition. The updated frontend tests await the combined
+  matrix.
 - [x] UI-5 Slack setup panel, channel picker, and their API modules are
   deleted; no concrete package-id branch remains in frontend source. —
   slack-setup-panel, slack-channel-picker, slack-setup-api,
@@ -1030,17 +996,17 @@ Rules — kept short on purpose:
   blocks died across all 11 locales (`345c54135`); the source-scan pin
   keeps the four files deleted and the frontend free of concrete
   package-id branches (`5208f7df0`).
-- [x] UI-6 The existing Python e2e harness covers: configure → connect →
+- [ ] UI-6 The existing Python e2e harness covers: admin configure → connect →
   inbound message → reply → remove for one real channel; no new e2e harness is
   added. — `tests/e2e/scenarios/test_reborn_slack_channel_e2e.py` over
   the EXISTING harness (conftest fixtures + `fake_slack_api.py` extended
-  with `oauth.v2.access`; no new harness): install + `[channel.config]`
-  setup POST → real product-auth OAuth connect against the fake vendor
-  through the loopback-only rewrite seam → credential-gated activation →
+  with `oauth.v2.access`; no new harness): tenant admin-configuration POST →
+  user install → real product-auth OAuth connect against the fake vendor
+  through the loopback-only rewrite seam → derived `active` readiness →
   v0-signed inbound DM on the canonical generic route → coordinated
   reply on `chat.postMessage` (while proving the retired MIG-5 alias is 404) → remove
-  (no further admission, no further delivery). Green on the standard
-  `webui-v2-beta` binary.
+  (no further admission, no further delivery). The revised journey must be run
+  against the standard `webui-v2-beta` binary.
 
 ## 10. Migration and compatibility (MIG)
 
@@ -1053,18 +1019,18 @@ Rules — kept short on purpose:
   `list_extensions_golden_wire_multi_surface_extension_freezes_accounts_list`
   (a connected account projects `state = "connected"`). Vendor id strings and
   grant records are untouched, so existing users need no re-auth.
-- [x] MIG-2 Slack setup slots migrate to config/client-credential handles
+- [ ] MIG-2 Slack setup slots migrate to tenant admin-configuration handles
   (idempotent, dry-run supported). — H.3 load-time fold
   (`composition/src/extension_host/channel_state_folds.rs`, wired in
-  `build_local_runtime`): non-secret setup ids → durable installation
-  channel config, secret material → the manifest handles at the
-  channel-egress scope, OAuth client id/secret → the `[auth.slack]`
-  `client_credentials` handles (resolved via the generic channel-config
-  credential fallback). Proven by
+  `build_local_runtime`): deployment setup values → tenant-scoped manifest
+  `[admin_configuration]` handles. Secret material stays write-only and OAuth
+  recipes consume the same declared client-credential handles; no value is
+  copied into per-user membership. Proven by
   `fold_moves_setup_state_roots_onto_generic_homes_and_second_run_is_a_noop`
   + `fold_skips_malformed_records_and_operator_owned_values` (+ the libSQL
   flavor). Dry-run posture: the fold only runs on the local-runtime build
-  path; the `MigrationDryRun` profile never executes it.
+  path; the `MigrationDryRun` profile never executes it. The revised target
+  and its tests await the combined matrix.
 - [x] MIG-3 Slack state roots migrate to generic scoped state; no slack-named
   root is read outside migration code. — The H.4 fold (same module/tests as
   MIG-2) moves identities, channel routes, and DM targets onto the generic
@@ -1075,17 +1041,13 @@ Rules — kept short on purpose:
   `sanctioned_legacy_roots_cover_only_the_retired_lane` pins the table to
   exactly the retired lane's roots); the table shrinks to nothing with
   the alias retirement.
-- [x] MIG-4 Old installation lifecycle records backfill into the standard
-  state enum. — The durable store's binary activation state
-  (`ExtensionActivationState::Enabled`/`Disabled`) backfills into the
-  generic host's standard seven-state records at every boot: the facade
-  restore (`restore_extension_lifecycle_state`) plus the host hydration
-  (`build_generic_extension_host`). Pinned by
-  `boot_hydration_activates_enabled_and_skips_disabled_installations`
-  (`crates/ironclaw_reborn_composition/src/extension_host/generic_host.rs`):
-  durable Enabled → an Active record in the first published generation
-  (snapshot presence + capability resolves); durable Disabled → inactive
-  after restart.
+- [ ] MIG-4 Old installation lifecycle records backfill into explicit caller
+  membership. A legacy tenant-owned row narrows to the configured operator;
+  current lifecycle code never creates new tenant-owned membership. Public
+  state is then derived as `uninstalled | setup_needed | active`. —
+  `legacy_tenant_owned_installation_migrates_to_operator_private_state`
+  (`tests/integration/extension_user_lifecycle_isolation.rs`), pending the
+  combined matrix.
 - [x] MIG-5 `/webhooks/slack/events` forwarded to the canonical route for the
   cutover release and is now retired. The whole-path Slack E2E pins the legacy
   path at 404 while the canonical
@@ -1121,7 +1083,7 @@ Rules — kept short on purpose:
   (`ironclaw_product_adapters::conformance`, test-support export): inbound
   bounds + malformed-never-panics + challenge, full-envelope delivery with
   structured per-part reports against a scripted vendor server,
-  activate/cleanup idempotency, unsupported surfaces fail cleanly.
+  internal publish/cleanup-hook idempotency, unsupported surfaces fail cleanly.
   Consumers: `crates/ironclaw_slack_extension/tests/channel_conformance.rs`,
   `crates/ironclaw_telegram_extension/tests/channel_conformance.rs`, and
   the acme fixture in `tests/integration/extension_runtime.rs`.
@@ -1139,7 +1101,8 @@ Rules — kept short on purpose:
 - [ ] TEST-4 The acme fixture drives the full generic path end-to-end in the
   integration harness. (P2 landed the tool leg:
   `acme_fixture_lifecycle_dispatches_from_the_active_snapshot` drives
-  install → activate → snapshot dispatch → remove through model tool calls,
+  install → internally published snapshot → dispatch → remove through model
+  tool calls,
   with the fixture's native factory assembled through the production
   `RebornHostBindings` seam. P4 landed the inbound leg —
   `signed_acme_post_flows_through_the_production_mount_into_a_turn`.

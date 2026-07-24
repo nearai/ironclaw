@@ -22,7 +22,7 @@ use ironclaw_reborn_openai_compat::{
     OpenAiCompatAuthenticatedCaller, OpenAiCompatErrorKind, OpenAiCompatHttpError,
     OpenAiCompatIdempotencyKey, OpenAiCompatInternalRefs, OpenAiCompatProductActionRef,
     OpenAiCompatProjectionRef, OpenAiCompatRefLookup, OpenAiCompatRefOperation,
-    OpenAiCompatRefReservation, OpenAiCompatRefReservationOutcome, OpenAiCompatRefStore,
+    OpenAiCompatRefReservation, OpenAiCompatRefReservationOutcome, OpenAiCompatRefStorePort,
     OpenAiCompatRequestFingerprint, OpenAiCompatRouteSurface, OpenAiCompatRouterState,
     OpenAiCompatTurnRunRef, OpenAiUsage, openai_compat_router_with_state,
 };

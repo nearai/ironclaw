@@ -193,6 +193,11 @@ for tool in $TOOL_NAMES; do
     echo ""
     echo "  --- tools-src/${tool}/ changed ---"
 
+    if [[ ! -d "tools-src/${tool}" ]]; then
+        echo "  SKIP: tools-src/${tool}/ no longer exists (retired local source)."
+        continue
+    fi
+
     if [[ ! -f "$REGISTRY_FILE" ]]; then
         echo "  SKIP: ${REGISTRY_FILE} does not exist yet (new extension?)."
         continue
@@ -224,6 +229,11 @@ for channel in $CHANNEL_NAMES; do
     REGISTRY_FILE="registry/channels/${channel}.json"
     echo ""
     echo "  --- channels-src/${channel}/ changed ---"
+
+    if [[ ! -d "channels-src/${channel}" ]]; then
+        echo "  SKIP: channels-src/${channel}/ no longer exists (retired local source)."
+        continue
+    fi
 
     if [[ ! -f "$REGISTRY_FILE" ]]; then
         echo "  SKIP: ${REGISTRY_FILE} does not exist yet (new extension?)."

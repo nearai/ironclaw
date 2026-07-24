@@ -54,7 +54,7 @@ mod launchd;
 mod systemd;
 
 /// launchd label / systemd unit name for the canonical Reborn service
-/// identity. Shared, deliberately, with `RebornLocalServiceLifecycle` in
+/// identity. Shared, deliberately, with `OperatorServiceLifecycle` in
 /// `ironclaw_reborn_composition::observability::operator_service_lifecycle`
 /// (the WebUI operator-service service) — see the module doc above. An
 /// install from either surface atomically replaces the other's file at

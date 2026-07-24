@@ -9,7 +9,7 @@
 //! `ScopedFilesystem<InMemoryBackend>` mounted at `/processes` — so tests
 //! instantiate the same store a deployment runs.
 //!
-//! Note on sub-scope isolation: `FilesystemProcessStore` encodes
+//! Note on sub-scope isolation: `ProcessStore` encodes
 //! agent/project/mission/thread in the path (structural under any mount), while
 //! tenant/user isolation lives in the `MountView`. The single fixed mount below
 //! therefore isolates by agent/project/mission/thread but not by tenant/user —
@@ -26,7 +26,7 @@ use std::sync::Arc;
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
 
-use crate::{FilesystemProcessResultStore, FilesystemProcessStore, ProcessServices};
+use crate::{ProcessResultStore, ProcessServices, ProcessStore};
 
 /// A fresh, volatile `ScopedFilesystem<InMemoryBackend>` mounted at `/processes`
 /// — the in-memory backend seam every process store uses in tests.
@@ -45,14 +45,14 @@ pub fn in_memory_backed_processes_filesystem() -> Arc<ScopedFilesystem<InMemoryB
 
 /// The production process store over a fresh in-memory backend — the drop-in
 /// replacement for the deleted `InMemoryProcessStore`.
-pub fn in_memory_backed_process_store() -> FilesystemProcessStore<InMemoryBackend> {
-    FilesystemProcessStore::new(in_memory_backed_processes_filesystem())
+pub fn in_memory_backed_process_store() -> ProcessStore<InMemoryBackend> {
+    ProcessStore::new(in_memory_backed_processes_filesystem())
 }
 
 /// The production process result store over a fresh in-memory backend — the
 /// drop-in replacement for the deleted `InMemoryProcessResultStore`.
-pub fn in_memory_backed_process_result_store() -> FilesystemProcessResultStore<InMemoryBackend> {
-    FilesystemProcessResultStore::new(in_memory_backed_processes_filesystem())
+pub fn in_memory_backed_process_result_store() -> ProcessResultStore<InMemoryBackend> {
+    ProcessResultStore::new(in_memory_backed_processes_filesystem())
 }
 
 /// A [`ProcessServices`] whose lifecycle and result stores share **one**
@@ -60,9 +60,7 @@ pub fn in_memory_backed_process_result_store() -> FilesystemProcessResultStore<I
 /// deleted `ProcessServices::in_memory()`. Use this (not the two standalone
 /// helpers) when a test starts a process and reads back its result, since both
 /// stores must resolve against the same backend.
-pub fn in_memory_backed_process_services() -> ProcessServices<
-    FilesystemProcessStore<InMemoryBackend>,
-    FilesystemProcessResultStore<InMemoryBackend>,
-> {
+pub fn in_memory_backed_process_services()
+-> ProcessServices<ProcessStore<InMemoryBackend>, ProcessResultStore<InMemoryBackend>> {
     ProcessServices::filesystem(in_memory_backed_processes_filesystem())
 }

@@ -250,7 +250,7 @@ COMMIT;
 
 ### 7.1 Before
 
-One process-global `/resources/snapshot.json` under `ResourceScope::system()` holding four `HashMap`s + reservations + period anchors. `update_snapshot` (`cas_snapshot.rs:177`) does full read-modify-write CAS, serialized in-process by one path-keyed `filesystem_record_lock` (`cas_snapshot.rs:357`, held across get→put so there is no intra-process TOCTOU window), cross-process by blob CAS with **no retry** — the loser gets `"cross-process CAS contention"` (`cas_snapshot.rs:204`) and the reserve fails. Two agents in **unrelated tenants** contend on this one row. `filesystem_store.rs:62-65` is explicit: resources is process-global; per-tenant accounting is a "future capability." **This decomposition introduces per-account row separation where today there is one system() blob — it is therefore also a (small) scoping change, not pure granularity.**
+One process-global `/resources/snapshot.json` under `ResourceScope::system()` holding four `HashMap`s + reservations + period anchors. `update_snapshot` (`cas_snapshot.rs:177`) does full read-modify-write CAS, serialized in-process by one path-keyed `filesystem_record_lock` (`cas_snapshot.rs:357`, held across get→put so there is no intra-process TOCTOU window), cross-process by blob CAS with **no retry** — the loser gets `"cross-process CAS contention"` (`cas_snapshot.rs:204`) and the reserve fails. Two agents in **unrelated tenants** contend on this one row. `resource_store.rs:62-65` is explicit: resources is process-global; per-tenant accounting is a "future capability." **This decomposition introduces per-account row separation where today there is one system() blob — it is therefore also a (small) scoping change, not pure granularity.**
 
 ### 7.2 After — record schema
 
@@ -385,7 +385,7 @@ The decomposition trades one hot blob for many small rows. The performance conse
 
 ### 8.0 The turn-scope premise correction
 
-The first angle claimed `/turns/state.json` is "already per-tenant-scope physically." **This is FALSE in code:** `io.rs:92` and `filesystem_store.rs:197` call `put`/`get` with `ResourceScope::system()` — a **constant** — for every tenant. The blob therefore **multiplexes all scopes' runs**, and tenant isolation comes from `TurnScope` fields *inside the body* (`scope.rs:5`: tenant/agent/project/thread/thread_owner), not from the mount. Consequences threaded through this design:
+The first angle claimed `/turns/state.json` is "already per-tenant-scope physically." **This is FALSE in code:** `io.rs:92` and `turn_state_row_store.rs:197` call `put`/`get` with `ResourceScope::system()` — a **constant** — for every tenant. The blob therefore **multiplexes all scopes' runs**, and tenant isolation comes from `TurnScope` fields *inside the body* (`scope.rs:5`: tenant/agent/project/thread/thread_owner), not from the mount. Consequences threaded through this design:
 - `scope_seg` is derived from **each run's own `TurnScope`** in the body, not from a physically distinct blob.
 - Shape migration iterates `snapshot.runs` and **re-keys each run by its own scope**, not "one blob = one scope."
 - The fail-open fallback keys off the body-derived scope.

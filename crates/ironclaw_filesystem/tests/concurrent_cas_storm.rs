@@ -195,6 +195,49 @@ async fn in_memory_concurrent_delete_if_version_storm_has_exactly_one_winner_per
     let fs = Arc::new(scoped(Arc::new(InMemoryBackend::new()), "/engine/counters"));
     run_delete_storm(fs).await;
 }
+
+#[tokio::test]
+async fn cas_delete_returns_successful_mutation_outcome_after_verification() {
+    let fs = scoped(Arc::new(InMemoryBackend::new()), "/engine/counters");
+    let scope = ResourceScope::system();
+    let path = ScopedPath::new("/counters/delete-outcome.json").unwrap();
+    fs.put(
+        &scope,
+        &path,
+        encode(&Counter { value: 1 }).unwrap(),
+        CasExpectation::Absent,
+    )
+    .await
+    .expect("seed counter");
+
+    let outcome = cas_update(
+        &fs,
+        &scope,
+        &path,
+        decode,
+        encode,
+        |current: Option<Counter>| async move {
+            Ok(match current {
+                Some(snapshot) => CasApply::delete(snapshot, "delete-applied"),
+                None => CasApply::no_op(Counter { value: 0 }, "verification-only"),
+            })
+        },
+    )
+    .await
+    .expect("delete and post-delete verification");
+
+    assert_eq!(
+        outcome, "delete-applied",
+        "post-delete verification must not replace the successful mutation outcome"
+    );
+    assert!(
+        fs.get(&scope, &path)
+            .await
+            .expect("read deleted path")
+            .is_none()
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn libsql_concurrent_cas_storm_has_no_errors_or_lost_updates() {
     let dir = tempfile::tempdir().unwrap();

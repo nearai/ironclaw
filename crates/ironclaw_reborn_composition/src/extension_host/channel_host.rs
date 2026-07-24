@@ -35,11 +35,9 @@ use ironclaw_host_api::ChannelInboundProductSurface;
 use ironclaw_host_api::recipe::IngressVerificationRecipe;
 use ironclaw_host_api::{
     AgentId, ExtensionId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId,
-    ResourceScope, SecretHandle, TenantId, ThreadId, UserId, VirtualPath,
+    RecipeSecretField, ResourceScope, SecretHandle, TenantId, ThreadId, UserId, VirtualPath,
 };
-use ironclaw_outbound::{
-    CommunicationPreferenceRepository, DeliveredGateRouteStore, OutboundStateStore,
-};
+use ironclaw_outbound::{CommunicationPreferenceRepository, DeliveredGateRouteStore};
 use ironclaw_product::{
     AdapterInstallationId, ExternalConversationRef, ExternalEventId, ProductAdapterId,
     ProductInboundAck, ProductInboundEnvelope,
@@ -69,6 +67,21 @@ use ironclaw_extension_host::ChannelConfigService;
 
 const CHANNEL_IDEMPOTENCY_LEDGER_SETTLED_LIMIT: usize = 10_000;
 const CHANNEL_IDEMPOTENCY_LEDGER_PRUNE_INTERVAL: usize = 1_000;
+
+fn admin_configuration_fields(
+    resolved: &ironclaw_extensions::ResolvedExtensionManifest,
+) -> Vec<RecipeSecretField> {
+    resolved
+        .admin_configuration
+        .iter()
+        .flat_map(|descriptor| descriptor.fields.iter())
+        .map(|field| RecipeSecretField {
+            handle: field.handle.clone(),
+            label: field.label.clone(),
+            secret: field.secret,
+        })
+        .collect()
+}
 
 /// Derive the trusted-evidence shape the generic inbound sink mints from the
 /// resolved contract's ingress verification recipe — the mint mirrors the
@@ -244,7 +257,7 @@ pub struct ChannelHostIdentity {
 /// then ingress-only (turns run; nothing watches them for channel replies).
 pub(crate) struct ChannelHostDeliveryDeps {
     pub(crate) coordinator: Arc<DeliveryCoordinator>,
-    pub(crate) outbound_store: Arc<dyn OutboundStateStore>,
+    pub(crate) outbound_store: Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
     pub(crate) route_store: Arc<dyn DeliveredGateRouteStore>,
     pub(crate) communication_preferences: Arc<dyn CommunicationPreferenceRepository>,
     pub(crate) approval_context: Option<Arc<dyn ApprovalPromptContextSource>>,
@@ -802,16 +815,9 @@ impl GenericChannelHostAssembly {
             match &extras.subject_route_resolver {
                 Some(resolver) => Some(Arc::clone(resolver)),
                 None => {
-                    let handles = source
-                        .resolved()
-                        .channel
-                        .as_ref()
-                        .map(|channel| {
-                            ironclaw_extension_host::shared_channel_admission_handles(
-                                &channel.config.fields,
-                            )
-                        })
-                        .unwrap_or_default();
+                    let fields = admin_configuration_fields(source.resolved());
+                    let handles =
+                        ironclaw_extension_host::shared_channel_admission_handles(&fields);
                     if handles.declared() {
                         let extension_id = ExtensionId::new(source.extension_id())
                             .map_err(|error| format!("invalid extension id: {error}"))?;

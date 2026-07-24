@@ -7,6 +7,7 @@ import {
   RUNTIME_LABELS,
   STATE_TONES,
   STATE_LABELS,
+  hasAuthSurface,
   hasChannelSurface,
   primaryAuthAccount,
   authAccountNeedsReconnect,
@@ -111,7 +112,7 @@ function ChipGrid({ items }) {
   );
 }
 
-export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }) {
+export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
   const t = useT();
   const state = extensionLifecycleState(ext);
   const tone = STATE_TONES[state] || "muted";
@@ -122,7 +123,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   const tools = ext.tools || [];
   const [capsOpen, setCapsOpen] = React.useState(false);
 
-  const setupState = state === "setup_required" || state === "auth_required";
+  const setupState = state === "setup_needed";
   const onboardingHint =
     (setupState
       ? ext.onboarding?.credential_instructions || ext.onboarding?.credential_next_step
@@ -130,14 +131,9 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
     null;
 
   const configurePayload = {
+    ...ext,
     packageRef: ext.package_ref,
     displayName,
-    surfaces: ext.surfaces,
-    active: ext.active,
-    authenticated: ext.authenticated,
-    needs_setup: ext.needs_setup,
-    installationState: ext.installation_state,
-    onboardingState: ext.onboarding_state,
   };
 
   // The caller's primary vendor account (§6.3 state + typed last_error). An
@@ -147,6 +143,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   // and the notice key off it.
   const channelAccount = hasChannelSurface(ext) ? primaryAuthAccount(ext) : null;
   const needsReconnect = hasChannelSurface(ext) && authAccountNeedsReconnect(ext);
+  const hasConnectedChannelAccount = channelAccount?.state === "connected";
 
   // Connectable channels are configured by pairing (Connect/Reconnect), not by
   // an operator credential form (Configure/Reconfigure). Pick the label by kind,
@@ -154,10 +151,10 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   const configureLabel = hasChannelSurface(ext)
     ? needsReconnect
       ? t("extensions.reconnectExpired")
-      : ext.authenticated
+      : hasConnectedChannelAccount
         ? t("extensions.reconnect")
         : t("extensions.connect")
-    : ext.authenticated
+    : state === "active"
       ? t("extensions.reconfigure")
       : t("extensions.configure");
 
@@ -171,42 +168,12 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
       label: configureLabel,
       run: () => onConfigure(configurePayload),
     });
-  } else if (primaryAction === "activate") {
-    primaryActions.push({
-      id: "activate",
-      label: t("extensions.activate"),
-      run: () => onActivate(configurePayload),
-    });
-  }
-  if (canManage && (ext.needs_setup || ext.has_auth) && primaryAction !== "configure") {
-    overflowActions.push({
-      id: "configure",
-      label: configureLabel,
-      icon: "settings",
-      run: () => onConfigure(configurePayload),
-    });
-  }
-  const hasOverflowConfigureAction = overflowActions.some(
-    (action) => action.id === "configure"
-  );
-  if (
-    canManage &&
-    primaryAction !== "configure" &&
-    hasChannelSurface(ext) &&
-    (state === "setup_required" || state === "failed")
-  ) {
-    overflowActions.push({
-      id: "setup",
-      label: t("extensions.setup"),
-      icon: "settings",
-      run: () => onConfigure(configurePayload),
-    });
   }
   if (
     canManage &&
-    hasChannelSurface(ext) &&
-    !hasOverflowConfigureAction &&
-    (state === "active" || state === "ready" || state === "pairing_required" || state === "pairing")
+    state === "active" &&
+    (hasAuthSurface(ext) || hasChannelSurface(ext)) &&
+    primaryAction !== "configure"
   ) {
     overflowActions.push({
       id: "reconfigure",
@@ -252,11 +219,8 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
 
       {ext.description && (<p className={DESC}>{ext.description}</p>)}
 
-      {/* `activation_error` is present iff `installation_state === "failed"`
-          (a terminal, non-auth activation failure — §6.1); gating on the
-          field's own presence renders the redacted reason whenever the wire
-          sends one, independent of which axis wins the onboarding/
-          installation state-badge above. */}
+      {/* Internal startup failures remain attached to the public
+          `setup_needed` state as redacted remediation context. */}
       {ext.activation_error &&
       (
         <div
@@ -319,9 +283,6 @@ export function RegistryCard({ entry, onInstall = null, isBusy, statusLabel = un
   const kindLabel = translatedKnownLabel(t, "extensions.runtime", entry.runtime, RUNTIME_LABELS);
   const displayName = entry.display_name || packageId(entry);
   const canInstall = Boolean(entry.package_ref && onInstall);
-  const configureAfterInstall = Boolean(
-    entry.needs_setup || entry.has_auth || hasChannelSurface(entry)
-  );
   const keywords = entry.keywords || [];
   const [kwOpen, setKwOpen] = React.useState(false);
 
@@ -377,8 +338,6 @@ export function RegistryCard({ entry, onInstall = null, isBusy, statusLabel = un
               onInstall({
                 packageRef: entry.package_ref,
                 displayName,
-                surfaces: entry.surfaces,
-                configureAfterInstall,
               })}
             disabled={isBusy}
           >

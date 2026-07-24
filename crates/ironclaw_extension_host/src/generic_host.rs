@@ -30,8 +30,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ironclaw_extensions::{
-    ExtensionActivationState, ExtensionInstallationError, ExtensionInstallationStore,
-    ExtensionManifest, ExtensionPackage, ResolvedExtensionManifest,
+    ExtensionInstallationError, ExtensionInstallationStorePort, ExtensionManifest,
+    ExtensionPackage, ResolvedExtensionManifest,
 };
 use ironclaw_host_api::{
     ExtensionHostAssemblyConfig, RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest,
@@ -64,7 +64,7 @@ pub struct GenericExtensionHostParams {
     pub binder: ExtensionLaneToolBinder,
     pub native_factories: Vec<Arc<dyn NativeExtensionFactory>>,
     pub channel_adapters: Vec<(String, Arc<dyn ChannelAdapter>)>,
-    pub installation_store: Arc<dyn ExtensionInstallationStore>,
+    pub installation_store: Arc<dyn ExtensionInstallationStorePort>,
     pub boot_installations: Vec<InstallationRecord>,
     pub governor: Arc<dyn ResourceGovernor>,
     pub assembly: ExtensionHostAssemblyConfig,
@@ -99,7 +99,7 @@ pub enum BootInstallationRecordsError {
 /// installation. The caller owns boot fail policy; missing manifests are
 /// skipped to preserve the previous composition behavior.
 pub async fn boot_installation_records(
-    installation_store: &Arc<dyn ExtensionInstallationStore>,
+    installation_store: &Arc<dyn ExtensionInstallationStorePort>,
     channel_config: Option<&Arc<ChannelConfigService>>,
 ) -> Result<Vec<InstallationRecord>, BootInstallationRecordsError> {
     let mut records = Vec::new();
@@ -108,9 +108,6 @@ pub async fn boot_installation_records(
         .await
         .map_err(|source| BootInstallationRecordsError::ListInstallations { source })?
     {
-        if installation.activation_state() != ExtensionActivationState::Enabled {
-            continue;
-        }
         let extension_id = installation.extension_id().clone();
         let Some(manifest_record) = installation_store
             .get_manifest(&extension_id)
@@ -130,7 +127,7 @@ pub async fn boot_installation_records(
 }
 
 async fn effective_channel_config(
-    installation_store: &Arc<dyn ExtensionInstallationStore>,
+    _installation_store: &Arc<dyn ExtensionInstallationStorePort>,
     channel_config: Option<&Arc<ChannelConfigService>>,
     extension_id: &ironclaw_host_api::ExtensionId,
 ) -> Result<Vec<(String, String)>, BootInstallationRecordsError> {
@@ -139,10 +136,7 @@ async fn effective_channel_config(
             .effective_non_secret_config(extension_id)
             .await
             .map_err(|source| BootInstallationRecordsError::EffectiveChannelConfig { source }),
-        None => installation_store
-            .channel_config(extension_id)
-            .await
-            .map_err(|source| BootInstallationRecordsError::ChannelConfig { source }),
+        None => Ok(Vec::new()),
     }
 }
 
@@ -265,7 +259,7 @@ struct CompositionExtensionLoader {
     /// adapter lands.
     channel_adapters: HashMap<String, Arc<dyn ChannelAdapter>>,
     governor: Arc<dyn ResourceGovernor>,
-    installation_store: Arc<dyn ExtensionInstallationStore>,
+    installation_store: Arc<dyn ExtensionInstallationStorePort>,
 }
 
 #[async_trait]
@@ -526,9 +520,9 @@ mod tests {
 
     use ironclaw_authorization::GrantAuthorizer;
     use ironclaw_extensions::{
-        ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
-        ExtensionManifestRecord, ExtensionManifestRef, ExtensionRegistry,
-        FilesystemExtensionInstallationStore, MANIFEST_SCHEMA_VERSION, ManifestSource,
+        ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStore,
+        ExtensionManifestRecord, ExtensionManifestRef, ExtensionRegistry, MANIFEST_SCHEMA_VERSION,
+        ManifestSource,
     };
     use ironclaw_filesystem::DiskFilesystem;
     use ironclaw_host_api::ExtensionHostAssemblyConfig;
@@ -597,11 +591,7 @@ input_schema_ref = "schemas/echo.input.json"
         }
     }
 
-    async fn seed_installation(
-        store: &FilesystemExtensionInstallationStore,
-        id: &str,
-        state: ExtensionActivationState,
-    ) {
+    async fn seed_installation(store: &ExtensionInstallationStore, id: &str) {
         let record = ExtensionManifestRecord::from_toml(
             fixture_manifest_toml(id),
             ManifestSource::HostBundled,
@@ -617,7 +607,6 @@ input_schema_ref = "schemas/echo.input.json"
                 ExtensionInstallation::new(
                     ExtensionInstallationId::new(id.to_string()).expect("installation id"),
                     extension_id.clone(),
-                    state,
                     ExtensionManifestRef::new(extension_id, None),
                     Vec::new(),
                     chrono::Utc::now(),
@@ -641,23 +630,19 @@ input_schema_ref = "schemas/echo.input.json"
         .extension_lane_tool_binder()
     }
 
-    /// H.5 / MIG-4: the durable binary activation state backfills into the
-    /// generic host's standard seven-state records at boot — a durable
-    /// `Enabled` installation hydrates to an Active record in the first
-    /// published generation (snapshot presence + resolvable capability),
-    /// while a durable `Disabled` installation never activates.
+    /// H.5 / MIG-4: durable installation records hydrate into the generic
+    /// host's standard active records at boot.
     #[tokio::test]
-    async fn boot_hydration_activates_enabled_and_skips_disabled_installations() {
+    async fn boot_hydration_activates_persisted_installations() {
         let store = Arc::new(filesystem_installation_store_for_test().await);
-        seed_installation(&store, "h5-enabled", ExtensionActivationState::Enabled).await;
-        seed_installation(&store, "h5-disabled", ExtensionActivationState::Disabled).await;
+        seed_installation(&store, "h5-enabled").await;
         let boot_installations = boot_installation_records_for_test(&store).await;
 
         let generic = build_generic_extension_host(GenericExtensionHostParams {
             binder: test_binder(),
             native_factories: vec![Arc::new(FixtureNativeFactory)],
             channel_adapters: Vec::new(),
-            installation_store: Arc::clone(&store) as Arc<dyn ExtensionInstallationStore>,
+            installation_store: Arc::clone(&store) as Arc<dyn ExtensionInstallationStorePort>,
             boot_installations,
             governor: Arc::new(InMemoryResourceGovernor::new()),
             assembly: ExtensionHostAssemblyConfig::new(
@@ -672,7 +657,7 @@ input_schema_ref = "schemas/echo.input.json"
         let snapshot = generic.host.snapshot().await;
         assert!(
             snapshot.extension("h5-enabled").is_some(),
-            "durable Enabled installation must hydrate to an Active record \
+            "durable installation must hydrate to an Active record \
              in the first published generation"
         );
         assert!(
@@ -681,17 +666,13 @@ input_schema_ref = "schemas/echo.input.json"
                 .is_some(),
             "the hydrated Active extension's capability must resolve from the snapshot"
         );
-        assert!(
-            snapshot.extension("h5-disabled").is_none(),
-            "durable Disabled installation must stay inactive after restart"
-        );
     }
 
-    async fn filesystem_installation_store_for_test() -> FilesystemExtensionInstallationStore {
+    async fn filesystem_installation_store_for_test() -> ExtensionInstallationStore {
         use ironclaw_filesystem::InMemoryBackend;
         use ironclaw_host_api::{HostPortCatalog, VirtualPath};
 
-        FilesystemExtensionInstallationStore::load_at(
+        ExtensionInstallationStore::load_at(
             Arc::new(InMemoryBackend::new()),
             VirtualPath::new("/system/extensions/.installations/test").expect("valid test path"),
             HostPortCatalog::empty(),
@@ -702,7 +683,7 @@ input_schema_ref = "schemas/echo.input.json"
     }
 
     async fn boot_installation_records_for_test(
-        store: &FilesystemExtensionInstallationStore,
+        store: &ExtensionInstallationStore,
     ) -> Vec<InstallationRecord> {
         let mut records = Vec::new();
         for installation in store
@@ -710,9 +691,6 @@ input_schema_ref = "schemas/echo.input.json"
             .await
             .expect("list installations")
         {
-            if installation.activation_state() != ExtensionActivationState::Enabled {
-                continue;
-            }
             let extension_id = installation.extension_id().clone();
             let Some(manifest_record) = store.get_manifest(&extension_id).await.expect("manifest")
             else {
@@ -723,10 +701,7 @@ input_schema_ref = "schemas/echo.input.json"
                 installation_id: installation.installation_id().as_str().to_string(),
                 state: crate::InstallationState::Installed,
                 resolved: Arc::new(manifest_record.resolved().clone()),
-                config: store
-                    .channel_config(&extension_id)
-                    .await
-                    .expect("channel config"),
+                config: Vec::new(),
                 last_error: None,
             });
         }

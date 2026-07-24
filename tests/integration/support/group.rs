@@ -54,7 +54,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
-use ironclaw_extensions::ExtensionInstallationStore;
+use ironclaw_extensions::ExtensionInstallationStorePort;
 use ironclaw_filesystem::CompositeRootFilesystem;
 use ironclaw_host_api::{ResourceScope, UserId};
 use ironclaw_llm::testing::provider_chain_over;
@@ -67,7 +67,7 @@ use ironclaw_loop_host::{
 use ironclaw_product::ProductTriggerReason;
 use ironclaw_product::{
     ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
-    IdempotencyLedger, InboundTurnService, ResolvedBinding,
+    IdempotencyLedger, InboundTurnService, ResolvedBinding, RunDeliveryEventRouter,
 };
 use ironclaw_reborn_composition::RebornTrajectoryObserver;
 use ironclaw_reborn_composition::build_default_budget_accountant;
@@ -75,7 +75,7 @@ use ironclaw_reborn_composition::test_support::ChannelConnectionTestBundle;
 use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_resources::test_support::in_memory_backed_budget_gate_store;
 use ironclaw_resources::{
-    BudgetEventSink, BudgetGateStore, InMemoryBudgetEventSink, InMemoryResourceGovernor,
+    BudgetEventSink, BudgetGateStorePort, InMemoryBudgetEventSink, InMemoryResourceGovernor,
     ResourceAccount, ResourceGovernor,
 };
 use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
@@ -89,8 +89,7 @@ use ironclaw_runner::runtime::{
 };
 use ironclaw_runner::subagent::{
     await_edge::{
-        boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver,
-        store::FilesystemAwaitEdgeStore,
+        boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver, store::AwaitEdgeStore,
     },
     flavors::StaticSubagentDefinitionResolver,
     goal_store::in_memory_backed_subagent_goal_store,
@@ -102,8 +101,8 @@ use ironclaw_turns::run_profile::{
     ModelProfileId,
 };
 use ironclaw_turns::{
-    FilesystemTurnStateRowStore, InMemoryTurnEventSink, LoopCheckpointStore, TurnCoordinator,
-    TurnEventSink, TurnScope, TurnStateStore, TurnStateStoreLimits,
+    InMemoryTurnEventSink, LoopCheckpointStore, TurnCoordinator, TurnEventSink, TurnScope,
+    TurnStateRowStore, TurnStateStore, TurnStateStoreLimits,
 };
 
 use super::builder::{
@@ -205,9 +204,9 @@ pub(crate) struct GroupSharedStorage {
     /// model hot path.
     pub(crate) scope_gateway: Arc<ScopeRegistryGateway>,
     /// The group's single shared turn-state store. All threads share one
-    /// `FilesystemTurnStateRowStore` (isolation is by `run_id`, not by path —
+    /// `TurnStateRowStore` (isolation is by `run_id`, not by path —
     /// see `turns_scope_path`, which has no `thread_id` component).
-    pub(crate) turn_store: Arc<FilesystemTurnStateRowStore<HarnessTurnBackend>>,
+    pub(crate) turn_store: Arc<TurnStateRowStore<HarnessTurnBackend>>,
     /// S2 seam: the SAME canonical binding `turn_store`'s `/turns` mount is
     /// scoped to (`scoped_turns_fs_composite`). Retained so a reopen can
     /// rebuild the identical scoped path independently, instead of
@@ -228,6 +227,11 @@ pub(crate) struct GroupSharedStorage {
     /// opted in (C-TRACECAP seam); `None` otherwise. Concrete type (not `Arc<dyn
     /// TurnEventSink>`) so a test can read `.events()` back directly.
     pub(crate) turn_event_sink: Option<Arc<InMemoryTurnEventSink>>,
+    /// The production run-delivery lifecycle router wired into the group's
+    /// canonical turn-event sink. Present only for delivery-proof groups, so
+    /// those tests exercise the same event-driven final-reply path as the
+    /// channel host instead of relying on the admission observer.
+    pub(crate) run_delivery_events: Option<Arc<RunDeliveryEventRouter>>,
     /// W5-WIRING-PARITY: production local-dev always wires a security-audit
     /// sink; the harness mirrors that shape with a recording sink so tests can
     /// assert events emitted through real caller paths.
@@ -339,7 +343,9 @@ impl GroupCapability {
     /// re-read an auth block's `credential_requirements` from. `None` only for
     /// the `Recording` (echo) backend; the host-runtime backend always resolves
     /// a store (`HostRuntimeCapabilityHarness::gate_record_store` returns `Some`).
-    pub(crate) fn gate_record_store(&self) -> Option<Arc<dyn ironclaw_run_state::GateRecordStore>> {
+    pub(crate) fn gate_record_store(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_run_state::GateRecordStorePort>> {
         match self {
             Self::HostRuntime(harness) => harness.gate_record_store(),
             Self::Recording => None,
@@ -347,7 +353,7 @@ impl GroupCapability {
     }
 
     /// E-DURABLE core: assert `extension_id` is present in a FRESHLY reopened
-    /// `ExtensionInstallationStore` at this backend's on-disk `storage_root`
+    /// `ExtensionInstallationStorePort` at this backend's on-disk `storage_root`
     /// (a handle independent of the live `Arc`) — proving the install
     /// persisted to disk, not just to in-memory state. One implementation
     /// behind both the harness- and group-level
@@ -422,6 +428,7 @@ impl RebornIntegrationGroup {
             storage: StorageMode::InMemory,
             safety_context: None,
             turn_event_sink: None,
+            run_delivery_events: None,
             trace_capture: false,
             tool_disclosure: None,
             budget: false,
@@ -450,12 +457,76 @@ impl RebornIntegrationGroup {
         self.shared.channel_connection.clone()
     }
 
+    /// The run-delivery lifecycle router wired into this group's canonical
+    /// turn-event bus. Available only to delivery-proof scenarios.
+    pub fn run_delivery_events(&self) -> Option<Arc<RunDeliveryEventRouter>> {
+        self.shared.run_delivery_events.clone()
+    }
+
     /// The group-canonical binding's ACTOR user id — the identity capability
     /// dispatch stamps as `authenticated_actor_user_id` on execution contexts
     /// (loop-host capability port reads `run_context.actor()`), and therefore
     /// the caller identity extension-removal channel cleanup disconnects.
     pub fn canonical_actor_user(&self) -> UserId {
         self.shared.canonical_binding.actor_user_id.clone()
+    }
+
+    /// Register a hermetic external delivery target on the exact local
+    /// outbound registry `builtin.trigger_create` consults. Scenarios pass the
+    /// host-sealed reply binding read from an already-submitted source run;
+    /// no model-authored id participates in this setup.
+    pub fn register_source_delivery_target_for_test(
+        &self,
+        provider_key: &str,
+        target_id: &str,
+        reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef,
+    ) -> HarnessResult<()> {
+        let GroupCapability::HostRuntime(harness) = &self.shared.capability else {
+            return Err("source delivery target requires a host-runtime capability backend".into());
+        };
+        let services = harness
+            .reborn_services_for_test()
+            .ok_or("source delivery target requires composed Reborn services")?;
+        let target_id = ironclaw_product::RebornOutboundDeliveryTargetId::new(target_id)?;
+        ironclaw_reborn_composition::test_support::register_static_source_delivery_target_for_test(
+            services,
+            provider_key,
+            target_id,
+            reply_target_binding_ref,
+        )?;
+        Ok(())
+    }
+
+    /// Register the same real scripted provider chain used by ordinary group
+    /// threads for a caller scope materialized from a channel adapter. This
+    /// lets channel-origin whole-path tests execute model tool calls on the
+    /// exact admitted run instead of pre-writing the side effect under test.
+    pub async fn register_scope_script_for_test(
+        &self,
+        scope: TurnScope,
+        session_label: &str,
+        replies: impl IntoIterator<Item = RebornScriptedReply>,
+    ) -> HarnessResult<Arc<TraceLlm>> {
+        let scripted_llm = Arc::new(scripted_trace_llm(replies));
+        let raw: Arc<dyn LlmProvider> = scripted_llm.clone();
+        let session = create_session_manager(SessionConfig {
+            session_path: self
+                .shared
+                .turn_root
+                .path()
+                .join(format!("{session_label}.session.json")),
+            ..SessionConfig::default()
+        })
+        .await;
+        let llm_config = ironclaw_llm::testing::nearai_test_config(SCRIPTED_MODEL_NAME);
+        let provider = provider_chain_over(raw, &llm_config, session).await?;
+        let model_profile_id = ModelProfileId::new(INTERACTIVE_MODEL_PROFILE)
+            .map_err(|reason| format!("invalid model profile id: {reason}"))?;
+        let policy = LlmModelProfilePolicy::new().allow_model_profile(model_profile_id, None);
+        let gateway: Arc<dyn HostManagedModelGateway> =
+            Arc::new(LlmProviderModelGateway::new(provider, policy));
+        self.shared.scope_gateway.register(scope, gateway);
+        Ok(scripted_llm)
     }
 
     /// Create a per-thread *workflow* builder for `conversation_id`, over the
@@ -522,7 +593,7 @@ impl RebornIntegrationGroup {
 
     /// C-MULTIUSER: grant global always-allow (auto-approve) for a SPECIFIC run
     /// owner's `(tenant, user)` scope over the shared CAS-persisted
-    /// `AutoApproveSettingStore`. In a `multiuser_approvals` group (built with
+    /// `AutoApproveSettingStorePort`. In a `multiuser_approvals` group (built with
     /// `with_run_owner_scoped_capability_dispatch`), a turn OWNED by `owner`
     /// then dispatches its capability without raising an approval gate, while
     /// any OTHER owner's identical call still gates — the per-actor isolation
@@ -539,7 +610,7 @@ impl RebornIntegrationGroup {
     }
 
     /// C-MULTIUSER: set a SPECIFIC run owner's always-allow OFF over the shared
-    /// `AutoApproveSettingStore`. Auto-approve defaults ON when a user has no
+    /// `AutoApproveSettingStorePort`. Auto-approve defaults ON when a user has no
     /// record (`AUTO_APPROVE_DEFAULT_ENABLED = true`, production), so a per-actor
     /// isolation test that needs owner B to still GATE must give B its own
     /// explicit OFF setting — exactly as `live_approvals` disables its dispatch
@@ -670,6 +741,9 @@ pub struct RebornIntegrationGroupBuilder {
     /// Set by `extension_lifecycle()` before `into_group`; `None` for every
     /// other constructor.
     channel_connection: Option<Arc<ChannelConnectionTestBundle>>,
+    /// Canonical run-delivery lifecycle router for delivery-proof groups.
+    /// `into_group` composes this into the planned runtime's turn-event sink.
+    run_delivery_events: Option<Arc<RunDeliveryEventRouter>>,
 }
 
 impl RebornIntegrationGroupBuilder {
@@ -746,7 +820,7 @@ impl RebornIntegrationGroupBuilder {
         let scope_gateway = Arc::new(ScopeRegistryGateway::new());
 
         // Issue #5476 lease-wedge coverage: `.with_limits` is the store's own
-        // public builder method (`ironclaw_turns::filesystem_store`); this only
+        // public builder method (`ironclaw_turns::turn_state_row_store`); this only
         // calls it a second time with a shortened `runner_lease_ttl` when a test
         // opts in via `with_runner_lease_ttl_for_test`. `None` (default) leaves
         // `TurnStateStoreLimits::default()` untouched, byte-identical to
@@ -757,9 +831,8 @@ impl RebornIntegrationGroupBuilder {
         }
         let turns_scoped_fs =
             scoped_turns_fs_composite(Arc::clone(&base.composite), &base.canonical_binding)?;
-        let turn_store: Arc<FilesystemTurnStateRowStore<HarnessTurnBackend>> = Arc::new(
-            FilesystemTurnStateRowStore::new(Arc::clone(&turns_scoped_fs))
-                .with_limits(turn_state_limits),
+        let turn_store: Arc<TurnStateRowStore<HarnessTurnBackend>> = Arc::new(
+            TurnStateRowStore::new(Arc::clone(&turns_scoped_fs)).with_limits(turn_state_limits),
         );
         let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
         let checkpoint_state_store = in_memory_checkpoint_state_store();
@@ -812,8 +885,7 @@ impl RebornIntegrationGroupBuilder {
         // mount) — the await-edge tree lives at
         // `/turns/subagent-await-edges/...`, a sibling prefix, per §4.5a's
         // "one shared handle, never a per-store fixed view" rule.
-        let await_edge_store =
-            Arc::new(FilesystemAwaitEdgeStore::new(Arc::clone(&turns_scoped_fs)));
+        let await_edge_store = Arc::new(AwaitEdgeStore::new(Arc::clone(&turns_scoped_fs)));
         let await_edge_goal_store = Arc::new(in_memory_backed_subagent_goal_store());
         let await_edge_resolver = Arc::new(AwaitEdgeResolver::new_unbound(
             Arc::clone(&await_edge_store),
@@ -876,6 +948,9 @@ impl RebornIntegrationGroupBuilder {
         if let Some((sink, _)) = &trace_capture {
             turn_event_sinks.push(Arc::clone(sink));
         }
+        if let Some(router) = self.run_delivery_events.clone() {
+            turn_event_sinks.push(router as Arc<dyn TurnEventSink>);
+        }
         let composed_turn_event_sink: Option<Arc<dyn TurnEventSink>> = match turn_event_sinks.len()
         {
             0 | 1 => turn_event_sinks.pop(),
@@ -906,7 +981,7 @@ impl RebornIntegrationGroupBuilder {
             let accountant = build_default_budget_accountant(
                 Arc::clone(&governor) as Arc<dyn ResourceGovernor>,
                 Arc::new(ZeroCostTable) as Arc<dyn ModelCostTable>,
-                Arc::new(in_memory_backed_budget_gate_store()) as Arc<dyn BudgetGateStore>,
+                Arc::new(in_memory_backed_budget_gate_store()) as Arc<dyn BudgetGateStorePort>,
                 Arc::new(InMemoryBudgetEventSink::new()) as Arc<dyn BudgetEventSink>,
                 &BudgetDefaults::compiled_defaults(),
             );
@@ -1044,6 +1119,7 @@ impl RebornIntegrationGroupBuilder {
                 capability_recorder,
                 user_profile_source,
                 turn_event_sink: self.turn_event_sink,
+                run_delivery_events: self.run_delivery_events,
                 security_audit_sink,
                 milestone_sink: milestone_sink_for_assertions,
                 trace_capture_scope: trace_capture.map(|(_, scope)| scope),

@@ -555,6 +555,7 @@ mod tests {
 
     fn memory_request(capability_id: &'static str, input: Value) -> FirstPartyCapabilityRequest {
         FirstPartyCapabilityRequest {
+            origin: None,
             run_id: None,
             capability_id: CapabilityId::new(capability_id).unwrap(),
             scope: sample_scope(),

@@ -462,7 +462,7 @@ impl RebornProductAuthServicePorts {
     pub(crate) fn into_services(
         self,
         continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
-        secret_store: Arc<dyn ironclaw_secrets::SecretStore>,
+        secret_store: Arc<dyn ironclaw_secrets::SecretStorePort>,
     ) -> RebornProductAuthServices {
         // `secret_store` is required here (not defaulted) so the store that the
         // OAuth provider client writes access-token `expires_at` to is
@@ -544,7 +544,7 @@ pub struct RebornProductAuthServices {
     /// GSuite account visibility policy) so composition names no concrete extension.
     credential_account_visibility_policy: Option<Arc<dyn RuntimeCredentialAccountVisibilityPolicy>>,
     /// Secret store forwarded to the inline-refresh margin check (A2).
-    secret_store: Arc<dyn ironclaw_secrets::SecretStore>,
+    secret_store: Arc<dyn ironclaw_secrets::SecretStorePort>,
     host_managed_nearai_credential_scope: Option<AuthProductScope>,
     /// The recipe-driven auth engine (also wired as `provider_client`); serve
     /// routes use it to prepare vendor authorize URLs.
@@ -650,7 +650,7 @@ impl RebornProductAuthServices {
             credential_account_visibility_policy: None,
             // §4.3: volatile default — the production encrypted filesystem
             // secret store over an in-memory backend (ephemeral master key).
-            secret_store: Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral()),
+            secret_store: Arc::new(ironclaw_secrets::SecretStore::ephemeral()),
             host_managed_nearai_credential_scope: None,
             auth_engine: None,
             oauth_gate_driver: None,
@@ -806,7 +806,7 @@ impl RebornProductAuthServices {
         // metadata and skip the token-endpoint round-trip when the access token
         // is still fresh. The margin is fixed at `DEFAULT_ACCESS_REFRESH_MARGIN`.
         let inner_port: Arc<dyn RuntimeCredentialAccountRefreshPort> = self.clone();
-        let secret_store: Arc<dyn ironclaw_secrets::SecretStore> = self.secret_store.clone();
+        let secret_store: Arc<dyn ironclaw_secrets::SecretStorePort> = self.secret_store.clone();
         Arc::new(ProductAuthRuntimeCredentialAccountRefresher::new(
             inner_port,
             secret_store,
@@ -895,7 +895,7 @@ impl RebornProductAuthServices {
     /// store and skips an unnecessary token-endpoint round-trip when the
     /// access token is still fresh. Defaults to an in-memory store (always
     /// refreshes unconditionally — safe, backward-compatible).
-    pub fn with_secret_store(mut self, store: Arc<dyn ironclaw_secrets::SecretStore>) -> Self {
+    pub fn with_secret_store(mut self, store: Arc<dyn ironclaw_secrets::SecretStorePort>) -> Self {
         self.secret_store = store;
         self
     }
@@ -1846,7 +1846,7 @@ impl RebornProductAuthServices {
         RebornProductAuthServicePorts::from_shared(services.clone())
             .into_services(
                 continuation_dispatcher,
-                Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral()),
+                Arc::new(ironclaw_secrets::SecretStore::ephemeral()),
             )
             .with_flow_record_source(services)
     }
@@ -1888,7 +1888,9 @@ fn auth_product_error_from_reborn_error(error: RebornAuthProductError) -> AuthPr
         AuthErrorCode::RefreshFailed => AuthProductError::RefreshFailed,
         AuthErrorCode::CredentialMissing => AuthProductError::CredentialMissing,
         AuthErrorCode::AccountSelectionRequired => AuthProductError::AccountSelectionRequired,
-        AuthErrorCode::BackendUnavailable => AuthProductError::BackendUnavailable,
+        AuthErrorCode::BackendUnavailable | AuthErrorCode::LifecycleActivationFailed => {
+            AuthProductError::BackendUnavailable
+        }
         AuthErrorCode::ProviderIdentityAlreadyConnected => {
             AuthProductError::ProviderIdentityAlreadyConnected
         }

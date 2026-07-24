@@ -128,7 +128,7 @@ error posts the notice. Unit test the kind→hint mapping for exhaustive
 - `DeliveredGateRouteStore` gains
   `load_delivered_gate_route_by_conversation(&TenantId, &ExternalConversationRef) -> Result<Option<DeliveredGateRouteRecord>, String>`.
 - Implement on `InMemoryDeliveredGateRouteStore` (secondary map) and the
-  filesystem store (`filesystem_store.rs` — secondary index file keyed
+  filesystem store (`outbound_state_store.rs` — secondary index file keyed
   by a hash of the conversation ref, same scope dir). Extend the store
   round-trip tests to cover the new lookup, TTL expiry, and
   default-on-missing-field rehydration.

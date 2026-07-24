@@ -109,7 +109,31 @@ async def _set_reminder_outcome(emulate_url: str, preview: dict) -> None:
     assert EVENT_ID in json.dumps(preview), preview
 
 
+async def _calendar_list_baseline(emulate_url: str) -> None:
+    result = await google_json(
+        emulate_url, "GET", "/calendar/v3/users/me/calendarList"
+    )
+    assert isinstance(result, dict)
+    items = result.get("items", [])
+    assert any(item.get("id") == CALENDAR_ID for item in items), items
+
+
+async def _list_calendars_outcome(emulate_url: str, preview: dict) -> None:
+    await _calendar_list_baseline(emulate_url)
+    assert CALENDAR_ID in json.dumps(preview), preview
+
+
 GOOGLE_CALENDAR_PROVIDER_OPERATION_CASES = (
+    # Executable evidence for a read capability whose harvested journey was
+    # quarantined with the retired activation flow (#6520).
+    ProviderOperationCase(
+        case_id="google_calendar_list_calendars",
+        provider_service="google",
+        capability_id="google-calendar.list_calendars",
+        arguments={},
+        assert_baseline=_calendar_list_baseline,
+        assert_outcome=_list_calendars_outcome,
+    ),
     ProviderOperationCase(
         case_id="google_calendar_create_event",
         provider_service="google",

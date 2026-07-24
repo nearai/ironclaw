@@ -8,13 +8,13 @@ use ironclaw_host_api::{
     TenantId, ThreadId, UserId, VirtualPath,
 };
 use ironclaw_processes::{
-    FilesystemProcessResultStore, FilesystemProcessStore, ProcessError, ProcessResultStore,
-    ProcessStart, ProcessStatus, ProcessStore,
+    ProcessError, ProcessResultStore, ProcessResultStorePort, ProcessStart, ProcessStatus,
+    ProcessStore, ProcessStorePort,
 };
 
 type ProcessFs = ScopedFilesystem<InMemoryBackend>;
-type ProcessLifecycleStore = FilesystemProcessStore<InMemoryBackend>;
-type ResultStore = FilesystemProcessResultStore<InMemoryBackend>;
+type ProcessLifecycleStore = ProcessStore<InMemoryBackend>;
+type ResultStore = ProcessResultStore<InMemoryBackend>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ExpectedProcess {
@@ -137,8 +137,8 @@ fn process_fs() -> Arc<ProcessFs> {
 
 fn stores(fs: Arc<ProcessFs>) -> (ProcessLifecycleStore, ResultStore) {
     (
-        FilesystemProcessStore::new(Arc::clone(&fs)),
-        FilesystemProcessResultStore::new(fs),
+        ProcessStore::new(Arc::clone(&fs)),
+        ProcessResultStore::new(fs),
     )
 }
 

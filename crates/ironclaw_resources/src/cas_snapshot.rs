@@ -1,8 +1,8 @@
 //! Shared CAS-snapshot infrastructure for filesystem-backed governor
 //! stores in this crate.
 //!
-//! Both [`FilesystemResourceGovernorStore`](crate::FilesystemResourceGovernorStore)
-//! and [`FilesystemBudgetGateStore`](crate::FilesystemBudgetGateStore)
+//! Both [`ResourceGovernorStore`](crate::ResourceGovernorStore)
+//! and [`BudgetGateStore`](crate::BudgetGateStore)
 //! share the same shape: a single JSON snapshot per scope, read-modify-
 //! write through `ScopedFilesystem` with a `CasExpectation::Version`
 //! precondition, lock-free optimistic concurrency via the shared

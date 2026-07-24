@@ -70,11 +70,29 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         let surface = &input.surface;
         let surface_index = CapabilitySurfaceIndex::new(surface);
         let calls = input.calls;
+        let denied_auth_activity_id = state
+            .pending_auth_resume
+            .as_ref()
+            .filter(|pending| {
+                matches!(
+                    pending.disposition,
+                    Some(ironclaw_turns::GateResumeDisposition::Denied)
+                )
+            })
+            .map(|pending| pending.activity_id_for_resume());
 
         let mut visible_calls = Vec::new();
         let mut denied_calls = Vec::new();
         for call in calls {
-            if capability_is_visible(&surface_index, &call) {
+            // A denied auth gate terminalizes the exact already-admitted
+            // invocation. It is not a new capability dispatch, so removal from
+            // the current surface must not strand the durable BlockedAuth
+            // record. The loop-host and CapabilityHost still validate the
+            // saved activity, scope, actor, and capability identity before
+            // mutating it.
+            if denied_auth_activity_id == Some(call.activity_id)
+                || capability_is_visible(&surface_index, &call)
+            {
                 visible_calls.push(call);
                 continue;
             }
@@ -122,52 +140,6 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             return self
                 .completed_turn(ctx, state, result_refs_start, capability_batch)
                 .await;
-        }
-
-        // A run resumed from a user-DENIED auth gate must not re-dispatch the
-        // parked capability (still-missing credential -> re-block -> infinite loop).
-        // Surface a model-visible gate-declined failure (retry forbidden) for
-        // the denied call and let unrelated calls in the same batch proceed
-        // normally.
-        //
-        // We call `handle_capability_error` directly so the planner-visible
-        // summary can stay distinct from the stable product-facing declined
-        // reason token.
-        if let Some(pending) = state.pending_auth_resume.as_ref().filter(|p| {
-            matches!(
-                p.disposition.as_ref(),
-                Some(ironclaw_turns::GateResumeDisposition::Denied)
-            )
-        }) {
-            let denied_activity_id = pending.activity_id_for_resume();
-            // Take ownership now that we've confirmed the disposition is Denied.
-            // The unconditional take() below also covers the defensive case where
-            // auth_denied_calls is empty — preventing a stale Denied disposition
-            // from leaking into the fall-through batch.
-            state.pending_auth_resume = None;
-            match self
-                .short_circuit_denied_resume(
-                    ctx,
-                    state,
-                    &mut signatures,
-                    &mut capability_batch,
-                    denied_activity_id,
-                    "auth gate denied by user",
-                    visible_calls,
-                )
-                .await?
-            {
-                ControlFlow::Break(exit) => return Ok(exit),
-                ControlFlow::Continue((next, remaining)) => {
-                    state = next;
-                    visible_calls = remaining;
-                }
-            }
-            if visible_calls.is_empty() {
-                return self
-                    .completed_turn(ctx, state, result_refs_start, capability_batch)
-                    .await;
-            }
         }
 
         // A run resumed from a user-DENIED approval gate must not re-dispatch
@@ -1301,14 +1273,14 @@ fn auth_resume_for_gate(
 
     match auth_resume.as_mut() {
         Some(resume) => {
-            resume.resume_token = prior_approval.resume_token.clone();
+            resume.resume_token = Some(prior_approval.resume_token.clone());
             resume.prior_approval.get_or_insert_with(prior_identity);
             auth_resume
         }
-        None => Some(CapabilityAuthResume {
-            resume_token: prior_approval.resume_token.clone(),
-            prior_approval: Some(prior_identity()),
-        }),
+        None => Some(CapabilityAuthResume::resolved(
+            prior_approval.resume_token.clone(),
+            Some(prior_identity()),
+        )),
     }
 }
 
@@ -1601,10 +1573,7 @@ fn auth_resume_from_gate(
 ) -> Option<CapabilityAuthResume> {
     let base = resume_token
         .and_then(|token| CapabilityResumeToken::new(token.as_str()).ok())
-        .map(|resume_token| CapabilityAuthResume {
-            resume_token,
-            prior_approval: None,
-        });
+        .map(|resume_token| CapabilityAuthResume::resolved(resume_token, None));
     auth_resume_for_gate(base, prior_approval)
 }
 

@@ -1,7 +1,8 @@
 //! Declarative instance-configuration vocabulary for extension manifests.
 //!
 //! These descriptors describe deployment-owned values only. They do not
-//! install, activate, connect, pair, or execute an extension.
+//! install or execute an extension, and they do not create a caller's personal
+//! OAuth or pairing binding.
 
 use std::collections::BTreeSet;
 

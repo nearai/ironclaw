@@ -10,11 +10,9 @@
 //! edge. No extension or vendor may introduce a state, so the definition is
 //! generic and nothing downstream extends it.
 //!
-//! It is an **honest projection**, not a durable multi-step machine. The
-//! durable intent is `ironclaw_extensions::ExtensionActivationState`
-//! (`{Installed, Disabled, Enabled}`); this enum is projected from that intent
-//! plus active-set membership, the record's `last_error`, credential
-//! completeness, and runtime support. The host persists only the working
+//! It is an **honest internal projection**, not a durable user lifecycle.
+//! User state is derived from installation membership plus manifest-declared
+//! personal setup readiness. The host persists only the working
 //! subset it can prove — `Installed` (staged), `Active` (serving), and `Failed`
 //! (activation failed, carries `last_error`) — while `Configured`, `Disabled`,
 //! `Unsupported` are derived at projection time and `Removed` is an
@@ -52,7 +50,8 @@ pub enum InstallationState {
     Configured,
     /// Enabled and serving (in the host active-set).
     Active,
-    /// The user turned it off (`ExtensionActivationState::Disabled`).
+    /// A runtime-internal disabled working record. User disable is removal,
+    /// never this state.
     Disabled,
     /// Terminal non-auth activation failure (activation failed with a
     /// `last_error`). Does not auto-retry; distinct from pristine `Installed`.

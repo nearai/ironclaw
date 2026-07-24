@@ -28,6 +28,9 @@ pub(crate) fn outbound_target_tools_profile() -> HarnessResult<ToolsProfile> {
             CapabilityId::new(
                 ironclaw_reborn_composition::test_support::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
             )?,
+            CapabilityId::new(
+                ironclaw_host_runtime::OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
+            )?,
         ],
         effect_kinds: vec![
             EffectKind::DispatchCapability,

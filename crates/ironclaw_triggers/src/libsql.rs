@@ -1351,7 +1351,7 @@ fn row_to_record(row: &libsql::Row) -> Result<TriggerRecord, TriggerError> {
         .map(|value| parse_turn_run_id(&value))
         .transpose()?;
     let delivery_target = optional_text(row, DELIVERY_TARGET_COL, "delivery_target")?
-        .map(crate::TriggerDeliveryTargetId::new)
+        .map(crate::parse_trigger_delivery_target_id)
         .transpose()?;
 
     let record = TriggerRecord {

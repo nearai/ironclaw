@@ -14,7 +14,7 @@ use ironclaw_host_api::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::cas_record::FilesystemCasRecordStore;
+use crate::cas_record::CasRecordStore;
 
 const POLICY_PREFIX: &str = "/approvals/persistent";
 const POLICY_PATH_CACHE_MAX_ENTRIES: usize = 1024;
@@ -174,7 +174,7 @@ pub struct PersistentApprovalPolicyInput {
 }
 
 #[async_trait]
-pub trait PersistentApprovalPolicyStore: Send + Sync {
+pub trait PersistentApprovalPolicyStorePort: Send + Sync {
     /// Creates or refreshes a reusable persistent approval policy.
     ///
     /// `max_invocations` is always cleared; persistent policies are
@@ -216,26 +216,26 @@ pub trait PersistentApprovalPolicyStore: Send + Sync {
     ) -> Result<Option<PersistentApprovalPolicy>, PersistentApprovalPolicyError>;
 }
 
-pub struct FilesystemPersistentApprovalPolicyStore<F>
+pub struct PersistentApprovalPolicyStore<F>
 where
     F: RootFilesystem,
 {
-    records: FilesystemCasRecordStore<F, PersistentApprovalPolicyKey>,
+    records: CasRecordStore<F, PersistentApprovalPolicyKey>,
 }
 
-impl<F> FilesystemPersistentApprovalPolicyStore<F>
+impl<F> PersistentApprovalPolicyStore<F>
 where
     F: RootFilesystem,
 {
     pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
         Self {
-            records: FilesystemCasRecordStore::new(filesystem, POLICY_PATH_CACHE_MAX_ENTRIES),
+            records: CasRecordStore::new(filesystem, POLICY_PATH_CACHE_MAX_ENTRIES),
         }
     }
 }
 
 #[async_trait]
-impl<F> PersistentApprovalPolicyStore for FilesystemPersistentApprovalPolicyStore<F>
+impl<F> PersistentApprovalPolicyStorePort for PersistentApprovalPolicyStore<F>
 where
     F: RootFilesystem + 'static,
 {
@@ -398,7 +398,7 @@ where
     }
 }
 
-impl<F> FilesystemPersistentApprovalPolicyStore<F>
+impl<F> PersistentApprovalPolicyStore<F>
 where
     F: RootFilesystem + 'static,
 {
@@ -576,8 +576,8 @@ mod tests {
     // The single production store, exercised over the in-memory filesystem
     // backend — the seam that replaced the deleted
     // `InMemoryPersistentApprovalPolicyStore`.
-    fn memory_store() -> FilesystemPersistentApprovalPolicyStore<InMemoryBackend> {
-        FilesystemPersistentApprovalPolicyStore::new(scoped_fs(
+    fn memory_store() -> PersistentApprovalPolicyStore<InMemoryBackend> {
+        PersistentApprovalPolicyStore::new(scoped_fs(
             Arc::new(InMemoryBackend::new()),
             "tenant-a",
             "alice",
@@ -623,12 +623,12 @@ mod tests {
     async fn filesystem_policy_store_survives_restart() {
         let backend = Arc::new(InMemoryBackend::new());
         let scoped = scoped_fs(Arc::clone(&backend), "tenant-a", "alice");
-        let store = FilesystemPersistentApprovalPolicyStore::new(Arc::clone(&scoped));
+        let store = PersistentApprovalPolicyStore::new(Arc::clone(&scoped));
         let scope = scope(None, Some("thread-a"));
         let key = key_for(&scope);
 
         let saved = store.allow(input(scope)).await.expect("allow policy");
-        let reloaded = FilesystemPersistentApprovalPolicyStore::new(scoped)
+        let reloaded = PersistentApprovalPolicyStore::new(scoped)
             .lookup(&key)
             .await
             .expect("lookup")
@@ -642,7 +642,7 @@ mod tests {
     async fn filesystem_policy_store_caches_policy_paths() {
         let backend = Arc::new(InMemoryBackend::new());
         let scoped = scoped_fs(backend, "tenant-a", "alice");
-        let store = FilesystemPersistentApprovalPolicyStore::new(scoped);
+        let store = PersistentApprovalPolicyStore::new(scoped);
         let scope = scope(None, Some("thread-a"));
         let key = key_for(&scope);
 
@@ -657,7 +657,7 @@ mod tests {
     async fn filesystem_policy_store_bounds_policy_path_cache() {
         let backend = Arc::new(InMemoryBackend::new());
         let scoped = scoped_fs(backend, "tenant-a", "alice");
-        let store = FilesystemPersistentApprovalPolicyStore::new(scoped);
+        let store = PersistentApprovalPolicyStore::new(scoped);
 
         for index in 0..(POLICY_PATH_CACHE_MAX_ENTRIES + 2) {
             store
@@ -680,7 +680,7 @@ mod tests {
             )
             .expect("mount local filesystem");
         let scoped = scoped_fs(Arc::new(backend), "tenant-a", "alice");
-        let store = FilesystemPersistentApprovalPolicyStore::new(scoped);
+        let store = PersistentApprovalPolicyStore::new(scoped);
         let scope = scope(None, Some("thread-a"));
         let key = key_for(&scope);
 
@@ -711,7 +711,7 @@ mod tests {
     async fn filesystem_policy_store_evicts_idle_mutation_locks() {
         let backend = Arc::new(InMemoryBackend::new());
         let scoped = scoped_fs(backend, "tenant-a", "alice");
-        let store = FilesystemPersistentApprovalPolicyStore::new(scoped);
+        let store = PersistentApprovalPolicyStore::new(scoped);
 
         store
             .allow(input(scope(None, Some("thread-a"))))
@@ -771,7 +771,7 @@ mod tests {
     async fn filesystem_revoke_if_source_approval_request_revokes_matching_source() {
         let backend = Arc::new(InMemoryBackend::new());
         let scoped = scoped_fs(backend, "tenant-a", "alice");
-        let store = FilesystemPersistentApprovalPolicyStore::new(scoped);
+        let store = PersistentApprovalPolicyStore::new(scoped);
         let scope = scope(None, Some("thread-a"));
         let key = key_for(&scope);
         let source = ApprovalRequestId::new();
@@ -844,7 +844,7 @@ mod tests {
         // thread and finds it through the canonical path.
         let backend = Arc::new(InMemoryBackend::new());
         let scoped = scoped_fs(Arc::clone(&backend), "tenant-a", "alice");
-        let store = FilesystemPersistentApprovalPolicyStore::new(Arc::clone(&scoped));
+        let store = PersistentApprovalPolicyStore::new(Arc::clone(&scoped));
 
         let granted = store
             .allow(input(scope(Some("project-a"), Some("thread-1"))))
@@ -852,7 +852,7 @@ mod tests {
             .expect("allow project-scoped policy");
 
         let new_thread_key = key_for(&scope(Some("project-a"), Some("thread-2")));
-        let reloaded = FilesystemPersistentApprovalPolicyStore::new(scoped)
+        let reloaded = PersistentApprovalPolicyStore::new(scoped)
             .lookup(&new_thread_key)
             .await
             .expect("lookup")

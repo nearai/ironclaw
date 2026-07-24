@@ -197,6 +197,7 @@ where
         let mut request = CapabilityDispatchRequest {
             capability_id: invocation.capability,
             scope: invocation.scope,
+            origin: invocation.origin,
             authenticated_actor_user_id,
             run_id,
             estimate: invocation.estimate,

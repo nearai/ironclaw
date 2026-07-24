@@ -3,6 +3,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+// arch-exempt: large_file, mechanical store-port rename churn only, plan #6263
+
 mod support;
 
 use async_trait::async_trait;
@@ -22,7 +24,7 @@ use ironclaw_reborn_openai_compat::{
     OpenAiCompatMarkExternalToolResumeCompleted, OpenAiCompatProductActionRef,
     OpenAiCompatProjectionRef, OpenAiCompatProjectionStreamer, OpenAiCompatRecordAcceptedAck,
     OpenAiCompatRefError, OpenAiCompatRefLookup, OpenAiCompatRefReservation,
-    OpenAiCompatRefReservationOutcome, OpenAiCompatRefStore, OpenAiCompatResourceMapping,
+    OpenAiCompatRefReservationOutcome, OpenAiCompatRefStorePort, OpenAiCompatResourceMapping,
     OpenAiCompatRouterState, OpenAiCompatTurnRunRef, OpenAiResponseId, OpenAiResponseObject,
     OpenAiResponseOutputItem, OpenAiResponseOutputItemStatus, OpenAiResponseProjection,
     OpenAiResponseProjectionStreamRequest, OpenAiResponseReadRequest, OpenAiResponseStatus,
@@ -1198,7 +1200,7 @@ fn test_router(
 
 fn router_with_store(
     workflow: Arc<FakeProductSurface>,
-    ref_store: Arc<dyn OpenAiCompatRefStore>,
+    ref_store: Arc<dyn OpenAiCompatRefStorePort>,
     reader: Arc<dyn OpenAiResponsesProjectionReader>,
 ) -> axum::Router {
     router_with_store_and_caller(workflow, ref_store, reader, caller())
@@ -1206,7 +1208,7 @@ fn router_with_store(
 
 fn router_with_store_and_caller(
     workflow: Arc<FakeProductSurface>,
-    ref_store: Arc<dyn OpenAiCompatRefStore>,
+    ref_store: Arc<dyn OpenAiCompatRefStorePort>,
     reader: Arc<dyn OpenAiResponsesProjectionReader>,
     caller: OpenAiCompatAuthenticatedCaller,
 ) -> axum::Router {
@@ -1215,7 +1217,7 @@ fn router_with_store_and_caller(
 
 fn router_with_product_surface(
     workflow: Arc<dyn ProductSurface>,
-    ref_store: Arc<dyn OpenAiCompatRefStore>,
+    ref_store: Arc<dyn OpenAiCompatRefStorePort>,
     reader: Arc<dyn OpenAiResponsesProjectionReader>,
     caller: OpenAiCompatAuthenticatedCaller,
 ) -> axum::Router {
@@ -1758,7 +1760,7 @@ impl OpenAiCompatExternalToolResume for ConflictAfterFirstResume {
 }
 
 struct FailsFirstResumeCompletionMark {
-    inner: Arc<dyn OpenAiCompatRefStore>,
+    inner: Arc<dyn OpenAiCompatRefStorePort>,
     fail_next_mark: Mutex<bool>,
 }
 
@@ -1772,7 +1774,7 @@ impl FailsFirstResumeCompletionMark {
 }
 
 #[async_trait]
-impl OpenAiCompatRefStore for FailsFirstResumeCompletionMark {
+impl OpenAiCompatRefStorePort for FailsFirstResumeCompletionMark {
     async fn reserve(
         &self,
         request: OpenAiCompatRefReservation,
@@ -1825,7 +1827,7 @@ impl OpenAiCompatRefStore for FailsFirstResumeCompletionMark {
 
 fn router_with_external_tools(
     workflow: Arc<FakeProductSurface>,
-    ref_store: Arc<dyn OpenAiCompatRefStore>,
+    ref_store: Arc<dyn OpenAiCompatRefStorePort>,
     reader: Arc<dyn OpenAiResponsesProjectionReader>,
     store: Arc<dyn OpenAiCompatExternalToolStore>,
     resume: Arc<dyn OpenAiCompatExternalToolResume>,
@@ -1838,7 +1840,7 @@ fn router_with_external_tools(
 
 fn router_with_external_tools_and_streamer(
     workflow: Arc<FakeProductSurface>,
-    ref_store: Arc<dyn OpenAiCompatRefStore>,
+    ref_store: Arc<dyn OpenAiCompatRefStorePort>,
     reader: Arc<dyn OpenAiResponsesProjectionReader>,
     streamer: Arc<dyn OpenAiCompatProjectionStreamer>,
     store: Arc<dyn OpenAiCompatExternalToolStore>,

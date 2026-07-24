@@ -181,6 +181,22 @@ inbound = true
 outbound = true
 conversation_model = "continuous"
 
+[channel.connection]
+provider = "slack"
+strategy = "oauth"
+instructions = "Connect your Slack account with OAuth from the Slack extension configuration. The workspace bot is configured once by an administrator; this connection authorizes only your personal Slack tools and identity."
+input_placeholder = ""
+submit_label = "Connect Slack"
+error_message = "Slack OAuth connection failed. Try connecting Slack again."
+connection_success_message = "Slack is installed and connected for this user. Slack tools use the user's OAuth account, while inbound and outbound channel messages use the administrator-configured workspace bot."
+
+[channel.connection.notices]
+connect_required = "👋 Connect your Slack account in the IronClaw web app, then message me here again."
+paired = "✅ Slack is connected. You can talk to IronClaw here."
+already_paired_same_user = "✅ This Slack account is already connected to you."
+already_bound_to_other_user = "This Slack account is already connected to another IronClaw user."
+expired_or_unknown = "That Slack connection is invalid or expired. Start a fresh OAuth connection from IronClaw."
+
 [channel.ingress]
 route_suffix = "events"
 method = "post"
@@ -199,34 +215,6 @@ signed_payload = [
   { header = "X-Slack-Request-Timestamp" },
   { literal = ":" },
   { body = true },
-]
-
-[channel.config]
-fields = [
-  { handle = "slack_bot_token", label = "Bot token", secret = true },
-  { handle = "slack_signing_secret", label = "Signing secret", secret = true },
-  # Connection-scoping values for the generic post-OAuth identity binding
-  # (handle-suffix convention: *_team_id / *_app_id map onto the proven
-  # identity claims).
-  { handle = "slack_team_id", label = "Workspace (team) ID", secret = false },
-  { handle = "slack_api_app_id", label = "App ID", secret = false },
-  # Operator installation identity + inbound-subject defaults (previously
-  # carried by the retired Slack setup surface).
-  { handle = "slack_installation_id", label = "Installation ID", secret = false },
-  { handle = "slack_bot_user_id", label = "Bot user ID", secret = false },
-  { handle = "slack_shared_subject_user_id", label = "Shared subject user ID (optional)", secret = false },
-  # Deployment OAuth client material for [auth.slack]: the recipe's
-  # client_credentials handles resolve through this channel configuration.
-  { handle = "slack_oauth_client_id", label = "OAuth client ID", secret = false },
-  { handle = "slack_oauth_client_secret", label = "OAuth client secret", secret = true },
-  # Channel admission + routing, JSON-valued:
-  #  - slack_allowed_channels: JSON array of Slack channel IDs, e.g.
-  #    ["C0123ALPHA", "C0456BETA"].
-  #  - slack_subject_routes: JSON object mapping Slack channel ID to the
-  #    subject user id turns in that channel run as, e.g.
-  #    {"C0123ALPHA": "subject-user-1"}.
-  { handle = "slack_allowed_channels", label = "Allowed channels (JSON array of Slack channel IDs)", secret = false },
-  { handle = "slack_subject_routes", label = "Subject routes (JSON object: channel ID -> subject user ID)", secret = false },
 ]
 
 [[channel.egress]]

@@ -33,7 +33,7 @@ use ironclaw_host_api::RestrictedEgress;
 use ironclaw_outbound::{
     CommunicationPreferenceRepository, DeliveryFailureKind, OutboundDeliveryAttempt,
     OutboundDeliveryDecision, OutboundDeliveryStatus, OutboundPolicyService, OutboundPushCandidate,
-    OutboundPushKind, OutboundStateStore, PrepareCommunicationDeliveryRequest,
+    OutboundPushKind, OutboundStateStorePort, PrepareCommunicationDeliveryRequest,
     UpdateDeliveryStatusRequest, ValidatedReplyTargetBinding,
 };
 use ironclaw_turns::{TurnRunId, TurnScope};
@@ -242,7 +242,7 @@ impl Default for DeliveryRetryPolicy {
 /// The delivery coordinator. Sole writer of delivery state; one instance per
 /// composition (§5.4: "no direct product send path").
 pub struct DeliveryCoordinator {
-    store: Arc<dyn OutboundStateStore>,
+    store: Arc<dyn OutboundStateStorePort>,
     resolver: Arc<dyn ChannelDeliveryResolver>,
     reply_context: Arc<dyn DeliveryReplyContextSource>,
     retry: DeliveryRetryPolicy,
@@ -259,7 +259,7 @@ impl DeliveryCoordinator {
     /// context source — there is deliberately no no-op-sink constructor
     /// (OUT-4): a composition that cannot persist attempts must not deliver.
     pub fn new(
-        store: Arc<dyn OutboundStateStore>,
+        store: Arc<dyn OutboundStateStorePort>,
         resolver: Arc<dyn ChannelDeliveryResolver>,
         reply_context: Arc<dyn DeliveryReplyContextSource>,
         retry: DeliveryRetryPolicy,

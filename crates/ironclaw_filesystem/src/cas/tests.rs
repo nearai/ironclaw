@@ -18,9 +18,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{CasApply, CasUpdateError, cas_update};
 use crate::{
-    BackendCapabilities, CasExpectation, ContentType, DirEntry, Entry, FileStat, FilesystemError,
-    FilesystemOperation, InMemoryBackend, RecordKind, RecordVersion, RootFilesystem,
-    ScopedFilesystem, VersionedEntry,
+    BackendCapabilities, Capability, CasExpectation, ContentType, DirEntry, Entry, FileStat,
+    FilesystemError, FilesystemOperation, InMemoryBackend, RecordKind, RecordVersion,
+    RootFilesystem, ScopedFilesystem, VersionedEntry,
 };
 // The generic get/put backend-error regressions inject a `Backend` fault below
 // the real CAS-capable `InMemoryBackend` via the shared `FaultInjecting`
@@ -79,6 +79,150 @@ fn scoped<F: RootFilesystem>(root: Arc<F>) -> ScopedFilesystem<F> {
 async fn increment(current: Option<Counter>) -> Result<CasApply<Counter, u64>, TestError> {
     let next = current.map(|c| c.value).unwrap_or(0) + 1;
     Ok(CasApply::new(Counter { value: next }, next))
+}
+
+async fn delete_counter(current: Option<Counter>) -> Result<CasApply<Counter, ()>, TestError> {
+    let Some(snapshot) = current else {
+        return Ok(CasApply::no_op(Counter { value: 0 }, ()));
+    };
+    Ok(CasApply::delete(snapshot, ()))
+}
+
+#[tokio::test]
+async fn delete_action_removes_present_snapshot_and_is_idempotent_when_absent() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let fs = Arc::new(scoped(Arc::clone(&backend)));
+    let scope = ResourceScope::system();
+
+    cas_update(
+        fs.as_ref(),
+        &scope,
+        &counter_path(),
+        decode_counter,
+        encode_counter,
+        increment,
+    )
+    .await
+    .expect("seed counter");
+
+    cas_update(
+        fs.as_ref(),
+        &scope,
+        &counter_path(),
+        decode_counter,
+        encode_counter,
+        delete_counter,
+    )
+    .await
+    .expect("delete counter");
+    cas_update(
+        fs.as_ref(),
+        &scope,
+        &counter_path(),
+        decode_counter,
+        encode_counter,
+        delete_counter,
+    )
+    .await
+    .expect("replayed delete is a no-op");
+
+    assert!(
+        fs.get(&scope, &counter_path())
+            .await
+            .expect("read deleted counter")
+            .is_none()
+    );
+}
+
+struct CasWithoutDeleteBackend {
+    inner: InMemoryBackend,
+    delete_called: AtomicBool,
+}
+
+impl CasWithoutDeleteBackend {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryBackend::new(),
+            delete_called: AtomicBool::new(false),
+        }
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for CasWithoutDeleteBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities::in_memory_full().without(Capability::Delete)
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn delete_if_version(
+        &self,
+        path: &VirtualPath,
+        expected_version: RecordVersion,
+    ) -> Result<(), FilesystemError> {
+        self.delete_called.store(true, Ordering::SeqCst);
+        self.inner.delete_if_version(path, expected_version).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+}
+
+#[tokio::test]
+async fn delete_action_fails_closed_when_backend_does_not_advertise_delete() {
+    let backend = Arc::new(CasWithoutDeleteBackend::new());
+    let fs = Arc::new(scoped(Arc::clone(&backend)));
+    let scope = ResourceScope::system();
+
+    cas_update(
+        fs.as_ref(),
+        &scope,
+        &counter_path(),
+        decode_counter,
+        encode_counter,
+        increment,
+    )
+    .await
+    .expect("seed counter");
+
+    let result = cas_update(
+        fs.as_ref(),
+        &scope,
+        &counter_path(),
+        decode_counter,
+        encode_counter,
+        delete_counter,
+    )
+    .await;
+
+    assert!(matches!(result, Err(CasUpdateError::CasUnsupported)));
+    assert!(
+        !backend.delete_called.load(Ordering::SeqCst),
+        "known missing delete capability must fail before conditional delete I/O"
+    );
+    assert!(
+        fs.get(&scope, &counter_path())
+            .await
+            .expect("read preserved counter")
+            .is_some()
+    );
 }
 
 // ─── A non-CAS, byte-only backend ───────────────────────────────────────────

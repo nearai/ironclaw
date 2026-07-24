@@ -1,10 +1,10 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use ironclaw_extensions::{
-    CapabilityVisibility, ExtensionActivationState, ExtensionError, ExtensionInstallation,
-    ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
-    ExtensionLifecycleService, ExtensionManifestRecord, ExtensionManifestRef, ExtensionPackage,
-    InstallationOwner, ManifestHash, ManifestSource, canonicalize_installation_rows,
+    CapabilityVisibility, ExtensionError, ExtensionInstallation, ExtensionInstallationError,
+    ExtensionInstallationId, ExtensionInstallationStorePort, ExtensionLifecycleService,
+    ExtensionManifestRecord, ExtensionManifestRef, ExtensionPackage, InstallationOwner,
+    ManifestHash, ManifestSource, canonicalize_installation_rows,
 };
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::sha256_digest_token;
@@ -21,7 +21,7 @@ const RETIRED_SLACK_USER_EXTENSION_ID: &str = "slack_user";
 pub async fn restore_extension_lifecycle_state(
     catalog: &AvailableExtensionCatalog,
     filesystem: &Arc<dyn RootFilesystem>,
-    installation_store: &Arc<dyn ExtensionInstallationStore>,
+    installation_store: &Arc<dyn ExtensionInstallationStorePort>,
     lifecycle_service: &Arc<Mutex<ExtensionLifecycleService>>,
     active_extensions: &ActiveExtensionPublisher,
 ) -> Result<(), ProductSurfaceFailure> {
@@ -61,30 +61,18 @@ pub async fn restore_extension_lifecycle_state(
                 .install(available.package.clone())
                 .await
                 .map_err(map_extension_error)?;
-            match installation.activation_state() {
-                ExtensionActivationState::Enabled => {
-                    lifecycle
-                        .enable(&available.package.id)
-                        .await
-                        .map_err(map_extension_error)?;
-                }
-                ExtensionActivationState::Installed | ExtensionActivationState::Disabled => {
-                    lifecycle
-                        .disable(&available.package.id)
-                        .await
-                        .map_err(map_extension_error)?;
-                }
-            }
+            lifecycle
+                .enable(&available.package.id)
+                .await
+                .map_err(map_extension_error)?;
         }
-        if installation.activation_state() == ExtensionActivationState::Enabled {
-            active_extensions.publish(&available.package)?;
-        }
+        active_extensions.publish(&available.package)?;
     }
     Ok(())
 }
 
 async fn canonicalize_persisted_installation_rows(
-    installation_store: &Arc<dyn ExtensionInstallationStore>,
+    installation_store: &Arc<dyn ExtensionInstallationStorePort>,
 ) -> Result<Vec<ExtensionInstallation>, ProductSurfaceFailure> {
     let persisted = installation_store
         .list_installations()
@@ -121,7 +109,7 @@ async fn canonicalize_persisted_installation_rows(
 }
 
 async fn remove_retired_internal_installation(
-    installation_store: &Arc<dyn ExtensionInstallationStore>,
+    installation_store: &Arc<dyn ExtensionInstallationStorePort>,
     installation: &ExtensionInstallation,
 ) -> Result<bool, ProductSurfaceFailure> {
     if installation.extension_id().as_str() != RETIRED_SLACK_USER_EXTENSION_ID {
@@ -181,7 +169,6 @@ pub fn prepare_install(
     let installation = ExtensionInstallation::new(
         installation_id,
         available.package.id.clone(),
-        ExtensionActivationState::Installed,
         ExtensionManifestRef::new(available.package.id.clone(), Some(manifest_hash)),
         Vec::new(),
         chrono::Utc::now(),
@@ -221,7 +208,6 @@ fn prepare_manifest_migration(
     let installation = ExtensionInstallation::new(
         existing.installation_id().clone(),
         existing.extension_id().clone(),
-        existing.activation_state(),
         ExtensionManifestRef::new(existing.extension_id().clone(), Some(manifest_hash)),
         existing.credential_bindings().to_vec(),
         chrono::Utc::now(),
@@ -235,7 +221,7 @@ fn prepare_manifest_migration(
 }
 
 async fn migrate_host_bundled_manifest_hash(
-    installation_store: &Arc<dyn ExtensionInstallationStore>,
+    installation_store: &Arc<dyn ExtensionInstallationStorePort>,
     available: &AvailableExtensionPackage,
     installation: &ExtensionInstallation,
     hash_error: ProductSurfaceFailure,

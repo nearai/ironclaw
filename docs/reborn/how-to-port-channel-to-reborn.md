@@ -12,7 +12,7 @@ Ask first: **is this channel an IronClaw-owned user surface, or an external prot
 | --- | --- | --- |
 | Host-owned native surface | TUI, Web Gateway, local REPL, built-in local control endpoints | Native Reborn surface that enters the product workflow directly |
 | External protocol integration | Telegram, Slack, Discord, Signal-like integrations, external webhooks | WASM ProductAdapter component as the production artifact |
-| Legacy WASM channel | `channels-src/telegram` style plugins | Port to WASM ProductAdapter; reuse protocol lessons, not v1 DTOs |
+| Legacy WASM channel | Retired v1 WASM channel plugins | Port to WASM ProductAdapter; reuse protocol lessons, not v1 DTOs |
 | Native external integration | `SignalChannel` style native protocol adapter | Extract pure core logic, then wrap as WASM ProductAdapter |
 
 Rule of thumb:
@@ -186,7 +186,7 @@ A ProductAdapter WIT contract already exists at `crates/ironclaw_wasm_product_ad
 
 ## Path C: port a legacy WASM channel
 
-Use this path for existing v1 WASM channels such as `channels-src/telegram`.
+Use this path for retired v1 WASM channels that need a Reborn replacement.
 
 Do reuse:
 
@@ -328,5 +328,5 @@ This guide can be used now for planning and native-core work, but the full produ
 - `crates/ironclaw_wasm_product_adapters/wit/product_adapter.wit`
 - `docs/reborn/contracts/wasm.md`
 - `src/channels/mod.rs`
-- `channels-src/telegram/` as a v1 WASM reference only
+- `crates/ironclaw_first_party_extensions/assets/telegram/manifest.toml` as the current packaged Telegram extension reference
 - Tracking architecture issue: <https://github.com/nearai/ironclaw/issues/3572>

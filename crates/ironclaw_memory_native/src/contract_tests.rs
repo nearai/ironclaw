@@ -35,7 +35,7 @@
 //! (isolation, round-trip, list filtering, search isolation). The
 //! shape — not the breadth — is the point. Follow-up PRs can extend
 //! the suite (CAS, metadata, append outcomes) and port other traits
-//! (`IdempotencyLedger`, `CheckpointStateStore`, `ProcessStore`, …)
+//! (`IdempotencyLedger`, `CheckpointStateStorePort`, `ProcessStorePort`, …)
 //! onto the same pattern.
 
 use ironclaw_filesystem::FilesystemError;

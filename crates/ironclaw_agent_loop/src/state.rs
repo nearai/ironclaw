@@ -355,7 +355,7 @@ impl LoopExecutionState {
     /// the executor produced via `serde_json::to_vec(&state)` before passing
     /// the bytes to `LoopCheckpointPort::stage_checkpoint_payload`. The payload
     /// contains **no outer envelope**: schema-id and kind live in store-side
-    /// metadata, validated by `CheckpointStateStore::get_checkpoint_state`
+    /// metadata, validated by `CheckpointStateStorePort::get_checkpoint_state`
     /// before the bytes ever reach this function. The `kind` argument is
     /// accepted for API symmetry (the call site can document what boundary the
     /// checkpoint belongs to) but is not used to authenticate the bytes.
@@ -529,7 +529,7 @@ mod tests {
     /// Encode a checkpoint payload the same way the executor does:
     /// `serde_json::to_vec(&state)` — no outer envelope.
     /// Schema-id and kind are stored as side-channel metadata by
-    /// `CheckpointStateStore::put_checkpoint_state`, not inside the bytes.
+    /// `CheckpointStateStorePort::put_checkpoint_state`, not inside the bytes.
     fn encode_payload(state: &LoopExecutionState) -> Vec<u8> {
         serde_json::to_vec(state).expect("encode payload")
     }
@@ -812,7 +812,7 @@ mod tests {
     }
 
     /// Schema-id and kind validation now live in the store layer
-    /// (`CheckpointStateStore::get_checkpoint_state`) — not in the payload
+    /// (`CheckpointStateStorePort::get_checkpoint_state`) — not in the payload
     /// bytes. `from_checkpoint_payload` therefore succeeds for any
     /// well-formed `LoopExecutionState` regardless of what kind is passed.
     #[test]

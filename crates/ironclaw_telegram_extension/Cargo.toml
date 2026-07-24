@@ -23,12 +23,15 @@ chrono = { version = "0.4", features = ["serde"] }
 # moved to dev-deps because it is only referenced from the integration
 # contract test crate, not from the adapter library itself.
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+ironclaw_product = { path = "../ironclaw_product", version = "0.1.0" }
+ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
 ironclaw_telegram_v2_adapter = { path = "../ironclaw_telegram_v2_adapter", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 
 [dev-dependencies]
+ironclaw_product = { path = "../ironclaw_product", version = "0.1.0", features = ["test-support", "host-auth-mint"] }
 # `test-support` exposes `FakeProtocolHttpEgress` / `FakeOutboundDeliverySink`
 # used by the `adapter::tests` mod. `host-auth-mint` exposes
 # `mark_shared_secret_header_verified` used by `payload::tests` to mint

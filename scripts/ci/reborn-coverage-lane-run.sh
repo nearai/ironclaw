@@ -3,17 +3,18 @@
 # Run one instrumented Reborn integration-tier coverage lane and produce that
 # lane's lcov tracefile.
 #
-# The 34 tests/integration/ suites (see reborn-coverage-int-tier-tests.sh for
-# the canonical enumeration) are split across 5 lanes in
+# The tests/integration/ suites (see reborn-coverage-int-tier-tests.sh for
+# the canonical, registration-driven enumeration — flat, domain-folder, and
+# group bins alike) are split across 5 lanes in
 # .github/workflows/reborn-tests.yml's `reborn-integration-coverage` matrix
-# job: 4 modulo-partitions of the 27 flat `reborn_integration_*` suites, plus
-# one dedicated lane for all 7 `reborn_group_*` suites.
+# job: 4 modulo-partitions of the `reborn_integration_*` suites, plus one
+# dedicated lane for the `reborn_group_*` suites.
 #
-# This script is the SINGLE execution of the 34 int-tier suites for pass/fail
+# This script is the SINGLE execution of the int-tier suites for pass/fail
 # purposes too: `cargo llvm-cov ... test` has the same pass/fail semantics as
-# `cargo test`, so there is no separate uninstrumented run of the 27 flat
-# suites. (The 7 group suites also still have their own uninstrumented
-# `reborn-group-tests` job via run-reborn-group-tests.sh, which stays as the
+# `cargo test`, so there is no separate uninstrumented run of the
+# `reborn_integration_*` suites. (The group suites also still have their own
+# uninstrumented `reborn-group-tests` job via run-reborn-group-tests.sh, which stays as the
 # fast low-contention pass/fail signal for that suite; this lane additionally
 # runs them once more, instrumented, for coverage.)
 #
@@ -36,12 +37,12 @@
 # reborn_group_* rewrite rules), so this script never re-derives that mapping.
 #
 # Modes (REBORN_COV_LANE_MODE):
-#   flat-partition  Modulo-partitions the 27 reborn_integration_* suites
+#   flat-partition  Modulo-partitions the reborn_integration_* suites
 #                   across REBORN_COV_LANE_PARTITIONS lanes; REBORN_COV_LANE_INDEX
 #                   (0-based) selects this lane's slice — mirrors
 #                   scripts/ci/run-reborn-root-partition.sh's partitioning.
-#   group           Runs all reborn_group_* suites (7 total) — the one
-#                   dedicated group coverage lane.
+#   group           Runs all reborn_group_* suites — the one dedicated
+#                   group coverage lane.
 #
 # Usage: REBORN_COV_LANE_MODE=... [other env] reborn-coverage-lane-run.sh <output-lcov-path>
 

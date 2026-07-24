@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use ironclaw_host_api::{ResourceScope, SecretHandle};
-use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStoreError};
+use ironclaw_secrets::{SecretMaterial, SecretStoreError};
 use thiserror::Error;
 
 const HANDLE: &str = "google_oauth_client_secret";
@@ -21,12 +21,12 @@ const HANDLE: &str = "google_oauth_client_secret";
 /// Google OAuth client secret.
 #[derive(Clone)]
 pub struct GoogleOauthSecretStore {
-    store: Arc<dyn SecretStore>,
+    store: Arc<dyn ironclaw_secrets::SecretStorePort>,
 }
 
 impl GoogleOauthSecretStore {
     /// Wrap the instance's shared secret store.
-    pub fn new(store: Arc<dyn SecretStore>) -> Self {
+    pub fn new(store: Arc<dyn ironclaw_secrets::SecretStorePort>) -> Self {
         Self { store }
     }
 
@@ -108,10 +108,10 @@ pub enum GoogleOauthSecretStoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_secrets::FilesystemSecretStore;
+    use ironclaw_secrets::SecretStore;
 
     fn store() -> GoogleOauthSecretStore {
-        GoogleOauthSecretStore::new(Arc::new(FilesystemSecretStore::ephemeral()))
+        GoogleOauthSecretStore::new(Arc::new(SecretStore::ephemeral()))
     }
 
     #[tokio::test]

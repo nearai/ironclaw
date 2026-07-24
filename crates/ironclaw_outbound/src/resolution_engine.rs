@@ -72,6 +72,7 @@ impl<'a> OutboundResolutionEngine<'a> {
             RunNotificationOrigin::LiveSourceRoute { source_route } => {
                 source_route.reply_target_binding_ref.clone()
             }
+            RunNotificationOrigin::RunScopedTarget { target } => target.clone(),
             RunNotificationOrigin::Triggered { .. } => {
                 self.resolve_triggered_target(scope, actor, kind).await?
             }

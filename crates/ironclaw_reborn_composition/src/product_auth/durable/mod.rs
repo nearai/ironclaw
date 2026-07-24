@@ -11,7 +11,6 @@ use ironclaw_filesystem::{
     ScopedFilesystem,
 };
 use ironclaw_host_api::{AgentId, ProjectId, ResourceScope, ScopedPath, TenantId, UserId};
-use ironclaw_secrets::SecretStore;
 use serde::{Serialize, de::DeserializeOwned};
 
 use ironclaw_auth::{
@@ -91,7 +90,7 @@ where
     /// `list_refresh_candidates` returns an empty vec in that case (safe: no
     /// accounts are refreshed, which is benign for local/test deployments).
     root: Option<Arc<F>>,
-    secret_store: Arc<dyn SecretStore>,
+    secret_store: Arc<dyn ironclaw_secrets::SecretStorePort>,
     locks: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
 }
 
@@ -102,7 +101,7 @@ where
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn new(
         filesystem: Arc<ScopedFilesystem<F>>,
-        secret_store: Arc<dyn SecretStore>,
+        secret_store: Arc<dyn ironclaw_secrets::SecretStorePort>,
     ) -> Self {
         Self {
             filesystem,
@@ -121,7 +120,7 @@ where
     pub(crate) fn new_with_root(
         filesystem: Arc<ScopedFilesystem<F>>,
         root: Arc<F>,
-        secret_store: Arc<dyn SecretStore>,
+        secret_store: Arc<dyn ironclaw_secrets::SecretStorePort>,
     ) -> Self {
         Self {
             filesystem,

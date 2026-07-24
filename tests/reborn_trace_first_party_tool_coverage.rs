@@ -68,6 +68,12 @@ const REBORN_FIRST_PARTY_E2E_COVERED_CAPABILITIES: &[&str] = &[
     TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
     TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
     TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
+    // #6520 registers the product-owned run-scoped delivery router as a real
+    // built-in; its e2e coverage lives in
+    // `reborn_integration_delivery_user_journeys` (ROUTE_CURRENT journeys:
+    // exact-listed-target routing, web_app-only routing, stale-target
+    // model-correctable failure).
+    ironclaw_host_runtime::OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
 ];
 
 const SKILL_NAME: &str = "reborn-skill-e2e";

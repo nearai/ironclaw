@@ -19,7 +19,7 @@ use std::sync::Arc;
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
 
-use crate::FilesystemCapabilityLeaseStore;
+use crate::CapabilityLeaseStore;
 
 /// A fresh, volatile `ScopedFilesystem<InMemoryBackend>` mounted at
 /// `/authorization` — the in-memory backend seam the lease store uses in tests.
@@ -38,7 +38,6 @@ pub fn in_memory_backed_authorization_filesystem() -> Arc<ScopedFilesystem<InMem
 
 /// The production capability-lease store over a fresh in-memory backend — the
 /// drop-in replacement for the deleted `InMemoryCapabilityLeaseStore`.
-pub fn in_memory_backed_capability_lease_store() -> FilesystemCapabilityLeaseStore<InMemoryBackend>
-{
-    FilesystemCapabilityLeaseStore::new(in_memory_backed_authorization_filesystem())
+pub fn in_memory_backed_capability_lease_store() -> CapabilityLeaseStore<InMemoryBackend> {
+    CapabilityLeaseStore::new(in_memory_backed_authorization_filesystem())
 }

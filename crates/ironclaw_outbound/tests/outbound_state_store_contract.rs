@@ -1,23 +1,25 @@
 // Contract tests construct the store directly under test.
 #![allow(clippy::disallowed_methods)]
+// arch-exempt: large_file, cross-instance claim regressions share the existing outbound persistence harness, plan #6175
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use async_trait::async_trait;
 use ironclaw_event_projections::{ProjectionCursor, ProjectionScope};
 use ironclaw_events::{EventCursor, EventStreamKey, ReadScope};
 use ironclaw_filesystem::{
     BackendCapabilities, CasExpectation, ContentType, DirEntry, Entry, FileStat, FilesystemError,
-    FilesystemOperation, Filter, InMemoryBackend, IndexSpec, Page, RecordVersion, RootFilesystem,
-    ScopedFilesystem, VersionedEntry,
+    FilesystemOperation, Filter, InMemoryBackend, IndexKind, IndexName, IndexSpec, Page,
+    RecordVersion, RootFilesystem, ScopedFilesystem, VersionedEntry,
 };
 use ironclaw_host_api::{
     AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId, ThreadId,
     UserId, VirtualPath,
 };
 use ironclaw_outbound::*;
-use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
-use tokio::sync::Mutex;
+use ironclaw_turns::{ReplyTargetBindingRef, RunOriginAdapter, TurnActor, TurnRunId, TurnScope};
+use tokio::sync::{Mutex, Notify};
 
 const TEST_OUTBOUND_ROOT: &str = "/engine/tenants/test/users/test/outbound";
 
@@ -41,13 +43,26 @@ fn build_scoped_fs<F: RootFilesystem>(
 
 fn build_outbound_store_for_backend(
     backend: Arc<InMemoryBackend>,
-) -> FilesystemOutboundStateStore<InMemoryBackend> {
-    FilesystemOutboundStateStore::new(build_scoped_fs(backend, TEST_OUTBOUND_ROOT))
+) -> OutboundStateStore<InMemoryBackend> {
+    OutboundStateStore::new(build_scoped_fs(backend, TEST_OUTBOUND_ROOT))
+}
+
+fn build_outbound_store_with_permissions<F: RootFilesystem>(
+    backend: Arc<F>,
+    permissions: MountPermissions,
+) -> OutboundStateStore<F> {
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/outbound").expect("alias"),
+        VirtualPath::new(TEST_OUTBOUND_ROOT).expect("target"),
+        permissions,
+    )])
+    .expect("mount view");
+    OutboundStateStore::new(Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts)))
 }
 
 #[tokio::test]
-async fn filesystem_store_satisfies_outbound_contract_on_in_memory_backend() {
-    // The new FilesystemOutboundStateStore runs the same contract suite as
+async fn outbound_state_store_satisfies_outbound_contract_on_in_memory_backend() {
+    // The new OutboundStateStore runs the same contract suite as
     // the in-memory and SQL backends, demonstrating that it satisfies the
     // OutboundStateStore trait identically. The InMemoryBackend from
     // ironclaw_filesystem stands in as the underlying mount; in production
@@ -64,20 +79,69 @@ async fn filesystem_store_satisfies_outbound_contract_on_in_memory_backend() {
     communication_preference_update_inserts_absent_record(&store).await;
     communication_preference_stale_version_conflicts_without_writing(&store).await;
     communication_preference_update_rejects_invalid_or_mismatched_record(&store).await;
-    filesystem_store_rejects_communication_preference_put_cas_conflict(&backend).await;
-    filesystem_store_rejects_communication_preference_update_cas_conflict(&backend).await;
-    filesystem_store_rejects_mismatched_communication_preference_identity(&backend, &store).await;
+    outbound_state_store_rejects_communication_preference_put_cas_conflict(&backend).await;
+    outbound_state_store_rejects_communication_preference_update_cas_conflict(&backend).await;
+    outbound_state_store_rejects_mismatched_communication_preference_identity(&backend, &store)
+        .await;
     durable_policy_subscription_delivery_flow(&store).await;
     subscription_cursor_rejects_mismatched_scope(&store).await;
     subscription_ids_are_scoped_not_global(&store).await;
     subscription_cursor_rejects_backward_advancement(&store).await;
     delivery_status_rejects_inconsistent_failure_kind(&store).await;
     coordinator_delivery_lifecycle_round_trips(&store).await;
+    recovery_transition_never_clobbers_delivered(&store).await;
     notification_policy_rejects_excessive_targets(&store).await;
 }
 
+#[tokio::test]
+async fn delivery_send_claim_is_atomic_across_store_instances() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let first = Arc::new(build_outbound_store_for_backend(Arc::clone(&backend)));
+    let second = Arc::new(build_outbound_store_for_backend(backend));
+    let scope = turn_scope();
+    let delivery_id = OutboundDeliveryId::new();
+    first
+        .record_delivery_attempt(OutboundDeliveryAttempt {
+            delivery_id,
+            scope: scope.clone(),
+            candidate: OutboundPushCandidate {
+                tenant_id: scope.tenant_id.clone(),
+                agent_id: scope.agent_id.clone(),
+                project_id: scope.project_id.clone(),
+                thread_id: scope.thread_id.clone(),
+                turn_run_id: Some(TurnRunId::new()),
+                target: reply_ref("reply-cross-instance-claim"),
+                kind: OutboundPushKind::FinalReply,
+                projection_ref: ProjectionUpdateRef::new("projection:cross-instance-claim")
+                    .unwrap(),
+                requires_reply_target_revalidation: true,
+            },
+            status: OutboundDeliveryStatus::Prepared,
+            attempted_at: now(),
+            failure_kind: None,
+        })
+        .await
+        .unwrap();
+
+    let first_request = ClaimDeliveryAttemptForSendRequest {
+        delivery_id,
+        scope: scope.clone(),
+    };
+    let second_request = first_request.clone();
+    let (first_claim, second_claim) = tokio::join!(
+        first.claim_delivery_attempt_for_send(first_request),
+        second.claim_delivery_attempt_for_send(second_request),
+    );
+    let claims = [first_claim.unwrap(), second_claim.unwrap()];
+    assert_eq!(claims.into_iter().filter(|claimed| *claimed).count(), 1);
+
+    let attempts = first.list_delivery_attempts(scope).await.unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].status, OutboundDeliveryStatus::Sending);
+}
+
 // Legacy LibSqlOutboundStateStore / PostgresOutboundStateStore have been
-// deleted. The FilesystemOutboundStateStore over LibSqlRootFilesystem /
+// deleted. The OutboundStateStore over LibSqlRootFilesystem /
 // PostgresRootFilesystem (driven by the production `MountView`) replaces
 // them; durability across reopen is now a property of the
 // `RootFilesystem` backend, not of an outbound-specific persistence
@@ -116,7 +180,7 @@ where
 
 async fn communication_preferences_are_tenant_user_scoped<S>(store: &S)
 where
-    S: CommunicationPreferenceRepository + OutboundStateStore,
+    S: CommunicationPreferenceRepository + OutboundStateStorePort,
 {
     let tenant_id = TenantId::new("tenant-outbound").unwrap();
     let user_id = UserId::new("user-outbound").unwrap();
@@ -195,7 +259,7 @@ where
 
 async fn communication_preferences_are_shared_agent_scoped<S>(store: &S)
 where
-    S: CommunicationPreferenceRepository + OutboundStateStore,
+    S: CommunicationPreferenceRepository + OutboundStateStorePort,
 {
     let tenant_id = TenantId::new("tenant-outbound-shared").unwrap();
     let agent_id = AgentId::new("agent-outbound-shared").unwrap();
@@ -277,7 +341,7 @@ where
 
 async fn communication_preferences_reject_empty_updated_by<S>(store: &S)
 where
-    S: CommunicationPreferenceRepository + OutboundStateStore,
+    S: CommunicationPreferenceRepository + OutboundStateStorePort,
 {
     let valid_record = CommunicationPreferenceRecord {
         scope: DeliveryDefaultScope::personal(
@@ -317,7 +381,7 @@ where
 
 async fn communication_preferences_reject_empty_shared_agent_scope<S>(store: &S)
 where
-    S: CommunicationPreferenceRepository + OutboundStateStore,
+    S: CommunicationPreferenceRepository + OutboundStateStorePort,
 {
     let valid_record = CommunicationPreferenceRecord {
         scope: DeliveryDefaultScope::shared_agent(
@@ -364,7 +428,7 @@ where
 
 async fn communication_preference_put_existing_conflicts_without_writing<S>(store: &S)
 where
-    S: CommunicationPreferenceRepository + OutboundStateStore,
+    S: CommunicationPreferenceRepository + OutboundStateStorePort,
 {
     let tenant_id = TenantId::new("tenant-outbound-duplicate").unwrap();
     let user_id = UserId::new("user-outbound-duplicate").unwrap();
@@ -397,7 +461,7 @@ where
 
 async fn communication_preference_atomic_update_preserves_existing_slots<S>(store: &S)
 where
-    S: CommunicationPreferenceRepository + OutboundStateStore,
+    S: CommunicationPreferenceRepository + OutboundStateStorePort,
 {
     let tenant_id = TenantId::new("tenant-outbound-atomic").unwrap();
     let user_id = UserId::new("user-outbound-atomic").unwrap();
@@ -451,7 +515,7 @@ where
 
 async fn communication_preference_update_inserts_absent_record<S>(store: &S)
 where
-    S: CommunicationPreferenceRepository + OutboundStateStore,
+    S: CommunicationPreferenceRepository + OutboundStateStorePort,
 {
     let tenant_id = TenantId::new("tenant-outbound-update-absent").unwrap();
     let user_id = UserId::new("user-outbound-update-absent").unwrap();
@@ -476,7 +540,7 @@ where
 
 async fn communication_preference_stale_version_conflicts_without_writing<S>(store: &S)
 where
-    S: CommunicationPreferenceRepository + OutboundStateStore,
+    S: CommunicationPreferenceRepository + OutboundStateStorePort,
 {
     let tenant_id = TenantId::new("tenant-outbound-update-error").unwrap();
     let user_id = UserId::new("user-outbound-update-error").unwrap();
@@ -526,7 +590,7 @@ where
 
 async fn communication_preference_update_rejects_invalid_or_mismatched_record<S>(store: &S)
 where
-    S: CommunicationPreferenceRepository + OutboundStateStore,
+    S: CommunicationPreferenceRepository + OutboundStateStorePort,
 {
     let tenant_id = TenantId::new("tenant-outbound-update-invalid").unwrap();
     let user_id = UserId::new("user-outbound-update-invalid").unwrap();
@@ -579,9 +643,9 @@ where
     assert_eq!(load_preference_record(store, key).await, Some(record));
 }
 
-async fn filesystem_store_rejects_mismatched_communication_preference_identity(
+async fn outbound_state_store_rejects_mismatched_communication_preference_identity(
     backend: &Arc<InMemoryBackend>,
-    store: &FilesystemOutboundStateStore<InMemoryBackend>,
+    store: &OutboundStateStore<InMemoryBackend>,
 ) {
     let tenant_id = TenantId::new("tenant-outbound-corrupt").unwrap();
     let user_id = UserId::new("user-outbound-corrupt").unwrap();
@@ -660,7 +724,7 @@ async fn filesystem_store_rejects_mismatched_communication_preference_identity(
 }
 
 #[tokio::test]
-async fn filesystem_store_personal_and_shared_agent_hashes_are_always_distinct() {
+async fn outbound_state_store_personal_and_shared_agent_hashes_are_always_distinct() {
     let backend = Arc::new(InMemoryBackend::new());
     let store = build_outbound_store_for_backend(Arc::clone(&backend));
     let tenant_id = TenantId::new("tenant-outbound-hash-distinct").unwrap();
@@ -713,12 +777,11 @@ async fn filesystem_store_personal_and_shared_agent_hashes_are_always_distinct()
     );
 }
 
-async fn filesystem_store_rejects_communication_preference_put_cas_conflict(
+async fn outbound_state_store_rejects_communication_preference_put_cas_conflict(
     backend: &Arc<InMemoryBackend>,
 ) {
     let racing = Arc::new(VersionRacingBackend::new(Arc::clone(backend)));
-    let store =
-        FilesystemOutboundStateStore::new(build_scoped_fs(Arc::clone(&racing), TEST_OUTBOUND_ROOT));
+    let store = OutboundStateStore::new(build_scoped_fs(Arc::clone(&racing), TEST_OUTBOUND_ROOT));
     let tenant_id = TenantId::new("tenant-outbound-cas").unwrap();
     let user_id = UserId::new("user-outbound-cas").unwrap();
     racing
@@ -747,12 +810,11 @@ async fn filesystem_store_rejects_communication_preference_put_cas_conflict(
     assert_eq!(racing.injected_count().await, 1);
 }
 
-async fn filesystem_store_rejects_communication_preference_update_cas_conflict(
+async fn outbound_state_store_rejects_communication_preference_update_cas_conflict(
     backend: &Arc<InMemoryBackend>,
 ) {
     let racing = Arc::new(VersionRacingBackend::new(Arc::clone(backend)));
-    let store =
-        FilesystemOutboundStateStore::new(build_scoped_fs(Arc::clone(&racing), TEST_OUTBOUND_ROOT));
+    let store = OutboundStateStore::new(build_scoped_fs(Arc::clone(&racing), TEST_OUTBOUND_ROOT));
     let tenant_id = TenantId::new("tenant-outbound-update-cas").unwrap();
     let user_id = UserId::new("user-outbound-update-cas").unwrap();
     let key = CommunicationPreferenceKey::new(tenant_id.clone(), user_id.clone());
@@ -801,13 +863,10 @@ async fn filesystem_store_rejects_communication_preference_update_cas_conflict(
 }
 
 #[tokio::test]
-async fn filesystem_store_rejects_communication_preference_write_on_unsupported_cas_mount() {
+async fn outbound_state_store_rejects_communication_preference_write_on_unsupported_cas_mount() {
     let inner = Arc::new(InMemoryBackend::new());
-    let backend = Arc::new(UnsupportedPreferenceCasBackend::new(Arc::clone(&inner)));
-    let store = FilesystemOutboundStateStore::new(build_scoped_fs(
-        Arc::clone(&backend),
-        TEST_OUTBOUND_ROOT,
-    ));
+    let backend = Arc::new(UnsupportedCriticalCasBackend::new(Arc::clone(&inner)));
+    let store = OutboundStateStore::new(build_scoped_fs(Arc::clone(&backend), TEST_OUTBOUND_ROOT));
     let tenant_id = TenantId::new("tenant-outbound-unsupported-cas").unwrap();
     let user_id = UserId::new("user-outbound-unsupported-cas").unwrap();
     let key = CommunicationPreferenceKey::new(tenant_id.clone(), user_id.clone());
@@ -834,7 +893,48 @@ async fn filesystem_store_rejects_communication_preference_write_on_unsupported_
     assert_eq!(load_preference_record(&store, key).await, None);
 }
 
-async fn durable_policy_subscription_delivery_flow(store: &impl OutboundStateStore) {
+#[tokio::test]
+async fn delivery_send_claim_fails_closed_on_unsupported_cas_mount() {
+    let inner = Arc::new(InMemoryBackend::new());
+    let backend = Arc::new(UnsupportedCriticalCasBackend::new(Arc::clone(&inner)));
+    let store = OutboundStateStore::new(build_scoped_fs(Arc::clone(&backend), TEST_OUTBOUND_ROOT));
+    let scope = turn_scope();
+    let delivery_id = OutboundDeliveryId::new();
+    store
+        .record_delivery_attempt(OutboundDeliveryAttempt {
+            delivery_id,
+            scope: scope.clone(),
+            candidate: OutboundPushCandidate {
+                tenant_id: scope.tenant_id.clone(),
+                agent_id: scope.agent_id.clone(),
+                project_id: scope.project_id.clone(),
+                thread_id: scope.thread_id.clone(),
+                turn_run_id: Some(TurnRunId::new()),
+                target: reply_ref("reply-unsupported-claim"),
+                kind: OutboundPushKind::FinalReply,
+                projection_ref: ProjectionUpdateRef::new("projection:unsupported-claim").unwrap(),
+                requires_reply_target_revalidation: true,
+            },
+            status: OutboundDeliveryStatus::Prepared,
+            attempted_at: now(),
+            failure_kind: None,
+        })
+        .await
+        .unwrap();
+
+    let claim = store
+        .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
+            delivery_id,
+            scope: scope.clone(),
+        })
+        .await;
+    assert!(matches!(claim, Err(OutboundError::Backend)));
+    assert_eq!(backend.unsupported_count().await, 1);
+    let attempt = store.list_delivery_attempts(scope).await.unwrap();
+    assert_eq!(attempt[0].status, OutboundDeliveryStatus::Prepared);
+}
+
+async fn durable_policy_subscription_delivery_flow(store: &impl OutboundStateStorePort) {
     let scope = turn_scope();
     let default_reply = reply_ref("reply-default");
     let extra_final = reply_ref("reply-extra-final");
@@ -1047,7 +1147,7 @@ async fn durable_policy_subscription_delivery_flow(store: &impl OutboundStateSto
     full_turn_scope_isolation(store, scope).await;
 }
 
-async fn seed_subscription(store: &impl OutboundStateStore) {
+async fn seed_subscription(store: &impl OutboundStateStorePort) {
     store
         .upsert_subscription(ProjectionSubscriptionRecord {
             subscription_id: subscription_id(),
@@ -1060,7 +1160,7 @@ async fn seed_subscription(store: &impl OutboundStateStore) {
         .unwrap();
 }
 
-async fn subscription_cursor_rejects_mismatched_scope(store: &impl OutboundStateStore) {
+async fn subscription_cursor_rejects_mismatched_scope(store: &impl OutboundStateStorePort) {
     let wrong_actor = TurnActor::new(UserId::new("user-other").unwrap());
     let result = store
         .load_subscription_cursor(LoadSubscriptionCursorRequest {
@@ -1108,7 +1208,7 @@ async fn subscription_cursor_rejects_mismatched_scope(store: &impl OutboundState
     ));
 }
 
-async fn subscription_ids_are_scoped_not_global(store: &impl OutboundStateStore) {
+async fn subscription_ids_are_scoped_not_global(store: &impl OutboundStateStorePort) {
     let shared_subscription_id =
         ProjectionSubscriptionId::new(format!("webui-scoped-subscription-{}", TurnRunId::new()))
             .unwrap();
@@ -1177,7 +1277,7 @@ async fn subscription_ids_are_scoped_not_global(store: &impl OutboundStateStore)
     assert!(matches!(unrelated_lookup, Ok(None)));
 }
 
-async fn subscription_cursor_rejects_backward_advancement(store: &impl OutboundStateStore) {
+async fn subscription_cursor_rejects_backward_advancement(store: &impl OutboundStateStorePort) {
     let subscription_id =
         ProjectionSubscriptionId::new(format!("webui-subscription-backward-{}", TurnRunId::new()))
             .unwrap();
@@ -1242,7 +1342,7 @@ async fn subscription_cursor_rejects_backward_advancement(store: &impl OutboundS
 /// terminal) persists and reloads on every backend: a crash between vendor
 /// egress and the result write leaves `Sending`, which recovery marks
 /// `Unknown` — never a blind resend (OUT-3/OUT-6/OUT-9).
-async fn coordinator_delivery_lifecycle_round_trips(store: &impl OutboundStateStore) {
+async fn coordinator_delivery_lifecycle_round_trips(store: &impl OutboundStateStorePort) {
     let scope = turn_scope();
     let delivery_id = OutboundDeliveryId::new();
     let candidate = OutboundPushCandidate {
@@ -1272,16 +1372,36 @@ async fn coordinator_delivery_lifecycle_round_trips(store: &impl OutboundStateSt
         .await
         .unwrap();
 
-    store
-        .update_delivery_status(UpdateDeliveryStatusRequest {
+    assert!(
+        store
+            .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
+                delivery_id,
+                scope: scope.clone(),
+            })
+            .await
+            .unwrap(),
+        "the first caller atomically owns vendor egress"
+    );
+    assert!(
+        !store
+            .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
+                delivery_id,
+                scope: scope.clone(),
+            })
+            .await
+            .unwrap(),
+        "a replay cannot claim the same durable attempt"
+    );
+    let wrong_scope_claim = store
+        .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
             delivery_id,
-            scope: scope.clone(),
-            status: OutboundDeliveryStatus::Sending,
-            updated_at: now(),
-            failure_kind: None,
+            scope: sibling_turn_scope(),
         })
-        .await
-        .unwrap();
+        .await;
+    assert!(matches!(
+        wrong_scope_claim,
+        Err(OutboundError::DeliveryNotFound | OutboundError::SubscriptionScopeMismatch)
+    ));
     let in_flight = store.list_delivery_attempts(scope.clone()).await.unwrap();
     let attempt = in_flight
         .iter()
@@ -1323,7 +1443,126 @@ async fn coordinator_delivery_lifecycle_round_trips(store: &impl OutboundStateSt
     assert_eq!(attempt.status, OutboundDeliveryStatus::Unknown);
 }
 
-async fn delivery_status_rejects_inconsistent_failure_kind(store: &impl OutboundStateStore) {
+async fn recovery_transition_never_clobbers_delivered(store: &impl OutboundStateStorePort) {
+    let scope = turn_scope();
+    let candidate = |marker: &str| OutboundPushCandidate {
+        tenant_id: scope.tenant_id.clone(),
+        agent_id: scope.agent_id.clone(),
+        project_id: scope.project_id.clone(),
+        thread_id: scope.thread_id.clone(),
+        turn_run_id: Some(TurnRunId::new()),
+        target: reply_ref(marker),
+        kind: OutboundPushKind::FinalReply,
+        projection_ref: ProjectionUpdateRef::new(format!(
+            "projection:{marker}:{}",
+            TurnRunId::new()
+        ))
+        .unwrap(),
+        requires_reply_target_revalidation: true,
+    };
+
+    // A genuinely-interrupted send is still `Sending`: recovery re-verifies
+    // that under CAS and transitions it to `Unknown`, reporting the conversion.
+    let interrupted = OutboundDeliveryId::new();
+    store
+        .record_delivery_attempt(OutboundDeliveryAttempt {
+            delivery_id: interrupted,
+            scope: scope.clone(),
+            candidate: candidate("reply-recovery-interrupted"),
+            status: OutboundDeliveryStatus::Prepared,
+            attempted_at: now(),
+            failure_kind: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        store
+            .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
+                delivery_id: interrupted,
+                scope: scope.clone(),
+            })
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .recover_interrupted_delivery_attempt(RecoverInterruptedDeliveryRequest {
+                delivery_id: interrupted,
+                scope: scope.clone(),
+            })
+            .await
+            .unwrap(),
+        "a still-Sending attempt is recovered to Unknown"
+    );
+    let attempts = store.list_delivery_attempts(scope.clone()).await.unwrap();
+    assert_eq!(
+        attempts
+            .iter()
+            .find(|attempt| attempt.delivery_id == interrupted)
+            .expect("interrupted attempt persisted")
+            .status,
+        OutboundDeliveryStatus::Unknown
+    );
+
+    // The crash-recovery race: another worker completed egress and durably
+    // wrote `Delivered`, while a stale recovery list snapshot still believes
+    // the attempt is `Sending`. Re-verifying `Sending` inside the same CAS read
+    // must no-op instead of clobbering the successful delivery to `Unknown`.
+    let delivered = OutboundDeliveryId::new();
+    store
+        .record_delivery_attempt(OutboundDeliveryAttempt {
+            delivery_id: delivered,
+            scope: scope.clone(),
+            candidate: candidate("reply-recovery-delivered"),
+            status: OutboundDeliveryStatus::Prepared,
+            attempted_at: now(),
+            failure_kind: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        store
+            .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
+                delivery_id: delivered,
+                scope: scope.clone(),
+            })
+            .await
+            .unwrap()
+    );
+    store
+        .update_delivery_status(UpdateDeliveryStatusRequest {
+            delivery_id: delivered,
+            scope: scope.clone(),
+            status: OutboundDeliveryStatus::Delivered,
+            updated_at: now(),
+            failure_kind: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        !store
+            .recover_interrupted_delivery_attempt(RecoverInterruptedDeliveryRequest {
+                delivery_id: delivered,
+                scope: scope.clone(),
+            })
+            .await
+            .unwrap(),
+        "recovery must not claim an attempt that already advanced past Sending"
+    );
+    let attempts = store.list_delivery_attempts(scope).await.unwrap();
+    assert_eq!(
+        attempts
+            .iter()
+            .find(|attempt| attempt.delivery_id == delivered)
+            .expect("delivered attempt persisted")
+            .status,
+        OutboundDeliveryStatus::Delivered,
+        "a successful delivery must never be clobbered back to Unknown by stale recovery"
+    );
+}
+
+async fn delivery_status_rejects_inconsistent_failure_kind(store: &impl OutboundStateStorePort) {
     let scope = turn_scope();
     let delivery_id = OutboundDeliveryId::new();
     let attempt = OutboundDeliveryAttempt {
@@ -1387,7 +1626,7 @@ async fn delivery_status_rejects_inconsistent_failure_kind(store: &impl Outbound
     assert_eq!(stored.failure_kind, None);
 }
 
-async fn notification_policy_rejects_excessive_targets(store: &impl OutboundStateStore) {
+async fn notification_policy_rejects_excessive_targets(store: &impl OutboundStateStorePort) {
     let targets = (0..33)
         .map(|i| ThreadNotificationTarget {
             target: reply_ref(&format!("reply-too-many-{i}")),
@@ -1404,7 +1643,7 @@ async fn notification_policy_rejects_excessive_targets(store: &impl OutboundStat
     assert!(matches!(result, Err(OutboundError::InvalidRequest { .. })));
 }
 
-async fn full_turn_scope_isolation(store: &impl OutboundStateStore, original_scope: TurnScope) {
+async fn full_turn_scope_isolation(store: &impl OutboundStateStorePort, original_scope: TurnScope) {
     let sibling_scope = sibling_turn_scope();
     let sibling_target = reply_ref("reply-sibling");
     store
@@ -1536,7 +1775,7 @@ fn now() -> ironclaw_host_api::Timestamp {
 
 async fn put_preference_and_find_virtual_path(
     backend: &Arc<InMemoryBackend>,
-    store: &FilesystemOutboundStateStore<InMemoryBackend>,
+    store: &OutboundStateStore<InMemoryBackend>,
     record: CommunicationPreferenceRecord,
 ) -> (CommunicationPreferenceKey, VirtualPath) {
     let before = communication_preference_virtual_paths(backend).await;
@@ -1684,16 +1923,148 @@ impl RootFilesystem for VersionRacingBackend {
     }
 }
 
-/// Test backend that mimics a mount that cannot honor CAS writes for
-/// communication-preference records. An accidental byte fallback would retry
-/// as `CasExpectation::Any` and succeed through the inner backend, so the
-/// test above proves preference writes fail closed instead.
-struct UnsupportedPreferenceCasBackend {
+/// Synchronization decorator for deterministic two-store conditional-delete
+/// races. This is an interleaving barrier, not an I/O fault fake: every
+/// operation delegates to the real [`InMemoryBackend`].
+struct DeletePauseBackend {
+    inner: Arc<InMemoryBackend>,
+    pause_point: AtomicU8,
+    delete_entered: Notify,
+    release_delete: Notify,
+}
+
+impl DeletePauseBackend {
+    const NONE: u8 = 0;
+    const BEFORE_DELETE: u8 = 1;
+    const AFTER_DELETE: u8 = u8::MAX;
+
+    fn new(inner: Arc<InMemoryBackend>) -> Self {
+        Self {
+            inner,
+            pause_point: AtomicU8::new(Self::NONE),
+            delete_entered: Notify::new(),
+            release_delete: Notify::new(),
+        }
+    }
+
+    fn arm_before_delete(&self) {
+        self.pause_point
+            .store(Self::BEFORE_DELETE, Ordering::SeqCst);
+    }
+
+    fn arm_before_deletes(&self, count: u8) {
+        assert!(count < Self::AFTER_DELETE);
+        self.pause_point.store(count, Ordering::SeqCst);
+    }
+
+    fn arm_after_delete(&self) {
+        self.pause_point.store(Self::AFTER_DELETE, Ordering::SeqCst);
+    }
+
+    async fn wait_for_delete(&self) {
+        self.delete_entered.notified().await;
+    }
+
+    fn release_delete(&self) {
+        self.release_delete.notify_one();
+    }
+
+    async fn pause(&self) {
+        self.delete_entered.notify_one();
+        self.release_delete.notified().await;
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for DeletePauseBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn query(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.inner.query(path, filter, page).await
+    }
+
+    async fn ensure_index(
+        &self,
+        path: &VirtualPath,
+        spec: &IndexSpec,
+    ) -> Result<(), FilesystemError> {
+        self.inner.ensure_index(path, spec).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+
+    async fn delete_if_version(
+        &self,
+        path: &VirtualPath,
+        expected_version: RecordVersion,
+    ) -> Result<(), FilesystemError> {
+        let pause_point = self
+            .pause_point
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                if current == Self::AFTER_DELETE {
+                    Some(Self::NONE)
+                } else if current > Self::NONE {
+                    Some(current - 1)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(Self::NONE);
+        match pause_point {
+            Self::NONE => self.inner.delete_if_version(path, expected_version).await,
+            Self::AFTER_DELETE => {
+                let result = self.inner.delete_if_version(path, expected_version).await;
+                self.pause().await;
+                result
+            }
+            _ => {
+                self.pause().await;
+                self.inner.delete_if_version(path, expected_version).await
+            }
+        }
+    }
+}
+
+/// Test backend that mimics a mount that cannot honor CAS writes for critical
+/// preference updates or delivery ownership claims. An accidental byte
+/// fallback would retry as `CasExpectation::Any` and succeed through the inner
+/// backend, so the tests above prove both operations fail closed instead.
+struct UnsupportedCriticalCasBackend {
     inner: Arc<InMemoryBackend>,
     unsupported: Mutex<u32>,
 }
 
-impl UnsupportedPreferenceCasBackend {
+impl UnsupportedCriticalCasBackend {
     fn new(inner: Arc<InMemoryBackend>) -> Self {
         Self {
             inner,
@@ -1707,7 +2078,7 @@ impl UnsupportedPreferenceCasBackend {
 }
 
 #[async_trait]
-impl RootFilesystem for UnsupportedPreferenceCasBackend {
+impl RootFilesystem for UnsupportedCriticalCasBackend {
     fn capabilities(&self) -> BackendCapabilities {
         self.inner.capabilities()
     }
@@ -1718,11 +2089,15 @@ impl RootFilesystem for UnsupportedPreferenceCasBackend {
         entry: Entry,
         cas: CasExpectation,
     ) -> Result<RecordVersion, FilesystemError> {
-        if path
+        let preference_requires_cas = path
             .as_str()
             .starts_with(&format!("{TEST_OUTBOUND_ROOT}/communication-preferences/"))
-            && !matches!(cas, CasExpectation::Any)
-        {
+            && !matches!(cas, CasExpectation::Any);
+        let delivery_claim_requires_cas = path
+            .as_str()
+            .starts_with(&format!("{TEST_OUTBOUND_ROOT}/deliveries/"))
+            && matches!(cas, CasExpectation::Version(_));
+        if preference_requires_cas || delivery_claim_requires_cas {
             *self.unsupported.lock().await += 1;
             return Err(FilesystemError::Unsupported {
                 path: path.clone(),
@@ -1776,7 +2151,7 @@ impl RootFilesystem for UnsupportedPreferenceCasBackend {
 async fn advance_subscription_cursor_retries_through_cas_conflict() {
     let inner = Arc::new(InMemoryBackend::new());
     let racing = Arc::new(VersionRacingBackend::new(Arc::clone(&inner)));
-    let store = FilesystemOutboundStateStore::new(build_scoped_fs(
+    let store = OutboundStateStore::new(build_scoped_fs(
         Arc::clone(&racing),
         "/engine/tenants/test/users/test/outbound",
     ));
@@ -1925,7 +2300,7 @@ async fn list_delivery_attempts_drains_more_than_page_max_limit() {
 }
 
 /// Regression test mirroring the engine-store
-/// `filesystem_store_isolates_two_tenants_with_same_user_project_ids`
+/// `outbound_state_store_isolates_two_tenants_with_same_user_project_ids`
 /// shape: the outbound store must enforce tenant isolation through the
 /// [`ScopedFilesystem`] mount permission boundary, not assume path strings
 /// inside outbound code already encode tenant identity.
@@ -1943,11 +2318,11 @@ async fn list_delivery_attempts_drains_more_than_page_max_limit() {
 #[tokio::test]
 async fn filesystem_outbound_store_isolates_two_tenants_with_same_user_project_ids() {
     let backend = Arc::new(InMemoryBackend::new());
-    let store_a = FilesystemOutboundStateStore::new(build_scoped_fs(
+    let store_a = OutboundStateStore::new(build_scoped_fs(
         Arc::clone(&backend),
         "/engine/tenants/a/users/alice/outbound",
     ));
-    let store_b = FilesystemOutboundStateStore::new(build_scoped_fs(
+    let store_b = OutboundStateStore::new(build_scoped_fs(
         Arc::clone(&backend),
         "/engine/tenants/b/users/alice/outbound",
     ));
@@ -2050,16 +2425,15 @@ async fn filesystem_outbound_store_isolates_two_tenants_with_same_user_project_i
 /// Defense-in-depth regression for the tenant-isolation indexed
 /// projection (see
 /// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`):
-/// every `FilesystemOutboundStateStore` write decorates its `Entry`
+/// every `OutboundStateStore` write decorates its `Entry`
 /// with a `tenant_id` projection so an admin-tier query can filter
 /// explicitly by tenant and a path-rewriting bug surfaces as a
 /// query-time mismatch.
 ///
-/// Records a delivery attempt under tenant A's scope, then issues a
-/// raw `RootFilesystem::query` against `/outbound/deliveries` with
-/// `Filter::Eq { key: "tenant_id", value: <tenant-a> }` and asserts the
-/// record is returned; a query for a different tenant must return zero
-/// rows.
+/// Records a delivery attempt and a run-delivery-cleanup snapshot under tenant
+/// A's scope, then issues raw `RootFilesystem::query` calls against both roots
+/// with `Filter::Eq { key: "tenant_id", value: <tenant-a> }`. Each record must
+/// be returned for tenant A and hidden from a different tenant.
 #[tokio::test]
 async fn filesystem_outbound_store_writes_tenant_id_indexed_projection() {
     let backend = Arc::new(InMemoryBackend::new());
@@ -2067,7 +2441,7 @@ async fn filesystem_outbound_store_writes_tenant_id_indexed_projection() {
         Arc::clone(&backend),
         "/engine/tenants/tenant-outbound/users/user-outbound/outbound",
     );
-    let store = FilesystemOutboundStateStore::new(Arc::clone(&scoped));
+    let store = OutboundStateStore::new(Arc::clone(&scoped));
     let scope = turn_scope();
     let delivery_id = OutboundDeliveryId::new();
     store
@@ -2123,7 +2497,7 @@ async fn filesystem_outbound_store_writes_tenant_id_indexed_projection() {
         .query(
             &virtual_prefix,
             &Filter::Eq {
-                key: tenant_key,
+                key: tenant_key.clone(),
                 value: ironclaw_filesystem::IndexValue::Text("tenant-b".to_string()),
             },
             Page::new(0, Page::MAX_LIMIT),
@@ -2134,5 +2508,547 @@ async fn filesystem_outbound_store_writes_tenant_id_indexed_projection() {
         miss.is_empty(),
         "tenant_id projection must NOT surface tenant-outbound's delivery under tenant-b query; got {} rows",
         miss.len(),
+    );
+
+    let cleanup = cleanup_record(TurnRunId::new(), "tenant-index");
+    store
+        .put_run_delivery_cleanup(cleanup)
+        .await
+        .expect("persist cleanup snapshot");
+    let cleanup_prefix =
+        ironclaw_host_api::ScopedPath::new("/outbound/run-delivery-cleanup".to_string()).unwrap();
+    let cleanup_virtual_prefix = scoped
+        .resolve(&scope.to_resource_scope(), &cleanup_prefix)
+        .unwrap();
+    let conflicting_cleanup_index = IndexSpec::new(
+        IndexName::new("outbound_by_tenant").unwrap(),
+        vec![ironclaw_filesystem::IndexKey::new("wrong_tenant_key").unwrap()],
+        IndexKind::Exact,
+    );
+    assert!(
+        matches!(
+            backend
+                .ensure_index(&cleanup_virtual_prefix, &conflicting_cleanup_index)
+                .await,
+            Err(FilesystemError::IndexConflict { .. })
+        ),
+        "cleanup mutation must declare the canonical tenant index before writing"
+    );
+    let cleanup_hit = backend
+        .query(
+            &cleanup_virtual_prefix,
+            &Filter::Eq {
+                key: tenant_key.clone(),
+                value: ironclaw_filesystem::IndexValue::Text(scope.tenant_id.as_str().to_string()),
+            },
+            Page::new(0, Page::MAX_LIMIT),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        cleanup_hit.len(),
+        1,
+        "tenant_id projection must surface the cleanup snapshot via Filter::Eq",
+    );
+
+    let cleanup_miss = backend
+        .query(
+            &cleanup_virtual_prefix,
+            &Filter::Eq {
+                key: tenant_key,
+                value: ironclaw_filesystem::IndexValue::Text("tenant-b".to_string()),
+            },
+            Page::new(0, Page::MAX_LIMIT),
+        )
+        .await
+        .unwrap();
+    assert!(
+        cleanup_miss.is_empty(),
+        "tenant_id projection must NOT surface tenant-outbound's cleanup snapshot under tenant-b query; got {} rows",
+        cleanup_miss.len(),
+    );
+}
+
+#[tokio::test]
+async fn run_final_reply_target_is_durable_and_exactly_scoped() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let first = build_outbound_store_for_backend(Arc::clone(&backend));
+    let second = build_outbound_store_for_backend(backend);
+    let scope = turn_scope();
+    let run_id = TurnRunId::new();
+    let actor = TurnActor::new(UserId::new("user-run-route").unwrap());
+    let record = RunFinalReplyTargetRecord {
+        run_id,
+        scope: scope.clone(),
+        actor: actor.clone(),
+        destination: RunFinalReplyDestination::External {
+            reply_target_binding_ref: reply_ref("reply:run-scoped-slack-dm"),
+        },
+    };
+
+    first
+        .put_run_final_reply_target(record.clone())
+        .await
+        .expect("persist run final-reply target");
+
+    let loaded = second
+        .load_run_final_reply_target(RunFinalReplyTargetRequest {
+            run_id,
+            scope: scope.clone(),
+            actor: actor.clone(),
+        })
+        .await
+        .expect("load through an independent store instance");
+    assert_eq!(loaded, Some(record));
+
+    let foreign_actor = second
+        .load_run_final_reply_target(RunFinalReplyTargetRequest {
+            run_id,
+            scope: scope.clone(),
+            actor: TurnActor::new(UserId::new("user-foreign").unwrap()),
+        })
+        .await
+        .expect("foreign lookup must not reveal whether the route exists");
+    assert!(foreign_actor.is_none());
+
+    let foreign_scope = TurnScope::new_with_owner(
+        TenantId::new("tenant-foreign").unwrap(),
+        scope.agent_id.clone(),
+        scope.project_id.clone(),
+        scope.thread_id.clone(),
+        scope.explicit_owner_user_id().cloned(),
+    );
+    let foreign_scope = second
+        .load_run_final_reply_target(RunFinalReplyTargetRequest {
+            run_id,
+            scope: foreign_scope,
+            actor,
+        })
+        .await
+        .expect("foreign scope lookup must not reveal whether the route exists");
+    assert!(foreign_scope.is_none());
+}
+
+#[tokio::test]
+async fn final_reply_handoff_survives_reopen_and_cursor_replay_is_monotonic() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let first = build_outbound_store_for_backend(Arc::clone(&backend));
+    let reopened = build_outbound_store_for_backend(backend);
+    let handoff = RunFinalReplyHandoffRecord {
+        event_cursor: ironclaw_turns::EventCursor(41),
+        scope: turn_scope(),
+        run_id: TurnRunId::new(),
+    };
+
+    first
+        .put_run_final_reply_handoff(handoff.clone())
+        .await
+        .expect("persist handoff before process death");
+    first
+        .advance_run_final_reply_handoff_cursor(ironclaw_turns::EventCursor(41))
+        .await
+        .expect("persist materialization cursor");
+
+    assert_eq!(
+        reopened
+            .list_pending_run_final_reply_handoffs(10)
+            .await
+            .expect("reopened store lists pending handoff"),
+        vec![handoff.clone()]
+    );
+    assert_eq!(
+        reopened
+            .load_run_final_reply_handoff_cursor()
+            .await
+            .expect("reopened store loads cursor"),
+        ironclaw_turns::EventCursor(41)
+    );
+
+    reopened
+        .advance_run_final_reply_handoff_cursor(ironclaw_turns::EventCursor(12))
+        .await
+        .expect("stale replay is idempotent");
+    assert_eq!(
+        reopened
+            .load_run_final_reply_handoff_cursor()
+            .await
+            .expect("cursor never regresses"),
+        ironclaw_turns::EventCursor(41)
+    );
+
+    reopened
+        .complete_run_final_reply_handoff(&handoff)
+        .await
+        .expect("settle handoff");
+    reopened
+        .complete_run_final_reply_handoff(&handoff)
+        .await
+        .expect("settlement replay is idempotent");
+    assert!(
+        reopened
+            .list_pending_run_final_reply_handoffs(10)
+            .await
+            .expect("settled handoff is absent")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn final_reply_handoff_keyset_survives_deletion_between_pages() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let store = build_outbound_store_for_backend(backend);
+    let mut handoffs = (0..3)
+        .map(|_| RunFinalReplyHandoffRecord {
+            event_cursor: ironclaw_turns::EventCursor(41),
+            scope: turn_scope(),
+            run_id: TurnRunId::new(),
+        })
+        .collect::<Vec<_>>();
+    handoffs.sort_by_key(|record| (record.event_cursor, record.run_id));
+    for handoff in &handoffs {
+        store
+            .put_run_final_reply_handoff(handoff.clone())
+            .await
+            .expect("persist handoff");
+    }
+
+    let first_page = store
+        .list_pending_run_final_reply_handoffs_after(None, 1)
+        .await
+        .expect("first keyset page");
+    assert_eq!(first_page, vec![handoffs[0].clone()]);
+    store
+        .complete_run_final_reply_handoff(&first_page[0])
+        .await
+        .expect("delete first page before continuing");
+
+    assert_eq!(
+        store
+            .list_pending_run_final_reply_handoffs_after(first_page.first(), 1)
+            .await
+            .expect("second keyset page after deleted cursor row"),
+        vec![handoffs[1].clone()],
+        "the continuation key must not depend on deletion-sensitive offsets"
+    );
+}
+
+#[tokio::test]
+async fn completing_last_run_delivery_cleanup_record_deletes_snapshot() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let store = build_outbound_store_for_backend(Arc::clone(&backend));
+    let record = RunDeliveryCleanupRecord::new(
+        turn_scope(),
+        TurnRunId::new(),
+        RunOriginAdapter::new("test-adapter").expect("adapter"),
+        reply_ref("reply-cleanup-compaction"),
+        "conversation-cleanup-compaction".to_string(),
+        "vendor-message-cleanup-compaction".to_string(),
+    )
+    .expect("cleanup record");
+    let cleanup_root = VirtualPath::new(format!("{TEST_OUTBOUND_ROOT}/run-delivery-cleanup"))
+        .expect("cleanup root");
+
+    store
+        .put_run_delivery_cleanup(record.clone())
+        .await
+        .expect("persist cleanup record");
+    assert_eq!(
+        backend
+            .query(&cleanup_root, &Filter::All, Page::default())
+            .await
+            .expect("query cleanup snapshots")
+            .len(),
+        1
+    );
+
+    store
+        .complete_run_delivery_cleanup(&record)
+        .await
+        .expect("complete cleanup record");
+    assert!(
+        backend
+            .query(&cleanup_root, &Filter::All, Page::default())
+            .await
+            .expect("query compacted cleanup snapshots")
+            .is_empty(),
+        "an empty cleanup snapshot must be removed instead of retained forever"
+    );
+}
+
+fn cleanup_record(run_id: TurnRunId, suffix: &str) -> RunDeliveryCleanupRecord {
+    RunDeliveryCleanupRecord::new(
+        turn_scope(),
+        run_id,
+        RunOriginAdapter::new("test-adapter").expect("adapter"),
+        reply_ref(&format!("reply-cleanup-{suffix}")),
+        format!("conversation-cleanup-{suffix}"),
+        format!("vendor-message-cleanup-{suffix}"),
+    )
+    .expect("cleanup record")
+}
+
+#[tokio::test]
+async fn cleanup_put_rejects_invalid_existing_snapshot_without_writing() {
+    for (case, mismatch_identity) in [("mismatched-identity", true), ("malformed-record", false)] {
+        let backend = Arc::new(InMemoryBackend::new());
+        let store = build_outbound_store_for_backend(Arc::clone(&backend));
+        let run_id = TurnRunId::new();
+        let existing = cleanup_record(run_id, &format!("{case}-existing"));
+        let incoming = cleanup_record(run_id, &format!("{case}-incoming"));
+        store
+            .put_run_delivery_cleanup(existing)
+            .await
+            .expect("seed cleanup snapshot");
+
+        let cleanup_root = VirtualPath::new(format!("{TEST_OUTBOUND_ROOT}/run-delivery-cleanup"))
+            .expect("cleanup root");
+        let mut rows = backend
+            .query(&cleanup_root, &Filter::All, Page::default())
+            .await
+            .expect("query seeded cleanup snapshot");
+        assert_eq!(rows.len(), 1, "{case}: exactly one snapshot must exist");
+        let stored = rows.remove(0);
+        let path = stored.path.clone();
+        let mut snapshot_json: serde_json::Value =
+            serde_json::from_slice(&stored.entry.body).expect("decode raw cleanup snapshot");
+        let record_json = snapshot_json
+            .get_mut("records")
+            .and_then(serde_json::Value::as_array_mut)
+            .and_then(|records| records.first_mut())
+            .expect("cleanup snapshot has one record");
+        if mismatch_identity {
+            record_json["run_id"] =
+                serde_json::to_value(TurnRunId::new()).expect("serialize mismatched run id");
+        } else {
+            record_json["vendor_message_ref"] = serde_json::Value::String(String::new());
+        }
+        let corrupted_body =
+            serde_json::to_vec(&snapshot_json).expect("encode corrupted cleanup snapshot");
+        let mut corrupted_entry = stored.entry;
+        corrupted_entry.body = corrupted_body.clone();
+        let corrupted_version = backend
+            .put(
+                &path,
+                corrupted_entry,
+                CasExpectation::Version(stored.version),
+            )
+            .await
+            .expect("write corrupted cleanup snapshot");
+
+        assert!(
+            matches!(
+                store.put_run_delivery_cleanup(incoming).await,
+                Err(OutboundError::Serialization)
+            ),
+            "{case}: put must reject invalid authoritative snapshot data"
+        );
+        let after = backend
+            .get(&path)
+            .await
+            .expect("read snapshot after rejected put")
+            .expect("corrupted snapshot remains");
+        assert_eq!(
+            after.version, corrupted_version,
+            "{case}: rejected put must not write"
+        );
+        assert_eq!(
+            after.entry.body, corrupted_body,
+            "{case}: rejected put must preserve authoritative bytes"
+        );
+    }
+}
+
+#[tokio::test]
+async fn cleanup_completion_retries_delete_when_second_store_adds_sibling_record() {
+    let inner = Arc::new(InMemoryBackend::new());
+    let backend = Arc::new(DeletePauseBackend::new(inner));
+    let first = Arc::new(OutboundStateStore::new(build_scoped_fs(
+        Arc::clone(&backend),
+        TEST_OUTBOUND_ROOT,
+    )));
+    let second = OutboundStateStore::new(build_scoped_fs(Arc::clone(&backend), TEST_OUTBOUND_ROOT));
+    let run_id = TurnRunId::new();
+    let completed = cleanup_record(run_id, "completed");
+    let sibling = cleanup_record(run_id, "sibling");
+
+    first
+        .put_run_delivery_cleanup(completed.clone())
+        .await
+        .expect("seed cleanup record");
+    backend.arm_before_delete();
+    let completed_for_task = completed.clone();
+    let completion = {
+        let first = Arc::clone(&first);
+        tokio::spawn(async move {
+            first
+                .complete_run_delivery_cleanup(&completed_for_task)
+                .await
+        })
+    };
+    backend.wait_for_delete().await;
+
+    second
+        .put_run_delivery_cleanup(sibling.clone())
+        .await
+        .expect("second store adds sibling during delete race");
+    backend.release_delete();
+    completion
+        .await
+        .expect("completion task joins")
+        .expect("completion retries version mismatch");
+
+    assert_eq!(
+        second
+            .load_run_delivery_cleanup(completed.request())
+            .await
+            .expect("load cleanup snapshot"),
+        vec![sibling],
+        "the second store's sibling record must survive delete-vs-write contention"
+    );
+}
+
+#[tokio::test]
+async fn cleanup_completion_uses_shared_retry_budget_under_two_store_contention() {
+    let inner = Arc::new(InMemoryBackend::new());
+    let backend = Arc::new(DeletePauseBackend::new(inner));
+    let first = Arc::new(OutboundStateStore::new(build_scoped_fs(
+        Arc::clone(&backend),
+        TEST_OUTBOUND_ROOT,
+    )));
+    let second = OutboundStateStore::new(build_scoped_fs(Arc::clone(&backend), TEST_OUTBOUND_ROOT));
+    let run_id = TurnRunId::new();
+    let completed = cleanup_record(run_id, "retry-budget-completed");
+    let racing = cleanup_record(run_id, "retry-budget-racing");
+
+    first
+        .put_run_delivery_cleanup(completed.clone())
+        .await
+        .expect("seed cleanup record");
+    backend.arm_before_deletes(5);
+    let completed_for_task = completed.clone();
+    let completion = {
+        let first = Arc::clone(&first);
+        tokio::spawn(async move {
+            first
+                .complete_run_delivery_cleanup(&completed_for_task)
+                .await
+        })
+    };
+
+    for _ in 0..5 {
+        backend.wait_for_delete().await;
+        second
+            .put_run_delivery_cleanup(racing.clone())
+            .await
+            .expect("racing store bumps the snapshot version");
+        second
+            .complete_run_delivery_cleanup(&racing)
+            .await
+            .expect("racing store restores the one-record snapshot");
+        backend.release_delete();
+    }
+
+    completion
+        .await
+        .expect("completion task joins")
+        .expect("shared retry budget exceeds the legacy fixed five attempts");
+    assert!(
+        second
+            .load_run_delivery_cleanup(completed.request())
+            .await
+            .expect("load cleanup snapshot")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn cleanup_completion_rechecks_aba_recreation_by_second_store() {
+    let inner = Arc::new(InMemoryBackend::new());
+    let backend = Arc::new(DeletePauseBackend::new(inner));
+    let first = Arc::new(OutboundStateStore::new(build_scoped_fs(
+        Arc::clone(&backend),
+        TEST_OUTBOUND_ROOT,
+    )));
+    let second = OutboundStateStore::new(build_scoped_fs(Arc::clone(&backend), TEST_OUTBOUND_ROOT));
+    let record = cleanup_record(TurnRunId::new(), "aba");
+
+    first
+        .put_run_delivery_cleanup(record.clone())
+        .await
+        .expect("seed cleanup record");
+    backend.arm_after_delete();
+    let record_for_task = record.clone();
+    let completion = {
+        let first = Arc::clone(&first);
+        tokio::spawn(async move { first.complete_run_delivery_cleanup(&record_for_task).await })
+    };
+    backend.wait_for_delete().await;
+
+    second
+        .put_run_delivery_cleanup(record.clone())
+        .await
+        .expect("second store recreates same record after delete commits");
+    backend.release_delete();
+    completion
+        .await
+        .expect("completion task joins")
+        .expect("completion rechecks recreated path");
+
+    assert!(
+        second
+            .load_run_delivery_cleanup(record.request())
+            .await
+            .expect("load cleanup snapshot")
+            .is_empty(),
+        "completion must not return while an ABA recreation still contains the record"
+    );
+}
+
+#[tokio::test]
+async fn cleanup_completion_delete_permission_fault_preserves_snapshot() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let writer = build_outbound_store_with_permissions(
+        Arc::clone(&backend),
+        MountPermissions::read_write_list_delete(),
+    );
+    let no_delete = build_outbound_store_with_permissions(backend, MountPermissions::read_write());
+    let record = cleanup_record(TurnRunId::new(), "permission-fault");
+
+    writer
+        .put_run_delivery_cleanup(record.clone())
+        .await
+        .expect("seed cleanup record");
+    assert!(matches!(
+        no_delete.complete_run_delivery_cleanup(&record).await,
+        Err(OutboundError::Backend)
+    ));
+    assert_eq!(
+        writer
+            .load_run_delivery_cleanup(record.request())
+            .await
+            .expect("load preserved cleanup snapshot"),
+        vec![record],
+        "a conditional-delete fault must not drop or rewrite the cleanup snapshot"
+    );
+}
+
+#[tokio::test]
+async fn final_reply_handoff_cursor_converges_across_concurrent_store_instances() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let first = Arc::new(build_outbound_store_for_backend(Arc::clone(&backend)));
+    let second = Arc::new(build_outbound_store_for_backend(backend));
+
+    let (low, high) = tokio::join!(
+        first.advance_run_final_reply_handoff_cursor(ironclaw_turns::EventCursor(17)),
+        second.advance_run_final_reply_handoff_cursor(ironclaw_turns::EventCursor(29)),
+    );
+    low.expect("lower cursor writer");
+    high.expect("higher cursor writer");
+    assert_eq!(
+        first
+            .load_run_final_reply_handoff_cursor()
+            .await
+            .expect("load converged cursor"),
+        ironclaw_turns::EventCursor(29)
     );
 }

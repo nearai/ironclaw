@@ -110,7 +110,9 @@ fn map_auth_error(error: crate::RebornAuthProductError) -> ProductSurfaceError {
             403,
             false,
         ),
-        AuthErrorCode::BackendUnavailable | AuthErrorCode::MalformedConfig => services_error(
+        AuthErrorCode::BackendUnavailable
+        | AuthErrorCode::MalformedConfig
+        | AuthErrorCode::LifecycleActivationFailed => services_error(
             ProductSurfaceErrorCode::Unavailable,
             ProductSurfaceErrorKind::ServiceUnavailable,
             503,

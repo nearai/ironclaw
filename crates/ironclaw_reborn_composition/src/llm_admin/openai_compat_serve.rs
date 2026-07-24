@@ -25,7 +25,6 @@ use ironclaw_product::{
     ProductProjectionState, ProjectionCursor, ProjectionReadRequest, ProjectionStream,
     ProjectionSubscriptionRequest,
 };
-use ironclaw_reborn_openai_compat::FilesystemOpenAiCompatRefStore;
 use ironclaw_reborn_openai_compat::{
     OpenAiChatCompletionProjection, OpenAiChatCompletionProjectionReader,
     OpenAiChatCompletionProjectionRequest, OpenAiChatCompletionsWorkflow,
@@ -77,11 +76,9 @@ pub async fn build_openai_compat_route_mount(
     _default_project_id: Option<ProjectId>,
 ) -> Result<ProtectedRouteMount, RebornBuildError> {
     let ref_filesystem: Arc<dyn RootFilesystem> = runtime.extension_filesystem.clone();
-    let ref_store: Arc<dyn OpenAiCompatRefStore> =
-        Arc::new(FilesystemOpenAiCompatRefStore::with_root(
-            ref_filesystem,
-            openai_compat_ref_root(&tenant_id)?,
-        ));
+    let ref_store: Arc<dyn ironclaw_reborn_openai_compat::OpenAiCompatRefStorePort> = Arc::new(
+        OpenAiCompatRefStore::with_root(ref_filesystem, openai_compat_ref_root(&tenant_id)?),
+    );
     let projection_stream = runtime.product_event_stream();
     let product_surface =
         crate::webui::service::build_webui_services(runtime, Some(projection_stream.clone()))?

@@ -168,6 +168,7 @@ pub async fn auth_prompt_view_for_blocked_auth(
         authorization_url: None,
         expires_at: None,
         connection: None,
+        pairing: None,
     };
     Ok(match challenge {
         Some(c) => c.enrich(base_view),

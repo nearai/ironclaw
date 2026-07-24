@@ -201,7 +201,7 @@ pub struct RebornHostBindings {
     /// web tooling): composition runs each once against the shared registry so
     /// the concrete executors live in the binary, not composition.
     pub(crate) first_party_registrars:
-        Vec<Arc<dyn crate::extension_host::first_party::FirstPartyHandlerRegistrar>>,
+        Vec<Arc<dyn ironclaw_extension_host::FirstPartyHandlerRegistrar>>,
     /// Injected credential-account visibility policy (extension-family-aware,
     /// e.g. the GSuite account visibility policy). `None` falls back to the safe
     /// fail-closed default in the product-auth services.
@@ -886,7 +886,7 @@ impl RebornHostBindings {
     /// Inject the binary-assembled neutral first-party package inventory.
     pub fn with_first_party_bundles(
         mut self,
-        bundles: Vec<crate::extension_host::first_party::FirstPartyPackageBundle>,
+        bundles: Vec<ironclaw_extension_host::FirstPartyPackageBundle>,
     ) -> Self {
         self.deployment.first_party_bundles = bundles;
         self
@@ -895,7 +895,7 @@ impl RebornHostBindings {
     /// Inject the binary-assembled first-party capability handler registrars.
     pub fn with_first_party_registrars(
         mut self,
-        registrars: Vec<Arc<dyn crate::extension_host::first_party::FirstPartyHandlerRegistrar>>,
+        registrars: Vec<Arc<dyn ironclaw_extension_host::FirstPartyHandlerRegistrar>>,
     ) -> Self {
         self.first_party_registrars = registrars;
         self
@@ -927,13 +927,13 @@ impl RebornHostBindings {
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_bundled_first_party_for_test(self) -> Self {
         self.with_first_party_bundles(
-            crate::extension_host::first_party::first_party_bundles_from_inventory(),
+            ironclaw_extension_host::test_support::first_party_bundles_from_inventory(),
         )
         .with_first_party_registrars(
-            crate::extension_host::first_party::test_support::bundled_first_party_registrars(),
+            crate::test_support::first_party_registrars::bundled_first_party_registrars(),
         )
         .with_credential_account_visibility_policy(
-            crate::extension_host::first_party::test_support::bundled_credential_account_visibility_policy(),
+            crate::test_support::first_party_registrars::bundled_credential_account_visibility_policy(),
         )
     }
 }

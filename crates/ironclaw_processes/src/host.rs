@@ -1,7 +1,7 @@
 //! Host-facing process query API.
 //!
-//! [`ProcessHost`] wraps a [`ProcessStore`](crate::types::ProcessStore) and an
-//! optional [`ProcessResultStore`](crate::types::ProcessResultStore) and
+//! [`ProcessHost`] wraps a [`ProcessStorePort`](crate::types::ProcessStorePort) and an
+//! optional [`ProcessResultStorePort`](crate::types::ProcessResultStorePort) and
 //! [`ProcessCancellationRegistry`](crate::cancellation::ProcessCancellationRegistry).
 //! It is the read/poll/await/cancel surface used by host runtimes; spawning
 //! processes lives in [`crate::services`].
@@ -14,20 +14,20 @@ use tokio::time::{Duration, sleep};
 
 use crate::cancellation::ProcessCancellationRegistry;
 use crate::types::{
-    ProcessError, ProcessExit, ProcessRecord, ProcessResultRecord, ProcessResultStore,
-    ProcessStatus, ProcessStore,
+    ProcessError, ProcessExit, ProcessRecord, ProcessResultRecord, ProcessResultStorePort,
+    ProcessStatus, ProcessStorePort,
 };
 
 /// Host-facing lifecycle API over process current state.
 pub struct ProcessHost<'a> {
-    store: &'a dyn ProcessStore,
+    store: &'a dyn ProcessStorePort,
     poll_interval: Duration,
     cancellation_registry: Option<Arc<ProcessCancellationRegistry>>,
-    result_store: Option<Arc<dyn ProcessResultStore>>,
+    result_store: Option<Arc<dyn ProcessResultStorePort>>,
 }
 
 impl<'a> ProcessHost<'a> {
-    pub fn new(store: &'a dyn ProcessStore) -> Self {
+    pub fn new(store: &'a dyn ProcessStorePort) -> Self {
         Self {
             store,
             poll_interval: Duration::from_millis(10),
@@ -51,18 +51,18 @@ impl<'a> ProcessHost<'a> {
 
     pub fn with_result_store<S>(mut self, store: Arc<S>) -> Self
     where
-        S: ProcessResultStore + 'static,
+        S: ProcessResultStorePort + 'static,
     {
         self.result_store = Some(store);
         self
     }
 
-    pub fn with_result_store_dyn(mut self, store: Arc<dyn ProcessResultStore>) -> Self {
+    pub fn with_result_store_dyn(mut self, store: Arc<dyn ProcessResultStorePort>) -> Self {
         self.result_store = Some(store);
         self
     }
 
-    fn result_store(&self) -> Result<&dyn ProcessResultStore, ProcessError> {
+    fn result_store(&self) -> Result<&dyn ProcessResultStorePort, ProcessError> {
         self.result_store
             .as_deref()
             .ok_or(ProcessError::ProcessResultStoreUnavailable)
@@ -201,7 +201,7 @@ impl<'a> ProcessHost<'a> {
 
 /// Scoped subscription over process lifecycle status changes.
 pub struct ProcessSubscription<'a> {
-    store: &'a dyn ProcessStore,
+    store: &'a dyn ProcessStorePort,
     scope: ResourceScope,
     process_id: ProcessId,
     poll_interval: Duration,

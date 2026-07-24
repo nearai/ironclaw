@@ -25,8 +25,6 @@ enum ExtensionSubcommand {
     Search(ExtensionSearchCommand),
     /// Install a local Reborn extension package.
     Install(ExtensionPackageCommand),
-    /// Activate an installed local Reborn extension package.
-    Activate(ExtensionPackageCommand),
     /// Remove an installed local Reborn extension package.
     Remove(ExtensionPackageCommand),
 }
@@ -66,11 +64,6 @@ impl ExtensionCommand {
                 RebornExtensionLifecycleCommand::Install { id: command.id },
                 command.json,
                 "install",
-            ),
-            ExtensionSubcommand::Activate(command) => (
-                RebornExtensionLifecycleCommand::Activate { id: command.id },
-                command.json,
-                "activate",
             ),
             ExtensionSubcommand::Remove(command) => (
                 RebornExtensionLifecycleCommand::Remove { id: command.id },

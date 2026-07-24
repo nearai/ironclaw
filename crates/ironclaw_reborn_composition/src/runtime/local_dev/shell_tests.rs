@@ -111,16 +111,16 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
         ),
         approval_requests: runtime_surfaces.approval_requests_for_test().clone(),
         capability_leases: runtime_surfaces.capability_leases_for_test().clone(),
-        gate_record_store: std::sync::Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+        gate_record_store: std::sync::Arc::new(ironclaw_run_state::GateRecordStore::new(
             crate::wrap_scoped(std::sync::Arc::new(
                 ironclaw_filesystem::InMemoryBackend::new(),
             )),
         )),
-        replay_payload_store: std::sync::Arc::new(
-            ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
-                std::sync::Arc::new(ironclaw_filesystem::InMemoryBackend::new()),
+        replay_payload_store: std::sync::Arc::new(ironclaw_capabilities::ReplayPayloadStore::new(
+            crate::wrap_scoped(std::sync::Arc::new(
+                ironclaw_filesystem::InMemoryBackend::new(),
             )),
-        ),
+        )),
         external_tool_catalog: std::sync::Arc::new(
             ironclaw_turns::InMemoryExternalToolCatalog::new(),
         ),
@@ -133,7 +133,7 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
     {
         let mut scope = run_context.scope.to_resource_scope();
         scope.user_id = UserId::new("local-dev-shell-user").expect("user id");
-        ironclaw_approvals::AutoApproveSettingStore::set(
+        ironclaw_approvals::AutoApproveSettingStorePort::set(
             runtime_surfaces.auto_approve_settings_for_test().as_ref(),
             ironclaw_approvals::AutoApproveSettingInput {
                 updated_by: ironclaw_host_api::Principal::User(scope.user_id.clone()),

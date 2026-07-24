@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_extensions::ExtensionInstallationStore;
+use ironclaw_extensions::ExtensionInstallationStorePort;
 use ironclaw_host_api::{
     AdapterInstallationId, ChannelConnectionScope, ChannelConnectionScopeSource, ExtensionId,
 };
@@ -15,7 +15,7 @@ use crate::ChannelConfigService;
 /// supplies the adapter installation id; non-secret config values whose
 /// handles carry a claim suffix supply the expected claim values.
 struct ChannelConfigConnectionScopeSource {
-    installation_store: Arc<dyn ExtensionInstallationStore>,
+    installation_store: Arc<dyn ExtensionInstallationStorePort>,
     extension_id: ExtensionId,
     channel_config: Option<Arc<ChannelConfigService>>,
 }
@@ -31,7 +31,7 @@ impl ChannelConnectionScopeSource for ChannelConfigConnectionScopeSource {
         else {
             return Ok(None);
         };
-        let Some(channel) = record.resolved().channel.as_ref() else {
+        if record.resolved().channel.is_none() {
             return Ok(None);
         };
         let installation = self
@@ -52,24 +52,13 @@ impl ChannelConnectionScopeSource for ChannelConfigConnectionScopeSource {
                 .await
                 .map_err(|error| error.to_string())?
         } else {
-            self.installation_store
-                .channel_config(&self.extension_id)
-                .await
-                .map_err(|error| error.to_string())?
+            Vec::new()
         };
         let expected = |claim: &str| -> Option<String> {
-            channel
-                .config
-                .fields
+            values
                 .iter()
-                .filter(|field| !field.secret)
-                .find(|field| handle_declares_claim(field.handle.as_str(), claim))
-                .and_then(|field| {
-                    values
-                        .iter()
-                        .find(|(handle, _)| handle == field.handle.as_str())
-                        .map(|(_, value)| value.clone())
-                })
+                .find(|(handle, _)| handle_declares_claim(handle, claim))
+                .map(|(_, value)| value.clone())
                 .filter(|value| !value.trim().is_empty())
         };
         Ok(Some(ChannelConnectionScope {
@@ -93,7 +82,7 @@ pub fn handle_declares_claim(handle: &str, claim: &str) -> bool {
 /// The generic scope source for one extension over the durable installation
 /// store.
 pub fn channel_config_connection_scope_source(
-    installation_store: Arc<dyn ExtensionInstallationStore>,
+    installation_store: Arc<dyn ExtensionInstallationStorePort>,
     extension_id: ExtensionId,
     channel_config: Option<Arc<ChannelConfigService>>,
 ) -> Arc<dyn ChannelConnectionScopeSource> {
@@ -114,7 +103,7 @@ pub struct DiscoveredChannelExtension {
 /// Installed extensions whose manifest declares a channel surface, excluding
 /// `overridden` extension ids whose lane owns identity binding.
 pub async fn discover_channel_extensions(
-    installation_store: &Arc<dyn ExtensionInstallationStore>,
+    installation_store: &Arc<dyn ExtensionInstallationStorePort>,
     overridden: &BTreeSet<String>,
 ) -> Result<Vec<DiscoveredChannelExtension>, String> {
     let manifests = installation_store

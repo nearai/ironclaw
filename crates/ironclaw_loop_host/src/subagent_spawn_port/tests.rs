@@ -2609,7 +2609,7 @@ async fn invoke_capability_batch_preserves_spawns_on_inner_batch_suspension() {
     // §3 replacement: `InMemoryAwaitEdgeWriter` keys per-child
     // `(parent_run_id, child_run_id)`, not per-`gate_ref` — two batch
     // children sharing one shared gate_ref now record 2 distinct edges
-    // (matching the real `FilesystemAwaitEdgeStore`'s per-child tracking,
+    // (matching the real `AwaitEdgeStore`'s per-child tracking,
     // D3's group-based settling), not 1 collapsed record as the deleted
     // `BoundedSubagentGateResolutionStore`'s gate_ref-keyed map did.
     assert_eq!(gate_store.records().len(), 2);

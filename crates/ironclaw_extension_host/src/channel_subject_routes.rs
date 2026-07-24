@@ -234,13 +234,14 @@ impl ProductConversationSubjectRouteResolver for ChannelConfigSubjectRouteResolv
 #[cfg(test)]
 mod tests {
     use ironclaw_extensions::{
-        ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
-        ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestRef, ManifestSource,
+        ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStore,
+        ExtensionInstallationStorePort, ExtensionManifestRecord, ExtensionManifestRef,
+        ManifestSource,
     };
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{HostPortCatalog, InvocationId, ResourceScope, VirtualPath};
     use ironclaw_product::ProductConversationRouteKey;
-    use ironclaw_secrets::FilesystemSecretStore;
+    use ironclaw_secrets::SecretStore;
 
     use super::*;
 
@@ -308,9 +309,8 @@ supports_threads = false
         }
     }
 
-    async fn filesystem_installation_store_for_test()
-    -> ironclaw_extensions::FilesystemExtensionInstallationStore {
-        ironclaw_extensions::FilesystemExtensionInstallationStore::load_at(
+    async fn filesystem_installation_store_for_test() -> ExtensionInstallationStore {
+        ExtensionInstallationStore::load_at(
             Arc::new(InMemoryBackend::new()),
             VirtualPath::new("/system/extensions/.installations/test").expect("valid test path"),
             HostPortCatalog::empty(),
@@ -351,7 +351,6 @@ supports_threads = false
                     ExtensionInstallationId::new(INSTALLATION.to_string())
                         .expect("installation id"),
                     extension_id.clone(),
-                    ExtensionActivationState::Enabled,
                     ExtensionManifestRef::new(extension_id.clone(), None),
                     Vec::new(),
                     chrono::Utc::now(),
@@ -368,7 +367,7 @@ supports_threads = false
         .expect("resource scope");
         let channel_config = Arc::new(ChannelConfigService::new(
             store,
-            Arc::new(FilesystemSecretStore::ephemeral()),
+            Arc::new(SecretStore::ephemeral()),
             scope,
             Arc::new(NoopReactivation),
         ));
@@ -429,14 +428,18 @@ supports_threads = false
             &product_extension_host_api_contract_registry().expect("contracts"),
         )
         .expect("fixture manifest parses");
-        let fields = &record
+        let fields = record
             .resolved()
-            .channel
-            .as_ref()
-            .expect("channel surface")
-            .config
-            .fields;
-        let handles = shared_channel_admission_handles(fields);
+            .admin_configuration
+            .iter()
+            .flat_map(|descriptor| descriptor.fields.iter())
+            .map(|field| RecipeSecretField {
+                handle: field.handle.clone(),
+                label: field.label.clone(),
+                secret: field.secret,
+            })
+            .collect::<Vec<_>>();
+        let handles = shared_channel_admission_handles(&fields);
         assert_eq!(
             handles,
             SharedChannelAdmissionHandles {

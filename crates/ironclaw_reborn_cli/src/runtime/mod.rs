@@ -5,13 +5,14 @@ use std::time::Duration;
 use std::{future::Future, thread};
 
 use anyhow::Context;
+use ironclaw_extension_host::FirstPartyPackageBundle;
 use ironclaw_reborn_composition::TriggerFireAccessPolicy;
 use ironclaw_reborn_composition::host_api::{AgentId, TenantId, UserId};
 use ironclaw_reborn_composition::hosted_single_tenant_runtime_policy;
 use ironclaw_reborn_composition::{
-    FirstPartyPackageBundle, KeepaliveSweepSettings, OAuthClientConfig, OperatorLogLayer,
-    PollSettings, RebornCompositionProfile, RebornHostBindings, RebornRuntimeIdentity,
-    RebornRuntimeInput, RebornRuntimeProfileOptions, TurnRunnerSettings, build_reborn_runtime,
+    KeepaliveSweepSettings, OAuthClientConfig, OperatorLogLayer, PollSettings,
+    RebornCompositionProfile, RebornHostBindings, RebornRuntimeIdentity, RebornRuntimeInput,
+    RebornRuntimeProfileOptions, TurnRunnerSettings, build_reborn_runtime,
     local_runtime_build_input_with_options, nearai_mcp_bootstrap_config_from_env,
 };
 use ironclaw_reborn_config::{
@@ -22,7 +23,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::context::RebornCliContext;
 
-mod account_setups;
 mod native_extensions;
 // Crate-wide process-env lock lives here (see test_env.rs). `pub(crate)` so
 // non-runtime env-mutating tests (e.g. commands::serve_sso) serialize against
@@ -624,7 +624,6 @@ fn with_binary_host_extension_bindings_from_bundles(
     Ok(services_input
         .with_native_extension_factories(native_extensions::bundled_native_extension_factories())
         .with_channel_extension_bindings(native_extensions::bundled_channel_extension_bindings())
-        .with_account_setup_descriptors(account_setups::bundled_account_setup_descriptors())
         .with_first_party_bundles(first_party_bundles)
         .with_first_party_registrars(crate::first_party::bundled_first_party_registrars())
         .with_credential_account_visibility_policy(

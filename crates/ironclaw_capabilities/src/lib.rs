@@ -45,6 +45,6 @@ pub use process_authorization::{
 };
 pub use registry::{CapabilityDispatchRegistry, CapabilityRegistrationError};
 pub use replay_payload::{
-    FilesystemReplayPayloadStore, ReplayPayload, ReplayPayloadStore, ReplayPayloadStoreError,
+    ReplayPayload, ReplayPayloadStore, ReplayPayloadStoreError, ReplayPayloadStorePort,
 };
 pub use requests::{CapabilityInvocationResult, CapabilitySpawnRequest, CapabilitySpawnResult};

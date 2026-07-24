@@ -125,7 +125,12 @@ impl GenericTriggeredRunDeliveryHook {
             .ok_or_else(|| {
                 "per-trigger delivery target is no longer available to its creator".to_string()
             })?;
-        Ok(Some(entry.reply_target_binding_ref))
+        match entry.destination {
+            ironclaw_outbound::RunFinalReplyDestination::External {
+                reply_target_binding_ref,
+            } => Ok(Some(reply_target_binding_ref)),
+            ironclaw_outbound::RunFinalReplyDestination::WebApp => Ok(None),
+        }
     }
 
     /// The creator's first configured personal preference target, in

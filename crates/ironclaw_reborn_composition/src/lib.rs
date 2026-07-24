@@ -49,7 +49,7 @@ mod runtime_input;
 mod runtime_profile_approval_policy;
 mod storage_catalog;
 mod support;
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 mod trigger_fire_access;
 mod turn_run_snapshot;
@@ -74,10 +74,6 @@ pub use extension_host::extension_ingress::{
 pub use extension_host::extension_lifecycle_command::{
     RebornExtensionLifecycleCommand, RebornExtensionLifecycleCommandError,
     execute_reborn_extension_lifecycle_command, render_reborn_extension_lifecycle_response,
-};
-pub use extension_host::first_party::{
-    FirstPartyHandlerRegistrar, FirstPartyPackageAsset, FirstPartyPackageBundle,
-    FirstPartyPackageOAuthSetup, FirstPartyPackageOnboarding, FirstPartyRegistrarContext,
 };
 pub use extension_host::skill_listing::{RebornSkillListError, list_reborn_local_skills};
 #[cfg(feature = "test-support")]
@@ -105,8 +101,8 @@ pub use input::{
 };
 /// OAuth redirect-URI newtype re-exported so the `ironclaw_reborn_cli` binary
 /// can name it without a direct `ironclaw_auth` dependency. Its
-/// `runtime/mod.rs` parses `IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI`
-/// and the Google OAuth redirect URI from env into `OAuthRedirectUri` when
+/// `runtime/mod.rs` parses extension OAuth redirect URIs from env into
+/// `OAuthRedirectUri` when
 /// building the runtime input / OAuth client config. The
 /// `reborn_cli_binary_crate_stays_separate_from_v1_root` boundary test (in
 /// `ironclaw_architecture`) pins the CLI's workspace dependencies to exactly
@@ -118,13 +114,9 @@ pub use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountId, CredentialAccountLabel,
     CredentialAccountStatus, CredentialOwnership, Timestamp,
 };
-/// First-party capability-wiring vocabulary re-exported so the assembling
-/// binary (`ironclaw_reborn_cli`) can build the concrete GSuite / web tooling
-/// [`FirstPartyHandlerRegistrar`]s and the credential-account visibility policy
-/// without depending on `ironclaw_host_api` / `ironclaw_host_runtime` /
-/// `ironclaw_auth` directly (extension-runtime DEL-7). The CLI's exact-deps
-/// allow-list is frozen to the composition service, so these types travel
-/// through here.
+/// Product-auth capability-wiring vocabulary re-exported so the assembling
+/// binary (`ironclaw_reborn_cli`) can inject the credential-account visibility
+/// policy without depending on composition-private product-auth modules.
 pub use ironclaw_auth::{CredentialAccount, CredentialAccountSelectionRequest};
 pub use ironclaw_host_api::{
     CapabilityId, HostApiError, NetworkScheme, NetworkTargetPattern, RuntimeCredentialRequirement,
@@ -133,10 +125,6 @@ pub use ironclaw_host_api::{
 };
 pub use ironclaw_host_api::{
     ExtensionId, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, VendorId,
-};
-pub use ironclaw_host_runtime::{
-    FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
-    FirstPartyCapabilityRequest, FirstPartyCapabilityResult, ProductAuthProviderRuntimePorts,
 };
 pub use ironclaw_product::PreferenceTargetCodec;
 /// Channel-adapter and codec contracts re-exported for the assembling
@@ -327,15 +315,13 @@ pub fn open_reborn_identity_resolver(
     let filesystem = std::sync::Arc::new(ironclaw_filesystem::ScopedFilesystem::with_fixed_view(
         root, view,
     ));
-    std::sync::Arc::new(
-        ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
-            filesystem,
-            tenant_id.clone(),
-            UserId::new("test-owner").expect("user"),
-            AgentId::new("test-agent").expect("agent"),
-            None,
-        ),
-    )
+    std::sync::Arc::new(ironclaw_reborn_identity::RebornIdentityStore::new(
+        filesystem,
+        tenant_id.clone(),
+        UserId::new("test-owner").expect("user"),
+        AgentId::new("test-agent").expect("agent"),
+        None,
+    ))
 }
 
 /// Reborn model purpose slot names exposed for diagnostic callers.
@@ -432,7 +418,7 @@ use ironclaw_host_api::{
     resource_scope_path_segment,
 };
 use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
-use ironclaw_processes::{FilesystemProcessResultStore, FilesystemProcessStore};
+use ironclaw_processes::{ProcessResultStore, ProcessStore};
 use ironclaw_reborn_event_store::RebornEventStoreConfig;
 use ironclaw_reborn_event_store::RebornEventStoreError;
 use ironclaw_resources::FilesystemResourceGovernor;
@@ -448,15 +434,15 @@ use thiserror::Error;
 pub type LibSqlProductionHostRuntimeServices = HostRuntimeServices<
     LibSqlRootFilesystem,
     FilesystemResourceGovernor<LibSqlRootFilesystem>,
-    FilesystemProcessStore<LibSqlRootFilesystem>,
-    FilesystemProcessResultStore<LibSqlRootFilesystem>,
+    ProcessStore<LibSqlRootFilesystem>,
+    ProcessResultStore<LibSqlRootFilesystem>,
 >;
 
 pub type PostgresProductionHostRuntimeServices = HostRuntimeServices<
     PostgresRootFilesystem,
     FilesystemResourceGovernor<PostgresRootFilesystem>,
-    FilesystemProcessStore<PostgresRootFilesystem>,
-    FilesystemProcessResultStore<PostgresRootFilesystem>,
+    ProcessStore<PostgresRootFilesystem>,
+    ProcessResultStore<PostgresRootFilesystem>,
 >;
 
 /// Consumer-store mount aliases that are tenant-rewritten by
@@ -784,14 +770,14 @@ mod mount_view_tests {
         let view = invocation_mount_view(&scope).unwrap();
         let resolved = view
             .resolve(
-                &ScopedPath::new("/extension-admin-configuration/groups/extension.slack.json")
+                &ScopedPath::new("/extension-admin-configuration/groups/extension.fixture.json")
                     .unwrap(),
             )
             .unwrap();
         assert_eq!(
             resolved.as_str(),
             &format!(
-                "/tenants/{}/shared/extension-admin-configuration/groups/extension.slack.json",
+                "/tenants/{}/shared/extension-admin-configuration/groups/extension.fixture.json",
                 scope.tenant_id.as_str(),
             ),
         );
@@ -930,14 +916,14 @@ mod two_tenant_isolation_tests {
     use super::*;
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{AgentId, InvocationId, ProjectId, SecretHandle, TenantId, UserId};
-    use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore, SecretsCrypto};
+    use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStorePort as _, SecretsCrypto};
     use secrecy::ExposeSecret;
 
     fn scope(tenant: &str, user: &str) -> ResourceScope {
         ResourceScope {
             tenant_id: TenantId::new(tenant).unwrap(), // safety: fixed-valid test fixture
             user_id: UserId::new(user).unwrap(),       // safety: fixed-valid test fixture
-            agent_id: Some(AgentId::new("github").unwrap()),
+            agent_id: Some(AgentId::new("agent").unwrap()),
             project_id: Some(ProjectId::new("default").unwrap()), // safety: fixed-valid test fixture
             mission_id: None,
             thread_id: None,
@@ -958,7 +944,7 @@ mod two_tenant_isolation_tests {
     async fn two_tenants_with_same_agent_project_handle_do_not_collide_on_put() {
         let backend = Arc::new(InMemoryBackend::new());
         let scoped = wrap_scoped(Arc::clone(&backend));
-        let store = FilesystemSecretStore::new(Arc::clone(&scoped), test_crypto());
+        let store = SecretStore::new(Arc::clone(&scoped), test_crypto());
 
         let handle = SecretHandle::new("oauth_token").unwrap();
         let scope_a = scope("tenant_a", "alice");
@@ -1007,7 +993,7 @@ mod gate_record_production_mount_tests {
     use ironclaw_host_api::{
         GateRecord, GateRef, InvocationId, ProjectId, SafeSummary, TenantId, UserId,
     };
-    use ironclaw_run_state::{FilesystemGateRecordStore, GateRecordStore};
+    use ironclaw_run_state::{GateRecordStore, GateRecordStorePort as _};
 
     fn scope(tenant: &str, user: &str) -> ResourceScope {
         ResourceScope {
@@ -1024,7 +1010,7 @@ mod gate_record_production_mount_tests {
     #[tokio::test]
     async fn gate_records_save_and_load_through_the_production_mount_view() {
         let scoped = wrap_scoped(Arc::new(InMemoryBackend::new()));
-        let store = FilesystemGateRecordStore::new(scoped);
+        let store = GateRecordStore::new(scoped);
         let record = GateRecord::Approval {
             summary: SafeSummary::new("awaiting decision").unwrap(), // safety: fixed-valid test fixture
         };

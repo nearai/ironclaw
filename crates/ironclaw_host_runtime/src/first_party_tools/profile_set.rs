@@ -120,6 +120,7 @@ mod tests {
     ) -> FirstPartyCapabilityRequest {
         FirstPartyCapabilityRequest {
             run_id: None,
+            origin: None,
             capability_id: CapabilityId::new(PROFILE_SET_CAPABILITY_ID).unwrap(),
             scope: sample_scope(),
             authenticated_actor_user_id: None,

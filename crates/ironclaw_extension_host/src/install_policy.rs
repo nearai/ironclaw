@@ -144,9 +144,7 @@ pub fn install_scope_for_owner(owner: &InstallationOwner) -> LifecycleInstallSco
 mod tests {
     use super::*;
     use chrono::Utc;
-    use ironclaw_extensions::{
-        ExtensionActivationState, ExtensionInstallationId, ExtensionManifestRef,
-    };
+    use ironclaw_extensions::{ExtensionInstallationId, ExtensionManifestRef};
     use ironclaw_host_api::ExtensionId;
 
     fn user(id: &str) -> UserId {
@@ -162,7 +160,6 @@ mod tests {
         ExtensionInstallation::new(
             ExtensionInstallationId::new("fixture").expect("installation id"),
             ext_id.clone(),
-            ExtensionActivationState::Enabled,
             ExtensionManifestRef::new(ext_id, None),
             Vec::new(),
             Utc::now(),

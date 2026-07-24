@@ -1,7 +1,7 @@
 //! Reborn integration test — cross-reopen capability durability (E-DURABLE seam).
 //!
 //! Installs an extension through a real turn, then reopens a FRESH, independent
-//! `ExtensionInstallationStore` at the capability harness's on-disk storage root
+//! `ExtensionInstallationStorePort` at the capability harness's on-disk storage root
 //! and asserts the install survived — proving capability-produced state persists
 //! to disk, not just to in-memory state. Parallels
 //! `assert_reply_persists_after_reopen` for capability state.
@@ -34,6 +34,10 @@ async fn extension_install_survives_independent_reopen() {
         .build()
         .await
         .expect("thread builds");
+    harness
+        .seed_capability_credential_account("github", "durable github ready path", &[])
+        .await
+        .expect("GitHub credential is ready for the durable install path");
 
     harness
         .submit_turn("install github")

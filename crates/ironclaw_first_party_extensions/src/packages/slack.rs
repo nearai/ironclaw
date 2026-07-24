@@ -3,15 +3,14 @@
 //! WASM binary keeps its legacy `slack_user_tool.wasm` filename and the
 //! `slack_user_token` credential handle, so the assets are spelled out rather
 //! than derived from the id. The connect flow is a personal-OAuth *setup*
-//! requirement whose scopes are the union of the tools' per-capability scopes
-//! (distinct from the manifest's per-tool runtime credentials), so it is carried
-//! here as an `oauth_setup` override.
+//! requirement whose scopes are the manifest-declared union of the tools'
+//! per-capability scopes.
 
 use std::borrow::Cow;
 
 use ironclaw_host_api::EffectKind;
 
-use super::{PackageBundle, PackageOAuthSetup, PackageOnboarding, bytes_asset};
+use super::{PackageBundle, PackageOnboarding, bytes_asset};
 
 pub(super) const ID: &str = "slack";
 
@@ -36,31 +35,6 @@ pub(super) fn bundle() -> PackageBundle {
                 "After authorization completes, DM the Slack bot directly or use \
                 the Slack tools from any chat."
                     .to_string(),
-        }),
-        // Model B: the user-installable Slack tools extension surfaces the
-        // slack_personal OAuth connect requirement; the bot channel is operator
-        // infra. Setup scopes are the union of the tools' per-capability scopes
-        // (read scopes plus chat:write for the shared account; scope-upgrade
-        // re-consent is nearai/ironclaw#5669). Provider id is `slack`.
-        oauth_setup: Some(PackageOAuthSetup {
-            requirement_name: "slack_personal_oauth".to_string(),
-            provider: "slack".to_string(),
-            scopes: [
-                "search:read",
-                "channels:history",
-                "groups:history",
-                "im:history",
-                "mpim:history",
-                "channels:read",
-                "groups:read",
-                "im:read",
-                "mpim:read",
-                "users:read",
-                "chat:write",
-            ]
-            .iter()
-            .map(|scope| (*scope).to_string())
-            .collect(),
         }),
         // User-scoped Slack tools: Dispatch + Network + UseSecret + ExternalWrite.
         trust_effects: Some(vec![

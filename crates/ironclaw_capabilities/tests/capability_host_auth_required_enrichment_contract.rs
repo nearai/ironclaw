@@ -215,7 +215,7 @@ async fn invoke_json_preserves_non_empty_credential_requirements_from_dispatcher
 
 #[tokio::test]
 async fn auth_resume_json_enriches_auth_required_credential_requirements_from_obligations() {
-    use ironclaw_run_state::{RunStateStore, RunStatus};
+    use ironclaw_run_state::{RunStateStorePort, RunStatus};
 
     // A dispatcher that returns AuthRequired with an empty credential_requirements
     // list on every call (simulating a WASM adapter at both invoke and resume time).

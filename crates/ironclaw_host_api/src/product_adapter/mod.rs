@@ -63,11 +63,11 @@ pub use outbound::{
     CapabilityActivityViewInput, CapabilityDisplayPreviewView, CapabilityDisplayPreviewViewInput,
     ConnectionPromptContext, FinalReplyView, GatePromptView, PROJECTION_SKILL_ACTIVATION_MAX_ITEMS,
     PROJECTION_SKILL_FEEDBACK_MAX_BYTES, PROJECTION_SKILL_NAME_MAX_BYTES,
-    PROJECTION_TEXT_MAX_BYTES, PreferenceTargetCodec, PreferenceTargetEncodeRequest,
-    ProductGateKind, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
-    ProductProjectionItem, ProductProjectionState, ProductRenderOutcome,
-    ProductSynchronousResponse, ProductWorkSummaryPhase, ProgressKind, ProgressUpdateView,
-    ProjectionCursor,
+    PROJECTION_TEXT_MAX_BYTES, PairingPromptView, PreferenceTargetCodec,
+    PreferenceTargetEncodeRequest, ProductGateKind, ProductOutboundEnvelope,
+    ProductOutboundPayload, ProductOutboundTarget, ProductProjectionItem, ProductProjectionState,
+    ProductRenderOutcome, ProductSynchronousResponse, ProductWorkSummaryPhase, ProgressKind,
+    ProgressUpdateView, ProjectionCursor, render_channel_auth_prompt,
 };
 pub use projection::{
     ProductProjectionReadInput, ProductProjectionSubject, ProductProjectionSubscribeInput,

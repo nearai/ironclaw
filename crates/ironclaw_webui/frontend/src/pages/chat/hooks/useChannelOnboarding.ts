@@ -24,7 +24,6 @@ import {
   fetchOauthFlowStatus,
   startExtensionOauth,
 } from "../../extensions/lib/extensions-api";
-import { redeemPairingCode } from "../../extensions/lib/pairing-api";
 
 const DISMISSED_ONBOARDING_STORAGE_PREFIX =
   "ironclaw.chat.dismissedOnboarding.v1:";
@@ -100,7 +99,7 @@ function persistDismissedOnboardingId(threadId, sourceMessageId) {
   }
 }
 
-// The backend marks an `extension_activate` result for a connectable channel
+// The backend marks an `extension_install` result for a connectable channel
 // with this `output_kind`; the structured connect action rides on the card's
 // `toolResultPreview` JSON. This is the structured replacement for the deleted
 // prose regex — the panel is derived from typed fields, never from message text.
@@ -181,28 +180,16 @@ function channelConnectionIsSatisfied(extensions, channel) {
   const expected = normalizeConnectionChannel(channel);
   const extension = (extensions || []).find(
     (item) =>
-      normalizeConnectionChannel(
-        item?.package_ref?.id || item?.packageRef?.id || item?.id || "",
-      ) === expected,
+      normalizeConnectionChannel(item?.package_ref?.id || "") === expected,
   );
-  if (!extension) return false;
-  if (extension.authenticated === true && extension.needs_setup !== true) return true;
-  if (extension.authenticated === false || extension.needs_setup === true) return false;
-  const state =
-    extension.onboarding_state ||
-    extension.onboardingState ||
-    extension.installation_state ||
-    extension.installationState;
-  // Fail closed: an explicit backend connect card must not be suppressed by a
-  // missing or unrecognized onboarding state. Treat the account as connected only
-  // when it reports a state that is not a "needs connection" one.
-  if (typeof state !== "string" || !state) return false;
-  return !["setup_required", "pairing_required", "pairing"].includes(state);
+  // Fail closed: only the authoritative caller-scoped lifecycle projection can
+  // suppress a durable connection-required card.
+  return extension?.installation_state === "active";
 }
 
 // The in-chat channel-connection ("pairing") panel state machine, extracted from
 // `useChat`. Owns `pendingOnboarding` and its refs, derives the panel from the
-// durable connection-required tool card, drives OAuth/pairing redemption, and
+// durable connection-required tool card, drives OAuth, and
 // resumes the parked chat on channel connect. `useChat` keeps the gate/send
 // state and threads the handles it shares (gate, send) in here; the values this
 // returns are re-exposed verbatim from `useChat` for `chat.tsx`.
@@ -212,7 +199,7 @@ function channelConnectionIsSatisfied(extensions, channel) {
 // per-slot coupling, but the vm test harness seeds/reads it positionally.
 export function useChannelOnboarding(
   threadId,
-  { messages, messagesThreadId, pendingGate, pendingGateRef, setPendingGate, setIsProcessing, sendRef },
+  { messages, messagesThreadId, pendingGate, sendRef },
 ) {
   const t = useT();
   const [pendingOnboarding, setPendingOnboardingState] = React.useState(null);
@@ -278,7 +265,7 @@ export function useChannelOnboarding(
 
   // Derive the in-chat pairing panel from the durable, structured
   // channel-connection-required tool card the backend attaches to an
-  // `extension_activate` result for a connectable channel. The trigger is a
+  // `extension_install` result for a connectable channel. The trigger is a
   // concrete per-thread card (present only after the agent engaged the channel
   // here), so — unlike the removed global poll — it never fires on an empty or
   // unrelated chat and never races history loading. It is gated on the live
@@ -514,117 +501,6 @@ export function useChannelOnboarding(
     });
   }, [setPendingOnboarding]);
 
-  const submitOnboardingPairing = React.useCallback(
-    async (code) => {
-      const onboarding = pendingOnboardingRef.current;
-      if (!onboarding) {
-        throw new Error("pairing is no longer pending");
-      }
-      const trimmed = String(code || "").trim();
-      if (!trimmed) {
-        throw new Error("pairing code is required");
-      }
-      const threadForResume = onboarding.threadId || threadId || null;
-      const options = {
-        threadId: threadForResume,
-        requestId: onboarding.requestId || null,
-      };
-      const response = await redeemPairingCode(onboarding.extensionName, trimmed, options);
-      if (response?.success === false) {
-        throw new Error(response.message || "Pairing failed");
-      }
-      if (response?.resumeError) {
-        // The connection succeeded (binding is durable), but the backend
-        // couldn't continue this parked chat. The gate only clears when the
-        // turn actually resumes, so it will stay pending — surface a distinct,
-        // recoverable error instead of leaving the card spinning forever.
-        const error = new Error("channel connection resume did not complete");
-        error.resumeFailed = true;
-        throw error;
-      }
-      const clearOnboarding = () => {
-        if (onboarding.sourceMessageId) {
-          dismissedOnboardingIdsRef.current.add(onboarding.sourceMessageId);
-          persistDismissedOnboardingId(threadForResume, onboarding.sourceMessageId);
-        }
-        forgetChannelConnectionWaiter({
-          channel: onboarding.extensionName,
-          threadId: threadForResume,
-          sourceMessageId: onboarding.sourceMessageId || null,
-        });
-        setPendingOnboarding(null);
-      };
-      if (threadForResume && !onboarding.requestId) {
-        const continuation = await sendRef.current(
-          channelConnectionContinuationMessage(onboarding.extensionName),
-          {
-            threadId: threadForResume,
-            bypassPendingOnboarding: true,
-          },
-        );
-        // `send` returns null (or a rejected_busy outcome) without posting a
-        // turn when thread admission blocks it — an in-flight submit or an
-        // active run on the resume thread. The account is connected either way,
-        // but the blocked request was NOT resumed: keep the waiter and panel
-        // so the channel-connected event path (or a manual retry) can still
-        // deliver the continuation instead of silently dropping it behind a
-        // success response.
-        if (continuation && continuation.outcome !== "rejected_busy") {
-          clearOnboarding();
-        }
-        return response;
-      }
-      clearOnboarding();
-      if (onboarding.requestId && threadForResume) {
-        setIsProcessing(true);
-      }
-      return response;
-    },
-    [threadId, setPendingOnboarding, setIsProcessing],
-  );
-
-  // Redeem a channel-pairing code for a LIVE auth gate — a `manual_token`
-  // challenge that also carries a `connection` requirement (gates.ts normalizes
-  // it onto `pendingGate.connection`). Distinct from `submitOnboardingPairing`,
-  // which drives the durable-timeline pairing panel: here the pairing context
-  // comes off the gate, and the parked turn resumes through the gate rather than
-  // by re-sending a continuation message. The redeem stores a durable binding and
-  // the server resumes every run this caller parked on the channel.
-  const submitChannelConnectionPairing = React.useCallback(
-    async (code) => {
-      const gate = pendingGateRef.current || pendingGate;
-      const channel = gate?.connection?.channel;
-      if (!gate || !channel) {
-        throw new Error("channel connection is no longer pending");
-      }
-      if (!gate.runId || !gate.gateRef) {
-        throw new Error("channel connection gate is missing run_id and gate_ref");
-      }
-      const trimmed = String(code || "").trim();
-      if (!trimmed) {
-        throw new Error("pairing code is required");
-      }
-      const response = await redeemPairingCode(channel, trimmed, { threadId });
-      if (response?.success === false) {
-        throw new Error(response.message || "Pairing failed");
-      }
-      if (response?.resumeError) {
-        // The binding is durable (connected), but the parked turn didn't resume;
-        // the gate stays pending. Surface a distinct, recoverable error instead of
-        // leaving the pairing card spinning forever.
-        const error = new Error("channel connection resume did not complete");
-        error.resumeFailed = true;
-        throw error;
-      }
-      // The server resumed the parked run on redeem; clear the gate locally and
-      // show processing while the resumed turn streams back over SSE.
-      setPendingGate(null);
-      setIsProcessing(true);
-      return response;
-    },
-    [pendingGate, threadId, setPendingGate, setIsProcessing],
-  );
-
   const startOnboardingOAuth = React.useCallback(async () => {
     const generation = onboardingOauthGenerationRef.current + 1;
     onboardingOauthGenerationRef.current = generation;
@@ -731,8 +607,6 @@ export function useChannelOnboarding(
     pendingOnboarding,
     pendingOnboardingRef,
     setPendingOnboardingState,
-    submitOnboardingPairing,
-    submitChannelConnectionPairing,
     startOnboardingOAuth,
     dismissOnboardingPairing,
   };
