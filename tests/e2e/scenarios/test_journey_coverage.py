@@ -49,10 +49,12 @@ def _manifest_provider_journeys() -> set[str]:
     return cases
 
 
-def _cargo_targets(manifest_path: Path) -> dict[str, dict]:
+def _cargo_test_config(manifest_path: Path) -> tuple[dict[str, dict], bool]:
     with manifest_path.open("rb") as manifest_file:
         manifest = tomllib.load(manifest_file)
-    return {target["name"]: target for target in manifest.get("test", [])}
+    targets = {target["name"]: target for target in manifest.get("test", [])}
+    autotests_enabled = manifest.get("package", {}).get("autotests", True)
+    return targets, autotests_enabled
 
 
 def _disabling_pytest_marks(
@@ -248,9 +250,12 @@ def _assert_cargo_target(
         if evidence.manifest is not None
         else root / "Cargo.toml"
     )
-    targets = _cargo_targets(manifest_path)
+    targets, autotests_enabled = _cargo_test_config(manifest_path)
     if evidence.target in targets:
         target = targets[evidence.target]
+        assert target.get("harness", True) is not False, (
+            f"{case_id}: Cargo target {evidence.target!r} disables the test harness"
+        )
         required_features = target.get("required-features", [])
         assert not required_features, (
             f"{case_id}: Cargo target {evidence.target!r} requires features "
@@ -264,6 +269,9 @@ def _assert_cargo_target(
         )
         return
 
+    assert autotests_enabled, (
+        f"{case_id}: Cargo manifest disables automatic test discovery"
+    )
     auto_target = manifest_path.parent / "tests" / f"{evidence.target}.rs"
     assert auto_target.resolve() == source_path.resolve(), (
         f"{case_id}: unknown Cargo target {evidence.target!r} in {manifest_path}"
@@ -478,6 +486,52 @@ def test_cargo_evidence_rejects_a_feature_gated_target(
         target="journey",
     )
     with pytest.raises(AssertionError, match="requires features"):
+        _assert_cargo_target(
+            "synthetic",
+            evidence,
+            source_path,
+            root=tmp_path,
+        )
+
+
+def test_cargo_evidence_rejects_a_harnessless_target(tmp_path: Path):
+    """A binary without Cargo's test harness cannot prove a named test runs."""
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "Cargo.toml").write_text(
+        '[[test]]\nname = "journey"\npath = "tests/journey.rs"\nharness = false\n',
+        encoding="utf-8",
+    )
+    source_path = tmp_path / "tests/journey.rs"
+    source_path.touch()
+    evidence = CargoEvidence(
+        source="tests/journey.rs",
+        test="required_journey",
+        target="journey",
+    )
+    with pytest.raises(AssertionError, match="disables the test harness"):
+        _assert_cargo_target(
+            "synthetic",
+            evidence,
+            source_path,
+            root=tmp_path,
+        )
+
+
+def test_cargo_evidence_rejects_disabled_implicit_discovery(tmp_path: Path):
+    """An inferred tests-directory target requires Cargo autotests."""
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "Cargo.toml").write_text(
+        '[package]\nname = "synthetic"\nversion = "0.1.0"\nautotests = false\n',
+        encoding="utf-8",
+    )
+    source_path = tmp_path / "tests/journey.rs"
+    source_path.touch()
+    evidence = CargoEvidence(
+        source="tests/journey.rs",
+        test="required_journey",
+        target="journey",
+    )
+    with pytest.raises(AssertionError, match="automatic test discovery"):
         _assert_cargo_target(
             "synthetic",
             evidence,
