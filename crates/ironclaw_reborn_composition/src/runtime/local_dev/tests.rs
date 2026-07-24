@@ -1617,7 +1617,7 @@ mod tests {
             .await
             .expect("input stages");
         let invocation_id = InvocationId::new();
-        let capability_id = CapabilityId::new("builtin.memory_search").expect("capability id");
+        let capability_id = CapabilityId::new("ironclaw.memory.search").expect("capability id");
 
         // Short strings serialize well over the preview cap.
         const ITEM_COUNT: usize = 4000;
