@@ -730,6 +730,12 @@ async def test_reborn_v2_automation_filter_keeps_list_visible_while_loading(
     try:
         await page.goto(f"{reborn_v2_server}/automations?token={REBORN_V2_AUTH_TOKEN}")
         await expect(active_row).to_be_visible(timeout=15000)
+        await active_row.locator(
+            SEL_V2["automation_name_button_for"].format(id=active_id)
+        ).click()
+        await expect(page.locator(SEL_V2["automation_detail_title"])).to_contain_text(
+            "Visible while filtering"
+        )
 
         completed_filter = page.get_by_role("button", name="Completed", exact=True)
         await completed_filter.click()
@@ -737,10 +743,16 @@ async def test_reborn_v2_automation_filter_keeps_list_visible_while_loading(
 
         await expect(completed_filter).to_have_attribute("aria-pressed", "true")
         await expect(active_row).to_be_visible()
+        await expect(page.locator(SEL_V2["automation_detail_title"])).to_contain_text(
+            "Visible while filtering"
+        )
 
         release_completed_request.set()
         await expect(completed_row).to_be_visible(timeout=10000)
         await expect(active_row).to_have_count(0)
+        await expect(page.locator(SEL_V2["automation_detail_title"])).to_contain_text(
+            "Completed result"
+        )
         assert include_completed_queries[:2] == [False, True]
     finally:
         release_completed_request.set()
