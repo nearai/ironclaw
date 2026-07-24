@@ -27,6 +27,15 @@ test-support = [
 # The real per-chain JSON-RPC broadcaster wired under the signing-ledger (PR12).
 # The durable-store re-exports it gates are inert until a deployment enables it.
 attested-broadcast = ["ironclaw_attested_store/broadcast-http"]
+# Durable attested-store backends (PR13). Forward to the store crate's backend
+# features so the `attested_durable` assembly module (fully cfg-gated on
+# `all(attested-broadcast, any(libsql, postgres))`) can compile against the
+# real Postgres / libSQL ledger + grant + binding stores. `deadpool-postgres`
+# and `libsql` are already unconditional deps of this crate, so the module's
+# direct `deadpool_postgres::Pool` / `libsql::Database` uses resolve without a
+# `dep:` optional toggle. Inert until a deployment opts in.
+postgres = ["ironclaw_attested_store/postgres"]
+libsql = ["ironclaw_attested_store/libsql"]
 [dependencies]
 async-trait = "0.1"
 base64 = "0.22"
@@ -183,6 +192,9 @@ tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "
 # returns 426), so the happy-path test needs a bound listener and a
 # proper WS client.
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
+# deadpool companion for the env-gated Postgres durable-assembly test
+# (`NoTls` + pool config). Matches `ironclaw_attested_store`'s test setup.
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
 tower = { version = "0.5", features = ["util"] }
 tracing-test = "0.2"
 

@@ -39,9 +39,10 @@ use ironclaw_threads::{
     ThreadMessageId, ThreadScope,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, AttestationClaimRef, GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
-    ResumeTurnRequest, RetryTurnRequest, SanitizedCancelReason, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
+    AcceptedMessageRef, AttestationClaimRef, GateRef, GetRunStateRequest, IdempotencyKey,
+    ResumeTurnPrecondition, ResumeTurnRequest, RetryTurnRequest, SanitizedCancelReason,
+    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId,
+    TurnScope, TurnStatus,
 };
 use secrecy::{ExposeSecret as _, SecretString};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, mpsc};
@@ -49,10 +50,8 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::{
-    AttestedProofClaim,
-    AttestedGateContinuationPort,
-    AttestedContinuationRejection,
-    ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
+    ApprovalInteractionDecision, ApprovalInteractionService, AttestedContinuationRejection,
+    AttestedGateContinuationPort, AttestedProofClaim, AuthInteractionDecision,
     AuthInteractionRejectionKind, AuthInteractionService, LifecyclePackageRef,
     LifecycleProductFacade, ListPendingApprovalsRequest, ProductWorkflowError,
     ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
@@ -1956,8 +1955,6 @@ pub trait RebornServicesApi: Send + Sync {
         caller: WebUiAuthenticatedCaller,
         request: WebUiResolveGateRequest,
     ) -> Result<RebornResolveGateResponse, RebornServicesError>;
-
-
 
     async fn retry_run(
         &self,
@@ -6599,6 +6596,20 @@ where
         // broadcast failure does NOT roll the turn back (the resume guard already
         // consumed the one-shot); it surfaces as a sanitized error so the client
         // can observe the failure category.
+        //
+        // Stuck-state semantics (intentional, non-retryable): when the broadcast
+        // submit itself fails, the driver moves the signing-ledger row to the
+        // `Unknown` TERMINAL state (`recover_unknown`) — the tx may or may not
+        // have landed on-chain, so the outcome is genuinely unknown. A client
+        // retry is therefore deliberately NOT offered (`retryable: false` in
+        // `map_attested_continuation_rejection`): re-driving would either hit the
+        // consumed one-shot / terminal ledger row (no-op) or, worse, risk a
+        // double-submission of a tx that already landed. Recovery is
+        // operator-mediated reconciliation against the chain, not automatic
+        // client retry. A future pollable `BroadcastPending` ledger state (the
+        // driver's deferred cross-crate follow-up) would give the client a
+        // poll-for-outcome path; until then this is the safe, fail-closed
+        // behavior and the turn correctly stays `AttestedResolved`.
         continuation
             .broadcast_resolved(&scope, run_id, &gate_ref, verified)
             .await
@@ -7641,9 +7652,116 @@ fn generated_thread_id(
     }
 }
 
+/// A malformed attested-resolution field, mapped to the standard validation
+/// error shape (400) so the client sees which field was rejected.
+fn attested_invalid_field(field: &str) -> RebornServicesError {
+    RebornServicesError::validation(WebUiInboundValidationError {
+        field: field.to_string(),
+        code: WebUiInboundValidationCode::InvalidValue,
+    })
+}
+
+/// Map a sanitized attested-continuation rejection to the WebUI error surface.
+/// The continuation runs after the resume guard already consumed the one-shot,
+/// so every category here is non-retryable from the client's perspective.
+fn map_attested_continuation_rejection(
+    rejection: AttestedContinuationRejection,
+) -> RebornServicesError {
+    let (code, kind, status) = match rejection {
+        AttestedContinuationRejection::MissingBinding => (
+            RebornServicesErrorCode::NotFound,
+            RebornServicesErrorKind::NotFound,
+            404,
+        ),
+        AttestedContinuationRejection::ProviderMismatch
+        | AttestedContinuationRejection::ProofRejected
+        | AttestedContinuationRejection::MalformedProof => (
+            RebornServicesErrorCode::InvalidRequest,
+            RebornServicesErrorKind::Validation,
+            400,
+        ),
+        AttestedContinuationRejection::LedgerGuard => (
+            RebornServicesErrorCode::Conflict,
+            RebornServicesErrorKind::Conflict,
+            409,
+        ),
+        AttestedContinuationRejection::Unavailable => (
+            RebornServicesErrorCode::Unavailable,
+            RebornServicesErrorKind::ServiceUnavailable,
+            503,
+        ),
+        // A chain-signing / broadcast backend failure is an infrastructure
+        // health failure, so it must surface as 503 (not a 400 proof rejection
+        // that would mislead the client and suppress the backend-health
+        // signal). It stays non-retryable like every other category here, and
+        // for a broadcast-stage failure that is a deliberate safety choice, not
+        // an oversight: the driver has already moved the ledger row to the
+        // `Unknown` TERMINAL state, so the on-chain outcome is unknown. Offering
+        // `retryable: true` would invite an unsafe rebroadcast of a tx that may
+        // already have landed (double-submission); recovery is operator-mediated
+        // reconciliation. See `resolve_attested_gate` for the full rationale.
+        AttestedContinuationRejection::BackendUnavailable => (
+            RebornServicesErrorCode::Unavailable,
+            RebornServicesErrorKind::ServiceUnavailable,
+            503,
+        ),
+    };
+    RebornServicesError::from_status_kind(code, kind, status, false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `map_attested_continuation_rejection` translates every sanitized
+    /// continuation-rejection category into the WebUI error surface. Pin the
+    /// status/kind for ALL variants (not just one) so the mapping cannot drift:
+    /// a wiring/infra failure must never regress into a 400 that reads as a
+    /// client proof rejection, and the IDOR `MissingBinding` must stay a 404.
+    /// Every category is non-retryable (the resume guard already consumed the
+    /// one-shot). See `resolve_attested_gate` for the broadcast-stage rationale.
+    #[test]
+    fn map_attested_continuation_rejection_covers_all_variants() {
+        use AttestedContinuationRejection as R;
+        let cases = [
+            // IDOR / missing binding is a 404 (no existence oracle).
+            (R::MissingBinding, RebornServicesErrorCode::NotFound, 404u16),
+            // Client-input failures (bad/mismatched/malformed proof) are 400.
+            (
+                R::ProviderMismatch,
+                RebornServicesErrorCode::InvalidRequest,
+                400,
+            ),
+            (
+                R::ProofRejected,
+                RebornServicesErrorCode::InvalidRequest,
+                400,
+            ),
+            (
+                R::MalformedProof,
+                RebornServicesErrorCode::InvalidRequest,
+                400,
+            ),
+            // One-shot idempotency guard fires -> 409 conflict.
+            (R::LedgerGuard, RebornServicesErrorCode::Conflict, 409),
+            // Service-health failures are 503, never a misleading 400.
+            (R::Unavailable, RebornServicesErrorCode::Unavailable, 503),
+            (
+                R::BackendUnavailable,
+                RebornServicesErrorCode::Unavailable,
+                503,
+            ),
+        ];
+        for (rejection, expected_code, expected_status) in cases {
+            let err = map_attested_continuation_rejection(rejection.clone());
+            assert_eq!(err.code, expected_code, "code for {rejection:?}");
+            assert_eq!(err.status_code, expected_status, "status for {rejection:?}");
+            assert!(
+                !err.retryable,
+                "every continuation rejection is non-retryable ({rejection:?})"
+            );
+        }
+    }
 
     /// The WebUI settings/tools request enum must use the exact wire strings
     /// the operator-config storage parser accepts and the entry writer emits.
@@ -7740,46 +7858,4 @@ mod tests {
             "false-arg sentinel is non-retryable"
         );
     }
-}
-
-/// A malformed attested-resolution field, mapped to the standard validation
-/// error shape (400) so the client sees which field was rejected.
-fn attested_invalid_field(field: &str) -> RebornServicesError {
-    RebornServicesError::validation(WebUiInboundValidationError {
-        field: field.to_string(),
-        code: WebUiInboundValidationCode::InvalidValue,
-    })
-}
-
-/// Map a sanitized attested-continuation rejection to the WebUI error surface.
-/// The continuation runs after the resume guard already consumed the one-shot,
-/// so every category here is non-retryable from the client's perspective.
-fn map_attested_continuation_rejection(
-    rejection: AttestedContinuationRejection,
-) -> RebornServicesError {
-    let (code, kind, status) = match rejection {
-        AttestedContinuationRejection::MissingBinding => (
-            RebornServicesErrorCode::NotFound,
-            RebornServicesErrorKind::NotFound,
-            404,
-        ),
-        AttestedContinuationRejection::ProviderMismatch
-        | AttestedContinuationRejection::ProofRejected
-        | AttestedContinuationRejection::MalformedProof => (
-            RebornServicesErrorCode::InvalidRequest,
-            RebornServicesErrorKind::Validation,
-            400,
-        ),
-        AttestedContinuationRejection::LedgerGuard => (
-            RebornServicesErrorCode::Conflict,
-            RebornServicesErrorKind::Conflict,
-            409,
-        ),
-        AttestedContinuationRejection::Unavailable => (
-            RebornServicesErrorCode::Unavailable,
-            RebornServicesErrorKind::ServiceUnavailable,
-            503,
-        ),
-    };
-    RebornServicesError::from_status_kind(code, kind, status, false)
 }

@@ -30,7 +30,13 @@ mod blocked_auth_resume;
 mod builtin_capability_policy;
 pub mod deployment;
 mod attested;
+mod attested_config;
 mod attested_continuation;
+#[cfg(all(
+    feature = "attested-broadcast",
+    any(feature = "libsql", feature = "postgres")
+))]
+mod attested_durable;
 mod error;
 mod extension_host;
 mod factory;
@@ -71,6 +77,23 @@ pub use attested_continuation::RebornAttestedContinuation;
 pub use attested::LibSqlAttestedComposition;
 #[cfg(all(feature = "postgres", feature = "attested-broadcast"))]
 pub use attested::PostgresAttestedComposition;
+pub use attested_config::{
+    AttestedConfigError, AttestedProvidersConfig, MIN_STATE_SECRET_BYTES, NEAR_CALLBACK_URL_ENV,
+    NEAR_STATE_SECRET_ENV, NEAR_WALLET_BASE_URL_ENV, NearRedirectConfig,
+    WALLETCONNECT_PROJECT_ID_ENV, WalletConnectConfig,
+};
+#[cfg(all(feature = "attested-broadcast", feature = "libsql"))]
+pub use attested_durable::assemble_libsql;
+#[cfg(all(feature = "attested-broadcast", feature = "postgres"))]
+pub use attested_durable::assemble_postgres;
+#[cfg(all(
+    feature = "attested-broadcast",
+    any(feature = "libsql", feature = "postgres")
+))]
+pub use attested_durable::{
+    DurableCustody, EVM_RPC_URL_ENV, NEAR_RPC_URL_ENV, SOLANA_RPC_URL_ENV,
+    chain_rpc_endpoints_from_env,
+};
 pub use error::RebornBuildError;
 pub use extension_host::channel_host::{ChannelHostIdentity, GenericChannelHostAssembly};
 pub use extension_host::channel_identity::{

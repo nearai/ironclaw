@@ -2684,7 +2684,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     // and its continuation driver is reachable.
     let attested_signing = Some(Arc::new(build_attested_composition(Arc::clone(
         &store_graph.attested_gate_bindings,
-    ))));
+    ))?));
 
     Ok(RebornServices {
         attested_signing,
@@ -2824,22 +2824,29 @@ where
 /// turn store, so a raised gate's binding is visible to the continuation driver.
 fn build_attested_composition(
     bindings: Arc<InMemoryAttestedGateBindingStore>,
-) -> crate::attested::LocalDevAttestedComposition {
-    use ironclaw_attestation::InMemorySealedGrantStore;
-    use ironclaw_attested_runtime::{CustodialMainnetShipGate, ProviderRegistry};
+) -> Result<crate::attested::LocalDevAttestedComposition, RebornBuildError> {
+    use ironclaw_attestation::{InMemorySealedGrantStore, SealedGrantStore};
+    use ironclaw_attested_runtime::CustodialMainnetShipGate;
     use ironclaw_chain_signing::SecretsKeyStore;
     use ironclaw_secrets::SecretsCrypto;
 
     let keystore = Arc::new(SecretsKeyStore::new(SecretsCrypto::generate()));
     let ship_gate = CustodialMainnetShipGate::from_env().build_chain_ship_gate(None);
     let grants = Arc::new(InMemorySealedGrantStore::new());
-    crate::attested::LocalDevAttestedComposition::new_in_memory(
-        bindings,
-        keystore,
-        ship_gate,
-        grants,
-        ProviderRegistry::new(),
-    )
+    // Register external-wallet providers over the SAME sealed-grant store the
+    // custodial signer claims from (one-shot CAS authoritative across every
+    // path). Injected-wallet is always registered; NEAR-redirect / WalletConnect
+    // register only when their ceremony config is present in the environment
+    // (absent config = unregistered = fail-closed `ProviderMismatch`).
+    // Present-but-invalid config is a hard startup error, not a weakened verifier.
+    let providers = crate::attested_config::AttestedProvidersConfig::from_env()
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("attested provider config: {error}"),
+        })?
+        .build_provider_registry(Arc::clone(&grants) as Arc<dyn SealedGrantStore>);
+    Ok(crate::attested::LocalDevAttestedComposition::new_in_memory(
+        bindings, keystore, ship_gate, grants, providers,
+    ))
 }
 
 fn production_turn_state_store<F>(

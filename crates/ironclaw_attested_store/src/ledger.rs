@@ -19,8 +19,6 @@
 use async_trait::async_trait;
 #[cfg(any(feature = "postgres", feature = "libsql"))]
 use ironclaw_attestation::{LedgerKey, LedgerError, SigningLedger, SigningLedgerState};
-#[cfg(any(feature = "postgres", feature = "libsql"))]
-use ironclaw_signing_provider::GateRef;
 
 #[cfg(any(feature = "postgres", feature = "libsql"))]
 const SCHEMA: &str = "\
