@@ -246,6 +246,55 @@ test("Chat shows a localized error toast when run cancellation fails", async () 
   );
 });
 
+test("Chat redacts malformed cancellation errors in request diagnostics", async () => {
+  const consoleErrors = [];
+  const cancellationError = Object.assign(
+    new Error("sensitive malformed cancellation detail"),
+    {
+      status: "503",
+      body: '{"error":"sensitive malformed cancellation detail"}',
+      payload: { error: "sensitive malformed cancellation detail" },
+    }
+  );
+  const { tree, components } = renderChat({
+    consoleErrors,
+    hookState: {
+      messages: [{ id: "message-1" }],
+      isProcessing: true,
+      pendingGate: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: { runId: "run-1", threadId: "thread-1", status: "running" },
+      send: async () => ({}),
+      cancelRun: async () => {
+        throw cancellationError;
+      },
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+
+  const chatInput = findComponent(tree, components.ChatInput);
+  const props = componentProps(chatInput, components.ChatInput);
+  await props.onCancel();
+
+  assert.deepEqual(JSON.parse(JSON.stringify(consoleErrors)), [
+    ["Failed to cancel active run", { category: "request_error" }],
+  ]);
+  assert.doesNotMatch(
+    JSON.stringify(consoleErrors),
+    /sensitive malformed cancellation detail/
+  );
+});
+
 test("Chat leaves the composer editable while a run is processing", () => {
   const { tree, components } = renderChat({
     hookState: {
