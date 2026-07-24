@@ -348,11 +348,23 @@ def test_journey_evidence_rejects_a_helper_that_never_runs(
         )
 
 
-def test_journey_evidence_accepts_a_genuinely_invoked_helper():
-    """The call check must still pass on real code, including via a wrapper."""
+@pytest.mark.parametrize(
+    ("label", "call"),
+    [
+        ("direct", "    await _assert_readback(world)\n"),
+        # Matched via ast.Attribute, which is receiver-agnostic on purpose:
+        # a helper reached through a module or holder object still counts.
+        ("through a receiver", "    await helpers._assert_readback(world)\n"),
+    ],
+)
+def test_journey_evidence_accepts_a_genuinely_invoked_helper(label: str, call: str):
+    """The check must pass on real calls, direct or through a receiver.
+
+    Guards the other direction: a detector that rejects everything would make
+    the gate unfalsifiable rather than strict.
+    """
     source = (
-        "async def test_journey(world):\n"
-        "    await _assert_readback(world)\n"
+        f"async def test_journey(world):\n{call}"
         "\n"
         "async def _assert_readback(url):\n"
         "    ...\n"
