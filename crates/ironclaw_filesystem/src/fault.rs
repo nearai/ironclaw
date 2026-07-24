@@ -3,7 +3,7 @@
 //! # Why this exists
 //!
 //! A store's fault-handling used to be tested by hand-writing a fake that
-//! implements the *whole store trait* (`SecretStore`, `ProcessStore`, …) and
+//! implements the *whole store trait* (`SecretStorePort`, `ProcessStorePort`, …) and
 //! returns an error on the Nth call. That fake never runs a single line of the
 //! production `Filesystem*Store` — its encryption, path building, CAS retry,
 //! and `FilesystemError -> DomainError` mapping are all bypassed. The test

@@ -25,7 +25,7 @@ use ironclaw_host_api::{
         DeploymentMode, FilesystemBackendKind, NetworkMode, ProcessBackendKind, SecretMode,
     },
 };
-use ironclaw_secrets::SecretStore;
+use ironclaw_secrets::SecretStorePort;
 use thiserror::Error;
 
 use crate::{
@@ -53,7 +53,7 @@ pub struct InvocationServices {
     /// network egress.
     pub runtime_secret_material_stager: Option<RuntimeSecretMaterialStager>,
     pub process: Arc<dyn RuntimeProcessPort>,
-    pub secret_store: Option<Arc<dyn SecretStore>>,
+    pub secret_store: Option<Arc<dyn SecretStorePort>>,
     pub audit_sink: Option<Arc<dyn AuditSink>>,
     pub unsafe_raw_diagnostics_allowed: bool,
     /// Operator-configured post-edit check appended to successful
@@ -174,26 +174,27 @@ impl InvocationServicesError {
     }
 }
 
-/// Local-host implementation for plans whose required backends are local.
+/// Configured service resolver for plans whose required backends are available
+/// through the composed host ports.
 #[derive(Clone)]
-pub struct LocalInvocationServicesResolver {
+pub struct ConfiguredInvocationServicesResolver {
     filesystem: Arc<dyn RootFilesystem>,
     runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     tool_call_http_egress: Option<Arc<dyn ToolCallHttpEgress>>,
     runtime_secret_material_stager: Option<RuntimeSecretMaterialStager>,
     process: Arc<dyn RuntimeProcessPort>,
     tenant_sandbox_process: Option<Arc<dyn RuntimeProcessPort>>,
-    secret_store: Option<Arc<dyn SecretStore>>,
+    secret_store: Option<Arc<dyn SecretStorePort>>,
     audit_sink: Option<Arc<dyn AuditSink>>,
     post_edit_check: Option<PostEditCheckConfig>,
 }
 
-impl LocalInvocationServicesResolver {
+impl ConfiguredInvocationServicesResolver {
     pub fn new(
         filesystem: Arc<dyn RootFilesystem>,
         runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
         process: Arc<dyn RuntimeProcessPort>,
-        secret_store: Option<Arc<dyn SecretStore>>,
+        secret_store: Option<Arc<dyn SecretStorePort>>,
     ) -> Self {
         Self {
             filesystem,
@@ -248,7 +249,7 @@ impl LocalInvocationServicesResolver {
     }
 }
 
-impl InvocationServicesResolver for LocalInvocationServicesResolver {
+impl InvocationServicesResolver for ConfiguredInvocationServicesResolver {
     fn resolve(
         &self,
         request: InvocationServicesResolutionRequest<'_>,
@@ -332,7 +333,7 @@ fn local_host_process_execution_permitted(plan: &ExecutionPlan) -> bool {
         && matches!(plan.deployment, DeploymentMode::LocalSingleUser)
 }
 
-impl LocalInvocationServicesResolver {
+impl ConfiguredInvocationServicesResolver {
     /// Select the process port the post-edit check must run through, matching
     /// the plan's process-isolation boundary: the local host port only when
     /// local host execution is permitted (`LocalSingleUser` + `LocalHost`), the

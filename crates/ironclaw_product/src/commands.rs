@@ -246,15 +246,6 @@ fn parse_lifecycle_command_payload(
                 LifecycleProductAction::ExtensionInstall { package_ref }
             })?
         }
-        LifecycleCommandKind::ExtensionAuth => extension_package_command(payload, |package_ref| {
-            LifecycleProductAction::ExtensionAuth { package_ref }
-        })?,
-        LifecycleCommandKind::ExtensionActivate => {
-            extension_package_command(payload, |package_ref| {
-                LifecycleProductAction::ExtensionActivate { package_ref }
-            })?
-        }
-        LifecycleCommandKind::ExtensionConfigure => parse_extension_configure_command(payload)?,
         LifecycleCommandKind::ExtensionRemove => {
             extension_package_command(payload, |package_ref| {
                 LifecycleProductAction::ExtensionRemove { package_ref }
@@ -268,28 +259,6 @@ fn parse_lifecycle_command_payload(
         LifecycleCommandKind::SkillInstall => parse_skill_install_command(payload)?,
         LifecycleCommandKind::SkillRemove => parse_skill_remove_command(payload)?,
     })
-}
-
-fn parse_extension_configure_command(payload: &InboundCommandPayload) -> ProductCommandParseResult {
-    let args = payload.arguments.trim();
-    let (id, config_payload) = match serde_json::from_str::<Value>(args) {
-        Ok(json) => {
-            let Some(id) = json.get("id").and_then(Value::as_str).map(str::to_string) else {
-                return invalid_lifecycle_command("extension_configure.id is required");
-            };
-            (id, json.get("payload").cloned())
-        }
-        Err(_) => (first_argument(args).to_string(), None),
-    };
-    match lifecycle_package_ref(LifecyclePackageKind::Extension, id) {
-        Ok(package_ref) => Ok(ProductCommand::Lifecycle {
-            action: LifecycleProductAction::ExtensionConfigure {
-                package_ref,
-                payload: config_payload,
-            },
-        }),
-        Err(error) => invalid_lifecycle_command(error.to_string()),
-    }
 }
 
 fn parse_skill_install_command(payload: &InboundCommandPayload) -> ProductCommandParseResult {

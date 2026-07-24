@@ -592,7 +592,7 @@ async fn seed_live_credentials_for_fixture(
 async fn preflight_seeded_qa_credential(
     fixture_name: &str,
     product_auth: &RebornProductAuthServices,
-    secret_store: &dyn ironclaw_secrets::SecretStore,
+    secret_store: &dyn ironclaw_secrets::SecretStorePort,
     account: &CredentialAccount,
 ) {
     let Some(access_secret) = account.access_secret.as_ref() else {
@@ -651,7 +651,7 @@ async fn preflight_seeded_qa_credential(
 async fn preflight_seeded_google_credential(
     fixture_name: &str,
     product_auth: &RebornProductAuthServices,
-    secret_store: &dyn ironclaw_secrets::SecretStore,
+    secret_store: &dyn ironclaw_secrets::SecretStorePort,
     account: &CredentialAccount,
 ) {
     let required_extension_scopes = match fixture_name {
@@ -1282,7 +1282,7 @@ fn env_or_config_identity(name: &str, config_value: Option<&str>, default: &str)
 
 async fn consume_source_secret(
     source: &RebornQaCredentialSource,
-    store: &dyn ironclaw_secrets::SecretStore,
+    store: &dyn ironclaw_secrets::SecretStorePort,
     scope: &ResourceScope,
     handle: &SecretHandle,
     kind: &str,
@@ -1587,7 +1587,7 @@ fn assert_recorded_fixture_matches_expected_result(
         }
         "github_notifications" => {
             // No credential is seeded, so the agent should onboard the github
-            // extension (install + activate) and reach the auth gate rather than
+            // extension through the single install action and reach the auth gate rather than
             // silently give up. The onboarding tool choices are the guardrail;
             // the outcome may be an auth gate or an onboarding reply.
             assert_recorded_tool_call(
@@ -1595,13 +1595,6 @@ fn assert_recorded_fixture_matches_expected_result(
                 fixture_path,
                 &trace,
                 "builtin.extension_install",
-                &["github"],
-            );
-            assert_recorded_tool_call(
-                fixture_name,
-                fixture_path,
-                &trace,
-                "builtin.extension_activate",
                 &["github"],
             );
         }
@@ -1612,13 +1605,6 @@ fn assert_recorded_fixture_matches_expected_result(
                 fixture_path,
                 &trace,
                 "builtin.extension_install",
-                &["gmail"],
-            );
-            assert_recorded_tool_call(
-                fixture_name,
-                fixture_path,
-                &trace,
-                "builtin.extension_activate",
                 &["gmail"],
             );
         }

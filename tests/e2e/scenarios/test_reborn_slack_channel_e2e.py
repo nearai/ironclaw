@@ -49,6 +49,7 @@ import pytest
 from reborn_webui_harness import (
     client_action_id,
     close_reborn_server,
+    fetch_extension_oauth_requirement,
     reborn_bearer_headers,
     start_reborn_webui_v2_server,
 )
@@ -320,19 +321,18 @@ async def test_reborn_slack_channel_configure_connect_roundtrip_remove(
         assert install.json()["success"] is True
 
         # ── connect: generic personal OAuth → channel identity binding ──
-        # Before activation: the lifecycle's activation credential gate
-        # requires the tools' [auth.slack] credential account, which this
-        # OAuth connect creates.
+        # The installed member remains setup-needed until this user-level
+        # OAuth connection exists. Completing OAuth is the lifecycle
+        # transition; there is no separate public activation action.
+        requirement = await fetch_extension_oauth_requirement(client, base_url, "slack")
         start = await client.post(
             f"{base_url}/api/webchat/v2/extensions/slack/setup/oauth/start",
             json={
-                "provider": "slack",
-                "account_label": "e2e slack account",
-                "scopes": [],
+                "requirement": requirement["name"],
                 "expires_at": time.strftime(
                     "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 300)
                 ),
-                "invocation_id": str(uuid.uuid4()),
+                "invocation_id": requirement["setup"].get("invocation_id"),
             },
             timeout=30,
         )
@@ -364,14 +364,8 @@ async def test_reborn_slack_channel_configure_connect_roundtrip_remove(
         assert flow_status.status_code == 200, flow_status.text
         assert flow_status.json()["status"] == "completed", flow_status.text
 
-        # ── activate: the assembly reconciles a live ingress registration ──
-        activate = await client.post(
-            f"{base_url}/api/webchat/v2/extensions/slack/activate",
-            json={"client_action_id": client_action_id()},
-            timeout=60,
-        )
-        activate.raise_for_status()
-        assert activate.json()["success"] is True, activate.text
+        # OAuth completion makes the member active and the assembly reconciles
+        # its live ingress registration without a second activation request.
         await wait_for_route_status(client, base_url, CANONICAL_EVENTS_PATH, {200})
         forged = await post_signed_event(
             client,

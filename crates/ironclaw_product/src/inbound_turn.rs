@@ -34,10 +34,7 @@ use crate::binding::{
     ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
     binding_profile_for_trigger,
 };
-use crate::binding_ref::{
-    DEFAULT_BINDING_REF_RAW_MAX_BYTES, bounded_idempotency_key, bounded_reply_target_binding_ref,
-    bounded_source_binding_ref,
-};
+use crate::binding_ref::{DEFAULT_BINDING_REF_RAW_MAX_BYTES, bounded_idempotency_key};
 use crate::error::ProductWorkflowError;
 use crate::policy::{
     BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
@@ -116,7 +113,7 @@ impl InboundTurnOutcome {
 
 /// Result of running replay, before-inbound policy, and fresh user-message acceptance.
 pub enum InboundUserMessageDispatch {
-    Accepted(InboundTurnOutcome),
+    Accepted(Box<InboundTurnOutcome>),
     Rejected(ProductRejection),
 }
 
@@ -257,7 +254,7 @@ where
             .accept_user_message_with_before_policy(envelope, &policy)
             .await?
         {
-            InboundUserMessageDispatch::Accepted(outcome) => Ok(outcome),
+            InboundUserMessageDispatch::Accepted(outcome) => Ok(*outcome),
             InboundUserMessageDispatch::Rejected(_) => {
                 Err(ProductWorkflowError::TurnSubmissionRejected {
                     reason: "noop before-inbound policy unexpectedly rejected message".into(),
@@ -309,7 +306,7 @@ where
             .replay_prepared_user_message(envelope, &prepared)
             .await?
         {
-            return Ok(InboundUserMessageDispatch::Accepted(outcome));
+            return Ok(InboundUserMessageDispatch::Accepted(Box::new(outcome)));
         }
 
         let policy_outcome = check_before_inbound_policy(
@@ -342,6 +339,7 @@ where
 
         self.accept_prepared_user_message(prepared_for_turn, envelope_for_turn, attachments)
             .await
+            .map(Box::new)
             .map(InboundUserMessageDispatch::Accepted)
     }
 
@@ -495,8 +493,6 @@ where
             binding: prepared.binding,
             thread_scope: prepared.thread_scope,
             message_id: accepted.message_id,
-            source_binding_id: prepared.source_binding_id,
-            reply_target_binding_id,
             idempotency_key_raw: prepared.submit_idempotency_key,
             received_at: envelope.received_at(),
             adapter_id: prepared.adapter_id,
@@ -659,24 +655,11 @@ impl ProductInboundTurnHandoff {
             });
         }
 
-        let source_binding_id = replay.source_binding_id.clone().ok_or_else(|| {
-            ProductWorkflowError::TurnSubmissionRejected {
-                reason: "accepted replay missing source_binding_id".into(),
-            }
-        })?;
-        let reply_target_binding_id = replay.reply_target_binding_id.clone().ok_or_else(|| {
-            ProductWorkflowError::TurnSubmissionRejected {
-                reason: "accepted replay missing reply_target_binding_id".into(),
-            }
-        })?;
-
         Ok(Self::NeedsSubmission(Box::new(
             AcceptedProductInboundTurn {
                 binding,
                 thread_scope,
                 message_id: replay.message_id,
-                source_binding_id,
-                reply_target_binding_id,
                 idempotency_key_raw: submit_idempotency_key,
                 received_at,
                 adapter_id,
@@ -729,8 +712,6 @@ struct AcceptedProductInboundTurn {
     binding: ResolvedBinding,
     thread_scope: ThreadScope,
     message_id: ThreadMessageId,
-    source_binding_id: String,
-    reply_target_binding_id: String,
     idempotency_key_raw: String,
     received_at: DateTime<Utc>,
     adapter_id: ProductAdapterId,
@@ -753,8 +734,6 @@ impl AcceptedProductInboundTurn {
             binding,
             thread_scope,
             message_id,
-            source_binding_id,
-            reply_target_binding_id,
             idempotency_key_raw,
             received_at,
             adapter_id,
@@ -770,23 +749,9 @@ impl AcceptedProductInboundTurn {
             thread_scope.owner_user_id.clone(),
         );
         let actor = TurnActor::new(binding.actor_user_id.clone());
-        let source_binding_ref = bounded_source_binding_ref(
-            "src",
-            &source_binding_id,
-            DEFAULT_BINDING_REF_RAW_MAX_BYTES,
-        )
-        .map_err(|e| ProductWorkflowError::TurnSubmissionRejected {
-            reason: format!("invalid src ref: {e}"),
-        })?;
+        let source_binding_ref = binding.source_binding_ref.clone();
         let accepted_message_ref = accepted_message_ref(message_id)?;
-        let reply_target_binding_ref = bounded_reply_target_binding_ref(
-            "reply",
-            &reply_target_binding_id,
-            DEFAULT_BINDING_REF_RAW_MAX_BYTES,
-        )
-        .map_err(|e| ProductWorkflowError::TurnSubmissionRejected {
-            reason: format!("invalid reply ref: {e}"),
-        })?;
+        let reply_target_binding_ref = binding.reply_target_binding_ref.clone();
         let idempotency_key = bounded_idempotency_key(
             "turn",
             &idempotency_key_raw,
@@ -900,6 +865,15 @@ fn binding_from_replay(
         tenant_id: replay.scope.tenant_id.clone(),
         actor_user_id,
         subject_user_id: replay.scope.owner_user_id.clone(),
+        source_binding_ref: ironclaw_turns::SourceBindingRef::new("source:test-replay").map_err(
+            |e| ProductWorkflowError::BindingResolutionFailed {
+                reason: e.to_string(),
+            },
+        )?,
+        reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new("reply:test-replay")
+            .map_err(|e| ProductWorkflowError::BindingResolutionFailed {
+            reason: e.to_string(),
+        })?,
         thread_id: replay.thread_id.clone(),
         agent_id: Some(replay.scope.agent_id.clone()),
         project_id: replay.scope.project_id.clone(),
@@ -1424,6 +1398,12 @@ mod tests {
                 tenant_id: tenant_id(),
                 actor_user_id: user_id(),
                 subject_user_id: Some(subject_user_id.clone()),
+                source_binding_ref: ironclaw_turns::SourceBindingRef::new("source:test-prepared")
+                    .unwrap(),
+                reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
+                    "reply:test-prepared",
+                )
+                .unwrap(),
                 thread_id: thread_id(),
                 agent_id: Some(AgentId::new("agent:alpha").unwrap()),
                 project_id: None,
@@ -1475,6 +1455,12 @@ mod tests {
                 tenant_id: tenant_id(),
                 actor_user_id: user_id(),
                 subject_user_id: Some(user_id()),
+                source_binding_ref: ironclaw_turns::SourceBindingRef::new("source:test-shared")
+                    .unwrap(),
+                reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
+                    "reply:test-shared",
+                )
+                .unwrap(),
                 thread_id: thread_id(),
                 agent_id: Some(AgentId::new("agent:alpha").unwrap()),
                 project_id: None,
@@ -1622,6 +1608,12 @@ mod tests {
                 tenant_id: tenant_id(),
                 actor_user_id: user_id(),
                 subject_user_id: Some(user_id()),
+                source_binding_ref: ironclaw_turns::SourceBindingRef::new("source:test-landing")
+                    .unwrap(),
+                reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
+                    "reply:test-landing",
+                )
+                .unwrap(),
                 thread_id: thread_id(),
                 agent_id: Some(AgentId::new("agent:alpha").unwrap()),
                 project_id: None,

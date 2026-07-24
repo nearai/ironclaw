@@ -2,17 +2,17 @@ use std::any::{TypeId, type_name};
 
 use thiserror::Error;
 
-use ironclaw_approvals::FilesystemPersistentApprovalPolicyStore;
-use ironclaw_authorization::FilesystemCapabilityLeaseStore;
+use ironclaw_approvals::PersistentApprovalPolicyStore;
+use ironclaw_authorization::CapabilityLeaseStore;
 use ironclaw_filesystem::InMemoryBackend;
-use ironclaw_processes::{FilesystemProcessResultStore, FilesystemProcessStore};
-use ironclaw_run_state::{FilesystemApprovalRequestStore, FilesystemRunStateStore};
+use ironclaw_processes::{ProcessResultStore, ProcessStore};
+use ironclaw_run_state::{ApprovalRequestStore, RunStateStore};
 
 use super::{
     DiskFilesystem, DurableAuditSink, DurableEventSink, EmptyWasmRuntimeCredentials,
-    FilesystemSecretStore, HostProcessPort, InMemoryAuditSink, InMemoryCredentialBroker,
-    InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink, InMemoryResourceGovernor,
-    NoopTurnRunWakeNotifier, RebornEventStoreError, RuntimeKind,
+    HostProcessPort, InMemoryAuditSink, InMemoryCredentialBroker, InMemoryDurableAuditLog,
+    InMemoryDurableEventLog, InMemoryEventSink, InMemoryResourceGovernor, NoopTurnRunWakeNotifier,
+    RebornEventStoreError, RuntimeKind, SecretStore,
 };
 
 #[derive(Debug, Error)]
@@ -80,15 +80,15 @@ pub enum ProductionWiringComponent {
     TrustPolicy,
     Filesystem,
     ResourceGovernor,
-    ProcessStore,
-    ProcessResultStore,
+    ProcessStorePort,
+    ProcessResultStorePort,
     RunState,
     ApprovalRequests,
     CapabilityLeases,
     PersistentApprovalPolicies,
     EventSink,
     AuditSink,
-    SecretStore,
+    SecretStorePort,
     CredentialAccountStore,
     CredentialSessionStore,
     RuntimeHttpEgress,
@@ -111,15 +111,15 @@ impl ProductionWiringComponent {
             Self::TrustPolicy => "trust_policy",
             Self::Filesystem => "filesystem",
             Self::ResourceGovernor => "resource_governor",
-            Self::ProcessStore => "process_store",
-            Self::ProcessResultStore => "process_result_store",
+            Self::ProcessStorePort => "process_store",
+            Self::ProcessResultStorePort => "process_result_store",
             Self::RunState => "run_state",
             Self::ApprovalRequests => "approval_requests",
             Self::CapabilityLeases => "capability_leases",
             Self::PersistentApprovalPolicies => "persistent_approval_policies",
             Self::EventSink => "event_sink",
             Self::AuditSink => "audit_sink",
-            Self::SecretStore => "secret_store",
+            Self::SecretStorePort => "secret_store",
             Self::CredentialAccountStore => "credential_account_store",
             Self::CredentialSessionStore => "credential_session_store",
             Self::RuntimeHttpEgress => "runtime_http_egress",
@@ -313,34 +313,34 @@ fn classify_component_type<T: ?Sized + 'static>() -> ProductionImplementationRea
             // behind the one production `FilesystemProcess*Store<F>`
             // (arch-simplification §4.3). A store backed by `InMemoryBackend` is
             // still local-only; libSQL/Postgres monomorphizations are distinct.
-            || type_id == TypeId::of::<FilesystemProcessStore<InMemoryBackend>>()
-            || type_id == TypeId::of::<FilesystemProcessResultStore<InMemoryBackend>>()
+            || type_id == TypeId::of::<ProcessStore<InMemoryBackend>>()
+            || type_id == TypeId::of::<ProcessResultStore<InMemoryBackend>>()
             // The run-state and approval-request stores no longer have bespoke
             // in-memory implementations; "in-memory" is the `InMemoryBackend`
             // behind the one production `Filesystem*Store<F>` (arch-simplification
             // §4.3). A store backed by `InMemoryBackend` is still local-only;
             // libSQL/Postgres monomorphizations are distinct.
-            || type_id == TypeId::of::<FilesystemRunStateStore<InMemoryBackend>>()
-            || type_id == TypeId::of::<FilesystemApprovalRequestStore<InMemoryBackend>>()
+            || type_id == TypeId::of::<RunStateStore<InMemoryBackend>>()
+            || type_id == TypeId::of::<ApprovalRequestStore<InMemoryBackend>>()
             // The persistent-approval and capability-lease stores no longer have
             // bespoke in-memory implementations; "in-memory" is now the
             // `InMemoryBackend` behind the one production `Filesystem*Store<F>`
             // (arch-simplification §4.3). A store backed by `InMemoryBackend` is
             // still local-only; the durable libSQL/Postgres monomorphizations are
             // distinct types and correctly classify as production candidates.
-            || type_id == TypeId::of::<FilesystemPersistentApprovalPolicyStore<InMemoryBackend>>()
-            || type_id == TypeId::of::<FilesystemCapabilityLeaseStore<InMemoryBackend>>()
+            || type_id == TypeId::of::<PersistentApprovalPolicyStore<InMemoryBackend>>()
+            || type_id == TypeId::of::<CapabilityLeaseStore<InMemoryBackend>>()
             || type_id == TypeId::of::<InMemoryEventSink>()
             || type_id == TypeId::of::<InMemoryDurableEventLog>()
             || type_id == TypeId::of::<InMemoryAuditSink>()
             || type_id == TypeId::of::<InMemoryDurableAuditLog>()
             // The secret store no longer has a bespoke in-memory implementation;
             // "in-memory" is the `InMemoryBackend` behind the one production
-            // encrypted `FilesystemSecretStore<F>` (arch-simplification §4.3).
+            // encrypted `SecretStore<F>` (arch-simplification §4.3).
             // A store backed by `InMemoryBackend` is still local-only; the
             // durable libSQL/Postgres monomorphizations are distinct types and
             // correctly classify as production candidates.
-            || type_id == TypeId::of::<FilesystemSecretStore<InMemoryBackend>>()
+            || type_id == TypeId::of::<SecretStore<InMemoryBackend>>()
             || type_id == TypeId::of::<InMemoryCredentialBroker>()
             || type_id == TypeId::of::<EmptyWasmRuntimeCredentials>()
             || type_id == TypeId::of::<NoopTurnRunWakeNotifier>()

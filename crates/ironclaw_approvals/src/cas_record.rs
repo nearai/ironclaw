@@ -10,7 +10,7 @@ use ironclaw_filesystem::{
 };
 use ironclaw_host_api::{ResourceScope, ScopedPath};
 
-pub(crate) struct FilesystemCasRecordStore<F, K>
+pub(crate) struct CasRecordStore<F, K>
 where
     F: RootFilesystem,
     K: Clone + Eq + Hash,
@@ -76,7 +76,7 @@ where
     }
 }
 
-impl<F, K> FilesystemCasRecordStore<F, K>
+impl<F, K> CasRecordStore<F, K>
 where
     F: RootFilesystem,
     K: Clone + Eq + Hash,

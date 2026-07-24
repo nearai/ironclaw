@@ -199,80 +199,100 @@ impl ExtensionHost {
 
     /// Activate an installed extension: load → bind → binding check → global
     /// conflict check → `channel.activate()` → persist Active → publish one
-    /// new generation. Failure publishes nothing and records the terminal
-    /// `Failed` state with a redacted `last_error` (non-auth activation
-    /// failure; the projection surfaces it as `Failed`, distinct from a
-    /// pristine `Installed`).
+    /// new generation. Initial failure publishes nothing and records the
+    /// terminal `Failed` state with a redacted `last_error`; failed refresh
+    /// retains the prior active record and generation.
     pub async fn activate(&self, extension_id: &str) -> Result<(), LifecycleError> {
         let mut guard = self.lifecycle_lock.lock().await;
         let record = self.require_installed(extension_id).await?;
+        self.publish_candidate_locked(&mut guard, record).await
+    }
 
-        match self.build_active(&record).await {
-            Ok(active) => {
-                // Global conflict check against the current active set.
-                if let Some(conflict) = guard.snapshot.would_conflict(&active) {
-                    self.persist_state(
-                        &record,
-                        InstallationState::Failed,
-                        Some(redact(&conflict.to_string())),
-                    )
-                    .await?;
-                    return Err(LifecycleError::Conflict(conflict));
-                }
+    /// Build and publish one candidate installation record without first
+    /// withdrawing the currently active generation.
+    ///
+    /// This is the runtime-publication entrypoint for composition. A refresh
+    /// candidate is loaded, bound, conflict-checked, and activated while the
+    /// prior immutable snapshot and host record remain authoritative. Only a
+    /// fully valid candidate is persisted as Active and swapped into the next
+    /// generation. A failed first publication records Failed as the ordinary
+    /// activation path does; a failed refresh retains the prior active record
+    /// and generation intact.
+    pub async fn publish_candidate(
+        &self,
+        record: InstallationRecord,
+    ) -> Result<(), LifecycleError> {
+        let mut guard = self.lifecycle_lock.lock().await;
+        self.publish_candidate_locked(&mut guard, record).await
+    }
 
-                // Vendor wiring: channel.activate(). Failure aborts with
-                // nothing published.
-                if let Some(channel) = &active.channel {
-                    let egress = self.deps.egress.egress_for_channel(
-                        extension_id,
-                        &record.installation_id,
-                        record
-                            .resolved
-                            .channel
-                            .as_ref()
-                            .map(|channel| channel.egress.as_slice())
-                            .unwrap_or(&[]),
-                    );
-                    let ctx = ironclaw_product::ChannelContext {
-                        extension_id: &record.extension_id,
-                        installation_id: &record.installation_id,
-                        config: &record.config,
-                    };
-                    if let Err(error) = with_deadline(
-                        self.deps.hook_deadline,
-                        channel.activate(&ctx, egress.as_ref()),
-                    )
-                    .await
-                    {
-                        self.persist_state(
-                            &record,
-                            InstallationState::Failed,
-                            Some(redact(&error.to_string())),
-                        )
-                        .await?;
-                        return Err(LifecycleError::ActivationHook {
-                            reason: redact(&error.to_string()),
-                        });
-                    }
-                }
+    async fn publish_candidate_locked(
+        &self,
+        guard: &mut LifecycleState,
+        record: InstallationRecord,
+    ) -> Result<(), LifecycleError> {
+        let record = InstallationRecord {
+            state: InstallationState::Installed,
+            last_error: None,
+            ..record
+        };
+        let previous_is_active = guard.snapshot.extension(&record.extension_id).is_some();
 
-                // Persist Active, then publish exactly one new generation.
-                self.persist_state(&record, InstallationState::Active, None)
-                    .await?;
-                self.publish_with(&mut guard, extension_id, Some(Arc::new(active)))
-                    .await?;
-                Ok(())
-            }
+        let active = match self.build_active(&record).await {
+            Ok(active) => active,
             Err(error) => {
-                self.persist_state(
-                    &record,
-                    InstallationState::Failed,
-                    Some(redact(&error.to_string())),
-                )
+                self.record_candidate_failure(&record, previous_is_active, &error)
+                    .await?;
+                return Err(error);
+            }
+        };
+        if let Some(conflict) = guard.snapshot.would_conflict(&active) {
+            let error = LifecycleError::Conflict(conflict);
+            self.record_candidate_failure(&record, previous_is_active, &error)
                 .await?;
-                Err(error)
+            return Err(error);
+        }
+
+        if let Some(channel) = &active.channel {
+            let egress = self.deps.egress.egress_for_channel(
+                &record.extension_id,
+                &record.installation_id,
+                record
+                    .resolved
+                    .channel
+                    .as_ref()
+                    .map(|channel| channel.egress.as_slice())
+                    .unwrap_or(&[]),
+            );
+            let ctx = ironclaw_product::ChannelContext {
+                extension_id: &record.extension_id,
+                installation_id: &record.installation_id,
+                config: &record.config,
+            };
+            if let Err(error) = with_deadline(
+                self.deps.hook_deadline,
+                channel.activate(&ctx, egress.as_ref()),
+            )
+            .await
+            {
+                let error = LifecycleError::ActivationHook {
+                    reason: redact(&error.to_string()),
+                };
+                self.record_candidate_failure(&record, previous_is_active, &error)
+                    .await?;
+                return Err(error);
             }
         }
+
+        // Build the immutable replacement before mutating either publication
+        // surface. Snapshot construction failure therefore leaves the prior
+        // host record and generation untouched.
+        let (generation, snapshot) =
+            self.build_snapshot(guard, &record.extension_id, Some(Arc::new(active)))?;
+        self.persist_state(&record, InstallationState::Active, None)
+            .await?;
+        self.publish_snapshot(guard, generation, snapshot);
+        Ok(())
     }
 
     /// Deactivate an active extension: unpublish (drain happens as the old
@@ -408,14 +428,30 @@ impl ExtensionHost {
             .await
     }
 
-    /// Rebuild and publish the next generation with `extension_id` set to
-    /// `active` (or removed when `None`). One immutable `Arc` swap.
-    async fn publish_with(
+    async fn record_candidate_failure(
         &self,
-        guard: &mut LifecycleState,
+        record: &InstallationRecord,
+        previous_is_active: bool,
+        error: &LifecycleError,
+    ) -> Result<(), LifecycleError> {
+        if previous_is_active {
+            return Ok(());
+        }
+        self.persist_state(
+            record,
+            InstallationState::Failed,
+            Some(redact(&error.to_string())),
+        )
+        .await?;
+        Ok(())
+    }
+
+    fn build_snapshot(
+        &self,
+        guard: &LifecycleState,
         extension_id: &str,
         active: Option<Arc<ActiveExtension>>,
-    ) -> Result<(), LifecycleError> {
+    ) -> Result<(u64, Arc<ActiveSnapshot>), LifecycleError> {
         let mut extensions: Vec<Arc<ActiveExtension>> = guard
             .snapshot
             .extension_ids()
@@ -426,9 +462,32 @@ impl ExtensionHost {
         if let Some(active) = active {
             extensions.push(active);
         }
-        guard.generation += 1;
-        guard.snapshot = ActiveSnapshot::build(Generation(guard.generation), extensions)?;
+        let generation = guard.generation + 1;
+        let snapshot = ActiveSnapshot::build(Generation(generation), extensions)?;
+        Ok((generation, snapshot))
+    }
+
+    fn publish_snapshot(
+        &self,
+        guard: &mut LifecycleState,
+        generation: u64,
+        snapshot: Arc<ActiveSnapshot>,
+    ) {
+        guard.generation = generation;
+        guard.snapshot = snapshot;
         self.mirror_snapshot(&guard.snapshot);
+    }
+
+    /// Rebuild and publish the next generation with `extension_id` set to
+    /// `active` (or removed when `None`). One immutable `Arc` swap.
+    async fn publish_with(
+        &self,
+        guard: &mut LifecycleState,
+        extension_id: &str,
+        active: Option<Arc<ActiveExtension>>,
+    ) -> Result<(), LifecycleError> {
+        let (generation, snapshot) = self.build_snapshot(guard, extension_id, active)?;
+        self.publish_snapshot(guard, generation, snapshot);
         Ok(())
     }
 }

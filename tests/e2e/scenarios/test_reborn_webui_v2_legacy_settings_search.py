@@ -87,26 +87,23 @@ CHANNEL_SURFACES = [
 ]
 
 MOCK_CHANNEL_EXTENSION = {
-    "name": "telegram-channel",
     "package_ref": {"kind": "extension", "id": "telegram-channel"},
     "display_name": "Telegram Channel",
-    "kind": "wasm_channel",
+    "runtime": "first_party",
     "description": "Configured messaging channel.",
-    "active": True,
-    "authenticated": True,
-    "onboarding_state": "ready",
-    "surfaces": CHANNEL_SURFACES,
+    "tools": [],
+    "installation_state": "active",
+    "surfaces": [{"kind": "channel", "inbound": True, "outbound": True}],
 }
 
 MOCK_MCP_EXTENSION = {
-    "name": "beta-mcp",
     "package_ref": {"kind": "extension", "id": "beta-mcp"},
     "display_name": "Beta MCP",
-    "kind": "mcp_server",
+    "runtime": "mcp",
     "description": "Installed MCP server.",
-    "active": False,
-    "authenticated": False,
-    "surfaces": [{"kind": "tool", "tools": ["beta-mcp.lookup"]}],
+    "tools": [],
+    "installation_state": "setup_needed",
+    "surfaces": [{"kind": "tool"}],
 }
 
 

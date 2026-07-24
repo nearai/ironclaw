@@ -1,4 +1,4 @@
-// arch-exempt: large_file, mechanical InMemoryOutboundStateStore -> FilesystemOutboundStateStore<InMemoryBackend> §4.3 store consolidation, no logic change, plan #6168
+// arch-exempt: large_file, mechanical InMemoryOutboundStateStore -> OutboundStateStore<InMemoryBackend> §4.3 store consolidation, no logic change, plan #6168
 use std::{
     sync::{Arc, atomic::AtomicU64},
     time::Duration,
@@ -24,7 +24,7 @@ use ironclaw_events::{DurableEventLog, EventCursor, EventStreamKey, ReadScope};
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_first_party_extension_ports::SkillActivationObserver;
 use ironclaw_host_api::UserId;
-use ironclaw_outbound::FilesystemOutboundStateStore;
+use ironclaw_outbound::OutboundStateStore;
 use ironclaw_product::{
     AdapterInstallationId, CapabilityActivityStatusView, CapabilityActivityView,
     CapabilityActivityViewInput, ExternalActorRef, ExternalConversationRef, ProductAdapterError,
@@ -33,7 +33,7 @@ use ironclaw_product::{
     ProjectionCursor as ProductProjectionCursor, ProjectionStream, ProjectionStreamSubscription,
     ProjectionSubscriptionRequest, RedactedString,
 };
-use ironclaw_run_state::ApprovalRequestStore;
+use ironclaw_run_state::ApprovalRequestStorePort;
 use ironclaw_turns::{
     ReplyTargetBindingRef, SanitizedFailure, TurnActor, TurnCoordinator, TurnError,
     TurnEventProjectionCursor, TurnEventProjectionSource, TurnEventSink, TurnLifecycleEvent,
@@ -86,7 +86,8 @@ pub(crate) struct RebornProjectionServices {
     live_epoch: Arc<str>,
     turn_event_wake_source: Arc<TurnEventWakeSource>,
     turn_events: TurnEventBridge,
-    approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
+    // arch-exempt: optional_arc, approval prompt enrichment is absent in minimal projection graphs, plan #4539
+    approval_requests: Option<Arc<dyn ApprovalRequestStorePort>>,
     display_previews: Arc<dyn CapabilityDisplayPreviewSource>,
     product_reply_target_binding_ref: ReplyTargetBindingRef,
     auth_challenges: Option<Arc<dyn AuthChallengeProvider>>,
@@ -108,7 +109,7 @@ impl RebornProjectionServices {
 
     pub(crate) fn with_approval_requests(
         mut self,
-        approval_requests: Arc<dyn ApprovalRequestStore>,
+        approval_requests: Arc<dyn ApprovalRequestStorePort>,
     ) -> Self {
         self.approval_requests = Some(approval_requests.clone());
         self.turn_events = self
@@ -224,9 +225,9 @@ pub(crate) fn build_reborn_projection_services(
         // composition-owned construction site.
         {
             #[allow(clippy::disallowed_methods)]
-            Arc::new(FilesystemOutboundStateStore::new(crate::wrap_scoped(
-                Arc::new(InMemoryBackend::new()),
-            )))
+            Arc::new(OutboundStateStore::new(crate::wrap_scoped(Arc::new(
+                InMemoryBackend::new(),
+            ))))
         },
     ));
     RebornProjectionServices {
@@ -1015,6 +1016,7 @@ impl ProductSurfaceProjectionBatch {
         {
             match runtime_item {
                 RuntimePayloadItem::Durable(durable) => {
+                    let durable = *durable;
                     return self.push_durable_runtime_payloads(
                         durable.final_cursor,
                         durable.item_cursor,
@@ -1024,7 +1026,7 @@ impl ProductSurfaceProjectionBatch {
                     );
                 }
                 RuntimePayloadItem::Live { cursor, payload } => {
-                    return Ok(self.push_live_payload(cursor, payload));
+                    return Ok(self.push_live_payload(cursor, *payload));
                 }
                 RuntimePayloadItem::CursorAdvance { cursor } => {
                     return Ok(self.push_runtime_cursor_advance(cursor));
@@ -1260,7 +1262,7 @@ fn live_update_payloads(
     let state = ProductProjectionState::new(scope.thread_id.to_string(), items)?;
     Ok(Some(RuntimePayloadItem::Live {
         cursor,
-        payload: ProductOutboundPayload::ProjectionUpdate { state },
+        payload: Box::new(ProductOutboundPayload::ProjectionUpdate { state }),
     }))
 }
 
@@ -1275,10 +1277,10 @@ struct DurableRuntimePayloadItem {
 
 #[derive(Debug)]
 enum RuntimePayloadItem {
-    Durable(DurableRuntimePayloadItem),
+    Durable(Box<DurableRuntimePayloadItem>),
     Live {
         cursor: EventProjectionCursor,
-        payload: ProductOutboundPayload,
+        payload: Box<ProductOutboundPayload>,
     },
     CursorAdvance {
         cursor: EventProjectionCursor,
@@ -1294,13 +1296,13 @@ fn durable_runtime_payload_item(
     total: usize,
     already_delivered: usize,
 ) -> RuntimePayloadItem {
-    RuntimePayloadItem::Durable(DurableRuntimePayloadItem {
+    RuntimePayloadItem::Durable(Box::new(DurableRuntimePayloadItem {
         final_cursor,
         item_cursor,
         payloads,
         total,
         already_delivered,
-    })
+    }))
 }
 
 async fn snapshot_payloads(

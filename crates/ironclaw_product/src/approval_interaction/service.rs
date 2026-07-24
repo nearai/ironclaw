@@ -3,8 +3,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_approvals::{
     DenyApproval, LeaseApproval, PersistentApprovalAction, PersistentApprovalPolicyInput,
-    PersistentApprovalPolicyKey, PersistentApprovalPolicyStore, ToolPermissionOverrideKey,
-    ToolPermissionOverrideStore,
+    PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort, ToolPermissionOverrideKey,
+    ToolPermissionOverrideStorePort,
 };
 use ironclaw_host_api::{Action, CapabilityId, Principal, ResourceScope};
 use ironclaw_run_state::ApprovalStatus;
@@ -67,9 +67,9 @@ pub struct DefaultApprovalInteractionService {
     // arch-exempt: optional_arc, absence is the explicit fail-closed
     // AlwaysAllowUnsupported path for minimal/test compositions until user-facing
     // revoke controls land, plan #4539
-    persistent_policies: Option<Arc<dyn PersistentApprovalPolicyStore>>,
+    persistent_policies: Option<Arc<dyn PersistentApprovalPolicyStorePort>>,
     persistent_grantee_resolver: Option<Arc<dyn PersistentApprovalGranteeResolver>>,
-    tool_permission_overrides: Option<Arc<dyn ToolPermissionOverrideStore>>,
+    tool_permission_overrides: Option<Arc<dyn ToolPermissionOverrideStorePort>>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
 }
 
@@ -120,7 +120,7 @@ impl DefaultApprovalInteractionService {
 
     pub fn with_persistent_policy_store(
         mut self,
-        persistent_policies: Arc<dyn PersistentApprovalPolicyStore>,
+        persistent_policies: Arc<dyn PersistentApprovalPolicyStorePort>,
     ) -> Self {
         self.persistent_policies = Some(persistent_policies);
         self
@@ -136,7 +136,7 @@ impl DefaultApprovalInteractionService {
 
     pub fn with_tool_permission_override_store(
         mut self,
-        tool_permission_overrides: Arc<dyn ToolPermissionOverrideStore>,
+        tool_permission_overrides: Arc<dyn ToolPermissionOverrideStorePort>,
     ) -> Self {
         self.tool_permission_overrides = Some(tool_permission_overrides);
         self

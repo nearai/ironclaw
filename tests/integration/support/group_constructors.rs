@@ -61,7 +61,7 @@ impl RebornIntegrationGroup {
     }
 
     /// Group with extension-lifecycle tools
-    /// (extension_search/install/activate/remove). Auto-approve is enabled;
+    /// (extension_search/install/remove). Auto-approve is enabled;
     /// registry credentials are seeded.
     pub async fn extension_lifecycle() -> HarnessResult<Self> {
         Self::builder().extension_lifecycle().await
@@ -69,7 +69,7 @@ impl RebornIntegrationGroup {
 
     /// Extension-lifecycle group extended with the invented-vendor fixture
     /// (native factory + on-disk assets): drives the full generic runtime
-    /// path — install → activate → dispatch-from-snapshot → remove — with
+    /// path — install → dispatch-from-snapshot → remove — with
     /// no real product (extension-runtime P2).
     pub async fn extension_runtime_acme() -> HarnessResult<Self> {
         Self::builder().extension_runtime_acme().await
@@ -295,7 +295,7 @@ impl RebornIntegrationGroupBuilder {
     /// Build an extension-lifecycle group. See [`RebornIntegrationGroup::extension_lifecycle`].
     pub async fn extension_lifecycle(self) -> HarnessResult<RebornIntegrationGroup> {
         self.extension_lifecycle_with_profile(
-            super::super::harness::profiles::extension::extension_lifecycle_tools_profile()?,
+            super::super::harness::profiles::extension::extension_lifecycle_tools_profile_for_user,
         )
         .await
     }
@@ -312,23 +312,28 @@ impl RebornIntegrationGroupBuilder {
         self,
     ) -> HarnessResult<RebornIntegrationGroup> {
         self.extension_lifecycle_with_profile(
-            super::super::harness::profiles::extension::extension_lifecycle_tools_profile_google_oauth_configured()?,
+            super::super::harness::profiles::extension::extension_lifecycle_tools_profile_google_oauth_configured_for_user,
         )
         .await
     }
 
     /// Shared assembly for [`Self::extension_lifecycle`] and
     /// [`Self::extension_lifecycle_google_oauth_configured`] — identical
-    /// except for which `ToolsProfile` the caller already built (with or
-    /// without the Google OAuth backend option).
+    /// except for which user-scoped `ToolsProfile` factory the caller selects
+    /// (with or without the Google OAuth backend option).
     async fn extension_lifecycle_with_profile(
         mut self,
-        profile: ToolsProfile,
+        profile_for_user: fn(&str) -> HarnessResult<ToolsProfile>,
     ) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;
-        // Lifecycle ownership is caller-derived. Align the shared capability
-        // harness with the group's canonical binding subject so install and
-        // remove execute under the same user scope as the turn.
+        // Lifecycle ownership is caller-derived. Build the profile with the
+        // canonical binding subject before credentials are seeded, then align
+        // the shared capability harness to that same subject. Building first
+        // with the fixed fixture user and only calling `with_user_id` would
+        // leave the credential rows under the old user and incorrectly block
+        // otherwise credential-ready installs on auth.
+        let subject_user = base.canonical_subject_user()?;
+        let profile = profile_for_user(subject_user.as_str())?;
         let host_runtime = build_group_capability_with_base(profile, &base).await?;
         // C-SLACK-LIFECYCLE (issue #6105): wire the REAL generic
         // channel-connection facade over this harness's own `RebornServices`,
@@ -392,12 +397,16 @@ impl RebornIntegrationGroupBuilder {
     /// Build a delivery-proof group. See
     /// [`RebornIntegrationGroup::extension_delivery`].
     pub async fn extension_delivery(mut self) -> HarnessResult<RebornIntegrationGroup> {
+        self.run_delivery_events = Some(Arc::new(
+            ironclaw_product::RunDeliveryEventRouter::new_ephemeral_for_test(),
+        ));
         let base = self.build_base().await?;
         let host_runtime = build_group_capability_with_base(
             super::super::harness::profiles::extension::extension_delivery_tools_profile()?,
             &base,
         )
-        .await?;
+        .await?
+        .with_run_owner_scoped_capability_dispatch();
         let scope = &base.product_harness.scope;
         let channel_connection =
             ironclaw_reborn_composition::test_support::build_channel_connection_for_test(

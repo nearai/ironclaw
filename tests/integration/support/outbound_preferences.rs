@@ -39,13 +39,19 @@ pub(crate) struct FakeOutboundPreferencesFacade {
 }
 
 impl FakeOutboundPreferencesFacade {
-    /// Seed a double whose inventory carries two Slack targets. A `target_set`
-    /// call for either id resolves; any other id surfaces as `NotFound`.
+    /// Seed a double whose inventory carries two Slack targets plus the
+    /// host-owned WebApp destination the production registry always exposes
+    /// (`host_owned_outbound_delivery_target_registry` in composition — the
+    /// double must mirror that contract or web_app routing tests diverge from
+    /// production). A `target_set` call for a listed id resolves; any other id
+    /// surfaces as `NotFound`.
     pub(crate) fn with_default_targets() -> Arc<Self> {
         Arc::new(Self {
             targets: vec![
                 target_option("slack:dm:alpha", "Slack DM Alpha"),
                 target_option("slack:channel:beta", "Slack Channel Beta"),
+                ironclaw_product::web_app_outbound_delivery_target_option()
+                    .expect("host-owned web_app target option"),
             ],
             state: Mutex::new(FakeOutboundState::default()),
         })

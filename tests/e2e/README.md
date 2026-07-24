@@ -59,6 +59,7 @@ Then Playwright drives a headless Chromium browser against the gateway, making D
 | `test_extensions.py` | Extensions tab: install, remove, configure, OAuth, auth card, activate |
 | `test_oauth_refresh.py` | Hosted Gmail/MCP OAuth refresh; the Gmail path refreshes through the proxy and reads seeded Gmail data from Emulate |
 | `test_emulate_reborn_provider_contracts.py` | Emulate provider contracts for Reborn-backed Google Gmail/Calendar/Drive reads, writes, missing resources, and account isolation; Slack QA 9/10 channel/thread/DM routing, strict-scope failures, profiles, mentions, and identity shapes; and GitHub identity, negative-result, repo/issue/PR/search/branch/git-object/release/fork/action-route surfaces |
+| `test_provider_fault_proxy.py` | Self-tests the transparent provider fault proxy, reusable status/transport/response profiles, safe request ledger, reset behavior, and commit-then-disconnect semantics |
 | `test_reborn_emulate_full_path.py` | Full-path IronClaw + Emulate coverage: install/auth extensions, drive scripted Gmail/Calendar/Drive/GitHub/Slack calls, assert provider-side state, and exercise GitHub→Slack, Calendar+Drive→Slack, Gmail→Slack, and Slack→Drive→Slack dispatch |
 
 ## Reborn coverage gate
@@ -107,14 +108,23 @@ provider fixture, install/auth the extension through IronClaw, drive
 `/api/chat/send` with the scripted mock LLM, and assert provider state through
 Emulate readback.
 
-Do not duplicate account binding, refresh/reconnect, malformed-provider,
-duplicate-inbound, or repeated-delivery contracts as provider-only fixtures.
-Those are caller/runtime properties and remain covered at their existing
-hermetic seams (`runtime_credentials`, `gsuite_core`,
-`github_wasm_runtime_contract`, `idempotent_replay`, trigger/outbound
-integration tests, and `test_v2_auth_oauth_matrix.py`). Emulate supplies the
-provider state for full-path flows; it is not an OAuth authority or a fault
-injection proxy.
+The full-path QA runtime routes provider traffic through the transparent fault
+proxy while keeping baseline and readback traffic direct to Emulate. Add common
+failure shapes to `PROVIDER_FAULT_PROFILES`, then apply them to a representative
+operation class in `PROVIDER_FAULT_CASES`; do not create the full Cartesian
+product. For ambiguous writes, assert the proxy's forwarded/responded evidence
+and direct provider mutation count so a lost acknowledgement cannot become a
+false success or a duplicate mutation.
+
+Do not duplicate account binding, refresh/reconnect, duplicate-inbound, or
+repeated-delivery contracts as provider-only fixtures. Those are
+caller/runtime properties and remain covered at their existing hermetic seams
+(`runtime_credentials`, `gsuite_core`, `github_wasm_runtime_contract`,
+`idempotent_replay`, trigger/outbound integration tests, and
+`test_v2_auth_oauth_matrix.py`). Malformed and transport failures cross the
+real caller path only for the representative operation-class matrix. Emulate
+supplies provider state for full-path flows; it is neither an OAuth authority
+nor the fault injector.
 
 ### Manual QA mapping
 

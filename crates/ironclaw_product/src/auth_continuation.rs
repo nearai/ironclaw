@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use ironclaw_auth::{AuthContinuationEvent, AuthContinuationRef, AuthProductError};
 use ironclaw_turns::{
     GateRef, GateResumeDisposition, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
@@ -19,6 +20,23 @@ use crate::binding_ref::{
     AUTH_CONTINUATION_BINDING_REF_RAW_MAX_BYTES, binding_ref_segment, bounded_idempotency_key,
 };
 use crate::{AuthContinuationRejectionKind, ProductWorkflowError};
+
+/// Product-workflow boundary for completing a durable auth continuation.
+///
+/// Implementations are idempotent on `flow_id`: the auth engine provides
+/// at-least-once delivery until the durable continuation fence is stamped.
+#[async_trait]
+pub trait ProductAuthContinuationDispatcher: Send + Sync {
+    async fn dispatch_auth_continuation(
+        &self,
+        event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError>;
+
+    async fn dispatch_canceled_auth_continuation(
+        &self,
+        event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError>;
+}
 
 #[derive(Clone)]
 pub struct ProductAuthTurnGateResumeDispatcher {
@@ -166,6 +184,23 @@ impl ProductAuthTurnGateResumeDispatcher {
             .map_err(map_auth_resume_error)?;
 
         Ok(run_id)
+    }
+}
+
+#[async_trait]
+impl ProductAuthContinuationDispatcher for ProductAuthTurnGateResumeDispatcher {
+    async fn dispatch_auth_continuation(
+        &self,
+        event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        ProductAuthTurnGateResumeDispatcher::dispatch_auth_continuation(self, event).await
+    }
+
+    async fn dispatch_canceled_auth_continuation(
+        &self,
+        event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        ProductAuthTurnGateResumeDispatcher::dispatch_canceled_auth_continuation(self, event).await
     }
 }
 

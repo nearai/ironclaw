@@ -28,11 +28,9 @@ use crate::webui::product_capability::RuntimeProductCapabilityInvoker;
 use crate::{
     RebornAutomationProductFacade, RebornBuildError, RebornProductAuthServices, RebornReadiness,
     RebornReadinessDiagnostic, RebornReadinessDiagnosticStatus, RebornRuntime,
-    extension_host::lifecycle::{
-        RebornLocalLifecycleFacade, RebornLocalSkillManagementError, RebornLocalSkillManagementPort,
-    },
+    extension_host::lifecycle::{LifecycleFacade, SkillManagementPort, SkillManagementPortError},
     extension_host::webui_extension_credentials::ProductAuthExtensionCredentialSetup,
-    observability::RebornLocalServiceLifecycle,
+    observability::OperatorServiceLifecycle,
     outbound::{
         OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistry,
         RebornOutboundPreferencesFacade, outbound_delivery_synthetic_provider,
@@ -203,12 +201,13 @@ pub(crate) fn build_webui_services_with_channel_connection(
         let tool_permission_overrides = &runtime.tool_permission_overrides;
         let auto_approve_settings = &runtime.auto_approve_settings;
         let persistent_approval_policies = &runtime.persistent_approval_policies;
-        let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
-            tool_permission_overrides.clone();
-        let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
+        let tool_permission_overrides: Arc<
+            dyn ironclaw_approvals::ToolPermissionOverrideStorePort,
+        > = tool_permission_overrides.clone();
+        let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort> =
             auto_approve_settings.clone();
         let persistent_approval_policies: Arc<
-            dyn ironclaw_approvals::PersistentApprovalPolicyStore,
+            dyn ironclaw_approvals::PersistentApprovalPolicyStorePort,
         > = persistent_approval_policies.clone();
         let tool_registry = runtime.shared_extension_registry.clone();
         let synthetic_operator_tools = if outbound_delivery_target_providers.is_empty() {
@@ -237,11 +236,11 @@ pub(crate) fn build_webui_services_with_channel_connection(
                 Some(runtime.extension_management.clone()),
             )),
         );
-        let mut lifecycle_facade =
-            RebornLocalLifecycleFacade::new(Arc::clone(&runtime.skill_management));
+        let mut lifecycle_facade = LifecycleFacade::new(Arc::clone(&runtime.skill_management));
         lifecycle_facade =
             lifecycle_facade.with_extension_management(runtime.extension_management.clone());
-        lifecycle_facade = lifecycle_facade.with_channel_config(runtime.channel_config.clone());
+        lifecycle_facade = lifecycle_facade
+            .with_admin_configuration_resolver(runtime.admin_configuration_resolver.clone());
         if let Some(runtime_http_egress) = &runtime.runtime_http_egress {
             lifecycle_facade =
                 lifecycle_facade.with_runtime_http_egress(runtime_http_egress.clone());
@@ -253,14 +252,9 @@ pub(crate) fn build_webui_services_with_channel_connection(
         );
         api = api.with_lifecycle_product_facade(Arc::new(lifecycle_facade));
     }
-    // The generic channel-config configure port: the setup facade renders
-    // manifest-declared channel-config fields and routes submitted values
-    // through it (extension-runtime §6.4).
-    api = api.with_channel_config_facade(Arc::new(
-        crate::extension_host::channel_config::RebornChannelConfigFacade::new(
-            runtime.channel_config.clone(),
-        ),
-    ));
+    // The manifest-declared administrator-configuration surface is rendered and
+    // routed through `admin_configuration_view` (built above from the canonical
+    // Admin Configuration service); no separate channel-config facade port.
     // Share the activation selector's live master switch when the selected skill
     // context reads it. Deployments without that selector pass `None`, so the
     // toggle reports unavailable rather than writing to an orphan flag.
@@ -300,7 +294,7 @@ pub(crate) fn build_webui_services_with_channel_connection(
     {
         let webui_boot_config = runtime.webui_boot_config();
         api = api.with_operator_service_lifecycle_service(Arc::new(
-            RebornLocalServiceLifecycle::new_for_operator_with_boot_config(
+            OperatorServiceLifecycle::new_for_operator_with_boot_config(
                 runtime.webui_tenant_id().clone(),
                 runtime.owner_user_id.clone(),
                 webui_boot_config,
@@ -374,7 +368,7 @@ impl OperatorStatusService for ReadinessOperatorStatusService {
 }
 
 struct LocalSkillsProductFacade {
-    skill_management: Arc<RebornLocalSkillManagementPort>,
+    skill_management: Arc<SkillManagementPort>,
     // `RebornRuntimeStores::skill_auto_activate_learned`); the read facade
     // reports it for the skills view. Writes go through the first-party
     // `builtin.skill_auto_activate_learned_set` capability. `None` when no
@@ -389,7 +383,7 @@ struct LocalSkillsProductFacade {
 
 impl LocalSkillsProductFacade {
     fn new(
-        skill_management: Arc<RebornLocalSkillManagementPort>,
+        skill_management: Arc<SkillManagementPort>,
         auto_activate_learned: Option<Arc<AtomicBool>>,
     ) -> Self {
         Self {
@@ -518,10 +512,10 @@ fn skill_info(skill: ironclaw_skills::SkillSummary) -> RebornSkillInfo {
     }
 }
 
-fn map_skill_management_error(error: RebornLocalSkillManagementError) -> ProductSurfaceError {
+fn map_skill_management_error(error: SkillManagementPortError) -> ProductSurfaceError {
     match error {
-        RebornLocalSkillManagementError::InvalidContext { .. } => internal_skill_error(),
-        RebornLocalSkillManagementError::Skill(error) => match error.kind() {
+        SkillManagementPortError::InvalidContext { .. } => internal_skill_error(),
+        SkillManagementPortError::Skill(error) => match error.kind() {
             ironclaw_skills::SkillManagementErrorKind::NotFound => ProductSurfaceError {
                 code: ProductSurfaceErrorCode::NotFound,
                 kind: ProductSurfaceErrorKind::NotFound,

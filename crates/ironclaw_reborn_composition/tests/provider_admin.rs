@@ -1,5 +1,53 @@
+use std::collections::BTreeSet;
+
 use ironclaw_reborn_composition::{RebornProviderAdmin, RebornProviderAdminError, RebornV1State};
 use ironclaw_reborn_config::{RebornBootConfig, RebornHome, RebornProfile};
+
+struct RuntimeEnvMaskGuard {
+    snapshots: Vec<ironclaw_common::env_helpers::RuntimeEnvSnapshot>,
+}
+
+impl Drop for RuntimeEnvMaskGuard {
+    fn drop(&mut self) {
+        for snapshot in self.snapshots.drain(..).rev() {
+            ironclaw_common::env_helpers::restore_runtime_env(snapshot);
+        }
+    }
+}
+
+fn mask_llm_env_for_test() -> RuntimeEnvMaskGuard {
+    let registry =
+        ironclaw_llm::ProviderRegistry::try_load_from_path(None).expect("builtin registry");
+    let mut keys = BTreeSet::from([
+        "LLM_BACKEND".to_string(),
+        "LLM_MODEL".to_string(),
+        "LLM_CHEAP_MODEL".to_string(),
+        "LLM_USE_CODEX_AUTH".to_string(),
+        "CODEX_AUTH_PATH".to_string(),
+        "SMART_ROUTING_CASCADE".to_string(),
+    ]);
+    for provider in registry.all() {
+        keys.insert(provider.model_env.clone());
+        if let Some(name) = &provider.api_key_env {
+            keys.insert(name.clone());
+        }
+        if let Some(name) = &provider.base_url_env {
+            keys.insert(name.clone());
+        }
+        if let Some(name) = &provider.extra_headers_env {
+            keys.insert(name.clone());
+        }
+    }
+
+    let snapshots = keys
+        .iter()
+        .map(|key| ironclaw_common::env_helpers::snapshot_runtime_env(key))
+        .collect();
+    for key in keys {
+        ironclaw_common::env_helpers::mask_runtime_env(&key);
+    }
+    RuntimeEnvMaskGuard { snapshots }
+}
 
 fn admin_for_home(reborn_home: &std::path::Path) -> RebornProviderAdmin {
     let home = RebornHome::resolve_from_env_parts(
@@ -97,6 +145,8 @@ fn set_provider_nearai_uses_concrete_default_model() {
 
 #[test]
 fn provider_admin_json_omits_absolute_host_paths() {
+    let _env_lock = ironclaw_common::env_helpers::lock_env();
+    let _env_mask = mask_llm_env_for_test();
     let temp = tempfile::tempdir().expect("tempdir");
     let admin = admin_for_home(&temp.path().join("reborn-home"));
 

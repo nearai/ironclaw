@@ -2,6 +2,7 @@
 
 // arch-exempt: large_file, caller-level product-auth route regression coverage, plan #5905
 
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
@@ -12,22 +13,25 @@ use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_auth::{
     AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthFlowId, AuthFlowKind,
-    AuthFlowManager, AuthInteractionId, AuthInteractionService, AuthProductError, AuthProductScope,
-    AuthProviderClient, AuthProviderId, AuthSurface, CredentialAccountLabel,
-    CredentialAccountService, CredentialAccountStatus, CredentialOwnership, CredentialSetupService,
-    GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_GMAIL_READONLY_SCOPE, InMemoryAuthProductServices,
-    ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount, OAuthAuthorizationUrl,
-    OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthProviderExchangeContext,
-    OAuthProviderRefresh, OAuthProviderRefreshRequest, ProviderScope, SecretCleanupService,
-    SecretSubmitRequest, SecretSubmitResult,
+    AuthFlowManager, AuthFlowStatus, AuthInteractionId, AuthInteractionService, AuthProductError,
+    AuthProductScope, AuthProviderClient, AuthProviderId, AuthSurface, CredentialAccountLabel,
+    CredentialAccountService, CredentialAccountStatus, CredentialOwnership,
+    CredentialSelectionInput, CredentialSetupService, GOOGLE_CALENDAR_READONLY_SCOPE,
+    GOOGLE_GMAIL_READONLY_SCOPE, InMemoryAuthProductServices, ManualTokenSetupRequest, NewAuthFlow,
+    NewCredentialAccount, OAuthAuthorizationUrl, OAuthProviderCallbackRequest,
+    OAuthProviderExchange, OAuthProviderExchangeContext, OAuthProviderRefresh,
+    OAuthProviderRefreshRequest, ProviderScope, SecretCleanupService, SecretSubmitRequest,
+    SecretSubmitResult,
 };
 use ironclaw_host_api::{
-    AgentId, InstallationState, InvocationId, ProductSurfaceCaller, ProductSurfaceError, ProjectId,
-    ResourceScope, SecretHandle, TenantId, UserId,
+    AgentId, InvocationId, ProductSurfaceCaller, ProductSurfaceError, ProjectId, ResourceScope,
+    SecretHandle, TenantId, UserId,
 };
 use ironclaw_product::{
-    EXTENSIONS_VIEW, LifecyclePackageKind, LifecyclePackageRef, RebornExtensionInfo,
-    RebornExtensionListResponse, rejecting_product_surface_error,
+    EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, LifecyclePackageKind, LifecyclePackageRef,
+    LifecyclePublicState, RebornExtensionCredentialSetup, RebornExtensionInfo,
+    RebornExtensionListResponse, RebornExtensionSetupSecret, RebornSetupExtensionResponse,
+    rejecting_product_surface_error,
 };
 use ironclaw_reborn_composition::{
     RebornAuthContinuationDispatcher, RebornProductAuthServices, RebornReadiness, RebornWebuiBundle,
@@ -73,6 +77,48 @@ impl RebornAuthContinuationDispatcher for RecordingAuthDispatcher {
     ) -> Result<(), AuthProductError> {
         self.events.lock().expect("auth events lock").push(event);
         Ok(())
+    }
+    async fn dispatch_canceled_auth_continuation(
+        &self,
+        _event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        Ok(())
+    }
+}
+
+/// Returns a queued sequence of dispatch outcomes, one per call — models a
+/// lifecycle continuation whose fan-out is first deferred (a retryable error,
+/// e.g. setup still incomplete) and later succeeds once readiness settles.
+struct SequencedAuthDispatcher {
+    outcomes: Mutex<VecDeque<Result<(), AuthProductError>>>,
+    events: Mutex<Vec<AuthContinuationEvent>>,
+}
+
+impl SequencedAuthDispatcher {
+    fn new(outcomes: impl IntoIterator<Item = Result<(), AuthProductError>>) -> Self {
+        Self {
+            outcomes: Mutex::new(outcomes.into_iter().collect()),
+            events: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn dispatch_count(&self) -> usize {
+        self.events.lock().expect("auth events lock").len()
+    }
+}
+
+#[async_trait]
+impl RebornAuthContinuationDispatcher for SequencedAuthDispatcher {
+    async fn dispatch_auth_continuation(
+        &self,
+        event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        self.events.lock().expect("auth events lock").push(event);
+        self.outcomes
+            .lock()
+            .expect("outcomes lock")
+            .pop_front()
+            .expect("a queued dispatch outcome for each reconcile pass")
     }
     async fn dispatch_canceled_auth_continuation(
         &self,
@@ -239,10 +285,46 @@ impl AuthInteractionService for SetupFailingManualTokenInteractions {
 #[derive(Default)]
 struct UnusedServices {
     installed_extensions: Vec<RebornExtensionInfo>,
+    extension_setups: HashMap<String, RebornSetupExtensionResponse>,
 }
 
 impl UnusedServices {
     fn with_installed_extensions(package_ids: &[&str]) -> Self {
+        let extension_setups = package_ids
+            .iter()
+            .map(|package_id| {
+                let package_ref =
+                    LifecyclePackageRef::new(LifecyclePackageKind::Extension, *package_id)
+                        .expect("installed extension package ref");
+                let scopes = vec![
+                    GOOGLE_GMAIL_READONLY_SCOPE.to_string(),
+                    GOOGLE_CALENDAR_READONLY_SCOPE.to_string(),
+                ];
+                (
+                    (*package_id).to_string(),
+                    RebornSetupExtensionResponse {
+                        package_ref,
+                        phase: LifecyclePublicState::SetupNeeded,
+                        blockers: Vec::new(),
+                        payload: None,
+                        secrets: vec![RebornExtensionSetupSecret {
+                            name: "google_oauth".to_string(),
+                            provider: "google".to_string(),
+                            prompt: "google credential".to_string(),
+                            optional: false,
+                            provided: false,
+                            setup: RebornExtensionCredentialSetup::OAuth {
+                                account_label: format!("{package_id} google"),
+                                scopes,
+                                invocation_id: InvocationId::new().to_string(),
+                            },
+                            credential_ref: None,
+                        }],
+                        onboarding: None,
+                    },
+                )
+            })
+            .collect();
         Self {
             installed_extensions: package_ids
                 .iter()
@@ -255,21 +337,17 @@ impl UnusedServices {
                     display_name: (*package_id).to_string(),
                     runtime: "wasm".to_string(),
                     description: "test installed extension".to_string(),
-                    authenticated: false,
-                    active: false,
                     tools: Vec::new(),
-                    needs_setup: true,
-                    has_auth: true,
-                    installation_state: InstallationState::Installed,
+                    installation_state: ironclaw_product::LifecyclePublicState::SetupNeeded,
                     activation_error: None,
                     version: None,
-                    onboarding_state: None,
                     onboarding: None,
                     auth_accounts: Vec::new(),
                     surfaces: Vec::new(),
                     install_scope: None,
                 })
                 .collect(),
+            extension_setups,
         }
     }
 }
@@ -299,6 +377,22 @@ impl ironclaw_host_api::ProductSurface for UnusedServices {
                 ],
                 next_cursor: None,
             }),
+            id if id == EXTENSION_SETUP_VIEW.id => {
+                let package_id = request
+                    .input
+                    .get("package_id")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(rejecting_product_surface_error)?;
+                let setup = self
+                    .extension_setups
+                    .get(package_id)
+                    .cloned()
+                    .ok_or_else(rejecting_product_surface_error)?;
+                Ok(ironclaw_host_api::ProductSurfaceQueryPage {
+                    items: vec![serde_json::to_value(setup).expect("extension setup payload")],
+                    next_cursor: None,
+                })
+            }
             _ => Err(rejecting_product_surface_error()),
         }
     }
@@ -448,7 +542,7 @@ fn vendor_test_engine(
             recipes: Arc::new(ironclaw_auth::StaticAuthRecipeResolver::new(vec![recipe])),
             client_credentials: Arc::new(StaticVendorClientCredentials),
             egress: Arc::new(PanicVendorEgress),
-            secret_store: Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral()),
+            secret_store: Arc::new(ironclaw_secrets::SecretStore::ephemeral()),
             callback_base: ironclaw_auth::EngineCallbackBase::new(
                 "http://127.0.0.1:3000/api/reborn/product-auth/oauth",
             )
@@ -597,12 +691,234 @@ async fn get_oauth_flow_status(
         .expect("oneshot")
 }
 
+async fn post_oauth_flow_reconcile(
+    app: &axum::Router,
+    flow_id: &str,
+    query: &str,
+) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!(
+                    "/api/reborn/product-auth/oauth/flow/{flow_id}/reconcile{query}"
+                ))
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot")
+}
+
+fn callback_scope_for(user_id: &str, invocation_id: InvocationId) -> AuthProductScope {
+    AuthProductScope::new(
+        ResourceScope {
+            tenant_id: TenantId::new(TENANT).expect("tenant"),
+            user_id: UserId::new(user_id).expect("user"),
+            agent_id: Some(AgentId::new(AGENT).expect("agent")),
+            project_id: Some(ProjectId::new(PROJECT).expect("project")),
+            mission_id: None,
+            thread_id: None,
+            invocation_id,
+        },
+        AuthSurface::Callback,
+    )
+}
+
+async fn seed_completed_unfenced_selection_flow(
+    shared: &InMemoryAuthProductServices,
+    scope: AuthProductScope,
+) -> AuthFlowId {
+    let provider = AuthProviderId::new("github").expect("provider");
+    let account = shared
+        .create_account(NewCredentialAccount {
+            scope: scope.clone(),
+            provider: provider.clone(),
+            label: CredentialAccountLabel::new("reconcile github").expect("account label"),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(
+                SecretHandle::new("reconcile-account-secret").expect("secret handle"),
+            ),
+            refresh_secret: None,
+            scopes: vec![ProviderScope::new("repo").expect("provider scope")],
+        })
+        .await
+        .expect("seed configured credential account");
+    let flow = shared
+        .create_flow(NewAuthFlow {
+            id: Some(AuthFlowId::new()),
+            scope: scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: provider.clone(),
+            challenge: AuthChallenge::AccountSelectionRequired {
+                provider,
+                accounts: vec![account.projection()],
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            opaque_state_hash: None,
+            pkce_verifier_hash: None,
+            expires_at: Utc::now() + ChronoDuration::minutes(5),
+        })
+        .await
+        .expect("seed account-selection flow");
+    let completed = shared
+        .complete_credential_selection(
+            &scope,
+            CredentialSelectionInput {
+                flow_id: flow.id,
+                credential_account_id: account.id,
+            },
+        )
+        .await
+        .expect("complete flow without dispatching its continuation");
+    assert_eq!(completed.status, AuthFlowStatus::Completed);
+    assert!(completed.continuation_emitted_at.is_none());
+    flow.id
+}
+
+/// Seed a completed-but-unfenced flow whose continuation is a lifecycle
+/// activation (the shape the `LifecycleAuthContinuationDispatcher` handles),
+/// mirroring [`seed_completed_unfenced_selection_flow`].
+async fn seed_completed_unfenced_lifecycle_flow(
+    shared: &InMemoryAuthProductServices,
+    scope: AuthProductScope,
+    package_id: &str,
+) -> AuthFlowId {
+    let provider = AuthProviderId::new("google").expect("provider");
+    let account = shared
+        .create_account(NewCredentialAccount {
+            scope: scope.clone(),
+            provider: provider.clone(),
+            label: CredentialAccountLabel::new("lifecycle google").expect("account label"),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(
+                SecretHandle::new("lifecycle-account-secret").expect("secret handle"),
+            ),
+            refresh_secret: None,
+            scopes: vec![ProviderScope::new("repo").expect("provider scope")],
+        })
+        .await
+        .expect("seed configured credential account");
+    let flow = shared
+        .create_flow(NewAuthFlow {
+            id: Some(AuthFlowId::new()),
+            scope: scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: provider.clone(),
+            challenge: AuthChallenge::AccountSelectionRequired {
+                provider,
+                accounts: vec![account.projection()],
+            },
+            continuation: AuthContinuationRef::LifecycleActivation {
+                package_ref: ironclaw_auth::LifecyclePackageRef::new(package_id)
+                    .expect("lifecycle package ref"),
+            },
+            update_binding: None,
+            opaque_state_hash: None,
+            pkce_verifier_hash: None,
+            expires_at: Utc::now() + ChronoDuration::minutes(5),
+        })
+        .await
+        .expect("seed lifecycle-activation flow");
+    let completed = shared
+        .complete_credential_selection(
+            &scope,
+            CredentialSelectionInput {
+                flow_id: flow.id,
+                credential_account_id: account.id,
+            },
+        )
+        .await
+        .expect("complete flow without dispatching its continuation");
+    assert_eq!(completed.status, AuthFlowStatus::Completed);
+    assert!(completed.continuation_emitted_at.is_none());
+    flow.id
+}
+
+/// Item 3: a lifecycle continuation whose fan-out is deferred (the dispatcher
+/// reports a retryable error — the shape `LifecycleAuthContinuationDispatcher`
+/// returns when OAuth completed but setup is still incomplete) must leave the
+/// completed flow UNFENCED, so a later reconcile finishes the fan-out. A plain
+/// success would durably fence it and permanently strand the blocked runs.
+#[tokio::test]
+async fn product_auth_deferred_lifecycle_continuation_stays_redrivable_until_readiness() {
+    let shared = Arc::new(InMemoryAuthProductServices::new());
+    let dispatcher = Arc::new(SequencedAuthDispatcher::new([
+        Err(AuthProductError::BackendUnavailable), // first pass: setup incomplete
+        Ok(()),                                    // later reconcile: readiness Active
+    ]));
+    let product_auth = Arc::new(RebornProductAuthServices::from_shared(
+        shared.clone(),
+        dispatcher.clone(),
+    ));
+    let app = build_app_with_product_auth_service(product_auth);
+    let invocation_id = InvocationId::new();
+    let scope = callback_scope_for(USER, invocation_id);
+    let flow_id =
+        seed_completed_unfenced_lifecycle_flow(&shared, scope.clone(), "google-calendar").await;
+
+    // First reconcile: the fan-out is deferred → the flow must stay UN-fenced.
+    let first = post_oauth_flow_reconcile(
+        &app,
+        &flow_id.to_string(),
+        &format!("?invocation_id={invocation_id}"),
+    )
+    .await;
+    assert_ne!(
+        first.status(),
+        StatusCode::OK,
+        "a deferred continuation surfaces as retryable, not a settled success"
+    );
+    assert_eq!(dispatcher.dispatch_count(), 1);
+    assert!(
+        shared
+            .get_flow(&scope, flow_id)
+            .await
+            .expect("read reconciled flow")
+            .expect("reconciled flow exists")
+            .continuation_emitted_at
+            .is_none(),
+        "a deferred (retryable) continuation must not be durably fenced",
+    );
+
+    // Later reconcile: readiness now Active → the same continuation re-drives,
+    // fans out, and only NOW is the flow fenced. Not permanently stuck.
+    let second = post_oauth_flow_reconcile(
+        &app,
+        &flow_id.to_string(),
+        &format!("?invocation_id={invocation_id}"),
+    )
+    .await;
+    assert_eq!(second.status(), StatusCode::OK);
+    assert_eq!(
+        dispatcher.dispatch_count(),
+        2,
+        "the deferred continuation re-drove on the readiness reconcile"
+    );
+    assert!(
+        shared
+            .get_flow(&scope, flow_id)
+            .await
+            .expect("read reconciled flow")
+            .expect("reconciled flow exists")
+            .continuation_emitted_at
+            .is_some(),
+        "the successful reconcile finally fences the continuation",
+    );
+}
+
 fn google_oauth_start_body(extra_fields: serde_json::Value) -> serde_json::Value {
     let expires_at = (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339();
     let mut body = json!({
-        "provider": "google",
-        "account_label": "work google",
-        "scopes": [GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE],
+        "requirement": "google_oauth",
         "expires_at": expires_at,
         "invocation_id": InvocationId::new().to_string(),
     });
@@ -639,14 +955,7 @@ async fn post_extension_oauth_start(
 }
 
 async fn start_google_oauth_flow(app: &axum::Router) -> (serde_json::Value, String) {
-    let start_response = post_google_oauth_start(
-        app,
-        google_oauth_start_body(json!({
-            "session_id": "web-session-google",
-            "thread_id": "thread-auth-google"
-        })),
-    )
-    .await;
+    let start_response = post_google_oauth_start(app, google_oauth_start_body(json!({}))).await;
     assert_eq!(start_response.status(), StatusCode::OK);
     let start_body = read_body_string(start_response).await;
     let start_json: serde_json::Value = serde_json::from_str(&start_body).expect("start json");
@@ -823,19 +1132,23 @@ async fn product_auth_google_oauth_start_fails_closed_without_config() {
 }
 
 #[tokio::test]
-async fn product_auth_google_oauth_start_rejects_disallowed_scopes() {
+async fn product_auth_google_oauth_start_rejects_browser_owned_provider_scopes() {
     let (app, _) = build_app_with_google_oauth();
 
-    // A scope outside the recipe ceiling is rejected before any flow exists
-    // (an empty list is valid: it means the full recipe ceiling).
+    // The extension route accepts only a manifest requirement key. A browser
+    // cannot override that requirement with another provider/scope set, even
+    // when the global provider recipe catalog knows the provider.
     let response = post_google_oauth_start(
         &app,
-        google_oauth_start_body(json!({ "scopes": [DISALLOWED_GOOGLE_SCOPE] })),
+        google_oauth_start_body(json!({
+            "provider": "google",
+            "account_label": "attacker-selected account",
+            "scopes": [DISALLOWED_GOOGLE_SCOPE],
+        })),
     )
     .await;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let body = read_body_string(response).await;
-    assert!(body.contains("\"code\":\"invalid_request\""));
     assert!(!body.contains(DISALLOWED_GOOGLE_SCOPE));
 }
 
@@ -1294,38 +1607,117 @@ async fn product_auth_oauth_flow_status_reports_completed_without_secrets() {
     assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
 }
 
-// A flow owned by a DIFFERENT scope must surface as 404, never 403: the read
-// cannot be used as a cross-user existence oracle. Full-scope equality in
-// `get_flow` rejects the mismatched owner even when the attacker supplies the
-// exact invocation id, because the trusted tenant/user come from the
-// authenticated caller — not the browser.
 #[tokio::test]
-async fn product_auth_oauth_flow_status_hides_cross_scope_flow_as_not_found() {
+async fn product_auth_oauth_flow_reconcile_dispatches_completed_unfenced_flow_exactly_once() {
     let shared = Arc::new(InMemoryAuthProductServices::new());
+    let dispatcher = Arc::new(RecordingAuthDispatcher::default());
     let product_auth = Arc::new(RebornProductAuthServices::from_shared(
         shared.clone(),
-        Arc::new(RecordingAuthDispatcher::default()),
+        dispatcher.clone(),
     ));
     let app = build_app_with_product_auth_service(product_auth);
+    let invocation_id = InvocationId::new();
+    let scope = callback_scope_for(USER, invocation_id);
+    let flow_id = seed_completed_unfenced_selection_flow(&shared, scope.clone()).await;
 
-    // Seed a flow owned by a DIFFERENT user in the same tenant/agent/project.
-    let other_invocation = InvocationId::new();
-    let other_scope = AuthProductScope::new(
-        ResourceScope {
-            tenant_id: TenantId::new(TENANT).expect("tenant"),
-            user_id: UserId::new("user-mallory").expect("user"),
-            agent_id: Some(AgentId::new(AGENT).expect("agent")),
-            project_id: Some(ProjectId::new(PROJECT).expect("project")),
-            mission_id: None,
-            thread_id: None,
-            invocation_id: other_invocation,
-        },
-        AuthSurface::Callback,
+    let response = post_oauth_flow_reconcile(
+        &app,
+        &flow_id.to_string(),
+        &format!("?invocation_id={invocation_id}"),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+    let json: serde_json::Value = serde_json::from_str(&body).expect("reconcile json");
+    assert_eq!(json, json!({ "status": "completed" }));
+    let events = dispatcher.events();
+    assert_eq!(events.len(), 1, "unfenced continuation dispatches once");
+    assert_eq!(events[0].flow_id, flow_id);
+    assert_eq!(events[0].scope, scope);
+    assert_eq!(events[0].continuation, AuthContinuationRef::SetupOnly);
+    assert!(
+        shared
+            .get_flow(&events[0].scope, flow_id)
+            .await
+            .expect("read reconciled flow")
+            .expect("reconciled flow exists")
+            .continuation_emitted_at
+            .is_some(),
+        "successful route reconciliation durably fences the continuation"
     );
+
+    let replay = post_oauth_flow_reconcile(
+        &app,
+        &flow_id.to_string(),
+        &format!("?invocation_id={invocation_id}"),
+    )
+    .await;
+    assert_eq!(replay.status(), StatusCode::OK);
+    assert_eq!(
+        dispatcher.events().len(),
+        1,
+        "the fenced flow must not dispatch on route replay"
+    );
+}
+
+#[tokio::test]
+async fn product_auth_oauth_flow_reconcile_fenced_flow_does_not_redispatch() {
+    let (app, dispatcher) = build_app_with_product_auth();
+    let started = start_oauth_flow(&app, "reconcile-state", "reconcile-pkce", json!({})).await;
+    let callback_response = app
+        .clone()
+        .oneshot(callback_request(callback_uri(
+            &started.flow_id,
+            &started.invocation_id,
+            USER,
+            "reconcile-state",
+            "&provider=github&account_label=work%20github&code=reconcile-code&scopes=repo",
+        )))
+        .await
+        .expect("oneshot");
+    assert_eq!(callback_response.status(), StatusCode::OK);
+    assert_eq!(dispatcher.events().len(), 1);
+
+    let response = post_oauth_flow_reconcile(
+        &app,
+        &started.flow_id,
+        &format!("?invocation_id={}", started.invocation_id),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "the frontend completion watcher must target a production-mounted route"
+    );
+    let body = read_body_string(response).await;
+    let json: serde_json::Value = serde_json::from_str(&body).expect("reconcile json");
+    assert_eq!(json["status"], "completed");
+    assert_eq!(
+        dispatcher.events().len(),
+        1,
+        "an acknowledged continuation must not dispatch twice"
+    );
+    assert!(!body.contains("reconcile-state"));
+    assert!(!body.contains("reconcile-pkce"));
+    assert!(!body.contains("reconcile-code"));
+}
+
+#[tokio::test]
+async fn product_auth_oauth_flow_reconcile_terminal_flow_does_not_dispatch() {
+    let shared = Arc::new(InMemoryAuthProductServices::new());
+    let dispatcher = Arc::new(RecordingAuthDispatcher::default());
+    let product_auth = Arc::new(RebornProductAuthServices::from_shared(
+        shared.clone(),
+        dispatcher.clone(),
+    ));
+    let app = build_app_with_product_auth_service(product_auth);
+    let invocation_id = InvocationId::new();
+    let scope = callback_scope_for(USER, invocation_id);
     let flow = shared
         .create_flow(NewAuthFlow {
             id: Some(AuthFlowId::new()),
-            scope: other_scope,
+            scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: AuthProviderId::new("github").expect("provider"),
             challenge: AuthChallenge::OAuthUrl {
@@ -1340,18 +1732,75 @@ async fn product_auth_oauth_flow_status_hides_cross_scope_flow_as_not_found() {
             expires_at: Utc::now() + ChronoDuration::minutes(5),
         })
         .await
-        .expect("seed cross-user flow");
+        .expect("seed flow");
+    let canceled = shared
+        .cancel_flow(&scope, flow.id)
+        .await
+        .expect("terminalize flow");
+    assert_eq!(canceled.status, AuthFlowStatus::Canceled);
+
+    let response = post_oauth_flow_reconcile(
+        &app,
+        &flow.id.to_string(),
+        &format!("?invocation_id={invocation_id}"),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+    let json: serde_json::Value = serde_json::from_str(&body).expect("reconcile json");
+    assert_eq!(json, json!({ "status": "canceled" }));
+    assert!(
+        dispatcher.events().is_empty(),
+        "terminal flows must never enter continuation dispatch"
+    );
+}
+
+// A flow owned by a DIFFERENT scope must surface as 404, never 403: the read
+// cannot be used as a cross-user existence oracle. Full-scope equality in
+// `get_flow` rejects the mismatched owner even when the attacker supplies the
+// exact invocation id, because the trusted tenant/user come from the
+// authenticated caller — not the browser.
+#[tokio::test]
+async fn product_auth_oauth_flow_routes_hide_cross_scope_flow_without_dispatch() {
+    let shared = Arc::new(InMemoryAuthProductServices::new());
+    let dispatcher = Arc::new(RecordingAuthDispatcher::default());
+    let product_auth = Arc::new(RebornProductAuthServices::from_shared(
+        shared.clone(),
+        dispatcher.clone(),
+    ));
+    let app = build_app_with_product_auth_service(product_auth);
+
+    // Seed a completed, unfenced flow owned by a DIFFERENT user in the same
+    // tenant/agent/project. If caller scoping regresses, reconcile would enter
+    // the production continuation boundary and make the dispatcher observable.
+    let other_invocation = InvocationId::new();
+    let other_scope = callback_scope_for("user-mallory", other_invocation);
+    let flow_id = seed_completed_unfenced_selection_flow(&shared, other_scope).await;
 
     // USER (the only authenticated identity) polls mallory's flow, even with the
     // exact invocation id. Cross-scope must read as not-found, never forbidden.
     let response = get_oauth_flow_status(
         &app,
-        &flow.id.to_string(),
+        &flow_id.to_string(),
         &format!("?invocation_id={other_invocation}"),
     )
     .await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     assert_ne!(response.status(), StatusCode::FORBIDDEN);
+
+    let reconcile = post_oauth_flow_reconcile(
+        &app,
+        &flow_id.to_string(),
+        &format!("?invocation_id={other_invocation}"),
+    )
+    .await;
+    assert_eq!(reconcile.status(), StatusCode::NOT_FOUND);
+    assert_ne!(reconcile.status(), StatusCode::FORBIDDEN);
+    assert!(
+        dispatcher.events().is_empty(),
+        "cross-scope reconcile must not dispatch another caller's continuation"
+    );
 }
 
 #[tokio::test]
@@ -1373,7 +1822,8 @@ async fn product_auth_google_oauth_start_builds_provider_authorization_url() {
     assert!(!body.contains("google-pkce"));
     let json: serde_json::Value = serde_json::from_str(&body).expect("start json");
     assert_eq!(json["provider"], "google");
-    assert_eq!(json["continuation"]["type"], "setup_only");
+    assert_eq!(json["continuation"]["type"], "lifecycle_activation");
+    assert_eq!(json["continuation"]["package_ref"], "google-tools");
     let authorization_url = json["authorization_url"]
         .as_str()
         .expect("authorization url");
@@ -1419,10 +1869,8 @@ async fn extension_oauth_start_rejects_package_missing_from_installed_inventory(
         &app,
         "google-calendar",
         json!({
-            "provider": "google",
-            "account_label": "work google",
+            "requirement": "google_oauth",
             "invocation_id": InvocationId::new().to_string(),
-            "scopes": [GOOGLE_CALENDAR_READONLY_SCOPE],
             "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
         }),
     )
@@ -1476,6 +1924,7 @@ async fn extension_oauth_start_for_installed_package_attaches_update_binding() {
             access_secret: Some(SecretHandle::new("existing-google-access").expect("secret")),
             refresh_secret: Some(SecretHandle::new("existing-google-refresh").expect("secret")),
             scopes: vec![
+                ProviderScope::new(GOOGLE_GMAIL_READONLY_SCOPE.to_string()).expect("scope"),
                 ProviderScope::new(GOOGLE_CALENDAR_READONLY_SCOPE.to_string()).expect("scope"),
             ],
         })
@@ -1486,10 +1935,8 @@ async fn extension_oauth_start_for_installed_package_attaches_update_binding() {
         &app,
         "google-calendar",
         json!({
-            "provider": "google",
-            "account_label": "work google",
+            "requirement": "google_oauth",
             "invocation_id": invocation_id.to_string(),
-            "scopes": [GOOGLE_CALENDAR_READONLY_SCOPE],
             "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
         }),
     )
@@ -1512,12 +1959,13 @@ async fn extension_oauth_start_for_installed_package_attaches_update_binding() {
             .map(|binding| binding.account_id),
         Some(account.id)
     );
-    // Auth = OURS (owner decision): extension-card OAuth start creates
-    // SetupOnly flows — the retired LifecycleActivation continuation lane was
-    // excised; activation is frontend-driven after the callback completes
-    // (configure-modal `handleOauthConfigured`), pinned by
-    // `oauth_callback_with_lifecycle_activation_returns_ok_without_resume`.
-    assert_eq!(flow.continuation, AuthContinuationRef::SetupOnly);
+    assert_eq!(
+        flow.continuation,
+        AuthContinuationRef::LifecycleActivation {
+            package_ref: ironclaw_auth::LifecyclePackageRef::new("google-calendar")
+                .expect("lifecycle package ref"),
+        }
+    );
 }
 
 #[tokio::test]
@@ -1575,6 +2023,74 @@ async fn product_auth_google_oauth_callback_accepts_provider_extra_scopes_withou
 }
 
 #[tokio::test]
+async fn product_auth_google_oauth_callback_ignores_incomplete_redirect_scope() {
+    let provider_client = Arc::new(RecordingProviderClient::default());
+    let (app, dispatcher) = build_app_with_google_oauth_provider(provider_client.clone());
+    let (start_json, state) = start_google_oauth_flow(&app).await;
+
+    let callback_response = app
+        .oneshot(callback_request(format!(
+            "/api/reborn/product-auth/oauth/google/callback?state={state}&code=google-auth-code&scope={GOOGLE_GMAIL_READONLY_SCOPE}"
+        )))
+        .await
+        .expect("oneshot");
+
+    assert_eq!(callback_response.status(), StatusCode::OK);
+    let callback_body = read_body_string(callback_response).await;
+    let callback_json: serde_json::Value =
+        serde_json::from_str(&callback_body).expect("callback json");
+    assert_eq!(callback_json["flow_id"], start_json["flow_id"]);
+    assert_eq!(callback_json["status"], "completed");
+    assert_eq!(dispatcher.events().len(), 1);
+    assert_eq!(
+        provider_client.exchanged_scopes(),
+        vec![vec![
+            GOOGLE_GMAIL_READONLY_SCOPE.to_string(),
+            GOOGLE_CALENDAR_READONLY_SCOPE.to_string()
+        ]],
+        "the provider exchange must receive the server-owned request scopes, \
+         not the redirect's non-authoritative scope echo"
+    );
+}
+
+#[tokio::test]
+async fn product_auth_google_oauth_callback_missing_code_is_rejected_without_exchange() {
+    let provider_client = Arc::new(RecordingProviderClient::default());
+    let (app, dispatcher) = build_app_with_google_oauth_provider(provider_client.clone());
+    let (start_json, state) = start_google_oauth_flow(&app).await;
+
+    let response = app
+        .clone()
+        .oneshot(callback_request(format!(
+            "/api/reborn/product-auth/oauth/google/callback?state={state}"
+        )))
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_body_string(response).await;
+    assert!(body.contains("\"code\":\"malformed_callback\""));
+    assert!(!body.contains(&state));
+    assert!(dispatcher.events().is_empty());
+    assert!(
+        provider_client.exchanged_scopes().is_empty(),
+        "a callback without an authorization code must not reach token exchange"
+    );
+
+    let flow_id = start_json["flow_id"].as_str().expect("flow id");
+    let invocation_id = start_json["callback_scope"]["invocation_id"]
+        .as_str()
+        .expect("invocation id");
+    let status_response =
+        get_oauth_flow_status(&app, flow_id, &format!("?invocation_id={invocation_id}")).await;
+    assert_eq!(status_response.status(), StatusCode::OK);
+    let status_body = read_body_string(status_response).await;
+    let status_json: serde_json::Value = serde_json::from_str(&status_body).expect("status json");
+    assert_eq!(status_json["status"], "awaiting_user");
+    assert!(!status_body.contains(&state));
+}
+
+#[tokio::test]
 async fn product_auth_google_oauth_browser_callback_notifies_chat_without_secrets() {
     let (app, dispatcher) = build_app_with_google_oauth();
     let (start_json, state) = start_google_oauth_flow(&app).await;
@@ -1610,9 +2126,10 @@ async fn product_auth_google_oauth_browser_callback_notifies_chat_without_secret
 }
 
 #[tokio::test]
-async fn product_auth_google_oauth_callback_rejects_disallowed_scopes() {
-    let (app, dispatcher) = build_app_with_google_oauth();
-    let (_, state) = start_google_oauth_flow(&app).await;
+async fn product_auth_google_oauth_callback_does_not_trust_redirect_scopes_outside_recipe() {
+    let provider_client = Arc::new(RecordingProviderClient::default());
+    let (app, dispatcher) = build_app_with_google_oauth_provider(provider_client.clone());
+    let (start_json, state) = start_google_oauth_flow(&app).await;
 
     let response = app
         .clone()
@@ -1622,13 +2139,23 @@ async fn product_auth_google_oauth_callback_rejects_disallowed_scopes() {
         .await
         .expect("oneshot");
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::OK);
     let body = read_body_string(response).await;
-    assert!(body.contains("\"code\":\"provider_denied\""));
+    let callback_json: serde_json::Value = serde_json::from_str(&body).expect("callback json");
+    assert_eq!(callback_json["flow_id"], start_json["flow_id"]);
+    assert_eq!(callback_json["status"], "completed");
     assert!(!body.contains(&state));
     assert!(!body.contains("google-auth-code"));
     assert!(!body.contains(DISALLOWED_GOOGLE_SCOPE));
-    assert!(dispatcher.events().is_empty());
+    assert_eq!(dispatcher.events().len(), 1);
+    assert_eq!(
+        provider_client.exchanged_scopes(),
+        vec![vec![
+            GOOGLE_GMAIL_READONLY_SCOPE.to_string(),
+            GOOGLE_CALENDAR_READONLY_SCOPE.to_string()
+        ]],
+        "a redirect scope outside the recipe must not become exchange authority"
+    );
 
     let replay_response = app
         .oneshot(callback_request(format!(
@@ -1646,7 +2173,8 @@ async fn product_auth_google_oauth_callback_rejects_disallowed_scopes() {
 
 #[tokio::test]
 async fn product_auth_google_oauth_callback_provider_denial_is_sanitized() {
-    let (app, dispatcher) = build_app_with_google_oauth();
+    let provider_client = Arc::new(RecordingProviderClient::default());
+    let (app, dispatcher) = build_app_with_google_oauth_provider(provider_client.clone());
     let (_, state) = start_google_oauth_flow(&app).await;
 
     let response = app
@@ -1662,6 +2190,10 @@ async fn product_auth_google_oauth_callback_provider_denial_is_sanitized() {
     assert!(!body.contains(&state));
     assert!(!body.contains("access_denied"));
     assert!(dispatcher.events().is_empty());
+    assert!(
+        provider_client.exchanged_scopes().is_empty(),
+        "an explicit provider denial must not reach token exchange"
+    );
 }
 
 #[tokio::test]
@@ -1685,9 +2217,9 @@ async fn product_auth_google_oauth_callback_unknown_state_is_sanitized() {
 }
 
 #[tokio::test]
-async fn product_auth_google_oauth_callback_rejects_empty_parsed_scopes() {
+async fn product_auth_google_oauth_callback_accepts_empty_redirect_scope() {
     let (app, dispatcher) = build_app_with_google_oauth();
-    let (_, state) = start_google_oauth_flow(&app).await;
+    let (start_json, state) = start_google_oauth_flow(&app).await;
 
     let response = app
         .clone()
@@ -1697,12 +2229,14 @@ async fn product_auth_google_oauth_callback_rejects_empty_parsed_scopes() {
         .await
         .expect("oneshot");
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::OK);
     let body = read_body_string(response).await;
-    assert!(body.contains("\"code\":\"provider_denied\""));
+    let callback_json: serde_json::Value = serde_json::from_str(&body).expect("callback json");
+    assert_eq!(callback_json["flow_id"], start_json["flow_id"]);
+    assert_eq!(callback_json["status"], "completed");
     assert!(!body.contains(&state));
     assert!(!body.contains("google-auth-code"));
-    assert!(dispatcher.events().is_empty());
+    assert_eq!(dispatcher.events().len(), 1);
 
     let replay_response = app
         .oneshot(callback_request(format!(

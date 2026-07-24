@@ -516,7 +516,12 @@ fn validation_error(
     ProductSurfaceError::validation(field, code)
 }
 
-fn parse_client_action_id(value: Option<String>) -> Result<IdempotencyKey, ProductSurfaceError> {
+/// Parses the browser-supplied client action id (gesture idempotency key).
+/// `pub` for the extension-lifecycle handlers, which derive a stable gesture
+/// ActivityId instead of hashing the input (#6520 install contract).
+pub fn parse_client_action_id(
+    value: Option<String>,
+) -> Result<IdempotencyKey, ProductSurfaceError> {
     let value = required_text(
         "client_action_id",
         value,

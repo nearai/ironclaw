@@ -12,7 +12,7 @@ use ironclaw_host_api::{
     RuntimeCredentialTarget, RuntimeKind, SecretHandle,
 };
 use ironclaw_network::{network_target_for_url, target_matches_pattern};
-use ironclaw_secrets::SecretStore;
+use ironclaw_secrets::SecretStorePort;
 use ironclaw_wasm::{WasmHostError, WasmRuntimeCredentialProvider, WasmRuntimeCredentialRequest};
 use tokio::runtime::Handle;
 
@@ -84,7 +84,7 @@ impl SharedHostWasmRuntimeCredentials {
 
     pub(crate) fn with_product_auth_restaging(
         mut self,
-        secret_store: Arc<dyn SecretStore>,
+        secret_store: Arc<dyn SecretStorePort>,
         secret_injections: Arc<RuntimeSecretInjectionStore>,
         account_resolver: Arc<dyn RuntimeCredentialAccountResolver>,
     ) -> Self {
@@ -116,7 +116,7 @@ struct SharedCredentialCache {
 
 #[derive(Clone)]
 struct RuntimeCredentialRestager {
-    secret_store: Arc<dyn SecretStore>,
+    secret_store: Arc<dyn SecretStorePort>,
     secret_injections: Arc<RuntimeSecretInjectionStore>,
     account_resolver: Arc<dyn RuntimeCredentialAccountResolver>,
 }

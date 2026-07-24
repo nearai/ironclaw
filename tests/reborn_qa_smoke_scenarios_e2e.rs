@@ -26,9 +26,9 @@ use parity_qa_support::model_replay::{
 use reborn_support::{
     config::WaitConfig,
     extension_surface::{
-        BUNDLED_EXTENSION_CAPABILITY_IDS, BUNDLED_EXTENSION_IDS, EXTENSION_ACTIVATE_CAPABILITY_ID,
-        EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_LIFECYCLE_CAPABILITY_IDS,
-        EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SEARCH_CAPABILITY_ID,
+        BUNDLED_EXTENSION_CAPABILITY_IDS, BUNDLED_EXTENSION_IDS, EXTENSION_INSTALL_CAPABILITY_ID,
+        EXTENSION_LIFECYCLE_CAPABILITY_IDS, EXTENSION_REMOVE_CAPABILITY_ID,
+        EXTENSION_SEARCH_CAPABILITY_ID,
     },
     github as github_support,
     harness::RecordingTestCapabilityPort,
@@ -662,10 +662,9 @@ async fn qa_error_process_repo_patch_and_cleanup_smokes_impl() {
 }
 
 #[tokio::test]
-async fn qa_extension_lifecycle_tools_search_install_activate_and_remove_e2e() {
+async fn qa_extension_lifecycle_tools_search_install_and_remove_e2e() {
     let search = cap(EXTENSION_SEARCH_CAPABILITY_ID);
     let install = cap(EXTENSION_INSTALL_CAPABILITY_ID);
-    let activate = cap(EXTENSION_ACTIVATE_CAPABILITY_ID);
     let remove = cap(EXTENSION_REMOVE_CAPABILITY_ID);
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::AssertProviderToolsThenProviderToolCalls {
@@ -681,14 +680,6 @@ async fn qa_extension_lifecycle_tools_search_install_activate_and_remove_e2e() {
             calls: vec![call(
                 &install,
                 "qa_extension_install_github",
-                serde_json::json!({"extension_id": "github"}),
-            )],
-            expected_tool_results: Vec::new(),
-        },
-        RebornModelReplayStep::ProviderToolCalls {
-            calls: vec![call(
-                &activate,
-                "qa_extension_activate_github",
                 serde_json::json!({"extension_id": "github"}),
             )],
             expected_tool_results: Vec::new(),
@@ -720,7 +711,7 @@ async fn qa_extension_lifecycle_tools_search_install_activate_and_remove_e2e() {
     let submitted = harness
         .submit_text(
             "event-qa-extension-lifecycle",
-            "search, install, activate, and remove a Reborn extension",
+            "search, install, and remove a Reborn extension",
         )
         .await
         .expect("submit extension lifecycle smoke");
@@ -749,10 +740,9 @@ async fn qa_extension_lifecycle_tools_search_install_activate_and_remove_e2e() {
     );
     assert!(
         results.iter().any(|result| {
-            result.capability_id == activate
-                && result.output["payload"]["activated"] == serde_json::json!(true)
+            result.capability_id == install && result.output["phase"] == serde_json::json!("active")
         }),
-        "extension activate should succeed"
+        "extension install should complete internal readiness"
     );
     assert!(
         results.iter().any(|result| {
@@ -766,9 +756,8 @@ async fn qa_extension_lifecycle_tools_search_install_activate_and_remove_e2e() {
 }
 
 #[tokio::test]
-async fn qa_activating_bundled_extensions_exposes_complete_model_surface_e2e() {
+async fn qa_installing_bundled_extensions_exposes_complete_model_surface_e2e() {
     let install = cap(EXTENSION_INSTALL_CAPABILITY_ID);
-    let activate = cap(EXTENSION_ACTIVATE_CAPABILITY_ID);
     let install_calls = BUNDLED_EXTENSION_IDS
         .iter()
         .map(|extension_id| {
@@ -779,27 +768,25 @@ async fn qa_activating_bundled_extensions_exposes_complete_model_surface_e2e() {
             )
         })
         .collect::<Vec<_>>();
-    let activate_calls = BUNDLED_EXTENSION_IDS
-        .iter()
-        .map(|extension_id| {
-            call(
-                &activate,
-                &format!("qa_activate_{extension_id}"),
-                serde_json::json!({"extension_id": extension_id}),
-            )
-        })
-        .collect::<Vec<_>>();
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::ProviderToolCalls {
             calls: install_calls,
             expected_tool_results: Vec::new(),
         },
-        RebornModelReplayStep::ProviderToolCalls {
-            calls: activate_calls,
-            expected_tool_results: Vec::new(),
-        },
         RebornModelReplayStep::AssertProviderToolsThenResponse {
-            capability_ids: capability_ids(BUNDLED_EXTENSION_CAPABILITY_IDS),
+            // `nearai.web_search` is hosted-MCP-backed: #6520 publishes it
+            // fail-closed only after live discovery, which this binary-tier
+            // harness has no scripted egress seam for. Its install→publish→
+            // dispatch contract is pinned end-to-end by
+            // `reborn_integration_mcp::nearai_web_search_dispatches_through_bundled_hosted_mcp`;
+            // this smoke asserts the statically-published surface.
+            capability_ids: capability_ids(
+                &BUNDLED_EXTENSION_CAPABILITY_IDS
+                    .iter()
+                    .copied()
+                    .filter(|id| *id != "nearai.web_search")
+                    .collect::<Vec<_>>(),
+            ),
             response: HostManagedModelResponse::assistant_reply(
                 "qa bundled extension surface complete",
             ),
@@ -817,7 +804,7 @@ async fn qa_activating_bundled_extensions_exposes_complete_model_surface_e2e() {
     let submitted = harness
         .submit_text(
             "event-qa-bundled-extension-surface",
-            "activate every bundled Reborn extension and verify the model surface",
+            "install every bundled Reborn extension and verify the model surface",
         )
         .await
         .expect("submit bundled extension surface smoke");
@@ -831,24 +818,19 @@ async fn qa_activating_bundled_extensions_exposes_complete_model_surface_e2e() {
         .expect("final reply");
 
     let invocations = harness.capability_invocations();
+    // Count distinct install gestures (activity ids), not raw dispatches:
+    // hosted-MCP packages (nearai, notion) may re-dispatch the same install
+    // invocation during bounded discovery retries, and the capability layer
+    // dedupes them by activity id (#6520 gesture idempotency).
     assert_eq!(
         invocations
             .iter()
             .filter(|invocation| invocation.capability_id == install)
-            .count(),
-        BUNDLED_EXTENSION_IDS.len(),
-        "each bundled extension should be installed through the lifecycle tool"
-    );
-    assert_eq!(
-        invocations
-            .iter()
-            .filter(|invocation| invocation.capability_id == activate)
-            .map(|invocation| invocation.input_ref.to_string())
-            .collect::<std::collections::BTreeSet<_>>()
+            .map(|invocation| invocation.activity_id)
+            .collect::<std::collections::HashSet<_>>()
             .len(),
         BUNDLED_EXTENSION_IDS.len(),
-        "each bundled extension should be activated through the lifecycle tool; retryable \
-         lifecycle failures may add duplicate attempts for the same scripted call"
+        "each bundled extension should be installed through the lifecycle tool"
     );
     harness.assert_model_exhausted();
     harness.shutdown().await;

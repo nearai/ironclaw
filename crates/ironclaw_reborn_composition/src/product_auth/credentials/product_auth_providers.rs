@@ -19,11 +19,11 @@ use ironclaw_auth::{
 };
 use ironclaw_host_api::{RecipeClientCredentials, RuntimeHttpEgress};
 use ironclaw_host_runtime::ProductAuthProviderRuntimePorts;
-use ironclaw_secrets::SecretStore;
+use ironclaw_secrets::SecretStorePort;
 use secrecy::SecretString;
 
 use crate::RebornBuildError;
-use crate::extension_host::channel_config::ChannelConfigService;
+use crate::extension_host::admin_configuration::ComposedExtensionAdminConfigurationResolver;
 use crate::input::{OAuthDcrCallbackConfig, OAuthProviderBackendConfig};
 use crate::product_auth::oauth::oauth_gate::OAuthGateFlowDriver;
 use crate::product_auth::oauth::staged_egress::ObligationStagedAuthEgress;
@@ -48,32 +48,32 @@ pub(crate) enum ClientCredentialValue {
     Static(SecretString),
 }
 
-/// Deferred handle source over the operator channel configuration
-/// (`[channel.config]`): the configure service is built after the auth
+/// Deferred handle source over administrator configuration
+/// (`[admin_configuration]`): the resolver is built after the auth
 /// engine (its durable stores land later in factory assembly), so the
 /// engine holds this slot and resolves handles through it at request time.
 /// Unfilled (startup window, or a composition path without the configure
 /// surface) it resolves nothing — the engine's existing not-configured
 /// path applies.
 #[derive(Clone, Default)]
-pub(crate) struct ChannelConfigCredentialSlot {
-    inner: Arc<std::sync::OnceLock<Arc<ChannelConfigService>>>,
+pub(crate) struct AdminConfigurationCredentialSlot {
+    inner: Arc<std::sync::OnceLock<Arc<ComposedExtensionAdminConfigurationResolver>>>,
 }
 
-impl ChannelConfigCredentialSlot {
-    pub(crate) fn fill(&self, service: Arc<ChannelConfigService>) {
+impl AdminConfigurationCredentialSlot {
+    pub(crate) fn fill(&self, service: Arc<ComposedExtensionAdminConfigurationResolver>) {
         let _ = self.inner.set(service);
     }
 
-    fn get(&self) -> Option<Arc<ChannelConfigService>> {
+    fn get(&self) -> Option<Arc<ComposedExtensionAdminConfigurationResolver>> {
         self.inner.get().cloned()
     }
 }
 
-impl fmt::Debug for ChannelConfigCredentialSlot {
+impl fmt::Debug for AdminConfigurationCredentialSlot {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("ChannelConfigCredentialSlot")
+            .debug_struct("AdminConfigurationCredentialSlot")
             .field("filled", &self.inner.get().is_some())
             .finish()
     }
@@ -88,7 +88,7 @@ impl fmt::Debug for ChannelConfigCredentialSlot {
 #[derive(Clone, Default)]
 pub(crate) struct CompositionClientCredentials {
     values: BTreeMap<String, ClientCredentialValue>,
-    channel_config: Option<ChannelConfigCredentialSlot>,
+    admin_configuration: Option<AdminConfigurationCredentialSlot>,
 }
 
 impl CompositionClientCredentials {
@@ -97,9 +97,9 @@ impl CompositionClientCredentials {
             .insert(handle.into(), ClientCredentialValue::Static(value));
     }
 
-    /// Attach the operator channel-config fallback for unregistered handles.
-    pub(crate) fn with_channel_config_fallback(&mut self, slot: ChannelConfigCredentialSlot) {
-        self.channel_config = Some(slot);
+    /// Attach the administrator-configuration fallback for unregistered handles.
+    pub(crate) fn with_admin_configuration(&mut self, slot: AdminConfigurationCredentialSlot) {
+        self.admin_configuration = Some(slot);
     }
 
     async fn resolve_handle(&self, handle: &str) -> Result<Option<SecretString>, AuthProductError> {
@@ -107,7 +107,11 @@ impl CompositionClientCredentials {
             Some(ClientCredentialValue::Static(value)) => return Ok(Some(value.clone())),
             None => {}
         }
-        let Some(service) = self.channel_config.as_ref().and_then(|slot| slot.get()) else {
+        let Some(service) = self
+            .admin_configuration
+            .as_ref()
+            .and_then(|slot| slot.get())
+        else {
             return Ok(None);
         };
         service
@@ -117,7 +121,7 @@ impl CompositionClientCredentials {
                 tracing::warn!(
                     %error,
                     handle,
-                    "operator channel-config client-credential lookup failed"
+                    "administrator client-credential lookup failed"
                 );
                 AuthProductError::BackendUnavailable
             })
@@ -170,9 +174,9 @@ impl EngineClientCredentialsSource for CompositionClientCredentials {
 pub(crate) fn compose_provider_client(
     configs: Vec<OAuthProviderBackendConfig>,
     dcr_callback: Option<OAuthDcrCallbackConfig>,
-    secret_store: Arc<dyn SecretStore>,
+    secret_store: Arc<dyn SecretStorePort>,
     runtime_ports: ProductAuthProviderRuntimePorts,
-    channel_config_credentials: ChannelConfigCredentialSlot,
+    admin_configuration_credentials: AdminConfigurationCredentialSlot,
     first_party_bundles: &[crate::extension_host::first_party::FirstPartyPackageBundle],
 ) -> Result<OAuthProviderComposition, RebornBuildError> {
     let recipes: Arc<dyn AuthRecipeResolver> = Arc::new(StaticAuthRecipeResolver::new(
@@ -188,7 +192,7 @@ pub(crate) fn compose_provider_client(
     for config in &configs {
         register_vendor_client_config(&mut client_credentials, recipes.as_ref(), config);
     }
-    client_credentials.with_channel_config_fallback(channel_config_credentials);
+    client_credentials.with_admin_configuration(admin_configuration_credentials);
     let callback_base = dcr_callback
         .map(|dcr| {
             EngineCallbackBase::new(format!(
@@ -275,7 +279,7 @@ pub(crate) fn compose_auth_engine(
     recipes: Arc<dyn AuthRecipeResolver>,
     client_credentials: CompositionClientCredentials,
     callback_base: Option<EngineCallbackBase>,
-    secret_store: Arc<dyn SecretStore>,
+    secret_store: Arc<dyn SecretStorePort>,
     runtime_ports: ProductAuthProviderRuntimePorts,
 ) -> Result<OAuthProviderComposition, RebornBuildError> {
     let Some(callback_base) = callback_base else {

@@ -26,13 +26,12 @@ pub(super) fn bundle() -> PackageBundle {
                 "Authorize the Google account that IronClaw should use for Gmail.".to_string(),
             ),
             setup_url: None,
-            credential_next_step: "After authorization completes, activate Gmail to publish its \
-                tools."
+            credential_next_step: "After authorization completes, IronClaw finishes Gmail \
+                installation automatically and publishes its tools."
                 .to_string(),
         }),
         // gsuite-family effect grant (Dispatch + Network + UseSecret +
         // ExternalWrite): OAuth-backed Google API access with mail writes.
-        oauth_setup: None,
         trust_effects: Some(vec![
             EffectKind::DispatchCapability,
             EffectKind::Network,

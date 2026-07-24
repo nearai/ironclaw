@@ -1,32 +1,36 @@
-//! The proactive half of run delivery: watch a trigger-submitted run and
-//! deliver its outputs to the creator's personal preference target, through
-//! the [`DeliveryCoordinator`].
+//! The proactive half of run delivery: register a trigger-submitted run with
+//! the lifecycle-event router and deliver its actionable outputs through the
+//! [`DeliveryCoordinator`].
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 
 use crate::OutboundPart;
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::{AgentId, UserId};
+use ironclaw_host_api::{AgentId, ResourceScope, UserId};
 use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
-    OutboundError, OutboundPolicyService, PrepareCommunicationDeliveryRequest, ProjectionUpdateRef,
-    ReplyTargetBindingClaim, ReplyTargetBindingValidator, ReplyTargetValidationRequest,
+    OutboundDeliveryTargetId, OutboundError, OutboundPolicyService,
+    PrepareCommunicationDeliveryRequest, ProjectionUpdateRef, ReplyTargetBindingClaim,
+    ReplyTargetBindingValidator, ReplyTargetValidationRequest, RunFinalReplyDestination,
     RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin,
     TriggerCommunicationContext, TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryRecord,
     TriggeredRunDeliveryStore, ValidatedReplyTargetBinding,
 };
 use ironclaw_threads::{FinalizedAssistantMessageByRunRequest, ThreadScope};
-use ironclaw_turns::{TurnActor, TurnRunId, TurnRunState, TurnScope, TurnStatus};
-use tokio::sync::Semaphore;
+use ironclaw_turns::{
+    GetRunStateRequest, TurnActor, TurnEventKind, TurnEventSink, TurnLifecycleEvent,
+    TurnOriginKind, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+};
 
-use super::observer::AllowNoProjectionAccess;
+use super::RunDeliveryEventRouter;
+use super::lifecycle_events::AllowNoProjectionAccess;
 use super::prompts;
 use super::{
-    BlockedActionableMarker, BlockedAuthPromptRequest, DeliveredChannelMessage, RunDeliveryError,
-    RunDeliveryServices, RunDeliverySettings, blocked_actionable_marker, cancel_auth_blocked_run,
-    delivered_messages_from_outcome, gate_routes::record_gate_route_if_needed,
-    triggered_run_delivery_settings, wait_for_actionable_state,
+    BlockedAuthPromptRequest, DeliveredChannelMessage, RunDeliveryError, RunDeliveryServices,
+    cancel_auth_blocked_run, delivered_messages_from_outcome,
+    gate_routes::record_gate_route_if_needed,
 };
 use crate::delivery_coordinator::{
     CoordinatedDeliveryError, CoordinatedDeliveryOutcome, CoordinatedDeliveryRequest,
@@ -38,9 +42,86 @@ use crate::{ProductOutboundTargetResolver, ProductWorkflowError};
 // is implemented by channel extension crates, which never depend on this
 // crate); re-exported here so the triggered-delivery consumers keep one
 // import surface.
-pub use crate::PreferenceTargetCodec;
 
-/// One trigger-submitted run to watch and deliver, in generic vocabulary.
+/// Send-time authority boundary for a host-selected delivery target.
+///
+/// Both live per-run routing and scheduled delivery use this same port, so a
+/// removed installation or revoked pairing invalidates either path uniformly.
+/// Implementations must re-resolve caller ownership and current channel
+/// readiness; decoding a stale opaque binding is not authorization. This is a
+/// `dyn` seam because channel target providers are runtime-registered and this
+/// boundary returns their current authority decision to product workflow.
+#[async_trait]
+pub trait CurrentDeliveryTargetResolver: Send + Sync {
+    async fn resolve_current_target(
+        &self,
+        scope: &TurnScope,
+        actor: &TurnActor,
+        target: &ironclaw_turns::ReplyTargetBindingRef,
+    ) -> Result<Option<CurrentDeliveryTarget>, ProductWorkflowError>;
+
+    /// Resolve an opaque registry id through current caller authority.
+    ///
+    /// The returned destination is the canonical host-sealed routing value;
+    /// implementations must not decode provider structure from `target_id`.
+    async fn resolve_current_destination(
+        &self,
+        scope: &ResourceScope,
+        target_id: &OutboundDeliveryTargetId,
+    ) -> Result<Option<RunFinalReplyDestination>, ProductWorkflowError>;
+
+    /// Resolve a currently-authorized binding back to its opaque registry id.
+    async fn resolve_current_target_id(
+        &self,
+        scope: &ResourceScope,
+        target: &ironclaw_turns::ReplyTargetBindingRef,
+    ) -> Result<Option<OutboundDeliveryTargetId>, ProductWorkflowError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurrentDeliveryTarget {
+    /// Extension/provider registration that owns this target. Delivery
+    /// handlers must match it against their own extension id before sending.
+    pub extension_id: String,
+    pub external_conversation_ref: crate::ExternalConversationRef,
+    pub personal_direct_message: bool,
+}
+
+/// Product-owned routing plan for a trigger's authoritative final-reply
+/// destination.
+///
+/// The product-owned trigger router resolves the opaque registry id through
+/// [`CurrentDeliveryTargetResolver`] and delegates the typed destination here.
+/// This is the one place that defines WebApp as history-only: it must never be
+/// collapsed into an absent external target, because absence means the
+/// creator's communication preference should be consulted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TriggeredRunExternalDeliveryTarget {
+    UseCommunicationPreference,
+    Explicit {
+        reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef,
+    },
+}
+
+impl TriggeredRunExternalDeliveryTarget {
+    /// Normalize the authoritative destination into the channel-egress lane.
+    /// `None` means the result remains in host-owned WebApp history and the
+    /// caller must not select or invoke a channel driver.
+    pub fn from_destination(destination: Option<RunFinalReplyDestination>) -> Option<Self> {
+        match destination {
+            None => Some(Self::UseCommunicationPreference),
+            Some(RunFinalReplyDestination::External {
+                reply_target_binding_ref,
+            }) => Some(Self::Explicit {
+                reply_target_binding_ref,
+            }),
+            Some(RunFinalReplyDestination::WebApp) => None,
+        }
+    }
+}
+
+/// One trigger-submitted run to register for lifecycle-event delivery, in
+/// generic vocabulary.
 /// The composition's post-submit hook translates its trigger-fire type into
 /// this.
 #[derive(Debug, Clone)]
@@ -66,7 +147,7 @@ pub struct TriggeredRunDeliveryRequest {
 struct TriggeredNotification {
     event_kind: RunNotificationEventKind,
     intent: DeliveryIntent,
-    text: String,
+    part: OutboundPart,
     gate_ref_for_routing: Option<String>,
     /// AuthPrompt payloads carrying an OAuth URL must only land in a
     /// personal DM; enforced by the resolver at send time.
@@ -82,6 +163,7 @@ struct TriggeredNotificationContext<'a> {
     trigger_context: &'a TriggerCommunicationContext,
     delivery_target: Option<&'a ironclaw_turns::ReplyTargetBindingRef>,
     authority: &'a TriggeredReplyTargetAuthority<'a>,
+    event_cursor: u64,
 }
 
 /// Typed failure classification for a single triggered-run notification
@@ -113,66 +195,502 @@ impl std::fmt::Display for TriggeredNotificationFailure {
     }
 }
 
-/// Drives triggered-run delivery: one background watcher per submitted run,
-/// bounded by delivery and pending-admission semaphores, recording every
-/// outcome in the [`TriggeredRunDeliveryStore`].
-pub struct TriggeredRunDeliveryDriver {
-    services: RunDeliveryServices,
-    settings: RunDeliverySettings,
-    delivery_permits: Arc<Semaphore>,
-    /// Bounds the total number of spawned delivery tasks (active + waiting).
-    /// Overflow is recorded as `Skipped` without spawning.
-    pending_permits: Arc<Semaphore>,
-    delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
-    target_codec: Arc<dyn PreferenceTargetCodec>,
-    /// Fallback agent id used when the submitted `TurnScope::agent_id` is
-    /// `None`. Must match the default agent id the trigger prompt was
-    /// recorded under so the thread-scope key aligns with the stored run.
-    fallback_agent_id: AgentId,
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum TriggeredDeliveryStage {
+    Approval(String),
+    Auth(String),
+    Final,
 }
 
-impl TriggeredRunDeliveryDriver {
-    pub fn new(
-        services: RunDeliveryServices,
-        delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
-        target_codec: Arc<dyn PreferenceTargetCodec>,
-        fallback_agent_id: AgentId,
-    ) -> Self {
-        Self::with_settings(
-            services,
-            triggered_run_delivery_settings(),
-            delivery_store,
-            target_codec,
-            fallback_agent_id,
-        )
-    }
+#[derive(Default)]
+struct TriggeredEventLedger {
+    active: HashSet<TriggeredDeliveryStage>,
+    delivered: HashSet<TriggeredDeliveryStage>,
+    cleanup: Vec<PendingTriggeredCleanup>,
+}
 
-    pub fn with_settings(
+struct PendingTriggeredCleanup {
+    message: DeliveredChannelMessage,
+    attempt_ordinal: u32,
+}
+
+/// Event-driven owner for one settled trigger fire. It retains routing
+/// context only while the durable run is live; each lifecycle event fetches
+/// canonical state and independently attempts the corresponding delivery.
+pub(crate) struct TriggeredRunDeliveryEventHandler {
+    services: RunDeliveryServices,
+    request: TriggeredRunDeliveryRequest,
+    delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
+    current_target_resolver: Arc<dyn CurrentDeliveryTargetResolver>,
+    fallback_agent_id: AgentId,
+    ledger: Mutex<TriggeredEventLedger>,
+}
+
+impl TriggeredRunDeliveryEventHandler {
+    fn new(
         services: RunDeliveryServices,
-        settings: RunDeliverySettings,
+        request: TriggeredRunDeliveryRequest,
         delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
-        target_codec: Arc<dyn PreferenceTargetCodec>,
+        current_target_resolver: Arc<dyn CurrentDeliveryTargetResolver>,
         fallback_agent_id: AgentId,
     ) -> Self {
-        let delivery_permits = Arc::new(Semaphore::new(settings.max_concurrent_deliveries.get()));
-        let pending_permits = Arc::new(Semaphore::new(settings.max_pending_deliveries.get()));
         Self {
             services,
-            settings,
-            delivery_permits,
-            pending_permits,
+            request,
             delivery_store,
-            target_codec,
+            current_target_resolver,
             fallback_agent_id,
+            ledger: Mutex::new(TriggeredEventLedger::default()),
         }
     }
 
-    /// Acquire a permit from the pending-delivery semaphore for testing:
-    /// lets tests hold the pending slot without spawning a real delivery
-    /// task, so `Skipped` outcomes are assertable.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn try_acquire_pending_permit(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
-        Arc::clone(&self.pending_permits).try_acquire_owned().ok()
+    pub(crate) async fn handle_event(
+        &self,
+        event: &TurnLifecycleEvent,
+    ) -> Result<bool, RunDeliveryError> {
+        match self.handle_event_inner(event).await {
+            Err(error)
+                if matches!(
+                    event.kind,
+                    TurnEventKind::Completed | TurnEventKind::Failed | TurnEventKind::Cancelled
+                ) =>
+            {
+                tracing::warn!(
+                    target = "ironclaw::reborn::run_delivery",
+                    run_id = %event.run_id,
+                    %error,
+                    "triggered terminal delivery failed; recording a terminal failed outcome"
+                );
+                record_triggered_run_outcome_strict(
+                    self.delivery_store.as_ref(),
+                    event.run_id,
+                    TriggeredRunDeliveryOutcomeKind::Failed,
+                )
+                .await?;
+                Ok(self.retract_cleanup(&event.scope, event.run_id).await)
+            }
+            result => result,
+        }
+    }
+
+    async fn handle_event_inner(
+        &self,
+        event: &TurnLifecycleEvent,
+    ) -> Result<bool, RunDeliveryError> {
+        if event.run_id != self.request.run_id || event.scope != self.request.scope {
+            return Ok(false);
+        }
+        let state = self
+            .services
+            .turn_coordinator
+            .get_run_state(GetRunStateRequest {
+                scope: event.scope.clone(),
+                run_id: event.run_id,
+            })
+            .await?;
+        if state
+            .product_context
+            .as_ref()
+            .is_some_and(|context| context.origin != TurnOriginKind::ScheduledTrigger)
+        {
+            return Ok(false);
+        }
+        if matches!(state.status, TurnStatus::Failed | TurnStatus::Cancelled) {
+            let cleanup_settled = self.retract_cleanup(&state.scope, state.run_id).await;
+            record_triggered_run_outcome(
+                self.delivery_store.as_ref(),
+                state.run_id,
+                TriggeredRunDeliveryOutcomeKind::Failed,
+            )
+            .await;
+            return Ok(cleanup_settled);
+        }
+        if !matches!(
+            state.status,
+            TurnStatus::BlockedApproval | TurnStatus::BlockedAuth | TurnStatus::Completed
+        ) {
+            return Ok(false);
+        }
+
+        let stage = match state.status {
+            TurnStatus::BlockedApproval => TriggeredDeliveryStage::Approval(
+                state
+                    .gate_ref
+                    .as_ref()
+                    .map(|gate| gate.as_str().to_string())
+                    .unwrap_or_default(),
+            ),
+            TurnStatus::BlockedAuth => TriggeredDeliveryStage::Auth(
+                state
+                    .gate_ref
+                    .as_ref()
+                    .map(|gate| gate.as_str().to_string())
+                    .unwrap_or_default(),
+            ),
+            TurnStatus::Completed => TriggeredDeliveryStage::Final,
+            _ => return Ok(false),
+        };
+        if stage == TriggeredDeliveryStage::Final && self.stage_was_delivered(&stage) {
+            return Ok(self.retract_cleanup(&state.scope, state.run_id).await);
+        }
+        if !self.claim(&stage) {
+            return Ok(false);
+        }
+
+        let actor = TurnActor::new(self.request.creator_user_id.clone());
+        let thread_scope = ThreadScope {
+            tenant_id: state.scope.tenant_id.clone(),
+            agent_id: state
+                .scope
+                .agent_id
+                .clone()
+                .unwrap_or_else(|| self.fallback_agent_id.clone()),
+            project_id: state.scope.project_id.clone(),
+            owner_user_id: state.scope.explicit_owner_user_id().cloned(),
+            mission_id: None,
+        };
+        let trigger_label = prompts::triggered_label_from_prompt(&self.request.prompt);
+        let notification = match triggered_notification_for_state(
+            &self.services,
+            &state.scope,
+            &thread_scope,
+            &actor,
+            &state,
+            state.run_id,
+            &trigger_label,
+        )
+        .await
+        {
+            Ok(Some(notification)) => notification,
+            Ok(None) => {
+                self.finish_claim(stage, false);
+                if state.status == TurnStatus::Completed {
+                    record_triggered_run_outcome(
+                        self.delivery_store.as_ref(),
+                        state.run_id,
+                        TriggeredRunDeliveryOutcomeKind::Skipped,
+                    )
+                    .await;
+                    return Ok(self.retract_cleanup(&state.scope, state.run_id).await);
+                }
+                return Ok(false);
+            }
+            Err(error) => {
+                self.finish_claim(stage, false);
+                return Err(error);
+            }
+        };
+        let notification_kind = notification.event_kind;
+        let gate_ref = notification.gate_ref_for_routing.clone();
+        let authority = TriggeredReplyTargetAuthority {
+            scope: state.scope.clone(),
+            actor: actor.clone(),
+            resolver: self.current_target_resolver.as_ref(),
+        };
+        let context = TriggeredNotificationContext {
+            scope: &state.scope,
+            actor: &actor,
+            run_id: state.run_id,
+            trigger_context: &self.request.trigger_context,
+            delivery_target: self.request.delivery_target.as_ref(),
+            authority: &authority,
+            event_cursor: state.event_cursor.0,
+        };
+
+        match deliver_triggered_notification(&self.services, &context, notification).await {
+            Ok(delivered) => {
+                if let Some(gate_ref) = gate_ref.as_deref() {
+                    record_gate_route_if_needed(
+                        self.services.route_store.as_ref(),
+                        state.run_id,
+                        &state.scope.tenant_id,
+                        &actor.user_id,
+                        gate_ref,
+                        &state.scope,
+                        &delivered,
+                        None,
+                    )
+                    .await;
+                }
+                self.finish_claim(stage, true);
+                if matches!(
+                    notification_kind,
+                    RunNotificationEventKind::ApprovalNeeded
+                        | RunNotificationEventKind::AuthRequired
+                ) {
+                    self.replace_cleanup(&state.scope, state.run_id, delivered)
+                        .await;
+                    record_triggered_run_outcome(
+                        self.delivery_store.as_ref(),
+                        state.run_id,
+                        TriggeredRunDeliveryOutcomeKind::Delivered,
+                    )
+                    .await;
+                    return Ok(false);
+                }
+                let cleanup_settled = self.retract_cleanup(&state.scope, state.run_id).await;
+                record_triggered_run_outcome(
+                    self.delivery_store.as_ref(),
+                    state.run_id,
+                    TriggeredRunDeliveryOutcomeKind::Delivered,
+                )
+                .await;
+                Ok(cleanup_settled)
+            }
+            Err(TriggeredNotificationFailure::OAuthTargetNotDm) => {
+                let (outcome, cleanup_settled) = self
+                    .cancel_and_deliver_auth_unavailable(&state, &actor, &context, &trigger_label)
+                    .await;
+                self.finish_claim(stage, true);
+                record_triggered_run_outcome(self.delivery_store.as_ref(), state.run_id, outcome)
+                    .await;
+                Ok(cleanup_settled)
+            }
+            Err(failure) => {
+                self.finish_claim(stage, true);
+                let outcome = triggered_failure_outcome(&failure);
+                record_triggered_run_outcome(self.delivery_store.as_ref(), state.run_id, outcome)
+                    .await;
+                Ok(self.retract_cleanup(&state.scope, state.run_id).await)
+            }
+        }
+    }
+
+    fn claim(&self, stage: &TriggeredDeliveryStage) -> bool {
+        let mut ledger = self
+            .ledger
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        !ledger.delivered.contains(stage) && ledger.active.insert(stage.clone())
+    }
+
+    fn finish_claim(&self, stage: TriggeredDeliveryStage, delivered: bool) {
+        let mut ledger = self
+            .ledger
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        ledger.active.remove(&stage);
+        if delivered {
+            ledger.delivered.insert(stage);
+        }
+    }
+
+    fn stage_was_delivered(&self, stage: &TriggeredDeliveryStage) -> bool {
+        self.ledger
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .delivered
+            .contains(stage)
+    }
+
+    async fn replace_cleanup(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+        delivered: Vec<DeliveredChannelMessage>,
+    ) {
+        let previous = {
+            let mut ledger = self
+                .ledger
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            std::mem::replace(
+                &mut ledger.cleanup,
+                delivered
+                    .into_iter()
+                    .map(|message| PendingTriggeredCleanup {
+                        message,
+                        attempt_ordinal: 0,
+                    })
+                    .collect(),
+            )
+        };
+        let mut retry = Vec::new();
+        for message in previous {
+            if let Some(message) = self.retract_if_current(scope, run_id, message).await {
+                retry.push(message);
+            }
+        }
+        if !retry.is_empty() {
+            self.ledger
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .cleanup
+                .extend(retry);
+        }
+    }
+
+    async fn retract_cleanup(&self, scope: &TurnScope, run_id: TurnRunId) -> bool {
+        let cleanup = {
+            let mut ledger = self
+                .ledger
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            std::mem::take(&mut ledger.cleanup)
+        };
+        let mut retry = Vec::new();
+        for message in cleanup {
+            if let Some(message) = self.retract_if_current(scope, run_id, message).await {
+                retry.push(message);
+            }
+        }
+        let settled = retry.is_empty();
+        if !settled {
+            self.ledger
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .cleanup
+                .extend(retry);
+        }
+        settled
+    }
+
+    async fn retract_if_current(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+        pending: PendingTriggeredCleanup,
+    ) -> Option<PendingTriggeredCleanup> {
+        let message = &pending.message;
+        let actor = TurnActor::new(self.request.creator_user_id.clone());
+        let target = match self
+            .current_target_resolver
+            .resolve_current_target(scope, &actor, &message.reply_target_binding_ref)
+            .await
+        {
+            Ok(Some(target)) => target,
+            Ok(None) => return None,
+            Err(error) => {
+                tracing::warn!(
+                    target = "ironclaw::reborn::run_delivery",
+                    run_id = %run_id,
+                    %error,
+                    "triggered cleanup target resolution failed; retaining cleanup responsibility"
+                );
+                return Some(pending);
+            }
+        };
+        if target.external_conversation_ref != message.conversation {
+            return None;
+        }
+        match self
+            .services
+            .retract_message_outcome(
+                scope.clone(),
+                Some(run_id),
+                pending.message.clone(),
+                pending.attempt_ordinal,
+            )
+            .await
+        {
+            Ok(CoordinatedDeliveryOutcome::Delivered { .. }) => None,
+            Ok(
+                CoordinatedDeliveryOutcome::NoDelivery
+                | CoordinatedDeliveryOutcome::Rejected { .. }
+                | CoordinatedDeliveryOutcome::DuplicateSuppressed { .. }
+                | CoordinatedDeliveryOutcome::Failed { .. },
+            ) => Some(PendingTriggeredCleanup {
+                message: pending.message,
+                attempt_ordinal: pending.attempt_ordinal.saturating_add(1),
+            }),
+            Err(error) => {
+                tracing::warn!(
+                    target = "ironclaw::reborn::run_delivery",
+                    run_id = %run_id,
+                    %error,
+                    "triggered cleanup delivery failed; retaining cleanup responsibility"
+                );
+                Some(PendingTriggeredCleanup {
+                    message: pending.message,
+                    attempt_ordinal: pending.attempt_ordinal.saturating_add(1),
+                })
+            }
+        }
+    }
+
+    async fn cancel_and_deliver_auth_unavailable(
+        &self,
+        state: &TurnRunState,
+        actor: &TurnActor,
+        context: &TriggeredNotificationContext<'_>,
+        trigger_label: &str,
+    ) -> (TriggeredRunDeliveryOutcomeKind, bool) {
+        if cancel_auth_blocked_run(
+            self.services.turn_coordinator.as_ref(),
+            self.services.auth_flow_cancel.as_deref(),
+            &state.scope,
+            actor.clone(),
+            state.run_id,
+            state.gate_ref.as_ref().map(|gate| gate.as_str()),
+        )
+        .await
+        .is_err()
+        {
+            let cleanup_settled = self.retract_cleanup(&state.scope, state.run_id).await;
+            return (TriggeredRunDeliveryOutcomeKind::Failed, cleanup_settled);
+        }
+        let notice = TriggeredNotification {
+            event_kind: RunNotificationEventKind::FinalReplyReady,
+            intent: DeliveryIntent::FinalReply,
+            part: OutboundPart::Text(format!(
+                "{}{}",
+                prompts::AUTH_UNAVAILABLE_MESSAGE,
+                prompts::triggered_update_footer(trigger_label)
+            )),
+            gate_ref_for_routing: None,
+            require_direct_message_target: false,
+        };
+        let outcome = match deliver_triggered_notification(&self.services, context, notice).await {
+            Ok(_) => TriggeredRunDeliveryOutcomeKind::Delivered,
+            Err(failure) => triggered_failure_outcome(&failure),
+        };
+        let cleanup_settled = self.retract_cleanup(&state.scope, state.run_id).await;
+        (outcome, cleanup_settled)
+    }
+}
+
+fn triggered_failure_outcome(
+    failure: &TriggeredNotificationFailure,
+) -> TriggeredRunDeliveryOutcomeKind {
+    match failure {
+        TriggeredNotificationFailure::NoDefaultConfigured => {
+            TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
+        }
+        TriggeredNotificationFailure::Denied => TriggeredRunDeliveryOutcomeKind::Denied,
+        TriggeredNotificationFailure::OAuthTargetNotDm | TriggeredNotificationFailure::Other(_) => {
+            TriggeredRunDeliveryOutcomeKind::Failed
+        }
+    }
+}
+
+/// Registers trigger fires with the shared lifecycle-event delivery router.
+pub struct TriggeredRunDeliveryDriver {
+    services: RunDeliveryServices,
+    delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
+    current_target_resolver: Arc<dyn CurrentDeliveryTargetResolver>,
+    /// Fallback agent id used when the submitted TurnScope has no agent.
+    fallback_agent_id: AgentId,
+    event_router: Arc<RunDeliveryEventRouter>,
+}
+
+impl TriggeredRunDeliveryDriver {
+    /// Build the event-driven driver. The shared router is the only
+    /// long-lived lifecycle owner; no task, timeout, or concurrency permit
+    /// is held while a run waits on auth or approval.
+    pub fn with_event_router(
+        services: RunDeliveryServices,
+        delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
+        current_target_resolver: Arc<dyn CurrentDeliveryTargetResolver>,
+        fallback_agent_id: AgentId,
+        event_router: Arc<RunDeliveryEventRouter>,
+    ) -> Self {
+        Self {
+            services,
+            delivery_store,
+            current_target_resolver,
+            fallback_agent_id,
+            event_router,
+        }
     }
 
     /// The preference repository this driver resolves targets from.
@@ -184,17 +702,11 @@ impl TriggeredRunDeliveryDriver {
         Arc::clone(&self.services.communication_preferences)
     }
 
-    /// Watch one submitted triggered run and deliver its outputs. Spawns a
-    /// bounded background task; the call returns once admission is decided.
+    /// Register one submitted trigger and reconcile its already-durable state.
     pub async fn on_trigger_submitted(&self, request: TriggeredRunDeliveryRequest) {
-        // Fail closed for non-personal triggers.
         if request.project_scoped {
-            tracing::debug!(
-                run_id = %request.run_id,
-                "triggered run delivery denied: project-scoped trigger is not personal scope"
-            );
             record_triggered_run_outcome(
-                &*self.delivery_store,
+                self.delivery_store.as_ref(),
                 request.run_id,
                 TriggeredRunDeliveryOutcomeKind::Denied,
             )
@@ -202,343 +714,56 @@ impl TriggeredRunDeliveryDriver {
             return;
         }
 
-        // Guard against unbounded task accumulation: if the pending queue is
-        // full, record Skipped immediately without spawning.
-        let Ok(pending_permit) = Arc::clone(&self.pending_permits).try_acquire_owned() else {
-            tracing::warn!(
-                target: "ironclaw::reborn::run_delivery",
-                run_id = %request.run_id,
-                "triggered run delivery skipped: pending delivery queue full"
-            );
-            record_triggered_run_outcome(
-                &*self.delivery_store,
-                request.run_id,
-                TriggeredRunDeliveryOutcomeKind::Skipped,
-            )
-            .await;
-            return;
-        };
-
-        let permits = Arc::clone(&self.delivery_permits);
-        let services = self.services.clone();
-        let settings = self.settings;
-        let delivery_store = Arc::clone(&self.delivery_store);
-        let target_codec = Arc::clone(&self.target_codec);
-        let fallback_agent_id = self.fallback_agent_id.clone();
-
-        tokio::spawn(async move {
-            // Hold the pending permit for the full task lifetime so it
-            // counts against the cap until delivery completes.
-            let _pending_permit = pending_permit;
-
-            let Ok(_permit) = permits.clone().acquire_owned().await else {
+        let event_router = Arc::clone(&self.event_router);
+        let run_id = request.run_id;
+        let scope = request.scope.clone();
+        let handler = Arc::new(TriggeredRunDeliveryEventHandler::new(
+            self.services.clone(),
+            request,
+            Arc::clone(&self.delivery_store),
+            Arc::clone(&self.current_target_resolver),
+            self.fallback_agent_id.clone(),
+        ));
+        event_router.register_triggered(run_id, handler);
+        let state = match self
+            .services
+            .turn_coordinator
+            .get_run_state(GetRunStateRequest { scope, run_id })
+            .await
+        {
+            Ok(state) => state,
+            Err(error) => {
                 tracing::warn!(
                     target = "ironclaw::reborn::run_delivery",
-                    run_id = %request.run_id,
-                    "triggered run delivery skipped: delivery semaphore closed"
+                    %run_id,
+                    %error,
+                    "triggered run delivery could not reconcile submitted state"
                 );
+                event_router.remove_triggered(run_id);
                 record_triggered_run_outcome(
-                    &*delivery_store,
-                    request.run_id,
-                    TriggeredRunDeliveryOutcomeKind::Skipped,
+                    self.delivery_store.as_ref(),
+                    run_id,
+                    TriggeredRunDeliveryOutcomeKind::Failed,
                 )
                 .await;
                 return;
-            };
-
-            let run_id = request.run_id;
-            let outcome = deliver_triggered_run(
-                &services,
-                &settings,
-                request,
-                &*delivery_store,
-                target_codec.as_ref(),
-                &fallback_agent_id,
-            )
-            .await;
-            tracing::debug!(
+            }
+        };
+        let event_kind = match state.status {
+            TurnStatus::BlockedApproval | TurnStatus::BlockedAuth => TurnEventKind::Blocked,
+            TurnStatus::Completed => TurnEventKind::Completed,
+            TurnStatus::Failed => TurnEventKind::Failed,
+            TurnStatus::Cancelled => TurnEventKind::Cancelled,
+            _ => TurnEventKind::Submitted,
+        };
+        let event = TurnLifecycleEvent::from_run_state(&state, event_kind, None);
+        if let Err(error) = event_router.publish(event).await {
+            tracing::warn!(
                 target = "ironclaw::reborn::run_delivery",
                 %run_id,
-                ?outcome,
-                "triggered run delivery completed"
+                %error,
+                "triggered run initial lifecycle reconciliation failed"
             );
-        });
-    }
-}
-
-/// Inner delivery coroutine for a single triggered run.
-///
-/// ## Invariant: a parked-awaiting-user run is terminal-for-delivery
-///
-/// After the actionable gate/auth prompt for a blocked run has been
-/// delivered, the run typically *stays* blocked until the user acts — the
-/// common case, not a failure. If the re-wait hits the `max_wait` backstop,
-/// the run is parked awaiting the user: that is a successful,
-/// terminal-for-delivery outcome (`Delivered`) — never record `Failed` for
-/// it. The backstop is the failure signal ONLY for runs that never reached
-/// an actionable state at all, distinguished by `delivered_blocked_marker`.
-async fn deliver_triggered_run(
-    services: &RunDeliveryServices,
-    settings: &RunDeliverySettings,
-    request: TriggeredRunDeliveryRequest,
-    delivery_store: &dyn TriggeredRunDeliveryStore,
-    target_codec: &dyn PreferenceTargetCodec,
-    fallback_agent_id: &AgentId,
-) -> TriggeredRunDeliveryOutcomeKind {
-    let TriggeredRunDeliveryRequest {
-        run_id,
-        scope,
-        creator_user_id,
-        project_scoped: _,
-        prompt,
-        delivery_target,
-        trigger_context,
-    } = request;
-    let actor = TurnActor::new(creator_user_id);
-
-    // Thread scope for reading the finalized assistant message: the turn
-    // scope's thread is the canonical trigger-session thread; the fallback
-    // agent id matches how the trigger prompt was recorded.
-    let thread_scope = ThreadScope {
-        tenant_id: scope.tenant_id.clone(),
-        agent_id: scope
-            .agent_id
-            .clone()
-            .unwrap_or_else(|| fallback_agent_id.clone()),
-        project_id: scope.project_id.clone(),
-        owner_user_id: scope.explicit_owner_user_id().cloned(),
-        mission_id: None,
-    };
-
-    let authority = TriggeredReplyTargetAuthority {
-        scope: scope.clone(),
-        actor: actor.clone(),
-        codec: target_codec,
-    };
-
-    let mut delivered_blocked_marker: Option<BlockedActionableMarker> = None;
-    let mut messages_to_delete_after_final: Vec<DeliveredChannelMessage> = Vec::new();
-
-    loop {
-        let state = match wait_for_actionable_state(
-            services.turn_coordinator.as_ref(),
-            &scope,
-            run_id,
-            settings,
-            delivered_blocked_marker.as_ref(),
-        )
-        .await
-        {
-            Ok(state) => state,
-            Err(RunDeliveryError::RunWaitTimedOut { .. }) if delivered_blocked_marker.is_some() => {
-                // Parked awaiting the user after its prompt went out — a
-                // successful, terminal-for-delivery outcome. The prompt must
-                // stay actionable, so stale-prompt cleanup deliberately does
-                // NOT run here.
-                tracing::debug!(
-                    target = "ironclaw::reborn::run_delivery",
-                    %run_id,
-                    "triggered run parked awaiting user after delivering blocked prompt; recording Delivered"
-                );
-                let outcome = TriggeredRunDeliveryOutcomeKind::Delivered;
-                record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-                return outcome;
-            }
-            Err(err) => {
-                tracing::warn!(
-                    target = "ironclaw::reborn::run_delivery",
-                    %run_id,
-                    error = %err,
-                    "triggered run wait failed"
-                );
-                let outcome = TriggeredRunDeliveryOutcomeKind::Failed;
-                record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-                return outcome;
-            }
-        };
-
-        let trigger_label = prompts::triggered_label_from_prompt(&prompt);
-        let notification = match triggered_notification_for_state(
-            services,
-            &scope,
-            &thread_scope,
-            &actor,
-            &state,
-            run_id,
-            &trigger_label,
-        )
-        .await
-        {
-            Ok(Some(notification)) => notification,
-            Ok(None) => {
-                // Run completed with no assistant message — a normal
-                // "skipped" outcome.
-                let outcome = TriggeredRunDeliveryOutcomeKind::Skipped;
-                record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-                return outcome;
-            }
-            Err(err) => {
-                tracing::warn!(
-                    target = "ironclaw::reborn::run_delivery",
-                    %run_id,
-                    error = %err,
-                    "triggered run notification build failed"
-                );
-                let outcome = TriggeredRunDeliveryOutcomeKind::Failed;
-                record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-                return outcome;
-            }
-        };
-
-        let next_blocked_marker = blocked_actionable_marker(&state);
-        let event_kind = notification.event_kind;
-        let gate_ref_for_routing = notification.gate_ref_for_routing.clone();
-
-        let notification_context = TriggeredNotificationContext {
-            scope: &scope,
-            actor: &actor,
-            run_id,
-            trigger_context: &trigger_context,
-            delivery_target: delivery_target.as_ref(),
-            authority: &authority,
-        };
-        let delivery_result =
-            deliver_triggered_notification(services, &notification_context, notification).await;
-
-        match delivery_result {
-            Ok(delivered_messages) => {
-                if (event_kind == RunNotificationEventKind::ApprovalNeeded
-                    || event_kind == RunNotificationEventKind::AuthRequired)
-                    && let Some(gate_ref) = gate_ref_for_routing.as_deref()
-                {
-                    record_gate_route_if_needed(
-                        services.route_store.as_ref(),
-                        run_id,
-                        &scope.tenant_id,
-                        &actor.user_id,
-                        gate_ref,
-                        &scope,
-                        &delivered_messages,
-                        None,
-                    )
-                    .await;
-                }
-                if let Some(marker) = next_blocked_marker
-                    && matches!(
-                        event_kind,
-                        RunNotificationEventKind::ApprovalNeeded
-                            | RunNotificationEventKind::AuthRequired
-                    )
-                {
-                    if event_kind == RunNotificationEventKind::AuthRequired {
-                        messages_to_delete_after_final.extend(delivered_messages);
-                    }
-                    delivered_blocked_marker = Some(marker);
-                    continue;
-                }
-                // Terminal delivery — clean up auth prompts that should not
-                // persist.
-                for message in messages_to_delete_after_final {
-                    services
-                        .retract_message(scope.clone(), Some(run_id), message)
-                        .await;
-                }
-                let outcome = TriggeredRunDeliveryOutcomeKind::Delivered;
-                record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-                return outcome;
-            }
-            Err(TriggeredNotificationFailure::OAuthTargetNotDm) => {
-                // Send-time backstop tripped: the payload carried an OAuth
-                // authorization_url but the binding was not a personal DM.
-                // Cancel the blocked run FIRST — a transient cancel failure
-                // must leave the existing prompt in place.
-                tracing::debug!(
-                    target = "ironclaw::reborn::run_delivery",
-                    %run_id,
-                    "triggered run OAuth URL suppressed by send-time backstop: resolved \
-                     target is not a personal DM; cancelling run"
-                );
-                if let Err(err) = cancel_auth_blocked_run(
-                    services.turn_coordinator.as_ref(),
-                    services.auth_flow_cancel.as_deref(),
-                    &scope,
-                    actor.clone(),
-                    run_id,
-                    state.gate_ref.as_ref().map(|gate_ref| gate_ref.as_str()),
-                )
-                .await
-                {
-                    tracing::debug!(
-                        target = "ironclaw::reborn::run_delivery",
-                        %run_id,
-                        error = %err,
-                        "triggered run OAuth backstop: cancel_auth_blocked_run failed"
-                    );
-                    let outcome = TriggeredRunDeliveryOutcomeKind::Failed;
-                    record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-                    return outcome;
-                }
-                // Post the auth-unavailable notice as a terminal FinalReply.
-                // No DM restriction applies: plain text, no OAuth URL.
-                let notice = TriggeredNotification {
-                    event_kind: RunNotificationEventKind::FinalReplyReady,
-                    intent: DeliveryIntent::FinalReply,
-                    text: format!(
-                        "{}{}",
-                        prompts::AUTH_UNAVAILABLE_MESSAGE,
-                        prompts::triggered_update_footer(&trigger_label)
-                    ),
-                    gate_ref_for_routing: None,
-                    require_direct_message_target: false,
-                };
-                let outcome =
-                    match deliver_triggered_notification(services, &notification_context, notice)
-                        .await
-                    {
-                        Ok(_) => TriggeredRunDeliveryOutcomeKind::Delivered,
-                        Err(TriggeredNotificationFailure::NoDefaultConfigured) => {
-                            TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
-                        }
-                        Err(TriggeredNotificationFailure::Denied) => {
-                            TriggeredRunDeliveryOutcomeKind::Denied
-                        }
-                        Err(TriggeredNotificationFailure::OAuthTargetNotDm)
-                        | Err(TriggeredNotificationFailure::Other(_)) => {
-                            TriggeredRunDeliveryOutcomeKind::Failed
-                        }
-                    };
-                // Only after a successful cancel and the replacement notice:
-                // remove the now-stale OAuth prompts.
-                for message in messages_to_delete_after_final.drain(..) {
-                    services
-                        .retract_message(scope.clone(), Some(run_id), message)
-                        .await;
-                }
-                record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-                return outcome;
-            }
-            Err(failure) => {
-                tracing::warn!(
-                    target = "ironclaw::reborn::run_delivery",
-                    %run_id,
-                    reason = %failure,
-                    "triggered run delivery failed"
-                );
-                let outcome = match failure {
-                    TriggeredNotificationFailure::NoDefaultConfigured => {
-                        TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
-                    }
-                    TriggeredNotificationFailure::Denied => TriggeredRunDeliveryOutcomeKind::Denied,
-                    TriggeredNotificationFailure::OAuthTargetNotDm => {
-                        unreachable!("OAuthTargetNotDm is handled by the dedicated arm above")
-                    }
-                    TriggeredNotificationFailure::Other(_) => {
-                        TriggeredRunDeliveryOutcomeKind::Failed
-                    }
-                };
-                record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-                return outcome;
-            }
         }
     }
 }
@@ -590,7 +815,10 @@ async fn triggered_notification_for_state(
             Ok(Some(TriggeredNotification {
                 event_kind: RunNotificationEventKind::FinalReplyReady,
                 intent: DeliveryIntent::TriggeredDelivery,
-                text: format!("{text}{}", prompts::triggered_update_footer(trigger_label)),
+                part: OutboundPart::Text(format!(
+                    "{text}{}",
+                    prompts::triggered_update_footer(trigger_label)
+                )),
                 gate_ref_for_routing: None,
                 require_direct_message_target: false,
             }))
@@ -621,7 +849,7 @@ async fn triggered_notification_for_state(
                 // Preference targets are personal DMs or picked shared
                 // channels; the DM reply instruction applies to the personal
                 // target this delivery resolves to.
-                text: prompts::gate_prompt_text(&view, true),
+                part: OutboundPart::Text(prompts::gate_prompt_text(&view, true)),
                 gate_ref_for_routing: Some(gate_ref.as_str().to_string()),
                 require_direct_message_target: false,
             }))
@@ -652,25 +880,33 @@ async fn triggered_notification_for_state(
                 ),
                 None => None,
             };
-            match view {
-                Some(mut view) if view.authorization_url.is_some() => {
+            let unavailable_message = prompts::unserviceable_auth_prompt_message(view.as_ref());
+            match view.filter(prompts::auth_prompt_is_serviceable) {
+                Some(mut view) => {
+                    view.body = prompts::actionable_auth_prompt_body(&view);
                     view.body
                         .push_str(&prompts::triggered_gate_footer(trigger_label));
+                    let require_direct_message_target =
+                        view.authorization_url.is_some() || view.pairing.is_some();
                     // The DM requirement is enforced by the resolver at send
                     // time (closing the snapshot-vs-send race); no pre-check
                     // here.
                     Ok(Some(TriggeredNotification {
                         event_kind: RunNotificationEventKind::AuthRequired,
                         intent: DeliveryIntent::AuthPrompt,
-                        text: prompts::auth_prompt_text(&view, true),
+                        part: OutboundPart::AuthPrompt {
+                            view: Box::new(view),
+                            direct_message: true,
+                        },
                         gate_ref_for_routing: Some(gate_ref.as_str().to_string()),
-                        require_direct_message_target: true,
+                        require_direct_message_target,
                     }))
                 }
                 _ => {
-                    // Non-OAuth challenge (manual credential entry). Deny:
-                    // cancel the parked run and deliver the auth-unavailable
-                    // notice as the terminal reply.
+                    // Missing/retired challenge metadata, secret entry, and a
+                    // pairing kind without materialized host challenge data
+                    // are not actionable in a channel. Cancel the parked run
+                    // and deliver one terminal-safe WebUI notice.
                     cancel_auth_blocked_run(
                         services.turn_coordinator.as_ref(),
                         services.auth_flow_cancel.as_deref(),
@@ -683,11 +919,11 @@ async fn triggered_notification_for_state(
                     Ok(Some(TriggeredNotification {
                         event_kind: RunNotificationEventKind::FinalReplyReady,
                         intent: DeliveryIntent::TriggeredDelivery,
-                        text: format!(
+                        part: OutboundPart::Text(format!(
                             "{}{}",
-                            prompts::AUTH_UNAVAILABLE_MESSAGE,
+                            unavailable_message,
                             prompts::triggered_update_footer(trigger_label)
-                        ),
+                        )),
                         gate_ref_for_routing: None,
                         require_direct_message_target: false,
                     }))
@@ -711,8 +947,11 @@ async fn deliver_triggered_notification(
         &projection_access_policy,
         context.authority,
     );
-    let projection_id =
-        prompts::run_notification_projection_id(context.run_id, notification.event_kind);
+    let projection_id = format!(
+        "{}:{}",
+        prompts::run_notification_projection_id(context.run_id, notification.event_kind),
+        context.event_cursor,
+    );
     let projection_ref = ProjectionUpdateRef::new(projection_id).map_err(|reason| {
         TriggeredNotificationFailure::Other(format!("invalid_projection_ref: {reason}"))
     })?;
@@ -748,7 +987,7 @@ async fn deliver_triggered_notification(
             CoordinatedDeliveryRequest {
                 intent: notification.intent,
                 delivery,
-                parts: vec![OutboundPart::Text(notification.text)],
+                parts: vec![notification.part],
                 thread_anchor: None,
                 require_direct_message_target: notification.require_direct_message_target,
                 extension_id: &services.extension_id,
@@ -757,6 +996,10 @@ async fn deliver_triggered_notification(
         .await
         .map_err(classify_delivery_error)?;
     match outcome {
+        CoordinatedDeliveryOutcome::NoDelivery => {
+            Err(TriggeredNotificationFailure::NoDefaultConfigured)
+        }
+        CoordinatedDeliveryOutcome::Rejected { .. } => Err(TriggeredNotificationFailure::Denied),
         CoordinatedDeliveryOutcome::Failed { failure_kind, .. } => Err(
             TriggeredNotificationFailure::Other(format!("delivery failed: {failure_kind:?}")),
         ),
@@ -786,12 +1029,7 @@ async fn record_triggered_run_outcome(
     run_id: TurnRunId,
     outcome: TriggeredRunDeliveryOutcomeKind,
 ) {
-    let record = TriggeredRunDeliveryRecord {
-        run_id,
-        outcome,
-        recorded_at: Utc::now(),
-    };
-    if let Err(error) = store.record_triggered_run_delivery(record).await {
+    if let Err(error) = record_triggered_run_outcome_strict(store, run_id, outcome).await {
         tracing::warn!(
             target = "ironclaw::reborn::run_delivery",
             %run_id,
@@ -801,14 +1039,30 @@ async fn record_triggered_run_outcome(
     }
 }
 
+async fn record_triggered_run_outcome_strict(
+    store: &dyn TriggeredRunDeliveryStore,
+    run_id: TurnRunId,
+    outcome: TriggeredRunDeliveryOutcomeKind,
+) -> Result<(), RunDeliveryError> {
+    let record = TriggeredRunDeliveryRecord {
+        run_id,
+        outcome,
+        recorded_at: Utc::now(),
+    };
+    store
+        .record_triggered_run_delivery(record)
+        .await
+        .map_err(|reason| ProductWorkflowError::Transient { reason }.into())
+}
+
 /// Reply-target authority for triggered-run delivery: trusts the target the
-/// resolution engine chose from the creator's personal preference (scope
-/// and actor must match), decodes it through the vendor codec port, and
-/// enforces the DM requirement against the send-time binding.
+/// resolution engine chose from the creator's personal preference. The
+/// current-target resolver rechecks ownership and channel readiness both at
+/// policy validation and immediately before adapter resolution.
 struct TriggeredReplyTargetAuthority<'a> {
     scope: TurnScope,
     actor: TurnActor,
-    codec: &'a dyn PreferenceTargetCodec,
+    resolver: &'a dyn CurrentDeliveryTargetResolver,
 }
 
 #[async_trait]
@@ -818,6 +1072,17 @@ impl ReplyTargetBindingValidator for TriggeredReplyTargetAuthority<'_> {
         request: ReplyTargetValidationRequest,
     ) -> Result<ReplyTargetBindingClaim, OutboundError> {
         if request.scope != self.scope || request.actor != self.actor {
+            return Err(OutboundError::AccessDenied);
+        }
+        let resolved = self
+            .resolver
+            .resolve_current_target(&self.scope, &self.actor, &request.candidate.target)
+            .await
+            .map_err(|error| match error {
+                ProductWorkflowError::Transient { .. } => OutboundError::Backend,
+                _ => OutboundError::AccessDenied,
+            })?;
+        if resolved.is_none() {
             return Err(OutboundError::AccessDenied);
         }
         Ok(ReplyTargetBindingClaim::new(request.candidate.target))
@@ -831,23 +1096,16 @@ impl ProductOutboundTargetResolver for TriggeredReplyTargetAuthority<'_> {
         target: &ValidatedReplyTargetBinding,
         require_direct_message: bool,
     ) -> Result<crate::VerifiedProductOutboundTargetMetadata, ProductWorkflowError> {
-        // Single enforcement point for the OAuth DM rule, checked against
-        // the binding resolved NOW (at send time) — race-free against a
-        // stale preference snapshot.
-        if require_direct_message && !self.codec.is_personal_direct_message(target.target()) {
+        let resolved = self
+            .resolver
+            .resolve_current_target(&self.scope, &self.actor, target.target())
+            .await?
+            .ok_or(ProductWorkflowError::BindingAccessDenied)?;
+        if require_direct_message && !resolved.personal_direct_message {
             return Err(ProductWorkflowError::OutboundTargetNotDirectMessage);
         }
-        let external_conversation_ref = self
-            .codec
-            .conversation_for_target(target.target())
-            .ok_or_else(|| ProductWorkflowError::BindingResolutionFailed {
-                reason: format!(
-                    "triggered delivery: cannot decode conversation from binding ref '{}'",
-                    target.target().as_str()
-                ),
-            })?;
         Ok(crate::VerifiedProductOutboundTargetMetadata {
-            external_conversation_ref,
+            external_conversation_ref: resolved.external_conversation_ref,
             external_actor_ref: None,
         })
     }

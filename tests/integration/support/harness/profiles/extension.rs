@@ -603,7 +603,7 @@ impl ironclaw_host_api::ToolAdapter for AcmeFixtureToolAdapter {
 /// its assets copied into the storage root pre-build (the catalog discovers
 /// them), its native factory assembled into the composition input, its tool
 /// granted, and its provider trusted — the acme lifecycle then runs through
-/// the REAL facade (install → activate → dispatch-from-snapshot → remove).
+/// the REAL facade (install → dispatch-from-snapshot → remove).
 pub(crate) fn extension_runtime_acme_tools_profile() -> HarnessResult<ToolsProfile> {
     let mut profile = extension_lifecycle_tools_profile()?;
     profile
@@ -612,7 +612,7 @@ pub(crate) fn extension_runtime_acme_tools_profile() -> HarnessResult<ToolsProfi
             ACME_SEND_NOTE_CAPABILITY_ID,
         )?);
     // The real Slack package's five tools (TOOL-7 drives them through the
-    // generic dispatcher post-activation).
+    // generic dispatcher after the install reaches `active`).
     for slack_tool in [
         "slack.search_messages",
         "slack.list_conversations",
@@ -739,6 +739,11 @@ fn delivery_vendor_router(
 /// vendor-shaped bodies so the real adapters can parse delivery responses.
 pub(crate) fn extension_delivery_tools_profile() -> HarnessResult<ToolsProfile> {
     let mut profile = extension_runtime_acme_tools_profile()?;
+    profile
+        .capability_ids
+        .push(ironclaw_host_api::CapabilityId::new(
+            ironclaw_host_runtime::OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
+        )?);
     if let Some(trust) = profile.provider_trust_override.as_mut() {
         trust.push((
             ironclaw_host_api::ExtensionId::new("telegram")?,
@@ -752,7 +757,6 @@ pub(crate) fn extension_delivery_tools_profile() -> HarnessResult<ToolsProfile> 
     profile.options = profile
         .options
         .with_native_extension_factory(Arc::new(TelegramFixtureFactory))
-        .with_account_setup_descriptor(telegram_account_setup_descriptor())
         .with_channel_extension_binding(slack_channel_extension_binding())
         .with_channel_extension_binding(telegram_channel_extension_binding())
         .with_recording_network_egress(network_egress);
@@ -771,12 +775,6 @@ fn slack_channel_extension_binding() -> ironclaw_reborn_composition::ChannelExte
     ironclaw_reborn_composition::ChannelExtensionBinding {
         extension_id: "slack".to_string(),
         adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
-        inbound_payload_classifier: Some(Arc::new(|message| {
-            ironclaw_slack_extension::classify_channel_interaction_resolution(
-                &message.text,
-                message.trigger,
-            )
-        })),
         preference_target_codec: Some(Arc::new(
             ironclaw_slack_extension::SlackPreferenceTargetCodec,
         )),
@@ -787,43 +785,7 @@ fn telegram_channel_extension_binding() -> ironclaw_reborn_composition::ChannelE
     ironclaw_reborn_composition::ChannelExtensionBinding {
         extension_id: "telegram".to_string(),
         adapter: Arc::new(ironclaw_telegram_extension::TelegramChannelAdapter::default()),
-        inbound_payload_classifier: None,
         preference_target_codec: None,
-    }
-}
-
-/// Telegram's account-setup declaration, mirrored from the binary assembly
-/// (`ironclaw_reborn_cli::runtime::account_setups`) the same way
-/// [`TelegramFixtureFactory`] mirrors the native factory: the harness
-/// composes its own runtime and cannot depend on the CLI crate.
-fn telegram_account_setup_descriptor() -> ironclaw_product::ExtensionAccountSetupDescriptor {
-    let extension_id = ironclaw_host_api::ExtensionId::new("telegram").expect("extension id");
-    let connection_requirement = ironclaw_product::ChannelConnectionRequirement {
-        channel: "telegram".to_string(),
-        display_name: "Telegram".to_string(),
-        strategy: ironclaw_product::RebornChannelConnectStrategy::WebGeneratedCode,
-        instructions: "Pair your Telegram account from the pairing panel.".to_string(),
-        input_placeholder: String::new(),
-        submit_label: "Open pairing".to_string(),
-        error_message: "Telegram pairing failed. Get a fresh code and try again.".to_string(),
-    };
-    let connection_notices = ironclaw_product::ChannelConnectionNoticePolicy::generic(
-        &connection_requirement.display_name,
-    );
-    ironclaw_product::ExtensionAccountSetupDescriptor {
-        extension_id: extension_id.clone(),
-        auth_requirement: ironclaw_host_api::RuntimeCredentialAuthRequirement {
-            provider: ironclaw_host_api::VendorId::new("telegram").expect("provider id"),
-            setup: ironclaw_host_api::RuntimeCredentialAccountSetup::Pairing,
-            requester_extension: extension_id,
-            provider_scopes: Vec::new(),
-        },
-        connection_requirement,
-        connection_notices,
-        activation_success_message:
-            "Telegram is installed as an inbound entrypoint; pair via the pairing panel."
-                .to_string(),
-        pairing_deep_link_template: Some("https://t.me/{bot_username}?start={code}".to_string()),
     }
 }
 

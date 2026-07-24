@@ -1,7 +1,8 @@
 //! Reborn integration test — the generic extension runtime (P2, TEST-4).
 //!
 //! Drives the invented-vendor fixture through the REAL production pipeline:
-//! model tool calls hit `builtin.extension_install` / `extension_activate`,
+//! model tool calls hit `builtin.extension_install`, which reconciles every
+//! internal readiness/publication checkpoint it can,
 //! the lifecycle facade mirrors the activation into the generic extension
 //! host, the fixture's `first_party` native factory (assembled through the
 //! same `RebornHostBindings` seam the binary uses) binds its adapters, and the
@@ -85,7 +86,7 @@ async fn acme_channel_adapter_satisfies_the_conformance_contract() {
     .await;
 }
 
-/// Full lifecycle — install → configure (credential) → activate →
+/// Full lifecycle — install (which reconciles configured credentials) →
 /// dispatch-from-snapshot → remove — all through model tool calls against the
 /// real dispatcher, matrixed over libSQL and a real PostgreSQL testcontainer
 /// (LIFE-17: the full lifecycle on both DBs; REL-3: a Postgres skip is a
@@ -102,7 +103,7 @@ async fn acme_fixture_lifecycle_dispatches_from_the_active_snapshot(#[case] stor
         .await
         .expect("acme extension-runtime group builds on this backend");
 
-    // Install + activate through the production lifecycle tools.
+    // One install call advances through every internally satisfiable phase.
     let lifecycle = group
         .thread("conv-acme-lifecycle")
         .script([
@@ -115,6 +116,13 @@ async fn acme_fixture_lifecycle_dispatches_from_the_active_snapshot(#[case] stor
         .build()
         .await
         .expect("install thread builds");
+    // The fixture's tool credential is a product-auth account for the
+    // invented vendor; seed it before install so the one public lifecycle
+    // action can complete readiness and publication.
+    lifecycle
+        .seed_capability_credential_account("acme", "acme fixture account", &["notes:write"])
+        .await
+        .expect("seed acme account");
     lifecycle
         .submit_turn("install the acme messenger extension")
         .await
@@ -123,35 +131,10 @@ async fn acme_fixture_lifecycle_dispatches_from_the_active_snapshot(#[case] stor
         .assert_tool_result_contains("\"installed\":true")
         .await
         .expect("install reported success");
-
-    // The fixture's tool credential is a product-auth account for the
-    // invented vendor; seed it (with real material) so activation's
-    // credential gate and dispatch-time staging both pass.
     lifecycle
-        .seed_capability_credential_account("acme", "acme fixture account", &["notes:write"])
+        .assert_tool_result_contains("\"phase\":\"active\"")
         .await
-        .expect("seed acme account");
-
-    let activate = group
-        .thread("conv-acme-activate")
-        .script([
-            RebornScriptedReply::tool_call(
-                "builtin.extension_activate",
-                json!({"extension_id": "acme-messenger"}),
-            ),
-            RebornScriptedReply::text("activated"),
-        ])
-        .build()
-        .await
-        .expect("activate thread builds");
-    activate
-        .submit_turn("activate the acme messenger extension")
-        .await
-        .expect("activate turn completes");
-    activate
-        .assert_tool_result_contains("\"activated\":true")
-        .await
-        .expect("activation reported success");
+        .expect("install completed readiness and publication");
 
     // Dispatch the fixture tool: it can only resolve from the generic
     // host's active snapshot (the registry lane is builtin-restricted).
@@ -271,12 +254,7 @@ async fn slack_tools_invoke_through_the_generic_dispatcher_with_recorded_egress(
                 "builtin.extension_install",
                 json!({"extension_id": "slack"}),
             ),
-            RebornScriptedReply::text("installed"),
-            RebornScriptedReply::tool_call(
-                "builtin.extension_activate",
-                json!({"extension_id": "slack"}),
-            ),
-            RebornScriptedReply::text("activated"),
+            RebornScriptedReply::text("installed and ready"),
         ])
         .build()
         .await
@@ -313,11 +291,7 @@ async fn slack_tools_invoke_through_the_generic_dispatcher_with_recorded_egress(
         .await
         .expect("slack install reported success");
     lifecycle
-        .submit_turn("activate slack")
-        .await
-        .expect("slack activate completes");
-    lifecycle
-        .assert_tool_result_contains("\"activated\":true")
+        .assert_tool_result_contains("\"phase\":\"active\"")
         .await
         .expect("slack activation reported success");
 

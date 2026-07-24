@@ -21,6 +21,7 @@ layer = "app"
 # budget pipeline end-to-end. Enable with `cargo test --features
 # test-support.
 test-support = [
+    "ironclaw_extension_host/test-support",
     "dep:ironclaw_first_party_extensions",
     "ironclaw_host_runtime/test-support",
     "ironclaw_outbound/test-support",
@@ -151,10 +152,11 @@ ironclaw_reborn_composition = { path = ".", features = ["test-support"] }
 ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_turns = { path = "../ironclaw_turns", features = ["test-support"] }
 ironclaw_product = { path = "../ironclaw_product", features = ["test-support"] }
-# The ported channel-host e2e suite drives the generic assembly with slack
-# fixtures; dev-dependency linkage of concrete extension crates is the
-# sanctioned test exception (DEL-7).
+# The ported channel-host e2e suite drives the generic assembly with real
+# channel adapters; dev-dependency linkage of concrete extension crates is
+# the sanctioned test exception (DEL-7).
 ironclaw_slack_extension = { path = "../ironclaw_slack_extension" }
+ironclaw_telegram_extension = { path = "../ironclaw_telegram_extension" }
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 rust_decimal_macros = "1"
 sha2 = "0.11"

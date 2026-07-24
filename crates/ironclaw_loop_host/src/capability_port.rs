@@ -4,7 +4,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_capabilities::{ReplayPayload, ReplayPayloadStore, ReplayPayloadStoreError};
+use ironclaw_capabilities::{ReplayPayload, ReplayPayloadStoreError, ReplayPayloadStorePort};
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityDisplayOutputPreview, CapabilityId, CapabilitySet, CorrelationId,
     DispatchFailureDetail, DispatchInputIssue, DispatchInputIssueCode, EffectKind,
@@ -16,7 +16,7 @@ use ironclaw_host_runtime::{
     CapabilityFailureDisposition, HostRuntime, HostRuntimeError, IdempotencyKey,
     RuntimeBlockedReason, RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeFailureKind,
 };
-use ironclaw_run_state::{GateRecordStore, RunStateError};
+use ironclaw_run_state::{GateRecordStorePort, RunStateError};
 use ironclaw_turns::{
     CapabilityActivityId, LoopGateRef, LoopResultRef,
     run_profile::{
@@ -595,8 +595,8 @@ pub struct HostRuntimeLoopCapabilityPortFactory {
     execution_mounts: MountView,
     capability_execution_mounts: HashMap<CapabilityId, MountView>,
     trajectory_observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
-    gate_record_store: Arc<dyn GateRecordStore>,
-    replay_payload_store: Arc<dyn ReplayPayloadStore>,
+    gate_record_store: Arc<dyn GateRecordStorePort>,
+    replay_payload_store: Arc<dyn ReplayPayloadStorePort>,
 }
 
 impl HostRuntimeLoopCapabilityPortFactory {
@@ -630,20 +630,20 @@ impl HostRuntimeLoopCapabilityPortFactory {
         }
     }
 
-    /// Wire the durable [`GateRecordStore`] every port built by this factory
+    /// Wire the durable [`GateRecordStorePort`] every port built by this factory
     /// persists pending-gate records into (§5.2.9). Production composition always
     /// calls this; the fail-closed default only guards an unwired factory.
-    pub fn with_gate_record_store(mut self, store: Arc<dyn GateRecordStore>) -> Self {
+    pub fn with_gate_record_store(mut self, store: Arc<dyn GateRecordStorePort>) -> Self {
         self.gate_record_store = store;
         self
     }
 
-    /// Wire the durable host-private [`ReplayPayloadStore`] every port built by
+    /// Wire the durable host-private [`ReplayPayloadStorePort`] every port built by
     /// this factory persists gate/auth replay payloads into and reconstitutes
     /// them from on resume (arch-simplification §5.3 Stage 2a-i). Production
     /// composition always calls this; the fail-closed default only guards an
     /// unwired factory.
-    pub fn with_replay_payload_store(mut self, store: Arc<dyn ReplayPayloadStore>) -> Self {
+    pub fn with_replay_payload_store(mut self, store: Arc<dyn ReplayPayloadStorePort>) -> Self {
         self.replay_payload_store = store;
         self
     }
@@ -1073,14 +1073,14 @@ pub struct HostRuntimeLoopCapabilityPort {
     /// Durable store for the model-visible [`GateRecord`] a pending gate renders
     /// from on a later resume turn (§5.2.9). Written at the capability seam when a
     /// gate/suspension outcome is produced; see `persist_gate_record_for_mapped`.
-    gate_record_store: Arc<dyn GateRecordStore>,
+    gate_record_store: Arc<dyn GateRecordStorePort>,
     /// Host-private store for the raw replay payload (tool `input` + `estimate`)
     /// a gate/auth resume re-dispatches from (arch-simplification §5.3 Stage
     /// 2a-i). Written at a FRESH gate raise keyed by `InvocationId`
     /// (`persist_replay_payload_for_fresh_gate`); loaded on resume by the
     /// invocation id recovered from the resume token
     /// (`replay_payload_for_resume`). Never model-visible.
-    replay_payload_store: Arc<dyn ReplayPayloadStore>,
+    replay_payload_store: Arc<dyn ReplayPayloadStorePort>,
     /// Per-idempotency-key reservation for a gate outcome's persisted
     /// [`Resolution`]. The mapping mints a fresh random `GateRef` per call for
     /// the approval/resource/dependent/external channels, so a replayed
@@ -1164,19 +1164,19 @@ impl HostRuntimeLoopCapabilityPort {
         }
     }
 
-    /// Wire the durable [`GateRecordStore`] this port persists pending-gate
+    /// Wire the durable [`GateRecordStorePort`] this port persists pending-gate
     /// records into (§5.2.9). Defaults to the transitional
     /// [`NoopGateRecordStore`] when unset.
-    pub fn with_gate_record_store(mut self, store: Arc<dyn GateRecordStore>) -> Self {
+    pub fn with_gate_record_store(mut self, store: Arc<dyn GateRecordStorePort>) -> Self {
         self.gate_record_store = store;
         self
     }
 
-    /// Wire the durable host-private [`ReplayPayloadStore`] this port persists
+    /// Wire the durable host-private [`ReplayPayloadStorePort`] this port persists
     /// gate/auth replay payloads into and reconstitutes them from on resume
     /// (arch-simplification §5.3 Stage 2a-i). Defaults to the transitional
     /// fail-closed [`NoopReplayPayloadStore`] when unset.
-    pub fn with_replay_payload_store(mut self, store: Arc<dyn ReplayPayloadStore>) -> Self {
+    pub fn with_replay_payload_store(mut self, store: Arc<dyn ReplayPayloadStorePort>) -> Self {
         self.replay_payload_store = store;
         self
     }
@@ -1466,6 +1466,70 @@ impl HostRuntimeLoopCapabilityPort {
             }
         };
         self.complete_terminal_milestone(key, completion.invocation_id, result, terminal_milestone)
+            .await
+    }
+
+    async fn finish_auth_decline_outcome(
+        &self,
+        key: &IdempotencyKey,
+        conversion: RuntimeOutcomeConversion<'_>,
+    ) -> Result<GatedResolution, AgentLoopHostError> {
+        let RuntimeOutcomeConversion {
+            input_ref,
+            invocation_id,
+            correlation_id,
+            requested_capability_id,
+            outcome,
+        } = conversion;
+        let failure = match &outcome {
+            RuntimeCapabilityOutcome::Failed(failure) => failure,
+            _ => {
+                let result = Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Internal,
+                    "capability auth decline returned a non-terminal runtime outcome",
+                ));
+                self.record_loop_completed(key, invocation_id, result.clone())?;
+                return result;
+            }
+        };
+        let result = runtime_outcome_to_loop(
+            &self.run_context,
+            self.result_writer.as_ref(),
+            RuntimeOutcomeConversion {
+                input_ref,
+                invocation_id,
+                correlation_id,
+                requested_capability_id,
+                outcome: outcome.clone(),
+            },
+        )
+        .await;
+        if should_retry_result_write(&outcome, &result) {
+            self.record_runtime_completed(
+                key,
+                invocation_id,
+                correlation_id,
+                requested_capability_id.clone(),
+                outcome.clone(),
+            )?;
+            return result;
+        }
+        if result.is_err() {
+            self.record_loop_completed(key, invocation_id, result.clone())?;
+            return result;
+        }
+        let milestone = LoopHostMilestoneKind::CapabilityFailed {
+            activity_id: CapabilityActivityId::from_uuid(invocation_id.as_uuid()),
+            capability_id: failure.capability_id.clone(),
+            // The current contract may already be gone. Durable invocation
+            // identity, rather than stale provider/runtime metadata, is the
+            // authority for this terminal transition.
+            provider: None,
+            runtime: None,
+            reason_kind: runtime_failure_kind_to_loop(failure.kind)?,
+            safe_summary: runtime_failure_loop_safe_summary(failure),
+        };
+        self.complete_terminal_milestone(key, invocation_id, result, Some(milestone))
             .await
     }
 
@@ -2114,7 +2178,10 @@ impl HostRuntimeLoopCapabilityPort {
             (Some(_), Some(_)) | (Option::None, Option::None) => return Ok(Option::None),
             (Some(resume), Option::None) => invocation_id_from_resume_token(&resume.resume_token)?,
             (Option::None, Some(auth_resume)) => {
-                invocation_id_from_resume_token(&auth_resume.resume_token)?
+                let Some(resume_token) = auth_resume.resume_token.as_ref() else {
+                    return Ok(Option::None);
+                };
+                invocation_id_from_resume_token(resume_token)?
             }
         };
         Ok(Some(self.replay_payload_for_resume(invocation_id).await?))
@@ -2142,11 +2209,163 @@ impl HostRuntimeLoopCapabilityPort {
         })
     }
 
+    async fn invoke_auth_decline_dispatch(
+        &self,
+        request: LoopRequest,
+        invocation_id: InvocationId,
+    ) -> Result<GatedResolution, AgentLoopHostError> {
+        let idempotency_key = auth_decline_idempotency_key(
+            &self.run_context,
+            request.activity_id,
+            invocation_id,
+            &request.capability_id,
+        )?;
+        loop {
+            match self.reserve_dispatch(&idempotency_key, invocation_id)? {
+                DispatchReservation::Reserved => break,
+                DispatchReservation::Wait(notify) => {
+                    self.wait_for_dispatch_completion(&idempotency_key, notify)
+                        .await?;
+                }
+                DispatchReservation::RuntimeCompleted {
+                    invocation_id,
+                    correlation_id,
+                    requested_capability_id,
+                    outcome,
+                } => {
+                    return self
+                        .finish_auth_decline_outcome(
+                            &idempotency_key,
+                            RuntimeOutcomeConversion {
+                                input_ref: &request.input_ref,
+                                invocation_id,
+                                correlation_id,
+                                requested_capability_id: &requested_capability_id,
+                                outcome,
+                            },
+                        )
+                        .await;
+                }
+                DispatchReservation::TerminalMilestonePending {
+                    invocation_id,
+                    result,
+                    milestone,
+                } => {
+                    return self
+                        .complete_terminal_milestone(
+                            &idempotency_key,
+                            invocation_id,
+                            result,
+                            Some(milestone),
+                        )
+                        .await;
+                }
+                DispatchReservation::LoopCompleted(result) => return result,
+            }
+        }
+
+        let guard = self.dispatch_reservation_guard(&idempotency_key);
+        let invocation_context = auth_decline_context_from_visible(
+            &self.visible_request.context,
+            &self.run_context,
+            request.activity_id,
+        )?;
+        let correlation_id = invocation_context.correlation_id;
+        let requested_capability_id = request.capability_id.clone();
+        self.result_writer.record_running_invocation(
+            &self.run_context,
+            invocation_id,
+            &request.input_ref,
+        );
+        let activity_id = CapabilityActivityId::from_uuid(invocation_id.as_uuid());
+        self.emit_capability_milestone(LoopHostMilestoneKind::CapabilityInvoked {
+            activity_id,
+            capability_id: requested_capability_id.clone(),
+        })
+        .await?;
+
+        let outcome = match dispatch_runtime_capability_auth_decline(
+            self.runtime.as_ref(),
+            invocation_context,
+            request.capability_id,
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(error @ HostRuntimeError::Unavailable { .. }) => {
+                return Err(host_runtime_error(error));
+            }
+            Err(error) => {
+                let host_error = host_runtime_error(error);
+                let milestone = LoopHostMilestoneKind::CapabilityFailed {
+                    activity_id,
+                    capability_id: requested_capability_id,
+                    provider: None,
+                    runtime: None,
+                    reason_kind: capability_failure_kind(host_error.kind.as_str())?,
+                    safe_summary: None,
+                };
+                guard.commit();
+                return self
+                    .complete_terminal_milestone(
+                        &idempotency_key,
+                        invocation_id,
+                        Err(host_error),
+                        Some(milestone),
+                    )
+                    .await;
+            }
+        };
+        guard.commit();
+        self.finish_auth_decline_outcome(
+            &idempotency_key,
+            RuntimeOutcomeConversion {
+                input_ref: &request.input_ref,
+                invocation_id,
+                correlation_id,
+                requested_capability_id: &requested_capability_id,
+                outcome,
+            },
+        )
+        .await
+    }
+
     async fn invoke_capability_dispatch(
         &self,
         request: LoopRequest,
     ) -> Result<GatedResolution, AgentLoopHostError> {
         let requested_invocation_id = InvocationId::from_uuid(request.activity_id.as_uuid());
+        if let Some(auth_resume) = request.auth_resume.as_ref().filter(|resume| {
+            matches!(
+                resume.disposition,
+                Some(ironclaw_turns::GateResumeDisposition::Denied)
+            )
+        }) {
+            if request.approval_resume.is_some() {
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    "capability invocation has both approval_resume and auth_resume set; \
+                     these resume modes are mutually exclusive",
+                ));
+            }
+            if auth_resume.prior_approval.is_some() {
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    "denied capability auth resume must not carry prior approval identity",
+                ));
+            }
+            if let Some(resume_token) = auth_resume.resume_token.as_ref() {
+                let token_invocation_id = invocation_id_from_resume_token(resume_token)?;
+                ensure_resume_invocation_matches_activity(
+                    token_invocation_id,
+                    requested_invocation_id,
+                    "auth denial",
+                )?;
+            }
+            return self
+                .invoke_auth_decline_dispatch(request, requested_invocation_id)
+                .await;
+        }
         // Normalize resume mode and validate token/activity identity before
         // dispatch reservation. Cached replay branches can return without
         // touching runtime state, so they must pass the same fail-closed checks
@@ -2186,8 +2405,13 @@ impl HostRuntimeLoopCapabilityPort {
                 }
             }
             (_, Some(auth_resume)) => {
-                let resume_invocation_id =
-                    invocation_id_from_resume_token(&auth_resume.resume_token)?;
+                let resume_token = auth_resume.resume_token.as_ref().ok_or_else(|| {
+                    AgentLoopHostError::new(
+                        AgentLoopHostErrorKind::InvalidInvocation,
+                        "resolved capability auth resume is missing its resume token",
+                    )
+                })?;
+                let resume_invocation_id = invocation_id_from_resume_token(resume_token)?;
                 ensure_resume_invocation_matches_activity(
                     resume_invocation_id,
                     requested_invocation_id,
@@ -2639,7 +2863,7 @@ fn gate_record_store_error(error: RunStateError) -> AgentLoopHostError {
     )
 }
 
-/// Transitional default [`GateRecordStore`] used until composition wires a
+/// Transitional default [`GateRecordStorePort`] used until composition wires a
 /// durable store into the capability-port factory via
 /// [`HostRuntimeLoopCapabilityPortFactory::with_gate_record_store`].
 ///
@@ -2655,7 +2879,7 @@ fn gate_record_store_error(error: RunStateError) -> AgentLoopHostError {
 struct NoopGateRecordStore;
 
 #[async_trait]
-impl GateRecordStore for NoopGateRecordStore {
+impl GateRecordStorePort for NoopGateRecordStore {
     async fn save(
         &self,
         _scope: ResourceScope,
@@ -2691,7 +2915,7 @@ fn replay_payload_store_error(error: ReplayPayloadStoreError) -> AgentLoopHostEr
     )
 }
 
-/// Transitional fail-closed default [`ReplayPayloadStore`] used until composition
+/// Transitional fail-closed default [`ReplayPayloadStorePort`] used until composition
 /// wires a durable store into the capability-port factory via
 /// [`HostRuntimeLoopCapabilityPortFactory::with_replay_payload_store`].
 ///
@@ -2705,7 +2929,7 @@ fn replay_payload_store_error(error: ReplayPayloadStoreError) -> AgentLoopHostEr
 struct NoopReplayPayloadStore;
 
 #[async_trait]
-impl ReplayPayloadStore for NoopReplayPayloadStore {
+impl ReplayPayloadStorePort for NoopReplayPayloadStore {
     async fn save(
         &self,
         _scope: ResourceScope,
@@ -2779,6 +3003,16 @@ async fn dispatch_runtime_capability_auth_resume(
 ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
     runtime
         .auth_resume_capability((context, capability_id, estimate, input, approval_request_id))
+        .await
+}
+
+async fn dispatch_runtime_capability_auth_decline(
+    runtime: &(dyn HostRuntime + Send + Sync),
+    context: ExecutionContext,
+    capability_id: CapabilityId,
+) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+    runtime
+        .decline_auth_capability((context, capability_id))
         .await
 }
 
@@ -2924,9 +3158,9 @@ struct VisibleInvocationContextRequest<'a> {
 fn invocation_context_from_visible(
     request: VisibleInvocationContextRequest<'_>,
 ) -> Result<ExecutionContext, AgentLoopHostError> {
-    let mut context = request.base.clone();
-    let loop_driver_extension = loop_driver_execution_extension_id(request.run_context)?;
-    context.extension_id = loop_driver_extension.clone();
+    let mut context =
+        auth_decline_context_from_visible(request.base, request.run_context, request.activity_id)?;
+    let loop_driver_extension = context.extension_id.clone();
     context.runtime = request.capability.runtime;
     context.trust = request.trust;
     context.grants = invocation_grants_from_visible(
@@ -2939,7 +3173,28 @@ fn invocation_context_from_visible(
     // caller-supplied mounts, while this invocation context receives the execution mounts that the
     // authority resolver selected for the run and capability dispatch.
     context.mounts = request.execution_mounts.clone();
-    let invocation_id = InvocationId::from_uuid(request.activity_id.as_uuid());
+    context.validate().map_err(|_| {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "capability execution context is invalid",
+        )
+    })?;
+    Ok(context)
+}
+
+/// Reconstruct only the host-sealed identity required to terminalize a denied
+/// auth gate. This deliberately does not consult the current capability
+/// surface, provider trust, grants, mounts, or input: the admitted invocation's
+/// durable `BlockedAuth` record is the authority, and `CapabilityHost` validates
+/// its exact scope, actor, activity, and capability before mutation.
+fn auth_decline_context_from_visible(
+    base: &ExecutionContext,
+    run_context: &LoopRunContext,
+    activity_id: CapabilityActivityId,
+) -> Result<ExecutionContext, AgentLoopHostError> {
+    let mut context = base.clone();
+    context.extension_id = loop_driver_execution_extension_id(run_context)?;
+    let invocation_id = InvocationId::from_uuid(activity_id.as_uuid());
     context.invocation_id = invocation_id;
     context.correlation_id = CorrelationId::new();
     context.process_id = None;
@@ -2948,17 +3203,27 @@ fn invocation_context_from_visible(
     // Prompt-visible run identity: tool calls within the same turn-run share
     // it, so run-scoped policy state (e.g. coding read-before-edit) carries
     // across tool calls of one run but never leaks into a later run.
-    let run_id = ironclaw_host_api::RunId::from_uuid(request.run_context.run_id.as_uuid());
+    let run_id = ironclaw_host_api::RunId::from_uuid(run_context.run_id.as_uuid());
     context.run_id = Some(run_id);
     // Authoritative origin (§5.2.1): a tool call inside an agent loop turn-run is
     // model-initiated, so the loop ingress seals `LoopRun`. The kernel would also
     // reconstruct this from `run_id`, but stamping `origin` explicitly makes the
     // loop the authoritative source rather than relying on the compat fallback.
-    context.origin = Some(InvocationOrigin::LoopRun(run_id));
-    context.authenticated_actor_user_id = request
-        .run_context
-        .actor()
-        .map(|actor| actor.user_id.clone());
+    context.origin = Some(
+        match run_context
+            .product_context
+            .as_ref()
+            .map(|product_context| product_context.origin)
+        {
+            Some(ironclaw_turns::TurnOriginKind::ScheduledTrigger) => {
+                InvocationOrigin::ScheduledLoopRun(run_id)
+            }
+            Some(ironclaw_turns::TurnOriginKind::WebUi)
+            | Some(ironclaw_turns::TurnOriginKind::Inbound)
+            | None => InvocationOrigin::LoopRun(run_id),
+        },
+    );
+    context.authenticated_actor_user_id = run_context.actor().map(|actor| actor.user_id.clone());
     context.validate().map_err(|_| {
         AgentLoopHostError::new(
             AgentLoopHostErrorKind::InvalidInvocation,
@@ -3112,15 +3377,30 @@ fn invocation_idempotency_key(
             "resume:{}:{}",
             resume.approval_request_id, resume.resume_token
         ),
-        (None, Some(auth_resume)) => format!(
-            "auth-resume:{}:{}",
-            auth_resume
-                .prior_approval
+        (None, Some(auth_resume))
+            if matches!(
+                auth_resume.disposition,
+                Some(ironclaw_turns::GateResumeDisposition::Denied)
+            ) =>
+        {
+            "auth-denied".to_string()
+        }
+        (None, Some(auth_resume)) => {
+            let resume_token = auth_resume
+                .resume_token
                 .as_ref()
-                .map(|pa| pa.approval_request_id.to_string())
-                .unwrap_or_else(|| "none".to_string()),
-            auth_resume.resume_token
-        ),
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "missing".to_string());
+            format!(
+                "auth-resume:{}:{}",
+                auth_resume
+                    .prior_approval
+                    .as_ref()
+                    .map(|pa| pa.approval_request_id.to_string())
+                    .unwrap_or_else(|| "none".to_string()),
+                resume_token
+            )
+        }
         (None, None) => "dispatch".to_string(),
     };
     let payload = format!(
@@ -3130,6 +3410,29 @@ fn invocation_idempotency_key(
         request.capability_id.as_str(),
         input_ref.as_str(),
         resume_scope
+    );
+    IdempotencyKey::new(format!(
+        "loop-capability:{}",
+        sha256_digest_token(payload.as_bytes())
+    ))
+    .map_err(host_runtime_error)
+}
+
+fn auth_decline_idempotency_key(
+    run_context: &LoopRunContext,
+    activity_id: CapabilityActivityId,
+    invocation_id: InvocationId,
+    capability_id: &CapabilityId,
+) -> Result<IdempotencyKey, AgentLoopHostError> {
+    // Auth denial terminalizes an already-admitted durable invocation. Its
+    // replay identity must therefore remain stable when the current surface or
+    // input reference changes after the invocation entered BlockedAuth.
+    let payload = format!(
+        "loop-capability-auth-decline\nrun={}\nactivity={}\ninvocation={}\ncapability={}\nmode=auth-denied",
+        run_context.run_id,
+        activity_id,
+        invocation_id,
+        capability_id.as_str(),
     );
     IdempotencyKey::new(format!(
         "loop-capability:{}",
@@ -3246,10 +3549,10 @@ async fn runtime_outcome_to_loop(
             loop_gate_ref("auth", gate.gate_id.to_string())?,
             gate.credential_requirements,
             blocked_summary(gate.reason).to_string(),
-            Some(ironclaw_turns::run_profile::CapabilityAuthResume {
-                resume_token: resume_token_from_invocation_id(conversion.invocation_id)?,
-                prior_approval: None,
-            }),
+            Some(ironclaw_turns::run_profile::CapabilityAuthResume::resolved(
+                resume_token_from_invocation_id(conversion.invocation_id)?,
+                None,
+            )),
         ),
         RuntimeCapabilityOutcome::ResourceBlocked(gate) => resolution::resource_blocked(
             loop_gate_ref("resource", gate.gate_id.to_string())?,
@@ -3567,6 +3870,7 @@ fn runtime_failure_kind_to_loop(
         RuntimeFailureKind::Backend => CapabilityFailureKind::Backend,
         RuntimeFailureKind::Cancelled => CapabilityFailureKind::Cancelled,
         RuntimeFailureKind::Dispatcher => CapabilityFailureKind::Dispatcher,
+        RuntimeFailureKind::GateDeclined => CapabilityFailureKind::GateDeclined,
         RuntimeFailureKind::Internal => CapabilityFailureKind::Internal,
         RuntimeFailureKind::InvalidInput => CapabilityFailureKind::InvalidInput,
         RuntimeFailureKind::InvalidOutput => CapabilityFailureKind::InvalidOutput,
@@ -8688,7 +8992,8 @@ mod tests {
                     .expect("valid input ref"),
             }),
             auth_resume: Some(CapabilityAuthResume {
-                resume_token,
+                resume_token: Some(resume_token),
+                disposition: None,
                 prior_approval: None,
             }),
         };
@@ -8965,7 +9270,8 @@ mod tests {
                 input_ref: invocation.input_ref,
                 approval_resume: None,
                 auth_resume: Some(CapabilityAuthResume {
-                    resume_token: resume_token_for_different_activity(invocation.activity_id),
+                    resume_token: Some(resume_token_for_different_activity(invocation.activity_id)),
+                    disposition: None,
                     prior_approval: None,
                 }),
             })
@@ -9425,12 +9731,12 @@ mod tests {
         Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default())
     }
 
-    /// Deterministic in-memory [`GateRecordStore`] fake for seam tests: records
+    /// Deterministic in-memory [`GateRecordStorePort`] fake for seam tests: records
     /// every write and answers `load` by the exact `(scope, gate_ref)` a gate
     /// outcome was persisted under. Keyed by `GateRef` (a freshly-minted uuid,
     /// globally unique) with the scope carried in the value for the wrong-scope
     /// isolation check the durable store applies. The durable
-    /// `FilesystemGateRecordStore` round-trip itself is covered by
+    /// `GateRecordStore` round-trip itself is covered by
     /// `ironclaw_run_state`'s `gate_record_store_contract`; this fake pins that
     /// the loop_host seam calls `save` with the right record and gate ref.
     #[derive(Debug, Default)]
@@ -9445,7 +9751,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl GateRecordStore for RecordingGateRecordStore {
+    impl GateRecordStorePort for RecordingGateRecordStore {
         async fn save(
             &self,
             scope: ResourceScope,
@@ -9483,7 +9789,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl GateRecordStore for FailOnceGateRecordStore {
+    impl GateRecordStorePort for FailOnceGateRecordStore {
         async fn save(
             &self,
             scope: ResourceScope,
@@ -9541,7 +9847,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl GateRecordStore for BlockingGateRecordStore {
+    impl GateRecordStorePort for BlockingGateRecordStore {
         async fn save(
             &self,
             scope: ResourceScope,
@@ -9639,12 +9945,12 @@ mod tests {
         );
     }
 
-    /// Deterministic in-memory [`ReplayPayloadStore`] fake for seam tests: the
+    /// Deterministic in-memory [`ReplayPayloadStorePort`] fake for seam tests: the
     /// port `save`s the raw replay payload at a fresh gate raise and `load`s it on
     /// resume. Keyed by `InvocationId` (globally unique per invocation); the scope
     /// is recorded for assertions but `load` is scope-insensitive because these
     /// crate-tier tests pin the write/read WIRING, not scope isolation — the
-    /// durable `FilesystemReplayPayloadStore`'s wrong-scope-looks-unknown check is
+    /// durable `ReplayPayloadStore`'s wrong-scope-looks-unknown check is
     /// covered by `ironclaw_capabilities`' own contract test and the full-infra
     /// cross-tenant integration scenario.
     #[derive(Debug, Default)]
@@ -9672,7 +9978,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl ReplayPayloadStore for RecordingReplayPayloadStore {
+    impl ReplayPayloadStorePort for RecordingReplayPayloadStore {
         async fn save(
             &self,
             scope: ResourceScope,
@@ -9737,7 +10043,7 @@ mod tests {
     }
 
     /// Like [`runtime_capability_port`] but wires an explicit
-    /// [`GateRecordStore`], so seam tests can observe the durable gate record the
+    /// [`GateRecordStorePort`], so seam tests can observe the durable gate record the
     /// port persists at the capability seam.
     async fn runtime_capability_port_with_gate_store(
         capability_id: &CapabilityId,
@@ -9745,7 +10051,7 @@ mod tests {
         runtime: Arc<dyn HostRuntime>,
         result_writer: Arc<dyn LoopCapabilityResultWriter>,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
-        gate_record_store: Arc<dyn GateRecordStore>,
+        gate_record_store: Arc<dyn GateRecordStorePort>,
         thread_id: &str,
     ) -> HostRuntimeLoopCapabilityPort {
         let mut context = execution_context(thread_id);
@@ -9771,7 +10077,7 @@ mod tests {
     }
 
     /// Like [`runtime_capability_port`] but wires an explicit
-    /// [`ReplayPayloadStore`], so resume seam tests can round-trip the raw replay
+    /// [`ReplayPayloadStorePort`], so resume seam tests can round-trip the raw replay
     /// payload the host persists at a gate raise and reconstitutes on resume.
     async fn runtime_capability_port_with_replay_store(
         capability_id: &CapabilityId,
@@ -9779,7 +10085,7 @@ mod tests {
         runtime: Arc<dyn HostRuntime>,
         result_writer: Arc<dyn LoopCapabilityResultWriter>,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
-        replay_payload_store: Arc<dyn ReplayPayloadStore>,
+        replay_payload_store: Arc<dyn ReplayPayloadStorePort>,
         thread_id: &str,
     ) -> HostRuntimeLoopCapabilityPort {
         let mut context = execution_context(thread_id);
@@ -9810,7 +10116,7 @@ mod tests {
     /// while the loop still receives the unchanged `CapabilityOutcome` (its resume
     /// token intact). Drives the production caller (`invoke_capability`) and
     /// asserts at the store seam that the record round-trips. The durable
-    /// `FilesystemGateRecordStore` round-trip is covered separately by
+    /// `GateRecordStore` round-trip is covered separately by
     /// `ironclaw_run_state`'s `gate_record_store_contract`.
     #[tokio::test]
     async fn approval_gate_outcome_persists_gate_record_at_the_seam() {
@@ -10576,6 +10882,7 @@ mod tests {
     struct RecordingResultWriter {
         records: Mutex<Vec<(CapabilityId, serde_json::Value)>>,
         display_previews: Mutex<Vec<Option<CapabilityDisplayOutputPreview>>>,
+        failure_previews: Mutex<Vec<(InvocationId, CapabilityId, String)>>,
     }
 
     impl RecordingResultWriter {
@@ -10587,6 +10894,13 @@ mod tests {
             self.display_previews
                 .lock()
                 .expect("display previews lock")
+                .clone()
+        }
+
+        fn failure_previews(&self) -> Vec<(InvocationId, CapabilityId, String)> {
+            self.failure_previews
+                .lock()
+                .expect("failure previews lock")
                 .clone()
         }
     }
@@ -10623,6 +10937,19 @@ mod tests {
                 output_digest: Some(output_digest),
                 model_observation: None,
             })
+        }
+
+        async fn stage_capability_failure_preview(
+            &self,
+            _run_context: &LoopRunContext,
+            invocation_id: InvocationId,
+            capability_id: &CapabilityId,
+            summary: &str,
+        ) {
+            self.failure_previews
+                .lock()
+                .expect("failure previews lock")
+                .push((invocation_id, capability_id.clone(), summary.to_string()));
         }
     }
 

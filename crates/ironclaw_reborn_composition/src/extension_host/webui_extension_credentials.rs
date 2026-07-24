@@ -117,7 +117,8 @@ fn map_auth_error(error: crate::RebornAuthProductError) -> ProductSurfaceError {
             error.retryable,
         ),
         AuthErrorCode::AccountSelectionRequired
-        | AuthErrorCode::ProviderIdentityAlreadyConnected => services_error(
+        | AuthErrorCode::ProviderIdentityAlreadyConnected
+        | AuthErrorCode::LifecycleActivationFailed => services_error(
             ProductSurfaceErrorCode::Conflict,
             ProductSurfaceErrorKind::BlockedAuthentication,
             409,

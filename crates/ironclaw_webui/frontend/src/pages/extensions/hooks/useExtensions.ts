@@ -12,18 +12,16 @@ import {
 } from "../../../lib/product-auth-oauth-events";
 import { useT } from "../../../lib/i18n";
 import { hasChannelSurface } from "../lib/extensions-schema";
+import { extensionIsActive } from "../lib/extension-actions";
 import {
   fetchExtensions,
   fetchExtensionRegistry,
   installExtension,
-  activateExtension,
   removeExtension,
   fetchExtensionSetup,
   submitExtensionSetup,
   startExtensionOauth,
   fetchOauthFlowStatus,
-  fetchPairingRequests,
-  approvePairingCode,
   importExtension,
 } from "../lib/extensions-api";
 
@@ -60,28 +58,27 @@ function oauthResponseInvocationId(response) {
 }
 
 function extensionListItemIsConfigured(extension) {
-  if (!extension) return false;
-  if (extension.needs_setup === false && (extension.authenticated || extension.active)) {
-    return true;
-  }
-  // Same snake/camel fallback chain as `extensionLifecycleState`
-  // (lib/extension-actions.ts) so a camelCase snapshot cannot read as
-  // "not configured" here while the rest of the page treats it as active.
-  const state =
-    extension.onboarding_state ||
-    extension.onboardingState ||
-    extension.installation_state ||
-    extension.installationState ||
-    (extension.active ? "active" : null);
-  return (state === "active" || state === "ready") && extension.needs_setup !== true;
+  return extensionIsActive(extension);
 }
 
 function packageId(item) {
   return item?.package_ref?.id || null;
 }
 
+function packageRefId(packageRef) {
+  return typeof packageRef === "string" ? packageRef : packageRef?.id || null;
+}
+
 function displayName(item) {
   return item?.display_name || packageId(item) || "";
+}
+
+function configureRequest(extension) {
+  return {
+    ...extension,
+    packageRef: extension.package_ref,
+    displayName: displayName(extension),
+  };
 }
 
 function catalogId(prefix, item, index) {
@@ -148,103 +145,34 @@ export function useExtensions() {
   const installMutation = useMutation({
     mutationFn: ({ packageRef, clientActionId: actionId }) =>
       installExtension(packageRef, { clientActionId: actionId }),
-    onSuccess: (res, { displayName, surfaces, configureAfterInstall, onNeedsSetup, packageRef }) => {
-      if (res.success) {
-        const message = hasChannelSurface({ surfaces })
-          ? t("extensions.channelInstalledSetup", {
-              name: displayName || t("extensions.defaultName"),
-            })
-          : res.message ||
-            res.instructions ||
-            t("extensions.installedSuccess", {
-              name: displayName || t("extensions.defaultName"),
-            });
-        setActionResult({
-          type: "success",
-          message,
-        });
-        let installAuthPopup = null;
-        if (res.auth_url) {
-          installAuthPopup = openAuthPopup(res.auth_url);
-        }
-        if (installAuthPopup && !installAuthPopup.ok) {
-          setActionResult({
-            type: "error",
-            message: authPopupFailureMessage(installAuthPopup.reason, t),
-          });
-        } else if (
-          !res.auth_url &&
-          configureAfterInstall &&
-          typeof onNeedsSetup === "function"
-        ) {
-          onNeedsSetup({
-            packageRef,
-            displayName,
-            // Carry `surfaces` so the modal can route a channel-surface
-            // extension to the Connect panel — without it the modal can't
-            // tell this is a channel and falls through to "No configuration
-            // required".
-            surfaces,
-            // Freshly installed: the caller has not connected/paired yet.
-            authenticated: false,
-            active: false,
-            installationState: "installed",
-            onboardingState: "setup_required",
-          });
-        }
-      } else {
-        setActionResult({ type: "error", message: res.message || t("extensions.installFailed") });
-      }
-      invalidate();
-    },
-    onError: (err) => {
-      setActionResult({ type: "error", message: err.message });
-      invalidate();
-    },
-  });
-
-  const activateMutation = useMutation({
-    mutationFn: ({ packageRef, clientActionId: actionId }) =>
-      activateExtension(packageRef, { clientActionId: actionId }),
-    onSuccess: (res, { displayName }) => {
+    onSuccess: async (res, { displayName: requestedName, onNeedsSetup, packageRef }) => {
       if (res.success) {
         setActionResult({
           type: "success",
           message:
             res.message ||
-            res.instructions ||
-            t("extensions.activatedSuccess", {
-              name: displayName || t("extensions.defaultName"),
+            t("extensions.installedSuccess", {
+              name: requestedName || t("extensions.defaultName"),
             }),
         });
-        if (res.auth_url) {
-          const opened = openAuthPopup(res.auth_url);
-          if (!opened.ok) {
-            setActionResult({
-              type: "error",
-              message: authPopupFailureMessage(opened.reason, t),
-            });
-          }
+        const [extensionsResult] = await refetch();
+        const installed = (extensionsResult?.data?.extensions || []).find(
+          (extension) => packageId(extension) === packageRefId(packageRef)
+        );
+        if (
+          installed?.installation_state === "setup_needed" &&
+          typeof onNeedsSetup === "function"
+        ) {
+          onNeedsSetup(configureRequest(installed));
         }
-      } else if (res.auth_url) {
-        const opened = openAuthPopup(res.auth_url);
-        if (opened.ok) {
-          setActionResult({ type: "info", message: t("extensions.openingAuth") });
-        } else {
-          setActionResult({
-            type: "error",
-            message: authPopupFailureMessage(opened.reason, t),
-          });
-        }
-      } else if (res.awaiting_token) {
-        setActionResult({ type: "info", message: t("extensions.configurationRequired") });
       } else {
-        setActionResult({ type: "error", message: res.message || t("extensions.activationFailed") });
+        setActionResult({ type: "error", message: res.message || t("extensions.installFailed") });
+        invalidate();
       }
-      invalidate();
     },
     onError: (err) => {
       setActionResult({ type: "error", message: err.message });
+      invalidate();
     },
   });
 
@@ -330,7 +258,7 @@ export function useExtensions() {
   });
 
   const isLoading = extensionsQuery.isLoading || registryQuery.isLoading;
-  const isBusy = installMutation.isPending || activateMutation.isPending || removeMutation.isPending || importMutation.isPending;
+  const isBusy = installMutation.isPending || removeMutation.isPending || importMutation.isPending;
 
   return {
     status,
@@ -354,8 +282,6 @@ export function useExtensions() {
     clearResult,
     install: (payload, options = undefined) =>
       installMutation.mutate(withClientActionId(payload), options),
-    activate: (payload, options = undefined) =>
-      activateMutation.mutate(withClientActionId(payload), options),
     remove: (payload, options = undefined) =>
       removeMutation.mutate(withClientActionId(payload), options),
     isRemoving: removeMutation.isPending,
@@ -374,7 +300,6 @@ export function useExtensionSetup(packageRef) {
 
   return {
     secrets: query.data?.secrets || [],
-    fields: query.data?.fields || [],
     onboarding: query.data?.onboarding || null,
     isLoading: query.isLoading,
     error: query.error,
@@ -387,8 +312,8 @@ export function useSetupSubmit(packageRef, onSuccess) {
   const packageKey = packageRef?.id || packageRef;
 
   const mutation = useMutation({
-    mutationFn: ({ secrets, fields, clientActionId: actionId }) =>
-      submitExtensionSetup(packageRef, secrets, fields, {
+    mutationFn: ({ secrets, clientActionId: actionId }) =>
+      submitExtensionSetup(packageRef, secrets, {
         clientActionId: actionId,
       }).then((res) => {
         if (res.success === false) {
@@ -448,15 +373,7 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
     queryClient.invalidateQueries({ queryKey: ["extension-setup", packageKey] });
   }, [packageKey, queryClient]);
 
-  const setupIsConfigured = React.useCallback(({ allowProvidedSecrets = true } = {}) => {
-    const setup = queryClient.getQueryData(["extension-setup", packageKey]);
-    if (
-      allowProvidedSecrets &&
-      setup?.secrets?.length > 0 &&
-      setup.secrets.every((secret) => secret.provided)
-    ) {
-      return true;
-    }
+  const setupIsConfigured = React.useCallback(() => {
     const extensions = queryClient.getQueryData(["extensions"])?.extensions || [];
     const extension = extensions.find((item) => item.package_ref?.id === packageKey);
     return extensionListItemIsConfigured(extension);
@@ -485,9 +402,7 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
       // "configured" alone cannot prove THIS flow finished: only a
       // not-configured → configured transition observed by the poll (or the
       // flow-id-matched callback signal) may complete the watcher.
-      const configuredBeforeFlow = setupIsConfigured({
-        allowProvidedSecrets: !requireCallbackCompletion,
-      });
+      const configuredBeforeFlow = setupIsConfigured();
       const hasFlowCompletionBackstop = Boolean(flowId);
       let stopped = false;
       let timer = null;
@@ -582,9 +497,7 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
           return;
         }
         pollFlowStatus();
-        const configured = setupIsConfigured({
-          allowProvidedSecrets: !requireCallbackCompletion,
-        });
+        const configured = setupIsConfigured();
         if (configured && !configuredBeforeFlow) {
           complete();
           return;
@@ -675,32 +588,4 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
     },
   });
   return { ...mutation, isAuthorizing, authError };
-}
-
-export function usePairing(channel, options = {}) {
-  const query = useQuery({
-    queryKey: ["pairing", channel],
-    queryFn: () => fetchPairingRequests(channel),
-    enabled: Boolean(channel) && options.enabled !== false,
-    refetchInterval: 5000,
-  });
-
-  const queryClient = useQueryClient();
-
-  const approveMutation = useMutation({
-    mutationFn: ({ code }) => approvePairingCode(channel, code),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["pairing", channel] });
-      queryClient.invalidateQueries({ queryKey: ["extensions"] });
-    },
-  });
-
-  return {
-    requests: query.data?.requests || [],
-    isLoading: query.isLoading,
-    approve: approveMutation.mutate,
-    isApproving: approveMutation.isPending,
-    result: approveMutation.isSuccess ? approveMutation.data : null,
-    error: approveMutation.isError ? approveMutation.error : null,
-  };
 }

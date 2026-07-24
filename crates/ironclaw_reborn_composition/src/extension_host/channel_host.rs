@@ -4,9 +4,9 @@
 //! against manifest-declared deployment channels plus an active-snapshot
 //! compatibility lane. Every discovered extension whose resolved contract
 //! declares inbound channel ingress gets one registration — a dynamic
-//! verification-secrets port over the
-//! `[channel.config]` secret storage plus a [`GenericChannelInboundSink`]
-//! over per-extension ProductSurface admission (durable idempotency ledger
+//! verification-secrets port over the manifest-declared administrator secrets
+//! plus a [`GenericChannelInboundSink`] over per-extension ProductSurface
+//! admission (durable idempotency ledger
 //! and durable conversation binding at extension-keyed storage roots),
 //! observed by the generic run-delivery observer when the composed runtime
 //! has a delivery coordinator. Deployment registrations remain independent
@@ -15,30 +15,25 @@
 //! `Arc` entries under one lock).
 //!
 //! Vendor residue that is not yet host-generic enters only through
-//! [`ChannelExtras`]: an inbound payload classifier (gate-resolution
-//! replies), the preference-target codec for the triggered delivery driver, and
-//! an optional storage-root override for a channel whose durable state
-//! predates the generic root scheme.
+//! [`ChannelExtras`]: the preference-target codec for the triggered delivery
+//! driver and an optional shared-conversation route resolver.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
-use ironclaw_conversations::RebornFilesystemConversationServices;
 use ironclaw_extension_host::active::{ActiveExtension, ActiveSnapshot};
 use ironclaw_extension_host::ingress::{
     IngressPortError, IngressSecretsPort, VerificationCandidate,
 };
 use ironclaw_extension_host::{DeploymentChannelBinding, DeploymentChannelRegistry, SnapshotWatch};
-use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::ChannelInboundProductSurface;
 use ironclaw_host_api::recipe::IngressVerificationRecipe;
 use ironclaw_host_api::{
-    AgentId, ExtensionId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId,
-    ResourceScope, SecretHandle, TenantId, ThreadId, UserId, VirtualPath,
+    AgentId, ExtensionId, ProjectId, ResourceScope, SecretHandle, TenantId, ThreadId, UserId,
 };
 use ironclaw_outbound::{
-    CommunicationPreferenceRepository, DeliveredGateRouteStore, OutboundStateStore,
+    CommunicationPreferenceRepository, DeliveredGateRouteStore, OutboundStateStorePort,
 };
 use ironclaw_product::{
     AdapterInstallationId, ExternalConversationRef, ExternalEventId, ProductAdapterId,
@@ -47,28 +42,24 @@ use ironclaw_product::{
 use ironclaw_product::{
     ApprovalInteractionService, ApprovalPromptContextSource, AuthInteractionService,
     BlockedAuthFlowCanceller, BlockedAuthPromptSource, ChannelConnectionNoticePolicy,
-    ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
-    DeliveryCoordinator, IdempotencyLedger, PreferenceTargetCodec,
+    ChannelPairingConsumeOutcome, ChannelPairingRegistry, ChannelWorkflowState,
+    ChannelWorkflowStateService, ConversationBindingService, DefaultInboundTurnService,
+    DefaultProductSurface, DeliveryCoordinator, PreferenceTargetCodec,
     ProductActorUserResolutionRequest, ProductActorUserResolver,
     ProductConversationSubjectRouteResolver, ProductInstallationKey, ProductInstallationScope,
-    ProductWorkflowError, RebornFilesystemIdempotencyLedger, ResolvedProductActorUser,
-    RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
-    StaticProductInstallationResolver,
+    ProductWorkflowError, ResolveStoredProductReplyTargetRequest, ResolvedProductActorUser,
+    ResolvedStoredProductReplyTarget, RunDeliveryObserver, RunDeliveryServices,
+    StaticProductInstallationResolver, TriggeredRunDeliveryChannel,
 };
 use ironclaw_threads::SessionThreadService;
 use ironclaw_turns::{TurnCoordinator, TurnScope};
 
-use crate::extension_host::channel_config::ChannelConfigService;
-use crate::extension_host::channel_pairing::ChannelPairingConsumeOutcome;
+use crate::extension_host::admin_configuration::ComposedExtensionAdminConfigurationResolver;
 use crate::extension_host::extension_ingress::{
     ChannelInboundSinkConfig, ChannelIngressDrain, ChannelIngressRegistration,
     ChannelPairingOutcomeObserver, ExtensionIngressRegistry, GenericChannelInboundSink,
-    InboundPayloadClassifier, ManagedRegistrationOutcome, PostAdmissionObserver,
-    VerifiedEvidenceMint,
+    ManagedRegistrationOutcome, PostAdmissionObserver, VerifiedEvidenceMint,
 };
-
-const CHANNEL_IDEMPOTENCY_LEDGER_SETTLED_LIMIT: usize = 10_000;
-const CHANNEL_IDEMPOTENCY_LEDGER_PRUNE_INTERVAL: usize = 1_000;
 
 /// Derive the trusted-evidence shape the generic inbound sink mints from the
 /// resolved contract's ingress verification recipe — the mint mirrors the
@@ -94,138 +85,25 @@ pub(crate) fn evidence_mint_for_verification(
     }
 }
 
-/// Extension-keyed durable roots for the per-extension workflow state (the
-/// idempotency ledger and the conversation-binding store). Parameterized so
-/// a channel whose durable state predates the generic scheme can keep its
-/// legacy roots until the one-time key migration folds them in.
-#[derive(Debug, Clone)]
-pub(crate) struct ChannelWorkflowStorageRoots {
-    pub(crate) idempotency: VirtualPath,
-    pub(crate) conversations: VirtualPath,
-}
-
-/// The generic root scheme: everything under one extension-keyed subtree.
-pub(crate) fn default_channel_workflow_storage_roots(
-    tenant_id: &TenantId,
-    extension_id: &str,
-) -> Result<ChannelWorkflowStorageRoots, String> {
-    let tenant = crate::resource_scope_path_segment(tenant_id.as_str());
-    let base = format!("/tenants/{tenant}/shared/channel-extensions/{extension_id}");
-    Ok(ChannelWorkflowStorageRoots {
-        idempotency: VirtualPath::new(format!("{base}/product-workflow/idempotency"))
-            .map_err(|error| format!("invalid idempotency storage root: {error}"))?,
-        conversations: VirtualPath::new(format!("{base}/conversations"))
-            .map_err(|error| format!("invalid conversation storage root: {error}"))?,
-    })
-}
-
-/// The durable per-extension workflow state a
-/// [`ChannelWorkflowStateFactory`] builds.
-pub(crate) struct ChannelWorkflowState {
-    pub(crate) ledger: Arc<dyn IdempotencyLedger>,
-    pub(crate) conversations: Arc<RebornFilesystemConversationServices>,
-}
-
-/// Builds the durable per-extension workflow state over whatever substrate
-/// the composed runtime owns. Injected so this module names no concrete
-/// backend.
-#[async_trait]
-pub(crate) trait ChannelWorkflowStateFactory: Send + Sync {
-    async fn build(
-        &self,
-        roots: &ChannelWorkflowStorageRoots,
-        ledger_scope: ResourceScope,
-    ) -> Result<ChannelWorkflowState, String>;
-}
-
-/// [`ChannelWorkflowStateFactory`] over a root filesystem: the storage roots
-/// are mounted at the fixed aliases the durable ledger and conversation
-/// store resolve (`/engine/product_workflow/idempotency`, `/conversations`).
-pub(crate) struct FilesystemChannelWorkflowStateFactory<F>
-where
-    F: RootFilesystem + 'static,
-{
-    filesystem: Arc<F>,
-}
-
-impl<F> FilesystemChannelWorkflowStateFactory<F>
-where
-    F: RootFilesystem + 'static,
-{
-    pub(crate) fn new(filesystem: Arc<F>) -> Self {
-        Self { filesystem }
-    }
-}
-
-#[async_trait]
-impl<F> ChannelWorkflowStateFactory for FilesystemChannelWorkflowStateFactory<F>
-where
-    F: RootFilesystem + 'static,
-{
-    async fn build(
-        &self,
-        roots: &ChannelWorkflowStorageRoots,
-        ledger_scope: ResourceScope,
-    ) -> Result<ChannelWorkflowState, String> {
-        let mount = |alias: &str, target: &VirtualPath| -> Result<MountGrant, String> {
-            Ok(MountGrant::new(
-                MountAlias::new(alias)
-                    .map_err(|error| format!("invalid workflow state mount alias: {error}"))?,
-                target.clone(),
-                MountPermissions::read_write_list_delete(),
-            ))
-        };
-        let view = MountView::new(vec![
-            mount("/engine/product_workflow/idempotency", &roots.idempotency)?,
-            mount("/conversations", &roots.conversations)?,
-        ])
-        .map_err(|error| format!("invalid workflow state mount view: {error}"))?;
-        let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
-            Arc::clone(&self.filesystem),
-            view,
-        ));
-        let settled_limit = std::num::NonZeroUsize::new(CHANNEL_IDEMPOTENCY_LEDGER_SETTLED_LIMIT)
-            .ok_or_else(|| "settled entry limit must be non-zero".to_string())?;
-        let prune_interval = std::num::NonZeroUsize::new(CHANNEL_IDEMPOTENCY_LEDGER_PRUNE_INTERVAL)
-            .ok_or_else(|| "settled prune interval must be non-zero".to_string())?;
-        let ledger = RebornFilesystemIdempotencyLedger::new(Arc::clone(&scoped), ledger_scope)
-            .with_settled_entry_limit(settled_limit)
-            .with_settled_prune_interval(prune_interval);
-        let conversations = RebornFilesystemConversationServices::new(scoped)
-            .await
-            .map_err(|error| format!("durable conversation store unavailable: {error}"))?;
-        Ok(ChannelWorkflowState {
-            ledger: Arc::new(ledger),
-            conversations: Arc::new(conversations),
-        })
-    }
-}
-
 /// Per-extension vendor ports that are not yet host-generic. Populated by
 /// the extension's composition lane; a pure-manifest channel package
 /// registers none.
 pub(crate) struct ChannelExtras {
-    /// Protocol-specific payload reclassification (gate-resolution replies).
-    pub(crate) classifier: Option<Arc<InboundPayloadClassifier>>,
     /// The vendor half of the triggered-delivery driver; consumed by the
     /// lane that builds the triggered hook.
     pub(crate) preference_target_codec: Option<Arc<dyn PreferenceTargetCodec>>,
     /// Optional shared-channel subject-route resolver override. Absent, the
     /// assembly installs the DEFAULT generic resolver over the extension's
-    /// `*_allowed_channels` / `*_subject_routes` `[channel.config]` values
+    /// `*_allowed_channels` / `*_subject_routes` administrator values
     /// when the manifest declares either handle.
     pub(crate) subject_route_resolver: Option<Arc<dyn ProductConversationSubjectRouteResolver>>,
-    /// Legacy storage-root override for the per-extension workflow state.
-    pub(crate) storage_roots: Option<ChannelWorkflowStorageRoots>,
 }
 
 /// The extras retained after registration.
 #[derive(Clone, Default)]
 struct StoredChannelExtras {
-    classifier: Option<Arc<InboundPayloadClassifier>>,
     preference_target_codec: Option<Arc<dyn PreferenceTargetCodec>>,
     subject_route_resolver: Option<Arc<dyn ProductConversationSubjectRouteResolver>>,
-    storage_roots: Option<ChannelWorkflowStorageRoots>,
 }
 
 /// The deployment identity every per-extension workflow binds under: the
@@ -241,16 +119,17 @@ pub struct ChannelHostIdentity {
 
 /// The outbound-delivery half of the assembly's dependencies. Absent when
 /// the composed runtime has no delivery coordinator — registrations are
-/// then ingress-only (turns run; nothing watches them for channel replies).
+/// then ingress-only (turns run; no channel lifecycle output is delivered).
 pub(crate) struct ChannelHostDeliveryDeps {
     pub(crate) coordinator: Arc<DeliveryCoordinator>,
-    pub(crate) outbound_store: Arc<dyn OutboundStateStore>,
+    pub(crate) outbound_store: Arc<dyn OutboundStateStorePort>,
     pub(crate) route_store: Arc<dyn DeliveredGateRouteStore>,
     pub(crate) communication_preferences: Arc<dyn CommunicationPreferenceRepository>,
+    pub(crate) current_delivery_targets: Arc<dyn ironclaw_product::CurrentDeliveryTargetResolver>,
     pub(crate) approval_context: Option<Arc<dyn ApprovalPromptContextSource>>,
     pub(crate) blocked_auth_prompts: Option<Arc<dyn BlockedAuthPromptSource>>,
     pub(crate) auth_flow_cancel: Option<Arc<dyn BlockedAuthFlowCanceller>>,
-    pub(crate) settings: RunDeliverySettings,
+    pub(crate) event_router: Arc<ironclaw_product::RunDeliveryEventRouter>,
 }
 
 /// Everything the assembly composes per-extension graphs from.
@@ -258,8 +137,8 @@ pub(crate) struct GenericChannelHostDeps {
     pub(crate) watch: SnapshotWatch,
     pub(crate) deployment_channels: Arc<DeploymentChannelRegistry>,
     pub(crate) registry: Arc<ExtensionIngressRegistry>,
-    pub(crate) channel_config: Arc<ChannelConfigService>,
-    pub(crate) workflow_state: Arc<dyn ChannelWorkflowStateFactory>,
+    pub(crate) admin_configuration_resolver: Arc<ComposedExtensionAdminConfigurationResolver>,
+    pub(crate) workflow_state: Arc<ChannelWorkflowStateService>,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) turn_coordinator: Arc<dyn TurnCoordinator>,
     pub(crate) approval_interaction: Option<Arc<dyn ApprovalInteractionService>>,
@@ -274,8 +153,7 @@ pub(crate) struct GenericChannelHostDeps {
     /// Pairing services for `WebGeneratedCode` channel extensions: drives the
     /// sink's pre-admission consume gate and identity-based actor resolution
     /// for extensions that pair without an OAuth vendor.
-    pub(crate) channel_pairing:
-        Option<Arc<crate::extension_host::channel_pairing::ChannelPairingRegistry>>,
+    pub(crate) channel_pairing: Option<Arc<ChannelPairingRegistry>>,
 }
 
 /// What the assembly last reconciled for one extension id.
@@ -283,7 +161,6 @@ enum ReconciledChannel {
     /// Assembly-built generic graph for exactly this channel source.
     Generic {
         source: HostedChannelSource,
-        #[cfg(feature = "test-support")]
         conversation_binding: Arc<dyn ConversationBindingService>,
         /// The post-admission observer registered with the sink (test seam:
         /// gate-resolution acks arriving from non-channel surfaces are
@@ -338,7 +215,6 @@ impl HostedChannelSource {
 
 struct BuiltGenericChannelGraph {
     registration: ChannelIngressRegistration,
-    #[cfg(feature = "test-support")]
     conversation_binding: Arc<dyn ConversationBindingService>,
     #[cfg(feature = "test-support")]
     observer: Option<Arc<dyn PostAdmissionObserver>>,
@@ -387,23 +263,19 @@ impl GenericChannelHostAssembly {
     }
 
     /// Register one extension's vendor extras, then re-reconcile the
-    /// extension against the current snapshot so classifier/storage
-    /// overrides apply to the next build.
+    /// extension against the current snapshot so vendor extras apply to the
+    /// next build.
     pub(crate) async fn register_extras(&self, extension_id: &str, extras: ChannelExtras) {
         let ChannelExtras {
-            classifier,
             preference_target_codec,
             subject_route_resolver,
-            storage_roots,
         } = extras;
         if let Ok(mut stored) = self.extras.lock() {
             stored.insert(
                 extension_id.to_string(),
                 StoredChannelExtras {
-                    classifier,
                     preference_target_codec,
                     subject_route_resolver,
-                    storage_roots,
                 },
             );
         }
@@ -454,6 +326,56 @@ impl GenericChannelHostAssembly {
             .filter_map(|extension_id| {
                 self.preference_target_codec(&extension_id)
                     .map(|codec| (extension_id, codec))
+            })
+            .collect()
+    }
+
+    /// Resolve an opaque run-state reply binding through the active channel
+    /// conversation stores. Each channel owns a separate durable binding
+    /// root, so misses are expected until the owning channel is reached.
+    pub(crate) async fn resolve_stored_reply_target(
+        &self,
+        request: ResolveStoredProductReplyTargetRequest,
+    ) -> Result<Option<ResolvedStoredProductReplyTarget>, ProductWorkflowError> {
+        let bindings = {
+            let reconciled = self.reconciled.lock().await;
+            reconciled
+                .values()
+                .filter_map(|channel| match channel {
+                    ReconciledChannel::Generic {
+                        conversation_binding,
+                        ..
+                    } => Some(Arc::clone(conversation_binding)),
+                    ReconciledChannel::Untouched { .. } => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        for binding in bindings {
+            match binding.resolve_stored_reply_target(request.clone()).await {
+                Ok(target) => return Ok(Some(target)),
+                // The product binding deliberately maps both an absent opaque
+                // ref and denied access to this fail-closed result. Continue
+                // across extension-scoped stores; no denied binding is ever
+                // returned or used as routing authority.
+                Err(ProductWorkflowError::BindingAccessDenied) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(None)
+    }
+
+    /// Currently assembled channel lanes for product-owned triggered-run
+    /// routing. Composition contributes dependencies only; it does not choose
+    /// a target or define fallback/failure semantics.
+    pub(crate) fn active_triggered_delivery_channels(&self) -> Vec<TriggeredRunDeliveryChannel> {
+        self.active_preference_codecs()
+            .into_iter()
+            .filter_map(|(extension_id, preference_target_codec)| {
+                self.triggered_run_delivery_services(&extension_id)
+                    .map(|services| TriggeredRunDeliveryChannel {
+                        preference_target_codec,
+                        services,
+                    })
             })
             .collect()
     }
@@ -577,7 +499,6 @@ impl GenericChannelHostAssembly {
                                 extension_id.clone(),
                                 ReconciledChannel::Generic {
                                     source,
-                                    #[cfg(feature = "test-support")]
                                     conversation_binding: graph.conversation_binding,
                                     #[cfg(feature = "test-support")]
                                     observer: graph.observer,
@@ -620,7 +541,7 @@ impl GenericChannelHostAssembly {
     }
 
     /// Build one extension's generic inbound graph: dynamic verification
-    /// secrets over the `[channel.config]` secret storage, per-extension
+    /// secrets over the administrator configuration service, per-extension
     /// ProductSurface admission, and (with a coordinator) the run-delivery
     /// observer.
     async fn build_generic_graph(
@@ -641,8 +562,8 @@ impl GenericChannelHostAssembly {
             return Ok(None);
         };
 
-        let secrets = Arc::new(ChannelConfigIngressSecrets {
-            channel_config: Arc::clone(&self.deps.channel_config),
+        let secrets = Arc::new(AdminConfigurationIngressSecrets {
+            admin_configuration_resolver: Arc::clone(&self.deps.admin_configuration_resolver),
             extension_id: ExtensionId::new(source.extension_id())
                 .map_err(|error| format!("invalid extension id: {error}"))?,
             handle: secret_handle.clone(),
@@ -683,15 +604,11 @@ impl GenericChannelHostAssembly {
             .channel_pairing
             .as_ref()
             .and_then(|registry| registry.get(source.extension_id()))
-            .map(|service| {
-                service
-                    as Arc<dyn crate::extension_host::extension_ingress::ChannelPairingInterceptor>
-            });
+            .map(|service| service as Arc<dyn ironclaw_product::ChannelPairingInterceptor>);
         let surface = Arc::new(workflow) as Arc<dyn ChannelInboundProductSurface>;
         let mut sink = GenericChannelInboundSink::new(ChannelInboundSinkConfig {
             adapter_id,
             evidence,
-            classifier: extras.classifier.clone(),
             surface,
             observer: observer
                 .clone()
@@ -713,7 +630,6 @@ impl GenericChannelHostAssembly {
         };
         Ok(Some(BuiltGenericChannelGraph {
             registration,
-            #[cfg(feature = "test-support")]
             conversation_binding: binding,
             #[cfg(feature = "test-support")]
             observer: observer.map(|observer| observer as Arc<dyn PostAdmissionObserver>),
@@ -728,12 +644,6 @@ impl GenericChannelHostAssembly {
         extras: &StoredChannelExtras,
     ) -> Result<(Arc<dyn ConversationBindingService>, ChannelWorkflowState), String> {
         let identity = &self.deps.identity;
-        let roots = match &extras.storage_roots {
-            Some(roots) => roots.clone(),
-            None => {
-                default_channel_workflow_storage_roots(&identity.tenant_id, source.extension_id())?
-            }
-        };
         let ledger_scope = ResourceScope {
             tenant_id: identity.tenant_id.clone(),
             user_id: identity.operator_user_id.clone(),
@@ -743,7 +653,14 @@ impl GenericChannelHostAssembly {
             thread_id: None,
             invocation_id: ironclaw_host_api::InvocationId::new(),
         };
-        let workflow_state = self.deps.workflow_state.build(&roots, ledger_scope).await?;
+        let extension_id = ExtensionId::new(source.extension_id())
+            .map_err(|error| format!("invalid extension id: {error}"))?;
+        let workflow_state = self
+            .deps
+            .workflow_state
+            .build_for_extension(&extension_id, ledger_scope)
+            .await
+            .map_err(|error| error.to_string())?;
 
         let adapter_id = ProductAdapterId::new(source.extension_id())
             .map_err(|error| format!("invalid adapter id: {error}"))?;
@@ -756,16 +673,17 @@ impl GenericChannelHostAssembly {
         // an auth vendor keep the operator-actor policy: the ingress
         // verification secret gates who reaches the installation and no
         // binding can exist to resolve.
-        let pairing_extension = self
+        let pairing_service = self
             .deps
             .channel_pairing
             .as_ref()
-            .is_some_and(|registry| registry.get(source.extension_id()).is_some());
+            .and_then(|registry| registry.get(source.extension_id()));
         let actor_user_resolver: Arc<dyn ProductActorUserResolver> = match (
             self.deps.identity_lookup.as_ref(),
             source.resolved().auth.first(),
+            pairing_service,
         ) {
-            (Some(lookup), Some(auth)) => Arc::new(
+            (Some(lookup), Some(auth), _) => Arc::new(
                 crate::provider_identity::ProviderIdentityActorResolver::for_any_actor_kind(
                     auth.vendor.as_str(),
                     source.extension_id(),
@@ -775,14 +693,10 @@ impl GenericChannelHostAssembly {
             // Pairing-strategy channels have no OAuth vendor; verified
             // inbound actors resolve through the bindings the pairing
             // consume wrote, keyed by the extension id as provider. Unbound
-            // actors fail closed instead of inheriting the operator.
-            (Some(lookup), None) if pairing_extension => Arc::new(
-                crate::provider_identity::ProviderIdentityActorResolver::for_any_actor_kind(
-                    source.extension_id(),
-                    source.extension_id(),
-                    Arc::clone(lookup),
-                ),
-            ),
+            // actors fail closed instead of inheriting the operator. The
+            // pairing service also returns its durable binding epoch so the
+            // conversation layer preserves exact-generation unpair fencing.
+            (_, None, Some(pairing)) => pairing,
             _ => Arc::new(OperatorActorUserResolver {
                 operator_user_id: identity.operator_user_id.clone(),
             }),
@@ -795,34 +709,29 @@ impl GenericChannelHostAssembly {
         .with_default_subject_user_id(identity.operator_user_id.clone());
         // Generic shared-channel admission (§5.3): with a subject-route
         // resolver installed, unrouted shared conversations fail closed —
-        // an extras override wins; otherwise a channel declaring the
-        // `*_allowed_channels` / `*_subject_routes` config convention gets
-        // the default resolver over its `[channel.config]` values.
+        // an extras override wins; otherwise a manifest declaring the
+        // `*_allowed_channels` / `*_subject_routes` administrator convention
+        // gets the default resolver over those values.
         let subject_route_resolver: Option<Arc<dyn ProductConversationSubjectRouteResolver>> =
             match &extras.subject_route_resolver {
                 Some(resolver) => Some(Arc::clone(resolver)),
                 None => {
-                    let handles = source
-                        .resolved()
-                        .channel
-                        .as_ref()
-                        .map(|channel| {
-                            crate::extension_host::channel_subject_routes::
-                                shared_channel_admission_handles(&channel.config.fields)
-                        })
-                        .unwrap_or_default();
+                    let handles = crate::extension_host::channel_subject_routes::
+                        shared_channel_admission_handles(
+                            &source.resolved().admin_configuration,
+                        );
                     if handles.declared() {
                         let extension_id = ExtensionId::new(source.extension_id())
                             .map_err(|error| format!("invalid extension id: {error}"))?;
                         Some(Arc::new(
                             crate::extension_host::channel_subject_routes::
-                                ChannelConfigSubjectRouteResolver::new(
+                                AdminConfigurationSubjectRouteResolver::new(
                                     adapter_id.clone(),
                                     installation_id.clone(),
                                     identity.tenant_id.clone(),
                                     extension_id,
                                     handles,
-                                    Arc::clone(&self.deps.channel_config),
+                                    Arc::clone(&self.deps.admin_configuration_resolver),
                                 ),
                         ))
                     } else {
@@ -897,14 +806,31 @@ impl GenericChannelHostAssembly {
             .and_then(|registry| registry.get(source.extension_id()))
             .map(|service| service.connection_notices().clone())
             .unwrap_or_else(|| ChannelConnectionNoticePolicy::generic(&source.resolved().name));
-        let observer = Arc::new(RunDeliveryObserver::with_settings_and_connection_notices(
-            services,
-            delivery.settings,
+        let observer = Arc::new(RunDeliveryObserver::with_connection_notices(
+            services.clone(),
             connection_notices.clone(),
         ));
+        let mut event_handler = ironclaw_product::RunDeliveryEventHandler::new(
+            services,
+            source.extension_id(),
+            source.installation_id(),
+        );
+        if self
+            .preference_target_codec(source.extension_id())
+            .is_some()
+        {
+            event_handler = event_handler
+                .with_current_target_resolver(Arc::clone(&delivery.current_delivery_targets));
+        }
+        let event_handler = Arc::new(event_handler);
+        delivery
+            .event_router
+            .register(source.extension_id(), &event_handler);
         Ok(Arc::new(RunDeliveryPostAdmissionObserver {
             observer,
             connection_notices,
+            event_handler,
+            event_router: Arc::clone(&delivery.event_router),
         }))
     }
 
@@ -962,8 +888,9 @@ fn spawn_drain(drain: Option<Arc<dyn ChannelIngressDrain>>) {
 }
 
 /// No-op [`ConversationBindingService`] for the triggered-delivery
-/// services: the triggered path receives its `TurnScope` from the poller
-/// and resolves its target from the creator's stored preference, so no
+/// services: the triggered path receives its sealed `TurnScope` from the
+/// trigger submission hook and resolves its target from current caller-scoped
+/// outbound-target state, so no
 /// binding is ever resolved. This stub satisfies the type system without
 /// an unnecessary installation-level conversation registry.
 struct TriggeredNoopConversationBindingService;
@@ -1008,20 +935,20 @@ impl ProductActorUserResolver for OperatorActorUserResolver {
     }
 }
 
-/// Dynamic verification-secrets port over the `[channel.config]` secret
+/// Dynamic verification-secrets port over administrator configuration
 /// storage: the manifest-declared `verification.secret_handle` is resolved
 /// per request, so a configure save takes effect on the next webhook with
 /// no route rebuild. No stored secret -> no candidates -> the generic
 /// router rejects 401.
-struct ChannelConfigIngressSecrets {
-    channel_config: Arc<ChannelConfigService>,
+struct AdminConfigurationIngressSecrets {
+    admin_configuration_resolver: Arc<ComposedExtensionAdminConfigurationResolver>,
     extension_id: ExtensionId,
     handle: SecretHandle,
     installation_id: String,
 }
 
 #[async_trait]
-impl IngressSecretsPort for ChannelConfigIngressSecrets {
+impl IngressSecretsPort for AdminConfigurationIngressSecrets {
     async fn verification_candidates(
         &self,
         _extension_id: &str,
@@ -1029,7 +956,7 @@ impl IngressSecretsPort for ChannelConfigIngressSecrets {
         _handle: Option<&SecretHandle>,
     ) -> Result<Vec<VerificationCandidate>, IngressPortError> {
         let material = self
-            .channel_config
+            .admin_configuration_resolver
             .secret_material(&self.extension_id, &self.handle)
             .await
             .map_err(|error| IngressPortError {
@@ -1052,12 +979,29 @@ impl IngressSecretsPort for ChannelConfigIngressSecrets {
 pub(super) struct RunDeliveryPostAdmissionObserver {
     observer: Arc<RunDeliveryObserver>,
     connection_notices: ChannelConnectionNoticePolicy,
+    // Strong ownership keeps the router's weak registration live for exactly
+    // as long as this reconciled channel graph remains installed.
+    event_handler: Arc<ironclaw_product::RunDeliveryEventHandler>,
+    event_router: Arc<ironclaw_product::RunDeliveryEventRouter>,
 }
 
 #[async_trait]
 impl PostAdmissionObserver for RunDeliveryPostAdmissionObserver {
     async fn observe_ack(&self, envelope: ProductInboundEnvelope, ack: ProductInboundAck) {
-        self.observer.observe_ack(envelope, ack).await;
+        self.observer
+            .observe_ack(envelope.clone(), ack.clone())
+            .await;
+        if let Err(error) = self
+            .event_handler
+            .reconcile_accepted_user_message(self.event_router.as_ref(), &envelope, &ack)
+            .await
+        {
+            tracing::debug!(
+                target = "ironclaw::reborn::run_delivery",
+                %error,
+                "post-admission lifecycle reconciliation was not applicable"
+            );
+        }
     }
 
     async fn observe_error(
@@ -1094,7 +1038,11 @@ impl RunDeliveryPostAdmissionObserver {
     }
 }
 
+// Lives under `channel_host/tests/` (the repo's test-only path convention the
+// no-panics checker recognizes); `#[path]` keeps the module name and its
+// `super::` references unchanged.
 #[cfg(test)]
+#[path = "channel_host/tests/e2e_tests.rs"]
 mod e2e_tests;
 
 #[cfg(test)]
@@ -1169,20 +1117,5 @@ mod tests {
     #[test]
     fn none_recipe_mints_nothing() {
         assert!(evidence_mint_for_verification(&IngressVerificationRecipe::None).is_none());
-    }
-
-    #[test]
-    fn default_storage_roots_are_extension_keyed() {
-        let tenant = TenantId::new("acme-tenant").expect("tenant id");
-        let roots =
-            default_channel_workflow_storage_roots(&tenant, "vendorx").expect("roots build");
-        assert_eq!(
-            roots.idempotency.as_str(),
-            "/tenants/acme-tenant/shared/channel-extensions/vendorx/product-workflow/idempotency"
-        );
-        assert_eq!(
-            roots.conversations.as_str(),
-            "/tenants/acme-tenant/shared/channel-extensions/vendorx/conversations"
-        );
     }
 }

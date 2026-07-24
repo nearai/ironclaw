@@ -21,9 +21,10 @@ fn build_approval_interaction_service_with_parts(
         parts.approval_requests.clone(),
         parts.capability_leases.clone(),
     ));
-    let persistent_approval_policies: Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore> =
-        parts.persistent_approval_policies.clone();
-    let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
+    let persistent_approval_policies: Arc<
+        dyn ironclaw_approvals::PersistentApprovalPolicyStorePort,
+    > = parts.persistent_approval_policies.clone();
+    let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort> =
         parts.tool_permission_overrides.clone();
 
     Ok(Arc::new(
@@ -36,9 +37,24 @@ fn build_approval_interaction_service_with_parts(
                 parts.skill_mounts.clone(),
                 parts.memory_mounts.clone(),
                 parts.system_extensions_lifecycle_mounts.clone(),
-                local_dev::extension_surface::ExtensionCapabilitySurfaceSource::new(Some(
-                    Arc::clone(&parts.extension_management),
-                )),
+                extension_surface::ExtensionCapabilitySurfaceSource::new(Some({
+                    let mut facade = crate::extension_host::lifecycle::LifecycleFacade::new(
+                        Arc::clone(&parts.skill_management),
+                    )
+                    .with_extension_management(Arc::clone(&parts.extension_management))
+                    .with_admin_configuration_resolver(Arc::clone(
+                        &parts.admin_configuration_resolver,
+                    ))
+                    .with_runtime_credential_accounts(
+                        parts
+                            .product_auth
+                            .runtime_credential_account_selection_service(),
+                    );
+                    if let Some(egress) = parts.runtime_http_egress.as_ref() {
+                        facade = facade.with_runtime_http_egress(Arc::clone(egress));
+                    }
+                    Arc::new(facade)
+                })),
             )),
             approval_resolver,
             turn_coordinator,
@@ -93,7 +109,7 @@ impl RebornRuntime {
     /// this runtime's own turn state (e.g.
     /// `RebornIntegrationGroup`, whose runs execute against its own
     /// `shared.turn_store` via a separate `build_default_planned_runtime`).
-    /// Generic over `F` so any `FilesystemTurnStateRowStore<F>`-backed store can be
+    /// Generic over `F` so any `TurnStateRowStore<F>`-backed store can be
     /// passed directly, without this crate exposing `TurnRunSnapshotSource`
     /// outside itself.
     ///
@@ -105,7 +121,7 @@ impl RebornRuntime {
     pub fn local_dev_approval_interaction_service_with_turn_state_for_test<F>(
         &self,
         turn_coordinator: Arc<dyn TurnCoordinator>,
-        turn_state: Arc<ironclaw_turns::FilesystemTurnStateRowStore<F>>,
+        turn_state: Arc<ironclaw_turns::TurnStateRowStore<F>>,
     ) -> Result<Option<Arc<dyn ApprovalInteractionService>>, RebornRuntimeError>
     where
         F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
@@ -133,7 +149,7 @@ impl RebornRuntime {
     pub fn local_dev_auth_interaction_service_with_turn_state_for_test<F>(
         &self,
         turn_coordinator: Arc<dyn TurnCoordinator>,
-        turn_state: Arc<ironclaw_turns::FilesystemTurnStateRowStore<F>>,
+        turn_state: Arc<ironclaw_turns::TurnStateRowStore<F>>,
     ) -> Option<Arc<dyn AuthInteractionService>>
     where
         F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,

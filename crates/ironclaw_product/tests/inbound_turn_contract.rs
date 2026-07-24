@@ -45,8 +45,7 @@ use ironclaw_runner::runtime::{
     RuntimeTurnStateStore, build_product_live_planned_runtime,
 };
 use ironclaw_runner::subagent::await_edge::{
-    boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver,
-    store::FilesystemAwaitEdgeStore,
+    boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver, store::AwaitEdgeStore,
 };
 use ironclaw_runner::subagent::goal_store::in_memory_backed_subagent_goal_store;
 use ironclaw_threads::{
@@ -55,11 +54,11 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::test_support::in_memory_turn_state_store;
 use ironclaw_turns::{
-    CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator, EventCursor,
-    FilesystemTurnStateRowStore, GetRunStateRequest, IdempotencyKey, ResumeTurnRequest,
-    ResumeTurnResponse, RunProfileId, RunProfileVersion, SanitizedCancelReason, SubmitTurnRequest,
-    SubmitTurnResponse, ThreadBusy, TurnActor, TurnCoordinator, TurnError, TurnId, TurnOriginKind,
-    TurnRunId, TurnRunState, TurnRunWake, TurnScope, TurnStateStore, TurnStatus,
+    CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator, EventCursor, GetRunStateRequest,
+    IdempotencyKey, ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion,
+    SanitizedCancelReason, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
+    TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId, TurnRunState, TurnRunWake,
+    TurnScope, TurnStateRowStore, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
         LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken, LoopInputCursorToken,
@@ -426,7 +425,7 @@ impl RunCancellationFactory for UnretainedRunCancellationFactory {
 }
 
 fn turn_state_store_dyn(
-    store: &Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
+    store: &Arc<TurnStateRowStore<InMemoryBackend>>,
 ) -> Arc<dyn TurnStateStore> {
     Arc::clone(store) as Arc<dyn TurnStateStore>
 }
@@ -438,7 +437,7 @@ fn turn_state_store_dyn(
 /// purposes.
 #[allow(clippy::type_complexity)]
 fn test_await_edge_trio(
-    turn_store: &Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
+    turn_store: &Arc<TurnStateRowStore<InMemoryBackend>>,
     capability_result_writer: Arc<dyn LoopCapabilityResultWriter>,
     thread_service: Arc<InMemorySessionThreadService>,
 ) -> (
@@ -453,7 +452,7 @@ fn test_await_edge_trio(
         MountPermissions::read_write_list_delete(),
     )])
     .unwrap();
-    let store = Arc::new(FilesystemAwaitEdgeStore::new(Arc::new(
+    let store = Arc::new(AwaitEdgeStore::new(Arc::new(
         ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), mounts),
     )));
     let goal_store = Arc::new(in_memory_backed_subagent_goal_store());
@@ -487,6 +486,10 @@ fn binding_with_user(user: &str, thread: &str) -> ironclaw_product::ResolvedBind
         tenant_id: TenantId::new("tenant:install_alpha").expect("valid tenant"),
         actor_user_id: user_id.clone(),
         subject_user_id: Some(user_id),
+        source_binding_ref: ironclaw_turns::SourceBindingRef::new("source:test-binding")
+            .expect("valid source binding ref"),
+        reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new("reply:test-binding")
+            .expect("valid reply target binding ref"),
         thread_id: ThreadId::new(thread).expect("valid thread"),
         agent_id: Some(AgentId::new("agent:fake").expect("valid agent")),
         project_id: None,
@@ -1423,7 +1426,7 @@ async fn legacy_deferred_busy_retry_resubmits_existing_message() {
 }
 
 #[tokio::test]
-async fn reply_target_binding_ref_has_single_reply_prefix() {
+async fn canonical_binding_refs_reach_turn_submission_unchanged() {
     let binding_service = FakeConversationBindingService::new();
     let thread_service = InMemorySessionThreadService::default();
     let coordinator = CapturingTurnCoordinator::default();
@@ -1441,10 +1444,11 @@ async fn reply_target_binding_ref_has_single_reply_prefix() {
         .expect("captured submit lock poisoned")
         .clone()
         .expect("submit request captured");
-    let reply_ref = request.reply_target_binding_ref.as_str();
-    assert!(reply_ref.starts_with("reply:"));
-    assert!(!reply_ref.starts_with("reply:reply:"));
-    assert_eq!(reply_ref.matches("reply:").count(), 1);
+    assert_eq!(request.source_binding_ref.as_str(), "source:fake-binding");
+    assert_eq!(
+        request.reply_target_binding_ref.as_str(),
+        "reply:fake-binding"
+    );
     assert_eq!(
         request.product_context.as_ref().map(|c| c.origin),
         Some(TurnOriginKind::Inbound),

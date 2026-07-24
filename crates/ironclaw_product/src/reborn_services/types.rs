@@ -3,7 +3,7 @@ use crate::{ProductOutboundEnvelope, ProjectionCursor};
 use chrono::{DateTime, Utc};
 use ironclaw_auth::{AuthAccountLastError, AuthAccountState};
 use ironclaw_common::llm_costs::RunCost;
-use ironclaw_host_api::{InstallationState, ThreadId};
+use ironclaw_host_api::ThreadId;
 use ironclaw_threads::{SessionThreadRecord, SummaryArtifact, ThreadMessageRecord};
 use ironclaw_turns::run_profile::LoopModelUsage;
 use ironclaw_turns::{
@@ -19,7 +19,6 @@ use crate::{
     LifecycleProductPayload, LifecycleReadinessBlocker,
 };
 
-const OUTBOUND_DELIVERY_TARGET_ID_MAX_BYTES: usize = 512;
 const OUTBOUND_DELIVERY_CHANNEL_MAX_BYTES: usize = 128;
 const OUTBOUND_DELIVERY_DISPLAY_NAME_MAX_BYTES: usize = 256;
 const OUTBOUND_DELIVERY_DESCRIPTION_MAX_BYTES: usize = 1024;
@@ -227,12 +226,20 @@ pub struct RebornServiceLifecycleResponse {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RebornChannelConnectStrategy {
-    InboundProofCode,
     AdminManagedChannels,
     WebGeneratedCode,
-    QrCode,
     #[serde(rename = "oauth")]
     OAuth,
+}
+
+impl RebornChannelConnectStrategy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AdminManagedChannels => "admin_managed_channels",
+            Self::WebGeneratedCode => "web_generated_code",
+            Self::OAuth => "oauth",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -694,6 +701,26 @@ pub struct RebornOutboundDeliveryTargetOption {
     pub capabilities: RebornOutboundDeliveryTargetCapabilities,
 }
 
+/// Canonical product projection for the host-owned WebApp destination.
+pub fn web_app_outbound_delivery_target_option()
+-> Result<RebornOutboundDeliveryTargetOption, String> {
+    Ok(RebornOutboundDeliveryTargetOption {
+        target: RebornOutboundDeliveryTargetSummary::new(
+            RebornOutboundDeliveryTargetId::new(
+                ironclaw_outbound::WEB_APP_OUTBOUND_DELIVERY_TARGET_ID,
+            )?,
+            "web_app",
+            "Web app only",
+            Some("Store the final answer in run history without external delivery.".to_string()),
+        )?,
+        capabilities: RebornOutboundDeliveryTargetCapabilities {
+            final_replies: true,
+            gate_prompts: false,
+            auth_prompts: false,
+        },
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "UncheckedRebornOutboundDeliveryTargetSummary")]
 pub struct RebornOutboundDeliveryTargetSummary {
@@ -911,68 +938,8 @@ pub enum RebornOutboundDeliveryModality {
     Text,
 }
 
-/// Client-safe opaque outbound delivery target id.
-///
-/// Must be non-empty, at most 512 bytes, and free of leading/trailing
-/// whitespace, control characters, and unsafe invisible Unicode formatting
-/// characters.
-///
-/// Composition resolves this id to an adapter-owned reply target before writing
-/// outbound preferences.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(try_from = "String")]
-pub struct RebornOutboundDeliveryTargetId(String);
-
-impl RebornOutboundDeliveryTargetId {
-    pub fn new(value: impl Into<String>) -> Result<Self, String> {
-        let value = value.into();
-        Self::validate(&value)?;
-        Ok(Self(value))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    pub fn into_inner(self) -> String {
-        self.0
-    }
-
-    fn validate(value: &str) -> Result<(), String> {
-        validate_outbound_delivery_display_field(
-            "outbound delivery target id",
-            value,
-            OUTBOUND_DELIVERY_TARGET_ID_MAX_BYTES,
-            true,
-        )
-    }
-}
-
-impl TryFrom<String> for RebornOutboundDeliveryTargetId {
-    type Error = String;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::new(value)
-    }
-}
-
-impl AsRef<str> for RebornOutboundDeliveryTargetId {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl std::fmt::Display for RebornOutboundDeliveryTargetId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl From<RebornOutboundDeliveryTargetId> for String {
-    fn from(value: RebornOutboundDeliveryTargetId) -> Self {
-        value.0
-    }
-}
+/// Product-facing name for the outbound domain's canonical opaque target id.
+pub use ironclaw_host_api::OutboundDeliveryTargetId as RebornOutboundDeliveryTargetId;
 
 fn validate_outbound_delivery_display_field(
     field_name: &str,
@@ -1416,26 +1383,17 @@ pub struct RebornExtensionInfo {
     /// Implementation detail — product taxonomy lives in `surfaces`.
     pub runtime: String,
     pub description: String,
-    pub authenticated: bool,
-    pub active: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
-    pub needs_setup: bool,
-    pub has_auth: bool,
-    /// The installation lifecycle state (§6.1), projected honestly and exposed
-    /// exactly: one of `installed` / `configured` / `active` / `disabled` /
-    /// `failed` / `unsupported`. `failed` is a terminal non-auth activation
-    /// failure and carries its redacted reason in `activation_error`;
-    /// auth-rejection failures surface on the `auth_accounts` axis instead.
-    pub installation_state: InstallationState,
-    /// Redacted reason for a `failed` installation state (the durable
-    /// installation record's `last_error`); absent otherwise.
+    /// Exactly `setup_needed` or `active`; absence from this response means
+    /// uninstalled. Internal activation failures stay attached to
+    /// `setup_needed` through `activation_error`, never as a fourth state.
+    pub installation_state: crate::LifecyclePublicState,
+    /// Redacted internal setup/publication failure; absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub onboarding_state: Option<RebornExtensionOnboardingState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub onboarding: Option<RebornExtensionOnboardingPayload>,
     /// Per-vendor connected accounts (§6.4, ADR 0001). Length ≤ 1 today; the
@@ -1457,27 +1415,6 @@ pub struct RebornExtensionInfo {
 pub struct RebornExtensionActionResponse {
     pub success: bool,
     pub message: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub activated: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth_url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub awaiting_token: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub instructions: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub onboarding_state: Option<RebornExtensionOnboardingState>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub onboarding: Option<RebornExtensionOnboardingPayload>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RebornExtensionOnboardingState {
-    AuthRequired,
-    SetupRequired,
-    Installed,
-    Failed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1492,22 +1429,18 @@ pub struct RebornExtensionOnboardingPayload {
 
 /// WebUI v2 setup projection for extension lifecycle.
 ///
-/// This intentionally uses the v2 `phase`/`blockers` lifecycle contract and
-/// omits the legacy `status` field from the earlier unimplemented route shape.
-/// The live browser consumer still uses the v1 setup route, so this v2 contract
-/// can become lifecycle-native before it has compatibility consumers.
+/// This uses the v2 `phase`/`blockers` lifecycle contract and omits the legacy
+/// `status` field from the retired route shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornSetupExtensionResponse {
     pub package_ref: LifecyclePackageRef,
-    pub phase: InstallationState,
+    pub phase: crate::LifecyclePublicState,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blockers: Vec<LifecycleReadinessBlocker>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<LifecycleProductPayload>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secrets: Vec<RebornExtensionSetupSecret>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub fields: Vec<RebornExtensionSetupField>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub onboarding: Option<RebornExtensionOnboardingPayload>,
 }
@@ -1537,15 +1470,6 @@ pub enum RebornExtensionCredentialSetup {
     /// Channel pairing: the setup card routes to the channel's pairing panel
     /// (host-issued code + deep link), never a token-submit form.
     Pairing,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornExtensionSetupField {
-    pub name: String,
-    pub prompt: String,
-    pub optional: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub placeholder: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

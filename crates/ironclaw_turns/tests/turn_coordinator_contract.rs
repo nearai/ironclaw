@@ -15,12 +15,11 @@ use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, AllowAllTurnAdmissionPolicy,
     BlockedReason, CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator,
-    DefaultTurnLifecycleEventBus, FilesystemTurnStateRowStore, GateRef, GetRunStateRequest,
-    IdempotencyKey, InMemoryRunProfileResolver, InMemoryTurnEventSink,
-    LifecyclePublicationErrorPort, LifecyclePublishingTurnStateStore, LoopBlockedKind,
-    LoopCheckpointStateRef, LoopExitMapping, LoopGateRef, ProductTurnContext,
-    ReplyTargetBindingRef, ResolvedRunProfile, ResumeTurnRequest, RetryTurnRequest,
-    RetryTurnResponse, RunOriginAdapter, RunProfileId, RunProfileRequest,
+    DefaultTurnLifecycleEventBus, GateRef, GetRunStateRequest, IdempotencyKey,
+    InMemoryRunProfileResolver, InMemoryTurnEventSink, LifecyclePublicationErrorPort,
+    LifecyclePublishingTurnStateStore, LoopBlockedKind, LoopCheckpointStateRef, LoopExitMapping,
+    LoopGateRef, ProductTurnContext, ReplyTargetBindingRef, ResolvedRunProfile, ResumeTurnRequest,
+    RetryTurnRequest, RetryTurnResponse, RunOriginAdapter, RunProfileId, RunProfileRequest,
     RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
     SanitizedCancelReason, SanitizedFailure, SourceBindingRef, StaticTurnAdmissionLimitProvider,
     SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
@@ -33,8 +32,8 @@ use ironclaw_turns::{
     TurnIdempotencyReplay, TurnLeaseToken, TurnLifecycleEvent, TurnLifecycleEventBus,
     TurnLockVersion, TurnOriginKind, TurnOwner, TurnRunId, TurnRunProfile, TurnRunState,
     TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnRunnerId, TurnScope,
-    TurnSpawnTreePort, TurnSpawnTreeStateStore, TurnStateStore, TurnStateStoreLimits, TurnStatus,
-    TurnSurfaceType,
+    TurnSpawnTreePort, TurnSpawnTreeStateStore, TurnStateRowStore, TurnStateStore,
+    TurnStateStoreLimits, TurnStatus, TurnSurfaceType,
     events::EventCursor,
     run_profile::{LoopGateKind, LoopModelRouteSnapshot, LoopModelUsage},
     runner::{
@@ -46,12 +45,12 @@ use ironclaw_turns::{
     test_support::{in_memory_turn_state_store, in_memory_turns_filesystem},
 };
 
-type TurnStore = FilesystemTurnStateRowStore<InMemoryBackend>;
+type TurnStore = TurnStateRowStore<InMemoryBackend>;
 
 /// Seed a fresh `/turns` filesystem with an arbitrary persistence snapshot — the
 /// row-store analog of the deleted whole-snapshot `from_persistence_snapshot`
 /// constructor. The snapshot is written
-/// as the legacy `/turns/state.json` blob; a [`FilesystemTurnStateRowStore`]
+/// as the legacy `/turns/state.json` blob; a [`TurnStateRowStore`]
 /// opened over the returned filesystem migrates it into durable rows on first
 /// read. This is the only way to feed the load / rehydration path a state the
 /// natural operation sequence cannot produce (cleared or corrupted admission
@@ -759,7 +758,7 @@ async fn spawn_tree_port_rejects_missing_parent_depth_overflow_and_capacity_exce
     {
         run.subagent_depth = u32::MAX;
     }
-    let depth_store = Arc::new(FilesystemTurnStateRowStore::new(
+    let depth_store = Arc::new(TurnStateRowStore::new(
         turns_fs_seeded_with(&snapshot).await,
     ));
     let depth_coordinator = DefaultTurnCoordinator::new(depth_store);
@@ -935,7 +934,7 @@ async fn blocked_dependent_run_can_resume_and_cancel_directly() {
 #[tokio::test]
 async fn blocked_run_persists_to_sink_and_rehydrates_across_restart() {
     let fs = in_memory_turns_filesystem();
-    let store = Arc::new(FilesystemTurnStateRowStore::new(fs.clone()));
+    let store = Arc::new(TurnStateRowStore::new(fs.clone()));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
 
     // Hot path: a turn that runs to completion without ever blocking still
@@ -1027,7 +1026,7 @@ async fn blocked_run_persists_to_sink_and_rehydrates_across_restart() {
     // Restart: reopen a fresh store over the same durable filesystem — both the
     // approval- and auth-blocked runs must come back blocked so a later
     // "Approve"/token submission lands on a real run.
-    let restored = FilesystemTurnStateRowStore::new(fs.clone());
+    let restored = TurnStateRowStore::new(fs.clone());
     let restored_runs = restored.persistence_snapshot().await.unwrap().runs;
     let restored_approval = restored_runs
         .iter()
@@ -1092,7 +1091,7 @@ async fn blocked_run_persists_to_sink_and_rehydrates_across_restart() {
 
     // Reopen once more from the terminal durable state — the run must come back
     // Completed, not Queued/Running, so recovery does not re-run a finished turn.
-    let restored_terminal = FilesystemTurnStateRowStore::new(fs.clone());
+    let restored_terminal = TurnStateRowStore::new(fs.clone());
     let restored_terminal_run = restored_terminal
         .persistence_snapshot()
         .await
@@ -1226,7 +1225,7 @@ async fn rehydrated_blocked_run_persists_terminal_state_after_resume() {
     // Build durable state that contains a gate-blocked run, as a restart would
     // recover.
     let fs = in_memory_turns_filesystem();
-    let origin = Arc::new(FilesystemTurnStateRowStore::new(fs.clone()));
+    let origin = Arc::new(TurnStateRowStore::new(fs.clone()));
     let coordinator = DefaultTurnCoordinator::new(origin.clone());
     let run_id = accepted_run_id(
         &coordinator
@@ -1275,7 +1274,7 @@ async fn rehydrated_blocked_run_persists_terminal_state_after_resume() {
 
     // Restart: reopen a fresh store over the same durable filesystem. The
     // recovered blocked run must be re-established as gate-touched.
-    let restored = Arc::new(FilesystemTurnStateRowStore::new(fs.clone()));
+    let restored = Arc::new(TurnStateRowStore::new(fs.clone()));
 
     // Resume the recovered gate, then claim + complete it.
     restored
@@ -1314,7 +1313,7 @@ async fn rehydrated_blocked_run_persists_terminal_state_after_resume() {
 
     // Completing the recovered run must have persisted its terminal state, so a
     // subsequent restart rehydrates it as Completed, not live.
-    let reopened = FilesystemTurnStateRowStore::new(fs.clone());
+    let reopened = TurnStateRowStore::new(fs.clone());
     let terminal_run = reopened
         .persistence_snapshot()
         .await
@@ -1339,7 +1338,7 @@ async fn rehydrated_blocked_run_persists_terminal_state_after_resume() {
 async fn rehydrated_resumed_run_persists_terminal_state() {
     // Build durable state where a gate-touched run has already resumed (Queued).
     let fs = in_memory_turns_filesystem();
-    let origin = Arc::new(FilesystemTurnStateRowStore::new(fs.clone()));
+    let origin = Arc::new(TurnStateRowStore::new(fs.clone()));
     let coordinator = DefaultTurnCoordinator::new(origin.clone());
     let run_id = accepted_run_id(
         &coordinator
@@ -1409,7 +1408,7 @@ async fn rehydrated_resumed_run_persists_terminal_state() {
 
     // Restart: reopen over the same durable filesystem. The resumed gate-touched
     // run must be re-tracked from its retained checkpoint marker.
-    let restored = Arc::new(FilesystemTurnStateRowStore::new(fs.clone()));
+    let restored = Arc::new(TurnStateRowStore::new(fs.clone()));
     let resume_runner = TurnRunnerId::new();
     let resume_lease = TurnLeaseToken::new();
     restored
@@ -1430,7 +1429,7 @@ async fn rehydrated_resumed_run_persists_terminal_state() {
         .await
         .unwrap();
 
-    let reopened = FilesystemTurnStateRowStore::new(fs.clone());
+    let reopened = TurnStateRowStore::new(fs.clone());
     assert_eq!(
         reopened
             .persistence_snapshot()
@@ -1454,7 +1453,7 @@ async fn rehydrated_resumed_run_persists_terminal_state() {
 #[tokio::test]
 async fn flush_persists_in_flight_non_blocked_run() {
     let fs = in_memory_turns_filesystem();
-    let store = Arc::new(FilesystemTurnStateRowStore::new(fs.clone()));
+    let store = Arc::new(TurnStateRowStore::new(fs.clone()));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let run_id = accepted_run_id(
         &coordinator
@@ -1494,7 +1493,7 @@ async fn flush_persists_in_flight_non_blocked_run() {
     store.drain().await.unwrap();
 
     // And it rehydrates, so a restart recovers the in-flight run.
-    let restored = FilesystemTurnStateRowStore::new(fs.clone());
+    let restored = TurnStateRowStore::new(fs.clone());
     assert!(
         restored
             .persistence_snapshot()
@@ -3385,7 +3384,7 @@ async fn same_thread_busy_is_transient_and_checked_before_admission_capacity() {
     let limits = StaticTurnAdmissionLimitProvider::default()
         .with_total_limit(TurnAdmissionAxisKind::Tenant, 1);
     let store = Arc::new(
-        FilesystemTurnStateRowStore::new(in_memory_turns_filesystem())
+        TurnStateRowStore::new(in_memory_turns_filesystem())
             .with_admission_limit_provider(Arc::new(limits)),
     );
     let coordinator = DefaultTurnCoordinator::new(store.clone());
@@ -3446,7 +3445,7 @@ async fn tenant_capacity_denial_is_structured_idempotent_and_all_or_nothing() {
     let limits = StaticTurnAdmissionLimitProvider::default()
         .with_total_limit(TurnAdmissionAxisKind::Tenant, 1);
     let store = Arc::new(
-        FilesystemTurnStateRowStore::new(in_memory_turns_filesystem())
+        TurnStateRowStore::new(in_memory_turns_filesystem())
             .with_admission_limit_provider(Arc::new(limits)),
     );
     let coordinator = DefaultTurnCoordinator::new(store.clone());
@@ -3494,7 +3493,7 @@ async fn concurrent_submits_cannot_oversubscribe_admission_limit() {
     let limits = StaticTurnAdmissionLimitProvider::default()
         .with_total_limit(TurnAdmissionAxisKind::Tenant, 1);
     let store = Arc::new(
-        FilesystemTurnStateRowStore::new(in_memory_turns_filesystem())
+        TurnStateRowStore::new(in_memory_turns_filesystem())
             .with_admission_limit_provider(Arc::new(limits)),
     );
     let coordinator = DefaultTurnCoordinator::new(store.clone());
@@ -3526,7 +3525,7 @@ async fn capacity_denial_does_not_advance_event_cursor() {
     let limits = StaticTurnAdmissionLimitProvider::default()
         .with_total_limit(TurnAdmissionAxisKind::Tenant, 1);
     let store = Arc::new(
-        FilesystemTurnStateRowStore::new(in_memory_turns_filesystem())
+        TurnStateRowStore::new(in_memory_turns_filesystem())
             .with_admission_limit_provider(Arc::new(limits)),
     );
     let coordinator = DefaultTurnCoordinator::new(store.clone());
@@ -3597,7 +3596,7 @@ async fn snapshot_load_ignores_legacy_submit_thread_busy_replays() {
         created_at: received_at(),
         expires_at: None,
     });
-    let restored = Arc::new(FilesystemTurnStateRowStore::new(
+    let restored = Arc::new(TurnStateRowStore::new(
         turns_fs_seeded_with(&snapshot).await,
     ));
     let runner_id = TurnRunnerId::new();
@@ -3643,7 +3642,7 @@ async fn snapshot_load_synthesizes_reservations_for_legacy_active_runs() {
     let limits = StaticTurnAdmissionLimitProvider::default()
         .with_total_limit(TurnAdmissionAxisKind::Tenant, 1);
     let restored = Arc::new(
-        FilesystemTurnStateRowStore::new(turns_fs_seeded_with(&snapshot).await)
+        TurnStateRowStore::new(turns_fs_seeded_with(&snapshot).await)
             .with_admission_limit_provider(Arc::new(limits)),
     );
     assert_eq!(
@@ -3699,7 +3698,7 @@ async fn snapshot_load_recovers_released_or_mismatched_reservations_for_active_r
         let limits = StaticTurnAdmissionLimitProvider::default()
             .with_total_limit(TurnAdmissionAxisKind::Tenant, 1);
         let restored = Arc::new(
-            FilesystemTurnStateRowStore::new(turns_fs_seeded_with(&snapshot).await)
+            TurnStateRowStore::new(turns_fs_seeded_with(&snapshot).await)
                 .with_admission_limit_provider(Arc::new(limits)),
         );
         let reservations = restored.active_admission_reservations().await.unwrap();
@@ -3742,7 +3741,7 @@ async fn terminal_run_releases_admission_reservation_for_new_thread() {
     let limits = StaticTurnAdmissionLimitProvider::default()
         .with_total_limit(TurnAdmissionAxisKind::Tenant, 1);
     let store = Arc::new(
-        FilesystemTurnStateRowStore::new(in_memory_turns_filesystem())
+        TurnStateRowStore::new(in_memory_turns_filesystem())
             .with_admission_limit_provider(Arc::new(limits)),
     );
     let coordinator = DefaultTurnCoordinator::new(store.clone());
@@ -3824,7 +3823,7 @@ async fn snapshot_load_drops_released_reservations_without_retained_run_records(
     assert!(snapshot.admission_reservations[0].released);
     snapshot.runs.clear();
 
-    let restored = FilesystemTurnStateRowStore::new(turns_fs_seeded_with(&snapshot).await);
+    let restored = TurnStateRowStore::new(turns_fs_seeded_with(&snapshot).await);
 
     assert!(
         restored
@@ -3839,7 +3838,7 @@ async fn snapshot_load_drops_released_reservations_without_retained_run_records(
 #[tokio::test]
 async fn model_route_snapshot_persists_across_snapshot_restore_and_recovery() {
     let fs = in_memory_turns_filesystem();
-    let source_store = Arc::new(FilesystemTurnStateRowStore::new(fs.clone()));
+    let source_store = Arc::new(TurnStateRowStore::new(fs.clone()));
     let source_coordinator = DefaultTurnCoordinator::new(source_store.clone());
     let run_id = accepted_run_id(
         &source_coordinator
@@ -3877,7 +3876,7 @@ async fn model_route_snapshot_persists_across_snapshot_restore_and_recovery() {
     // before reopening so their journal appends have landed.
     source_store.drain().await.expect("drain before reopen");
 
-    let restored = Arc::new(FilesystemTurnStateRowStore::new(fs.clone()));
+    let restored = Arc::new(TurnStateRowStore::new(fs.clone()));
     assert_eq!(
         restored
             .get_run_state(GetRunStateRequest {
@@ -4284,7 +4283,7 @@ async fn actor_user_capacity_uses_submitting_actor_not_thread_scope() {
     let limits = StaticTurnAdmissionLimitProvider::default()
         .with_total_limit(TurnAdmissionAxisKind::ActorUser, 1);
     let store = Arc::new(
-        FilesystemTurnStateRowStore::new(in_memory_turns_filesystem())
+        TurnStateRowStore::new(in_memory_turns_filesystem())
             .with_admission_limit_provider(Arc::new(limits)),
     );
     let coordinator = DefaultTurnCoordinator::new(store.clone());
@@ -4325,7 +4324,7 @@ async fn class_capacity_denial_reports_admission_class() {
         1,
     );
     let store = Arc::new(
-        FilesystemTurnStateRowStore::new(in_memory_turns_filesystem())
+        TurnStateRowStore::new(in_memory_turns_filesystem())
             .with_admission_limit_provider(Arc::new(limits)),
     );
     let coordinator = DefaultTurnCoordinator::new(store);
@@ -4381,7 +4380,7 @@ async fn project_none_consumes_unscoped_project_bucket() {
     let limits = StaticTurnAdmissionLimitProvider::default()
         .with_total_limit(TurnAdmissionAxisKind::Project, 1);
     let store = Arc::new(
-        FilesystemTurnStateRowStore::new(in_memory_turns_filesystem())
+        TurnStateRowStore::new(in_memory_turns_filesystem())
             .with_admission_limit_provider(Arc::new(limits)),
     );
     let coordinator = DefaultTurnCoordinator::new(store.clone());
@@ -4422,7 +4421,7 @@ async fn agent_capacity_is_keyed_by_tenant_and_optional_agent() {
     let limits = StaticTurnAdmissionLimitProvider::default()
         .with_total_limit(TurnAdmissionAxisKind::Agent, 1);
     let store = Arc::new(
-        FilesystemTurnStateRowStore::new(in_memory_turns_filesystem())
+        TurnStateRowStore::new(in_memory_turns_filesystem())
             .with_admission_limit_provider(Arc::new(limits)),
     );
     let coordinator = DefaultTurnCoordinator::new(store.clone());
@@ -4456,7 +4455,7 @@ async fn agent_capacity_is_keyed_by_tenant_and_optional_agent() {
 async fn admission_limit_provider_unavailable_fails_closed_without_run_or_reservation() {
     let limits = StaticTurnAdmissionLimitProvider::default().unavailable();
     let store = Arc::new(
-        FilesystemTurnStateRowStore::new(in_memory_turns_filesystem())
+        TurnStateRowStore::new(in_memory_turns_filesystem())
             .with_admission_limit_provider(Arc::new(limits)),
     );
     let coordinator = DefaultTurnCoordinator::new(store.clone());
@@ -4483,7 +4482,7 @@ async fn blocked_resume_then_recovery_failure_releases_admission_reservation() {
     let limits = StaticTurnAdmissionLimitProvider::default()
         .with_total_limit(TurnAdmissionAxisKind::Tenant, 1);
     let store = Arc::new(
-        FilesystemTurnStateRowStore::new(in_memory_turns_filesystem())
+        TurnStateRowStore::new(in_memory_turns_filesystem())
             .with_admission_limit_provider(Arc::new(limits)),
     );
     let coordinator = DefaultTurnCoordinator::new(store.clone());

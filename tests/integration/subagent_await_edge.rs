@@ -25,7 +25,7 @@ use ironclaw_runner::subagent::await_edge::{
     boot_recovery::ScopeRecoveryDriver,
     resolver::AwaitEdgeResolver,
     roster::{self, RosterKey},
-    store::FilesystemAwaitEdgeStore,
+    store::AwaitEdgeStore,
 };
 use ironclaw_threads::{InMemorySessionThreadService, SessionThreadService, ThreadScope};
 use ironclaw_turns::test_support::in_memory_turn_state_store;
@@ -50,10 +50,10 @@ fn scope(tenant: &str, user: &str, agent: Option<&str>, project: Option<&str>) -
 /// Shared production-shaped store: one `Arc<InMemoryBackend>` behind the
 /// REAL `wrap_scoped`/`invocation_mount_view` resolver — never
 /// `with_fixed_view` (§4.5a's named anti-pattern).
-fn real_store() -> Arc<FilesystemAwaitEdgeStore<InMemoryBackend>> {
+fn real_store() -> Arc<AwaitEdgeStore<InMemoryBackend>> {
     let root = Arc::new(InMemoryBackend::new());
     let fs = wrap_scoped(root);
-    Arc::new(FilesystemAwaitEdgeStore::new(fs))
+    Arc::new(AwaitEdgeStore::new(fs))
 }
 
 // Required test (§4.5a, P1.6c), integration-tier: two-users-distinct-paths.

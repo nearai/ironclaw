@@ -1,0 +1,107 @@
+{
+  "_quarantine_reason": "recorded trace invokes retired builtin.extension_activate",
+  "model_name": "reborn-qa-qa_4b_github_connect",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "In WebUI, ask IronClaw \"connect to GitHub.\" Go through the auth flow.\nExpected result: GitHub is connected"
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"connect to GitHub.\" Go through the auth flow.\nExpected r",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_02a5164c672a4e0e9323a122",
+            "name": "builtin__extension_search",
+            "arguments": {
+              "query": "github"
+            }
+          }
+        ],
+        "input_tokens": 13394,
+        "output_tokens": 57
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"connect to GitHub.\" Go through the auth flow.\nExpected r",
+        "min_message_count": 4
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_8cceb4f9a91f4dfa801fae73",
+            "name": "builtin__extension_install",
+            "arguments": {
+              "extension_id": "github"
+            }
+          }
+        ],
+        "input_tokens": 14263,
+        "output_tokens": 65
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"connect to GitHub.\" Go through the auth flow.\nExpected r",
+        "min_message_count": 6
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_d36d592201e04bd3928d2fac",
+            "name": "builtin__extension_activate",
+            "arguments": {
+              "extension_id": "github"
+            }
+          }
+        ],
+        "input_tokens": 14901,
+        "output_tokens": 62
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"connect to GitHub.\" Go through the auth flow.\nExpected r",
+        "min_message_count": 8
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_b2b8a6938848450eae727c3c",
+            "name": "github__get_authenticated_user",
+            "arguments": {}
+          }
+        ],
+        "input_tokens": 35046,
+        "output_tokens": 45
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"connect to GitHub.\" Go through the auth flow.\nExpected r",
+        "min_message_count": 10
+      },
+      "response": {
+        "type": "text",
+        "content": "GitHub is connected successfully.\n\n**Authenticated as:** [mikalai-pismiankou](https://github.com/mikalai-pismiankou)\n**Account created:** April 15, 2026\n**Public repos:** 0\n\nAll 40+ GitHub tools are now available — I can work with repositories, issues, pull requests, releases, workflows, branches, files, and more.",
+        "input_tokens": 35649,
+        "output_tokens": 84
+      }
+    }
+  ],
+  "expects": {
+    "tools_used": [
+      "github.get_authenticated_user"
+    ]
+  }
+}

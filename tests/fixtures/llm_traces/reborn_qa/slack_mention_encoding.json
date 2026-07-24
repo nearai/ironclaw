@@ -44,22 +44,6 @@
         "type": "tool_calls",
         "tool_calls": [
           {
-            "id": "call_mention_extension_activate",
-            "name": "builtin__extension_activate",
-            "arguments": {
-              "extension_id": "slack"
-            }
-          }
-        ],
-        "input_tokens": 0,
-        "output_tokens": 0
-      }
-    },
-    {
-      "response": {
-        "type": "tool_calls",
-        "tool_calls": [
-          {
             "id": "call_mention_get_conversation_info",
             "name": "slack.get_conversation_info",
             "arguments": {

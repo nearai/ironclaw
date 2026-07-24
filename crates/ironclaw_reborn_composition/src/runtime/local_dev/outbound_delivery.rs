@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_approvals::ToolPermissionOverride;
-use ironclaw_authorization::{CapabilityLeaseError, CapabilityLeaseStatus, CapabilityLeaseStore};
+use ironclaw_authorization::{
+    CapabilityLeaseError, CapabilityLeaseStatus, CapabilityLeaseStorePort,
+};
 use ironclaw_host_api::{
     Action, ApprovalRequest, ApprovalRequestId, CapabilityGrantId, CapabilityId, CorrelationId,
     GateRecord, GateRef, InvocationFingerprint, InvocationId, Principal, ProductSurfaceCaller,
@@ -11,7 +13,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_loop_host::{CapabilityResultWrite, DurablePersistence};
 use ironclaw_product::{OutboundPreferencesProductFacade, RebornOutboundDeliveryTargetId};
-use ironclaw_run_state::{ApprovalRequestStore, ApprovalStatus, RunStateError};
+use ironclaw_run_state::{ApprovalRequestStorePort, ApprovalStatus, RunStateError};
 use ironclaw_turns::{
     LoopGateRef,
     run_profile::{
@@ -43,12 +45,12 @@ use crate::runtime::local_dev::synthetic_capability::{
 pub(super) fn outbound_delivery_capabilities(
     facade: Arc<dyn OutboundPreferencesProductFacade>,
     fallback_user_id: UserId,
-    approval_requests: Arc<dyn ApprovalRequestStore>,
-    capability_leases: Arc<dyn CapabilityLeaseStore>,
+    approval_requests: Arc<dyn ApprovalRequestStorePort>,
+    capability_leases: Arc<dyn CapabilityLeaseStorePort>,
     target_set_requires_approval: bool,
     approval_settings: Arc<dyn ApprovalSettingsProvider>,
-    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
-    gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore>,
+    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort>,
+    gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort>,
 ) -> Result<Vec<SyntheticCapability>, AgentLoopHostError> {
     Ok(vec![
         SyntheticCapability::new(
@@ -148,20 +150,20 @@ const APPROVAL_GATE_SUMMARY: &str = "changing the outbound delivery target requi
 struct OutboundDeliveryTargetSetHandler {
     facade: Arc<dyn OutboundPreferencesProductFacade>,
     fallback_user_id: UserId,
-    approval_requests: Arc<dyn ApprovalRequestStore>,
-    capability_leases: Arc<dyn CapabilityLeaseStore>,
+    approval_requests: Arc<dyn ApprovalRequestStorePort>,
+    capability_leases: Arc<dyn CapabilityLeaseStorePort>,
     /// Host-private replay-payload store: this synthetic capability raises its own
     /// approval gate, so it persists {input, estimate} at the raise and
     /// reconstitutes them on resume host-side (§5.3 Stage 2a-i) rather than
     /// round-tripping raw tool args through the loop checkpoint.
-    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
+    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort>,
     /// Durable model-visible gate-record store. Because this synthetic capability
     /// raises its own approval gate OUTSIDE the loop-host persist seam
     /// (`HostRuntimeLoopCapabilityPort::persist_gate_record_for_mapped`), it must
     /// persist the [`GateRecord`] itself at the raise — keyed by the canonical
     /// [`GateRef::for_approval_request`] the product read model re-derives — so the
     /// approver-facing gate rendering (§5.2.9) has a record to read (§5.3 Stage 0).
-    gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore>,
+    gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort>,
     requires_approval: bool,
     approval_settings: Arc<dyn ApprovalSettingsProvider>,
 }

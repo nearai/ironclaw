@@ -441,7 +441,7 @@ mod tests {
         use crate::subagent::capability_surface::SubagentCapabilitySurfaceResolver;
         use crate::subagent::flavors::{SubagentFlavorId, lookup_flavor};
         use crate::subagent::goal_store::{
-            SubagentGoal, SubagentGoalStore, in_memory_backed_subagent_goal_store,
+            SubagentGoal, SubagentGoalStorePort, in_memory_backed_subagent_goal_store,
         };
         use crate::subagent::prompt_material::RebornSubagentPromptMaterialSource;
 

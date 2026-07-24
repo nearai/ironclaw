@@ -14,7 +14,8 @@ use ironclaw_host_api::{
 use ironclaw_product::{
     ActionFingerprintKey, ActionPhase, ConversationBindingService, IdempotencyDecision,
     IdempotencyLedger, ProductConversationRouteKind, ProductInboundAction, ProductWorkflowError,
-    ResolveBindingRequest, ResolvedBinding,
+    ResolveBindingRequest, ResolveStoredProductReplyTargetRequest, ResolvedBinding,
+    ResolvedStoredProductReplyTarget,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -199,14 +200,44 @@ where
             ProductConversationRouteKind::Direct => Some(actor_user_id.clone()),
             ProductConversationRouteKind::Shared => Some(self.scope.user_id.clone()),
         };
+        let binding_key = binding_key(&self.scope, &request)?;
+        let reply_target_binding_ref =
+            ironclaw_turns::ReplyTargetBindingRef::new(format!("reply:harness-{binding_key}"))
+                .map_err(|error| ProductWorkflowError::BindingResolutionFailed {
+                    reason: error.to_string(),
+                })?;
         let binding = ResolvedBinding {
             tenant_id: self.scope.tenant_id.clone(),
             actor_user_id,
             subject_user_id,
+            source_binding_ref: ironclaw_turns::SourceBindingRef::new(format!(
+                "source:harness-{binding_key}"
+            ))
+            .map_err(|error| ProductWorkflowError::BindingResolutionFailed {
+                reason: error.to_string(),
+            })?,
+            reply_target_binding_ref: reply_target_binding_ref.clone(),
             thread_id: thread_id_for_binding(&self.scope, &request)?,
             agent_id: Some(self.agent_id.clone()),
             project_id: self.project_id.clone(),
         };
+        let reply_target = StoredHarnessReplyTarget {
+            tenant_id: binding.tenant_id.clone(),
+            actor_user_id: binding.actor_user_id.clone(),
+            thread_id: binding.thread_id.clone(),
+            adapter_id: request.adapter_id.clone(),
+            installation_id: request.installation_id.clone(),
+            external_conversation_ref: request.external_conversation_ref.clone(),
+            route_kind: request.route_kind,
+        };
+        let reply_target_path = reply_target_path(&self.scope, &reply_target_binding_ref)?;
+        write_json(
+            &self.filesystem,
+            &self.scope,
+            &reply_target_path,
+            &reply_target,
+        )
+        .await?;
         let stored = StoredConversationBinding {
             binding: binding.clone(),
         };
@@ -225,6 +256,28 @@ where
             .ok_or_else(|| ProductWorkflowError::BindingRequired {
                 reason: "product conversation binding not found".to_string(),
             })
+    }
+
+    async fn resolve_stored_reply_target(
+        &self,
+        request: ResolveStoredProductReplyTargetRequest,
+    ) -> Result<ResolvedStoredProductReplyTarget, ProductWorkflowError> {
+        let path = reply_target_path(&self.scope, &request.reply_target_binding_ref)?;
+        let target = read_json::<F, StoredHarnessReplyTarget>(&self.filesystem, &self.scope, &path)
+            .await?
+            .ok_or(ProductWorkflowError::BindingAccessDenied)?;
+        if target.tenant_id != request.scope.tenant_id
+            || target.thread_id != request.scope.thread_id
+            || target.actor_user_id != request.actor.user_id
+        {
+            return Err(ProductWorkflowError::BindingAccessDenied);
+        }
+        Ok(ResolvedStoredProductReplyTarget {
+            adapter_id: target.adapter_id,
+            installation_id: target.installation_id,
+            external_conversation_ref: target.external_conversation_ref,
+            route_kind: target.route_kind,
+        })
     }
 }
 
@@ -384,6 +437,17 @@ struct StoredConversationBinding {
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
+struct StoredHarnessReplyTarget {
+    tenant_id: TenantId,
+    actor_user_id: UserId,
+    thread_id: ThreadId,
+    adapter_id: ironclaw_product::ProductAdapterId,
+    installation_id: ironclaw_product::AdapterInstallationId,
+    external_conversation_ref: ironclaw_product::ExternalConversationRef,
+    route_kind: ProductConversationRouteKind,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 struct StoredIdempotencyAction {
     action: ProductInboundAction,
     nonterminal_expires_at: Option<DateTime<Utc>>,
@@ -488,6 +552,41 @@ fn binding_path(
     )
 }
 
+fn binding_key(
+    scope: &ResourceScope,
+    request: &ResolveBindingRequest,
+) -> Result<String, ProductWorkflowError> {
+    let agent_id =
+        scope
+            .agent_id
+            .as_ref()
+            .ok_or_else(|| ProductWorkflowError::BindingResolutionFailed {
+                reason: "missing agent id in binding scope".to_string(),
+            })?;
+    let project_id = scope.project_id.as_ref().map_or("", ProjectId::as_str);
+    Ok(hash_parts(&[
+        agent_id.as_str(),
+        project_id,
+        request.adapter_id.as_str(),
+        request.installation_id.as_str(),
+        request.external_actor_ref.kind(),
+        request.external_actor_ref.id(),
+        &request.external_conversation_ref.conversation_fingerprint(),
+    ]))
+}
+
+fn reply_target_path(
+    scope: &ResourceScope,
+    reply_target: &ironclaw_turns::ReplyTargetBindingRef,
+) -> Result<ScopedPath, ProductWorkflowError> {
+    let agent_id = scope.agent_id.as_ref().map_or("", AgentId::as_str);
+    let project_id = scope.project_id.as_ref().map_or("", ProjectId::as_str);
+    hashed_scoped_path(
+        "/workflow/reply-targets",
+        &[agent_id, project_id, reply_target.as_str()],
+    )
+}
+
 fn ledger_path(
     scope: &ResourceScope,
     fingerprint: &ActionFingerprintKey,
@@ -510,17 +609,21 @@ fn ledger_path(
 }
 
 fn hashed_scoped_path(prefix: &str, parts: &[&str]) -> Result<ScopedPath, ProductWorkflowError> {
-    let mut hasher = Sha256::new();
-    for part in parts {
-        hasher.update((part.len() as u64).to_be_bytes());
-        hasher.update(part.as_bytes());
-    }
-    let digest = hex::encode(hasher.finalize());
+    let digest = hash_parts(parts);
     ScopedPath::new(format!("{prefix}/{digest}.json")).map_err(|error| {
         ProductWorkflowError::BindingResolutionFailed {
             reason: format!("invalid product workflow scoped path: {error}"),
         }
     })
+}
+
+fn hash_parts(parts: &[&str]) -> String {
+    let mut hasher = Sha256::new();
+    for part in parts {
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part.as_bytes());
+    }
+    hex::encode(hasher.finalize())
 }
 
 fn user_id_for_binding(

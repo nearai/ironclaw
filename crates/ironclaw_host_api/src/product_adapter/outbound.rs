@@ -1028,36 +1028,29 @@ pub enum AuthPromptChallengeKind {
     #[serde(rename = "oauth_url")]
     OAuthUrl,
     /// User pastes a secret string into the chat form. Wire value is
-    /// `manual_token` (via `rename_all = "snake_case"`): paste a secret. Covers
-    /// a GitHub PAT, an API key, AND a channel pairing code (e.g. Telegram): the
-    /// interaction modality — "paste a string" — is identical; what differs is
-    /// the resolve route, which rides in `connection` context (present for
-    /// channel pairing, absent for a stored-credential secret).
+    /// `manual_token` (via `rename_all = "snake_case"`): paste a credential
+    /// such as a GitHub PAT or API key.
     ManualToken,
     /// Host-issued channel pairing (WebGeneratedCode direction): the UI shows
     /// a code/deep-link panel and completion happens on the EXTERNAL side
     /// (e.g. Telegram `/start <code>`), then the run resumes server-side.
-    /// Nothing is pasted into IronClaw — the inverse of `ManualToken`'s
-    /// paste-a-code modality. Wire value is `pairing`.
+    /// Nothing is pasted into IronClaw. Wire value is `pairing`.
     Pairing,
     /// Other challenge kind (account selection, setup required, reauthorize).
     /// The UI should fall back to a generic "authentication required" card.
     Other,
 }
 
-/// Connection context for a channel-pairing challenge riding the `manual_token`
-/// modality. Present on an auth prompt when the paste is a pairing code that
-/// connects an inbound channel (e.g. Telegram), carrying the render copy and the
-/// resolve-route discriminator (`channel`) so one paste card serves both a
-/// stored-credential secret and a channel pairing code. Additive + serde-default
-/// so rows written before this field deserialize as `None`.
+/// Manifest-derived connection context for a channel authentication challenge.
+/// The strategy selects presentation while `channel` identifies the generic
+/// connection route. Additive + serde-default so older rows deserialize as
+/// `None`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ConnectionPromptContext {
-    /// Connectable channel id (e.g. `slack`). Doubles as the resolve-route
-    /// discriminator: "this paste is a pairing code for channel X".
+    /// Connectable channel id (e.g. `telegram`).
     pub channel: String,
-    /// Connect strategy wire value (e.g. `inbound_proof_code`).
+    /// Connect strategy wire value (e.g. `web_generated_code`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy: Option<String>,
     /// Backend-authored connect instructions for the pairing card.
@@ -1072,6 +1065,20 @@ pub struct ConnectionPromptContext {
     /// Error copy shown when the pasted code is rejected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
+}
+
+/// Host-issued pairing affordance for a `Pairing` auth challenge. The code,
+/// deep link, expiry, and copy all come from the same manifest-driven pairing
+/// service used by WebUI; channel adapters only choose native formatting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairingPromptView {
+    pub channel: String,
+    pub display_name: String,
+    pub instructions: String,
+    pub code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deep_link: Option<String>,
+    pub expires_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1104,12 +1111,56 @@ pub struct AuthPromptView {
     /// Challenge expiry. Present when the auth flow has a bounded TTL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// Channel-pairing connection context. Present only for a `manual_token`
-    /// challenge whose paste is a pairing code (channel connection), carrying
-    /// the render copy + resolve route. Absent for stored-credential secrets and
-    /// OAuth. Additive + serde-default.
+    /// Manifest-derived channel connection context. Presentation is selected
+    /// by `challenge_kind` and `connection.strategy`, never by provider name.
+    /// Additive + serde-default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection: Option<ConnectionPromptContext>,
+    /// Host-issued WebGeneratedCode presentation. Present only when
+    /// `challenge_kind == Pairing` and the target is authorized to receive the
+    /// bearer challenge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pairing: Option<PairingPromptView>,
+}
+
+/// Render one structured auth challenge for text-based channel adapters.
+/// Recipe selection and challenge materialization happened upstream; this
+/// helper only formats the already-typed view without naming a provider.
+pub fn render_channel_auth_prompt(view: &AuthPromptView, direct_message: bool) -> String {
+    let body = view
+        .pairing
+        .as_ref()
+        .map(|pairing| pairing.instructions.as_str())
+        .unwrap_or(view.body.as_str());
+    let mut text = format!("{}\n\n{}", view.headline, body);
+    if let Some(pairing) = view.pairing.as_ref() {
+        text.push_str("\n\nPairing code: `");
+        text.push_str(&pairing.code);
+        text.push('`');
+        if let Some(deep_link) = pairing.deep_link.as_deref() {
+            text.push_str("\n\nOpen ");
+            text.push_str(&pairing.display_name);
+            text.push_str(": ");
+            text.push_str(deep_link);
+        }
+        text.push_str("\n\nExpires: ");
+        text.push_str(&pairing.expires_at.to_rfc3339());
+    }
+    text.push_str("\n\n");
+    if direct_message {
+        text.push_str("Reply `auth deny ");
+        text.push_str(&view.auth_request_ref);
+        text.push_str("` here to cancel this run.");
+    } else {
+        text.push_str("Mention me with `auth deny ");
+        text.push_str(&view.auth_request_ref);
+        text.push_str("` in this thread to cancel this run.");
+    }
+    if let Some(url) = view.authorization_url.as_deref() {
+        text.push_str("\n\nSetup link: ");
+        text.push_str(url);
+    }
+    text
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1130,6 +1181,8 @@ pub struct AuthPromptContextView {
     /// Channel-pairing connection context — see [`AuthPromptView::connection`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection: Option<ConnectionPromptContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pairing: Option<PairingPromptView>,
 }
 
 impl AuthPromptContextView {
@@ -1141,6 +1194,27 @@ impl AuthPromptContextView {
         expires_at: Option<DateTime<Utc>>,
         connection: Option<ConnectionPromptContext>,
     ) -> Result<Self, ProductAdapterError> {
+        Self::new_with_pairing(
+            challenge_kind,
+            provider,
+            account_label,
+            authorization_url,
+            expires_at,
+            connection,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_pairing(
+        challenge_kind: AuthPromptChallengeKind,
+        provider: Option<String>,
+        account_label: Option<String>,
+        authorization_url: Option<String>,
+        expires_at: Option<DateTime<Utc>>,
+        connection: Option<ConnectionPromptContext>,
+        pairing: Option<PairingPromptView>,
+    ) -> Result<Self, ProductAdapterError> {
         let view = Self {
             challenge_kind,
             provider,
@@ -1148,6 +1222,7 @@ impl AuthPromptContextView {
             authorization_url,
             expires_at,
             connection,
+            pairing,
         };
         view.validate()?;
         Ok(view)
@@ -1157,13 +1232,14 @@ impl AuthPromptContextView {
         let Some(challenge_kind) = prompt.challenge_kind else {
             return Ok(None);
         };
-        Self::new(
+        Self::new_with_pairing(
             challenge_kind,
             prompt.provider.clone(),
             prompt.account_label.clone(),
             prompt.authorization_url.clone(),
             prompt.expires_at,
             prompt.connection.clone(),
+            prompt.pairing.clone(),
         )
         .map(Some)
     }
@@ -1187,7 +1263,40 @@ impl AuthPromptContextView {
         if let Some(connection) = self.connection.as_ref() {
             connection.validate()?;
         }
+        if let Some(pairing) = self.pairing.as_ref() {
+            pairing.validate()?;
+        }
         Ok(())
+    }
+}
+
+impl PairingPromptView {
+    fn validate(&self) -> Result<(), ProductAdapterError> {
+        validate_bounded_text(
+            "pairing_prompt_channel",
+            &self.channel,
+            PROJECTION_ITEM_ID_MAX_BYTES,
+        )?;
+        validate_bounded_text(
+            "pairing_prompt_display_name",
+            &self.display_name,
+            PROJECTION_TEXT_MAX_BYTES,
+        )?;
+        validate_bounded_text(
+            "pairing_prompt_instructions",
+            &self.instructions,
+            PROJECTION_TEXT_MAX_BYTES,
+        )?;
+        validate_bounded_text(
+            "pairing_prompt_code",
+            &self.code,
+            PROJECTION_ITEM_ID_MAX_BYTES,
+        )?;
+        validate_optional_display_text(
+            "pairing_prompt_deep_link",
+            self.deep_link.as_deref(),
+            PROJECTION_TEXT_MAX_BYTES,
+        )
     }
 }
 
@@ -1244,16 +1353,19 @@ impl<'de> Deserialize<'de> for AuthPromptContextView {
             expires_at: Option<DateTime<Utc>>,
             #[serde(default)]
             connection: Option<ConnectionPromptContext>,
+            #[serde(default)]
+            pairing: Option<PairingPromptView>,
         }
 
         let wire = Wire::deserialize(deserializer)?;
-        AuthPromptContextView::new(
+        AuthPromptContextView::new_with_pairing(
             wire.challenge_kind,
             wire.provider,
             wire.account_label,
             wire.authorization_url,
             wire.expires_at,
             wire.connection,
+            wire.pairing,
         )
         .map_err(serde::de::Error::custom)
     }
@@ -1326,7 +1438,7 @@ pub enum ProductProjectionItem {
         /// projection-gate consumer reads it (no duplicate top-level field, per
         /// the wire-contract no-duplicate-fields rule).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        auth_context: Option<AuthPromptContextView>,
+        auth_context: Option<Box<AuthPromptContextView>>,
     },
     SkillActivation {
         id: String,
@@ -1492,7 +1604,7 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
                 #[serde(default)]
                 allow_always: bool,
                 #[serde(default)]
-                auth_context: Option<AuthPromptContextView>,
+                auth_context: Option<Box<AuthPromptContextView>>,
             },
             SkillActivation {
                 id: String,
@@ -1706,11 +1818,12 @@ mod tests {
 
     #[test]
     fn auth_prompt_challenge_kind_all_variants_roundtrip() {
-        // Stable wire values: `oauth_url` (browser OAuth) and `manual_token`
-        // (paste a secret — PAT / API key / channel pairing code).
+        // Stable wire values: browser OAuth, pasted credentials, and
+        // host-issued channel pairing.
         for (variant, expected) in [
             (AuthPromptChallengeKind::OAuthUrl, "\"oauth_url\""),
             (AuthPromptChallengeKind::ManualToken, "\"manual_token\""),
+            (AuthPromptChallengeKind::Pairing, "\"pairing\""),
             (AuthPromptChallengeKind::Other, "\"other\""),
         ] {
             let serialized = serde_json::to_string(&variant).expect("serialize challenge kind");
@@ -1723,8 +1836,8 @@ mod tests {
 
     #[test]
     fn auth_prompt_context_round_trips_channel_connection() {
-        // A manual_token challenge whose paste is a pairing code carries the
-        // connection context (channel + copy). Round-trip it through the wire.
+        // A host-issued pairing challenge carries manifest-derived connection
+        // context. Round-trip it through the wire.
         let run_id = TurnRunId::new();
         let state = ProductProjectionState::new(
             "thread-1",
@@ -1736,26 +1849,24 @@ mod tests {
                 headline: "Connect Slack".to_string(),
                 body: Some("Message the app to get a pairing code.".to_string()),
                 allow_always: false,
-                auth_context: Some(
+                auth_context: Some(Box::new(
                     AuthPromptContextView::new(
-                        AuthPromptChallengeKind::ManualToken,
+                        AuthPromptChallengeKind::Pairing,
                         Some("telegram".to_string()),
                         None,
                         None,
                         None,
                         Some(ConnectionPromptContext {
                             channel: "telegram".to_string(),
-                            strategy: Some("inbound_proof_code".to_string()),
-                            instructions: Some(
-                                "Message the app to get a pairing code.".to_string(),
-                            ),
-                            input_placeholder: Some("Enter Telegram pairing code...".to_string()),
+                            strategy: Some("web_generated_code".to_string()),
+                            instructions: Some("Open the app with the generated code.".to_string()),
+                            input_placeholder: None,
                             submit_label: Some("Connect".to_string()),
                             error_message: Some("Invalid or expired pairing code.".to_string()),
                         }),
                     )
                     .expect("valid connection auth context"),
-                ),
+                )),
             }],
         )
         .expect("valid connection gate projection");
@@ -1765,15 +1876,16 @@ mod tests {
         // place); there is no duplicate top-level Gate.connection field.
         assert_eq!(
             value["items"][0]["gate"]["auth_context"]["challenge_kind"],
-            "manual_token"
+            "pairing"
         );
         assert_eq!(
             value["items"][0]["gate"]["auth_context"]["connection"]["channel"],
             "telegram"
         );
-        assert_eq!(
-            value["items"][0]["gate"]["auth_context"]["connection"]["input_placeholder"],
-            "Enter Telegram pairing code..."
+        assert!(
+            value["items"][0]["gate"]["auth_context"]["connection"]
+                .get("input_placeholder")
+                .is_none()
         );
         let decoded: ProductProjectionState =
             serde_json::from_value(value).expect("deserialize connection gate projection");
@@ -2032,7 +2144,7 @@ mod tests {
                 headline: "Authentication required".to_string(),
                 body: Some("Authenticate to continue this run.".to_string()),
                 allow_always: false,
-                auth_context: Some(
+                auth_context: Some(Box::new(
                     AuthPromptContextView::new(
                         AuthPromptChallengeKind::OAuthUrl,
                         Some("github".to_string()),
@@ -2042,7 +2154,7 @@ mod tests {
                         None,
                     )
                     .expect("valid auth context"),
-                ),
+                )),
             }],
         )
         .expect("valid auth gate projection");
@@ -2079,6 +2191,7 @@ mod tests {
             authorization_url: Some("x".repeat(PROJECTION_TEXT_MAX_BYTES + 1)),
             expires_at: None,
             connection: None,
+            pairing: None,
         };
 
         assert!(AuthPromptContextView::from_auth_prompt(&prompt).is_err());
@@ -2350,10 +2463,10 @@ mod tests {
         let json = serde_json::json!({
             "invocation_id": InvocationId::new(),
             "thread_id": "thread-tool-preview",
-            "capability_id": "builtin.extension_activate",
+            "capability_id": "builtin.extension_install",
             "status": "failed",
             "error_kind": "gate_declined",
-            "title": "extension_activate",
+            "title": "extension_install",
             "output_summary": "tool failed: gate_declined",
             "output_preview": "tool failed: gate_declined",
             "output_kind": "text",

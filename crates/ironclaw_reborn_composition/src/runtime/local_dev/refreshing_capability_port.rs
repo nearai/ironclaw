@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex};
 
-use ironclaw_authorization::CapabilityLeaseStore;
+use ironclaw_authorization::CapabilityLeaseStorePort;
 use ironclaw_host_api::{
     CapabilityId, ExtensionId, MountView, Resolution, ResolutionBatch, UserId,
 };
@@ -9,8 +9,11 @@ use ironclaw_host_runtime::HostRuntime;
 use ironclaw_loop_host::{
     HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
 };
-use ironclaw_product::{OutboundPreferencesProductFacade, ProjectService};
-use ironclaw_run_state::ApprovalRequestStore;
+use ironclaw_product::{
+    LifecycleProductContext, LifecycleProductSurfaceContext, OutboundPreferencesProductFacade,
+    ProjectService,
+};
+use ironclaw_run_state::ApprovalRequestStorePort;
 use ironclaw_threads::SessionThreadService;
 use ironclaw_trust::TrustDecision;
 use ironclaw_turns::ExternalToolCatalog;
@@ -25,7 +28,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::builtin_capability_policy::BuiltinCapabilityPolicy;
 use crate::profile_approval_authorization::ApprovalSettingsProvider;
 use crate::runtime::ComposedSelectableSkillContextSource;
-use crate::runtime::local_dev::extension_surface::ExtensionCapabilitySurfaceSource;
+use crate::runtime::extension_surface::ExtensionCapabilitySurfaceSource;
 use crate::runtime::local_dev::external_tool_capability::wrap_external_tools;
 use crate::runtime::local_dev::outbound_delivery::outbound_delivery_capabilities;
 use crate::runtime::local_dev::project_create::project_create_capability;
@@ -36,7 +39,7 @@ use crate::runtime::local_dev::synthetic_capability::wrap_synthetic_capabilities
 
 use super::{
     VisibleCapabilityInputs, capability_io_error, host_api_agent_loop_error,
-    visible_capability_request,
+    local_dev_resource_scope_for_run, visible_capability_request,
 };
 
 pub(crate) struct RefreshingCapabilityPortConfig {
@@ -59,15 +62,15 @@ pub(crate) struct RefreshingCapabilityPortConfig {
     pub(super) outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
     pub(super) outbound_delivery_target_set_requires_approval: bool,
     pub(super) approval_settings: Arc<dyn ApprovalSettingsProvider>,
-    pub(super) approval_requests: Arc<dyn ApprovalRequestStore>,
-    pub(super) capability_leases: Arc<dyn CapabilityLeaseStore>,
+    pub(super) approval_requests: Arc<dyn ApprovalRequestStorePort>,
+    pub(super) capability_leases: Arc<dyn CapabilityLeaseStorePort>,
     /// Durable model-visible gate-record store the built capability port persists
     /// pending-gate records into (wires the #6245 production gap closed).
-    pub(super) gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore>,
+    pub(super) gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort>,
     /// Durable host-private replay-payload store the built capability port
     /// persists gate/auth replay payloads into and reconstitutes on resume
     /// (arch-simplification §5.3 Stage 2a-i).
-    pub(super) replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
+    pub(super) replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort>,
     pub(super) external_tool_catalog: Arc<dyn ExternalToolCatalog>,
     /// Per-capability mount overrides, merged via `with_capability_execution_mount`.
     /// Always empty at the sole production call site (`local_dev.rs`'s `create_capability_port`);
@@ -156,10 +159,10 @@ struct RefreshingCapabilityPort {
     outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
     outbound_delivery_target_set_requires_approval: bool,
     approval_settings: Arc<dyn ApprovalSettingsProvider>,
-    approval_requests: Arc<dyn ApprovalRequestStore>,
-    capability_leases: Arc<dyn CapabilityLeaseStore>,
-    gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore>,
-    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
+    approval_requests: Arc<dyn ApprovalRequestStorePort>,
+    capability_leases: Arc<dyn CapabilityLeaseStorePort>,
+    gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort>,
+    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort>,
     external_tool_catalog: Arc<dyn ExternalToolCatalog>,
     capability_execution_mount_overrides: HashMap<CapabilityId, MountView>,
     additional_provider_trust: BTreeMap<ExtensionId, TrustDecision>,
@@ -171,9 +174,18 @@ struct RefreshingCapabilityPort {
 
 impl RefreshingCapabilityPort {
     async fn build_inner(&self) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+        let caller_scope =
+            local_dev_resource_scope_for_run(&self.run_context, &self.fallback_user_id);
         let extension_surface = self
             .extension_surface_source
-            .snapshot()
+            .snapshot(LifecycleProductContext::Surface(
+                LifecycleProductSurfaceContext {
+                    tenant_id: caller_scope.tenant_id,
+                    user_id: caller_scope.user_id,
+                    agent_id: caller_scope.agent_id,
+                    project_id: caller_scope.project_id,
+                },
+            ))
             .await
             .map_err(host_api_agent_loop_error)?;
         let mut visible_request = visible_capability_request(
@@ -518,6 +530,7 @@ pub(crate) async fn create_refreshing_capability_port_for_test(
     // the opaque `SkillActivationTestSource` handle the harness passed in
     // (see the field's doc-comment on `RefreshingCapabilityPortTestParts`).
     let skill_activation_source = skill_activation_source.map(|handle| handle.activation_source());
+    let extension_readiness_source = extension_management.map(|handle| handle.readiness_source());
 
     create_refreshing_capability_port(RefreshingCapabilityPortConfig {
         runtime,
@@ -534,9 +547,7 @@ pub(crate) async fn create_refreshing_capability_port_for_test(
         // `ExtensionManagementTestHandle` (see its doc-comment); `None` when
         // the harness never wired one, reproducing the prior always-no-op
         // surface.
-        extension_surface_source: ExtensionCapabilitySurfaceSource::new(
-            extension_management.map(|handle| handle.extension_management()),
-        ),
+        extension_surface_source: ExtensionCapabilitySurfaceSource::new(extension_readiness_source),
         input_resolver,
         result_writer,
         milestone_sink,

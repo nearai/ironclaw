@@ -4,14 +4,13 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::InstallationState;
 use ironclaw_product::{
     ActionDispatchKind, DefaultProductSurface, FakeConversationBindingService,
     FakeIdempotencyLedger, FakeInboundTurnService, LifecyclePackageKind, LifecyclePackageRef,
     LifecycleProductAction, LifecycleProductCommandService, LifecycleProductContext,
-    LifecycleProductFacade, LifecycleProductResponse, ProductCommand, ProductCommandAdmission,
-    ProductCommandAdmissionService, ProductCommandContext, ProductCommandService,
-    ProductModelCommand, ProductWorkflowError,
+    LifecycleProductFacade, LifecycleProductResponse, LifecyclePublicState, ProductCommand,
+    ProductCommandAdmission, ProductCommandAdmissionService, ProductCommandContext,
+    ProductCommandService, ProductModelCommand, ProductWorkflowError,
 };
 use ironclaw_product::{
     AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
@@ -122,7 +121,7 @@ impl LifecycleProductFacade for RecordingLifecycleProductFacade {
         self.commands.lock().expect("lock").push(action.clone());
         Ok(LifecycleProductResponse::projection(
             action.package_ref().cloned(),
-            InstallationState::Installed,
+            LifecyclePublicState::SetupNeeded,
             vec![],
         ))
     }
@@ -134,7 +133,7 @@ impl LifecycleProductFacade for RecordingLifecycleProductFacade {
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         Ok(LifecycleProductResponse::projection(
             Some(package_ref),
-            InstallationState::Unsupported,
+            LifecyclePublicState::SetupNeeded,
             vec![],
         ))
     }
@@ -260,7 +259,7 @@ async fn lifecycle_command_dispatches_through_lifecycle_facade() {
             .as_value()
             .get("phase")
             .and_then(serde_json::Value::as_str),
-        Some("installed")
+        Some("setup_needed")
     );
     assert_eq!(inbound.accepted_count(), 0);
     assert_eq!(
@@ -321,7 +320,7 @@ async fn lifecycle_command_admission_rejects_before_facade_executes() {
         .with_product_command_admission_service(admission_service)
         .with_product_command_service(command_service);
     let envelope =
-        sample_command_envelope("command-extension-denied", "extension_activate", "github");
+        sample_command_envelope("command-extension-denied", "extension_install", "github");
 
     let ack = workflow.submit_inbound(envelope).await.expect("accept");
 

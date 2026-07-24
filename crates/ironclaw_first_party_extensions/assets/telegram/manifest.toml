@@ -33,6 +33,24 @@ inbound = true
 outbound = true
 conversation_model = "continuous"
 
+[channel.connection]
+provider = "telegram"
+strategy = "web_generated_code"
+instructions = "Pair your Telegram account from the IronClaw pairing panel by opening its link, scanning its QR code, or sending /start followed by the displayed code to the bot."
+input_placeholder = ""
+submit_label = "Open pairing"
+error_message = "Telegram pairing failed. Get a fresh code and try again."
+connection_success_message = "Telegram is installed as an inbound entrypoint. If WebChat shows a Telegram pairing panel, tell the user to pair via the link, the QR code, or by sending the shown code to the bot in Telegram — nothing is pasted into normal chat. Once paired the user can DM the bot directly. Telegram exposes no tools and cannot read messages or send on the user's behalf."
+deep_link_template = "https://t.me/{bot_username}?start={code}"
+inbound_code_prefixes = ["/start"]
+
+[channel.connection.notices]
+connect_required = "👋 Pair your Telegram account in the IronClaw web app, then message me here again."
+paired = "✅ Telegram is paired. You can talk to IronClaw right here."
+already_paired_same_user = "✅ This Telegram account is already paired to you. You can talk to IronClaw right here."
+already_bound_to_other_user = "This Telegram account is already paired to another IronClaw user."
+expired_or_unknown = "That Telegram pairing code is invalid or expired. Get a fresh link or code from IronClaw and try again."
+
 [channel.ingress]
 route_suffix = "updates"
 method = "post"
@@ -42,18 +60,6 @@ body_limit_bytes = 1048576
 kind = "shared_secret_header"
 secret_handle = "telegram_webhook_secret"
 header = "X-Telegram-Bot-Api-Secret-Token"
-
-[channel.config]
-fields = [
-  { handle = "telegram_bot_token", label = "Bot token", secret = true },
-  { handle = "telegram_webhook_secret", label = "Webhook secret token", secret = true },
-  { handle = "telegram_webhook_url", label = "Public webhook URL", secret = false },
-  # The bot's public @username (without the @): fills the pairing deep link
-  # `https://t.me/{bot_username}?start={code}`. The setup-provisioning hook
-  # autofills it from `getMe`; until then an admin may set it manually and
-  # the pairing panel falls back to code-only presentation when unset.
-  { handle = "bot_username", label = "Bot username", secret = false },
-]
 
 [[channel.egress]]
 scheme = "https"

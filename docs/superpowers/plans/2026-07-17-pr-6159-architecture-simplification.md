@@ -34,7 +34,8 @@ both present where the finding requires behavioral proof.
 - [x] Unconfigured/broken dynamic trigger hooks persist terminal outcomes.
 - [x] Ingress builds identity, secret, adapter, and workflow from one atomic setup snapshot.
 - [x] Pairing codes are bound to the authenticated bot installation.
-- [x] Pairing continuation work is durable and retried from status polling.
+- [x] Pairing continuation work is durable; ingress awaits generic fan-out
+      acceptance and transient failures rely on provider redelivery.
 - [x] Unpair cleanup keeps durable metadata until actor and DM cleanup finish.
 - [x] Product connection status never exposes backend diagnostics.
 - [x] Pairing uses one validated `PairingCode` contract type.
@@ -214,7 +215,7 @@ pub struct ApprovalPromptLookup {
 }
 
 pub async fn approval_prompt_lookup(
-    approval_requests: Option<&dyn ApprovalRequestStore>,
+    approval_requests: Option<&dyn ApprovalRequestStorePort>,
     gate_ref: &GateRef,
     owner_user_id: &UserId,
     turn_scope: &TurnScope,
@@ -348,7 +349,7 @@ pub struct ExtensionAccountSetupDescriptor {
     pub extension_id: ExtensionId,
     pub auth_requirement: RuntimeCredentialAuthRequirement,
     pub connection_requirement: ChannelConnectionRequirement,
-    pub activation_success_message: String,
+    pub connection_success_message: String,
 }
 
 #[derive(Clone, Default)]
@@ -605,7 +606,7 @@ pub struct TelegramHostConfig { /* same five identity/public-origin fields */ }
 pub struct TelegramHostInput {
     pub config: TelegramHostConfig,
     pub state: Arc<FilesystemTelegramHostState>,
-    pub secret_store: Arc<dyn SecretStore>,
+    pub secret_store: Arc<dyn SecretStorePort>,
     pub host_egress: HostRuntimeHttpEgressPort,
     pub continuation: Arc<dyn RebornAuthContinuationDispatcher>,
     pub conversation_bindings: Arc<dyn ironclaw_conversations::ConversationBindingService>,

@@ -4,7 +4,7 @@
 //! `assert_reply_persists_after_reopen` (thread history) and
 //! `reborn_integration_durable.rs` (extension installs).
 //!
-//! Raises a real `BlockedApproval` gate, reopens a FRESH `ApprovalRequestStore`
+//! Raises a real `BlockedApproval` gate, reopens a FRESH `ApprovalRequestStorePort`
 //! at the same root, and asserts the `Pending` record is there independent of
 //! the live `Arc` the running group holds, then resolves the gate normally.
 

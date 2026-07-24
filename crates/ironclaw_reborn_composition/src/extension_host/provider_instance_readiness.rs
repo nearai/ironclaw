@@ -7,11 +7,11 @@
 //! user has connected an account.
 //!
 //! The unified extension runtime keeps extension-owned setup in manifests and
-//! account-setup descriptors. Concrete-provider detection and remediation are
-//! supplied by the composition root; this module only applies the generic
-//! configured-or-remediate rule.
+//! account-setup descriptors. The composition root supplies only the
+//! configured/not-configured signal; administrator fields and remediation stay
+//! behind the authorized Admin Configuration surface.
 
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use ironclaw_host_api::VendorId;
 
@@ -19,17 +19,17 @@ use ironclaw_host_api::VendorId;
 pub(crate) struct ProviderInstanceReadinessInput {
     pub(crate) provider: VendorId,
     pub(crate) configured: bool,
-    pub(crate) remediation: String,
 }
 
-/// Return remediation for providers whose host-level configuration is absent.
+/// Return providers whose host-level configuration is absent. Administrator
+/// field metadata and remediation never enter the caller lifecycle domain.
 pub(crate) fn provider_instance_readiness_map(
     inputs: impl IntoIterator<Item = ProviderInstanceReadinessInput>,
-) -> BTreeMap<VendorId, String> {
-    let mut map = BTreeMap::new();
+) -> BTreeSet<VendorId> {
+    let mut map = BTreeSet::new();
     for input in inputs {
         if !input.configured {
-            map.insert(input.provider, input.remediation);
+            map.insert(input.provider);
         }
     }
     map
@@ -48,12 +48,8 @@ mod tests {
         let map = provider_instance_readiness_map([ProviderInstanceReadinessInput {
             provider: provider(),
             configured: false,
-            remediation: "configure provider A".to_string(),
         }]);
-        assert_eq!(
-            map.get(&provider()).map(String::as_str),
-            Some("configure provider A")
-        );
+        assert!(map.contains(&provider()));
     }
 
     #[test]
@@ -61,8 +57,7 @@ mod tests {
         let map = provider_instance_readiness_map([ProviderInstanceReadinessInput {
             provider: provider(),
             configured: true,
-            remediation: "configure provider A".to_string(),
         }]);
-        assert!(!map.contains_key(&provider()));
+        assert!(!map.contains(&provider()));
     }
 }

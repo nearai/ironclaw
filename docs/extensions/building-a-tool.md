@@ -636,11 +636,11 @@ For hosted MCP:
 Add a test through the actual call site that gates side effects:
 
 - `CapabilityHost` or runtime adapter dispatch for capability invocation.
-- Extension lifecycle install/activate path for package publication.
+- Extension lifecycle install/readiness path for package publication.
 - Product-auth setup/callback path for OAuth-backed credentials.
 
 A helper-only test is not enough when a helper gates HTTP, DB writes, OAuth,
-tool execution, or lifecycle activation.
+tool execution, or lifecycle readiness.
 
 ## Review checklist
 

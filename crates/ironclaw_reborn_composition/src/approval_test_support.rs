@@ -1,8 +1,8 @@
-use ironclaw_approvals::{ApprovalResolver, AutoApproveSettingInput, AutoApproveSettingStore};
+use ironclaw_approvals::{ApprovalResolver, AutoApproveSettingInput, AutoApproveSettingStorePort};
 use ironclaw_host_api::MountView;
 use ironclaw_host_api::{Action, CapabilityId, ExecutionContext, Principal, ResourceEstimate};
 use ironclaw_host_runtime::{HostRuntime, RuntimeCapabilityOutcome, RuntimeFailureKind};
-use ironclaw_run_state::ApprovalRequestStore;
+use ironclaw_run_state::ApprovalRequestStorePort;
 use std::sync::Arc;
 
 use crate::builtin_capability_policy::{

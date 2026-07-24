@@ -25,6 +25,7 @@ async-trait = "0.1"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
+rand = "0.10"
 ironclaw_common = { path = "../ironclaw_common", version = "0.4.1" }
 ironclaw_attachments = { path = "../ironclaw_attachments", version = "0.1.0" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
@@ -39,6 +40,7 @@ ironclaw_outbound = { path = "../ironclaw_outbound", version = "0.1.0" }
 ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces", version = "0.1.0" }
 ironclaw_run_state = { path = "../ironclaw_run_state", version = "0.1.0" }
 ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }
+ironclaw_triggers = { path = "../ironclaw_triggers", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -64,7 +66,7 @@ ironclaw_authorization = { path = "../ironclaw_authorization", features = ["test
 ironclaw_run_state = { path = "../ironclaw_run_state", features = ["test-support"] }
 # FaultInjecting decorator: test store fault paths through the real store
 ironclaw_filesystem = { path = "../ironclaw_filesystem", features = ["test-support"] }
-# ProductLive planned-loop harness builds a `FilesystemReplayPayloadStore` over
+# ProductLive planned-loop harness builds a `ReplayPayloadStore` over
 # an in-memory filesystem so approval/auth resumes reconstitute their replay
 # input (mirrors production's capability-store wiring).
 ironclaw_capabilities = { path = "../ironclaw_capabilities", version = "0.1.0" }

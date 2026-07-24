@@ -68,11 +68,6 @@ async fn nearai_web_search_dispatches_through_bundled_hosted_mcp() {
             ),
             RebornScriptedReply::text("NEAR AI search is installed."),
             RebornScriptedReply::tool_call(
-                "builtin.extension_activate",
-                serde_json::json!({"extension_id": "nearai"}),
-            ),
-            RebornScriptedReply::text("NEAR AI search is ready."),
-            RebornScriptedReply::tool_call(
                 "nearai.web_search",
                 serde_json::json!({"query": "IronClaw capability evidence"}),
             ),
@@ -82,6 +77,9 @@ async fn nearai_web_search_dispatches_through_bundled_hosted_mcp() {
         .await
         .expect("NEAR AI lifecycle thread builds");
 
+    // #6520 removed the public activate action: install owns readiness, so
+    // the caller's nearai account must resolve BEFORE install for the
+    // package to reconcile straight to active.
     h.seed_capability_credential_account("nearai", "NEAR AI integration account", &[])
         .await
         .expect("NEAR AI account is seeded under the dispatching user");
@@ -91,12 +89,6 @@ async fn nearai_web_search_dispatches_through_bundled_hosted_mcp() {
     h.assert_tool_result_contains(r#""installed":true"#)
         .await
         .expect("NEAR AI package installed");
-    h.submit_turn("activate NEAR AI search")
-        .await
-        .expect("activation turn completes");
-    h.assert_tool_result_contains(r#""activated":true"#)
-        .await
-        .expect("NEAR AI package activated");
     h.submit_turn("search for IronClaw capability evidence")
         .await
         .expect("search turn completes");

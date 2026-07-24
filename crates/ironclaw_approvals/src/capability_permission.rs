@@ -28,7 +28,7 @@ use ironclaw_host_api::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{PersistentApprovalScope, cas_record::FilesystemCasRecordStore};
+use crate::{PersistentApprovalScope, cas_record::CasRecordStore};
 
 const OVERRIDE_PREFIX: &str = "/approvals/capability-permissions";
 const OVERRIDE_PATH_CACHE_MAX_ENTRIES: usize = 1024;
@@ -172,7 +172,7 @@ impl StoredCapabilityPermissionOverrideRecord {
 }
 
 #[async_trait]
-pub trait CapabilityPermissionOverrideStore: Send + Sync {
+pub trait CapabilityPermissionOverrideStorePort: Send + Sync {
     /// Create or update the explicit override for a capability.
     async fn set(
         &self,
@@ -206,26 +206,26 @@ pub trait CapabilityPermissionOverrideStore: Send + Sync {
     ) -> Result<(), CapabilityPermissionStoreError>;
 }
 
-pub struct FilesystemCapabilityPermissionOverrideStore<F>
+pub struct CapabilityPermissionOverrideStore<F>
 where
     F: RootFilesystem,
 {
-    records: FilesystemCasRecordStore<F, CapabilityPermissionOverrideKey>,
+    records: CasRecordStore<F, CapabilityPermissionOverrideKey>,
 }
 
-impl<F> FilesystemCapabilityPermissionOverrideStore<F>
+impl<F> CapabilityPermissionOverrideStore<F>
 where
     F: RootFilesystem,
 {
     pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
         Self {
-            records: FilesystemCasRecordStore::new(filesystem, OVERRIDE_PATH_CACHE_MAX_ENTRIES),
+            records: CasRecordStore::new(filesystem, OVERRIDE_PATH_CACHE_MAX_ENTRIES),
         }
     }
 }
 
 #[async_trait]
-impl<F> CapabilityPermissionOverrideStore for FilesystemCapabilityPermissionOverrideStore<F>
+impl<F> CapabilityPermissionOverrideStorePort for CapabilityPermissionOverrideStore<F>
 where
     F: RootFilesystem + 'static,
 {
@@ -341,7 +341,7 @@ where
     }
 }
 
-impl<F> FilesystemCapabilityPermissionOverrideStore<F>
+impl<F> CapabilityPermissionOverrideStore<F>
 where
     F: RootFilesystem + 'static,
 {
@@ -571,8 +571,8 @@ mod tests {
     // The single production store, exercised over the in-memory filesystem
     // backend — the seam that replaced the deleted
     // `InMemoryCapabilityPermissionOverrideStore`.
-    fn memory_store() -> FilesystemCapabilityPermissionOverrideStore<InMemoryBackend> {
-        FilesystemCapabilityPermissionOverrideStore::new(scoped_fs(
+    fn memory_store() -> CapabilityPermissionOverrideStore<InMemoryBackend> {
+        CapabilityPermissionOverrideStore::new(scoped_fs(
             Arc::new(InMemoryBackend::new()),
             "tenant-a",
             "alice",
@@ -845,7 +845,7 @@ mod tests {
     async fn filesystem_override_survives_restart() {
         let backend = Arc::new(InMemoryBackend::new());
         let scoped = scoped_fs(Arc::clone(&backend), "tenant-a", "alice");
-        let store = FilesystemCapabilityPermissionOverrideStore::new(Arc::clone(&scoped));
+        let store = CapabilityPermissionOverrideStore::new(Arc::clone(&scoped));
         let scope = scope(None, Some("thread-a"));
         let key = key_for(&scope);
 
@@ -854,7 +854,7 @@ mod tests {
             .await
             .unwrap();
 
-        let reloaded = FilesystemCapabilityPermissionOverrideStore::new(scoped)
+        let reloaded = CapabilityPermissionOverrideStore::new(scoped)
             .get(&key)
             .await
             .unwrap()
@@ -867,7 +867,7 @@ mod tests {
     async fn filesystem_clear_removes_override() {
         let backend = Arc::new(InMemoryBackend::new());
         let scoped = scoped_fs(backend, "tenant-a", "alice");
-        let store = FilesystemCapabilityPermissionOverrideStore::new(scoped);
+        let store = CapabilityPermissionOverrideStore::new(scoped);
         let scope = scope(None, Some("thread-a"));
         let key = key_for(&scope);
 
@@ -911,7 +911,7 @@ mod tests {
         let inner = Arc::new(InMemoryBackend::new());
         let backend = Arc::new(ClearRacingBackend::new(inner));
         let scoped = scoped_fs(Arc::clone(&backend), "tenant-a", "alice");
-        let store = FilesystemCapabilityPermissionOverrideStore::new(scoped);
+        let store = CapabilityPermissionOverrideStore::new(scoped);
         let scope = scope(None, Some("thread-a"));
         let key = key_for(&scope);
 
@@ -950,7 +950,7 @@ mod tests {
         let inner = Arc::new(InMemoryBackend::new());
         let backend = Arc::new(VersionMismatchOnceBackend::new(inner));
         let scoped = scoped_fs(Arc::clone(&backend), "tenant-a", "alice");
-        let store = FilesystemCapabilityPermissionOverrideStore::new(scoped);
+        let store = CapabilityPermissionOverrideStore::new(scoped);
         let scope = scope(None, Some("thread-a"));
         let key = key_for(&scope);
 
@@ -978,7 +978,7 @@ mod tests {
     async fn filesystem_project_scoped_override_matches_in_new_thread_after_reload() {
         let backend = Arc::new(InMemoryBackend::new());
         let scoped = scoped_fs(Arc::clone(&backend), "tenant-a", "alice");
-        let store = FilesystemCapabilityPermissionOverrideStore::new(Arc::clone(&scoped));
+        let store = CapabilityPermissionOverrideStore::new(Arc::clone(&scoped));
 
         let saved = store
             .set(input(
@@ -989,7 +989,7 @@ mod tests {
             .unwrap();
 
         let new_thread_key = key_for(&scope(Some("project-a"), Some("thread-2")));
-        let reloaded = FilesystemCapabilityPermissionOverrideStore::new(scoped)
+        let reloaded = CapabilityPermissionOverrideStore::new(scoped)
             .get(&new_thread_key)
             .await
             .unwrap()
@@ -1002,12 +1002,12 @@ mod tests {
     async fn filesystem_list_for_scope_returns_only_active_matching_scope_records() {
         let backend = Arc::new(InMemoryBackend::new());
         let scoped = scoped_fs(Arc::clone(&backend), "tenant-a", "alice");
-        let store = FilesystemCapabilityPermissionOverrideStore::new(Arc::clone(&scoped));
+        let store = CapabilityPermissionOverrideStore::new(Arc::clone(&scoped));
         let project_a_thread_1 = scope(Some("project-a"), Some("thread-1"));
         let project_a_thread_2 = scope(Some("project-a"), Some("thread-2"));
         let project_b = scope(Some("project-b"), Some("thread-1"));
         let tenant_b_scoped = scoped_fs(backend, "tenant-b", "alice");
-        let tenant_b_store = FilesystemCapabilityPermissionOverrideStore::new(tenant_b_scoped);
+        let tenant_b_store = CapabilityPermissionOverrideStore::new(tenant_b_scoped);
         let tenant_b_scope = ResourceScope {
             tenant_id: TenantId::new("tenant-b").unwrap(),
             ..scope(Some("project-a"), Some("thread-1"))
@@ -1051,7 +1051,7 @@ mod tests {
     async fn filesystem_get_returns_serialization_error_for_corrupt_override_record() {
         let backend = Arc::new(InMemoryBackend::new());
         let scoped = scoped_fs(backend, "tenant-a", "alice");
-        let store = FilesystemCapabilityPermissionOverrideStore::new(Arc::clone(&scoped));
+        let store = CapabilityPermissionOverrideStore::new(Arc::clone(&scoped));
         let scope = scope(None, Some("thread-a"));
         let key = key_for(&scope);
         let path = override_path(&key).unwrap();

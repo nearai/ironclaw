@@ -12,11 +12,6 @@
     "automation",
     "apps"
   ],
-  "source": {
-    "dir": "tools-src/composio",
-    "capabilities": "composio-tool.capabilities.json",
-    "crate_name": "composio-tool"
-  },
   "artifacts": {
     "wasm32-wasip2": {
       "sha256": "f8de24313bdb9ff1d70796267feb7ea33c876e52167b040f9831900e90936688",

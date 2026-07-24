@@ -229,6 +229,48 @@ async def _status_outcome(emulate_url: str, preview: dict) -> None:
     assert STATUS_CONTEXT in json.dumps(preview), preview
 
 
+AUTHENTICATED_LOGIN = "reborn-dev"
+LISTED_RELEASE_TAG = "provider-case-listed-v1"
+
+
+async def _authenticated_user_baseline(emulate_url: str) -> None:
+    user = await github_request(emulate_url, "GET", "/user")
+    assert isinstance(user, dict)
+    assert user["login"] == AUTHENTICATED_LOGIN, user
+
+
+async def _get_authenticated_user_outcome(emulate_url: str, preview: dict) -> None:
+    await _authenticated_user_baseline(emulate_url)
+    assert AUTHENTICATED_LOGIN in json.dumps(preview), preview
+
+
+async def _get_repo_outcome(emulate_url: str, preview: dict) -> None:
+    await _repo_baseline(emulate_url)
+    assert f"{OWNER}/{REPO}" in json.dumps(preview), preview
+
+
+async def _seed_listed_release(emulate_url: str) -> None:
+    await _repo_baseline(emulate_url)
+    release = await github_request(
+        emulate_url,
+        "POST",
+        f"{REPO_PATH}/releases",
+        payload={"tag_name": LISTED_RELEASE_TAG, "name": "Provider Case Listed v1"},
+        expected_status=201,
+    )
+    assert isinstance(release, dict)
+    assert release["tag_name"] == LISTED_RELEASE_TAG, release
+
+
+async def _list_releases_outcome(emulate_url: str, preview: dict) -> None:
+    releases = await github_request(emulate_url, "GET", f"{REPO_PATH}/releases")
+    assert isinstance(releases, list)
+    assert LISTED_RELEASE_TAG in [
+        release["tag_name"] for release in releases
+    ], releases
+    assert LISTED_RELEASE_TAG in json.dumps(preview), preview
+
+
 GITHUB_REPO_PROVIDER_OPERATION_CASES = (
     ProviderOperationCase(
         case_id="github_create_branch",
@@ -347,5 +389,31 @@ GITHUB_REPO_PROVIDER_OPERATION_CASES = (
         arguments={**BASE_ARGS, "ref": "main"},
         assert_baseline=_seed_status,
         assert_outcome=_status_outcome,
+    ),
+    # Executable evidence for read capabilities whose harvested journeys were
+    # quarantined with the retired activation flow (#6520).
+    ProviderOperationCase(
+        case_id="github_get_authenticated_user",
+        provider_service="github",
+        capability_id="github.get_authenticated_user",
+        arguments={},
+        assert_baseline=_authenticated_user_baseline,
+        assert_outcome=_get_authenticated_user_outcome,
+    ),
+    ProviderOperationCase(
+        case_id="github_get_repo",
+        provider_service="github",
+        capability_id="github.get_repo",
+        arguments=BASE_ARGS,
+        assert_baseline=_repo_baseline,
+        assert_outcome=_get_repo_outcome,
+    ),
+    ProviderOperationCase(
+        case_id="github_list_releases",
+        provider_service="github",
+        capability_id="github.list_releases",
+        arguments=BASE_ARGS,
+        assert_baseline=_seed_listed_release,
+        assert_outcome=_list_releases_outcome,
     ),
 )

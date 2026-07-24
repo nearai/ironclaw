@@ -1,11 +1,11 @@
 use ironclaw_authorization::{
-    CapabilityLease, CapabilityLeaseError, CapabilityLeaseStatus, CapabilityLeaseStore,
+    CapabilityLease, CapabilityLeaseError, CapabilityLeaseStatus, CapabilityLeaseStorePort,
 };
 use ironclaw_host_api::{
     Action, ApprovalRequest, CapabilityId, ExecutionContext, InvocationFingerprint, InvocationId,
     Principal, ResourceEstimate, ResourceScope,
 };
-use ironclaw_run_state::{ApprovalStatus, RunStateError, RunStateStore};
+use ironclaw_run_state::{ApprovalStatus, RunStateError, RunStateStorePort};
 use tracing::warn;
 
 use crate::{CapabilityInvocationError, ResumeContextMismatchKind};
@@ -83,7 +83,7 @@ pub(crate) fn validate_approval_request_matches_invocation(
 }
 
 pub(crate) async fn matching_approval_lease(
-    capability_leases: &dyn CapabilityLeaseStore,
+    capability_leases: &dyn CapabilityLeaseStorePort,
     context: &ExecutionContext,
     capability_id: &CapabilityId,
     invocation_fingerprint: &InvocationFingerprint,
@@ -108,7 +108,7 @@ pub(crate) async fn matching_approval_lease(
 /// the lease is Claimed rather than Active.  This helper locates it so the
 /// same invocation can continue without a second approval prompt.
 pub(crate) async fn matching_claimed_approval_lease_for_auth_resume(
-    capability_leases: &dyn CapabilityLeaseStore,
+    capability_leases: &dyn CapabilityLeaseStorePort,
     scope: &ResourceScope,
     capability_id: &CapabilityId,
     invocation_fingerprint: &InvocationFingerprint,
@@ -126,7 +126,7 @@ pub(crate) async fn matching_claimed_approval_lease_for_auth_resume(
 }
 
 pub(crate) async fn fail_run_if_configured(
-    run_state: Option<&dyn RunStateStore>,
+    run_state: Option<&dyn RunStateStorePort>,
     scope: &ResourceScope,
     invocation_id: InvocationId,
     error_kind: &'static str,
@@ -207,7 +207,7 @@ impl CapabilityInvocationError {
 }
 
 pub(crate) async fn apply_run_state_transition_if_configured(
-    run_state: Option<&dyn RunStateStore>,
+    run_state: Option<&dyn RunStateStorePort>,
     scope: &ResourceScope,
     invocation_id: InvocationId,
     error: &CapabilityInvocationError,
@@ -241,7 +241,7 @@ pub(crate) async fn apply_run_state_transition_if_configured(
 }
 
 pub(crate) async fn fail_run(
-    run_state: &dyn RunStateStore,
+    run_state: &dyn RunStateStorePort,
     scope: &ResourceScope,
     invocation_id: InvocationId,
     error_kind: &'static str,
@@ -253,7 +253,7 @@ pub(crate) async fn fail_run(
 }
 
 pub(crate) async fn complete_run_after_side_effect(
-    run_state: &dyn RunStateStore,
+    run_state: &dyn RunStateStorePort,
     scope: &ResourceScope,
     invocation_id: InvocationId,
     capability_id: &CapabilityId,

@@ -1606,26 +1606,29 @@ async fn webui_v2_gmail_oauth_setup_complete_allows_activation() {
         "setup should see the completed Google OAuth account so the UI can offer Activate: {setup_body}"
     );
 
-    let activate = harness
+    // #6520 removed the public activation endpoint: install is the only user
+    // action and host-owned readiness reconciliation derives the public
+    // phase. With the completed Google OAuth account present, the lifecycle
+    // projection reports gmail active — there is nothing left to call.
+    let list = harness
         .router
         .clone()
-        .oneshot(bearer_post(
-            "/api/webchat/v2/extensions/gmail/activate",
-            json!({
-                "client_action_id": "webui-v2-gmail-activate-after-setup"
-            }),
-        ))
+        .oneshot(bearer_get("/api/webchat/v2/extensions"))
         .await
-        .expect("activate Gmail oneshot");
-    let activate_status = activate.status();
-    let activate_body = read_json(activate).await;
+        .expect("list extensions oneshot");
+    assert_eq!(list.status(), StatusCode::OK);
+    let list_body = read_json(list).await;
+    let gmail = list_body["extensions"]
+        .as_array()
+        .expect("extensions array")
+        .iter()
+        .find(|extension| extension["package_ref"]["id"] == "gmail")
+        .cloned()
+        .expect("gmail listed after install");
     assert_eq!(
-        activate_status,
-        StatusCode::OK,
-        "activation should succeed after setup completion: {activate_body}"
+        gmail["installation_state"], "active",
+        "the completed OAuth account must reconcile gmail to active without an activate call: {gmail}"
     );
-    assert_eq!(activate_body["success"], true);
-    assert_eq!(activate_body["activated"], true);
 }
 
 /// The provider-instance readiness map's 400 path
@@ -1634,11 +1637,13 @@ async fn webui_v2_gmail_oauth_setup_complete_allows_activation() {
 /// (`google_family_activation_fails_closed_when_provider_instance_not_configured`
 /// in `extension_lifecycle.rs`) and for the WebUI mapping function
 /// (`lifecycle_setup::provider_instance_not_configured_maps_to_sanitized_400`),
-/// but nothing drove the real HTTP activate route end-to-end. This proves the
-/// whole chain: a composition build with NO Google OAuth backend configured
-/// -> the readiness map's `google` entry -> `activation_credential_requirements`
-/// failing closed -> the real `POST .../activate` handler returning 400 with
-/// the sanitized wire body (no remediation text, no `reason` field at all).
+/// but nothing drove the real HTTP surface end-to-end. #6520 removed the
+/// public activate route; install now owns the readiness reconciliation, so
+/// this proves the whole chain: a composition build with NO Google OAuth
+/// backend configured -> the readiness map's `google` entry ->
+/// `activation_credential_requirements` failing closed -> the real
+/// `POST .../extensions/install` handler returning 400 with the sanitized
+/// wire body (no remediation text, no `reason` field at all).
 #[tokio::test]
 async fn webui_v2_extension_activate_returns_400_when_provider_instance_not_configured() {
     let harness = build_harness_without_google_oauth_backend().await;
@@ -1660,45 +1665,22 @@ async fn webui_v2_extension_activate_returns_400_when_provider_instance_not_conf
     let install_body = read_json(install).await;
     assert_eq!(
         install_status,
-        StatusCode::OK,
-        "install body: {install_body}"
-    );
-    assert_eq!(
-        install_body["success"], true,
-        "install body: {install_body}"
-    );
-
-    let activate = harness
-        .router
-        .clone()
-        .oneshot(bearer_post(
-            "/api/webchat/v2/extensions/gmail/activate",
-            json!({
-                "client_action_id": "webui-v2-gmail-activate-without-provider"
-            }),
-        ))
-        .await
-        .expect("activate Gmail oneshot");
-    let activate_status = activate.status();
-    let activate_body = read_json(activate).await;
-    assert_eq!(
-        activate_status,
         StatusCode::BAD_REQUEST,
-        "activation must fail closed before any per-account credential gate when the \
-         operator never configured this instance's Google OAuth backend at all: {activate_body}"
+        "install must fail closed before any per-account credential gate when the \
+         operator never configured this instance's Google OAuth backend at all: {install_body}"
     );
-    assert_eq!(activate_body["error"], "invalid_request");
-    assert_eq!(activate_body["kind"], "validation");
-    assert_eq!(activate_body["retryable"], false);
+    assert_eq!(install_body["error"], "invalid_request");
+    assert_eq!(install_body["kind"], "validation");
+    assert_eq!(install_body["retryable"], false);
     assert!(
-        activate_body.get("field").is_none(),
-        "sanitized 400 body must carry no field hint: {activate_body}"
+        install_body.get("field").is_none(),
+        "sanitized 400 body must carry no field hint: {install_body}"
     );
     assert!(
-        activate_body.get("validation_code").is_none(),
-        "sanitized 400 body must carry no validation code: {activate_body}"
+        install_body.get("validation_code").is_none(),
+        "sanitized 400 body must carry no validation code: {install_body}"
     );
-    let body_text = activate_body.to_string().to_ascii_lowercase();
+    let body_text = install_body.to_string().to_ascii_lowercase();
     for leaked in [
         "config set",
         "client_secret",
@@ -1707,7 +1689,7 @@ async fn webui_v2_extension_activate_returns_400_when_provider_instance_not_conf
     ] {
         assert!(
             !body_text.contains(leaked),
-            "sanitized 400 body must not leak remediation text: {activate_body}"
+            "sanitized 400 body must not leak remediation text: {install_body}"
         );
     }
 
@@ -1731,10 +1713,11 @@ async fn webui_v2_google_docs_setup_projects_oauth_before_install() {
     assert_eq!(setup.status(), StatusCode::OK);
     let setup_body = read_json(setup).await;
     assert_eq!(setup_body["package_ref"]["id"], "google-docs");
-    // Option A retired the "discovered" wire phase: a catalog package that
-    // is not yet installed projects the neutral "installed"-vocabulary
-    // installation_state ("installed" here), never a transient phase string.
-    assert_eq!(setup_body["phase"], "installed");
+    // #6520 three-state lifecycle: a catalog package that is not yet
+    // installed projects the honest "uninstalled" public state (the
+    // "discovered"/"installed" wire literals are retired), never a
+    // transient phase string.
+    assert_eq!(setup_body["phase"], "uninstalled");
 
     let secrets = setup_body["secrets"]
         .as_array()
@@ -1793,10 +1776,11 @@ async fn webui_v2_github_api_key_setup_projects_manual_token_secret() {
     assert_eq!(setup.status(), StatusCode::OK);
     let setup_body = read_json(setup).await;
     assert_eq!(setup_body["package_ref"]["id"], "github");
-    // Option A retired the "discovered" wire phase: a catalog package that
-    // is not yet installed projects the neutral "installed"-vocabulary
-    // installation_state ("installed" here), never a transient phase string.
-    assert_eq!(setup_body["phase"], "installed");
+    // #6520 three-state lifecycle: a catalog package that is not yet
+    // installed projects the honest "uninstalled" public state (the
+    // "discovered"/"installed" wire literals are retired), never a
+    // transient phase string.
+    assert_eq!(setup_body["phase"], "uninstalled");
 
     let secrets = setup_body["secrets"]
         .as_array()

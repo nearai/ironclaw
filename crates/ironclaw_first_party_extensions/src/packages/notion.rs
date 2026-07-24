@@ -25,12 +25,11 @@ pub(super) fn bundle() -> PackageBundle {
                 "Authorize the Notion workspace that IronClaw should access.".to_string(),
             ),
             setup_url: None,
-            credential_next_step: "After authorization completes, activate Notion to publish its \
-                MCP tools."
+            credential_next_step: "After authorization completes, IronClaw finishes Notion \
+                installation automatically and publishes its MCP tools."
                 .to_string(),
         }),
         // MCP OAuth extension: Dispatch + Network + UseSecret + ExternalWrite.
-        oauth_setup: None,
         trust_effects: Some(vec![
             EffectKind::DispatchCapability,
             EffectKind::Network,

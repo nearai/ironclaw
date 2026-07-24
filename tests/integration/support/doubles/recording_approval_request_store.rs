@@ -1,5 +1,5 @@
-/// Test double substituting the production `ApprovalRequestStore` impl
-/// (`FilesystemApprovalRequestStore`, `crates/ironclaw_run_state/src/lib.rs`).
+/// Test double substituting the production `ApprovalRequestStorePort` impl
+/// (`ApprovalRequestStore`, `crates/ironclaw_run_state/src/lib.rs`).
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -17,12 +17,12 @@ use ironclaw_host_api::{ApprovalRequestId, ResourceScope};
 /// / `deny_local_dev_gate` depend on. Delegation is total, so the inner store
 /// stays the single source of truth.
 pub(crate) struct RecordingApprovalRequestStore {
-    pub(crate) inner: Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
+    pub(crate) inner: Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>,
     pub(crate) pending_approval_scopes: Arc<Mutex<HashMap<ApprovalRequestId, ResourceScope>>>,
 }
 
 #[async_trait]
-impl ironclaw_run_state::ApprovalRequestStore for RecordingApprovalRequestStore {
+impl ironclaw_run_state::ApprovalRequestStorePort for RecordingApprovalRequestStore {
     async fn save_pending(
         &self,
         scope: ResourceScope,

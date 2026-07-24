@@ -119,11 +119,18 @@ impl ProductCommandHandler {
                 let _: EmptyProductCommandInput = product_command_input(input)?;
                 command_output(services.trace_account_login_link(caller).await?)
             }
-            Self::TraceHoldAuthorize => command_output(
-                services
-                    .authorize_trace_hold(caller, product_command_input(input)?)
-                    .await?,
-            ),
+            Self::TraceHoldAuthorize => {
+                // The wire input is the command descriptor's request struct;
+                // deserializing it as the bare submission string rejected
+                // every well-formed request with a 400 (playwright live-serve
+                // regression).
+                let request: RebornTraceHoldAuthorizeProductRequest = product_command_input(input)?;
+                command_output(
+                    services
+                        .authorize_trace_hold(caller, request.submission_id)
+                        .await?,
+                )
+            }
             Self::OperatorConfigSetKey => {
                 let request: RebornOperatorConfigSetProductRequest = product_command_input(input)?;
                 command_output(
@@ -337,7 +344,6 @@ impl ProductCapabilityHandler {
                 lifecycle_setup::submit_extension_setup_capability(
                     services.lifecycle_facade.as_ref(),
                     services.extension_credentials.as_deref(),
-                    services.channel_config_facade.as_deref(),
                     caller,
                     input,
                 )
@@ -517,7 +523,6 @@ mod tests {
     fn runtime_backed_capabilities_stay_out_of_product_operation_registry() {
         for id in [
             EXTENSION_INSTALL_CAPABILITY_ID,
-            EXTENSION_ACTIVATE_CAPABILITY_ID,
             EXTENSION_REMOVE_CAPABILITY_ID,
             SKILL_INSTALL_CAPABILITY_ID,
             SKILL_UPDATE_CAPABILITY_ID,

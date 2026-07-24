@@ -7,12 +7,12 @@ import vm from "node:vm";
 function loadGates() {
   const source = readFileSync(new URL("./gates.ts", import.meta.url), "utf8")
     .replace(
-      /export function (gateFromEvent|gateFromProjectionGate)/g,
+      /export function (gateFromEvent|gateFromProjectionGate|channelConnectionFromGate)/g,
       "function $1",
     );
   const context = { globalThis: {} };
   vm.runInNewContext(
-    `${source}\nglobalThis.__testExports = { gateFromEvent, gateFromProjectionGate };`,
+    `${source}\nglobalThis.__testExports = { gateFromEvent, gateFromProjectionGate, channelConnectionFromGate };`,
     context,
   );
   return context.globalThis.__testExports;
@@ -225,30 +225,85 @@ test("gateFromEvent defaults, passes through challenge kinds, and carries channe
     "manual_token",
   );
 
-  // A channel-pairing gate rides the manual_token rail and carries a normalized
-  // connection requirement for the pairing card.
+  // A host-issued channel pairing gate carries normalized manifest context.
   const pairing = gateFromEvent("auth_required", {
     turn_run_id: "run-pair",
     auth_request_ref: "gate:pair",
-    challenge_kind: "manual_token",
+    challenge_kind: "pairing",
     connection: {
       channel: "slack",
-      strategy: "inbound_proof_code",
-      instructions: "Message the app for a pairing code.",
-      input_placeholder: "Enter code",
+      strategy: "web_generated_code",
+      instructions: "Open the app with the generated link.",
       submit_label: "Connect",
       error_message: "Invalid code.",
     },
   });
-  assert.equal(pairing.challengeKind, "manual_token");
+  assert.equal(pairing.challengeKind, "pairing");
   assert.deepEqual(plain(pairing.connection), {
     channel: "slack",
-    strategy: "inbound_proof_code",
-    instructions: "Message the app for a pairing code.",
-    inputPlaceholder: "Enter code",
+    strategy: "web_generated_code",
+    instructions: "Open the app with the generated link.",
+    inputPlaceholder: null,
     submitLabel: "Connect",
     errorMessage: "Invalid code.",
   });
+});
+
+test("channelConnectionFromGate selects only pairing gates that carry connection context", () => {
+  const { gateFromEvent, channelConnectionFromGate } = loadGates();
+
+  // A host-issued pairing gate WITH connection context is a channel-connection
+  // gate. chat.tsx derives BOTH the composer affordance
+  // (activeThreadHasChannelConnectionGate) and the pairing-card selector from
+  // this single predicate so they cannot disagree.
+  const pairing = gateFromEvent("auth_required", {
+    turn_run_id: "run-pair",
+    auth_request_ref: "gate:pair",
+    challenge_kind: "pairing",
+    connection: { channel: "slack", strategy: "web_generated_code" },
+  });
+  assert.equal(channelConnectionFromGate(pairing), pairing.connection);
+  assert.equal(channelConnectionFromGate(pairing).channel, "slack");
+
+  // A manual_token gate that somehow carried a connection must NOT be treated
+  // as a channel-connection gate: it renders the token-paste card, so the
+  // composer must not promise "finish pairing" for it. Backend invariant
+  // (crates/ironclaw_product_workflow/src/auth_prompt.rs): `connection` is only
+  // ever populated on `challenge_kind == pairing`, so this shape can't occur in
+  // production — this pins the frontend against drift if that invariant changes.
+  const manualWithConnection = {
+    ...gateFromEvent("auth_required", {
+      turn_run_id: "run-token",
+      auth_request_ref: "gate:token",
+      challenge_kind: "manual_token",
+    }),
+    connection: { channel: "slack", strategy: "web_generated_code" },
+  };
+  assert.equal(channelConnectionFromGate(manualWithConnection), null);
+
+  // A pairing gate WITHOUT connection (the credential-requirement fallback that
+  // sets challenge_kind=pairing but carries no manifest context) falls through
+  // to the generic auth card, not the pairing card.
+  const pairingNoConnection = gateFromEvent("auth_required", {
+    turn_run_id: "run-pair2",
+    auth_request_ref: "gate:pair2",
+    challenge_kind: "pairing",
+  });
+  assert.equal(channelConnectionFromGate(pairingNoConnection), null);
+
+  // Approval gates and a null gate never carry channel connection.
+  assert.equal(
+    channelConnectionFromGate(
+      gateFromEvent("gate", {
+        turn_run_id: "run-approval",
+        gate_ref: "gate:approval",
+        headline: "h",
+        body: "b",
+      }),
+    ),
+    null,
+  );
+  assert.equal(channelConnectionFromGate(null), null);
 });
 
 test("gateFromProjectionGate normalizes the connection context from auth_context", () => {
@@ -259,22 +314,21 @@ test("gateFromProjectionGate normalizes the connection context from auth_context
     gate_kind: "auth",
     gate_ref: "gate:pair",
     auth_context: {
-      challenge_kind: "manual_token",
+      challenge_kind: "pairing",
       connection: {
         channel: "slack",
-        input_placeholder: "Enter code",
-        submit_label: "Connect",
+        strategy: "web_generated_code",
       },
     },
   });
 
-  assert.equal(gate.challengeKind, "manual_token");
+  assert.equal(gate.challengeKind, "pairing");
   assert.deepEqual(plain(gate.connection), {
     channel: "slack",
-    strategy: null,
+    strategy: "web_generated_code",
     instructions: null,
-    inputPlaceholder: "Enter code",
-    submitLabel: "Connect",
+    inputPlaceholder: null,
+    submitLabel: null,
     errorMessage: null,
   });
 });

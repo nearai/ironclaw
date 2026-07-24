@@ -18,18 +18,18 @@
 //! the same subject id. Verified email may link OAuth providers within a
 //! tenant; an unverified email never links.
 //!
-//! Persistence ([`FilesystemRebornIdentityStore`]) goes through the host
+//! Persistence ([`RebornIdentityStore`]) goes through the host
 //! [`RootFilesystem`](ironclaw_filesystem::RootFilesystem) /
 //! `ScopedFilesystem` abstraction — the same substrate boundary every other
 //! durable Reborn store sits behind — so substrate choice, tenant scoping,
 //! and host ownership stay centralized in the filesystem layer rather than
 //! this crate holding a raw database handle.
 
-mod filesystem_store;
+mod identity_store;
 mod key;
 mod user_directory;
 
-pub use filesystem_store::FilesystemRebornIdentityStore;
+pub use identity_store::RebornIdentityStore;
 pub use key::{ExternalSubjectId, IdentityKeyError, ProviderInstanceId, ProviderKind};
 pub use user_directory::{
     RebornUser, RebornUserDirectory, RebornUserProfileUpdate, RebornUserRole, RebornUserStatus,

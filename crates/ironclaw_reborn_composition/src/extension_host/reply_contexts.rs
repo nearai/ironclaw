@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use ironclaw_extension_host::ingress::{IngressPortError, ReplyContextKey, ReplyContextStore};
+use ironclaw_extension_host::ingress::{IngressPortError, ReplyContextKey, ReplyContextStorePort};
 use ironclaw_filesystem::{
     CasApply, ContentType, Entry, FilesystemError, RootFilesystem, ScopedFilesystem, cas_update,
 };
@@ -54,23 +54,23 @@ struct ReplyContextSnapshot {
     entries: Vec<ReplyContextEntry>,
 }
 
-/// Filesystem-backed [`ReplyContextStore`] shared by the ingress router
+/// Filesystem-backed [`ReplyContextStorePort`] shared by the ingress router
 /// (write half) and the delivery coordinator (read half).
-pub(crate) struct FilesystemReplyContextStore {
+pub(crate) struct ReplyContextStore {
     filesystem: Arc<ScopedFilesystem<dyn RootFilesystem>>,
     scope: ResourceScope,
 }
 
-impl std::fmt::Debug for FilesystemReplyContextStore {
+impl std::fmt::Debug for ReplyContextStore {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("FilesystemReplyContextStore")
+            .debug_struct("ReplyContextStore")
             .field("scope", &self.scope)
             .finish_non_exhaustive()
     }
 }
 
-impl FilesystemReplyContextStore {
+impl ReplyContextStore {
     pub(crate) fn new(
         filesystem: Arc<dyn RootFilesystem>,
         tenant_id: TenantId,
@@ -111,7 +111,7 @@ fn store_unavailable() -> IngressPortError {
 }
 
 #[async_trait]
-impl ReplyContextStore for FilesystemReplyContextStore {
+impl ReplyContextStorePort for ReplyContextStore {
     async fn put(&self, key: ReplyContextKey, context: Vec<u8>) -> Result<(), IngressPortError> {
         let path = Self::snapshot_path(&key)?;
         let conversation = key.conversation.clone();
@@ -198,8 +198,8 @@ mod tests {
         }
     }
 
-    fn store_over(backend: Arc<InMemoryBackend>) -> FilesystemReplyContextStore {
-        FilesystemReplyContextStore::new(
+    fn store_over(backend: Arc<InMemoryBackend>) -> ReplyContextStore {
+        ReplyContextStore::new(
             backend,
             TenantId::new("tenant-alpha").expect("tenant"),
             UserId::new("operator").expect("user"),

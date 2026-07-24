@@ -35,9 +35,12 @@ def _production_capability_ids() -> set[str]:
 def _recorded_tool_evidence() -> dict[str, set[str]]:
     manifest = json.loads((TRACE_ROOT / "case-manifest.json").read_text())
     no_model_cases = set(manifest["no_model_cases"])
+    # Quarantined traces encode the retired activation flow; their fixtures
+    # live under quarantined_retired_activation/ and are not replayable here.
+    quarantined = set(manifest.get("quarantined_model_cases", []))
     evidence: dict[str, set[str]] = {}
     for case in manifest["selected_cases"]:
-        if case in no_model_cases:
+        if case in no_model_cases or case in quarantined:
             continue
         trace = json.loads((TRACE_ROOT / f"{case}.json").read_text())
         for step in trace["steps"]:

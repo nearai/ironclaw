@@ -128,7 +128,7 @@ async fn push_candidates_reject_actor_stream_user_mismatch_before_outbound_looku
 async fn push_candidates_maps_outbound_store_failures() {
     let scope = turn_scope("thread-a");
 
-    // Backend faults flow through the real `FilesystemOutboundStateStore`: the
+    // Backend faults flow through the real `OutboundStateStore`: the
     // policy `ReadFile` fault maps `FilesystemError::Backend ->
     // OutboundError::Backend -> ProjectionStreamError::Outbound`, exercising the
     // production store's error mapping rather than a hand-returned variant.
