@@ -59,7 +59,7 @@ def _cargo_test_config(manifest_path: Path) -> tuple[dict[str, dict], bool]:
     else:
         edition = package.get("edition", "2015")
         has_manual_target = any(
-            manifest.get(target_kind)
+            target_kind in manifest
             for target_kind in ("lib", "bin", "test", "bench", "example")
         )
         autotests_enabled = edition != "2015" or not has_manual_target
@@ -262,6 +262,9 @@ def _assert_cargo_target(
     targets, autotests_enabled = _cargo_test_config(manifest_path)
     if evidence.target in targets:
         target = targets[evidence.target]
+        assert target.get("test", True) is not False, (
+            f"{case_id}: Cargo target {evidence.target!r} disables test execution"
+        )
         assert target.get("harness", True) is not False, (
             f"{case_id}: Cargo target {evidence.target!r} disables the test harness"
         )
@@ -526,6 +529,29 @@ def test_cargo_evidence_rejects_a_harnessless_target(tmp_path: Path):
         )
 
 
+def test_cargo_evidence_rejects_a_target_with_test_disabled(tmp_path: Path):
+    """A target excluded from cargo test cannot satisfy executable evidence."""
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "Cargo.toml").write_text(
+        '[[test]]\nname = "journey"\npath = "tests/journey.rs"\ntest = false\n',
+        encoding="utf-8",
+    )
+    source_path = tmp_path / "tests/journey.rs"
+    source_path.touch()
+    evidence = CargoEvidence(
+        source="tests/journey.rs",
+        test="required_journey",
+        target="journey",
+    )
+    with pytest.raises(AssertionError, match="disables test execution"):
+        _assert_cargo_target(
+            "synthetic",
+            evidence,
+            source_path,
+            root=tmp_path,
+        )
+
+
 def test_cargo_evidence_rejects_disabled_implicit_discovery(tmp_path: Path):
     """An inferred tests-directory target requires Cargo autotests."""
     (tmp_path / "tests").mkdir()
@@ -561,6 +587,33 @@ def test_cargo_evidence_rejects_legacy_manual_target_implicit_discovery(
         encoding="utf-8",
     )
     (tmp_path / "src/main.rs").touch()
+    source_path = tmp_path / "tests/journey.rs"
+    source_path.touch()
+    evidence = CargoEvidence(
+        source="tests/journey.rs",
+        test="required_journey",
+        target="journey",
+    )
+    with pytest.raises(AssertionError, match="automatic test discovery"):
+        _assert_cargo_target(
+            "synthetic",
+            evidence,
+            source_path,
+            root=tmp_path,
+        )
+
+
+def test_cargo_evidence_counts_an_empty_lib_table_as_a_manual_target(
+    tmp_path: Path,
+):
+    """Even an empty target table disables edition-2015 auto-discovery."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "Cargo.toml").write_text(
+        '[package]\nname = "synthetic"\nversion = "0.1.0"\n[lib]\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "src/lib.rs").touch()
     source_path = tmp_path / "tests/journey.rs"
     source_path.touch()
     evidence = CargoEvidence(
