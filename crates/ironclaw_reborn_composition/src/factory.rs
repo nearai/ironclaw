@@ -603,17 +603,22 @@ fn auth_execution_context(
         mission_id: resource_scope.mission_id.clone(),
         thread_id: resource_scope.thread_id.clone(),
         origin: None,
-        extension_id: ExtensionId::new("ironclaw_auth")
-            .map_err(|_| AuthProductError::BackendUnavailable)?,
+        extension_id: ExtensionId::new("ironclaw_auth").map_err(|error| {
+            tracing::warn!(%error, "auth execution-context extension id invalid");
+            AuthProductError::BackendUnavailable
+        })?,
         runtime: RuntimeKind::System,
         trust: TrustClass::System,
         grants: CapabilitySet::default(),
         mounts: MountView::default(),
         resource_scope,
     };
-    context
-        .validate()
-        .map_err(|_| AuthProductError::BackendUnavailable)?;
+    context.validate().map_err(|error| {
+        tracing::warn!(%error, "auth execution-context validation failed");
+        AuthProductError::InvalidRequest {
+            reason: "auth execution context validation failed".to_string(),
+        }
+    })?;
     Ok(context)
 }
 
@@ -1091,6 +1096,10 @@ pub(crate) struct RebornRuntimeStores {
     #[cfg(any(test, feature = "test-support"))]
     #[allow(dead_code)]
     pub(crate) local_dev_wasm_runtime_credential_provider_captured: bool,
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)]
+    pub(crate) product_auth_product_continuation_dispatcher:
+        Arc<dyn ironclaw_product::ProductAuthContinuationDispatcher>,
     /// Readiness of the background credential keepalive worker (B1). Carries the
     /// worker's dependencies together so "both deps present or neither" is a type
     /// invariant rather than a runtime check. MUST stay private — the worker is
@@ -5398,6 +5407,8 @@ async fn build_backend_production(
         secret_store,
         #[cfg(any(test, feature = "test-support"))]
         local_dev_wasm_runtime_credential_provider_captured,
+        #[cfg(any(test, feature = "test-support"))]
+        product_auth_product_continuation_dispatcher: lifecycle_wrapped_product_continuation,
         // `Ready` only when this path built a durable candidate source (i.e. no
         // caller-supplied product_auth_ports override); `Absent` otherwise. The
         // leader lock is always available on this production path.

@@ -94,9 +94,6 @@ pub use product_auth::api::auth::{
     RebornOAuthStartFlowRequest, RebornProductAuthServicePorts, RebornProductAuthServices,
 };
 pub use product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock;
-pub use product_auth::credentials::runtime_credentials::host_managed_fallback::{
-    HostManagedCredentialFallbackRule, HostManagedRuntimeCredentialAccountSelector,
-};
 pub use product_auth::credentials::runtime_credentials::{
     RuntimeCredentialAccountRefreshService, RuntimeCredentialAccountSelectionService,
     RuntimeCredentialAccountVisibilityPolicy, map_account_error,

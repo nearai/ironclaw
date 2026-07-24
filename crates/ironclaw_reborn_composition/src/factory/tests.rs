@@ -3178,6 +3178,7 @@ async fn channel_pairing_completions_run_the_lifecycle_wrapped_continuation_disp
         .as_ref()
         .expect("local-dev build composes the channel pairing registry");
     let mut pairing_services_checked = 0usize;
+    let canonical_dispatcher = Arc::clone(&services.product_auth_product_continuation_dispatcher);
     let mut shared_dispatcher = None;
     for extension_id in ["telegram", "slack"] {
         let Some(pairing) = channel_pairing.get(extension_id) else {
@@ -3185,6 +3186,11 @@ async fn channel_pairing_completions_run_the_lifecycle_wrapped_continuation_disp
         };
         pairing_services_checked += 1;
         let dispatcher = pairing.continuation_dispatcher_for_test();
+        assert!(
+            Arc::ptr_eq(&dispatcher, &canonical_dispatcher),
+            "{extension_id} pairing completions must dispatch through the authoritative \
+             lifecycle-wrapped continuation dispatcher",
+        );
         if let Some(shared_dispatcher) = &shared_dispatcher {
             assert!(
                 Arc::ptr_eq(&dispatcher, shared_dispatcher),
