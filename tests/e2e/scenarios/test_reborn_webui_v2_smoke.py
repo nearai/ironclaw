@@ -492,6 +492,64 @@ async def test_reborn_v2_appearance_theme_selection_persists(reborn_v2_page):
     )
 
 
+async def test_reborn_v2_chat_request_failure_uses_selected_language(
+    reborn_v2_page,
+):
+    """The Settings locale reaches Chat's browser-generated request errors."""
+    origin = await reborn_v2_page.evaluate("location.origin")
+    await reborn_v2_page.goto(
+        f"{origin}/settings/language?token={REBORN_V2_AUTH_TOKEN}"
+    )
+
+    chinese_option = reborn_v2_page.get_by_role(
+        "button", name=re.compile(r"简体中文")
+    )
+    await expect(chinese_option).to_be_visible(timeout=15000)
+    await chinese_option.click()
+    await expect(reborn_v2_page.locator("html")).to_have_attribute(
+        "lang", "zh-CN"
+    )
+
+    thread_id = "thread-localized-request-failure"
+
+    async def handle_create_thread(route) -> None:
+        await route.fulfill(
+            status=201,
+            content_type="application/json",
+            body=json.dumps({"thread": {"thread_id": thread_id}}),
+        )
+
+    async def fail_send(route) -> None:
+        await route.abort("connectionfailed")
+
+    await reborn_v2_page.route(
+        "**/api/webchat/v2/threads", handle_create_thread
+    )
+    await reborn_v2_page.route(
+        f"**/api/webchat/v2/threads/{thread_id}/messages", fail_send
+    )
+
+    await reborn_v2_page.goto(
+        f"{origin}/chat?token={REBORN_V2_AUTH_TOKEN}"
+    )
+    composer = reborn_v2_page.locator(SEL_V2["chat_composer"])
+    await expect(composer).to_be_visible(timeout=15000)
+    await expect(composer).to_have_attribute(
+        "placeholder", "向 IronClaw 提问。"
+    )
+
+    await composer.fill("触发网络错误")
+    await composer.press("Enter")
+
+    error_message = reborn_v2_page.locator(SEL_V2["msg_error"]).last
+    await expect(error_message).to_contain_text(
+        "请求在发送前失败。", timeout=5000
+    )
+    await expect(error_message).not_to_contain_text(
+        "The request failed before it could be sent."
+    )
+
+
 async def test_reborn_v2_settings_import_rejects_unsupported_payloads(
     reborn_v2_page,
 ):
