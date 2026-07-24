@@ -2393,6 +2393,12 @@ mod tests {
         );
         assert!(
             descriptor
+                .safe_description
+                .contains("at most four active skills total per run"),
+            "skill_activate description must advertise the selector's activation limit"
+        );
+        assert!(
+            descriptor
                 .parameters_schema
                 .get("properties")
                 .and_then(|properties| properties.get("names"))
@@ -2405,7 +2411,18 @@ mod tests {
                 .and_then(|properties| properties.get("names"))
                 .and_then(|names| names.get("description"))
                 .and_then(serde_json::Value::as_str),
-            Some("Exact skill names copied from the available-skills list")
+            Some(
+                "Exact skill names copied from the available-skills list; at most four total per run"
+            )
+        );
+        assert_eq!(
+            descriptor
+                .parameters_schema
+                .get("properties")
+                .and_then(|properties| properties.get("names"))
+                .and_then(|names| names.get("maxItems"))
+                .and_then(serde_json::Value::as_u64),
+            Some(4)
         );
         let tool_definition = port
             .tool_definitions()
