@@ -12,9 +12,9 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfaceVersion, HostRuntime,
-    HostRuntimeError, HostRuntimeHealth, HostRuntimeStatus, RuntimeCapabilityCompleted,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
-    RuntimeStatusRequest, SurfaceKind, VisibleCapability, VisibleCapabilityAccess,
+    HostRuntimeError, HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalResume,
+    RuntimeCapabilityCompleted, RuntimeCapabilityOutcome, RuntimeInvocation, RuntimeStatusRequest,
+    SurfaceKind, VisibleCapability, VisibleCapabilityAccess,
     VisibleCapabilityRequest as HostVisibleCapabilityRequest,
     VisibleCapabilitySurface as HostVisibleCapabilitySurface,
 };
@@ -27,8 +27,8 @@ use ironclaw_turns::{
     InMemoryRunProfileResolver, LoopResultRef, RunProfileResolutionRequest, RunProfileResolver,
     TurnId, TurnRunId, TurnScope,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInvocation,
-        InMemoryLoopHostMilestoneSink, LoopCapabilityPort, LoopRunContext, ProviderToolCall,
+        AgentLoopHostError, AgentLoopHostErrorKind, InMemoryLoopHostMilestoneSink,
+        LoopCapabilityPort, LoopRequest, LoopRunContext, ProviderToolCall,
         RegisterProviderToolCallRequest, VisibleCapabilityRequest,
     },
 };
@@ -212,7 +212,7 @@ async fn factory_stages_provider_tool_call_arguments_without_custom_resolver_ove
         arguments
     );
     let outcome = port
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: candidate.activity_id,
             surface_version: candidate.surface_version,
             capability_id: candidate.capability_id,
@@ -226,7 +226,7 @@ async fn factory_stages_provider_tool_call_arguments_without_custom_resolver_ove
         matches!(&outcome, Resolution::Done(done) if done.verdict.is_success()),
         "expected completed provider invocation, got {outcome:?}"
     );
-    assert_eq!(runtime.take_requests()[0].input, arguments);
+    assert_eq!(runtime.take_requests()[0].3, arguments);
 }
 
 fn workspace_root() -> PathBuf {
@@ -262,14 +262,14 @@ struct EmptyHostRuntime;
 impl HostRuntime for EmptyHostRuntime {
     async fn invoke_capability(
         &self,
-        _request: RuntimeCapabilityRequest,
+        _request: RuntimeInvocation,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         Err(HostRuntimeError::unavailable("not used in this test"))
     }
 
     async fn resume_capability(
         &self,
-        _request: RuntimeCapabilityResumeRequest,
+        _request: RuntimeApprovalResume,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         Err(HostRuntimeError::unavailable("not used in this test"))
     }
@@ -305,11 +305,11 @@ impl HostRuntime for EmptyHostRuntime {
 
 #[derive(Default)]
 struct SingleToolHostRuntime {
-    requests: Mutex<Vec<RuntimeCapabilityRequest>>,
+    requests: Mutex<Vec<RuntimeInvocation>>,
 }
 
 impl SingleToolHostRuntime {
-    fn take_requests(&self) -> Vec<RuntimeCapabilityRequest> {
+    fn take_requests(&self) -> Vec<RuntimeInvocation> {
         self.requests.lock().expect("requests lock").clone()
     }
 }
@@ -318,7 +318,7 @@ impl SingleToolHostRuntime {
 impl HostRuntime for SingleToolHostRuntime {
     async fn invoke_capability(
         &self,
-        request: RuntimeCapabilityRequest,
+        request: RuntimeInvocation,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         self.requests
             .lock()
@@ -326,7 +326,7 @@ impl HostRuntime for SingleToolHostRuntime {
             .push(request.clone());
         Ok(RuntimeCapabilityOutcome::Completed(Box::new(
             RuntimeCapabilityCompleted {
-                capability_id: request.capability_id,
+                capability_id: request.1,
                 output: serde_json::json!({"ok": true}),
                 display_preview: None,
                 usage: ResourceUsage::default(),
@@ -336,7 +336,7 @@ impl HostRuntime for SingleToolHostRuntime {
 
     async fn resume_capability(
         &self,
-        _request: RuntimeCapabilityResumeRequest,
+        _request: RuntimeApprovalResume,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         Err(HostRuntimeError::unavailable("not used in this test"))
     }
@@ -364,6 +364,7 @@ impl HostRuntime for SingleToolHostRuntime {
                     default_permission: PermissionMode::Allow,
                     runtime_credentials: Vec::new(),
                     network_targets: Vec::new(),
+                    max_egress_bytes: None,
                     resource_profile: None,
                     origin_gate_matrix: None,
                 },

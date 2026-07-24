@@ -305,14 +305,14 @@ the crate's "named types with a single policy responsibility" rule
 pub trait LoopCapabilityPort: Send + Sync {
     async fn visible_capabilities(&self, request: VisibleCapabilityRequest)
         -> Result<VisibleCapabilitySurface, AgentLoopHostError>;
-    async fn invoke_capability(&self, request: CapabilityInvocation)
+    async fn invoke_capability(&self, request: LoopRequest)
         -> Result<CapabilityOutcome, AgentLoopHostError>;
-    async fn invoke_capability_batch(&self, request: CapabilityBatchInvocation)
+    async fn invoke_capability_batch(&self, request: LoopRequestBatch)
         -> Result<CapabilityBatchOutcome, AgentLoopHostError>;
 }
 
-// CapabilityInvocation { surface_version, capability_id, input_ref }
-// CapabilityBatchInvocation { invocations: Vec<CapabilityInvocation>, stop_on_first_suspension: bool }
+// LoopRequest { surface_version, capability_id, input_ref }
+// LoopRequestBatch { invocations: Vec<LoopRequest>, stop_on_first_suspension: bool }
 // CapabilityBatchOutcome { outcomes: Vec<CapabilityOutcome>, stopped_on_suspension: bool }
 
 // coordination — ironclaw_turns/src/coordinator.rs + request.rs + scope.rs
@@ -389,9 +389,9 @@ use ironclaw_turns::{
     AcceptedMessageRef, IdempotencyKey, ReplyTargetBindingRef, RunProfileRequest,
     SourceBindingRef, TurnActor, TurnCoordinator, TurnRunId, TurnScope,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
+        AgentLoopHostError, AgentLoopHostErrorKind, LoopRequestBatch,
         CapabilityBatchOutcome, CapabilityDenied, CapabilityDeniedReasonKind,
-        CapabilityInvocation, CapabilityOutcome, LoopCapabilityPort,
+        LoopRequest, CapabilityOutcome, LoopCapabilityPort,
         LoopCapabilityResultWriter, LoopGateRef, LoopRunContext,
         VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
@@ -410,7 +410,7 @@ pub struct SubagentSpawnLimits {
 pub struct SubagentSpawnDeps {
     pub coordinator:      Arc<dyn TurnCoordinator>,
     pub thread_service:   Arc<dyn SessionThreadService>,
-    pub goal_store:       Arc<dyn SubagentGoalStore>,            // from ironclaw_runner
+    pub goal_store:       Arc<dyn SubagentGoalStorePort>,            // from ironclaw_runner
     pub gate_store:       Arc<dyn SubagentGateResolutionStore>,  // from ironclaw_runner
     pub flavor_resolver:  Arc<dyn SubagentFlavorResolver>,       // from ironclaw_runner
     pub child_profiles:   Arc<dyn SubagentRunProfileBinding>,    // flavor -> RunProfileRequest
@@ -460,7 +460,7 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
         self.inner.visible_capabilities(req).await
     }
 
-    async fn invoke_capability(&self, req: CapabilityInvocation)
+    async fn invoke_capability(&self, req: LoopRequest)
         -> Result<CapabilityOutcome, AgentLoopHostError>
     {
         if self.is_spawn(&req.capability_id) {
@@ -470,7 +470,7 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
         self.inner.invoke_capability(req).await
     }
 
-    async fn invoke_capability_batch(&self, req: CapabilityBatchInvocation)
+    async fn invoke_capability_batch(&self, req: LoopRequestBatch)
         -> Result<CapabilityBatchOutcome, AgentLoopHostError>
     {
         // ── per-turn fan-out cap (README §8.2). Counted across THIS batch.
@@ -509,7 +509,7 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
                 {
                     idx += 1;
                 }
-                let inner = self.inner.invoke_capability_batch(CapabilityBatchInvocation {
+                let inner = self.inner.invoke_capability_batch(LoopRequestBatch {
                     invocations: req.invocations[start..idx].to_vec(),
                     stop_on_first_suspension: req.stop_on_first_suspension,
                 }).await?;
@@ -555,7 +555,7 @@ and a per-tree over-admit cannot occur (README §6, §8.3, §9
 impl SubagentSpawnCapabilityPort {
     async fn handle_spawn(
         &self,
-        inv: &CapabilityInvocation,
+        inv: &LoopRequest,
         ordinal: u32,
         tree: &mut TreeBudget,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
@@ -988,7 +988,7 @@ const HANDOFF_DELIM: &str = "## Context from parent";
 /// Builds the subagent's inline system + (framing) user messages.
 /// Injected with the durable goal store + the static direction table.
 pub struct SubagentPromptComposer {
-    goal_store: Arc<dyn SubagentGoalStore>,
+    goal_store: Arc<dyn SubagentGoalStorePort>,
     flavor_resolver: Arc<dyn SubagentFlavorResolver>,
 }
 
@@ -1038,7 +1038,7 @@ impl SubagentPromptComposer {
 /// The FULL goal materialisation — used by P2.A when seeding the child thread
 /// (see §2.3 option B). Reads the durable goal store; a MISS fails loud.
 pub async fn materialize_goal_message(
-    goal_store: &dyn SubagentGoalStore,
+    goal_store: &dyn SubagentGoalStorePort,
     child_run_id: TurnRunId,
 ) -> Result<String, AgentLoopHostError> {
     let goal = goal_store.get_goal(child_run_id).await

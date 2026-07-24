@@ -11,13 +11,13 @@ use ironclaw_auth::{
 use ironclaw_host_api::{
     InvocationId, ResourceScope, RuntimeCredentialAuthRequirement, SecretHandle,
 };
-use ironclaw_product_adapters::AuthPromptChallengeKind;
-use ironclaw_secrets::{SecretMaterial, SecretStore};
+use ironclaw_product::AuthPromptChallengeKind;
+use ironclaw_secrets::{SecretMaterial, SecretStorePort};
 use ironclaw_turns::{TurnRunId, TurnScope};
 use secrecy::SecretString;
 use tokio::sync::Mutex as AsyncMutex;
 
-use ironclaw_product_workflow::AuthChallengeView;
+use ironclaw_product::AuthChallengeView;
 
 const GATE_FLOW_TTL_SECONDS: i64 = 600;
 
@@ -42,12 +42,12 @@ pub(crate) struct OAuthGateChallengeRequest<'a> {
 #[derive(Clone)]
 pub(crate) struct OAuthGateFlowDriver {
     engine: Arc<AuthEngine>,
-    secret_store: Arc<dyn SecretStore>,
+    secret_store: Arc<dyn SecretStorePort>,
     setup_lock: Arc<AsyncMutex<()>>,
 }
 
 impl OAuthGateFlowDriver {
-    pub(crate) fn new(engine: Arc<AuthEngine>, secret_store: Arc<dyn SecretStore>) -> Self {
+    pub(crate) fn new(engine: Arc<AuthEngine>, secret_store: Arc<dyn SecretStorePort>) -> Self {
         Self {
             engine,
             secret_store,
@@ -331,6 +331,7 @@ pub(crate) fn challenge_view_from_flow(
             account_label: None,
             authorization_url: Some(authorization_url.clone()),
             expires_at: Some(*expires_at),
+            pairing: None,
         }),
         Some(_) | None => Err(AuthProductError::BackendUnavailable),
     }
@@ -346,7 +347,7 @@ mod tests {
     use ironclaw_host_api::{
         AgentId, ExtensionId, TenantId, ThreadId, UserId, VendorAuthRecipe, VendorId,
     };
-    use ironclaw_secrets::FilesystemSecretStore;
+    use ironclaw_secrets::SecretStore;
 
     fn acme_vendor_recipe() -> ResolvedVendorAuthRecipe {
         let recipe: VendorAuthRecipe = serde_json::from_value(serde_json::json!({
@@ -420,7 +421,7 @@ mod tests {
             recipes: Arc::new(StaticAuthRecipeResolver::new(vec![acme_vendor_recipe()])),
             client_credentials: credentials,
             egress: Arc::new(PanicEgress),
-            secret_store: Arc::new(FilesystemSecretStore::ephemeral()),
+            secret_store: Arc::new(SecretStore::ephemeral()),
             callback_base: EngineCallbackBase::new(
                 "https://host.example/api/reborn/product-auth/oauth",
             )
@@ -452,7 +453,7 @@ mod tests {
                 flow_source,
                 driver: OAuthGateFlowDriver::new(
                     engine_with_credentials(Arc::new(StaticCredentials)),
-                    Arc::new(FilesystemSecretStore::ephemeral()),
+                    Arc::new(SecretStore::ephemeral()),
                 ),
                 scope: TurnScope::new(
                     TenantId::new("tenant-alpha").unwrap(),
@@ -626,7 +627,7 @@ mod tests {
         // And an unconfigured (credentials missing) vendor also falls through.
         let unconfigured_driver = OAuthGateFlowDriver::new(
             engine_with_credentials(Arc::new(UnconfiguredCredentials)),
-            Arc::new(FilesystemSecretStore::ephemeral()),
+            Arc::new(SecretStore::ephemeral()),
         );
         let result = unconfigured_driver
             .challenge_for_blocked_gate(OAuthGateChallengeRequest {

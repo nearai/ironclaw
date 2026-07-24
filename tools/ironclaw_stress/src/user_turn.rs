@@ -29,10 +29,10 @@ use ironclaw_threads::{
     UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, BlockedReason, DefaultTurnCoordinator, FilesystemTurnStateRowStore,
-    GateRef, IdempotencyKey, LoopCheckpointStateRef, ReplyTargetBindingRef, ResumeTurnPrecondition,
-    ResumeTurnRequest, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnCheckpointId, TurnCoordinator, TurnError, TurnErrorCategory, TurnLeaseToken, TurnRunnerId,
+    AcceptedMessageRef, BlockedReason, DefaultTurnCoordinator, GateRef, IdempotencyKey,
+    LoopCheckpointStateRef, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
+    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId,
+    TurnCoordinator, TurnError, TurnErrorCategory, TurnLeaseToken, TurnRunnerId, TurnStateRowStore,
     TurnStateStore, TurnStateStoreLimits,
     runner::{
         BlockRunRequest, ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, TurnRunTransitionPort,
@@ -53,12 +53,12 @@ use crate::{
 };
 
 /// Backend-agnostic turn store for the stress workload. The row store
-/// `FilesystemTurnStateRowStore` implements the supertraits, so the impl is
+/// `TurnStateRowStore` implements the supertraits, so the impl is
 /// empty — this lets `turn_store_for_context` return one
 /// `Arc<dyn StressTurnStore>` and the workload submit/claim/complete against it
 /// without per-method dispatch.
 pub(crate) trait StressTurnStore: TurnStateStore + TurnRunTransitionPort {}
-impl<F: RootFilesystem + 'static> StressTurnStore for FilesystemTurnStateRowStore<F> {}
+impl<F: RootFilesystem + 'static> StressTurnStore for TurnStateRowStore<F> {}
 
 pub(crate) struct UserTurnServices<F>
 where
@@ -1667,10 +1667,7 @@ where
                         Arc::clone(&self.root),
                         view,
                     ));
-                    Arc::new(
-                        FilesystemTurnStateRowStore::new(scoped)
-                            .with_limits(self.turn_state_limits),
-                    )
+                    Arc::new(TurnStateRowStore::new(scoped).with_limits(self.turn_state_limits))
                 })
             }
             // Same row-store mechanism, but over the shared in-process
@@ -1683,10 +1680,7 @@ where
                         Arc::clone(&self.memory_root),
                         view,
                     ));
-                    Arc::new(
-                        FilesystemTurnStateRowStore::new(scoped)
-                            .with_limits(self.turn_state_limits),
-                    )
+                    Arc::new(TurnStateRowStore::new(scoped).with_limits(self.turn_state_limits))
                 })
             }
         }

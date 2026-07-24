@@ -22,8 +22,8 @@ lane routes (`/api/webchat/v2/channels/slack/*`):
                `/webhooks/extensions/slack/events` admits a real turn.
   reply out  — the coordinated reply reaches `chat.postMessage` on the fake
                Slack API (`/__mock/sent_messages`), via the delivery
-               coordinator and host-side credential injection. The MIG-5
-               legacy alias `/webhooks/slack/events` round-trips too.
+               coordinator and host-side credential injection. The retired
+               `/webhooks/slack/events` compatibility alias stays unmounted.
   remove     — after `/api/webchat/v2/extensions/slack/remove`, deployment
                ingress remains live, the user's personal connection is gone,
                and a subsequent DM gets the static connect notice without a
@@ -47,7 +47,9 @@ import httpx
 import pytest
 
 from reborn_webui_harness import (
+    client_action_id,
     close_reborn_server,
+    fetch_extension_oauth_requirement,
     reborn_bearer_headers,
     start_reborn_webui_v2_server,
 )
@@ -65,7 +67,7 @@ TEAM_ID = "T0001"
 DM_CHANNEL = f"D{OWNER_USER_ID}"
 
 CANONICAL_EVENTS_PATH = "/webhooks/extensions/slack/events"
-ALIAS_EVENTS_PATH = "/webhooks/slack/events"
+RETIRED_EVENTS_PATH = "/webhooks/slack/events"
 
 
 @pytest.fixture(scope="module")
@@ -309,26 +311,28 @@ async def test_reborn_slack_channel_configure_connect_roundtrip_remove(
         # ── install: user lifecycle remains separate from admin setup ──
         install = await client.post(
             f"{base_url}/api/webchat/v2/extensions/install",
-            json={"package_ref": SLACK_PACKAGE_REF},
+            json={
+                "package_ref": SLACK_PACKAGE_REF,
+                "client_action_id": client_action_id(),
+            },
             timeout=60,
         )
         install.raise_for_status()
         assert install.json()["success"] is True
 
         # ── connect: generic personal OAuth → channel identity binding ──
-        # Before activation: the lifecycle's activation credential gate
-        # requires the tools' [auth.slack] credential account, which this
-        # OAuth connect creates.
+        # The installed member remains setup-needed until this user-level
+        # OAuth connection exists. Completing OAuth is the lifecycle
+        # transition; there is no separate public activation action.
+        requirement = await fetch_extension_oauth_requirement(client, base_url, "slack")
         start = await client.post(
             f"{base_url}/api/webchat/v2/extensions/slack/setup/oauth/start",
             json={
-                "provider": "slack",
-                "account_label": "e2e slack account",
-                "scopes": [],
+                "requirement": requirement["name"],
                 "expires_at": time.strftime(
                     "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 300)
                 ),
-                "invocation_id": str(uuid.uuid4()),
+                "invocation_id": requirement["setup"].get("invocation_id"),
             },
             timeout=30,
         )
@@ -360,13 +364,8 @@ async def test_reborn_slack_channel_configure_connect_roundtrip_remove(
         assert flow_status.status_code == 200, flow_status.text
         assert flow_status.json()["status"] == "completed", flow_status.text
 
-        # ── activate: the assembly reconciles a live ingress registration ──
-        activate = await client.post(
-            f"{base_url}/api/webchat/v2/extensions/slack/activate",
-            timeout=60,
-        )
-        activate.raise_for_status()
-        assert activate.json()["success"] is True, activate.text
+        # OAuth completion makes the member active and the assembly reconciles
+        # its live ingress registration without a second activation request.
         await wait_for_route_status(client, base_url, CANONICAL_EVENTS_PATH, {200})
         forged = await post_signed_event(
             client,
@@ -388,20 +387,20 @@ async def test_reborn_slack_channel_configure_connect_roundtrip_remove(
         replies = await wait_for_final_replies(client, fake_slack_server, 1)
         assert replies[0]["channel"] == DM_CHANNEL, replies
 
-        # ── MIG-5 alias: the legacy path forwards into the same router ──
-        alias_inbound = await post_signed_event(
+        # ── retired compatibility alias: only the manifest route remains ──
+        retired_inbound = await post_signed_event(
             client,
             base_url,
-            ALIAS_EVENTS_PATH,
-            dm_event("Ev-alias-dm", "hello via the alias path"),
+            RETIRED_EVENTS_PATH,
+            dm_event("Ev-retired-path", "this route must stay retired"),
         )
-        assert alias_inbound.status_code == 200, alias_inbound.text
-        replies = await wait_for_final_replies(client, fake_slack_server, 2)
-        assert replies[1]["channel"] == DM_CHANNEL, replies
+        assert retired_inbound.status_code == 404, retired_inbound.text
+        assert len(await wait_for_final_replies(client, fake_slack_server, 1)) == 1
 
         # ── remove: personal state clears; deployment ingress remains ──
         remove = await client.post(
             f"{base_url}/api/webchat/v2/extensions/slack/remove",
+            json={"client_action_id": client_action_id()},
             timeout=60,
         )
         remove.raise_for_status()
@@ -416,6 +415,6 @@ async def test_reborn_slack_channel_configure_connect_roundtrip_remove(
             client, fake_slack_server, "connect it in the Ironclaw web app", 2
         )
         final_messages = await fake_sent_messages(client, fake_slack_server)
-        assert len(final_replies(final_messages)) == 2, (
+        assert len(final_replies(final_messages)) == 1, (
             f"no model reply may be delivered after removal: {final_messages}"
         )

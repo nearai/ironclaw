@@ -11,13 +11,13 @@ use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationServices, CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
+    RuntimeCapabilityOutcome,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
 };
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceGovernor};
-use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore};
+use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStorePort};
 use ironclaw_trust::TrustDecision;
 use serde_json::json;
 
@@ -33,7 +33,7 @@ fn local_test_runtime_policy() -> ironclaw_host_api::runtime_policy::EffectiveRu
 async fn default_runtime_installs_configured_builtin_obligation_services() {
     let registry = Arc::new(registry_with_echo_capability());
     let audit_sink = Arc::new(InMemoryAuditSink::new());
-    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store = Arc::new(SecretStore::ephemeral());
     let resource_governor = Arc::new(InMemoryResourceGovernor::new());
     let services = BuiltinObligationServices::new(
         audit_sink.clone(),
@@ -86,7 +86,7 @@ async fn default_runtime_installs_configured_builtin_obligation_services() {
         .await
         .unwrap();
 
-    let request = RuntimeCapabilityRequest::new(
+    let request = (
         context,
         capability_id(),
         ResourceEstimate::default(),

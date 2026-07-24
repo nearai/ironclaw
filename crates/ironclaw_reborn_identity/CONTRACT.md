@@ -20,7 +20,7 @@ admin surface extends this store; it does not stand up a new one. See
 Bottom-of-stack, downstream-facing. Among internal `ironclaw_*` crates it
 depends **only** on `ironclaw_host_api` (identity/scope newtypes, `ScopedPath`)
 and `ironclaw_filesystem` (the durable substrate). It must never reach upstream
-(`ironclaw_reborn_composition`, `ironclaw_product_workflow`) or onto the v1
+(`ironclaw_reborn_composition`, `ironclaw_product`) or onto the v1
 legacy enclave. This is machine-enforced: `reborn_crate_dependency_boundaries_hold`
 in `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs` allows
 exactly those two edges. The only external consumer is
@@ -42,8 +42,8 @@ value no base64 encoding produces.
 
 The store persists three JSON record shapes under the
 `/tenant-shared/reborn-identity` root. Shapes are defined in
-`src/filesystem_store/record.rs`; path construction is in
-`src/filesystem_store/paths.rs` (every opaque segment is base64url-encoded into
+`src/identity_store/record.rs`; path construction is in
+`src/identity_store/paths.rs` (every opaque segment is base64url-encoded into
 its own path segment — `surface` renders via its stable `as_str()`, and an empty
 segment maps to the `_` sentinel).
 
@@ -77,7 +77,7 @@ tracked as #5616.)
 ## User directory surface (`RebornUserDirectory`)
 
 A **separate** trait from `RebornIdentityResolver`, implemented by the same
-`FilesystemRebornIdentityStore`, for the operator/admin surface that enumerates
+`RebornIdentityStore`, for the operator/admin surface that enumerates
 and manages the `StoredUser` records. It is kept apart from the resolver so admin
 CRUD cannot perturb the mint/link/create invariants above, and so the resolver's
 contract tests are not entangled with admin methods. Its only production
@@ -112,7 +112,7 @@ facade can map it to a 404.
 ## Invariants (and where each is enforced)
 
 1. **Verified-email linking is gated to OAuth + verified + non-empty.**
-   `verified_email_key` (`filesystem_store.rs`) is the single source of truth:
+   `verified_email_key` (`identity_store.rs`) is the single source of truth:
    it returns `Some(lowercased email)` only on `SurfaceKind::Oauth` with
    `email_verified` and a non-empty address, feeding **both** `resolve_or_create`
    and `adopt_migrated_identity`. The surface gate is a **security** boundary: the

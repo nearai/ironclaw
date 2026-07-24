@@ -24,19 +24,31 @@
 
 use std::sync::Arc;
 
-use ironclaw_host_api::{InstallationState, SecretHandle, UserId};
-use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef};
+use ironclaw_host_api::SecretHandle;
+use ironclaw_product::{
+    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload, LifecyclePublicState,
+    ProductWorkflowError,
+};
 use secrecy::SecretString;
 
 use crate::RebornBuildError;
 use crate::admin_secrets::AdminSecretProvisioner;
 use crate::extension_host::extension_lifecycle::{
-    ExtensionActivationMode, RebornLocalExtensionManagementPort,
+    ExtensionActivationMode, ExtensionManagementPort,
 };
 
 const WEB_SEARCH_EXTENSION_ID: &str = "web_search";
 const BRAVE_API_KEY_SECRET_NAME: &str = "brave_api_key";
 pub(crate) const BRAVE_API_KEY_ENV_VAR: &str = "BRAVE_API_KEY";
+
+/// Matches `AvailableExtensionCatalog::resolve`'s error text for a package id
+/// with no catalog entry at all. `build_backend_production` composes this
+/// bootstrap for every deployment shape it serves (local-dev, hosted
+/// single-tenant, and narrower test/production fixtures that compose a
+/// reduced first-party catalog without `web_search`) — treat "not in this
+/// deployment's catalog" as a normal skip rather than a hard composition
+/// failure.
+const EXTENSION_NOT_FOUND_REASON: &str = "available extension was not found";
 
 /// Read `BRAVE_API_KEY` from the process environment. Split out from
 /// [`bootstrap_web_search_brave`] so the bootstrap logic itself takes the key
@@ -55,20 +67,26 @@ pub(crate) enum WebSearchBootstrapOutcome {
     /// No `BRAVE_API_KEY` in the environment — nothing to do, and
     /// `web-access` (Exa) should be bootstrapped instead.
     NotConfigured,
-    /// A prior boot (or the user) explicitly removed/disabled `web_search`;
-    /// that choice is preserved rather than silently overridden.
-    SkippedPreservedRemoved,
-    SkippedDisabled,
-    SkippedNonActivatable,
     AlreadyActive,
     Activated,
+    /// The extension is installed but not in an auto-activatable public
+    /// state (e.g. the user explicitly disabled or removed it — the product
+    /// contract deliberately collapses those into one non-`Active`,
+    /// non-`Uninstalled` state, so this bootstrap can't distinguish them and
+    /// errs on the side of not overriding whatever the user did).
+    SkippedNonActivatable,
+    /// `web_search` isn't in this deployment's available-extension catalog
+    /// at all (a composition that never bundles it). `web-access` (Exa)
+    /// should be bootstrapped instead, same as `NotConfigured`.
+    SkippedUnavailable,
 }
 
 impl WebSearchBootstrapOutcome {
     /// Whether `web-access` (Exa) must stay off to avoid a `web_search`
-    /// display-name collision. Only `NotConfigured` leaves room for it.
+    /// display-name collision. `NotConfigured`/`SkippedUnavailable` both
+    /// leave room for it (no working Brave path either way).
     pub(crate) fn leaves_web_access_available(self) -> bool {
-        matches!(self, Self::NotConfigured)
+        matches!(self, Self::NotConfigured | Self::SkippedUnavailable)
     }
 
     pub(crate) fn log_completion(self) {
@@ -76,7 +94,7 @@ impl WebSearchBootstrapOutcome {
             Self::NotConfigured => {
                 tracing::debug!("web_search (Brave) bootstrap is not configured")
             }
-            Self::SkippedPreservedRemoved | Self::SkippedDisabled | Self::SkippedNonActivatable => {
+            Self::SkippedNonActivatable | Self::SkippedUnavailable => {
                 tracing::debug!(
                     outcome = ?self,
                     "web_search (Brave) bootstrap skipped; extension will not be auto-activated"
@@ -92,11 +110,11 @@ impl WebSearchBootstrapOutcome {
 /// Read `BRAVE_API_KEY` from the process environment, seed it into the
 /// tenant/user's secret store (so the WASM tool's declared `brave_api_key`
 /// credential injection resolves), then install (if not already) and
-/// activate `web_search` for the runtime's tenant-operator identity — unless
-/// the user already explicitly disabled or removed it.
+/// activate `web_search` for the runtime's owner scope — unless it's
+/// installed but not in an auto-activatable public state.
 pub(crate) async fn bootstrap_web_search_brave(
     api_key: Option<SecretString>,
-    extension_management: &Arc<RebornLocalExtensionManagementPort>,
+    extension_management: &Arc<ExtensionManagementPort>,
     admin_secret_provisioner: Option<&Arc<dyn AdminSecretProvisioner>>,
     owner_scope: &ironclaw_host_api::ResourceScope,
 ) -> Result<WebSearchBootstrapOutcome, RebornBuildError> {
@@ -104,49 +122,51 @@ pub(crate) async fn bootstrap_web_search_brave(
         return Ok(WebSearchBootstrapOutcome::NotConfigured);
     };
 
-    let caller: UserId = extension_management.tenant_operator_user_id().clone();
+    let caller = &owner_scope.user_id;
     let package_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, WEB_SEARCH_EXTENSION_ID)
             .map_err(|error| RebornBuildError::InvalidConfig {
                 reason: format!("web_search package ref is invalid: {error}"),
             })?;
 
-    let phase = extension_management
-        .project(package_ref.clone(), &caller)
+    let projection = match extension_management
+        .project(package_ref.clone(), caller, None)
         .await
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("web_search extension projection failed: {error}"),
-        })?
-        .phase;
-
-    match phase {
-        // `Installed` also covers a never-installed package (`project()`
-        // reports the neutral `Installed` when there is no installation
-        // record at all — see its doc comment); `install()` below is
-        // idempotent for an already-installed package, so both cases take
-        // the same path unconditionally.
-        InstallationState::Installed | InstallationState::Configured => {}
-        InstallationState::Active => return Ok(WebSearchBootstrapOutcome::AlreadyActive),
-        InstallationState::Removed => {
-            tracing::debug!(
-                "web_search was explicitly removed; preserving that state rather than \
-                 re-installing it"
-            );
-            return Ok(WebSearchBootstrapOutcome::SkippedPreservedRemoved);
+    {
+        Ok(projection) => projection,
+        Err(ProductWorkflowError::InvalidBindingRequest { reason })
+            if reason == EXTENSION_NOT_FOUND_REASON =>
+        {
+            tracing::debug!("web_search is not in this deployment's extension catalog");
+            return Ok(WebSearchBootstrapOutcome::SkippedUnavailable);
         }
-        InstallationState::Disabled => {
-            tracing::debug!(
-                "web_search is explicitly disabled; preserving that state rather than \
-                 re-activating it"
-            );
-            return Ok(WebSearchBootstrapOutcome::SkippedDisabled);
+        Err(error) => {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: format!("web_search extension projection failed: {error}"),
+            });
         }
-        InstallationState::Failed | InstallationState::Unsupported => {
-            tracing::debug!(
-                phase = ?phase,
-                "web_search is not in an auto-activatable phase; skipping bootstrap"
-            );
-            return Ok(WebSearchBootstrapOutcome::SkippedNonActivatable);
+    };
+    let phase = projection.phase;
+    // `install_scope` is present exactly when the caller has a visible
+    // installation; the projected `phase` is a resting state only for an
+    // installed package (a not-installed projection carries a neutral
+    // phase) — same convention `bootstrap_nearai_mcp` uses.
+    let installed = matches!(
+        projection.payload.as_ref(),
+        Some(LifecycleProductPayload::ExtensionList { extensions, .. })
+            if extensions.first().and_then(|extension| extension.install_scope).is_some()
+    );
+    if installed {
+        match phase {
+            LifecyclePublicState::Active => return Ok(WebSearchBootstrapOutcome::AlreadyActive),
+            LifecyclePublicState::SetupNeeded => {}
+            LifecyclePublicState::Uninstalled => {
+                tracing::debug!(
+                    phase = ?phase,
+                    "web_search is installed but projects as uninstalled; skipping bootstrap"
+                );
+                return Ok(WebSearchBootstrapOutcome::SkippedNonActivatable);
+            }
         }
     }
 
@@ -186,17 +206,17 @@ pub(crate) async fn bootstrap_web_search_brave(
             })?;
     }
 
-    // Idempotent for an already-installed package (see the match above), so
-    // this always runs rather than branching on whether `phase` distinguishes
-    // "never installed" from "installed" — it no longer does.
+    // Idempotent for an already-installed package, so this always runs
+    // rather than branching on `installed` — install() no-ops if it's
+    // already there.
     extension_management
-        .install(package_ref.clone(), &caller)
+        .install(package_ref.clone(), caller)
         .await
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("web_search extension install failed: {error}"),
         })?;
     extension_management
-        .activate(package_ref, ExtensionActivationMode::Static, &caller)
+        .activate(package_ref, ExtensionActivationMode::Static, caller)
         .await
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("web_search extension activation failed: {error}"),

@@ -1,16 +1,16 @@
-//! Generic shared-channel admission over `[channel.config]`
-//! (extension-runtime §5.3).
+//! Generic shared-channel admission over manifest-declared administrator
+//! configuration (extension-runtime §5.3).
 //!
 //! A channel extension opts into shared-conversation admission by declaring
-//! non-secret `[channel.config]` fields with the handle-suffix convention
+//! non-secret `[admin_configuration]` fields with the handle-suffix convention
 //! `*_allowed_channels` / `*_subject_routes` (or the bare names). When either
 //! field is declared, the generic channel host assembly installs
-//! [`ChannelConfigSubjectRouteResolver`] on the extension's installation
+//! [`AdminConfigurationSubjectRouteResolver`] on the extension's installation
 //! scope and requires a configured route for every shared conversation —
 //! unrouted shared conversations fail closed instead of falling to the
 //! default subject.
 //!
-//! The two values are operator-saved JSON:
+//! The two values are administrator-configured JSON:
 //! - `*_subject_routes`: object mapping external conversation id to the
 //!   subject user id turns in that conversation run as (explicit routes win).
 //! - `*_allowed_channels`: array of external conversation ids admitted with
@@ -18,23 +18,24 @@
 //!   the exact scheme the retired lane's route store derived, so folded
 //!   deployments keep their managed-subject value shape).
 //!
-//! Reads are per-request through [`ChannelConfigService`]: a configure save
-//! takes effect on the next inbound admission with no route rebuild.
+//! Reads are per-request through [`ComposedExtensionAdminConfigurationResolver`], so an authorized
+//! Admin Configuration update takes effect without a route rebuild.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{ExtensionId, RecipeSecretField, TenantId, UserId};
-use ironclaw_product_adapters::{AdapterInstallationId, ProductAdapterId};
-use ironclaw_product_workflow::{
+use ironclaw_extensions::ExtensionAdminConfigurationDescriptor;
+use ironclaw_host_api::{ExtensionId, TenantId, UserId};
+use ironclaw_product::{AdapterInstallationId, ProductAdapterId};
+use ironclaw_product::{
     ProductConversationSubjectRouteResolutionRequest, ProductConversationSubjectRouteResolver,
     ProductWorkflowError,
 };
 use sha2::{Digest, Sha256};
 
-use crate::extension_host::channel_config::ChannelConfigService;
+use crate::extension_host::admin_configuration::ComposedExtensionAdminConfigurationResolver;
 
 const ALLOWED_CHANNELS_FIELD: &str = "allowed_channels";
 const SUBJECT_ROUTES_FIELD: &str = "subject_routes";
@@ -48,7 +49,7 @@ pub(crate) fn handle_declares_field(handle: &str, name: &str) -> bool {
             .is_some_and(|prefix| prefix.ends_with('_'))
 }
 
-/// The admission config handles one extension's `[channel.config]` declares.
+/// The admission config handles one extension's administrator schema declares.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SharedChannelAdmissionHandles {
     pub(crate) allowed_channels: Option<String>,
@@ -61,15 +62,16 @@ impl SharedChannelAdmissionHandles {
     }
 }
 
-/// Scan the manifest's `[channel.config]` field descriptors for the
+/// Scan the manifest's administrator configuration descriptors for the
 /// admission handles (non-secret fields only — admission config is operator
 /// routing data, never secret material).
 pub(crate) fn shared_channel_admission_handles(
-    fields: &[RecipeSecretField],
+    descriptors: &[ExtensionAdminConfigurationDescriptor],
 ) -> SharedChannelAdmissionHandles {
     let find = |name: &str| {
-        fields
+        descriptors
             .iter()
+            .flat_map(|descriptor| &descriptor.fields)
             .filter(|field| !field.secret)
             .find(|field| handle_declares_field(field.handle.as_str(), name))
             .map(|field| field.handle.as_str().to_string())
@@ -114,23 +116,23 @@ pub(crate) fn managed_channel_subject_user_id(
 /// entries win; `*_allowed_channels` entries admit with the managed derived
 /// subject; everything else resolves to no route (which the assembly's
 /// require-configured-route policy fails closed).
-pub(crate) struct ChannelConfigSubjectRouteResolver {
+pub(crate) struct AdminConfigurationSubjectRouteResolver {
     adapter_id: ProductAdapterId,
     installation_id: AdapterInstallationId,
     tenant_id: TenantId,
     extension_id: ExtensionId,
     handles: SharedChannelAdmissionHandles,
-    channel_config: Arc<ChannelConfigService>,
+    admin_configuration_resolver: Arc<ComposedExtensionAdminConfigurationResolver>,
 }
 
-impl ChannelConfigSubjectRouteResolver {
+impl AdminConfigurationSubjectRouteResolver {
     pub(crate) fn new(
         adapter_id: ProductAdapterId,
         installation_id: AdapterInstallationId,
         tenant_id: TenantId,
         extension_id: ExtensionId,
         handles: SharedChannelAdmissionHandles,
-        channel_config: Arc<ChannelConfigService>,
+        admin_configuration_resolver: Arc<ComposedExtensionAdminConfigurationResolver>,
     ) -> Self {
         Self {
             adapter_id,
@@ -138,12 +140,12 @@ impl ChannelConfigSubjectRouteResolver {
             tenant_id,
             extension_id,
             handles,
-            channel_config,
+            admin_configuration_resolver,
         }
     }
 
     async fn config_value(&self, handle: &str) -> Result<Option<String>, ProductWorkflowError> {
-        self.channel_config
+        self.admin_configuration_resolver
             .non_secret_value(&self.extension_id, handle)
             .await
             .map_err(|error| ProductWorkflowError::Transient {
@@ -152,10 +154,10 @@ impl ChannelConfigSubjectRouteResolver {
     }
 }
 
-impl std::fmt::Debug for ChannelConfigSubjectRouteResolver {
+impl std::fmt::Debug for AdminConfigurationSubjectRouteResolver {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("ChannelConfigSubjectRouteResolver")
+            .debug_struct("AdminConfigurationSubjectRouteResolver")
             .field("extension_id", &self.extension_id)
             .field("handles", &self.handles)
             .finish_non_exhaustive()
@@ -163,7 +165,7 @@ impl std::fmt::Debug for ChannelConfigSubjectRouteResolver {
 }
 
 #[async_trait]
-impl ProductConversationSubjectRouteResolver for ChannelConfigSubjectRouteResolver {
+impl ProductConversationSubjectRouteResolver for AdminConfigurationSubjectRouteResolver {
     async fn resolve_product_conversation_subject_route(
         &self,
         request: ProductConversationSubjectRouteResolutionRequest,
@@ -233,13 +235,12 @@ impl ProductConversationSubjectRouteResolver for ChannelConfigSubjectRouteResolv
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_extensions::{
-        ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
-        ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestRef, ManifestSource,
-    };
+    use ironclaw_extension_host::{AdminConfigurationService, AdminConfigurationStore};
+    use ironclaw_extensions::{ExtensionManifestRecord, ManifestSource};
+    use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{InvocationId, ResourceScope};
-    use ironclaw_product_workflow::ProductConversationRouteKey;
-    use ironclaw_secrets::FilesystemSecretStore;
+    use ironclaw_product::ProductConversationRouteKey;
+    use ironclaw_secrets::{SecretStore, SecretStorePort};
 
     use super::*;
     use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
@@ -253,6 +254,15 @@ name = "VendorX"
 version = "0.1.0"
 description = "shared-channel admission fixture"
 trust = "first_party_requested"
+
+[admin_configuration]
+group_id = "extension.vendorx"
+display_name = "VendorX deployment configuration"
+fields = [
+  { handle = "vendorx_webhook_secret", label = "Webhook secret", secret = true, required = false },
+  { handle = "vendorx_allowed_channels", label = "Allowed channels", secret = false, required = false },
+  { handle = "vendorx_subject_routes", label = "Subject routes", secret = false, required = false },
+]
 
 [runtime]
 kind = "first_party"
@@ -275,13 +285,6 @@ kind = "shared_secret_header"
 secret_handle = "vendorx_webhook_secret"
 header = "X-VendorX-Secret"
 
-[channel.config]
-fields = [
-  { handle = "vendorx_webhook_secret", label = "Webhook secret", secret = true },
-  { handle = "vendorx_allowed_channels", label = "Allowed channels", secret = false },
-  { handle = "vendorx_subject_routes", label = "Subject routes", secret = false },
-]
-
 [channel.presentation]
 supports_markdown = false
 supports_threads = false
@@ -291,25 +294,11 @@ supports_threads = false
     const INSTALLATION: &str = "vendorx-install-1";
 
     struct Fixture {
-        resolver: ChannelConfigSubjectRouteResolver,
-        channel_config: Arc<ChannelConfigService>,
-        extension_id: ExtensionId,
-    }
-
-    struct NoopReactivation;
-
-    #[async_trait]
-    impl crate::extension_host::channel_config::ChannelConfigReactivation for NoopReactivation {
-        async fn reactivate_if_active(
-            &self,
-            _extension_id: &ExtensionId,
-        ) -> Result<(), ProductWorkflowError> {
-            Ok(())
-        }
+        resolver: AdminConfigurationSubjectRouteResolver,
+        admin_configuration_resolver: Arc<ComposedExtensionAdminConfigurationResolver>,
     }
 
     async fn fixture() -> Fixture {
-        let store = Arc::new(crate::extension_host::filesystem_installation_store_for_test().await);
         let record = ExtensionManifestRecord::from_toml(
             ADMISSION_FIXTURE_MANIFEST,
             ManifestSource::HostBundled,
@@ -318,51 +307,44 @@ supports_threads = false
             &product_extension_host_api_contract_registry().expect("contracts"),
         )
         .expect("fixture manifest parses");
+        let manifest = Arc::new(record.resolved().clone());
         let extension_id = ExtensionId::new("vendorx").expect("extension id");
-        store
-            .upsert_manifest_and_installation(
-                record,
-                ExtensionInstallation::new(
-                    ExtensionInstallationId::new(INSTALLATION.to_string())
-                        .expect("installation id"),
-                    extension_id.clone(),
-                    ExtensionActivationState::Enabled,
-                    ExtensionManifestRef::new(extension_id.clone(), None),
-                    Vec::new(),
-                    chrono::Utc::now(),
-                    ironclaw_extensions::InstallationOwner::Tenant,
-                )
-                .expect("installation"),
-            )
-            .await
-            .expect("persist install");
         let scope = ResourceScope::local_default(
             UserId::new("operator").expect("user id"),
             InvocationId::new(),
         )
         .expect("resource scope");
-        let channel_config = Arc::new(ChannelConfigService::new(
-            store,
-            Arc::new(FilesystemSecretStore::ephemeral()),
-            scope,
-            Arc::new(NoopReactivation),
-        ));
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+        let secrets: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
+        let admin = Arc::new(
+            AdminConfigurationService::new(
+                AdminConfigurationStore::new(Arc::new(ScopedFilesystem::new(
+                    filesystem,
+                    crate::invocation_mount_view,
+                ))),
+                secrets,
+                manifest.admin_configuration.clone(),
+            )
+            .expect("admin configuration service"),
+        );
+        let admin_configuration_resolver = Arc::new(
+            ComposedExtensionAdminConfigurationResolver::new(admin, scope, [Arc::clone(&manifest)]),
+        );
         let handles = SharedChannelAdmissionHandles {
             allowed_channels: Some("vendorx_allowed_channels".to_string()),
             subject_routes: Some("vendorx_subject_routes".to_string()),
         };
-        let resolver = ChannelConfigSubjectRouteResolver::new(
+        let resolver = AdminConfigurationSubjectRouteResolver::new(
             ProductAdapterId::new("vendorx").expect("adapter id"),
             AdapterInstallationId::new(INSTALLATION).expect("installation id"),
             TenantId::new(TENANT).expect("tenant"),
             extension_id.clone(),
             handles,
-            Arc::clone(&channel_config),
+            Arc::clone(&admin_configuration_resolver),
         );
         Fixture {
             resolver,
-            channel_config,
-            extension_id,
+            admin_configuration_resolver,
         }
     }
 
@@ -385,9 +367,9 @@ supports_threads = false
 
     async fn save(fixture: &Fixture, handle: &str, value: &str) {
         fixture
-            .channel_config
-            .save(
-                &fixture.extension_id,
+            .admin_configuration_resolver
+            .configure_admin_group_for_test(
+                "extension.vendorx",
                 vec![(handle.to_string(), value.to_string())],
             )
             .await
@@ -404,14 +386,7 @@ supports_threads = false
             &product_extension_host_api_contract_registry().expect("contracts"),
         )
         .expect("fixture manifest parses");
-        let fields = &record
-            .resolved()
-            .channel
-            .as_ref()
-            .expect("channel surface")
-            .config
-            .fields;
-        let handles = shared_channel_admission_handles(fields);
+        let handles = shared_channel_admission_handles(&record.resolved().admin_configuration);
         assert_eq!(
             handles,
             SharedChannelAdmissionHandles {

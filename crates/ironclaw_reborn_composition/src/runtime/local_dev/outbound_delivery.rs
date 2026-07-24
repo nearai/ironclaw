@@ -2,18 +2,18 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_approvals::ToolPermissionOverride;
-use ironclaw_authorization::{CapabilityLeaseError, CapabilityLeaseStatus, CapabilityLeaseStore};
+use ironclaw_authorization::{
+    CapabilityLeaseError, CapabilityLeaseStatus, CapabilityLeaseStorePort,
+};
 use ironclaw_host_api::{
     Action, ApprovalRequest, ApprovalRequestId, CapabilityGrantId, CapabilityId, CorrelationId,
-    GateRecord, GateRef, InvocationFingerprint, InvocationId, Principal, Resolution,
-    ResourceEstimate, ResourceScope, SafeSummary, UserId,
+    GateRecord, GateRef, InvocationFingerprint, InvocationId, Principal, ProductSurfaceCaller,
+    ProductSurfaceError, ProductSurfaceErrorCode, Resolution, ResourceEstimate, ResourceScope,
+    SafeSummary, UserId,
 };
 use ironclaw_loop_host::{CapabilityResultWrite, DurablePersistence};
-use ironclaw_product_workflow::{
-    OutboundPreferencesProductFacade, RebornOutboundDeliveryTargetId, RebornServicesError,
-    RebornServicesErrorCode, WebUiAuthenticatedCaller,
-};
-use ironclaw_run_state::{ApprovalRequestStore, ApprovalStatus, RunStateError};
+use ironclaw_product::{OutboundPreferencesProductFacade, RebornOutboundDeliveryTargetId};
+use ironclaw_run_state::{ApprovalRequestStorePort, ApprovalStatus, RunStateError};
 use ironclaw_turns::{
     LoopGateRef,
     run_profile::{
@@ -45,12 +45,12 @@ use crate::runtime::local_dev::synthetic_capability::{
 pub(super) fn outbound_delivery_capabilities(
     facade: Arc<dyn OutboundPreferencesProductFacade>,
     fallback_user_id: UserId,
-    approval_requests: Arc<dyn ApprovalRequestStore>,
-    capability_leases: Arc<dyn CapabilityLeaseStore>,
+    approval_requests: Arc<dyn ApprovalRequestStorePort>,
+    capability_leases: Arc<dyn CapabilityLeaseStorePort>,
     target_set_requires_approval: bool,
     approval_settings: Arc<dyn ApprovalSettingsProvider>,
-    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
-    gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore>,
+    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort>,
+    gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort>,
 ) -> Result<Vec<SyntheticCapability>, AgentLoopHostError> {
     Ok(vec![
         SyntheticCapability::new(
@@ -150,20 +150,20 @@ const APPROVAL_GATE_SUMMARY: &str = "changing the outbound delivery target requi
 struct OutboundDeliveryTargetSetHandler {
     facade: Arc<dyn OutboundPreferencesProductFacade>,
     fallback_user_id: UserId,
-    approval_requests: Arc<dyn ApprovalRequestStore>,
-    capability_leases: Arc<dyn CapabilityLeaseStore>,
+    approval_requests: Arc<dyn ApprovalRequestStorePort>,
+    capability_leases: Arc<dyn CapabilityLeaseStorePort>,
     /// Host-private replay-payload store: this synthetic capability raises its own
     /// approval gate, so it persists {input, estimate} at the raise and
     /// reconstitutes them on resume host-side (§5.3 Stage 2a-i) rather than
     /// round-tripping raw tool args through the loop checkpoint.
-    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
+    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort>,
     /// Durable model-visible gate-record store. Because this synthetic capability
     /// raises its own approval gate OUTSIDE the loop-host persist seam
     /// (`HostRuntimeLoopCapabilityPort::persist_gate_record_for_mapped`), it must
     /// persist the [`GateRecord`] itself at the raise — keyed by the canonical
     /// [`GateRef::for_approval_request`] the product read model re-derives — so the
     /// approver-facing gate rendering (§5.2.9) has a record to read (§5.3 Stage 0).
-    gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore>,
+    gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort>,
     requires_approval: bool,
     approval_settings: Arc<dyn ApprovalSettingsProvider>,
 }
@@ -641,8 +641,8 @@ fn invocation_effective_input_ref(
 fn caller_for_run(
     invocation: &SyntheticCapabilityInvocation,
     fallback_user_id: &UserId,
-) -> WebUiAuthenticatedCaller {
-    WebUiAuthenticatedCaller::new(
+) -> ProductSurfaceCaller {
+    ProductSurfaceCaller::new(
         invocation.run_context.scope.tenant_id.clone(),
         effective_user_id(&invocation.run_context, fallback_user_id),
         invocation.run_context.scope.agent_id.clone(),
@@ -776,37 +776,37 @@ fn input_error(error: OutboundDeliveryCapabilityInputError) -> AgentLoopHostErro
 /// limits, and transient unavailability are all surfaced to the model instead of
 /// killing the turn.
 ///
-/// Safe summaries stay fixed and host-authored: `RebornServicesError` carries a
+/// Safe summaries stay fixed and host-authored: `ProductSurfaceError` carries a
 /// free-form `field` that could contain a forbidden delimiter/marker and remap a
 /// recoverable arm into a terminal `HostUnavailable` (Invariant 2).
-fn outbound_delivery_outcome(error: RebornServicesError) -> Result<Resolution, AgentLoopHostError> {
+fn outbound_delivery_outcome(error: ProductSurfaceError) -> Result<Resolution, AgentLoopHostError> {
     match error.code {
-        RebornServicesErrorCode::InvalidRequest | RebornServicesErrorCode::NotFound => {
+        ProductSurfaceErrorCode::InvalidRequest | ProductSurfaceErrorCode::NotFound => {
             Ok(resolution::failed(
                 CapabilityFailureKind::InvalidInput,
                 "invalid outbound delivery request".to_string(),
                 None,
             ))
         }
-        RebornServicesErrorCode::Unauthenticated | RebornServicesErrorCode::Forbidden => {
+        ProductSurfaceErrorCode::Unauthenticated | ProductSurfaceErrorCode::Forbidden => {
             approval_denied("not permitted to change the outbound delivery target")
         }
-        RebornServicesErrorCode::Conflict => Ok(resolution::failed(
+        ProductSurfaceErrorCode::Conflict => Ok(resolution::failed(
             CapabilityFailureKind::OperationFailed,
             "outbound delivery target operation conflicted".to_string(),
             None,
         )),
-        RebornServicesErrorCode::RateLimited => Ok(resolution::failed(
+        ProductSurfaceErrorCode::RateLimited => Ok(resolution::failed(
             CapabilityFailureKind::Resource,
             "outbound delivery target operation rate limited".to_string(),
             None,
         )),
-        RebornServicesErrorCode::Unavailable => Ok(resolution::failed(
+        ProductSurfaceErrorCode::Unavailable => Ok(resolution::failed(
             CapabilityFailureKind::Unavailable,
             "outbound delivery service temporarily unavailable".to_string(),
             None,
         )),
-        RebornServicesErrorCode::Internal => Err(AgentLoopHostError::new(
+        ProductSurfaceErrorCode::Internal => Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::Internal,
             "outbound delivery target operation failed",
         )),
@@ -874,13 +874,13 @@ fn approval_lease_outcome(
 mod tests {
     use super::*;
     use crate::runtime::local_dev::assert_recoverable_failure;
-    use ironclaw_product_workflow::RebornServicesErrorKind;
+    use ironclaw_host_api::ProductSurfaceErrorKind;
     use ironclaw_turns::run_profile::LoopSafeSummary;
 
-    fn service_error(code: RebornServicesErrorCode) -> RebornServicesError {
-        RebornServicesError {
+    fn service_error(code: ProductSurfaceErrorCode) -> ProductSurfaceError {
+        ProductSurfaceError {
             code,
-            kind: RebornServicesErrorKind::Internal,
+            kind: ProductSurfaceErrorKind::Internal,
             status_code: 500,
             retryable: false,
             // A free-form `field` carrying a forbidden delimiter is the exact
@@ -913,7 +913,7 @@ mod tests {
     #[test]
     fn invalid_request_is_a_recoverable_tool_failure_not_terminal() {
         let outcome =
-            outbound_delivery_outcome(service_error(RebornServicesErrorCode::InvalidRequest))
+            outbound_delivery_outcome(service_error(ProductSurfaceErrorCode::InvalidRequest))
                 .expect("invalid request must be a model-visible failure, not terminal");
         assert_recoverable_failure(&outcome, ironclaw_host_api::FailureKind::InvalidInput);
         LoopSafeSummary::new(recoverable_summary(&outcome))
@@ -922,7 +922,7 @@ mod tests {
 
     #[test]
     fn not_found_is_a_recoverable_tool_failure_not_terminal() {
-        let outcome = outbound_delivery_outcome(service_error(RebornServicesErrorCode::NotFound))
+        let outcome = outbound_delivery_outcome(service_error(ProductSurfaceErrorCode::NotFound))
             .expect("not found must be a model-visible failure, not terminal");
         assert_recoverable_failure(&outcome, ironclaw_host_api::FailureKind::InvalidInput);
     }
@@ -930,7 +930,7 @@ mod tests {
     #[test]
     fn unauthenticated_is_a_recoverable_denial_not_terminal() {
         let outcome =
-            outbound_delivery_outcome(service_error(RebornServicesErrorCode::Unauthenticated))
+            outbound_delivery_outcome(service_error(ProductSurfaceErrorCode::Unauthenticated))
                 .expect("unauthenticated must be a model-visible denial, not terminal");
         assert!(matches!(outcome, Resolution::Denied(_)));
         LoopSafeSummary::new(recoverable_summary(&outcome))
@@ -939,14 +939,14 @@ mod tests {
 
     #[test]
     fn forbidden_is_a_recoverable_denial_not_terminal() {
-        let outcome = outbound_delivery_outcome(service_error(RebornServicesErrorCode::Forbidden))
+        let outcome = outbound_delivery_outcome(service_error(ProductSurfaceErrorCode::Forbidden))
             .expect("forbidden must be a model-visible denial, not terminal");
         assert!(matches!(outcome, Resolution::Denied(_)));
     }
 
     #[test]
     fn conflict_is_a_recoverable_tool_failure_not_terminal() {
-        let outcome = outbound_delivery_outcome(service_error(RebornServicesErrorCode::Conflict))
+        let outcome = outbound_delivery_outcome(service_error(ProductSurfaceErrorCode::Conflict))
             .expect("conflict must be a model-visible failure, not terminal");
         assert_recoverable_failure(&outcome, ironclaw_host_api::FailureKind::OperationFailed);
     }
@@ -954,7 +954,7 @@ mod tests {
     #[test]
     fn rate_limited_is_a_recoverable_tool_failure_not_terminal() {
         let outcome =
-            outbound_delivery_outcome(service_error(RebornServicesErrorCode::RateLimited))
+            outbound_delivery_outcome(service_error(ProductSurfaceErrorCode::RateLimited))
                 .expect("rate limited must be a model-visible failure, not terminal");
         assert_recoverable_failure(&outcome, ironclaw_host_api::FailureKind::Resource);
     }
@@ -962,14 +962,14 @@ mod tests {
     #[test]
     fn unavailable_is_a_recoverable_tool_failure_not_terminal() {
         let outcome =
-            outbound_delivery_outcome(service_error(RebornServicesErrorCode::Unavailable))
+            outbound_delivery_outcome(service_error(ProductSurfaceErrorCode::Unavailable))
                 .expect("transient unavailability must not kill the run");
         assert_recoverable_failure(&outcome, ironclaw_host_api::FailureKind::Unavailable);
     }
 
     #[test]
     fn internal_service_error_stays_terminal() {
-        let error = outbound_delivery_outcome(service_error(RebornServicesErrorCode::Internal))
+        let error = outbound_delivery_outcome(service_error(ProductSurfaceErrorCode::Internal))
             .expect_err("internal bugs must stay terminal");
 
         assert_eq!(error.kind, AgentLoopHostErrorKind::Internal);
@@ -982,13 +982,13 @@ mod tests {
         // still pass the loop safe-summary validator that fires at
         // `append_capability_result_ref` (the terminal-failure boundary).
         for code in [
-            RebornServicesErrorCode::InvalidRequest,
-            RebornServicesErrorCode::NotFound,
-            RebornServicesErrorCode::Unauthenticated,
-            RebornServicesErrorCode::Forbidden,
-            RebornServicesErrorCode::Conflict,
-            RebornServicesErrorCode::RateLimited,
-            RebornServicesErrorCode::Unavailable,
+            ProductSurfaceErrorCode::InvalidRequest,
+            ProductSurfaceErrorCode::NotFound,
+            ProductSurfaceErrorCode::Unauthenticated,
+            ProductSurfaceErrorCode::Forbidden,
+            ProductSurfaceErrorCode::Conflict,
+            ProductSurfaceErrorCode::RateLimited,
+            ProductSurfaceErrorCode::Unavailable,
         ] {
             let outcome = outbound_delivery_outcome(service_error(code))
                 .unwrap_or_else(|_| panic!("{code:?} must be recoverable"));

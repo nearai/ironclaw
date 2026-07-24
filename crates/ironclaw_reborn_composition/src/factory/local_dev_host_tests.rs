@@ -11,8 +11,8 @@ async fn local_yolo_policy_mounts_confirmed_host_home_as_host() {
     let host_home = dir.path().join("home");
     std::fs::create_dir_all(&host_home).expect("host home root");
 
-    let services = build_reborn_services(
-        RebornBuildInput::local_dev_with_profile(
+    let services = build_runtime_substrate(
+        crate::deployment::local_dev_build_input_with_profile(
             RebornCompositionProfile::LocalDevYolo,
             "local-dev-yolo-host-owner",
             storage_root,
@@ -22,13 +22,12 @@ async fn local_yolo_policy_mounts_confirmed_host_home_as_host() {
     )
     .await
     .expect("local-dev-yolo services build");
-    let local_runtime = services
-        .local_runtime
-        .as_ref()
+    let runtime_surfaces = services
+        .local_runtime_for_test()
         .expect("local-dev runtime substrate");
 
-    let host_mount = local_runtime
-        .workspace_mounts
+    let host_mount = runtime_surfaces
+        .workspace_mounts_for_test()
         .mounts
         .iter()
         .find(|mount| mount.alias.as_str() == "/host")
@@ -41,8 +40,8 @@ async fn local_yolo_policy_mounts_confirmed_host_home_as_host() {
         .expect("canonical host home")
         .to_string_lossy()
         .into_owned();
-    let raw_host_home_mount = local_runtime
-        .workspace_mounts
+    let raw_host_home_mount = runtime_surfaces
+        .workspace_mounts_for_test()
         .mounts
         .iter()
         .find(|mount| mount.alias.as_str() == raw_host_home_alias)
@@ -62,8 +61,8 @@ async fn local_yolo_policy_allows_workspace_under_confirmed_host_home() {
     let workspace_root = host_home.join("repo");
     std::fs::create_dir_all(&workspace_root).expect("workspace root");
 
-    let services = build_reborn_services(
-        RebornBuildInput::local_dev_with_profile(
+    let services = build_runtime_substrate(
+        crate::deployment::local_dev_build_input_with_profile(
             RebornCompositionProfile::LocalDevYolo,
             "local-dev-yolo-host-owner",
             storage_root,
@@ -74,13 +73,12 @@ async fn local_yolo_policy_allows_workspace_under_confirmed_host_home() {
     )
     .await
     .expect("local-dev-yolo services build");
-    let local_runtime = services
-        .local_runtime
-        .as_ref()
+    let runtime_surfaces = services
+        .local_runtime_for_test()
         .expect("local-dev runtime substrate");
 
-    let workspace_mount = local_runtime
-        .workspace_mounts
+    let workspace_mount = runtime_surfaces
+        .workspace_mounts_for_test()
         .mounts
         .iter()
         .find(|mount| mount.alias.as_str() == "/workspace")
@@ -88,8 +86,8 @@ async fn local_yolo_policy_allows_workspace_under_confirmed_host_home() {
     assert_eq!(workspace_mount.target.as_str(), "/projects/workspace");
     assert_eq!(workspace_mount.permissions, MountPermissions::read_write());
 
-    let host_mount = local_runtime
-        .workspace_mounts
+    let host_mount = runtime_surfaces
+        .workspace_mounts_for_test()
         .mounts
         .iter()
         .find(|mount| mount.alias.as_str() == "/host")
@@ -108,8 +106,8 @@ async fn local_yolo_policy_keeps_symlinked_host_home_raw_alias() {
     std::fs::create_dir_all(&host_home).expect("host home root"); // safety: test-only setup in #[cfg(test)] module.
     std::os::unix::fs::symlink(&host_home, &host_home_link).expect("host home symlink"); // safety: test-only setup in #[cfg(test)] module.
 
-    let services = build_reborn_services(
-        RebornBuildInput::local_dev_with_profile(
+    let services = build_runtime_substrate(
+        crate::deployment::local_dev_build_input_with_profile(
             RebornCompositionProfile::LocalDevYolo,
             "local-dev-yolo-host-owner",
             storage_root,
@@ -119,13 +117,12 @@ async fn local_yolo_policy_keeps_symlinked_host_home_raw_alias() {
     )
     .await
     .expect("local-dev-yolo services build"); // safety: test-only assertion in #[cfg(test)] module.
-    let local_runtime = services
-        .local_runtime
-        .as_ref()
+    let runtime_surfaces = services
+        .local_runtime_for_test()
         .expect("local-dev runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
 
-    let raw_aliases = local_runtime
-        .workspace_mounts
+    let raw_aliases = runtime_surfaces
+        .workspace_mounts_for_test()
         .mounts
         .iter()
         .map(|mount| mount.alias.as_str())
@@ -146,8 +143,8 @@ async fn local_yolo_policy_keeps_symlinked_host_home_raw_alias() {
 #[tokio::test]
 async fn local_yolo_policy_requires_confirmed_host_home_root() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let error = build_reborn_services(
-        RebornBuildInput::local_dev_with_profile(
+    let error = build_runtime_substrate(
+        crate::deployment::local_dev_build_input_with_profile(
             RebornCompositionProfile::LocalDevYolo,
             "local-dev-yolo-host-owner",
             dir.path().join("local-dev"),
@@ -166,10 +163,13 @@ async fn confirmed_host_home_root_is_rejected_without_matching_policy() {
     let host_home = dir.path().join("home");
     std::fs::create_dir_all(&host_home).expect("host home root");
 
-    let error = build_reborn_services(
-        RebornBuildInput::local_dev("local-dev-host-owner", dir.path().join("local-dev"))
-            .with_runtime_policy(local_dev_policy())
-            .with_local_dev_confirmed_host_home_root(host_home),
+    let error = build_runtime_substrate(
+        crate::deployment::local_dev_build_input(
+            "local-dev-host-owner",
+            dir.path().join("local-dev"),
+        )
+        .with_runtime_policy(local_dev_policy())
+        .with_local_dev_confirmed_host_home_root(host_home),
     )
     .await
     .expect_err("host home root needs matching policy");
@@ -183,8 +183,8 @@ async fn local_yolo_policy_rejects_confirmed_host_home_file() {
     let host_home_file = dir.path().join("home-file");
     std::fs::write(&host_home_file, "not a directory").expect("host home file");
 
-    let error = build_reborn_services(
-        RebornBuildInput::local_dev_with_profile(
+    let error = build_runtime_substrate(
+        crate::deployment::local_dev_build_input_with_profile(
             RebornCompositionProfile::LocalDevYolo,
             "local-dev-yolo-host-owner",
             dir.path().join("local-dev"),
@@ -201,8 +201,8 @@ async fn local_yolo_policy_rejects_confirmed_host_home_file() {
 #[tokio::test]
 async fn local_yolo_policy_rejects_confirmed_host_home_filesystem_root() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let error = build_reborn_services(
-        RebornBuildInput::local_dev_with_profile(
+    let error = build_runtime_substrate(
+        crate::deployment::local_dev_build_input_with_profile(
             RebornCompositionProfile::LocalDevYolo,
             "local-dev-yolo-host-owner",
             dir.path().join("local-dev"),

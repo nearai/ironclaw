@@ -9,12 +9,11 @@ use ironclaw_loop_host::{LoopCapabilityInputResolver, LoopCapabilityResultWriter
 use ironclaw_turns::{
     CapabilityActivityId,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
-        CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInputRef,
-        CapabilityInvocation, CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort,
-        LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReplay,
-        ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate,
+        CapabilityDescriptorView, CapabilityInputRef, CapabilitySurfaceVersion, ConcurrencyHint,
+        LoopCapabilityPort, LoopRequest, LoopRequestBatch, LoopRunContext, ProviderToolCall,
+        ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
+        RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 
@@ -30,7 +29,7 @@ pub(super) fn wrap_synthetic_capabilities(
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
-    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
+    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort>,
 ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
     if capabilities.is_empty() {
         return Ok(inner);
@@ -148,7 +147,7 @@ impl SyntheticCapabilityDescriptor {
 
 pub(super) struct SyntheticCapabilityInvocation {
     pub(super) run_context: LoopRunContext,
-    pub(super) request: CapabilityInvocation,
+    pub(super) request: LoopRequest,
     pub(super) input: serde_json::Value,
     pub(super) result_writer: Arc<dyn LoopCapabilityResultWriter>,
 }
@@ -186,7 +185,7 @@ struct SyntheticCapabilityPort {
     /// own approval gate reconstitutes {input} from here on resume, keyed by the
     /// invocation id in the resume token (§5.3 Stage 2a-i), instead of reading raw
     /// tool args off the loop-facing resume DTO.
-    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
+    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort>,
 }
 
 struct SyntheticProviderToolCallRegistration {
@@ -207,7 +206,7 @@ impl SyntheticCapabilityPort {
         input_resolver: Arc<dyn LoopCapabilityInputResolver>,
         result_writer: Arc<dyn LoopCapabilityResultWriter>,
         trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
-        replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
+        replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort>,
     ) -> Result<Self, AgentLoopHostError> {
         let mut capabilities_by_id = HashMap::new();
         let mut capability_ids_by_provider_tool_name = HashMap::new();
@@ -489,7 +488,7 @@ impl LoopCapabilityPort for SyntheticCapabilityPort {
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         let Some(capability) = self.capabilities_by_id.get(&request.capability_id) else {
             return self.inner.invoke_capability(request).await;
@@ -580,7 +579,7 @@ impl LoopCapabilityPort for SyntheticCapabilityPort {
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
         let mut resolutions = Vec::new();
         let mut stopped_on_suspension = false;
@@ -779,7 +778,7 @@ mod tests {
             }),
             result_writer,
             None,
-            Arc::new(ironclaw_capabilities::FilesystemReplayPayloadStore::new(
+            Arc::new(ironclaw_capabilities::ReplayPayloadStore::new(
                 crate::wrap_scoped(Arc::new(ironclaw_filesystem::InMemoryBackend::new())),
             )),
         )
@@ -880,7 +879,7 @@ mod tests {
             .expect("provider call registers");
 
         let error = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: different_activity_id(activity_id),
                 surface_version: candidate.surface_version,
                 capability_id: candidate.capability_id,

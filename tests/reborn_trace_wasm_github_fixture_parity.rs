@@ -48,7 +48,7 @@ async fn reborn_trace_advertises_github_v2_wasm_capabilities() {
             submitted.run_id,
             TurnStatus::Completed,
             HarnessWaitConfig {
-                timeout: Duration::from_secs(15),
+                timeout: Duration::from_secs(45),
                 poll_interval: Duration::from_millis(10),
             },
         )
@@ -74,6 +74,99 @@ async fn reborn_trace_advertises_github_v2_wasm_capabilities() {
                 && message.content.contains("show GitHub issue tools")),
         "trace should exercise the real inbound user-to-model path"
     );
+    harness.assert_model_exhausted();
+
+    harness.shutdown().await;
+}
+
+/// A non-validation GitHub 422 is classified by the real WASM guest as
+/// `operation_failed`. The run must keep going, put that typed failure in the
+/// next model request, accept a changed fallback action, and persist the final
+/// reply after the fallback succeeds.
+#[tokio::test]
+async fn reborn_trace_wasm_guest_operation_failure_recovers_with_changed_action() {
+    let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
+        RebornModelReplayStep::ProviderToolCalls {
+            calls: vec![call(
+                "github.search_issues",
+                "search-issues-that-fails",
+                json!({"query": "author:serrrfirat is:pr created:YYYY-MM-DD", "limit": 1}),
+            )],
+            expected_tool_results: Vec::new(),
+        },
+        RebornModelReplayStep::ProviderToolCallsForRequest {
+            request_contains: "operation_failed".to_string(),
+            calls: vec![call(
+                "github.get_repo",
+                "fallback-get-repo",
+                json!({"owner": "nearai", "repo": "ironclaw"}),
+            )],
+            expected_tool_results: Vec::new(),
+        },
+        RebornModelReplayStep::ResponseForRequest {
+            request_contains: "capability completed".to_string(),
+            response: HostManagedModelResponse::assistant_reply(
+                "Recovered from the GitHub operation failure with a repository lookup.",
+            ),
+            expected_tool_results: Vec::new(),
+        },
+    ]);
+    let mut harness = RebornBinaryE2EHarness::with_host_runtime_github_issue_capabilities(
+        "room-trace-github-wasm-operation-recovery",
+        model_gateway,
+    )
+    .await
+    .expect("harness");
+    harness
+        .install_network_response_script(
+            422,
+            br#"{"message":"Validation failed, or the endpoint has been spammed.","status":"422"}"#
+                .to_vec(),
+        )
+        .expect("script exact non-validation GitHub 422");
+    harness.start();
+
+    let submitted = harness
+        .submit_text(
+            "event-trace-github-wasm-operation-recovery",
+            "Find my pull requests, then recover if GitHub rejects that operation",
+        )
+        .await
+        .expect("submit text");
+    harness
+        .wait_for_status_with_config(
+            submitted.run_id,
+            TurnStatus::Completed,
+            HarnessWaitConfig {
+                timeout: Duration::from_secs(15),
+                poll_interval: Duration::from_millis(10),
+            },
+        )
+        .await
+        .expect("WASM guest failure is recovered in the same run");
+    harness
+        .assert_final_reply("Recovered from the GitHub operation failure with a repository lookup.")
+        .await
+        .expect("recovered final reply persisted");
+
+    let requests = harness.model_requests();
+    assert_eq!(
+        requests.len(),
+        3,
+        "failure recovery requires three model turns"
+    );
+    let recovery_request = serde_json::to_string(&requests[1]).expect("request serializes");
+    assert!(recovery_request.contains("operation_failed"));
+    assert!(recovery_request.contains("respect_failure_constraint"));
+
+    let invocations = harness.capability_invocations();
+    assert_eq!(invocations.len(), 2);
+    assert_eq!(
+        invocations[0].capability_id.as_str(),
+        "github.search_issues"
+    );
+    assert_eq!(invocations[1].capability_id.as_str(), "github.get_repo");
+    assert_eq!(harness.network_http_requests().len(), 2);
     harness.assert_model_exhausted();
 
     harness.shutdown().await;

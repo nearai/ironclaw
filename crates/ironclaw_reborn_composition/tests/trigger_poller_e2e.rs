@@ -20,8 +20,8 @@ use ironclaw_host_api::{
     ProviderToolName, ResourceEstimate, RunId, RuntimeKind, TenantId, TrustClass, UserId,
 };
 use ironclaw_host_runtime::{
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, TRIGGER_CREATE_CAPABILITY_ID,
-    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
+    RuntimeCapabilityOutcome, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
 };
 use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
@@ -403,7 +403,7 @@ async fn build_runtime_with<G: HostManagedModelGateway + 'static>(
     .expect("local-yolo runtime input")
     .with_local_dev_confirmed_host_home_root(host_home_root);
 
-    let input = RebornRuntimeInput::from_services(input)
+    let input = RebornRuntimeInput::from_build_input(input)
         .with_identity(RebornRuntimeIdentity {
             tenant_id: TENANT.to_string(),
             agent_id: AGENT.to_string(),
@@ -441,7 +441,7 @@ async fn build_runtime_with_tool_disclosure<G: HostManagedModelGateway + 'static
     .expect("local-yolo runtime input")
     .with_local_dev_confirmed_host_home_root(host_home_root);
 
-    let input = RebornRuntimeInput::from_services(input)
+    let input = RebornRuntimeInput::from_build_input(input)
         .with_identity(RebornRuntimeIdentity {
             tenant_id: TENANT.to_string(),
             agent_id: AGENT.to_string(),
@@ -462,7 +462,6 @@ async fn invoke_trigger_create(runtime: &RebornRuntime, input: Value) -> Value {
     // same tenant/user) exercise the dispatch path instead of stopping at the
     // per-tool approval gate.
     let auto_approve = runtime
-        .services()
         .local_dev_auto_approve_settings_for_test()
         .expect("local-dev exposes auto-approve settings for test");
     let auto_approve_scope = trigger_management_execution_context().resource_scope;
@@ -476,12 +475,10 @@ async fn invoke_trigger_create(runtime: &RebornRuntime, input: Value) -> Value {
         .expect("enable global auto-approve for trigger management dispatch");
 
     let host_runtime = runtime
-        .services()
-        .host_runtime
-        .as_deref()
+        .host_runtime_for_test()
         .expect("runtime exposes host runtime");
     let outcome = host_runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             trigger_management_execution_context(),
             CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID).expect("capability id"),
             ResourceEstimate::default(),
@@ -554,9 +551,7 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
     )
     .await;
 
-    let repo = runtime
-        .trigger_repository()
-        .expect("local-dev runtime exposes trigger repository");
+    let repo = runtime.trigger_repository();
     let pairing = runtime
         .trigger_conversation_pairing()
         .expect("trigger poller runtime exposes conversation pairing service");
@@ -735,9 +730,7 @@ async fn builtin_trigger_create_pairs_creator_and_poller_submits_turn() {
     assert!(created["trigger"]["tenant_id"].is_null());
     assert!(created["trigger"]["creator_user_id"].is_null());
 
-    let repo = runtime
-        .trigger_repository()
-        .expect("local-dev runtime exposes trigger repository");
+    let repo = runtime.trigger_repository();
     let tenant_id = TenantId::new(TENANT).expect("tenant id");
     let user_id = UserId::new(USER).expect("user id");
     let trigger_id = TriggerId::parse(
@@ -846,9 +839,7 @@ async fn builtin_created_recurring_trigger_fires_again_after_first_run_settles()
     )
     .await;
 
-    let repo = runtime
-        .trigger_repository()
-        .expect("local-dev runtime exposes trigger repository");
+    let repo = runtime.trigger_repository();
     let tenant_id = TenantId::new(TENANT).expect("tenant id");
     let trigger_id = TriggerId::parse(
         created["trigger"]["trigger_id"]
@@ -929,10 +920,7 @@ async fn trigger_conversation_pairing_returns_none_when_poller_disabled() {
     .await;
 
     // The trigger repository is built regardless of poller state.
-    assert!(
-        runtime.trigger_repository().is_some(),
-        "trigger repository should be present even when poller is disabled"
-    );
+    let _repo = runtime.trigger_repository();
 
     // When the poller is disabled, no conversation pairing service is wired.
     assert!(
@@ -959,9 +947,7 @@ async fn trigger_poller_does_not_fire_trigger_with_future_next_run_at() {
     )
     .await;
 
-    let repo = runtime
-        .trigger_repository()
-        .expect("local-dev runtime exposes trigger repository");
+    let repo = runtime.trigger_repository();
     let pairing = runtime
         .trigger_conversation_pairing()
         .expect("trigger poller runtime exposes conversation pairing service");
@@ -1077,9 +1063,7 @@ async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
     )
     .await;
 
-    let repo = runtime
-        .trigger_repository()
-        .expect("local-dev runtime exposes trigger repository");
+    let repo = runtime.trigger_repository();
 
     // Intentionally do NOT call pair_external_actor — the actor is unpaired.
 
@@ -1186,9 +1170,7 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
     )
     .await;
 
-    let repo = runtime
-        .trigger_repository()
-        .expect("local-dev runtime exposes trigger repository");
+    let repo = runtime.trigger_repository();
     let pairing = runtime
         .trigger_conversation_pairing()
         .expect("trigger poller runtime exposes conversation pairing service");
@@ -1406,9 +1388,7 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
         json!("trigger-e2e-self-create-guard")
     );
 
-    let repo = runtime
-        .trigger_repository()
-        .expect("local-dev runtime exposes trigger repository");
+    let repo = runtime.trigger_repository();
     let tenant_id = TenantId::new(TENANT).expect("tenant id");
     let trigger_id = TriggerId::parse(
         created["trigger"]["trigger_id"]

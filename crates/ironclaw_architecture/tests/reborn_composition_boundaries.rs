@@ -38,8 +38,8 @@ const SUBSTRATE_CRATES: &[&str] = &[
     "ironclaw_runner",
     "ironclaw_reborn_openai_compat",
     "ironclaw_telegram_extension",
-    "ironclaw_product_adapters",
-    "ironclaw_product_workflow",
+    "ironclaw_product",
+    "ironclaw_product",
     "ironclaw_triggers",
 ];
 
@@ -181,7 +181,7 @@ fn reborn_binary_main_is_thin_bootstrap() {
     );
     for forbidden in [
         "build_reborn_runtime",
-        "build_reborn_services",
+        "build_runtime",
         "axum::serve",
         "TcpListener::bind",
         "src/channels/web",
@@ -302,7 +302,7 @@ const EXTENSION_HOST_INTERNAL_MODULES: &[&str] = &[
     "extension_lifecycle_capabilities",
     "extension_lifecycle_capabilities_auth_tests",
     "extension_lifecycle_command",
-    "gsuite",
+    "first_party",
     "lifecycle",
     "mcp",
     "mcp_discovery",

@@ -14,11 +14,6 @@
     "search",
     "releases"
   ],
-  "source": {
-    "dir": "tools-src/github",
-    "capabilities": "github-tool.capabilities.json",
-    "crate_name": "github-tool"
-  },
   "artifacts": {
     "wasm32-wasip2": {
       "url": "https://github.com/nearai/ironclaw/releases/download/ironclaw-v0.27.0/tool-github-0.2.5-wasm32-wasip2.tar.gz",

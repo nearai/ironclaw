@@ -21,7 +21,7 @@ mod reborn_support;
 mod support;
 
 use axum::http::StatusCode;
-use ironclaw_product_workflow::RebornServices;
+use ironclaw_product::RebornServices;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;

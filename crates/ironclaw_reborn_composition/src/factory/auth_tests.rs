@@ -13,8 +13,8 @@ use ironclaw_host_api::{
     AgentId, InvocationId, ProjectId, ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressError,
     RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, TenantId, ThreadId, UserId,
 };
-use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
-use ironclaw_secrets::FilesystemSecretStore;
+use ironclaw_product::ProductAuthTurnGateResumeDispatcher;
+use ironclaw_secrets::SecretStore;
 use ironclaw_turns::{
     AcceptedMessageRef, BlockedReason, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
     GetRunStateRequest, IdempotencyKey, LoopCheckpointStateRef, ReplyTargetBindingRef,
@@ -167,18 +167,18 @@ impl RuntimeHttpEgress for RecordingOAuthEgress {
 #[tokio::test]
 async fn local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(
-        RebornBuildInput::local_dev("local-dev-auth-owner", dir.path().join("local-dev"))
-            .with_product_auth_ports(in_memory_product_auth_ports()),
+    let services = build_runtime_substrate(
+        crate::deployment::local_dev_build_input(
+            "local-dev-auth-owner",
+            dir.path().join("local-dev"),
+        )
+        .with_product_auth_ports(in_memory_product_auth_ports()),
     )
     .await
     .expect("local-dev services build");
-    let product_auth = services.product_auth.as_ref().expect("product auth");
-    let turn_coordinator = services
-        .turn_coordinator
-        .as_ref()
-        .expect("turn coordinator");
-    let local_runtime = services.local_runtime.as_ref().expect("local runtime");
+    let product_auth = &services.product_auth;
+    let turn_coordinator = &services.turn_coordinator;
+    let runtime_surfaces = services.local_runtime_for_test().expect("local runtime");
     let scope = turn_scope();
     let actor = TurnActor::new(UserId::new("alice").unwrap());
     let submit = turn_coordinator
@@ -203,7 +203,7 @@ async fn local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator() {
     let SubmitTurnResponse::Accepted { run_id, .. } = submit;
     let runner_id = TurnRunnerId::new();
     let lease_token = TurnLeaseToken::new();
-    local_runtime
+    runtime_surfaces
         .turn_state
         .claim_next_run(ClaimRunRequest {
             runner_id,
@@ -214,7 +214,7 @@ async fn local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator() {
         .expect("claim run")
         .expect("queued run exists");
     let gate_ref = ironclaw_turns::GateRef::new("gate:auth-callback").unwrap();
-    local_runtime
+    runtime_surfaces
         .turn_state
         .block_run(BlockRunRequest {
             run_id,
@@ -294,24 +294,25 @@ async fn local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator() {
 #[tokio::test]
 async fn local_dev_google_oauth_backend_builds_with_host_provider_config() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(
-        RebornBuildInput::local_dev("local-dev-google-oauth-owner", dir.path().join("local-dev"))
-            .with_vendor_oauth_client(
-                "google",
-                OAuthClientConfig {
-                    client_id: OAuthClientId::new("google-client-123").expect("client id"),
-                    client_secret: None,
-                    redirect_uri: OAuthRedirectUri::new(
-                        "https://app.example/oauth/google/callback",
-                    )
+    let services = build_runtime_substrate(
+        crate::deployment::local_dev_build_input(
+            "local-dev-google-oauth-owner",
+            dir.path().join("local-dev"),
+        )
+        .with_vendor_oauth_client(
+            "google",
+            OAuthClientConfig {
+                client_id: OAuthClientId::new("google-client-123").expect("client id"),
+                client_secret: None,
+                redirect_uri: OAuthRedirectUri::new("https://app.example/oauth/google/callback")
                     .expect("redirect uri"),
-                    hosted_domain_hint: None,
-                },
-            ),
+                hosted_domain_hint: None,
+            },
+        ),
     )
     .await
     .expect("local-dev services build");
-    assert!(services.product_auth.is_some());
+    let _ = &services.product_auth;
     assert!(
         services.local_dev_wasm_runtime_credential_provider_captured,
         "local-dev WASM runtime must capture the product-auth credential provider"
@@ -327,8 +328,8 @@ async fn production_libsql_google_oauth_backend_captures_wasm_credential_provide
             .await
             .expect("build libsql database"),
     );
-    let services = build_reborn_services(
-        RebornBuildInput::libsql(
+    let services = build_runtime_substrate(
+        RebornHostBindings::libsql(
             RebornCompositionProfile::Production,
             "production-google-oauth-owner",
             db,
@@ -364,7 +365,7 @@ async fn production_libsql_google_oauth_backend_captures_wasm_credential_provide
     .await
     .expect("production services build");
 
-    assert!(services.product_auth.is_some());
+    let _ = &services.product_auth;
     assert!(
         services.local_dev_wasm_runtime_credential_provider_captured,
         "production WASM runtime must capture the product-auth credential provider"
@@ -380,8 +381,8 @@ async fn production_libsql_oauth_callback_fans_out_to_all_owner_provider_blocked
             .await
             .expect("build libsql database"),
     );
-    let services = build_reborn_services(
-        RebornBuildInput::libsql(
+    let services = build_runtime_substrate(
+        RebornHostBindings::libsql(
             RebornCompositionProfile::Production,
             "production-auth-fanout-owner",
             db,
@@ -407,19 +408,9 @@ async fn production_libsql_oauth_callback_fans_out_to_all_owner_provider_blocked
     )
     .await
     .expect("production services build");
-    let product_auth = services.product_auth.as_ref().expect("product auth");
-    let turn_coordinator = services
-        .turn_coordinator
-        .as_ref()
-        .expect("turn coordinator");
-    let production_runtime = services
-        .production_runtime
-        .as_ref()
-        .expect("production runtime");
-    let graph = match production_runtime {
-        RebornProductionRuntimeServices::LibSql(graph) => graph,
-        RebornProductionRuntimeServices::Postgres(_) => panic!("expected libsql runtime"),
-    };
+    let product_auth = &services.product_auth;
+    let turn_coordinator = &services.turn_coordinator;
+    let turn_state = &services.turn_state;
     let actor = TurnActor::new(UserId::new("alice").unwrap());
     let first_scope = turn_scope();
     let second_scope = TurnScope::new_with_owner(
@@ -431,7 +422,7 @@ async fn production_libsql_oauth_callback_fans_out_to_all_owner_provider_blocked
     );
     let first_run = submit_and_block_provider_auth_run(
         turn_coordinator.as_ref(),
-        graph.turn_state.as_ref(),
+        turn_state.as_ref(),
         first_scope.clone(),
         actor.clone(),
         "first",
@@ -441,7 +432,7 @@ async fn production_libsql_oauth_callback_fans_out_to_all_owner_provider_blocked
     .await;
     let second_run = submit_and_block_provider_auth_run(
         turn_coordinator.as_ref(),
-        graph.turn_state.as_ref(),
+        turn_state.as_ref(),
         second_scope.clone(),
         actor.clone(),
         "second",
@@ -478,43 +469,42 @@ async fn production_libsql_oauth_callback_fans_out_to_all_owner_provider_blocked
 #[tokio::test]
 async fn local_dev_notion_oauth_backend_builds_with_host_provider_config() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(
-        RebornBuildInput::local_dev("local-dev-notion-oauth-owner", dir.path().join("local-dev"))
-            .with_vendor_oauth_client(
-                "google",
-                OAuthClientConfig {
-                    client_id: OAuthClientId::new("google-client-123").expect("client id"),
-                    client_secret: None,
-                    redirect_uri: OAuthRedirectUri::new(
-                        "https://app.example/oauth/google/callback",
-                    )
+    let services = build_runtime_substrate(
+        crate::deployment::local_dev_build_input(
+            "local-dev-notion-oauth-owner",
+            dir.path().join("local-dev"),
+        )
+        .with_vendor_oauth_client(
+            "google",
+            OAuthClientConfig {
+                client_id: OAuthClientId::new("google-client-123").expect("client id"),
+                client_secret: None,
+                redirect_uri: OAuthRedirectUri::new("https://app.example/oauth/google/callback")
                     .expect("redirect uri"),
-                    hosted_domain_hint: None,
-                },
-            )
-            .with_vendor_oauth_client(
-                "notion",
-                OAuthClientConfig {
-                    client_id: OAuthClientId::new("notion-client-123").expect("client id"),
-                    client_secret: None,
-                    redirect_uri: OAuthRedirectUri::new(
-                        "https://app.example/oauth/notion/callback",
-                    )
+                hosted_domain_hint: None,
+            },
+        )
+        .with_vendor_oauth_client(
+            "notion",
+            OAuthClientConfig {
+                client_id: OAuthClientId::new("notion-client-123").expect("client id"),
+                client_secret: None,
+                redirect_uri: OAuthRedirectUri::new("https://app.example/oauth/notion/callback")
                     .expect("redirect uri"),
-                    hosted_domain_hint: None,
-                },
-            ),
+                hosted_domain_hint: None,
+            },
+        ),
     )
     .await
     .expect("local-dev services build");
-    assert!(services.product_auth.is_some());
+    let _ = &services.product_auth;
 }
 
 #[tokio::test]
 async fn local_dev_dcr_oauth_callback_builds_and_wires_challenge_provider() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(
-        RebornBuildInput::local_dev(
+    let services = build_runtime_substrate(
+        crate::deployment::local_dev_build_input(
             "local-dev-notion-dcr-oauth-owner",
             dir.path().join("local-dev"),
         )
@@ -524,14 +514,10 @@ async fn local_dev_dcr_oauth_callback_builds_and_wires_challenge_provider() {
     .await
     .expect("local-dev services build");
 
-    assert!(services.product_auth.is_some());
+    let _ = &services.product_auth;
     assert!(
-        services
-            .product_auth
-            .as_ref()
-            .and_then(|product_auth| product_auth.as_auth_challenge_provider())
-            .is_some(),
-        "engine-backed product auth must expose the challenge provider projection path"
+        services.product_auth.as_auth_challenge_provider().is_some(),
+        "DCR-backed product auth must expose the challenge provider projection path"
     );
 }
 
@@ -588,7 +574,7 @@ async fn oauth_callback_exchanges_vendor_recipe_through_reborn_product_auth_boun
             ])),
             client_credentials: Arc::new(StaticTestCredentials),
             egress: egress.clone(),
-            secret_store: Arc::new(FilesystemSecretStore::ephemeral()),
+            secret_store: Arc::new(SecretStore::ephemeral()),
             callback_base: ironclaw_auth::EngineCallbackBase::new(
                 "https://app.example/api/reborn/product-auth/oauth",
             )
@@ -635,8 +621,8 @@ async fn oauth_callback_exchanges_vendor_recipe_through_reborn_product_auth_boun
 #[tokio::test]
 async fn local_dev_google_oauth_backend_accepts_optional_client_secret_config() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(
-        RebornBuildInput::local_dev(
+    let services = build_runtime_substrate(
+        crate::deployment::local_dev_build_input(
             "local-dev-google-oauth-secret-owner",
             dir.path().join("local-dev"),
         )
@@ -653,29 +639,29 @@ async fn local_dev_google_oauth_backend_accepts_optional_client_secret_config() 
     )
     .await
     .expect("local-dev services build");
-    assert!(services.product_auth.is_some());
+    let _ = &services.product_auth;
 }
 
 #[tokio::test]
 async fn oauth_callback_with_stale_gate_converges_without_resuming() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(
-        RebornBuildInput::local_dev("local-dev-auth-stale-owner", dir.path().join("local-dev"))
-            .with_product_auth_ports(in_memory_product_auth_ports()),
+    let services = build_runtime_substrate(
+        crate::deployment::local_dev_build_input(
+            "local-dev-auth-stale-owner",
+            dir.path().join("local-dev"),
+        )
+        .with_product_auth_ports(in_memory_product_auth_ports()),
     )
     .await
     .expect("local-dev services build");
-    let product_auth = services.product_auth.as_ref().expect("product auth");
-    let turn_coordinator = services
-        .turn_coordinator
-        .as_ref()
-        .expect("turn coordinator");
-    let local_runtime = services.local_runtime.as_ref().expect("local runtime");
+    let product_auth = &services.product_auth;
+    let turn_coordinator = &services.turn_coordinator;
+    let runtime_surfaces = services.local_runtime_for_test().expect("local runtime");
     let scope = turn_scope();
     let actor = TurnActor::new(UserId::new("alice").unwrap());
     let run_id = submit_and_block_auth_run(
         turn_coordinator.as_ref(),
-        local_runtime.as_ref(),
+        runtime_surfaces,
         scope.clone(),
         actor.clone(),
         "gate:current-auth",
@@ -725,8 +711,8 @@ async fn oauth_callback_with_stale_gate_converges_without_resuming() {
 #[tokio::test]
 async fn oauth_callback_with_lifecycle_activation_returns_ok_without_resume() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(
-        RebornBuildInput::local_dev(
+    let services = build_runtime_substrate(
+        crate::deployment::local_dev_build_input(
             "local-dev-auth-lifecycle-owner",
             dir.path().join("local-dev"),
         )
@@ -734,23 +720,50 @@ async fn oauth_callback_with_lifecycle_activation_returns_ok_without_resume() {
     )
     .await
     .expect("local-dev services build");
-    let product_auth = services.product_auth.as_ref().expect("product auth");
-    let auth_scope = auth_scope_for_turn(
-        &turn_scope(),
-        &TurnActor::new(UserId::new("alice").unwrap()),
-    );
+    let product_auth = &services.product_auth;
+    // #6520: a lifecycle-activation continuation reconciles a real installed
+    // extension, so install GitHub for the caller before completing its OAuth
+    // flow (an unknown package would fail the continuation dispatch).
+    let extension_management = services
+        .local_runtime_for_test()
+        .expect("local runtime")
+        .extension_management
+        .clone();
+    let user_id = UserId::new("alice").expect("user id");
+    let product_package_ref = ironclaw_product::LifecyclePackageRef::new(
+        ironclaw_product::LifecyclePackageKind::Extension,
+        "github",
+    )
+    .expect("product package ref");
+    extension_management
+        .install(product_package_ref.clone(), &user_id)
+        .await
+        .expect("install GitHub before its OAuth continuation");
+    let auth_scope = auth_scope_for_turn(&turn_scope(), &TurnActor::new(user_id.clone()));
     let continuation = AuthContinuationRef::LifecycleActivation {
-        package_ref: LifecyclePackageRef::new("github-extension").unwrap(),
+        package_ref: LifecyclePackageRef::new("github").unwrap(),
     };
     let flow_id = create_flow(product_auth, auth_scope.clone(), continuation.clone()).await;
 
     let response = product_auth
-        .handle_oauth_callback(authorized_request(auth_scope, flow_id))
+        .handle_oauth_callback(authorized_request(auth_scope.clone(), flow_id))
         .await
-        .expect("lifecycle continuation is deferred");
+        .expect("lifecycle continuation activates the installed extension");
 
     assert_eq!(response.flow_id, flow_id);
     assert_eq!(response.continuation, continuation);
+    let credential_gate = crate::extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate::new(
+        auth_scope.resource,
+        product_auth.runtime_credential_account_selection_service(),
+    );
+    let projection = extension_management
+        .project(product_package_ref, &user_id, Some(&credential_gate))
+        .await
+        .expect("project GitHub after OAuth continuation");
+    assert_eq!(
+        projection.phase,
+        ironclaw_product::LifecyclePublicState::Active
+    );
 }
 
 #[tokio::test]
@@ -952,7 +965,7 @@ fn provider_scope(value: &str) -> ProviderScope {
 #[cfg(test)]
 async fn submit_and_block_auth_run(
     turn_coordinator: &dyn ironclaw_turns::TurnCoordinator,
-    local_runtime: &RebornRuntimeSubstrate,
+    runtime_surfaces: &RebornRuntimeStores,
     scope: TurnScope,
     actor: TurnActor,
     gate_ref: &str,
@@ -979,7 +992,7 @@ async fn submit_and_block_auth_run(
     let SubmitTurnResponse::Accepted { run_id, .. } = submit;
     let runner_id = TurnRunnerId::new();
     let lease_token = TurnLeaseToken::new();
-    local_runtime
+    runtime_surfaces
         .turn_state
         .claim_next_run(ClaimRunRequest {
             runner_id,
@@ -989,7 +1002,7 @@ async fn submit_and_block_auth_run(
         .await
         .expect("claim run")
         .expect("queued run exists");
-    local_runtime
+    runtime_surfaces
         .turn_state
         .block_run(BlockRunRequest {
             run_id,

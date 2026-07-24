@@ -9,15 +9,15 @@ use ironclaw_filesystem::{
 use ironclaw_host_api::*;
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
-/// The production `FilesystemCapabilityLeaseStore` over a fresh in-memory backend
+/// The production `CapabilityLeaseStore` over a fresh in-memory backend
 /// — the drop-in for the deleted `InMemoryCapabilityLeaseStore`
 /// (arch-simplification §4.3): "in-memory" is a filesystem backend, not a bespoke
 /// store. The fixed `/authorization` mount resolves every op to one subtree
 /// regardless of scope, which matches these single-scope state-machine tests;
 /// cross-scope *store visibility* isolation is exercised separately by the
 /// `filesystem_capability_lease_store_isolates_*` tests, which mount per user.
-fn in_memory_lease_store() -> FilesystemCapabilityLeaseStore<InMemoryBackend> {
-    FilesystemCapabilityLeaseStore::new(build_scoped_fs(
+fn in_memory_lease_store() -> CapabilityLeaseStore<InMemoryBackend> {
+    CapabilityLeaseStore::new(build_scoped_fs(
         Arc::new(InMemoryBackend::new()),
         "/engine/tenants/test/users/test/authorization",
     ))
@@ -354,11 +354,11 @@ async fn revocation_is_scoped_to_tenant_and_user() {
     // `filesystem_capability_lease_store_isolates_two_tenants_*` does: a revoke
     // issued against tenant2's mount cannot reach a lease issued under tenant1.
     let backend = Arc::new(InMemoryBackend::new());
-    let store_tenant1 = FilesystemCapabilityLeaseStore::new(build_scoped_fs(
+    let store_tenant1 = CapabilityLeaseStore::new(build_scoped_fs(
         Arc::clone(&backend),
         "/engine/tenants/tenant1/users/test/authorization",
     ));
-    let store_tenant2 = FilesystemCapabilityLeaseStore::new(build_scoped_fs(
+    let store_tenant2 = CapabilityLeaseStore::new(build_scoped_fs(
         Arc::clone(&backend),
         "/engine/tenants/tenant2/users/test/authorization",
     ));
@@ -713,11 +713,11 @@ async fn filesystem_lease_store_persists_and_reloads_issued_leases() {
     let lease = CapabilityLease::new(context.resource_scope.clone(), grant);
     let lease_id = lease.grant.id;
 
-    FilesystemCapabilityLeaseStore::new(Arc::clone(&fs))
+    CapabilityLeaseStore::new(Arc::clone(&fs))
         .issue(lease.clone())
         .await
         .unwrap();
-    let reloaded = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs));
+    let reloaded = CapabilityLeaseStore::new(Arc::clone(&fs));
 
     assert_eq!(
         reloaded.get(&context.resource_scope, lease_id).await,
@@ -751,7 +751,7 @@ async fn filesystem_lease_store_lists_from_owner_index_without_scanning_invocati
     );
     let context = execution_context(CapabilitySet::default());
     let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
-    let store = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs));
+    let store = CapabilityLeaseStore::new(Arc::clone(&fs));
     let mut expected = Vec::new();
 
     for _ in 0..3 {
@@ -806,7 +806,7 @@ async fn filesystem_lease_store_persists_revoke_claim_and_consume() {
     let mut lease = CapabilityLease::new(context.resource_scope.clone(), grant);
     lease.invocation_fingerprint = Some(fingerprint.clone());
     let lease_id = lease.grant.id;
-    let store = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs));
+    let store = CapabilityLeaseStore::new(Arc::clone(&fs));
     store.issue(lease).await.unwrap();
 
     let claimed = store
@@ -815,7 +815,7 @@ async fn filesystem_lease_store_persists_revoke_claim_and_consume() {
         .unwrap();
     assert_eq!(claimed.status, CapabilityLeaseStatus::Claimed);
     assert_eq!(
-        FilesystemCapabilityLeaseStore::new(Arc::clone(&fs))
+        CapabilityLeaseStore::new(Arc::clone(&fs))
             .get(&context.resource_scope, lease_id)
             .await
             .unwrap()
@@ -823,20 +823,20 @@ async fn filesystem_lease_store_persists_revoke_claim_and_consume() {
         CapabilityLeaseStatus::Claimed
     );
 
-    let consumed = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs))
+    let consumed = CapabilityLeaseStore::new(Arc::clone(&fs))
         .consume(&context.resource_scope, lease_id)
         .await
         .unwrap();
     assert_eq!(consumed.status, CapabilityLeaseStatus::Consumed);
     assert_eq!(consumed.grant.constraints.max_invocations, Some(0));
 
-    let revoked = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs))
+    let revoked = CapabilityLeaseStore::new(Arc::clone(&fs))
         .revoke(&context.resource_scope, lease_id)
         .await
         .unwrap();
     assert_eq!(revoked.status, CapabilityLeaseStatus::Revoked);
     assert_eq!(
-        FilesystemCapabilityLeaseStore::new(Arc::clone(&fs))
+        CapabilityLeaseStore::new(Arc::clone(&fs))
             .get(&context.resource_scope, lease_id)
             .await
             .unwrap()
@@ -867,7 +867,7 @@ async fn filesystem_fingerprinted_lease_cannot_be_consumed_before_claim() {
     );
     lease.invocation_fingerprint = Some(fingerprint);
     let lease_id = lease.grant.id;
-    let store = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs));
+    let store = CapabilityLeaseStore::new(Arc::clone(&fs));
     store.issue(lease).await.unwrap();
 
     let err = store
@@ -880,7 +880,7 @@ async fn filesystem_fingerprinted_lease_cannot_be_consumed_before_claim() {
         CapabilityLeaseError::UnclaimedFingerprintLease { lease_id: id } if id == lease_id
     ));
     assert_eq!(
-        FilesystemCapabilityLeaseStore::new(Arc::clone(&fs))
+        CapabilityLeaseStore::new(Arc::clone(&fs))
             .get(&context.resource_scope, lease_id)
             .await
             .unwrap()
@@ -911,21 +911,21 @@ async fn filesystem_fingerprinted_lease_without_invocation_limit_is_consumed_aft
     );
     lease.invocation_fingerprint = Some(fingerprint.clone());
     let lease_id = lease.grant.id;
-    let store = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs));
+    let store = CapabilityLeaseStore::new(Arc::clone(&fs));
     store.issue(lease).await.unwrap();
 
     store
         .claim(&context.resource_scope, lease_id, &fingerprint)
         .await
         .unwrap();
-    let consumed = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs))
+    let consumed = CapabilityLeaseStore::new(Arc::clone(&fs))
         .consume(&context.resource_scope, lease_id)
         .await
         .unwrap();
 
     assert_eq!(consumed.status, CapabilityLeaseStatus::Consumed);
     assert!(matches!(
-        FilesystemCapabilityLeaseStore::new(Arc::clone(&fs))
+        CapabilityLeaseStore::new(Arc::clone(&fs))
             .claim(&context.resource_scope, lease_id, &fingerprint)
             .await
             .unwrap_err(),
@@ -952,7 +952,7 @@ async fn filesystem_lease_store_is_tenant_user_invocation_scoped() {
         ),
     );
     let lease_id = lease.grant.id;
-    let store = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs));
+    let store = CapabilityLeaseStore::new(Arc::clone(&fs));
     store.issue(lease.clone()).await.unwrap();
 
     assert_eq!(store.get(&other_invocation_scope, lease_id).await, None);
@@ -968,7 +968,7 @@ async fn filesystem_lease_store_is_tenant_user_invocation_scoped() {
 
 /// Regression test for the systemic finding tracked in
 /// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`:
-/// `FilesystemCapabilityLeaseStore` must enforce tenant isolation through
+/// `CapabilityLeaseStore` must enforce tenant isolation through
 /// the [`ScopedFilesystem`] mount permission boundary, not by hand-rolling
 /// `/engine/tenants/<tenant_id>/users/<user_id>/...` prefixes inside its
 /// path builders.
@@ -994,8 +994,8 @@ async fn filesystem_capability_lease_store_isolates_two_tenants_with_same_user_p
         Arc::clone(&backend),
         "/engine/tenants/b/users/alice/authorization",
     );
-    let store_a = FilesystemCapabilityLeaseStore::new(Arc::clone(&scoped_a));
-    let store_b = FilesystemCapabilityLeaseStore::new(Arc::clone(&scoped_b));
+    let store_a = CapabilityLeaseStore::new(Arc::clone(&scoped_a));
+    let store_b = CapabilityLeaseStore::new(Arc::clone(&scoped_b));
 
     // Build a context whose `(user_id, project_id, invocation_id)` triple
     // is reused verbatim across tenants. After the mount-view migration
@@ -1048,7 +1048,7 @@ async fn filesystem_capability_lease_store_isolates_two_tenants_with_same_user_p
 /// Defense-in-depth regression for the tenant-isolation indexed
 /// projection (see
 /// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`):
-/// every `FilesystemCapabilityLeaseStore` lease write decorates its
+/// every `CapabilityLeaseStore` lease write decorates its
 /// `Entry` with a `tenant_id` projection so an admin-tier query can
 /// filter explicitly by tenant and a path-rewriting bug surfaces as a
 /// query-time mismatch.
@@ -1067,7 +1067,7 @@ async fn filesystem_capability_lease_store_writes_tenant_id_indexed_projection()
         Arc::clone(&backend),
         "/engine/tenants/tenant-a/users/alice/authorization",
     );
-    let store = FilesystemCapabilityLeaseStore::new(Arc::clone(&scoped));
+    let store = CapabilityLeaseStore::new(Arc::clone(&scoped));
     let context = execution_context(CapabilitySet::default());
     let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
     let lease = CapabilityLease::new(
@@ -1189,6 +1189,7 @@ fn descriptor(id: CapabilityId) -> CapabilityDescriptor {
         default_permission: PermissionMode::Deny,
         runtime_credentials: Vec::new(),
         network_targets: Vec::new(),
+        max_egress_bytes: None,
         resource_profile: None,
         origin_gate_matrix: None,
     }
@@ -1247,7 +1248,7 @@ fn local_filesystem_with_engine_mount() -> DiskFilesystem {
 /// with full read/write/list/delete permissions. Multiple stores can share
 /// one backend by passing different `target_root` values — that's how the
 /// tenant-isolation regression test below constructs two disjoint
-/// `FilesystemCapabilityLeaseStore`s over a single `InMemoryBackend`.
+/// `CapabilityLeaseStore`s over a single `InMemoryBackend`.
 fn build_scoped_fs<F>(backend: Arc<F>, target_root: &str) -> Arc<ScopedFilesystem<F>>
 where
     F: RootFilesystem,
@@ -1296,7 +1297,7 @@ fn execution_context(grants: CapabilitySet) -> ExecutionContext {
 }
 
 // ---------------------------------------------------------------------------
-// TEST 3: FilesystemCapabilityLeaseStore persists Dispatching across
+// TEST 3: CapabilityLeaseStore persists Dispatching across
 // begin_dispatch_claimed / abort_dispatch_claimed / consume lifecycle.
 //
 // Covers the `begin_dispatch_claimed` → `Dispatching` transition (and its
@@ -1330,7 +1331,7 @@ async fn filesystem_lease_store_persists_dispatching_begin_abort_and_consume() {
     let lease_id = lease.grant.id;
 
     // Issue + claim the lease (Claimed state).
-    let store = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs));
+    let store = CapabilityLeaseStore::new(Arc::clone(&fs));
     store.issue(lease).await.unwrap();
     let claimed = store
         .claim(&context.resource_scope, lease_id, &fingerprint)
@@ -1350,7 +1351,7 @@ async fn filesystem_lease_store_persists_dispatching_begin_abort_and_consume() {
     );
 
     // Reload from the same shared filesystem backend and assert Dispatching is persisted.
-    let reloaded = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs));
+    let reloaded = CapabilityLeaseStore::new(Arc::clone(&fs));
     assert_eq!(
         reloaded
             .get(&context.resource_scope, lease_id)
@@ -1373,7 +1374,7 @@ async fn filesystem_lease_store_persists_dispatching_begin_abort_and_consume() {
     );
 
     // Reload and assert Claimed is persisted.
-    let reloaded2 = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs));
+    let reloaded2 = CapabilityLeaseStore::new(Arc::clone(&fs));
     assert_eq!(
         reloaded2
             .get(&context.resource_scope, lease_id)
@@ -1401,7 +1402,7 @@ async fn filesystem_lease_store_persists_dispatching_begin_abort_and_consume() {
     );
 
     // Reload and assert Consumed is persisted.
-    let reloaded3 = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs));
+    let reloaded3 = CapabilityLeaseStore::new(Arc::clone(&fs));
     assert_eq!(
         reloaded3
             .get(&context.resource_scope, lease_id)

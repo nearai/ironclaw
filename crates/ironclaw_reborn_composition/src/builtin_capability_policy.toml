@@ -10,6 +10,7 @@ authority_effects = [
     "execute_code",
     "network",
     "use_secret",
+    "modify_approval",
     "external_write",
 ]
 
@@ -76,6 +77,23 @@ exempt_capabilities = [
     # operator's explicit save gesture. Its handler repeats operator identity
     # enforcement and uses revision CAS plus idempotent replay.
     "builtin.admin_configuration_replace",
+    # This API-only capability is reachable only from an authenticated user's
+    # explicit settings toggle. Its handler repeats actor/scope matching and
+    # writes only that tenant/user's approval settings scope.
+    "builtin.operator_config_set_auto_approve",
+    # This API-only capability is reachable only from an authenticated
+    # operator's explicit per-tool permission save. Its handler repeats
+    # actor/scope matching, reuses the visible tool catalog, and writes only
+    # the tenant/user approval settings scope.
+    "builtin.operator_config_set_tool_permission",
+    # This API-only capability is reachable only from an authenticated user's
+    # explicit delivery-preferences save gesture. Its handler repeats
+    # actor/scope matching and writes only that user's final-reply target.
+    "builtin.outbound_preferences_set",
+    # This API-only capability is reachable only from an authenticated user's
+    # explicit settings toggle. Its handler repeats actor/scope matching and
+    # writes only the in-process learned-skill selector flag.
+    "builtin.skill_auto_activate_learned_set",
 ]
 
 [approval_defaults.spawn_capability]
@@ -208,12 +226,6 @@ network = "default"
 
 [[grants]]
 capability = "builtin.extension_install"
-effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
-mounts = "system_extensions_lifecycle"
-network = "default"
-
-[[grants]]
-capability = "builtin.extension_activate"
 effects = ["dispatch_capability", "read_filesystem", "write_filesystem", "network"]
 mounts = "system_extensions_lifecycle"
 network = "dev_wildcard"
@@ -222,6 +234,24 @@ network = "dev_wildcard"
 capability = "builtin.extension_remove"
 effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
 mounts = "system_extensions_lifecycle"
+network = "default"
+
+[[grants]]
+capability = "builtin.operator_config_set_auto_approve"
+effects = ["dispatch_capability", "modify_approval"]
+mounts = "ambient"
+network = "default"
+
+[[grants]]
+capability = "builtin.operator_config_set_tool_permission"
+effects = ["dispatch_capability", "modify_approval"]
+mounts = "ambient"
+network = "default"
+
+[[grants]]
+capability = "builtin.outbound_preferences_set"
+effects = ["dispatch_capability", "external_write"]
+mounts = "ambient"
 network = "default"
 
 [[grants]]
@@ -237,9 +267,27 @@ mounts = "skill_management"
 network = "dev_wildcard"
 
 [[grants]]
+capability = "builtin.skill_update"
+effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
+mounts = "skill_management"
+network = "default"
+
+[[grants]]
+capability = "builtin.skill_auto_activate_set"
+effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
+mounts = "skill_management"
+network = "default"
+
+[[grants]]
 capability = "builtin.skill_remove"
 effects = ["dispatch_capability", "read_filesystem", "write_filesystem", "delete_filesystem"]
 mounts = "skill_management"
+network = "default"
+
+[[grants]]
+capability = "builtin.skill_auto_activate_learned_set"
+effects = ["dispatch_capability", "write_filesystem"]
+mounts = "ambient"
 network = "default"
 
 [[grants]]
@@ -304,6 +352,12 @@ network = "dev_wildcard"
 
 [[grants]]
 capability = "builtin.outbound_delivery_target_set"
+effects = ["dispatch_capability", "external_write"]
+mounts = "ambient"
+network = "default"
+
+[[grants]]
+capability = "builtin.outbound_delivery_target_route_current"
 effects = ["dispatch_capability", "external_write"]
 mounts = "ambient"
 network = "default"

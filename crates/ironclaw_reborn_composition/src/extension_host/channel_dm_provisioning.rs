@@ -17,12 +17,10 @@
 use std::{sync::Arc, time::Duration};
 
 use ironclaw_host_api::UserId;
-use ironclaw_product_adapters::TargetQuery;
-use ironclaw_product_workflow::ChannelDeliveryResolver;
+use ironclaw_product::ChannelDeliveryResolver;
+use ironclaw_product::TargetQuery;
 
-use crate::extension_host::channel_dm_targets::{
-    FilesystemChannelDmTargetStore, dm_target_payload,
-};
+use crate::extension_host::channel_dm_targets::{ChannelDmTargetStore, dm_target_payload};
 use crate::extension_host::channel_identity::{
     ChannelIdentityPostBind, ChannelIdentityPostBindFactory,
 };
@@ -53,14 +51,14 @@ fn direct_conversation_query(external_actor_id: &str) -> String {
 /// wiring.
 pub(crate) struct ChannelDmTargetProvisioning {
     delivery: Arc<dyn ChannelDeliveryResolver>,
-    store: Arc<FilesystemChannelDmTargetStore>,
+    store: Arc<ChannelDmTargetStore>,
     snapshot_updates: tokio::sync::watch::Receiver<u64>,
 }
 
 impl ChannelDmTargetProvisioning {
     pub(crate) fn new(
         delivery: Arc<dyn ChannelDeliveryResolver>,
-        store: Arc<FilesystemChannelDmTargetStore>,
+        store: Arc<ChannelDmTargetStore>,
         snapshot_updates: tokio::sync::watch::Receiver<u64>,
     ) -> Self {
         Self {
@@ -89,7 +87,7 @@ impl ChannelIdentityPostBindFactory for ChannelDmTargetProvisioning {
 struct ChannelDmTargetPostBind {
     extension_id: String,
     delivery: Arc<dyn ChannelDeliveryResolver>,
-    store: Arc<FilesystemChannelDmTargetStore>,
+    store: Arc<ChannelDmTargetStore>,
     snapshot_updates: tokio::sync::watch::Receiver<u64>,
 }
 
@@ -132,7 +130,7 @@ impl ChannelIdentityPostBind for ChannelDmTargetPostBind {
 async fn provision_dm_target_after_bind(
     extension_id: &str,
     delivery: &Arc<dyn ChannelDeliveryResolver>,
-    store: &Arc<FilesystemChannelDmTargetStore>,
+    store: &Arc<ChannelDmTargetStore>,
     user_id: &UserId,
     external_actor_id: &str,
     mut snapshot_updates: tokio::sync::watch::Receiver<u64>,
@@ -161,7 +159,7 @@ async fn provision_dm_target_after_bind(
 async fn provision_dm_target(
     extension_id: &str,
     delivery: &Arc<dyn ChannelDeliveryResolver>,
-    store: &Arc<FilesystemChannelDmTargetStore>,
+    store: &Arc<ChannelDmTargetStore>,
     user_id: &UserId,
     external_actor_id: &str,
 ) -> Result<bool, DmTargetProvisioningError> {
@@ -182,7 +180,7 @@ async fn provision_dm_target(
         .await
     {
         Ok(candidates) => candidates,
-        Err(ironclaw_product_adapters::ChannelError::Unsupported) => return Ok(false),
+        Err(ironclaw_product::ChannelError::Unsupported) => return Ok(false),
         Err(error) => {
             return Err(DmTargetProvisioningError::TargetDiscovery(
                 error.to_string(),
@@ -220,11 +218,11 @@ mod tests {
         RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
         TenantId,
     };
-    use ironclaw_product_adapters::{
+    use ironclaw_product::ResolvedChannelDelivery;
+    use ironclaw_product::{
         ChannelAdapter, ChannelError, DeliveryReport, ExternalConversationRef, InboundOutcome,
         OutboundEnvelope, TargetCandidate, VerifiedInbound,
     };
-    use ironclaw_product_workflow::ResolvedChannelDelivery;
 
     use super::*;
 
@@ -342,8 +340,8 @@ mod tests {
         }
     }
 
-    fn store() -> Arc<FilesystemChannelDmTargetStore> {
-        Arc::new(FilesystemChannelDmTargetStore::new(
+    fn store() -> Arc<ChannelDmTargetStore> {
+        Arc::new(ChannelDmTargetStore::new(
             Arc::new(InMemoryBackend::new()),
             TenantId::new("tenant-alpha").expect("tenant"),
             UserId::new("operator").expect("user"),

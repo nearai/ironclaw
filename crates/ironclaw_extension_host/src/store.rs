@@ -1,8 +1,8 @@
 //! Persistence port for installation lifecycle records.
 //!
 //! `ExtensionHost` is the only writer of installation state; this port is the
-//! host's working set, rehydrated from the facade's durable
-//! `ExtensionActivationState` records at every boot. The record carries the
+//! host's working set, rehydrated from durable installation membership records
+//! at every boot. The record carries the
 //! resolved contract (so a restore never needs the package source), the
 //! current working state (`Installed` / `Active` / `Failed`), the non-secret
 //! config values, and a typed, redacted last error.
@@ -48,7 +48,7 @@ pub enum StoreError {
 }
 
 /// The derived execution view of installation records: rehydrated at boot
-/// from the durable `ExtensionInstallationStore` and kept current by the
+/// from the durable `ExtensionInstallationStorePort` and kept current by the
 /// generic host's lifecycle writes (lifecycle.md: an in-memory registry is a
 /// derived execution view, never the source of truth — there is no durable
 /// twin of this port to keep in lock-step). Contract tests use it standalone.

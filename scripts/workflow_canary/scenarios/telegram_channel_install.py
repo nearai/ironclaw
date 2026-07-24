@@ -83,7 +83,6 @@ async def run(
     details: dict[str, Any] = {
         "install_status": install_response.get("status"),
         "setup_success": setup_response.get("success"),
-        "setup_activated": setup_response.get("activated"),
         "active": active,
     }
     if error is not None:

@@ -17,14 +17,13 @@ use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use ironclaw_approvals::{
-    PersistentApprovalAction, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
+    PersistentApprovalAction, PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort,
     PersistentApprovalScope,
 };
-use ironclaw_authorization::{CapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer};
+use ironclaw_authorization::{CapabilityLeaseStorePort, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_capabilities::{
-    CapabilityAuthResumeRequest, CapabilityHost, CapabilityInvocationError,
-    CapabilityInvocationRequest, CapabilityInvocationResult, CapabilityObligationHandler,
-    CapabilityResumeRequest, CapabilitySpawnRequest, CapabilitySpawnResult,
+    CapabilityHost, CapabilityInvocationError, CapabilityInvocationResult,
+    CapabilityObligationHandler, CapabilitySpawnRequest, CapabilitySpawnResult,
 };
 use ironclaw_extensions::{ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_filesystem::RootFilesystem;
@@ -39,13 +38,14 @@ use ironclaw_process_sandbox::{
     PROCESS_SANDBOX_CAPABILITY_ID, SandboxProcessPlan, ValidatedSandboxProcessPlan,
 };
 use ironclaw_processes::{
-    ProcessCancellationRegistry, ProcessError, ProcessHost, ProcessManager, ProcessResultStore,
-    ProcessStart, ProcessStatus, ProcessStore,
+    ProcessCancellationRegistry, ProcessError, ProcessHost, ProcessManager, ProcessResultStorePort,
+    ProcessStart, ProcessStatus, ProcessStorePort,
 };
 use ironclaw_run_state::{
-    ApprovalRequestStore, RunStateApprovalStore, RunStateError, RunStateStore, RunStatus,
+    ApprovalRequestStorePort, RunStateApprovalStorePort, RunStateError, RunStateStorePort,
+    RunStatus,
 };
-use ironclaw_secrets::SecretStore;
+use ironclaw_secrets::SecretStorePort;
 use ironclaw_trust::{HostTrustPolicy, TrustPolicy};
 use ironclaw_turns::run_profile::LoopSafeSummary;
 
@@ -98,12 +98,12 @@ fn trace_capability_latency_error<E: ?Sized>(
 use crate::{
     BuiltinObligationHandler, BuiltinObligationServices, CancelRuntimeWorkOutcome,
     CancelRuntimeWorkRequest, CapabilitySurfaceVersion, HostRuntime, HostRuntimeError,
-    HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalGate, RuntimeAuthGate,
-    RuntimeBackendHealth, RuntimeBlockedReason, RuntimeCapabilityAuthResumeRequest,
+    HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalGate, RuntimeApprovalResume,
+    RuntimeAuthGate, RuntimeAuthResume, RuntimeBackendHealth, RuntimeBlockedReason,
     RuntimeCapabilityCompleted, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind, RuntimeGateId,
-    RuntimeStatusRequest, RuntimeWorkId, RuntimeWorkSummary, VisibleCapabilityRequest,
-    VisibleCapabilitySurface, obligations::secret_owner_scope, surface::CapabilityCatalog,
+    RuntimeFailureKind, RuntimeGateId, RuntimeInvocation, RuntimeStatusRequest, RuntimeWorkId,
+    RuntimeWorkSummary, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    obligations::secret_owner_scope, surface::CapabilityCatalog,
 };
 
 /// Default production wiring for [`HostRuntime`].
@@ -112,17 +112,22 @@ pub struct DefaultHostRuntime {
     dispatcher: Arc<dyn CapabilityDispatcher>,
     authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer>,
     trust_policy: Arc<dyn TrustPolicy>,
-    run_state: Option<Arc<dyn RunStateStore>>,
-    approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
-    run_state_approval_store: Option<Arc<dyn RunStateApprovalStore>>,
-    capability_leases: Option<Arc<dyn CapabilityLeaseStore>>,
-    // arch-exempt: optional_arc, minimal/test compositions intentionally disable
-    // persistent approval replay until the product revoke control plane is split out,
-    // plan #4539
-    persistent_approval_policies: Option<Arc<dyn PersistentApprovalPolicyStore>>,
+    // arch-exempt: optional_arc, store ports are absent in minimal/test runtime graphs, plan #4539
+    run_state: Option<Arc<dyn RunStateStorePort>>,
+    // arch-exempt: optional_arc, store ports are absent in minimal/test runtime graphs, plan #4539
+    approval_requests: Option<Arc<dyn ApprovalRequestStorePort>>,
+    // arch-exempt: optional_arc, combined store port is absent in minimal/test runtime graphs, plan #4539
+    run_state_approval_store: Option<Arc<dyn RunStateApprovalStorePort>>,
+    // arch-exempt: optional_arc, capability leases are absent in minimal/test runtime graphs, plan #4539
+    capability_leases: Option<Arc<dyn CapabilityLeaseStorePort>>,
+    // arch-exempt: optional_arc, minimal/test compositions intentionally disable persistent approval replay, plan #4539
+    // Until the product revoke control plane is split out.
+    persistent_approval_policies: Option<Arc<dyn PersistentApprovalPolicyStorePort>>,
     process_manager: Option<Arc<dyn ProcessManager>>,
-    process_store: Option<Arc<dyn ProcessStore>>,
-    process_result_store: Option<Arc<dyn ProcessResultStore>>,
+    // arch-exempt: optional_arc, process stores are absent unless process execution is wired, plan #4539
+    process_store: Option<Arc<dyn ProcessStorePort>>,
+    // arch-exempt: optional_arc, process stores are absent unless process execution is wired, plan #4539
+    process_result_store: Option<Arc<dyn ProcessResultStorePort>>,
     process_cancellation_registry: Option<Arc<ProcessCancellationRegistry>>,
     surface_filesystem: Option<Arc<dyn RootFilesystem>>,
     runtime_health: Option<Arc<dyn RuntimeBackendHealth>>,
@@ -137,9 +142,9 @@ pub struct DefaultHostRuntime {
     ///
     /// When absent the pre-flight is skipped; the dispatch-time obligation check
     /// remains the enforcement backstop regardless.
-    // arch-exempt: optional_arc, credential pre-flight is disabled in minimal/test
-    // host-runtime graphs that do not wire a secret store, plan #4539 (Fix B)
-    credential_preflight_store: Option<Arc<dyn SecretStore>>,
+    // arch-exempt: optional_arc, credential pre-flight is disabled in minimal/test graphs, plan #4539
+    // Those host-runtime graphs do not wire a secret store.
+    credential_preflight_store: Option<Arc<dyn SecretStorePort>>,
     surface_version: CapabilitySurfaceVersion,
     runtime_policy: EffectiveRuntimePolicy,
 }
@@ -156,7 +161,7 @@ impl DefaultHostRuntime {
     /// policy with [`Self::with_trust_policy`] or [`Self::with_trust_policy_dyn`].
     ///
     /// Callers must additionally attach either a combined
-    /// [`RunStateApprovalStore`] via
+    /// [`RunStateApprovalStorePort`] via
     /// [`with_run_state_approval_store`](Self::with_run_state_approval_store),
     /// or separate stores via [`with_run_state`](Self::with_run_state) and
     /// [`with_approval_requests`](Self::with_approval_requests), before
@@ -240,16 +245,18 @@ impl DefaultHostRuntime {
     }
 
     /// Attaches the run-state store used to record invocation lifecycle.
-    pub fn with_run_state(mut self, run_state: Arc<dyn RunStateStore>) -> Self {
+    // arch-exempt: optional_arc, store ports are absent in minimal/test runtime graphs, plan #4539
+    pub fn with_run_state(mut self, run_state: Arc<dyn RunStateStorePort>) -> Self {
         self.run_state = Some(run_state);
         self.run_state_approval_store = None;
         self
     }
 
     /// Attaches the approval-request store used to persist approval prompts.
+    // arch-exempt: optional_arc, store ports are absent in minimal/test runtime graphs, plan #4539
     pub fn with_approval_requests(
         mut self,
-        approval_requests: Arc<dyn ApprovalRequestStore>,
+        approval_requests: Arc<dyn ApprovalRequestStorePort>,
     ) -> Self {
         self.approval_requests = Some(approval_requests);
         self.run_state_approval_store = None;
@@ -258,7 +265,11 @@ impl DefaultHostRuntime {
 
     /// Attaches a combined durable run-state/approval-request store with an
     /// atomic approval-block transition.
-    pub fn with_run_state_approval_store(mut self, store: Arc<dyn RunStateApprovalStore>) -> Self {
+    // arch-exempt: optional_arc, combined store port is absent in minimal/test runtime graphs, plan #4539
+    pub fn with_run_state_approval_store(
+        mut self,
+        store: Arc<dyn RunStateApprovalStorePort>,
+    ) -> Self {
         self.run_state = Some(store.clone());
         self.approval_requests = Some(store.clone());
         self.run_state_approval_store = Some(store);
@@ -266,9 +277,10 @@ impl DefaultHostRuntime {
     }
 
     /// Attaches the capability-lease store used by approval resume paths.
+    // arch-exempt: optional_arc, capability leases are absent in minimal/test runtime graphs, plan #4539
     pub fn with_capability_leases(
         mut self,
-        capability_leases: Arc<dyn CapabilityLeaseStore>,
+        capability_leases: Arc<dyn CapabilityLeaseStorePort>,
     ) -> Self {
         self.capability_leases = Some(capability_leases);
         self
@@ -276,9 +288,10 @@ impl DefaultHostRuntime {
 
     /// Attaches reusable approval policy overrides used to inject scoped,
     /// manifest-bounded grants before ordinary authorization.
+    // arch-exempt: optional_arc, approval policy overrides are absent in minimal/test runtime graphs, plan #4539
     pub fn with_persistent_approval_policies(
         mut self,
-        policies: Arc<dyn PersistentApprovalPolicyStore>,
+        policies: Arc<dyn PersistentApprovalPolicyStorePort>,
     ) -> Self {
         self.persistent_approval_policies = Some(policies);
         self
@@ -291,15 +304,17 @@ impl DefaultHostRuntime {
     }
 
     /// Attaches the process store used for status and cancellation fanout.
-    pub fn with_process_store(mut self, process_store: Arc<dyn ProcessStore>) -> Self {
+    // arch-exempt: optional_arc, process stores are absent unless process execution is wired, plan #4539
+    pub fn with_process_store(mut self, process_store: Arc<dyn ProcessStorePort>) -> Self {
         self.process_store = Some(process_store);
         self
     }
 
     /// Attaches the process result store used to persist cancellation results.
+    // arch-exempt: optional_arc, process stores are absent unless process execution is wired, plan #4539
     pub fn with_process_result_store(
         mut self,
-        process_result_store: Arc<dyn ProcessResultStore>,
+        process_result_store: Arc<dyn ProcessResultStorePort>,
     ) -> Self {
         self.process_result_store = Some(process_result_store);
         self
@@ -377,7 +392,7 @@ impl DefaultHostRuntime {
     // plan #4539 (Fix B)
     pub(crate) fn with_credential_preflight_store(
         mut self,
-        secret_store: Arc<dyn SecretStore>,
+        secret_store: Arc<dyn SecretStorePort>,
     ) -> Self {
         self.credential_preflight_store = Some(secret_store);
         self
@@ -410,14 +425,9 @@ impl DefaultHostRuntime {
 impl HostRuntime for DefaultHostRuntime {
     async fn invoke_capability(
         &self,
-        request: RuntimeCapabilityRequest,
+        request: RuntimeInvocation,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-        let RuntimeCapabilityRequest {
-            context,
-            capability_id,
-            estimate,
-            input,
-        } = request;
+        let (context, capability_id, estimate, input) = request;
         let scope = context.resource_scope.clone();
         let invocation_id = context.invocation_id;
         let total_started_at = live_latency_started_at();
@@ -426,7 +436,7 @@ impl HostRuntime for DefaultHostRuntime {
 
         // Validate the execution context before the kernel's credential pre-flight
         // queries the secret store. Without this guard a malformed
-        // RuntimeCapabilityRequest could probe secret-store presence under a forged
+        // HostRuntime::invoke_capability could probe secret-store presence under a forged
         // resource_scope that does not match the top-level
         // tenant/user/agent/project fields. Trust classification and runtime-policy
         // planning now run inside the kernel's `authorize()` fold — no host_runtime
@@ -445,15 +455,11 @@ impl HostRuntime for DefaultHostRuntime {
 
         let host = self.capability_host(&registry);
 
-        let invocation = CapabilityInvocationRequest {
-            context,
-            capability_id: capability_id.clone(),
-            estimate,
-            input,
-        };
-
         let dispatch_started_at = live_latency_started_at();
-        match host.invoke_json(invocation).await {
+        match host
+            .invoke_json(context, capability_id.clone(), estimate, input)
+            .await
+        {
             Ok(result) => {
                 trace_capability_latency_ok(
                     "capability_host_invoke_json",
@@ -514,14 +520,9 @@ impl HostRuntime for DefaultHostRuntime {
 
     async fn spawn_capability(
         &self,
-        request: RuntimeCapabilityRequest,
+        request: RuntimeInvocation,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-        let RuntimeCapabilityRequest {
-            context,
-            capability_id,
-            estimate,
-            input,
-        } = request;
+        let (context, capability_id, estimate, input) = request;
         let input = match host_runtime_spawn_input_for_capability(&capability_id, input)? {
             SpawnInputPreparation::Ready(input) => input,
             SpawnInputPreparation::ModelInputRejected(failure) => {
@@ -539,7 +540,7 @@ impl HostRuntime for DefaultHostRuntime {
 
         // Validate the execution context before the kernel's credential pre-flight
         // queries the secret store. Without this guard a malformed
-        // RuntimeCapabilityRequest could probe secret-store presence under a forged
+        // HostRuntime::spawn_capability could probe secret-store presence under a forged
         // resource_scope that does not match the top-level
         // tenant/user/agent/project fields. Trust classification and runtime-policy
         // planning now run inside the kernel's spawn authorize fold — no
@@ -580,15 +581,9 @@ impl HostRuntime for DefaultHostRuntime {
 
     async fn resume_capability(
         &self,
-        request: RuntimeCapabilityResumeRequest,
+        request: RuntimeApprovalResume,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-        let RuntimeCapabilityResumeRequest {
-            context,
-            approval_request_id,
-            capability_id,
-            estimate,
-            input,
-        } = request;
+        let (context, approval_request_id, capability_id, estimate, input) = request;
         if let Some(outcome) = self
             .resume_actor_preflight_guard(&context, &capability_id)
             .await?
@@ -601,15 +596,16 @@ impl HostRuntime for DefaultHostRuntime {
         // host_runtime pre-authorization + `context.trust` stamp).
         let registry = self.registry.snapshot();
         let host = self.capability_host(&registry);
-        let resume = CapabilityResumeRequest {
-            context,
-            approval_request_id,
-            capability_id: capability_id.clone(),
-            estimate,
-            input,
-        };
-
-        match host.resume_json(resume).await {
+        match host
+            .resume_json(
+                context,
+                approval_request_id,
+                capability_id.clone(),
+                estimate,
+                input,
+            )
+            .await
+        {
             Ok(result) => Ok(RuntimeCapabilityOutcome::Completed(Box::new(
                 completed_outcome_from(result, capability_id),
             ))),
@@ -643,15 +639,9 @@ impl HostRuntime for DefaultHostRuntime {
 
     async fn auth_resume_capability(
         &self,
-        request: RuntimeCapabilityAuthResumeRequest,
+        request: RuntimeAuthResume,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-        let RuntimeCapabilityAuthResumeRequest {
-            context,
-            capability_id,
-            estimate,
-            input,
-            approval_request_id,
-        } = request;
+        let (context, capability_id, estimate, input, approval_request_id) = request;
         if let Some(outcome) = self
             .resume_actor_preflight_guard(&context, &capability_id)
             .await?
@@ -662,22 +652,23 @@ impl HostRuntime for DefaultHostRuntime {
         // Trust classification and the persistent-approval re-application on
         // auth-resume now live in the kernel's `authorize_resumed` fold
         // (§5.2.7/§5.3.2): a capability authorized only by a persistent grant
-        // (e.g. `extension_activate` under admin-config FirstParty trust) is
+        // (e.g. `extension_install` under admin-config FirstParty trust) is
         // re-authorized by the kernel injecting the candidate grant after the
         // credential gate, and a trust rejection fails the blocked run there —
         // replacing the former host_runtime pre-authorization + `context.trust`
         // stamp.
         let registry = self.registry.snapshot();
         let host = self.capability_host(&registry);
-        let auth_resume = CapabilityAuthResumeRequest {
-            context,
-            capability_id: capability_id.clone(),
-            estimate,
-            input,
-            approval_request_id,
-        };
-
-        match host.auth_resume_json(auth_resume).await {
+        match host
+            .auth_resume_json(
+                context,
+                capability_id.clone(),
+                estimate,
+                input,
+                approval_request_id,
+            )
+            .await
+        {
             Ok(result) => Ok(RuntimeCapabilityOutcome::Completed(Box::new(
                 completed_outcome_from(result, capability_id),
             ))),
@@ -706,17 +697,39 @@ impl HostRuntime for DefaultHostRuntime {
         }
     }
 
+    async fn decline_auth_capability(
+        &self,
+        request: crate::RuntimeAuthDecline,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        let (context, capability_id) = request;
+        let registry = self.registry.snapshot();
+        let host = self.capability_host(&registry);
+        match host.decline_auth_json(context, capability_id.clone()).await {
+            Ok(()) => Ok(RuntimeCapabilityOutcome::Failed(
+                RuntimeCapabilityFailure::new(
+                    capability_id,
+                    RuntimeFailureKind::GateDeclined,
+                    Some("auth gate denied by user".to_string()),
+                ),
+            )),
+            Err(CapabilityInvocationError::RunState(error)) => {
+                Err(unavailable_from_run_state(*error))
+            }
+            Err(CapabilityInvocationError::ResumeStoreMissing { .. }) => {
+                Err(HostRuntimeError::unavailable("run-state store unavailable"))
+            }
+            Err(error) => Ok(RuntimeCapabilityOutcome::Failed(failure_from(
+                error,
+                capability_id,
+            ))),
+        }
+    }
+
     async fn resume_spawn_capability(
         &self,
-        request: RuntimeCapabilityResumeRequest,
+        request: RuntimeApprovalResume,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-        let RuntimeCapabilityResumeRequest {
-            context,
-            approval_request_id,
-            capability_id,
-            estimate,
-            input,
-        } = request;
+        let (context, approval_request_id, capability_id, estimate, input) = request;
         if let Some(outcome) = self
             .resume_actor_preflight_guard(&context, &capability_id)
             .await?
@@ -740,15 +753,16 @@ impl HostRuntime for DefaultHostRuntime {
         // stamp.
         let registry = self.registry.snapshot();
         let host = self.capability_host(&registry);
-        let resume = CapabilityResumeRequest {
-            context,
-            approval_request_id,
-            capability_id: capability_id.clone(),
-            estimate,
-            input,
-        };
-
-        match host.resume_spawn_json(resume).await {
+        match host
+            .resume_spawn_json(
+                context,
+                approval_request_id,
+                capability_id.clone(),
+                estimate,
+                input,
+            )
+            .await
+        {
             Ok(result) => Ok(RuntimeCapabilityOutcome::SpawnedProcess(
                 spawned_process_outcome_from(result, capability_id),
             )),
@@ -1586,7 +1600,7 @@ fn host_runtime_spawn_input_for_capability(
     }
     let plan = match serde_json::from_value::<SandboxProcessPlan>(input) {
         Ok(plan) => plan,
-        Err(_) => {
+        Err(error) => {
             return Ok(SpawnInputPreparation::ModelInputRejected(
                 RuntimeCapabilityFailure::new(
                     capability_id.clone(),
@@ -1594,13 +1608,17 @@ fn host_runtime_spawn_input_for_capability(
                     Some(
                         "process sandbox capability input must be a SandboxProcessPlan".to_string(),
                     ),
-                ),
+                )
+                // The parse cause ("missing field `run`", …) rides the
+                // model-visible Diagnostic channel — scrubbed at the loop
+                // seam — so the model can correct the plan shape on retry.
+                .with_model_visible_cause(error.to_string()),
             ));
         }
     };
     let plan = match ValidatedSandboxProcessPlan::new(plan) {
         Ok(plan) => plan,
-        Err(_) => {
+        Err(error) => {
             return Ok(SpawnInputPreparation::ModelInputRejected(
                 RuntimeCapabilityFailure::new(
                     capability_id.clone(),
@@ -1609,7 +1627,10 @@ fn host_runtime_spawn_input_for_capability(
                         "process sandbox capability input failed SandboxProcessPlan validation"
                             .to_string(),
                     ),
-                ),
+                )
+                // `ProcessSandboxPlanError` names the offending field and rule
+                // ("run command must not be empty"); carry it to the model.
+                .with_model_visible_cause(error.to_string()),
             ));
         }
     };
@@ -1868,10 +1889,17 @@ impl From<DispatchFailureKind> for RuntimeFailureKind {
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UndeclaredCapability) => {
                 RuntimeFailureKind::InvalidInput
             }
+            // A guest trap is an extension-local execution failure. It can be
+            // an extension defect or a call-specific failure, but retrying the
+            // same guest invocation as host infrastructure cannot repair it.
+            // Surface it as an operation failure so the model can change
+            // approach or report the broken extension.
+            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest) => {
+                RuntimeFailureKind::OperationFailed
+            }
             DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend)
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Client)
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Executor)
-            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest)
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Manifest)
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UnsupportedRunner) => {
                 RuntimeFailureKind::Backend
@@ -2086,7 +2114,10 @@ mod tests {
                 RuntimeDispatchErrorKind::FilesystemDenied,
                 RuntimeFailureKind::Authorization,
             ),
-            (RuntimeDispatchErrorKind::Guest, RuntimeFailureKind::Backend),
+            (
+                RuntimeDispatchErrorKind::Guest,
+                RuntimeFailureKind::OperationFailed,
+            ),
             (
                 RuntimeDispatchErrorKind::InputEncode,
                 RuntimeFailureKind::InvalidInput,
@@ -2250,6 +2281,15 @@ mod tests {
                     failure.disposition(),
                     crate::CapabilityFailureDisposition::ModelVisibleToolError
                 );
+                // The serde cause must ride the model-visible Diagnostic channel
+                // so the model learns WHAT is malformed, not just that it is.
+                let cause = failure
+                    .model_visible_cause()
+                    .expect("malformed plan rejection must carry the parse cause");
+                assert!(
+                    cause.contains("missing field"),
+                    "cause must name the missing field, got: {cause}"
+                );
             }
             SpawnInputPreparation::Ready(_) => {
                 panic!("malformed plan must be rejected as model-visible InvalidInput")
@@ -2273,6 +2313,15 @@ mod tests {
                 assert_eq!(
                     failure.disposition(),
                     crate::CapabilityFailureDisposition::ModelVisibleToolError
+                );
+                // The validation cause must ride the model-visible Diagnostic
+                // channel so the model learns which field broke which rule.
+                let cause = failure
+                    .model_visible_cause()
+                    .expect("invalid plan rejection must carry the validation cause");
+                assert!(
+                    cause.contains("run command must not be empty"),
+                    "cause must name the offending field and rule, got: {cause}"
                 );
             }
             SpawnInputPreparation::Ready(_) => {

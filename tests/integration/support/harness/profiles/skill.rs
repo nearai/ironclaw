@@ -72,7 +72,22 @@ pub(crate) fn skill_activation_tools_profile(tenant: &TenantId) -> HarnessResult
                 true,
             )?),
         )
-        .with_skill_activation_tenant(tenant.clone()),
+        .with_skill_activation_tenant(tenant.clone())
+        .with_system_skill_fixture(
+            "greet",
+            "greets the user warmly",
+            "GREET_SKILL_PROMPT_SENTINEL",
+        )
+        .with_system_skill_fixture(
+            "bloat",
+            "an oversized skill",
+            "BLOAT_SKILL_FILLER ".repeat(2200),
+        )
+        .with_system_skill_fixture(
+            "duplicate",
+            "a system-scoped skill",
+            "SYSTEM_DUPLICATE_SKILL_SENTINEL",
+        ),
         network_policy_override: Some(http_test_policy()),
         auto_approve_default: Some(true),
         ..ToolsProfile::new(

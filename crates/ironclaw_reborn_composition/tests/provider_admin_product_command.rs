@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use ironclaw_product_adapters::{
+use ironclaw_product::{
     AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
     ExternalEventId, InboundCommandPayload, ProductAdapterError, ProductAdapterId,
     ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason,
-    ProductWorkflow, ProductWorkflowRejectionKind, ProtocolAuthEvidence, TrustedInboundContext,
+    ProductWorkflowRejectionKind, ProtocolAuthEvidence, TrustedInboundContext,
 };
-use ironclaw_product_workflow::{
-    DefaultProductWorkflow, FakeConversationBindingService, FakeIdempotencyLedger,
+use ironclaw_product::{
+    DefaultProductSurface, FakeConversationBindingService, FakeIdempotencyLedger,
     FakeInboundTurnService, ProductCommandAdmission, ProductCommandAdmissionService,
     ProductCommandContext, ProductWorkflowError,
 };
@@ -35,7 +35,7 @@ fn sample_command_envelope(
         &evidence,
     )
     .expect("verified");
-    let parsed = ironclaw_product_adapters::ParsedProductInbound::new(
+    let parsed = ironclaw_product::ParsedProductInbound::new(
         ExternalEventId::new(format!("evt:{event_suffix}")).expect("valid event"),
         ExternalActorRef::new("test", "user1", Option::<String>::None).expect("valid actor"),
         ExternalConversationRef::new(None, "conv1", None, None).expect("valid conversation"),
@@ -56,7 +56,7 @@ impl ProductCommandAdmissionService for AllowingCommandAdmissionService {
     async fn admit(
         &self,
         _context: &ProductCommandContext,
-        _command: &ironclaw_product_workflow::ProductCommand,
+        _command: &ironclaw_product::ProductCommand,
     ) -> Result<ProductCommandAdmission, ProductWorkflowError> {
         Ok(ProductCommandAdmission::Allowed)
     }
@@ -64,7 +64,7 @@ impl ProductCommandAdmissionService for AllowingCommandAdmissionService {
 
 fn workflow_for_reborn_home(
     reborn_home: &std::path::Path,
-) -> (DefaultProductWorkflow, Arc<FakeInboundTurnService>) {
+) -> (DefaultProductSurface, Arc<FakeInboundTurnService>) {
     let home = RebornHome::resolve_from_env_parts(
         Some(reborn_home.as_os_str().to_os_string()),
         None,
@@ -76,7 +76,7 @@ fn workflow_for_reborn_home(
     let inbound = Arc::new(FakeInboundTurnService::new());
     let ledger = Arc::new(FakeIdempotencyLedger::new());
     let binding = Arc::new(FakeConversationBindingService::new());
-    let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger, binding)
+    let workflow = DefaultProductSurface::new(inbound.clone(), ledger, binding)
         .with_product_command_admission_service(Arc::new(AllowingCommandAdmissionService))
         .with_product_command_service(command_service);
     (workflow, inbound)
@@ -197,7 +197,7 @@ async fn non_model_command_is_rejected_by_provider_admin_service() {
     };
     assert_eq!(
         rejection.kind,
-        ironclaw_product_adapters::ProductRejectionKind::PolicyDenied
+        ironclaw_product::ProductRejectionKind::PolicyDenied
     );
     assert_eq!(inbound.accepted_count(), 0);
 }

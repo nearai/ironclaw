@@ -59,11 +59,11 @@ does NOT block an OS thread. So the narrow "lock-across-await is UB" reading is
 
 | Claim | Verdict | Evidence |
 |---|---|---|
-| `ironclaw_turns` already mutex-free via CAS+15s timeout (the reference) | VALID | `ironclaw_turns/src/filesystem_store.rs:65-66,248-309` (own `put_with_cas`/`cas_retry_backoff`/`PutError` — currently a *local* copy, not yet shared). |
+| `ironclaw_turns` already mutex-free via CAS+15s timeout (the reference) | VALID | `ironclaw_turns/src/turn_state_row_store.rs:65-66,248-309` (own `put_with_cas`/`cas_retry_backoff`/`PutError` — currently a *local* copy, not yet shared). |
 | `run_state` per-scope `tokio::Mutex` guard across `apply_update`/`put_with_cas` awaits; map uses `Weak`+prune | VALID | `ironclaw_run_state/src/lib.rs` guards 645/680/697/713/730 + approval store 880-957; `Weak` map + `retain` at :1104/:1116. Has CAS retry (8) already. |
 | `threads` `ensure_thread` holds guard across `read_thread_versioned`+`put_with_cas`; `Weak`+prune | VALID | `ironclaw_threads/src/filesystem_service.rs:1066` guard; awaits 1067-1115; `Weak` map :2693, `retain` :2701. `ensure_thread` reconciles VersionMismatch once (no loop); other write paths already lock-free w/ CAS retry. |
 | `resources` `update_with_scope` holds guard across `update_snapshot().await`; **NO retry loop**; `Weak`+prune | VALID | `ironclaw_resources/src/cas_snapshot.rs:160-161`; `update_snapshot` single attempt, returns `E::storage(...)` on VersionMismatch (:201-207). `Weak` map :353-355, `retain` :364. |
-| `secrets` holds guard across `cas_mutate().await`; map uses `Arc` (NOT Weak), never pruned → **unbounded leak** | VALID | `ironclaw_secrets/src/filesystem_store.rs` guards 463/538/881/909; **leak**: `HashMap<String, Arc<tokio::Mutex<()>>>` at :1122-1133, no `Weak`, no `retain` — every distinct lease-UUID / session key permanently retained. `cas_mutate` already has a 3-attempt retry. |
+| `secrets` holds guard across `cas_mutate().await`; map uses `Arc` (NOT Weak), never pruned → **unbounded leak** | VALID | `ironclaw_secrets/src/secret_store.rs` guards 463/538/881/909; **leak**: `HashMap<String, Arc<tokio::Mutex<()>>>` at :1122-1133, no `Weak`, no `retain` — every distinct lease-UUID / session key permanently retained. `cas_mutate` already has a 3-attempt retry. |
 | All target state mounts are CAS-capable (gate won't reject prod) | VALID | per `2026-06-22-...:§6`: `/turns` + sibling state roots resolve under `/tenants/...` → LibSql/InMemory (real CAS). Byte-only `LocalFilesystem` backs only `/workspace`+`/projects`, never state stores. `BackendCapabilities` + `TxnCapability::CompareAndSwap` already exist (`ironclaw_filesystem/src/types.rs:362`, `RootFilesystem::capabilities()` `root.rs:43`). |
 
 **Nothing was found invalid.** The only adjustment is the framing of PR B (it is a
@@ -159,7 +159,7 @@ Crates: `ironclaw_filesystem` (new helper), `ironclaw_turns`, `ironclaw_run_stat
 ### B1. `cas_update` helper in `ironclaw_filesystem`
 One generic, mutex-free, bounded-CAS-retry helper that owns the
 read-modify-write contract. Port verbatim semantics from
-`ironclaw_turns/src/filesystem_store.rs` (the proven #5142 implementation):
+`ironclaw_turns/src/turn_state_row_store.rs` (the proven #5142 implementation):
 - `FILESYSTEM_CAS_RETRIES = 32`, jittered exponential backoff
   (`FILESYSTEM_CAS_BACKOFF_BASE=2ms`, `MAX=50ms`), wrapped in a
   `tokio::time::timeout(15s)` (defense-in-depth — §7c).

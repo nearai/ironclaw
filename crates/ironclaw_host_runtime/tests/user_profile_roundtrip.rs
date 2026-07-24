@@ -38,8 +38,7 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::builtin_first_party_package;
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, MemoryBackedUserProfileSource,
-    PROFILE_SET_CAPABILITY_ID, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    builtin_first_party_handlers,
+    PROFILE_SET_CAPABILITY_ID, RuntimeCapabilityOutcome, builtin_first_party_handlers,
 };
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_triggers::InMemoryTriggerRepository;
@@ -269,7 +268,7 @@ async fn profile_set_then_runtime_context_renders_local_time_and_profile_line() 
     );
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             ironclaw_host_api::CapabilityId::new(PROFILE_SET_CAPABILITY_ID).unwrap(),
             ResourceEstimate::default(),
@@ -384,7 +383,7 @@ async fn profile_set_for_one_user_is_not_visible_to_another() {
     // Write profile for user-A (agent+project scoped run).
     let context_a = agent_scoped_context("tenant-isolation", "user-A", "agent-x", "project-x");
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context_a,
             ironclaw_host_api::CapabilityId::new(PROFILE_SET_CAPABILITY_ID).unwrap(),
             ResourceEstimate::default(),

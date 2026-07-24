@@ -4,14 +4,14 @@ use std::sync::Arc;
 
 use ironclaw_filesystem::{CasExpectation, Entry, InMemoryBackend, RecordKind, RootFilesystem};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId, VirtualPath};
-use ironclaw_product_adapters::ProductInboundAck;
-use ironclaw_reborn_openai_compat::FilesystemOpenAiCompatRefStore;
+use ironclaw_product::ProductInboundAck;
+use ironclaw_reborn_openai_compat::OpenAiCompatRefStore;
 use ironclaw_reborn_openai_compat::{
     OpenAiCompatActorScope, OpenAiCompatBindInternalRefs, OpenAiCompatIdempotencyKey,
     OpenAiCompatInternalRefs, OpenAiCompatProductActionRef, OpenAiCompatProjectionRef,
     OpenAiCompatPublicId, OpenAiCompatRecordAcceptedAck, OpenAiCompatRefLookup,
     OpenAiCompatRefOperation, OpenAiCompatRefReservation, OpenAiCompatRefReservationOutcome,
-    OpenAiCompatRefStore, OpenAiCompatRequestFingerprint, OpenAiCompatResourceBinding,
+    OpenAiCompatRefStorePort, OpenAiCompatRequestFingerprint, OpenAiCompatResourceBinding,
     OpenAiCompatRouteSurface, OpenAiCompatTurnRunRef, OpenAiResponseId,
 };
 use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
@@ -24,7 +24,7 @@ async fn durable_store_replays_same_idempotency_key_after_reopen() {
     let request = reservation("tenant-a", "alice", "same-key", b"same body");
     let created = expect_created(store.reserve(request.clone()).await);
 
-    let reopened = FilesystemOpenAiCompatRefStore::with_root(filesystem, root);
+    let reopened = OpenAiCompatRefStore::with_root(filesystem, root);
     let replayed = expect_replayed(reopened.reserve(request).await);
 
     assert_eq!(replayed.public_id, created.public_id);
@@ -50,7 +50,7 @@ async fn durable_store_persists_accepted_ack_for_idempotency_replay_after_reopen
 
     assert_eq!(updated.accepted_ack, Some(ack.clone()));
 
-    let reopened = FilesystemOpenAiCompatRefStore::with_root(filesystem, root);
+    let reopened = OpenAiCompatRefStore::with_root(filesystem, root);
     let replayed = expect_replayed(reopened.reserve(request).await);
 
     assert_eq!(replayed.public_id, created.public_id);
@@ -110,7 +110,7 @@ async fn durable_store_conflicts_same_key_different_body_after_reopen() {
     let request = reservation("tenant-a", "alice", "same-key", b"first body");
     let created = expect_created(store.reserve(request).await);
 
-    let reopened = FilesystemOpenAiCompatRefStore::with_root(filesystem, root);
+    let reopened = OpenAiCompatRefStore::with_root(filesystem, root);
     let conflict = reopened
         .reserve(reservation(
             "tenant-a",
@@ -263,7 +263,7 @@ async fn durable_store_persists_bound_internal_refs() {
         }
     );
 
-    let reopened = FilesystemOpenAiCompatRefStore::with_root(filesystem, root);
+    let reopened = OpenAiCompatRefStore::with_root(filesystem, root);
     let loaded = reopened
         .lookup_authorized(OpenAiCompatRefLookup::new(
             actor("tenant-a", "alice"),
@@ -525,16 +525,10 @@ async fn durable_store_rejects_idempotency_index_pointing_to_other_actor_mapping
     ));
 }
 
-fn test_store(
-    suffix: &str,
-) -> (
-    Arc<InMemoryBackend>,
-    VirtualPath,
-    FilesystemOpenAiCompatRefStore,
-) {
+fn test_store(suffix: &str) -> (Arc<InMemoryBackend>, VirtualPath, OpenAiCompatRefStore) {
     let filesystem = Arc::new(InMemoryBackend::new());
     let root = root_for(suffix);
-    let store = FilesystemOpenAiCompatRefStore::with_root(filesystem.clone(), root.clone());
+    let store = OpenAiCompatRefStore::with_root(filesystem.clone(), root.clone());
     (filesystem, root, store)
 }
 

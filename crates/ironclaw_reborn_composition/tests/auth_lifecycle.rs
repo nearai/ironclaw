@@ -15,7 +15,7 @@ use ironclaw_auth::{
     SecretCleanupRequest, TurnRunRef, opaque_state_hash,
 };
 use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope, SecretHandle, ThreadId, UserId};
-use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
+use ironclaw_product::ProductAuthTurnGateResumeDispatcher;
 use ironclaw_reborn_composition::{RebornAuthContinuationDispatcher, RebornProductAuthServices};
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GateRef, GateResumeDisposition,

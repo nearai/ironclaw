@@ -17,9 +17,9 @@ use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, CapabilitySurfaceVersion, CommandExecutionOutput,
     CommandExecutionRequest, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HostRuntime,
     HostRuntimeServices, LIST_DIR_CAPABILITY_ID, PostEditCheckConfig, READ_FILE_CAPABILITY_ID,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeProcessError,
-    RuntimeProcessPort, SandboxCommandTransport, TenantSandboxProcessPort,
-    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
+    RuntimeCapabilityOutcome, RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort,
+    SandboxCommandTransport, TenantSandboxProcessPort, WRITE_FILE_CAPABILITY_ID,
+    builtin_first_party_handlers, builtin_first_party_package,
 };
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_triggers::InMemoryTriggerRepository;
@@ -1519,7 +1519,7 @@ async fn invoke_with_context<R: HostRuntime + ?Sized>(
     context: ExecutionContext,
 ) -> Result<Value, RuntimeFailureKind> {
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             CapabilityId::new(capability).unwrap(),
             ResourceEstimate::default(),
@@ -1541,7 +1541,7 @@ async fn invoke_completed_with_context<R: HostRuntime + ?Sized>(
     context: ExecutionContext,
 ) -> ironclaw_host_runtime::RuntimeCapabilityCompleted {
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             CapabilityId::new(capability).unwrap(),
             ResourceEstimate::default(),
@@ -1562,7 +1562,7 @@ async fn invoke_failure_with_context<R: HostRuntime + ?Sized>(
     context: ExecutionContext,
 ) -> ironclaw_host_runtime::RuntimeCapabilityFailure {
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             CapabilityId::new(capability).unwrap(),
             ResourceEstimate::default(),

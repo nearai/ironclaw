@@ -37,7 +37,7 @@ use tokio::sync::Semaphore;
 use super::{
     resolver::AwaitEdgeResolver,
     roster::{self, RosterKey},
-    store::FilesystemAwaitEdgeStore,
+    store::AwaitEdgeStore,
 };
 
 /// Shared across boot and lazy recovery (round-4 fix: one limiter, not a
@@ -49,7 +49,7 @@ pub const BOOT_RECOVERY_MAX_CONCURRENT_SCOPES: usize = 4;
 /// used by both the boot pass and a lazy first-touch recovery task.
 async fn recover_scope<S, F>(
     resolver: &AwaitEdgeResolver<S, F>,
-    store: &FilesystemAwaitEdgeStore<F>,
+    store: &AwaitEdgeStore<F>,
     scope: &TurnScope,
 ) -> ResolveReport
 where
@@ -185,12 +185,12 @@ fn roster_key_to_probe_scope(key: &RosterKey) -> TurnScope {
 }
 
 /// Lazy per-scope admission backstop (§5.3): `AwaitEdgeWriter::check_scope_recovered`'s
-/// real implementation. Wraps a `FilesystemAwaitEdgeStore` and implements
+/// real implementation. Wraps a `AwaitEdgeStore` and implements
 /// `AwaitEdgeWriter` by delegating writes to it while adding the admission
 /// check on top.
 pub struct ScopeRecoveryDriver<S: SessionThreadService + ?Sized, F: RootFilesystem + ?Sized> {
     resolver: Arc<AwaitEdgeResolver<S, F>>,
-    store: Arc<FilesystemAwaitEdgeStore<F>>,
+    store: Arc<AwaitEdgeStore<F>>,
     semaphore: Arc<Semaphore>,
     // `Arc`-wrapped (not bare `Mutex<..>` fields) so the spawned recovery
     // task below can hold its own clone and update these sets on
@@ -207,10 +207,7 @@ where
     S: SessionThreadService + ?Sized,
     F: RootFilesystem + ?Sized,
 {
-    pub fn new(
-        resolver: Arc<AwaitEdgeResolver<S, F>>,
-        store: Arc<FilesystemAwaitEdgeStore<F>>,
-    ) -> Self {
+    pub fn new(resolver: Arc<AwaitEdgeResolver<S, F>>, store: Arc<AwaitEdgeStore<F>>) -> Self {
         Self {
             resolver,
             store,
@@ -543,7 +540,7 @@ mod tests {
             Arc::clone(&backend),
             mounts,
         ));
-        let store = Arc::new(FilesystemAwaitEdgeStore::new(Arc::clone(&fs)));
+        let store = Arc::new(AwaitEdgeStore::new(Arc::clone(&fs)));
         let goal_store: Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore> =
             Arc::new(crate::subagent::goal_store::in_memory_backed_subagent_goal_store());
         let turn_state_store: Arc<dyn TurnSpawnTreeStateStore> =
@@ -619,7 +616,7 @@ mod tests {
     fn boot_sem_resolver(
         fs: Arc<ScopedFilesystem<InMemoryBackend>>,
     ) -> Arc<AwaitEdgeResolver<InMemorySessionThreadService, InMemoryBackend>> {
-        let store = Arc::new(FilesystemAwaitEdgeStore::new(fs));
+        let store = Arc::new(AwaitEdgeStore::new(fs));
         let goal_store: Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore> =
             Arc::new(crate::subagent::goal_store::in_memory_backed_subagent_goal_store());
         let turn_state_store: Arc<dyn TurnSpawnTreeStateStore> =
@@ -651,7 +648,7 @@ mod tests {
     async fn boot_and_lazy_recovery_share_one_semaphore_not_separate_pools() {
         let fs = boot_sem_scoped_fs();
         let resolver = boot_sem_resolver(Arc::clone(&fs));
-        let store = Arc::new(FilesystemAwaitEdgeStore::new(Arc::clone(&fs)));
+        let store = Arc::new(AwaitEdgeStore::new(Arc::clone(&fs)));
         let driver = ScopeRecoveryDriver::new(Arc::clone(&resolver), store);
 
         // Seed exactly one roster entry so boot's walk has one scope to
@@ -706,7 +703,7 @@ mod tests {
         };
 
         let fs = boot_sem_scoped_fs();
-        let store = Arc::new(FilesystemAwaitEdgeStore::new(Arc::clone(&fs)));
+        let store = Arc::new(AwaitEdgeStore::new(Arc::clone(&fs)));
         let state_store = Arc::new(ironclaw_turns::test_support::in_memory_turn_state_store());
         let coordinator = DefaultTurnCoordinator::new(Arc::clone(&state_store));
         let thread_service = Arc::new(InMemorySessionThreadService::default());

@@ -1,23 +1,22 @@
-//! ProductWorkflow-backed Responses route service.
+//! ProductSurface-backed Responses route service.
 //!
-//! This slice routes Responses create/cancel through the ProductWorkflow facade,
+//! This slice routes Responses create/cancel through the ProductSurface facade,
 //! resolves retrieve through a composition-supplied projection reader, and
 //! translates projection-backed streaming creates into OpenAI-compatible SSE.
 //! The ack and text helpers intentionally mirror the chat slice until the two
 //! surfaces share a crate-private normalization module.
 
+// arch-exempt: large_file, mechanical store-port rename churn only, plan #6263
+
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::ack_helpers::internal_refs_from_ack;
+use crate::ack_helpers::{internal_refs_from_ack, product_ack_from_reborn_submit};
 use crate::content_parts::{
     content_array_item_text, non_text_part_marker, sanitize_product_text_fragment,
 };
 use crate::error::product_rejection_to_openai_error;
 use crate::external_tools::parse_external_tools;
-use crate::identity::{
-    OPENAI_COMPAT_ACTOR_KIND, OPENAI_COMPAT_ADAPTER_ID, OPENAI_COMPAT_INSTALLATION_ID,
-};
 use crate::projection_helpers::{
     ensure_projection_read_matches_caller, ensure_projection_subscription_matches_caller,
 };
@@ -29,7 +28,7 @@ use crate::{
     OpenAiCompatMarkExternalToolResumeCompleted, OpenAiCompatProjectionRef,
     OpenAiCompatProjectionStreamer, OpenAiCompatPublicId, OpenAiCompatRecordAcceptedAck,
     OpenAiCompatRefLookup, OpenAiCompatRefOperation, OpenAiCompatRefReservation,
-    OpenAiCompatRefReservationOutcome, OpenAiCompatRefStore, OpenAiCompatRequestFingerprint,
+    OpenAiCompatRefReservationOutcome, OpenAiCompatRefStorePort, OpenAiCompatRequestFingerprint,
     OpenAiCompatResourceBinding, OpenAiCompatResourceMapping, OpenAiCompatRouteSurface,
     OpenAiCompatTurnRunRef, OpenAiResponseId, OpenAiResponseObject,
     OpenAiResponseProjectionStreamRequest, OpenAiResponsesCreateRequest, OpenAiResponsesInput,
@@ -38,28 +37,35 @@ use crate::{
 use async_trait::async_trait;
 use axum::Json;
 use axum::response::{IntoResponse, Response};
-use chrono::Utc;
-use ironclaw_host_api::ThreadId;
-use ironclaw_product_adapters::{
-    AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ExternalEventId,
-    ParsedProductInbound, ProductAdapterId, ProductControlActionPayload, ProductInboundAck,
-    ProductInboundEnvelope, ProductInboundPayload, ProductProjectionReadInput,
-    ProductProjectionSubject, ProductProjectionSubscribeInput, ProductRejection,
-    ProductTriggerReason, ProductWorkflow, ProjectionReadRequest, ProjectionSubscriptionRequest,
-    TrustedInboundContext, UserMessagePayload,
+use ironclaw_host_api::{ActivityId, BoundProductSurface, ProductSurface, ThreadId};
+use ironclaw_product::{
+    CANCEL_RUN_COMMAND, CREATE_THREAD_COMMAND, ProductCancelRunRequest, ProductCreateThreadRequest,
+    ProductSubmitTurnRequest, SUBMIT_TURN_COMMAND,
 };
+use ironclaw_product::{
+    ProductInboundAck, ProductRejection, ProductTriggerReason, ProjectionReadRequest,
+    ProjectionSubscriptionRequest, UserMessagePayload,
+};
+use uuid::Uuid;
 
 const DEFAULT_RESPONSES_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_BIND_INTERNAL_REFS_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_RESPONSES_BODY_BYTES: usize = 4 * 1024 * 1024;
 const MAX_RESPONSES_CONTEXT_BYTES: usize = 10 * 1024;
 const MAX_RESPONSES_INPUT_ITEMS: usize = 1_000;
-const OPENAI_COMPAT_CONVERSATION_PREFIX: &str = "response";
 
+fn openai_product_activity_id(surface: &str, operation_id: &str, public_id: &str) -> ActivityId {
+    let mut seed = Vec::new();
+    for segment in ["openai-compat", surface, operation_id, public_id] {
+        seed.extend_from_slice(&(segment.len() as u64).to_be_bytes());
+        seed.extend_from_slice(segment.as_bytes());
+    }
+    ActivityId::from_uuid(Uuid::new_v5(&Uuid::NAMESPACE_OID, &seed))
+}
 #[derive(Clone)]
 pub struct OpenAiResponsesWorkflow {
-    product_workflow: Arc<dyn ProductWorkflow>,
-    ref_store: Arc<dyn OpenAiCompatRefStore>,
+    product_surface: Arc<dyn ProductSurface>,
+    ref_store: Arc<dyn OpenAiCompatRefStorePort>,
     projection_reader: Arc<dyn OpenAiResponsesProjectionReader>,
     /// Wired by host composition when OpenAI-compatible streaming is enabled.
     /// When `None`, `stream: true` requests fail closed.
@@ -77,28 +83,22 @@ pub struct OpenAiResponsesWorkflow {
     /// arch-exempt: optional_arc, paired with external_tool_store (same #4447 gate).
     external_tool_resume: Option<Arc<dyn OpenAiCompatExternalToolResume>>,
     wait_timeout: Duration,
-    adapter_id: ProductAdapterId,
-    installation_id: AdapterInstallationId,
 }
 
 impl OpenAiResponsesWorkflow {
     pub fn new(
-        product_workflow: Arc<dyn ProductWorkflow>,
-        ref_store: Arc<dyn OpenAiCompatRefStore>,
+        product_surface: Arc<dyn ProductSurface>,
+        ref_store: Arc<dyn OpenAiCompatRefStorePort>,
         projection_reader: Arc<dyn OpenAiResponsesProjectionReader>,
     ) -> Self {
         Self {
-            product_workflow,
+            product_surface,
             ref_store,
             projection_reader,
             projection_streamer: None,
             external_tool_store: None,
             external_tool_resume: None,
             wait_timeout: DEFAULT_RESPONSES_WAIT_TIMEOUT,
-            adapter_id: ProductAdapterId::new(OPENAI_COMPAT_ADAPTER_ID)
-                .expect("OPENAI_COMPAT_ADAPTER_ID is valid"), // safety: hard-coded non-empty product adapter id literal.
-            installation_id: AdapterInstallationId::new(OPENAI_COMPAT_INSTALLATION_ID)
-                .expect("OPENAI_COMPAT_INSTALLATION_ID is valid"), // safety: hard-coded non-empty installation id literal.
         }
     }
 
@@ -534,9 +534,28 @@ impl OpenAiResponsesWorkflow {
             .response_projection_read_request(&caller, &mapping, None)
             .await?;
         let run_ref = response_turn_run_ref(&mapping)?;
-        let envelope = self.cancel_product_envelope(&caller, &response_id, &run_ref)?;
-        let ack = self.product_workflow.submit_inbound(envelope).await?;
-        accepted_cancel_ack_from_ack(ack)?;
+        let thread_id = projection_thread_id(&mapping)?
+            .ok_or_else(|| OpenAiCompatHttpError::conflict(Some("response_id".to_string())))?;
+        let surface = BoundProductSurface::new(
+            Arc::clone(&self.product_surface),
+            caller.product_surface_caller(),
+        );
+        CANCEL_RUN_COMMAND
+            .invoke_on(
+                &surface,
+                ProductCancelRunRequest {
+                    client_action_id: Some(format!("{}:cancel", response_id.as_str())),
+                    thread_id: Some(thread_id.as_str().to_string()),
+                    run_id: Some(run_ref.as_str().to_string()),
+                    reason: Some("cancelled by OpenAI-compatible Responses API".to_string()),
+                },
+                openai_product_activity_id(
+                    "responses",
+                    CANCEL_RUN_COMMAND.id,
+                    response_id.as_str(),
+                ),
+            )
+            .await?;
 
         self.projection_reader
             .read_response(OpenAiResponseReadRequest {
@@ -572,13 +591,27 @@ impl OpenAiResponsesWorkflow {
         previous_mapping: Option<&OpenAiCompatResourceMapping>,
         user_message_payload: UserMessagePayload,
     ) -> Result<(OpenAiCompatResourceMapping, ProductInboundAck), OpenAiCompatHttpError> {
-        let envelope = self.response_product_envelope(
-            caller,
-            public_id,
-            previous_mapping,
-            user_message_payload,
-        )?;
-        let ack = self.product_workflow.submit_inbound(envelope).await?;
+        let thread_id = self
+            .response_thread_id_from_previous_or_public(public_id, previous_mapping)
+            .map_err(|_| OpenAiCompatHttpError::internal())?;
+        self.ensure_response_thread(caller, &thread_id).await?;
+        let surface = BoundProductSurface::new(
+            Arc::clone(&self.product_surface),
+            caller.product_surface_caller(),
+        );
+        let ack = product_ack_from_reborn_submit(
+            SUBMIT_TURN_COMMAND
+                .invoke_on(
+                    &surface,
+                    response_surface_submit_request(public_id, &thread_id, user_message_payload),
+                    openai_product_activity_id(
+                        "responses",
+                        SUBMIT_TURN_COMMAND.id,
+                        public_id.as_str(),
+                    ),
+                )
+                .await?,
+        );
         let accepted_ack = accepted_ack_from_ack(ack)?;
         // Persist accepted acks for both streaming and non-streaming creates so
         // idempotency replay can reuse the canonical product turn without
@@ -680,8 +713,7 @@ impl OpenAiResponsesWorkflow {
         mapping: &OpenAiCompatResourceMapping,
         previous_mapping: Option<&OpenAiCompatResourceMapping>,
     ) -> Result<ProjectionReadRequest, OpenAiCompatHttpError> {
-        let request = self.response_projection_read_input(caller, mapping, previous_mapping)?;
-        let projection_read = self.product_workflow.read_projection(request).await?;
+        let projection_read = self.response_projection_read(caller, mapping, previous_mapping)?;
         ensure_projection_read_matches_caller(caller, &projection_read)?;
         Ok(projection_read)
     }
@@ -692,150 +724,95 @@ impl OpenAiResponsesWorkflow {
         mapping: &OpenAiCompatResourceMapping,
         previous_mapping: Option<&OpenAiCompatResourceMapping>,
     ) -> Result<ProjectionSubscriptionRequest, OpenAiCompatHttpError> {
-        let request =
-            self.response_projection_subscribe_input(caller, mapping, previous_mapping)?;
-        let projection_subscription = self.product_workflow.subscribe_projection(request).await?;
+        let projection_subscription =
+            self.response_projection_subscription(caller, mapping, previous_mapping)?;
         ensure_projection_subscription_matches_caller(caller, &projection_subscription)?;
         Ok(projection_subscription)
     }
 
-    fn response_projection_read_input(
+    fn response_projection_read(
         &self,
         caller: &OpenAiCompatAuthenticatedCaller,
         mapping: &OpenAiCompatResourceMapping,
         previous_mapping: Option<&OpenAiCompatResourceMapping>,
-    ) -> Result<ProductProjectionReadInput, OpenAiCompatHttpError> {
-        Ok(ProductProjectionReadInput::new(
-            self.response_projection_subject(caller, mapping, previous_mapping)?,
-            None,
-            None,
-            None,
-        ))
-    }
-
-    fn response_projection_subscribe_input(
-        &self,
-        caller: &OpenAiCompatAuthenticatedCaller,
-        mapping: &OpenAiCompatResourceMapping,
-        previous_mapping: Option<&OpenAiCompatResourceMapping>,
-    ) -> Result<ProductProjectionSubscribeInput, OpenAiCompatHttpError> {
-        Ok(ProductProjectionSubscribeInput::new(
-            self.response_projection_subject(caller, mapping, previous_mapping)?,
-            None,
-            None,
-        ))
-    }
-
-    fn response_projection_subject(
-        &self,
-        caller: &OpenAiCompatAuthenticatedCaller,
-        mapping: &OpenAiCompatResourceMapping,
-        previous_mapping: Option<&OpenAiCompatResourceMapping>,
-    ) -> Result<ProductProjectionSubject, OpenAiCompatHttpError> {
-        if let Some(thread_id) = projection_thread_id(mapping)? {
-            return Ok(ProductProjectionSubject::canonical_thread_scope(
-                caller.scope().user_id().clone(),
-                caller.scope().tenant_id().clone(),
-                caller.scope().agent_id().cloned(),
-                caller.scope().project_id().cloned(),
-                thread_id,
-                Some(caller.scope().user_id().clone()),
-            ));
-        }
-
-        let public_id = response_public_id(mapping)?;
-        let Some(auth_claim) = caller.auth_evidence().claim().cloned() else {
-            return Err(OpenAiCompatHttpError::internal());
-        };
-        let conversation_ref = previous_mapping
-            .map(|mapping| mapping.public_id.as_str())
-            .unwrap_or_else(|| public_id.as_str());
-        Ok(ProductProjectionSubject::AdapterExternalRefs {
-            adapter_id: self.adapter_id.clone(),
-            installation_id: self.installation_id.clone(),
-            external_event_id: ExternalEventId::new(public_id.as_str())?,
-            external_actor_ref: ExternalActorRef::new(
-                OPENAI_COMPAT_ACTOR_KIND,
-                caller.scope().user_id().as_str(),
-                Option::<String>::None,
-            )?,
-            external_conversation_ref: ExternalConversationRef::new(
-                None,
-                format!("{OPENAI_COMPAT_CONVERSATION_PREFIX}:{conversation_ref}"),
-                None,
-                None,
-            )?,
-            auth_claim,
+    ) -> Result<ProjectionReadRequest, OpenAiCompatHttpError> {
+        let thread_id = self.response_thread_id(mapping, previous_mapping)?;
+        let surface_caller = caller.product_surface_caller();
+        Ok(ProjectionReadRequest {
+            actor: surface_caller.actor(),
+            scope: surface_caller.turn_scope(thread_id),
+            after_cursor: None,
+            limit: None,
         })
     }
 
-    fn response_product_envelope(
+    fn response_projection_subscription(
         &self,
         caller: &OpenAiCompatAuthenticatedCaller,
+        mapping: &OpenAiCompatResourceMapping,
+        previous_mapping: Option<&OpenAiCompatResourceMapping>,
+    ) -> Result<ProjectionSubscriptionRequest, OpenAiCompatHttpError> {
+        let thread_id = self.response_thread_id(mapping, previous_mapping)?;
+        let surface_caller = caller.product_surface_caller();
+        Ok(ProjectionSubscriptionRequest {
+            actor: surface_caller.actor(),
+            scope: surface_caller.turn_scope(thread_id),
+            after_cursor: None,
+        })
+    }
+
+    async fn ensure_response_thread(
+        &self,
+        caller: &OpenAiCompatAuthenticatedCaller,
+        thread_id: &ThreadId,
+    ) -> Result<(), OpenAiCompatHttpError> {
+        let surface = BoundProductSurface::new(
+            Arc::clone(&self.product_surface),
+            caller.product_surface_caller(),
+        );
+        CREATE_THREAD_COMMAND
+            .invoke_on(
+                &surface,
+                ProductCreateThreadRequest {
+                    client_action_id: Some(thread_id.as_str().to_string()),
+                    requested_thread_id: Some(thread_id.as_str().to_string()),
+                    project_id: None,
+                },
+                openai_product_activity_id(
+                    "responses",
+                    CREATE_THREAD_COMMAND.id,
+                    thread_id.as_str(),
+                ),
+            )
+            .await?;
+        Ok(())
+    }
+
+    fn response_thread_id(
+        &self,
+        mapping: &OpenAiCompatResourceMapping,
+        previous_mapping: Option<&OpenAiCompatResourceMapping>,
+    ) -> Result<ThreadId, OpenAiCompatHttpError> {
+        if let Some(thread_id) = projection_thread_id(mapping)? {
+            return Ok(thread_id);
+        }
+        let public_id = response_public_id(mapping)?;
+        self.response_thread_id_from_previous_or_public(&public_id, previous_mapping)
+    }
+
+    fn response_thread_id_from_previous_or_public(
+        &self,
         public_id: &OpenAiResponseId,
         previous_mapping: Option<&OpenAiCompatResourceMapping>,
-        user_message_payload: UserMessagePayload,
-    ) -> Result<ProductInboundEnvelope, OpenAiCompatHttpError> {
-        if let Some(mapping) = previous_mapping
-            && &mapping.owner != caller.scope()
-        {
-            return Err(OpenAiCompatHttpError::not_found(Some(
-                "previous_response_id".to_string(),
-            )));
+    ) -> Result<ThreadId, OpenAiCompatHttpError> {
+        if let Some(mapping) = previous_mapping {
+            if let Some(thread_id) = projection_thread_id(mapping)? {
+                return Ok(thread_id);
+            }
+            return ThreadId::new(mapping.public_id.as_str().to_string())
+                .map_err(|_| OpenAiCompatHttpError::internal());
         }
-        let conversation_ref = previous_mapping
-            .map(|mapping| mapping.public_id.as_str())
-            .unwrap_or_else(|| public_id.as_str());
-        self.product_envelope(
-            caller,
-            ExternalEventId::new(public_id.as_str())?,
-            format!("{OPENAI_COMPAT_CONVERSATION_PREFIX}:{conversation_ref}"),
-            ProductInboundPayload::UserMessage(user_message_payload),
-        )
-    }
-
-    fn cancel_product_envelope(
-        &self,
-        caller: &OpenAiCompatAuthenticatedCaller,
-        public_id: &OpenAiResponseId,
-        run_ref: &OpenAiCompatTurnRunRef,
-    ) -> Result<ProductInboundEnvelope, OpenAiCompatHttpError> {
-        self.product_envelope(
-            caller,
-            ExternalEventId::new(format!("{}:cancel", public_id.as_str()))?,
-            format!("{OPENAI_COMPAT_CONVERSATION_PREFIX}:{}", public_id.as_str()),
-            ProductInboundPayload::ControlAction(
-                ProductControlActionPayload::cancel_run(run_ref.as_str()).map_err(|_| {
-                    OpenAiCompatHttpError::not_found(Some("response_id".to_string()))
-                })?,
-            ),
-        )
-    }
-
-    fn product_envelope(
-        &self,
-        caller: &OpenAiCompatAuthenticatedCaller,
-        event_id: ExternalEventId,
-        conversation_ref: String,
-        payload: ProductInboundPayload,
-    ) -> Result<ProductInboundEnvelope, OpenAiCompatHttpError> {
-        let context = TrustedInboundContext::from_verified_evidence(
-            self.adapter_id.clone(),
-            self.installation_id.clone(),
-            Utc::now(),
-            caller.auth_evidence(),
-        )?;
-        let parsed = ParsedProductInbound::new(
-            event_id,
-            ExternalActorRef::new(
-                OPENAI_COMPAT_ACTOR_KIND,
-                caller.scope().user_id().as_str(),
-                Option::<String>::None,
-            )?,
-            ExternalConversationRef::new(None, conversation_ref, None, None)?,
-            payload,
-        )?;
-        ProductInboundEnvelope::from_trusted_parse(context, parsed).map_err(Into::into)
+        ThreadId::new(public_id.as_str().to_string()).map_err(|_| OpenAiCompatHttpError::internal())
     }
 
     fn validate_responses_request(
@@ -1051,6 +1028,20 @@ fn is_already_resumed_conflict(error: &OpenAiCompatHttpError) -> bool {
     error.status_code() == 409
         && !error.retryable()
         && error.body().error.param() == Some("previous_response_id")
+}
+
+fn response_surface_submit_request(
+    public_id: &OpenAiResponseId,
+    thread_id: &ThreadId,
+    user_message_payload: UserMessagePayload,
+) -> ProductSubmitTurnRequest {
+    ProductSubmitTurnRequest {
+        client_action_id: Some(public_id.as_str().to_string()),
+        thread_id: Some(thread_id.as_str().to_string()),
+        content: Some(user_message_payload.text),
+        attachments: Vec::new(),
+        model: user_message_payload.requested_model,
+    }
 }
 
 fn request_has_function_call_output(request: &OpenAiResponsesCreateRequest) -> bool {
@@ -1274,36 +1265,6 @@ fn accepted_ack_from_ack(
             ProductInboundAck::CommandResult { .. } | ProductInboundAck::NoOp => {
                 return Err(OpenAiCompatHttpError::internal());
             }
-        }
-    }
-}
-
-fn accepted_cancel_ack_from_ack(mut ack: ProductInboundAck) -> Result<(), OpenAiCompatHttpError> {
-    loop {
-        match ack {
-            ProductInboundAck::Accepted { .. } | ProductInboundAck::CommandResult { .. } => {
-                return Ok(());
-            }
-            ProductInboundAck::Duplicate { prior } => ack = *prior,
-            ProductInboundAck::DeferredBusy { .. } => {
-                return Err(OpenAiCompatHttpError::from_kind(
-                    429,
-                    true,
-                    crate::OpenAiCompatErrorKind::RateLimited,
-                    None,
-                ));
-            }
-            ProductInboundAck::RejectedBusy { .. } => {
-                // terminal/settled, not retryable — client must issue a new request
-                return Err(OpenAiCompatHttpError::from_kind(
-                    429,
-                    false,
-                    crate::OpenAiCompatErrorKind::RateLimited,
-                    None,
-                ));
-            }
-            ProductInboundAck::Rejected(rejection) => return Err(error_from_rejection(rejection)),
-            ProductInboundAck::NoOp => return Err(OpenAiCompatHttpError::internal()),
         }
     }
 }
@@ -1537,10 +1498,10 @@ fn content_value_to_text(content: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_product_adapters::ProductInboundAck;
+    use ironclaw_product::ProductInboundAck;
     use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
 
-    use super::{accepted_ack_from_ack, accepted_cancel_ack_from_ack};
+    use super::accepted_ack_from_ack;
 
     #[test]
     fn deferred_busy_ack_is_retryable_429_on_create() {
@@ -1560,31 +1521,6 @@ mod tests {
             active_run_id: None,
         };
         let err = accepted_ack_from_ack(ack).unwrap_err();
-        assert_eq!(err.status_code(), 429);
-        assert!(
-            !err.retryable(),
-            "RejectedBusy is terminal — must not be retryable"
-        );
-    }
-
-    #[test]
-    fn deferred_busy_ack_is_retryable_429_on_cancel() {
-        let ack = ProductInboundAck::DeferredBusy {
-            accepted_message_ref: AcceptedMessageRef::new("msg:deferred-busy").expect("ref"),
-            active_run_id: TurnRunId::new(),
-        };
-        let err = accepted_cancel_ack_from_ack(ack).unwrap_err();
-        assert_eq!(err.status_code(), 429);
-        assert!(err.retryable(), "DeferredBusy must be retryable");
-    }
-
-    #[test]
-    fn rejected_busy_ack_is_non_retryable_429_on_cancel() {
-        let ack = ProductInboundAck::RejectedBusy {
-            accepted_message_ref: AcceptedMessageRef::new("msg:rejected-busy").expect("ref"),
-            active_run_id: None,
-        };
-        let err = accepted_cancel_ack_from_ack(ack).unwrap_err();
         assert_eq!(err.status_code(), 429);
         assert!(
             !err.retryable(),

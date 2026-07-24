@@ -317,14 +317,23 @@ impl EventProjectionService for ActivityThreadMismatchProjectionService {
         &self,
         request: ProjectionRequest,
     ) -> Result<ProjectionSnapshot, ProjectionError> {
-        Ok(snapshot_with_activity_thread(&request.scope, 10, "thread-b"))
+        Ok(snapshot_with_activity_thread(
+            &request.scope,
+            10,
+            "thread-b",
+        ))
     }
 
     async fn updates(
         &self,
         request: ProjectionRequest,
     ) -> Result<ProjectionReplay, ProjectionError> {
-        Ok(replay_with_activity_thread(&request.scope, 2, 3, "thread-b"))
+        Ok(replay_with_activity_thread(
+            &request.scope,
+            2,
+            3,
+            "thread-b",
+        ))
     }
 }
 
@@ -645,7 +654,7 @@ impl ProjectionRedactionValidator for CountingRedactionValidator {
     }
 }
 
-/// The production [`FilesystemOutboundStateStore`] over a [`FaultInjecting`]
+/// The production [`OutboundStateStore`] over a [`FaultInjecting`]
 /// in-memory backend armed to fail every policy read with a backend fault.
 /// Replaces the former `FailingOutboundStore { kind: Backend }`: the store now
 /// runs its real `get_json` read and genuine `FilesystemError::Backend ->
@@ -655,7 +664,7 @@ impl ProjectionRedactionValidator for CountingRedactionValidator {
 /// notification policy through `ScopedFilesystem::get`, so a `ReadFile` fault
 /// surfaces as `OutboundError::Backend`.
 fn outbound_store_failing_backend_reads()
--> Arc<FilesystemOutboundStateStore<FaultInjecting<InMemoryBackend>>> {
+-> Arc<OutboundStateStore<FaultInjecting<InMemoryBackend>>> {
     let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()).with_fault(
         Fault::on(FilesystemOperation::ReadFile).backend("injected outbound backend failure"),
     ));
@@ -668,15 +677,15 @@ fn outbound_store_failing_backend_reads()
     )])
     .expect("static valid outbound mount view");
     let scoped = Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts));
-    // The `disallowed_methods` lint reserves `FilesystemOutboundStateStore::new`
+    // The `disallowed_methods` lint reserves `OutboundStateStore::new`
     // for composition's owned construction site; this fault-injection test seam
     // is the sanctioned use, matching `ironclaw_outbound::test_support`.
     #[allow(clippy::disallowed_methods)]
-    Arc::new(FilesystemOutboundStateStore::new(scoped))
+    Arc::new(OutboundStateStore::new(scoped))
 }
 
 /// Injects the non-filesystem [`OutboundError`] variants the real
-/// `FilesystemOutboundStateStore` can never emit from a backend fault
+/// `OutboundStateStore` can never emit from a backend fault
 /// (`AccessDenied`, caller-bug `InvalidRequest`, `PreferenceTargetMissing` — its
 /// `OutboundStateStore` impl only ever maps a filesystem error to `Backend` /
 /// `CasConflict` / `Serialization`). These lock the manager's
@@ -711,7 +720,76 @@ impl FailingOutboundStore {
 }
 
 #[async_trait]
-impl OutboundStateStore for FailingOutboundStore {
+impl OutboundStateStorePort for FailingOutboundStore {
+    async fn put_run_delivery_cleanup(
+        &self,
+        _record: ironclaw_outbound::RunDeliveryCleanupRecord,
+    ) -> Result<(), OutboundError> {
+        Err(OutboundError::Backend)
+    }
+
+    async fn load_run_delivery_cleanup(
+        &self,
+        _request: ironclaw_outbound::RunDeliveryCleanupRequest,
+    ) -> Result<Vec<ironclaw_outbound::RunDeliveryCleanupRecord>, OutboundError> {
+        Err(OutboundError::Backend)
+    }
+
+    async fn complete_run_delivery_cleanup(
+        &self,
+        _record: &ironclaw_outbound::RunDeliveryCleanupRecord,
+    ) -> Result<(), OutboundError> {
+        Err(OutboundError::Backend)
+    }
+
+    async fn put_run_final_reply_handoff(
+        &self,
+        _record: ironclaw_outbound::RunFinalReplyHandoffRecord,
+    ) -> Result<(), OutboundError> {
+        Err(OutboundError::Backend)
+    }
+
+    async fn list_pending_run_final_reply_handoffs(
+        &self,
+        _limit: usize,
+    ) -> Result<Vec<ironclaw_outbound::RunFinalReplyHandoffRecord>, OutboundError> {
+        Err(OutboundError::Backend)
+    }
+
+    async fn complete_run_final_reply_handoff(
+        &self,
+        _record: &ironclaw_outbound::RunFinalReplyHandoffRecord,
+    ) -> Result<(), OutboundError> {
+        Err(OutboundError::Backend)
+    }
+
+    async fn load_run_final_reply_handoff_cursor(
+        &self,
+    ) -> Result<ironclaw_turns::EventCursor, OutboundError> {
+        Err(OutboundError::Backend)
+    }
+
+    async fn advance_run_final_reply_handoff_cursor(
+        &self,
+        _cursor: ironclaw_turns::EventCursor,
+    ) -> Result<(), OutboundError> {
+        Err(OutboundError::Backend)
+    }
+
+    async fn put_run_final_reply_target(
+        &self,
+        _record: ironclaw_outbound::RunFinalReplyTargetRecord,
+    ) -> Result<(), OutboundError> {
+        Err(OutboundError::Backend)
+    }
+
+    async fn load_run_final_reply_target(
+        &self,
+        _request: ironclaw_outbound::RunFinalReplyTargetRequest,
+    ) -> Result<Option<ironclaw_outbound::RunFinalReplyTargetRecord>, OutboundError> {
+        Err(OutboundError::Backend)
+    }
+
     async fn put_thread_notification_policy(
         &self,
         _policy: ThreadNotificationPolicy,
@@ -758,6 +836,20 @@ impl OutboundStateStore for FailingOutboundStore {
         &self,
         _attempt: OutboundDeliveryAttempt,
     ) -> Result<(), OutboundError> {
+        Err(self.error())
+    }
+
+    async fn claim_delivery_attempt_for_send(
+        &self,
+        _request: ironclaw_outbound::ClaimDeliveryAttemptForSendRequest,
+    ) -> Result<bool, OutboundError> {
+        Err(self.error())
+    }
+
+    async fn recover_interrupted_delivery_attempt(
+        &self,
+        _request: ironclaw_outbound::RecoverInterruptedDeliveryRequest,
+    ) -> Result<bool, OutboundError> {
         Err(self.error())
     }
 

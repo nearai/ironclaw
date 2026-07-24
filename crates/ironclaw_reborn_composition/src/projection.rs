@@ -1,4 +1,4 @@
-// arch-exempt: large_file, mechanical InMemoryOutboundStateStore -> FilesystemOutboundStateStore<InMemoryBackend> §4.3 store consolidation, no logic change, plan #6168
+// arch-exempt: large_file, mechanical InMemoryOutboundStateStore -> OutboundStateStore<InMemoryBackend> §4.3 store consolidation, no logic change, plan #6168
 use std::{
     sync::{Arc, atomic::AtomicU64},
     time::Duration,
@@ -24,8 +24,8 @@ use ironclaw_events::{DurableEventLog, EventCursor, EventStreamKey, ReadScope};
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_first_party_extension_ports::SkillActivationObserver;
 use ironclaw_host_api::UserId;
-use ironclaw_outbound::FilesystemOutboundStateStore;
-use ironclaw_product_adapters::{
+use ironclaw_outbound::OutboundStateStore;
+use ironclaw_product::{
     AdapterInstallationId, CapabilityActivityStatusView, CapabilityActivityView,
     CapabilityActivityViewInput, ExternalActorRef, ExternalConversationRef, ProductAdapterError,
     ProductAdapterId, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
@@ -33,13 +33,14 @@ use ironclaw_product_adapters::{
     ProjectionCursor as ProductProjectionCursor, ProjectionStream, ProjectionStreamSubscription,
     ProjectionSubscriptionRequest, RedactedString,
 };
-use ironclaw_run_state::ApprovalRequestStore;
+use ironclaw_run_state::ApprovalRequestStorePort;
 use ironclaw_turns::{
     ReplyTargetBindingRef, SanitizedFailure, TurnActor, TurnCoordinator, TurnError,
     TurnEventProjectionCursor, TurnEventProjectionSource, TurnEventSink, TurnLifecycleEvent,
     TurnRunId, TurnScope, TurnStatus, run_profile::LoopHostMilestoneSink,
 };
 use tokio::sync::{broadcast, mpsc};
+use uuid::Uuid;
 
 mod display_preview;
 mod live_progress;
@@ -49,7 +50,7 @@ use display_preview::{
     CapabilityDisplayPreviewResolution, CapabilityDisplayPreviewSource,
     NoopCapabilityDisplayPreviewSource,
 };
-use ironclaw_product_workflow::AuthChallengeProvider;
+use ironclaw_product::AuthChallengeProvider;
 use live_progress::{
     LiveProgressMilestoneSink, LiveSkillActivationObserver, product_items_for_live_update,
 };
@@ -70,23 +71,25 @@ pub(crate) use display_preview::{CapabilityDisplayPreviewResult, CapabilityDispl
 #[cfg(test)]
 pub(crate) use display_preview::{SANITIZE_JSON_MAX_DEPTH, sanitize_json_value, sanitize_text};
 
-const WEBUI_PROJECTION_PAGE_LIMIT: usize = 256;
-const WEBUI_RUNTIME_ITEM_MAX_PAYLOADS: usize = WEBUI_PROJECTION_PAGE_LIMIT + 1;
-const WEBUI_PROJECTION_ADAPTER_ID: &str = "webui_v2";
-const WEBUI_PROJECTION_INSTALLATION_ID: &str = "webui_v2.local";
+const PRODUCT_PROJECTION_PAGE_LIMIT: usize = 256;
+const PRODUCT_RUNTIME_ITEM_MAX_PAYLOADS: usize = PRODUCT_PROJECTION_PAGE_LIMIT + 1;
+const PRODUCT_PROJECTION_ADAPTER_ID: &str = "webui_v2";
+const PRODUCT_PROJECTION_INSTALLATION_ID: &str = "webui_v2.local";
 const TURN_EVENT_WAKE_BUFFER: usize = 256;
-const WEBUI_TERMINAL_TURN_LIVE_DRAIN_TIMEOUT: Duration = Duration::from_millis(50);
+const PRODUCT_TERMINAL_TURN_LIVE_DRAIN_TIMEOUT: Duration = Duration::from_millis(50);
 
 #[derive(Clone)]
 pub(crate) struct RebornProjectionServices {
     event_stream_manager: Arc<EventStreamManager>,
     live_updates: Arc<InMemoryProjectionUpdateSource>,
     live_sequence: Arc<AtomicU64>,
+    live_epoch: Arc<str>,
     turn_event_wake_source: Arc<TurnEventWakeSource>,
     turn_events: TurnEventBridge,
-    approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
+    // arch-exempt: optional_arc, approval prompt enrichment is absent in minimal projection graphs, plan #4539
+    approval_requests: Option<Arc<dyn ApprovalRequestStorePort>>,
     display_previews: Arc<dyn CapabilityDisplayPreviewSource>,
-    webui_reply_target_binding_ref: ReplyTargetBindingRef,
+    product_reply_target_binding_ref: ReplyTargetBindingRef,
     auth_challenges: Option<Arc<dyn AuthChallengeProvider>>,
 }
 
@@ -106,7 +109,7 @@ impl RebornProjectionServices {
 
     pub(crate) fn with_approval_requests(
         mut self,
-        approval_requests: Arc<dyn ApprovalRequestStore>,
+        approval_requests: Arc<dyn ApprovalRequestStorePort>,
     ) -> Self {
         self.approval_requests = Some(approval_requests.clone());
         self.turn_events = self
@@ -151,14 +154,15 @@ impl RebornProjectionServices {
         self
     }
 
-    pub(crate) fn webui_event_stream(&self) -> Arc<dyn ProjectionStream> {
-        Arc::new(WebuiRuntimeProjectionStream {
+    pub(crate) fn product_event_stream(&self) -> Arc<dyn ProjectionStream> {
+        Arc::new(ProductRuntimeProjectionStream {
             manager: Arc::clone(&self.event_stream_manager),
             turn_events: self.turn_events.clone(),
             turn_event_wake_source: Arc::clone(&self.turn_event_wake_source),
             auth_challenges: self.auth_challenges.clone(),
             display_previews: Arc::clone(&self.display_previews),
-            reply_target_binding_ref: self.webui_reply_target_binding_ref.clone(),
+            reply_target_binding_ref: self.product_reply_target_binding_ref.clone(),
+            live_epoch: Arc::clone(&self.live_epoch),
         })
     }
 
@@ -197,7 +201,7 @@ impl RebornProjectionServices {
 
 pub(crate) fn build_reborn_projection_services(
     event_log: Arc<dyn DurableEventLog>,
-    webui_reply_target_binding_ref: ReplyTargetBindingRef,
+    product_reply_target_binding_ref: ReplyTargetBindingRef,
 ) -> RebornProjectionServices {
     let projection: Arc<dyn EventProjectionService> =
         Arc::new(ReplayEventProjectionService::from_runtime_log(event_log));
@@ -206,6 +210,7 @@ pub(crate) fn build_reborn_projection_services(
     // the same SSE cursor space; per-publisher counters can collide after a
     // durable cursor has advanced.
     let live_sequence = Arc::new(AtomicU64::new(0));
+    let live_epoch: Arc<str> = Arc::from(Uuid::new_v4().to_string());
     let event_stream_manager = Arc::new(EventStreamManager::from_services(
         projection,
         Arc::new(AllowAllProjectionAccessPolicy),
@@ -220,20 +225,21 @@ pub(crate) fn build_reborn_projection_services(
         // composition-owned construction site.
         {
             #[allow(clippy::disallowed_methods)]
-            Arc::new(FilesystemOutboundStateStore::new(crate::wrap_scoped(
-                Arc::new(InMemoryBackend::new()),
-            )))
+            Arc::new(OutboundStateStore::new(crate::wrap_scoped(Arc::new(
+                InMemoryBackend::new(),
+            ))))
         },
     ));
     RebornProjectionServices {
         event_stream_manager,
         live_updates,
         live_sequence,
+        live_epoch,
         turn_event_wake_source: Arc::new(TurnEventWakeSource::new()),
         turn_events: TurnEventBridge::default(),
         approval_requests: None,
         display_previews: Arc::new(NoopCapabilityDisplayPreviewSource),
-        webui_reply_target_binding_ref,
+        product_reply_target_binding_ref,
         auth_challenges: None,
     }
 }
@@ -296,17 +302,18 @@ fn turn_wake_matches_request(
 /// behind the WebUI timeline facade until the browser event schema grows a
 /// first-class timeline-entry mapper.
 #[derive(Clone)]
-struct WebuiRuntimeProjectionStream {
+struct ProductRuntimeProjectionStream {
     manager: Arc<EventStreamManager>,
     turn_events: TurnEventBridge,
     turn_event_wake_source: Arc<TurnEventWakeSource>,
     auth_challenges: Option<Arc<dyn AuthChallengeProvider>>,
     display_previews: Arc<dyn CapabilityDisplayPreviewSource>,
     reply_target_binding_ref: ReplyTargetBindingRef,
+    live_epoch: Arc<str>,
 }
 
 #[async_trait]
-impl ProjectionStream for WebuiRuntimeProjectionStream {
+impl ProjectionStream for ProductRuntimeProjectionStream {
     fn supports_subscription(&self) -> bool {
         true
     }
@@ -316,7 +323,7 @@ impl ProjectionStream for WebuiRuntimeProjectionStream {
         request: ProjectionSubscriptionRequest,
     ) -> Result<ProjectionStreamSubscription, ProductAdapterError> {
         let (subscription, origin_cursor) = self.runtime_subscription(&request).await?;
-        let (sender, receiver) = mpsc::channel(WEBUI_PROJECTION_PAGE_LIMIT);
+        let (sender, receiver) = mpsc::channel(PRODUCT_PROJECTION_PAGE_LIMIT);
         let stream = self.clone();
         tokio::spawn(async move {
             stream
@@ -333,7 +340,7 @@ impl ProjectionStream for WebuiRuntimeProjectionStream {
         let (mut subscription, origin_cursor) = self.runtime_subscription(&request).await?;
 
         let is_resuming_runtime_payloads = origin_cursor.runtime_payloads_delivered > 0;
-        let mut batch = WebuiProjectionBatch::new(origin_cursor);
+        let mut batch = ProductSurfaceProjectionBatch::new(origin_cursor);
         if let Some(item) = subscription.next().await {
             let buffered = if is_resuming_runtime_payloads {
                 Vec::new()
@@ -375,19 +382,37 @@ impl ProjectionStream for WebuiRuntimeProjectionStream {
     }
 }
 
-impl WebuiRuntimeProjectionStream {
+impl ProductRuntimeProjectionStream {
     async fn runtime_subscription(
         &self,
         request: &ProjectionSubscriptionRequest,
-    ) -> Result<(EventProjectionSubscription, WebuiProjectionCursor), ProductAdapterError> {
+    ) -> Result<(EventProjectionSubscription, ProductSurfaceProjectionCursor), ProductAdapterError>
+    {
         let projection_scope = runtime_projection_scope(&request.actor, &request.scope);
-        let origin_cursor = request
+        let mut origin_cursor = request
             .after_cursor
             .clone()
-            .map(|cursor| parse_webui_projection_cursor(cursor.as_str()))
+            .map(|cursor| parse_product_projection_cursor(cursor.as_str()))
             .transpose()?
             .unwrap_or_default();
-        validate_webui_projection_cursor_scope(&origin_cursor, &request.scope, &projection_scope)?;
+        validate_product_projection_cursor_scope(
+            &origin_cursor,
+            &request.scope,
+            &projection_scope,
+        )?;
+        // Live projection updates are process-local and their numeric sequence
+        // restarts from zero with each projection-services bundle. A browser
+        // can retain an otherwise valid composite cursor across a deployment;
+        // carrying that prior process's live floor forward would suppress new
+        // live updates until the restarted counter overtook it. Keep the
+        // durable runtime/turn positions, but rebase only the volatile live
+        // component when the producing process changes.
+        if origin_cursor.live.is_some()
+            && origin_cursor.live_epoch.as_deref() != Some(self.live_epoch.as_ref())
+        {
+            origin_cursor.live = None;
+        }
+        origin_cursor.live_epoch = Some(self.live_epoch.to_string());
         let subscription = self
             .manager
             .subscribe(ProjectionSubscribeRequest {
@@ -398,7 +423,7 @@ impl WebuiRuntimeProjectionStream {
                     thread_id: request.scope.thread_id.clone(),
                 },
                 after_cursor: origin_cursor.runtime.clone(),
-                limit: WEBUI_PROJECTION_PAGE_LIMIT,
+                limit: PRODUCT_PROJECTION_PAGE_LIMIT,
                 capabilities: SubscriberCapabilities::default(),
             })
             .await
@@ -410,7 +435,7 @@ impl WebuiRuntimeProjectionStream {
         self,
         request: ProjectionSubscriptionRequest,
         mut subscription: EventProjectionSubscription,
-        origin_cursor: WebuiProjectionCursor,
+        origin_cursor: ProductSurfaceProjectionCursor,
         sender: mpsc::Sender<Result<ProductOutboundEnvelope, ProductAdapterError>>,
     ) {
         let mut cursor = origin_cursor;
@@ -425,7 +450,7 @@ impl WebuiRuntimeProjectionStream {
                 item
             }
         };
-        let mut batch = WebuiProjectionBatch::new(cursor.clone());
+        let mut batch = ProductSurfaceProjectionBatch::new(cursor.clone());
         let buffered = if is_resuming_runtime_payloads {
             Vec::new()
         } else {
@@ -485,7 +510,7 @@ impl WebuiRuntimeProjectionStream {
                     let Some(item) = item else {
                         return;
                     };
-                    let mut batch = WebuiProjectionBatch::new(cursor.clone());
+                    let mut batch = ProductSurfaceProjectionBatch::new(cursor.clone());
                     keep_consuming = match push_runtime_item(
                         &mut batch,
                         item,
@@ -528,7 +553,7 @@ impl WebuiRuntimeProjectionStream {
                         }
                     }
 
-                    let mut batch = WebuiProjectionBatch::new(cursor.clone());
+                    let mut batch = ProductSurfaceProjectionBatch::new(cursor.clone());
                     if let Err(error) = consume_buffered_runtime_items(
                         &mut subscription,
                         &mut batch,
@@ -560,7 +585,7 @@ impl WebuiRuntimeProjectionStream {
 
     async fn append_turn_events(
         &self,
-        batch: &mut WebuiProjectionBatch,
+        batch: &mut ProductSurfaceProjectionBatch,
         mut subscription: Option<&mut EventProjectionSubscription>,
         request: &ProjectionSubscriptionRequest,
     ) -> Result<(), ProductAdapterError> {
@@ -602,14 +627,14 @@ impl WebuiRuntimeProjectionStream {
 
     fn batch_into_outbound(
         &self,
-        batch: WebuiProjectionBatch,
+        batch: ProductSurfaceProjectionBatch,
         request: &ProjectionSubscriptionRequest,
     ) -> Result<Vec<ProductOutboundEnvelope>, ProductAdapterError> {
         batch
             .into_payloads()
             .map(|(cursor, payload)| {
                 envelope_to_outbound(
-                    product_cursor_from_webui_cursor(&cursor)?,
+                    product_cursor_from_projection_cursor(&cursor)?,
                     payload,
                     &request.scope,
                     &request.actor,
@@ -621,13 +646,13 @@ impl WebuiRuntimeProjectionStream {
 
     async fn send_subscription_batch(
         &self,
-        batch: WebuiProjectionBatch,
+        batch: ProductSurfaceProjectionBatch,
         request: &ProjectionSubscriptionRequest,
         sender: &mpsc::Sender<Result<ProductOutboundEnvelope, ProductAdapterError>>,
-        cursor: &mut WebuiProjectionCursor,
+        cursor: &mut ProductSurfaceProjectionCursor,
     ) -> bool {
         for (next_cursor, payload) in batch.into_payloads() {
-            let projection_cursor = match product_cursor_from_webui_cursor(&next_cursor) {
+            let projection_cursor = match product_cursor_from_projection_cursor(&next_cursor) {
                 Ok(cursor) => cursor,
                 Err(error) => {
                     send_projection_subscription_error(sender, error).await;
@@ -665,7 +690,7 @@ async fn send_projection_subscription_error(
 
 async fn consume_buffered_runtime_items(
     subscription: &mut EventProjectionSubscription,
-    batch: &mut WebuiProjectionBatch,
+    batch: &mut ProductSurfaceProjectionBatch,
     scope: &TurnScope,
     display_previews: &dyn CapabilityDisplayPreviewSource,
 ) -> Result<(), ProductAdapterError> {
@@ -681,7 +706,7 @@ fn collect_buffered_runtime_items(
     subscription: &mut EventProjectionSubscription,
 ) -> Vec<ProjectionStreamItem> {
     let mut items = Vec::new();
-    for _ in 0..WEBUI_PROJECTION_PAGE_LIMIT {
+    for _ in 0..PRODUCT_PROJECTION_PAGE_LIMIT {
         let Some(item) = subscription.try_next_buffered() else {
             break;
         };
@@ -692,7 +717,7 @@ fn collect_buffered_runtime_items(
 
 async fn drain_runtime_items_before_terminal_turn(
     subscription: &mut EventProjectionSubscription,
-    batch: &mut WebuiProjectionBatch,
+    batch: &mut ProductSurfaceProjectionBatch,
     scope: &TurnScope,
     display_previews: &dyn CapabilityDisplayPreviewSource,
 ) -> Result<(), ProductAdapterError> {
@@ -700,10 +725,13 @@ async fn drain_runtime_items_before_terminal_turn(
     if !batch.has_runtime_payload_capacity() {
         return Ok(());
     }
-    let item = tokio::time::timeout(WEBUI_TERMINAL_TURN_LIVE_DRAIN_TIMEOUT, subscription.next())
-        .await
-        .ok()
-        .flatten();
+    let item = tokio::time::timeout(
+        PRODUCT_TERMINAL_TURN_LIVE_DRAIN_TIMEOUT,
+        subscription.next(),
+    )
+    .await
+    .ok()
+    .flatten();
     if let Some(item) = item {
         let keep_consuming = push_runtime_item(batch, item, scope, display_previews).await?;
         if keep_consuming {
@@ -714,7 +742,7 @@ async fn drain_runtime_items_before_terminal_turn(
 }
 
 async fn push_ordered_initial_runtime_items(
-    batch: &mut WebuiProjectionBatch,
+    batch: &mut ProductSurfaceProjectionBatch,
     first: ProjectionStreamItem,
     buffered: Vec<ProjectionStreamItem>,
     scope: &TurnScope,
@@ -757,7 +785,7 @@ async fn push_ordered_initial_runtime_items(
 }
 
 async fn push_runtime_item(
-    batch: &mut WebuiProjectionBatch,
+    batch: &mut ProductSurfaceProjectionBatch,
     item: ProjectionStreamItem,
     scope: &TurnScope,
     display_previews: &dyn CapabilityDisplayPreviewSource,
@@ -841,15 +869,15 @@ fn envelope_has_terminal_run_status(envelope: &ProductProjectionEnvelope) -> boo
         .any(|run| run.status != RunProjectionStatus::Running)
 }
 
-struct WebuiProjectionBatch {
-    cursor: WebuiProjectionCursor,
+struct ProductSurfaceProjectionBatch {
+    cursor: ProductSurfaceProjectionCursor,
     pending_runtime_cursor_advance: Option<EventProjectionCursor>,
     runtime_payloads_pushed: usize,
-    payloads: Vec<(WebuiProjectionCursor, ProductOutboundPayload)>,
+    payloads: Vec<(ProductSurfaceProjectionCursor, ProductOutboundPayload)>,
 }
 
-impl WebuiProjectionBatch {
-    fn new(cursor: WebuiProjectionCursor) -> Self {
+impl ProductSurfaceProjectionBatch {
+    fn new(cursor: ProductSurfaceProjectionCursor) -> Self {
         Self {
             cursor,
             pending_runtime_cursor_advance: None,
@@ -858,7 +886,7 @@ impl WebuiProjectionBatch {
         }
     }
 
-    fn cursor(&self) -> &WebuiProjectionCursor {
+    fn cursor(&self) -> &ProductSurfaceProjectionCursor {
         &self.cursor
     }
 
@@ -889,7 +917,7 @@ impl WebuiProjectionBatch {
         }
 
         let remaining_capacity =
-            WEBUI_RUNTIME_ITEM_MAX_PAYLOADS.saturating_sub(self.runtime_payloads_pushed);
+            PRODUCT_RUNTIME_ITEM_MAX_PAYLOADS.saturating_sub(self.runtime_payloads_pushed);
         if remaining_capacity == 0 {
             return Ok(false);
         }
@@ -974,7 +1002,7 @@ impl WebuiProjectionBatch {
     ) -> Result<bool, ProductAdapterError> {
         let already_delivered = self.cursor.runtime_payloads_delivered;
         let remaining_capacity =
-            WEBUI_RUNTIME_ITEM_MAX_PAYLOADS.saturating_sub(self.runtime_payloads_pushed);
+            PRODUCT_RUNTIME_ITEM_MAX_PAYLOADS.saturating_sub(self.runtime_payloads_pushed);
         if let Some(runtime_item) = item_to_payloads(
             item,
             scope,
@@ -988,6 +1016,7 @@ impl WebuiProjectionBatch {
         {
             match runtime_item {
                 RuntimePayloadItem::Durable(durable) => {
+                    let durable = *durable;
                     return self.push_durable_runtime_payloads(
                         durable.final_cursor,
                         durable.item_cursor,
@@ -997,7 +1026,7 @@ impl WebuiProjectionBatch {
                     );
                 }
                 RuntimePayloadItem::Live { cursor, payload } => {
-                    return Ok(self.push_live_payload(cursor, payload));
+                    return Ok(self.push_live_payload(cursor, *payload));
                 }
                 RuntimePayloadItem::CursorAdvance { cursor } => {
                     return Ok(self.push_runtime_cursor_advance(cursor));
@@ -1008,7 +1037,7 @@ impl WebuiProjectionBatch {
     }
 
     fn has_runtime_payload_capacity(&self) -> bool {
-        self.runtime_payloads_pushed < WEBUI_RUNTIME_ITEM_MAX_PAYLOADS
+        self.runtime_payloads_pushed < PRODUCT_RUNTIME_ITEM_MAX_PAYLOADS
     }
 
     fn push_turn(&mut self, cursor: TurnEventProjectionCursor, payload: ProductOutboundPayload) {
@@ -1027,7 +1056,7 @@ impl WebuiProjectionBatch {
 
     fn into_payloads(
         mut self,
-    ) -> impl Iterator<Item = (WebuiProjectionCursor, ProductOutboundPayload)> {
+    ) -> impl Iterator<Item = (ProductSurfaceProjectionCursor, ProductOutboundPayload)> {
         self.flush_pending_runtime_cursor_advance();
         self.payloads.into_iter()
     }
@@ -1057,10 +1086,12 @@ fn turn_cursor_advances(
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-struct WebuiProjectionCursor {
+struct ProductSurfaceProjectionCursor {
     runtime: Option<EventProjectionCursor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     live: Option<EventProjectionCursor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    live_epoch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     runtime_item: Option<EventCursor>,
     turn: Option<TurnEventProjectionCursor>,
@@ -1072,16 +1103,16 @@ fn is_zero(value: &usize) -> bool {
     *value == 0
 }
 
-fn parse_webui_projection_cursor(
+fn parse_product_projection_cursor(
     cursor: &str,
-) -> Result<WebuiProjectionCursor, ProductAdapterError> {
-    if let Ok(parsed) = serde_json::from_str::<WebuiProjectionCursor>(cursor)
+) -> Result<ProductSurfaceProjectionCursor, ProductAdapterError> {
+    if let Ok(parsed) = serde_json::from_str::<ProductSurfaceProjectionCursor>(cursor)
         && (parsed.runtime.is_some()
             || parsed.live.is_some()
             || parsed.turn.is_some()
             || parsed.runtime_payloads_delivered > 0)
     {
-        if parsed.runtime_payloads_delivered > WEBUI_RUNTIME_ITEM_MAX_PAYLOADS + 1 {
+        if parsed.runtime_payloads_delivered > PRODUCT_RUNTIME_ITEM_MAX_PAYLOADS + 1 {
             return Err(ProductAdapterError::InvalidIdentifier {
                 kind: "projection_cursor",
                 reason: "runtime delivery offset exceeds runtime item payload limit".to_string(),
@@ -1092,20 +1123,21 @@ fn parse_webui_projection_cursor(
     let runtime = serde_json::from_str::<EventProjectionCursor>(cursor).map_err(|_| {
         ProductAdapterError::InvalidIdentifier {
             kind: "projection_cursor",
-            reason: "must be a WebUI projection cursor".to_string(),
+            reason: "must be a product projection cursor".to_string(),
         }
     })?;
-    Ok(WebuiProjectionCursor {
+    Ok(ProductSurfaceProjectionCursor {
         runtime: Some(runtime),
         live: None,
+        live_epoch: None,
         runtime_item: None,
         turn: None,
         runtime_payloads_delivered: 0,
     })
 }
 
-fn validate_webui_projection_cursor_scope(
-    cursor: &WebuiProjectionCursor,
+fn validate_product_projection_cursor_scope(
+    cursor: &ProductSurfaceProjectionCursor,
     scope: &TurnScope,
     projection_scope: &EventProjectionScope,
 ) -> Result<(), ProductAdapterError> {
@@ -1136,8 +1168,8 @@ fn validate_webui_projection_cursor_scope(
     Ok(())
 }
 
-fn product_cursor_from_webui_cursor(
-    cursor: &WebuiProjectionCursor,
+fn product_cursor_from_projection_cursor(
+    cursor: &ProductSurfaceProjectionCursor,
 ) -> Result<ProductProjectionCursor, ProductAdapterError> {
     ProductProjectionCursor::new(
         serde_json::to_string(cursor).map_err(|_| internal_projection_error("cursor encode"))?,
@@ -1230,7 +1262,7 @@ fn live_update_payloads(
     let state = ProductProjectionState::new(scope.thread_id.to_string(), items)?;
     Ok(Some(RuntimePayloadItem::Live {
         cursor,
-        payload: ProductOutboundPayload::ProjectionUpdate { state },
+        payload: Box::new(ProductOutboundPayload::ProjectionUpdate { state }),
     }))
 }
 
@@ -1245,10 +1277,10 @@ struct DurableRuntimePayloadItem {
 
 #[derive(Debug)]
 enum RuntimePayloadItem {
-    Durable(DurableRuntimePayloadItem),
+    Durable(Box<DurableRuntimePayloadItem>),
     Live {
         cursor: EventProjectionCursor,
-        payload: ProductOutboundPayload,
+        payload: Box<ProductOutboundPayload>,
     },
     CursorAdvance {
         cursor: EventProjectionCursor,
@@ -1264,13 +1296,13 @@ fn durable_runtime_payload_item(
     total: usize,
     already_delivered: usize,
 ) -> RuntimePayloadItem {
-    RuntimePayloadItem::Durable(DurableRuntimePayloadItem {
+    RuntimePayloadItem::Durable(Box::new(DurableRuntimePayloadItem {
         final_cursor,
         item_cursor,
         payloads,
         total,
         already_delivered,
-    })
+    }))
 }
 
 async fn snapshot_payloads(
@@ -1684,8 +1716,8 @@ fn envelope_to_outbound(
     actor: &TurnActor,
     reply_target_binding_ref: &ReplyTargetBindingRef,
 ) -> Result<ProductOutboundEnvelope, ProductAdapterError> {
-    let adapter_id = ProductAdapterId::new(WEBUI_PROJECTION_ADAPTER_ID)?;
-    let installation_id = AdapterInstallationId::new(WEBUI_PROJECTION_INSTALLATION_ID)?;
+    let adapter_id = ProductAdapterId::new(PRODUCT_PROJECTION_ADAPTER_ID)?;
+    let installation_id = AdapterInstallationId::new(PRODUCT_PROJECTION_INSTALLATION_ID)?;
     let target = ProductOutboundTarget::new(
         reply_target_binding_ref.clone(),
         ExternalConversationRef::new(None, scope.thread_id.to_string(), None, None)?,

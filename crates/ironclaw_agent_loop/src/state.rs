@@ -2,20 +2,22 @@
 //!
 
 mod bounded_ring;
+mod model_recovery;
 mod signature;
 mod slots;
 
 pub use bounded_ring::BoundedRing;
 pub use ironclaw_turns::LoopFailureKind;
 pub use ironclaw_turns::run_profile::AuthResumeApprovalIdentity;
+pub use model_recovery::{ModelErrorRecoveryObservation, PendingModelRetryDirective};
 pub use signature::{
     ArgsHash, CapabilityCallSignature, CapabilityCallSignatureError, CapabilityOutputObservation,
 };
 pub use slots::{
     CapabilityStrategyState, CompactionEffectivenessBaseline, CompactionPromptSnapshot,
     CompactionStrategyState, ContextStrategyState, DeferredCompactionWatermark, GateStrategyState,
-    GoalRefreshStrategyState, IndexedMessageKind, MessageIndexEntry, ModelStrategyState,
-    PostCapabilityStageState, RecoveryAttemptClass, RecoveryStrategyState,
+    GoalRefreshStrategyState, IndexedMessageKind, MessageIndexEntry, ModelErrorObservationClass,
+    ModelStrategyState, PostCapabilityStageState, RecoveryAttemptClass, RecoveryStrategyState,
     RepeatedCallWarningPhase, RepeatedCallWarningState, ReplyAdmissionRejection,
     ReplyAdmissionRejectionReason, ReplyAdmissionStrategyState, StopStrategyState,
 };
@@ -101,6 +103,18 @@ pub struct LoopExecutionState {
     /// keeps older checkpoints decodable.
     #[serde(default)]
     pub completion_nudge_pending: bool,
+
+    /// One-shot, typed host-authored repair context for the next model call
+    /// after a model-error retry budget is exhausted. It remains checkpointed
+    /// until the executor has issued the request, so restart cannot lose it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_model_error_observation: Option<ModelErrorRecoveryObservation>,
+
+    /// Prompt-shape repair directive for the next model call. Kept separately
+    /// from backoff/compaction retry mechanics because it must be reconstructed
+    /// from the retry-transition checkpoint after worker restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_model_retry_directive: Option<PendingModelRetryDirective>,
 
     /// Whether the most recent admitted assistant reply "trailed off" without a
     /// real closing answer (empty after trim, or ends with a colon — a narrated
@@ -315,6 +329,8 @@ impl LoopExecutionState {
             final_answer_nudges_used: 0,
             completion_nudges_used: 0,
             completion_nudge_pending: false,
+            pending_model_error_observation: None,
+            pending_model_retry_directive: None,
             last_reply_trailed_off: false,
             context_state: ContextStrategyState::default(),
             capability_state: CapabilityStrategyState::default(),
@@ -339,7 +355,7 @@ impl LoopExecutionState {
     /// the executor produced via `serde_json::to_vec(&state)` before passing
     /// the bytes to `LoopCheckpointPort::stage_checkpoint_payload`. The payload
     /// contains **no outer envelope**: schema-id and kind live in store-side
-    /// metadata, validated by `CheckpointStateStore::get_checkpoint_state`
+    /// metadata, validated by `CheckpointStateStorePort::get_checkpoint_state`
     /// before the bytes ever reach this function. The `kind` argument is
     /// accepted for API symmetry (the call site can document what boundary the
     /// checkpoint belongs to) but is not used to authenticate the bytes.
@@ -513,7 +529,7 @@ mod tests {
     /// Encode a checkpoint payload the same way the executor does:
     /// `serde_json::to_vec(&state)` — no outer envelope.
     /// Schema-id and kind are stored as side-channel metadata by
-    /// `CheckpointStateStore::put_checkpoint_state`, not inside the bytes.
+    /// `CheckpointStateStorePort::put_checkpoint_state`, not inside the bytes.
     fn encode_payload(state: &LoopExecutionState) -> Vec<u8> {
         serde_json::to_vec(state).expect("encode payload")
     }
@@ -796,7 +812,7 @@ mod tests {
     }
 
     /// Schema-id and kind validation now live in the store layer
-    /// (`CheckpointStateStore::get_checkpoint_state`) — not in the payload
+    /// (`CheckpointStateStorePort::get_checkpoint_state`) — not in the payload
     /// bytes. `from_checkpoint_payload` therefore succeeds for any
     /// well-formed `LoopExecutionState` regardless of what kind is passed.
     #[test]

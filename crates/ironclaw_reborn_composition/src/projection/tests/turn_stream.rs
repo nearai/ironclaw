@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn webui_event_stream_resumes_after_serialized_projection_cursor() {
+async fn product_event_stream_resumes_after_serialized_projection_cursor() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();
     let agent_id = AgentId::new("webui-events-agent").unwrap();
@@ -24,7 +24,7 @@ async fn webui_event_stream_resumes_after_serialized_projection_cursor() {
         ReplyTargetBindingRef::new("webui-events-reply").unwrap(),
     );
     let first = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor: actor.clone(),
             scope: TurnScope::new(
@@ -46,7 +46,7 @@ async fn webui_event_stream_resumes_after_serialized_projection_cursor() {
         .await
         .unwrap();
     let resumed = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor,
             scope: TurnScope::new(tenant_id, Some(agent_id), None, thread_id),
@@ -60,7 +60,7 @@ async fn webui_event_stream_resumes_after_serialized_projection_cursor() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_resumes_mixed_batch_without_skipping_turn_event() {
+async fn product_event_stream_resumes_mixed_batch_without_skipping_turn_event() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();
     let agent_id = AgentId::new("webui-events-agent").unwrap();
@@ -120,7 +120,7 @@ async fn webui_event_stream_resumes_mixed_batch_without_skipping_turn_event() {
     );
 
     let first = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor: actor.clone(),
             scope: scope.clone(),
@@ -158,7 +158,7 @@ async fn webui_event_stream_resumes_mixed_batch_without_skipping_turn_event() {
     ));
 
     let resumed = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor,
             scope,
@@ -195,7 +195,7 @@ async fn webui_event_stream_resumes_mixed_batch_without_skipping_turn_event() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_offers_always_for_typed_approval_gate() {
+async fn product_event_stream_offers_always_for_typed_approval_gate() {
     let tenant_id = TenantId::new("webui-events-approval-tenant").unwrap();
     let user_id = UserId::new("webui-events-approval-user").unwrap();
     let agent_id = AgentId::new("webui-events-approval-agent").unwrap();
@@ -236,7 +236,7 @@ async fn webui_event_stream_offers_always_for_typed_approval_gate() {
         )
         .await
         .unwrap();
-    let approval_requests_dyn: Arc<dyn ApprovalRequestStore> = approval_requests;
+    let approval_requests_dyn: Arc<dyn ApprovalRequestStorePort> = approval_requests;
     let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
     let actor = TurnActor::new(user_id.clone());
     let services = build_reborn_projection_services(
@@ -275,7 +275,7 @@ async fn webui_event_stream_offers_always_for_typed_approval_gate() {
     );
 
     let events = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor,
             scope,
@@ -331,7 +331,7 @@ async fn webui_event_stream_offers_always_for_typed_approval_gate() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_projects_network_approval_context() {
+async fn product_event_stream_projects_network_approval_context() {
     let tenant_id = TenantId::new("webui-events-approval-actions-tenant").unwrap();
     let user_id = UserId::new("webui-events-approval-actions-user").unwrap();
     let agent_id = AgentId::new("webui-events-approval-actions-agent").unwrap();
@@ -378,7 +378,7 @@ async fn webui_event_stream_projects_network_approval_context() {
         .await
         .unwrap();
 
-    let approval_requests_dyn: Arc<dyn ApprovalRequestStore> = approval_requests;
+    let approval_requests_dyn: Arc<dyn ApprovalRequestStorePort> = approval_requests;
     let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
     let actor = TurnActor::new(user_id.clone());
     let services = build_reborn_projection_services(
@@ -417,7 +417,7 @@ async fn webui_event_stream_projects_network_approval_context() {
     );
 
     let events = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor,
             scope,
@@ -456,7 +456,7 @@ async fn webui_event_stream_projects_network_approval_context() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_projects_spawn_approval_context() {
+async fn product_event_stream_projects_spawn_approval_context() {
     let tenant_id = TenantId::new("webui-events-approval-spawn-tenant").unwrap();
     let user_id = UserId::new("webui-events-approval-spawn-user").unwrap();
     let agent_id = AgentId::new("webui-events-approval-spawn-agent").unwrap();
@@ -495,7 +495,7 @@ async fn webui_event_stream_projects_spawn_approval_context() {
         )
         .await
         .unwrap();
-    let approval_requests_dyn: Arc<dyn ApprovalRequestStore> = approval_requests;
+    let approval_requests_dyn: Arc<dyn ApprovalRequestStorePort> = approval_requests;
     let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
     let actor = TurnActor::new(user_id.clone());
     let services = build_reborn_projection_services(
@@ -534,7 +534,7 @@ async fn webui_event_stream_projects_spawn_approval_context() {
     );
 
     let events = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor,
             scope,
@@ -561,7 +561,7 @@ async fn webui_event_stream_projects_spawn_approval_context() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_fails_transiently_when_approval_request_lookup_fails() {
+async fn product_event_stream_fails_transiently_when_approval_request_lookup_fails() {
     let tenant_id = TenantId::new("webui-events-approval-fallback-tenant").unwrap();
     let user_id = UserId::new("webui-events-approval-fallback-user").unwrap();
     let agent_id = AgentId::new("webui-events-approval-fallback-agent").unwrap();
@@ -613,7 +613,7 @@ async fn webui_event_stream_fails_transiently_when_approval_request_lookup_fails
     );
 
     let error = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor,
             scope,
@@ -631,7 +631,7 @@ async fn webui_event_stream_fails_transiently_when_approval_request_lookup_fails
 }
 
 #[tokio::test]
-async fn webui_event_stream_fails_closed_for_projection_allow_always_without_prompt() {
+async fn product_event_stream_fails_closed_for_projection_allow_always_without_prompt() {
     let tenant_id = TenantId::new("webui-events-approval-no-prompt-tenant").unwrap();
     let user_id = UserId::new("webui-events-approval-no-prompt-user").unwrap();
     let agent_id = AgentId::new("webui-events-approval-no-prompt-agent").unwrap();
@@ -684,7 +684,7 @@ async fn webui_event_stream_fails_closed_for_projection_allow_always_without_pro
     );
 
     let events = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor,
             scope,
@@ -718,7 +718,7 @@ async fn webui_event_stream_fails_closed_for_projection_allow_always_without_pro
 }
 
 #[tokio::test]
-async fn webui_event_stream_does_not_offer_always_for_generic_approval_gate() {
+async fn product_event_stream_does_not_offer_always_for_generic_approval_gate() {
     let tenant_id = TenantId::new("webui-events-generic-approval-tenant").unwrap();
     let user_id = UserId::new("webui-events-generic-approval-user").unwrap();
     let agent_id = AgentId::new("webui-events-generic-approval-agent").unwrap();
@@ -768,7 +768,7 @@ async fn webui_event_stream_does_not_offer_always_for_generic_approval_gate() {
     );
 
     let events = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor,
             scope,
@@ -791,7 +791,7 @@ async fn webui_event_stream_does_not_offer_always_for_generic_approval_gate() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_projects_blocked_dependent_run_status() {
+async fn product_event_stream_projects_blocked_dependent_run_status() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();
     let agent_id = AgentId::new("webui-events-agent").unwrap();
@@ -840,7 +840,7 @@ async fn webui_event_stream_projects_blocked_dependent_run_status() {
     );
 
     let events = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor,
             scope,
@@ -862,7 +862,7 @@ async fn webui_event_stream_projects_blocked_dependent_run_status() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_tolerates_initial_turn_event_rebase() {
+async fn product_event_stream_tolerates_initial_turn_event_rebase() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();
     let agent_id = AgentId::new("webui-events-agent").unwrap();
@@ -900,7 +900,7 @@ async fn webui_event_stream_tolerates_initial_turn_event_rebase() {
     );
 
     let events = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor: TurnActor::new(user_id),
             scope: scope.clone(),
@@ -915,7 +915,8 @@ async fn webui_event_stream_tolerates_initial_turn_event_rebase() {
         Some(ProductOutboundPayload::KeepAlive)
     ));
     let parsed =
-        parse_webui_projection_cursor(events.last().unwrap().projection_cursor().as_str()).unwrap();
+        parse_product_projection_cursor(events.last().unwrap().projection_cursor().as_str())
+            .unwrap();
     assert_eq!(
         parsed.turn,
         Some(TurnEventProjectionCursor::for_scope(scope, turn_cursor))
@@ -923,7 +924,7 @@ async fn webui_event_stream_tolerates_initial_turn_event_rebase() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_recovers_from_turn_event_rebase_on_reconnect() {
+async fn product_event_stream_recovers_from_turn_event_rebase_on_reconnect() {
     // Regression for the SSE "disconnected" loop: a reconnecting stream carries
     // a non-`None` resume cursor whose turn component has fallen below the
     // projection's retention floor. The drain must jump forward to the earliest
@@ -971,11 +972,12 @@ async fn webui_event_stream_recovers_from_turn_event_rebase_on_reconnect() {
         }),
     );
 
-    let stale_cursor = product_cursor_from_webui_cursor(&WebuiProjectionCursor {
+    let stale_cursor = product_cursor_from_projection_cursor(&ProductSurfaceProjectionCursor {
         runtime: Some(EventProjectionCursor::origin_for_scope(
             runtime_projection_scope(&actor, &scope),
         )),
         live: None,
+        live_epoch: None,
         runtime_item: None,
         turn: Some(TurnEventProjectionCursor::for_scope(
             scope.clone(),
@@ -986,7 +988,7 @@ async fn webui_event_stream_recovers_from_turn_event_rebase_on_reconnect() {
     .unwrap();
 
     let events = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor,
             scope: scope.clone(),
@@ -1000,7 +1002,8 @@ async fn webui_event_stream_recovers_from_turn_event_rebase_on_reconnect() {
     // ... and the turn cursor is advanced to the earliest replayable cursor, so
     // the next reconnect resumes at/above the floor and the loop terminates.
     let parsed =
-        parse_webui_projection_cursor(events.last().unwrap().projection_cursor().as_str()).unwrap();
+        parse_product_projection_cursor(events.last().unwrap().projection_cursor().as_str())
+            .unwrap();
     assert_eq!(
         parsed.turn,
         Some(TurnEventProjectionCursor::for_scope(scope, retention_floor))
@@ -1008,7 +1011,7 @@ async fn webui_event_stream_recovers_from_turn_event_rebase_on_reconnect() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_rejects_foreign_composite_turn_cursor() {
+async fn product_event_stream_rejects_foreign_composite_turn_cursor() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();
     let agent_id = AgentId::new("webui-events-agent").unwrap();
@@ -1022,9 +1025,10 @@ async fn webui_event_stream_rejects_foreign_composite_turn_cursor() {
         thread_a.clone(),
     );
     let scope_b = TurnScope::new(tenant_id, Some(agent_id), None, thread_b);
-    let cursor = product_cursor_from_webui_cursor(&WebuiProjectionCursor {
+    let cursor = product_cursor_from_projection_cursor(&ProductSurfaceProjectionCursor {
         runtime: None,
         live: None,
+        live_epoch: None,
         runtime_item: None,
         turn: Some(TurnEventProjectionCursor::for_scope(
             scope_a,
@@ -1039,7 +1043,7 @@ async fn webui_event_stream_rejects_foreign_composite_turn_cursor() {
     );
 
     let error = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor: TurnActor::new(user_id),
             scope: scope_b,
@@ -1058,7 +1062,7 @@ async fn webui_event_stream_rejects_foreign_composite_turn_cursor() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_rejects_foreign_composite_runtime_cursor() {
+async fn product_event_stream_rejects_foreign_composite_runtime_cursor() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();
     let agent_id = AgentId::new("webui-events-agent").unwrap();
@@ -1073,11 +1077,12 @@ async fn webui_event_stream_rejects_foreign_composite_runtime_cursor() {
         thread_a.clone(),
     );
     let scope_b = TurnScope::new(tenant_id, Some(agent_id), None, thread_b);
-    let cursor = product_cursor_from_webui_cursor(&WebuiProjectionCursor {
+    let cursor = product_cursor_from_projection_cursor(&ProductSurfaceProjectionCursor {
         runtime: Some(EventProjectionCursor::origin_for_scope(
             runtime_projection_scope(&actor, &scope_a),
         )),
         live: None,
+        live_epoch: None,
         runtime_item: None,
         turn: None,
         runtime_payloads_delivered: 1,
@@ -1089,7 +1094,7 @@ async fn webui_event_stream_rejects_foreign_composite_runtime_cursor() {
     );
 
     let error = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor,
             scope: scope_b,
@@ -1108,7 +1113,7 @@ async fn webui_event_stream_rejects_foreign_composite_runtime_cursor() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_emits_keepalive_when_only_turn_cursor_advances() {
+async fn product_event_stream_emits_keepalive_when_only_turn_cursor_advances() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();
     let agent_id = AgentId::new("webui-events-agent").unwrap();
@@ -1147,7 +1152,7 @@ async fn webui_event_stream_emits_keepalive_when_only_turn_cursor_advances() {
     );
 
     let events = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor: TurnActor::new(user_id),
             scope: scope.clone(),
@@ -1161,7 +1166,7 @@ async fn webui_event_stream_emits_keepalive_when_only_turn_cursor_advances() {
         events[0].payload(),
         ProductOutboundPayload::KeepAlive
     ));
-    let parsed = parse_webui_projection_cursor(events[0].projection_cursor().as_str()).unwrap();
+    let parsed = parse_product_projection_cursor(events[0].projection_cursor().as_str()).unwrap();
     assert_eq!(
         parsed.turn,
         Some(TurnEventProjectionCursor::for_scope(
@@ -1172,7 +1177,7 @@ async fn webui_event_stream_emits_keepalive_when_only_turn_cursor_advances() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_reads_past_filtered_turn_event_pages() {
+async fn product_event_stream_reads_past_filtered_turn_event_pages() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();
     let agent_id = AgentId::new("webui-events-agent").unwrap();
@@ -1240,7 +1245,7 @@ async fn webui_event_stream_reads_past_filtered_turn_event_pages() {
     );
 
     let events = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor: TurnActor::new(user_id),
             scope,
@@ -1276,7 +1281,7 @@ async fn webui_event_stream_reads_past_filtered_turn_event_pages() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_does_not_prompt_for_stale_blocked_event() {
+async fn product_event_stream_does_not_prompt_for_stale_blocked_event() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();
     let agent_id = AgentId::new("webui-events-agent").unwrap();
@@ -1322,7 +1327,7 @@ async fn webui_event_stream_does_not_prompt_for_stale_blocked_event() {
     );
 
     let events = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor: TurnActor::new(user_id),
             scope,
@@ -1352,7 +1357,7 @@ async fn webui_event_stream_does_not_prompt_for_stale_blocked_event() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_uses_request_actor_for_projection_scope() {
+async fn product_event_stream_uses_request_actor_for_projection_scope() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let owner_user_id = UserId::new("webui-events-owner").unwrap();
     let other_user_id = UserId::new("webui-events-other").unwrap();
@@ -1379,7 +1384,7 @@ async fn webui_event_stream_uses_request_actor_for_projection_scope() {
         ReplyTargetBindingRef::new("webui-events-reply").unwrap(),
     );
     let events = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor: TurnActor::new(other_user_id),
             scope: TurnScope::new(tenant_id, Some(agent_id), None, thread_id),
@@ -1395,7 +1400,7 @@ async fn webui_event_stream_uses_request_actor_for_projection_scope() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_filters_turn_events_by_owner_user() {
+async fn product_event_stream_filters_turn_events_by_owner_user() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let owner_user_id = UserId::new("webui-events-owner").unwrap();
     let other_user_id = UserId::new("webui-events-other").unwrap();
@@ -1430,7 +1435,7 @@ async fn webui_event_stream_filters_turn_events_by_owner_user() {
     );
 
     let events = services
-        .webui_event_stream()
+        .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor: TurnActor::new(other_user_id),
             scope,

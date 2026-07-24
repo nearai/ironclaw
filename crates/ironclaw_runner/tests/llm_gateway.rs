@@ -2193,7 +2193,7 @@ async fn gateway_rejects_content_filtered_provider_responses() {
         .await
         .unwrap_err();
 
-    assert_eq!(error.kind, HostManagedModelErrorKind::PolicyDenied);
+    assert_eq!(error.kind, HostManagedModelErrorKind::ContentFiltered);
 }
 
 #[tokio::test]
@@ -4128,7 +4128,7 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
 
     async fn invoke_capability(
         &self,
-        _request: ironclaw_turns::run_profile::CapabilityInvocation,
+        _request: ironclaw_turns::run_profile::LoopRequest,
     ) -> Result<ironclaw_host_api::Resolution, ironclaw_turns::run_profile::AgentLoopHostError>
     {
         panic!("gateway tests do not invoke capabilities")
@@ -4136,7 +4136,7 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
 
     async fn invoke_capability_batch(
         &self,
-        _request: ironclaw_turns::run_profile::CapabilityBatchInvocation,
+        _request: ironclaw_turns::run_profile::LoopRequestBatch,
     ) -> Result<ironclaw_host_api::ResolutionBatch, ironclaw_turns::run_profile::AgentLoopHostError>
     {
         panic!("gateway tests do not invoke capability batches")

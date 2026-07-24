@@ -11,6 +11,7 @@ mod http_output;
 mod json;
 mod memory;
 mod model_visible_output;
+mod outbound_delivery;
 mod profile_set;
 mod schemas;
 mod shell;
@@ -34,8 +35,8 @@ use ironclaw_first_party_extensions::coding::{
 };
 use ironclaw_host_api::{
     CapabilityId, CapabilityProfileSchemaRef, EffectKind, ExtensionId, HostApiError,
-    OriginGateMatrix, PermissionMode, ProcessBackendKind, RequestedTrustClass, ResourceCeiling,
-    ResourceEstimate, ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind,
+    OriginGateMatrix, OriginGatePolicy, PermissionMode, ProcessBackendKind, RequestedTrustClass,
+    ResourceCeiling, ResourceEstimate, ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind,
     RuntimeHttpEgressError, RuntimeHttpEgressResponse, TrustClass, VirtualPath,
 };
 
@@ -53,10 +54,12 @@ pub use memory::{
     MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
     MEMORY_WRITE_CAPABILITY_ID,
 };
+pub use outbound_delivery::OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID;
 pub use profile_set::PROFILE_SET_CAPABILITY_ID;
 pub use shell::SHELL_CAPABILITY_ID;
 pub use skill_management::{
-    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
+    SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
+    SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID,
 };
 pub use spawn_subagent::SPAWN_SUBAGENT_CAPABILITY_ID;
 pub use time::TIME_CAPABILITY_ID;
@@ -196,6 +199,7 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                     trace_commons::profile_set_manifest()?,
                     trace_commons::account_login_link_manifest()?,
                     profile_set::manifest()?,
+                    outbound_delivery::manifest()?,
                 ];
                 capabilities.extend(memory::manifests()?);
                 capabilities.extend(coding_manifests()?);
@@ -333,6 +337,15 @@ pub fn builtin_first_party_handlers_with_trigger_create_hook(
     Ok(registry)
 }
 
+/// Replace the fail-closed default for the current-run outbound route with the
+/// product-owned routing service selected by composition.
+pub fn register_outbound_delivery_first_party_handler(
+    registry: &mut FirstPartyCapabilityRegistry,
+    router: Arc<dyn ironclaw_outbound::RouteCurrentRunFinalReply>,
+) -> Result<(), HostApiError> {
+    outbound_delivery::insert_handler(registry, router)
+}
+
 pub fn builtin_first_party_handlers_with_trigger_create_hook_for_process_backend(
     trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
     trigger_create_hook: Arc<dyn TriggerCreateHook>,
@@ -447,8 +460,21 @@ fn builtin_first_party_base_registry() -> Result<FirstPartyCapabilityRegistry, H
         handler.clone(),
     );
     registry.insert_handler(CapabilityId::new(PROFILE_SET_CAPABILITY_ID)?, handler);
+    outbound_delivery::insert_handler(&mut registry, Arc::new(UnavailableRunFinalReplyRouter))?;
     skill_management::insert_handlers(&mut registry)?;
     Ok(registry)
+}
+
+struct UnavailableRunFinalReplyRouter;
+
+#[async_trait]
+impl ironclaw_outbound::RouteCurrentRunFinalReply for UnavailableRunFinalReplyRouter {
+    async fn route_current_run_final_reply(
+        &self,
+        _request: ironclaw_outbound::RouteCurrentRunFinalReplyRequest,
+    ) -> Result<(), ironclaw_outbound::RouteCurrentRunFinalReplyError> {
+        Err(ironclaw_outbound::RouteCurrentRunFinalReplyError::Unavailable)
+    }
 }
 
 fn first_party_capability_manifest(
@@ -476,13 +502,24 @@ fn first_party_capability_manifest(
         required_host_ports: Vec::new(),
         runtime_credentials: Vec::new(),
         network_targets: Vec::new(),
+        max_egress_bytes: None,
         resource_profile,
-        // §5.3 S3 (behavior-neutral): the per-origin gate matrix mirrors today's
-        // effect gate for `LoopRun` (Ungated iff id is in the reviewed
-        // `UNGATED_LOOP_RUN_CAPABILITIES` allowlist), Product/Automation
-        // deny-by-default. Nothing reads this yet (fold is S4).
-        origin_gate_matrix: Some(OriginGateMatrix::builtin_loop_run_seed(id)),
+        origin_gate_matrix: Some(first_party_origin_gate_matrix(id)),
     })
+}
+
+fn first_party_origin_gate_matrix(id: &str) -> OriginGateMatrix {
+    let mut matrix = OriginGateMatrix::builtin_loop_run_seed(id);
+    if matches!(
+        id,
+        SKILL_INSTALL_CAPABILITY_ID
+            | SKILL_UPDATE_CAPABILITY_ID
+            | SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID
+            | SKILL_REMOVE_CAPABILITY_ID
+    ) {
+        matrix.product = OriginGatePolicy::ConsentSufficient;
+    }
+    matrix
 }
 
 #[derive(Debug, Default)]

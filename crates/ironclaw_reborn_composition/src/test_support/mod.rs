@@ -41,7 +41,7 @@
 //!     `local_dev_trigger_active_run_lookup_for_test` (the raw
 //!     `TriggerActiveRunLookup`, for wiring the `builtin.trigger_list`
 //!     capability directly rather than through the facade, #5886).
-//! 11. [`projection`] — `build_webui_event_stream_for_test`, a deliberately
+//! 11. [`projection`] — `build_product_event_stream_for_test`, a deliberately
 //!     narrowed `ProjectionStream` (turn-lifecycle events only) for the SSE
 //!     activity-stream scenario (W5-WEBUI-API-1 Enabler A).
 //! 12. [`refreshing_capability_port`] — `create_refreshing_capability_port_for_test`,
@@ -83,6 +83,8 @@ mod user_profile;
 #[cfg(feature = "test-support")]
 pub use automation::{
     local_dev_automation_product_facade_for_test, local_dev_trigger_active_run_lookup_for_test,
+    register_static_source_delivery_target_for_test,
+    set_local_dev_trigger_source_turn_state_for_test,
 };
 pub use budget_gateway::{
     BudgetTestGateway, FailingTestGateway, ScriptedReply, assistant_reply_without_text_for_test,
@@ -107,7 +109,9 @@ pub use local_dev_boot::{
     mount_local_dev_database_roots_for_test,
 };
 #[cfg(feature = "test-support")]
-pub use local_dev_capability_io::staged_capability_io_for_test;
+pub use local_dev_capability_io::{
+    staged_capability_io_for_test, staged_capability_io_with_observer_for_test,
+};
 pub use oauth_product_auth::build_google_oauth_product_auth_for_test;
 pub use oauth_product_auth::build_oauth_product_auth_for_test_on_libsql;
 pub use oauth_product_auth::build_oauth_product_auth_for_test_on_root;
@@ -123,7 +127,7 @@ pub use outbound_delivery::{
 #[cfg(feature = "test-support")]
 pub use project_create::PROJECT_CREATE_CAPABILITY_ID;
 #[cfg(feature = "test-support")]
-pub use projection::build_webui_event_stream_for_test;
+pub use projection::build_product_event_stream_for_test;
 #[cfg(feature = "test-support")]
 pub use refreshing_capability_port::{
     ExtensionManagementTestHandle, RefreshingCapabilityPortTestParts,

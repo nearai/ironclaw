@@ -43,11 +43,11 @@ use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
     PolicyNetworkHttpEgress, ReqwestNetworkTransport,
 };
-use ironclaw_product_workflow::RebornOutboundDeliveryTargetId;
+use ironclaw_product::RebornOutboundDeliveryTargetId;
 use ironclaw_reborn_composition::{
     AssistantReply, PollSettings, RebornCompositionProfile, RebornProductAuthServices,
     RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput, RebornRuntimeProfileOptions,
-    RebornTurnDriveOutcome, TriggerPollerSettings, build_reborn_runtime, build_reborn_services,
+    RebornTurnDriveOutcome, TriggerPollerSettings, build_reborn_runtime, build_runtime,
     local_runtime_build_input_with_options,
 };
 use ironclaw_reborn_config::{RebornConfigFile, RebornHome};
@@ -368,7 +368,7 @@ async fn build_qa_trace_runtime_with_http_interceptor_and_trigger_poller(
             mode,
         )));
     }
-    let mut input = RebornRuntimeInput::from_services(input)
+    let mut input = RebornRuntimeInput::from_build_input(input)
         .with_identity(RebornRuntimeIdentity {
             tenant_id: QA_TENANT.to_string(),
             agent_id: QA_AGENT.to_string(),
@@ -402,7 +402,6 @@ async fn build_qa_trace_runtime_with_http_interceptor_and_trigger_poller(
 
 async fn seed_qa_auto_approve(runtime: &RebornRuntime) {
     let auto_approve = runtime
-        .services()
         .local_dev_auto_approve_settings_for_test()
         .expect("QA runtime exposes local-dev auto-approve settings");
     auto_approve
@@ -481,18 +480,12 @@ async fn seed_live_credentials_for_fixture(
         source.agent
     );
     let source_services = source.build_services().await;
-    let source_product_auth = source_services
-        .product_auth
-        .as_ref()
-        .expect("Reborn source runtime exposes product auth services");
+    let source_product_auth = source_services.product_auth_for_test();
     let source_secret_store = source_services.secret_store_for_test();
     let source_auth_scope = AuthProductScope::credential_owner(&source.scope(), AuthSurface::Api);
 
-    let services = runtime.services();
-    let product_auth = services
-        .product_auth
-        .as_ref()
-        .expect("QA runtime exposes product auth services");
+    let services = runtime;
+    let product_auth = services.product_auth_for_test();
     let secret_store = services.secret_store_for_test();
     let scope = qa_recording_resource_scope();
     let auth_scope = AuthProductScope::credential_owner(&scope, AuthSurface::Api);
@@ -586,7 +579,7 @@ async fn seed_live_credentials_for_fixture(
             .expect("seed Reborn credential account");
         preflight_seeded_qa_credential(
             fixture_name,
-            product_auth,
+            &product_auth,
             secret_store.as_ref(),
             &created_account,
         )
@@ -598,7 +591,7 @@ async fn seed_live_credentials_for_fixture(
 async fn preflight_seeded_qa_credential(
     fixture_name: &str,
     product_auth: &RebornProductAuthServices,
-    secret_store: &dyn ironclaw_secrets::SecretStore,
+    secret_store: &dyn ironclaw_secrets::SecretStorePort,
     account: &CredentialAccount,
 ) {
     let Some(access_secret) = account.access_secret.as_ref() else {
@@ -657,7 +650,7 @@ async fn preflight_seeded_qa_credential(
 async fn preflight_seeded_google_credential(
     fixture_name: &str,
     product_auth: &RebornProductAuthServices,
-    secret_store: &dyn ironclaw_secrets::SecretStore,
+    secret_store: &dyn ironclaw_secrets::SecretStorePort,
     account: &CredentialAccount,
 ) {
     let required_extension_scopes = match fixture_name {
@@ -818,7 +811,7 @@ impl RebornQaCredentialSource {
         }
     }
 
-    async fn build_services(&self) -> ironclaw_reborn_composition::RebornServices {
+    async fn build_services(&self) -> ironclaw_reborn_composition::RebornRuntime {
         let input = local_runtime_build_input_with_options(
             RebornCompositionProfile::LocalDev,
             &self.user,
@@ -830,7 +823,7 @@ impl RebornQaCredentialSource {
             TenantId::new(&self.tenant).expect("source tenant id"),
             AgentId::new(&self.agent).expect("source agent id"),
         );
-        build_reborn_services(input)
+        build_runtime(RebornRuntimeInput::from_build_input(input))
             .await
             .expect("build Reborn QA credential source services")
     }
@@ -1288,7 +1281,7 @@ fn env_or_config_identity(name: &str, config_value: Option<&str>, default: &str)
 
 async fn consume_source_secret(
     source: &RebornQaCredentialSource,
-    store: &dyn ironclaw_secrets::SecretStore,
+    store: &dyn ironclaw_secrets::SecretStorePort,
     scope: &ResourceScope,
     handle: &SecretHandle,
     kind: &str,
@@ -1593,7 +1586,7 @@ fn assert_recorded_fixture_matches_expected_result(
         }
         "github_notifications" => {
             // No credential is seeded, so the agent should onboard the github
-            // extension (install + activate) and reach the auth gate rather than
+            // extension through the single install action and reach the auth gate rather than
             // silently give up. The onboarding tool choices are the guardrail;
             // the outcome may be an auth gate or an onboarding reply.
             assert_recorded_tool_call(
@@ -1601,13 +1594,6 @@ fn assert_recorded_fixture_matches_expected_result(
                 fixture_path,
                 &trace,
                 "builtin.extension_install",
-                &["github"],
-            );
-            assert_recorded_tool_call(
-                fixture_name,
-                fixture_path,
-                &trace,
-                "builtin.extension_activate",
                 &["github"],
             );
         }
@@ -1618,13 +1604,6 @@ fn assert_recorded_fixture_matches_expected_result(
                 fixture_path,
                 &trace,
                 "builtin.extension_install",
-                &["gmail"],
-            );
-            assert_recorded_tool_call(
-                fixture_name,
-                fixture_path,
-                &trace,
-                "builtin.extension_activate",
                 &["gmail"],
             );
         }

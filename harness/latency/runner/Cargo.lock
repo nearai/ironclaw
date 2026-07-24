@@ -2477,12 +2477,17 @@ dependencies = [
  "chrono",
  "ironclaw_common",
  "ironclaw_host_api",
+ "ironclaw_secrets",
+ "psl",
+ "rand 0.10.2",
  "secrecy",
  "serde",
  "serde_json",
  "subtle",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
+ "tracing",
  "url",
  "urlencoding",
  "uuid",
@@ -2526,52 +2531,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_channel_delivery"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "ironclaw_channel_host",
- "ironclaw_conversations",
- "ironclaw_host_api",
- "ironclaw_outbound",
- "ironclaw_product_adapters",
- "ironclaw_product_workflow",
- "ironclaw_run_state",
- "ironclaw_threads",
- "ironclaw_triggers",
- "ironclaw_turns",
- "ironclaw_wasm_product_adapters",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "ironclaw_channel_host"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum 0.8.9",
- "ironclaw_auth",
- "ironclaw_conversations",
- "ironclaw_extensions",
- "ironclaw_filesystem",
- "ironclaw_host_api",
- "ironclaw_host_runtime",
- "ironclaw_outbound",
- "ironclaw_product_adapter_registry",
- "ironclaw_product_adapters",
- "ironclaw_product_workflow",
- "ironclaw_threads",
- "ironclaw_turns",
- "ironclaw_wasm_product_adapters",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
-]
-
-[[package]]
 name = "ironclaw_common"
 version = "0.4.2"
 dependencies = [
@@ -2597,7 +2556,6 @@ dependencies = [
  "chrono",
  "ironclaw_filesystem",
  "ironclaw_host_api",
- "ironclaw_product_context",
  "ironclaw_safety",
  "ironclaw_triggers",
  "ironclaw_turns",
@@ -2614,9 +2572,8 @@ name = "ironclaw_dispatcher"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "ironclaw_events",
- "ironclaw_extensions",
- "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_resources",
  "serde_json",
@@ -2665,6 +2622,31 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "ironclaw_extension_host"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "hmac 0.13.0",
+ "ironclaw_auth",
+ "ironclaw_dispatcher",
+ "ironclaw_extensions",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_product",
+ "ironclaw_secrets",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "subtle",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
 ]
 
 [[package]]
@@ -2796,6 +2778,8 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "thiserror 2.0.18",
+ "tokio",
+ "tracing",
  "uuid",
  "zeroize",
 ]
@@ -3017,6 +3001,7 @@ dependencies = [
  "reqwest 0.12.28",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "url",
  "zeroize",
 ]
@@ -3079,43 +3064,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_product_adapter_registry"
-version = "0.1.0"
-dependencies = [
- "ironclaw_extensions",
- "ironclaw_host_api",
- "ironclaw_product_adapters",
- "serde",
- "thiserror 2.0.18",
- "toml 1.1.3+spec-1.1.0",
-]
-
-[[package]]
-name = "ironclaw_product_adapters"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "ironclaw_host_api",
- "ironclaw_turns",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "ironclaw_product_context"
-version = "0.1.0"
-dependencies = [
- "ironclaw_host_api",
- "ironclaw_turns",
-]
-
-[[package]]
-name = "ironclaw_product_workflow"
+name = "ironclaw_product"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -3129,11 +3078,10 @@ dependencies = [
  "ironclaw_common",
  "ironclaw_conversations",
  "ironclaw_events",
+ "ironclaw_extensions",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_outbound",
- "ironclaw_product_adapters",
- "ironclaw_product_context",
  "ironclaw_reborn_traces",
  "ironclaw_run_state",
  "ironclaw_threads",
@@ -3144,6 +3092,7 @@ dependencies = [
  "sha2 0.11.0",
  "thiserror 2.0.18",
  "tokio",
+ "toml 1.1.3+spec-1.1.0",
  "tracing",
  "url",
  "uuid",
@@ -3189,17 +3138,15 @@ dependencies = [
  "ironclaw_auth",
  "ironclaw_authorization",
  "ironclaw_capabilities",
- "ironclaw_channel_delivery",
- "ironclaw_channel_host",
  "ironclaw_common",
  "ironclaw_conversations",
  "ironclaw_event_projections",
  "ironclaw_event_streams",
  "ironclaw_events",
+ "ironclaw_extension_host",
  "ironclaw_extensions",
  "ironclaw_filesystem",
  "ironclaw_first_party_extension_ports",
- "ironclaw_first_party_extensions",
  "ironclaw_hooks",
  "ironclaw_host_api",
  "ironclaw_host_runtime",
@@ -3211,10 +3158,7 @@ dependencies = [
  "ironclaw_observability",
  "ironclaw_outbound",
  "ironclaw_processes",
- "ironclaw_product_adapter_registry",
- "ironclaw_product_adapters",
- "ironclaw_product_context",
- "ironclaw_product_workflow",
+ "ironclaw_product",
  "ironclaw_projects",
  "ironclaw_reborn_config",
  "ironclaw_reborn_event_store",
@@ -3228,13 +3172,10 @@ dependencies = [
  "ironclaw_safety",
  "ironclaw_secrets",
  "ironclaw_skills",
- "ironclaw_slack_v2_adapter",
- "ironclaw_telegram_extension",
  "ironclaw_threads",
  "ironclaw_triggers",
  "ironclaw_trust",
  "ironclaw_turns",
- "ironclaw_wasm_product_adapters",
  "libc",
  "libsql",
  "lru",
@@ -3328,7 +3269,7 @@ dependencies = [
  "ironclaw_common",
  "ironclaw_filesystem",
  "ironclaw_host_api",
- "ironclaw_product_adapters",
+ "ironclaw_product",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -3519,69 +3460,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_slack_v2_adapter"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "ironclaw_product_adapters",
- "ironclaw_turns",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
-]
-
-[[package]]
-name = "ironclaw_telegram_extension"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum 0.8.9",
- "chrono",
- "ironclaw_auth",
- "ironclaw_channel_delivery",
- "ironclaw_channel_host",
- "ironclaw_common",
- "ironclaw_conversations",
- "ironclaw_filesystem",
- "ironclaw_host_api",
- "ironclaw_host_runtime",
- "ironclaw_outbound",
- "ironclaw_product_adapters",
- "ironclaw_product_workflow",
- "ironclaw_run_state",
- "ironclaw_safety",
- "ironclaw_secrets",
- "ironclaw_telegram_v2_adapter",
- "ironclaw_threads",
- "ironclaw_triggers",
- "ironclaw_turns",
- "ironclaw_wasm_product_adapters",
- "rand 0.9.5",
- "secrecy",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "ironclaw_telegram_v2_adapter"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "ironclaw_product_adapters",
- "ironclaw_turns",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "ironclaw_threads"
 version = "0.1.0"
 dependencies = [
@@ -3680,26 +3558,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_wasm_product_adapters"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "hex",
- "hmac 0.13.0",
- "http 1.4.2",
- "ironclaw_product_adapters",
- "ironclaw_wasm",
- "serde_json",
- "sha2 0.11.0",
- "subtle",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "wasmtime",
-]
-
-[[package]]
 name = "ironclaw_webui"
 version = "0.1.0"
 dependencies = [
@@ -3712,7 +3570,7 @@ dependencies = [
  "hex",
  "hmac 0.13.0",
  "ironclaw_host_api",
- "ironclaw_product_workflow",
+ "ironclaw_product",
  "ironclaw_reborn_composition",
  "ironclaw_reborn_openai_compat",
  "jsonwebtoken",
@@ -4887,6 +4745,21 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "psl"
+version = "2.1.220"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "de177021aa731f88221b3ae411cb89d70f66e51487c26ef9c9f65fc7250c22e8"
+dependencies = [
+ "psl-types",
+]
+
+[[package]]
+name = "psl-types"
+version = "2.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
 
 [[package]]
 name = "ptr_meta"

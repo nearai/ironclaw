@@ -29,7 +29,7 @@ use ironclaw_mcp::{
     StaticMcpHostHttpEgressPlanner,
 };
 use ironclaw_resources::InMemoryResourceGovernor;
-use ironclaw_secrets::FilesystemSecretStore;
+use ironclaw_secrets::SecretStore;
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 use serde_json::json;
 
@@ -81,7 +81,7 @@ pub(super) fn local_dev_host_runtime_with_registry_egress_and_mcp(
         ironclaw_processes::ProcessServices::in_memory(),
         HostRuntimeCapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
-    .with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()))
+    .with_secret_store(Arc::new(SecretStore::ephemeral()))
     .with_first_party_capabilities(Arc::new(builtin_first_party_handlers(Arc::new(
         ironclaw_triggers::InMemoryTriggerRepository::default(),
     ))?))
@@ -143,6 +143,7 @@ pub(super) fn mock_mcp_extension_package(
             required_host_ports: Vec::new(),
             runtime_credentials: Vec::new(),
             network_targets: Vec::new(),
+            max_egress_bytes: None,
             resource_profile: None,
             origin_gate_matrix: None,
         }],
@@ -161,6 +162,7 @@ pub(super) fn mock_mcp_extension_package(
         default_permission: PermissionMode::Allow,
         runtime_credentials: Vec::new(),
         network_targets: Vec::new(),
+        max_egress_bytes: None,
         resource_profile: None,
         origin_gate_matrix: None,
     }];

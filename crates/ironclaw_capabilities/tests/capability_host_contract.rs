@@ -15,12 +15,12 @@ async fn capability_host_denies_missing_grant_before_dispatch() {
     let context = execution_context(CapabilitySet::default());
 
     let err = host
-        .invoke_json(CapabilityInvocationRequest {
+        .invoke_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"message": "blocked"}),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "blocked"}),
+        )
         .await
         .unwrap_err();
 
@@ -51,12 +51,12 @@ async fn capability_host_denies_dispatch_when_trust_ceiling_omits_capability_eff
     });
 
     let err = host
-        .invoke_json(CapabilityInvocationRequest {
+        .invoke_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"message": "blocked by trust"}),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "blocked by trust"}),
+        )
         .await
         .unwrap_err();
 
@@ -82,12 +82,12 @@ async fn capability_host_authorized_dispatch_uses_neutral_dispatch_port() {
     let scope = context.resource_scope.clone();
 
     let result = host
-        .invoke_json(CapabilityInvocationRequest {
+        .invoke_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default().set_output_bytes(4096),
-            input: json!({"message": "authorized"}),
-        })
+            capability_id(),
+            ResourceEstimate::default().set_output_bytes(4096),
+            json!({"message": "authorized"}),
+        )
         .await
         .unwrap();
 
@@ -101,6 +101,40 @@ async fn capability_host_authorized_dispatch_uses_neutral_dispatch_port() {
 }
 
 #[tokio::test]
+async fn capability_host_authorize_fold_seals_actorless_run_origin_from_run_id() {
+    let registry = registry_with_echo_capability();
+    let dispatcher = recording_dispatcher();
+    let authorizer = GrantAuthorizer::new();
+    let host = capability_host(&registry, &dispatcher, &authorizer);
+    let mut context = execution_context(CapabilitySet {
+        grants: vec![dispatch_grant()],
+    });
+    let run_id = RunId::new();
+    context.origin = None;
+    context.run_id = Some(run_id);
+    context.authenticated_actor_user_id = None;
+    context.validate().unwrap();
+
+    host.invoke_json(
+        context,
+        capability_id(),
+        ResourceEstimate::default(),
+        json!({"message": "legacy loop origin"}),
+    )
+    .await
+    .unwrap();
+
+    let recorded = dispatcher.last_request().unwrap();
+    assert_eq!(recorded.authenticated_actor_user_id, None);
+    assert_eq!(recorded.invocation.actor, Actor::System);
+    assert_eq!(
+        recorded.invocation.origin,
+        InvocationOrigin::LoopRun(run_id)
+    );
+    assert_eq!(recorded.run_id, Some(run_id));
+}
+
+#[tokio::test]
 async fn capability_host_returns_approval_store_missing_when_approval_cannot_be_persisted() {
     let registry = registry_with_echo_capability();
     let dispatcher = recording_dispatcher();
@@ -108,12 +142,12 @@ async fn capability_host_returns_approval_store_missing_when_approval_cannot_be_
     let context = execution_context(CapabilitySet::default());
 
     let err = host
-        .invoke_json(CapabilityInvocationRequest {
+        .invoke_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"message": "needs approval"}),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "needs approval"}),
+        )
         .await
         .unwrap_err();
 
@@ -150,12 +184,12 @@ async fn capability_host_missing_credential_blocks_before_approval_decision() {
     });
 
     let err = host
-        .invoke_json(CapabilityInvocationRequest {
+        .invoke_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"message": "needs credential"}),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "needs credential"}),
+        )
         .await
         .unwrap_err();
 
@@ -178,12 +212,12 @@ async fn capability_host_fails_closed_on_unsupported_obligations_before_dispatch
     let context = execution_context(CapabilitySet::default());
 
     let err = host
-        .invoke_json(CapabilityInvocationRequest {
+        .invoke_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"message": "must not dispatch"}),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "must not dispatch"}),
+        )
         .await
         .unwrap_err();
 

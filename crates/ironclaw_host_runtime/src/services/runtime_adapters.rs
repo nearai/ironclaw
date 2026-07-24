@@ -11,19 +11,20 @@ use ironclaw_host_api::SecretHandle;
 
 use ironclaw_extensions::ExtensionPackage;
 use ironclaw_host_api::{
-    CapabilityDescriptor, MountView, ResourceEstimate, ResourceReservation, UserId,
-    runtime_policy::EffectiveRuntimePolicy,
+    CapabilityDescriptor, InvocationOrigin, MountView, ResourceEstimate, ResourceReservation,
+    UserId, runtime_policy::EffectiveRuntimePolicy,
 };
 use serde_json::Value;
 
-use super::wasm_execution::{ReservationGuard, execute_prepared_wasm, run_wasm_prepare_blocking};
+use super::wasm_blocking::run_wasm_prepare_blocking;
+use super::wasm_execution::{ReservationGuard, execute_prepared_wasm};
 use super::{
     CapabilityId, DenyWasmHostHttp, DispatchError, ExtensionRuntime, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, InvocationServicesResolutionRequest, InvocationServicesResolver,
     McpError, McpExecutionRequest, McpExecutor, McpInvocation, NetworkObligationPolicyStore,
     PlannerError, PreparedWitTool, ResourceGovernor, ResourceReservationId, ResourceScope,
     RootFilesystem, RuntimeAdapterResult, RuntimeDispatchErrorKind, RuntimeKind, RuntimeLane,
-    ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation, SecretStore,
+    ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation, SecretStorePort,
     SharedRuntimeHttpEgress, WasmError, WasmHostSecrets, WasmRuntimeCredentialProvider,
     WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder, WitToolHost, WitToolRuntime,
     WitToolRuntimeConfig, plan_capability, runtime_http_egress,
@@ -46,7 +47,7 @@ use crate::{
 /// these per call. If `resource_reservation` is present, the lane must
 /// reconcile or release that prepared reservation instead of creating a
 /// second reservation.
-pub(crate) struct RuntimeAdapterRequest<'a, F, G>
+pub(crate) struct RuntimeLaneRequest<'a, F, G>
 where
     F: RootFilesystem,
     G: ResourceGovernor,
@@ -66,6 +67,8 @@ where
     /// Loop turn-run identity forwarded from the dispatch request. `None`
     /// for non-loop callers.
     pub run_id: Option<ironclaw_host_api::RunId>,
+    /// Host-sealed origin used by capability-boundary policy.
+    pub origin: Option<InvocationOrigin>,
     pub estimate: ResourceEstimate,
     pub mounts: Option<MountView>,
     pub resource_reservation: Option<ResourceReservation>,
@@ -85,14 +88,14 @@ where
 {
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, F, G>,
+        request: RuntimeLaneRequest<'_, F, G>,
     ) -> Result<RuntimeAdapterResult, DispatchError>;
 }
 
 type FirstPartyLatencyFields = RuntimeLatencyFields;
 
 fn first_party_latency_fields<F, G>(
-    request: &RuntimeAdapterRequest<'_, F, G>,
+    request: &RuntimeLaneRequest<'_, F, G>,
 ) -> Option<FirstPartyLatencyFields>
 where
     F: RootFilesystem,
@@ -199,7 +202,7 @@ where
 {
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, F, G>,
+        request: RuntimeLaneRequest<'_, F, G>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         let plan =
             plan_capability(request.descriptor, request.runtime_policy).map_err(|error| {
@@ -306,7 +309,7 @@ where
     pub(super) async fn dispatch_json(
         &self,
         lane: RuntimeLane,
-        request: RuntimeAdapterRequest<'_, F, G>,
+        request: RuntimeLaneRequest<'_, F, G>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         #[cfg(test)]
         if let Some(adapter) = self.test_adapters.get(&lane) {
@@ -334,7 +337,7 @@ where
 }
 
 fn fail_unconfigured_lane<F, G>(
-    request: RuntimeAdapterRequest<'_, F, G>,
+    request: RuntimeLaneRequest<'_, F, G>,
 ) -> Result<RuntimeAdapterResult, DispatchError>
 where
     F: RootFilesystem,
@@ -371,7 +374,7 @@ where
 {
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, F, G>,
+        request: RuntimeLaneRequest<'_, F, G>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         let execution = self
             .executor
@@ -423,7 +426,7 @@ where
 {
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, F, G>,
+        request: RuntimeLaneRequest<'_, F, G>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         let execution = self
             .executor
@@ -500,7 +503,7 @@ where
     )]
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, F, G>,
+        request: RuntimeLaneRequest<'_, F, G>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         let latency_fields = first_party_latency_fields(&request);
         let dispatch_started_at = latency_started_at();
@@ -690,6 +693,7 @@ where
             // attribute the action to the acting user.
             authenticated_actor_user_id: request.authenticated_actor_user_id.clone(),
             run_id: request.run_id,
+            origin: request.origin,
             estimate: request.estimate,
             mounts: request.mounts,
             services,
@@ -897,7 +901,7 @@ pub(super) struct WasmRuntimeAdapter {
     /// credential before attempting a call (as ironclaw's own `web_search`
     /// Brave tool does) can never proceed even when the secret is genuinely
     /// provisioned and the credential-injection path above would have worked.
-    secret_store: Option<Arc<dyn SecretStore>>,
+    secret_store: Option<Arc<dyn SecretStorePort>>,
     prepared: Mutex<HashMap<String, Arc<PreparedWitTool>>>,
 }
 
@@ -908,7 +912,7 @@ impl WasmRuntimeAdapter {
         network_policy_store: Arc<NetworkObligationPolicyStore>,
         runtime_http_egress: SharedRuntimeHttpEgress,
         credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
-        secret_store: Option<Arc<dyn SecretStore>>,
+        secret_store: Option<Arc<dyn SecretStorePort>>,
     ) -> Self {
         Self {
             runtime,
@@ -927,7 +931,7 @@ impl WasmRuntimeAdapter {
         network_policy_store: Arc<NetworkObligationPolicyStore>,
         runtime_http_egress: SharedRuntimeHttpEgress,
         credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
-        secret_store: Option<Arc<dyn SecretStore>>,
+        secret_store: Option<Arc<dyn SecretStorePort>>,
     ) -> Result<Self, WasmError> {
         Ok(Self::new(
             WitToolRuntime::new(config)?,
@@ -996,7 +1000,7 @@ where
 {
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, F, G>,
+        request: RuntimeLaneRequest<'_, F, G>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         let module_path = match &request.package.manifest.runtime {
             ExtensionRuntime::Wasm { module } => module
@@ -1039,8 +1043,8 @@ where
             )
             .await
             .map_err(|error| DispatchError::Wasm {
-                kind: wasm_error_kind(&error),
-                model_visible_cause: Some(error.to_string()),
+                kind: error.kind(),
+                model_visible_cause: Some(error.source().to_string()),
             })?,
         );
         let prepared = {
@@ -1085,7 +1089,7 @@ impl WasmRuntimePolicyDiscarder for NetworkPolicyDiscarder {
 /// `Handle::block_on` there is the standard, safe bridge (unlike on a normal
 /// async worker thread, it cannot starve other tasks).
 struct WasmRuntimeSecretsAdapter {
-    store: Arc<dyn SecretStore>,
+    store: Arc<dyn SecretStorePort>,
     scope: ResourceScope,
 }
 
@@ -1186,6 +1190,11 @@ fn script_error_kind(error: &ScriptError) -> RuntimeDispatchErrorKind {
         ScriptError::InvalidInvocation { .. } => RuntimeDispatchErrorKind::InputEncode,
         ScriptError::ExitFailure { .. } => RuntimeDispatchErrorKind::ExitFailure,
         ScriptError::OutputLimitExceeded { .. } => RuntimeDispatchErrorKind::OutputTooLarge,
+        // A script timeout does not encode whether the request, runtime, or
+        // backend caused the deadline to elapse. Keep it in the executor lane
+        // until the runtime can provide typed timeout provenance; otherwise a
+        // transient host slowdown would be mislabeled as a deterministic
+        // model-visible operation failure and lose its retry path.
         ScriptError::Timeout { .. } => RuntimeDispatchErrorKind::Executor,
         ScriptError::InvalidOutput { .. } => RuntimeDispatchErrorKind::OutputDecode,
     }
@@ -1195,6 +1204,7 @@ fn mcp_error_kind(error: &McpError) -> RuntimeDispatchErrorKind {
     match error {
         McpError::Resource(_) => RuntimeDispatchErrorKind::Resource,
         McpError::Client { .. } => RuntimeDispatchErrorKind::Client,
+        McpError::InvalidToolCatalog { .. } => RuntimeDispatchErrorKind::OutputDecode,
         McpError::AuthRequired { .. } => RuntimeDispatchErrorKind::Client,
         McpError::UnsupportedTransport { .. } => RuntimeDispatchErrorKind::UnsupportedRunner,
         McpError::HostHttpEgressRequired { .. } => RuntimeDispatchErrorKind::NetworkDenied,

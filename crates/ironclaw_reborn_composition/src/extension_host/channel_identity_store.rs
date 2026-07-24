@@ -53,22 +53,22 @@ pub(crate) fn channel_identity_mount_view(
 }
 
 /// The generic filesystem-backed channel-identity binding store.
-pub(crate) struct FilesystemChannelIdentityStore {
+pub(crate) struct ChannelIdentityStore {
     filesystem: Arc<ScopedFilesystem<dyn RootFilesystem>>,
     scope: ResourceScope,
     locks: Arc<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>>,
 }
 
-impl std::fmt::Debug for FilesystemChannelIdentityStore {
+impl std::fmt::Debug for ChannelIdentityStore {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("FilesystemChannelIdentityStore")
+            .debug_struct("ChannelIdentityStore")
             .field("scope", &self.scope)
             .finish_non_exhaustive()
     }
 }
 
-impl FilesystemChannelIdentityStore {
+impl ChannelIdentityStore {
     pub(crate) fn new(
         filesystem: Arc<dyn RootFilesystem>,
         tenant_id: TenantId,
@@ -96,7 +96,7 @@ impl FilesystemChannelIdentityStore {
     /// The (tenant, user) identity scope this store reads and writes under —
     /// captured by the channel-connection test bundle so its restart-survival
     /// reopen probe reconstructs the store with the same scoping production
-    /// composed (`build_reborn_services`' channel egress scope). Tests only.
+    /// composed (`build_runtime`' channel egress scope). Tests only.
     #[cfg(feature = "test-support")]
     pub(crate) fn identity_scope_tenant_and_user(&self) -> (&TenantId, &UserId) {
         (&self.scope.tenant_id, &self.scope.user_id)
@@ -306,7 +306,7 @@ impl FilesystemChannelIdentityStore {
 }
 
 #[async_trait::async_trait]
-impl RebornUserIdentityLookup for FilesystemChannelIdentityStore {
+impl RebornUserIdentityLookup for ChannelIdentityStore {
     async fn resolve_user_identity(
         &self,
         provider: &str,
@@ -386,7 +386,7 @@ impl RebornUserIdentityLookup for FilesystemChannelIdentityStore {
 }
 
 #[async_trait::async_trait]
-impl RebornUserIdentityBindingStore for FilesystemChannelIdentityStore {
+impl RebornUserIdentityBindingStore for ChannelIdentityStore {
     async fn bind_user_identity(
         &self,
         binding: RebornUserIdentityBinding,
@@ -442,7 +442,7 @@ impl RebornUserIdentityBindingStore for FilesystemChannelIdentityStore {
 }
 
 #[async_trait::async_trait]
-impl RebornUserIdentityBindingDeleteStore for FilesystemChannelIdentityStore {
+impl RebornUserIdentityBindingDeleteStore for ChannelIdentityStore {
     async fn delete_user_identity_bindings_for_user(
         &self,
         provider: &str,
@@ -590,8 +590,8 @@ mod tests {
 
     use super::*;
 
-    fn store() -> FilesystemChannelIdentityStore {
-        FilesystemChannelIdentityStore::new(
+    fn store() -> ChannelIdentityStore {
+        ChannelIdentityStore::new(
             Arc::new(InMemoryBackend::new()),
             TenantId::new("tenant-alpha").expect("tenant"),
             UserId::new("operator").expect("user"),

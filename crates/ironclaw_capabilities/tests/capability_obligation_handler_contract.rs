@@ -25,12 +25,12 @@ async fn capability_host_uses_obligation_handler_before_dispatch() {
         capability_host(&registry, &dispatcher, &authorizer).with_obligation_handler(&handler);
 
     let result = host
-        .invoke_json(CapabilityInvocationRequest {
-            context: execution_context(CapabilitySet::default()),
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"message": "handled"}),
-        })
+        .invoke_json(
+            execution_context(CapabilitySet::default()),
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "handled"}),
+        )
         .await
         .unwrap();
 
@@ -55,12 +55,12 @@ async fn capability_host_still_fails_closed_when_handler_rejects_obligations() {
         capability_host(&registry, &dispatcher, &authorizer).with_obligation_handler(&handler);
 
     let err = host
-        .invoke_json(CapabilityInvocationRequest {
-            context: execution_context(CapabilitySet::default()),
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"message": "must not dispatch"}),
-        })
+        .invoke_json(
+            execution_context(CapabilitySet::default()),
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "must not dispatch"}),
+        )
         .await
         .unwrap_err();
 
@@ -73,7 +73,7 @@ async fn capability_host_still_fails_closed_when_handler_rejects_obligations() {
 }
 
 #[tokio::test]
-async fn capability_host_passes_prepared_effects_to_dispatch() {
+async fn capability_host_authorize_fold_seals_authority_and_prepared_effects_to_dispatch() {
     let registry = registry_with_echo_capability();
     let reservation_id = ResourceReservationId::new();
     let narrowed_mounts = mount_view(
@@ -88,46 +88,72 @@ async fn capability_host_passes_prepared_effects_to_dispatch() {
         "/projects/demo",
         MountPermissions::read_write(),
     );
+    let actor = UserId::new("authenticated-alice").unwrap();
+    let process_id = ProcessId::new();
+    let parent_process_id = ProcessId::new();
+    context.authenticated_actor_user_id = Some(actor.clone());
+    context.process_id = Some(process_id);
+    context.parent_process_id = Some(parent_process_id);
+    context.validate().unwrap();
     let estimate = ResourceEstimate::default().set_concurrency_slots(1);
     let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let correlation_id = context.correlation_id;
     let authorizer = ObligatingAuthorizer::new(vec![
         Obligation::UseScopedMounts {
             mounts: narrowed_mounts.clone(),
         },
         Obligation::ReserveResources { reservation_id },
     ]);
+    let expected_reservation = ResourceReservation {
+        id: reservation_id,
+        scope: scope.clone(),
+        estimate: estimate.clone(),
+    };
     let handler = EffectObligationHandler {
         mounts: Some(narrowed_mounts.clone()),
-        reservation: Some(ResourceReservation {
-            id: reservation_id,
-            scope: scope.clone(),
-            estimate: estimate.clone(),
-        }),
+        reservation: Some(expected_reservation.clone()),
         aborted: Arc::new(AtomicBool::new(false)),
     };
     let host =
         capability_host(&registry, &dispatcher, &authorizer).with_obligation_handler(&handler);
 
-    host.invoke_json(CapabilityInvocationRequest {
+    host.invoke_json(
         context,
-        capability_id: capability_id(),
-        estimate: estimate.clone(),
-        input: json!({"message": "prepared effects"}),
-    })
+        capability_id(),
+        estimate.clone(),
+        json!({"message": "prepared effects"}),
+    )
     .await
     .unwrap();
 
     let request = dispatcher.last_request().unwrap();
+    assert_eq!(
+        request.invocation.activity_id,
+        ActivityId::from_uuid(invocation_id.as_uuid())
+    );
+    assert_eq!(request.authenticated_actor_user_id, Some(actor.clone()));
+    assert_eq!(request.invocation.actor, Actor::Sealed(actor));
+    assert_eq!(
+        request.invocation.origin,
+        InvocationOrigin::Product(ProductKind::new("tests").unwrap())
+    );
+    assert_eq!(request.invocation.correlation_id, correlation_id);
+    assert_eq!(request.invocation.process_id, Some(process_id));
+    assert_eq!(
+        request.invocation.parent_process_id,
+        Some(parent_process_id)
+    );
+    assert_eq!(
+        request.invocation.input,
+        json!({"message": "prepared effects"})
+    );
     assert_eq!(request.invocation.scope, scope);
     assert_eq!(request.invocation.estimate, estimate);
+    assert_eq!(request.lane, RuntimeLane::Wasm);
+    assert_eq!(request.run_id, None);
     assert_eq!(request.mounts, Some(narrowed_mounts));
-    assert_eq!(
-        request
-            .resource_reservation
-            .as_ref()
-            .map(|reservation| reservation.id),
-        Some(reservation_id)
-    );
+    assert_eq!(request.resource_reservation, Some(expected_reservation));
 }
 
 #[tokio::test]
@@ -145,12 +171,12 @@ async fn capability_host_completes_post_dispatch_obligations_before_returning() 
         capability_host(&registry, &dispatcher, &authorizer).with_obligation_handler(&handler);
 
     let result = host
-        .invoke_json(CapabilityInvocationRequest {
-            context: execution_context(CapabilitySet::default()),
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"message": "post dispatch"}),
-        })
+        .invoke_json(
+            execution_context(CapabilitySet::default()),
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "post dispatch"}),
+        )
         .await
         .unwrap();
 
@@ -186,12 +212,12 @@ async fn capability_host_aborts_staged_obligations_when_completion_fails() {
         capability_host(&registry, &dispatcher, &authorizer).with_obligation_handler(&handler);
 
     let err = host
-        .invoke_json(CapabilityInvocationRequest {
+        .invoke_json(
             context,
-            capability_id: capability_id(),
+            capability_id(),
             estimate,
-            input: json!({"message": "completion fails"}),
-        })
+            json!({"message": "completion fails"}),
+        )
         .await
         .unwrap_err();
 
@@ -340,12 +366,12 @@ async fn invoke_dispatch_carries_witness_none_mounts_verbatim_not_a_default() {
     let host =
         capability_host(&registry, &dispatcher, &authorizer).with_obligation_handler(&handler);
 
-    host.invoke_json(CapabilityInvocationRequest {
+    host.invoke_json(
         context,
-        capability_id: capability_id(),
-        estimate: estimate.clone(),
-        input: json!({"message": "none mounts"}),
-    })
+        capability_id(),
+        estimate.clone(),
+        json!({"message": "none mounts"}),
+    )
     .await
     .unwrap();
 
@@ -434,12 +460,12 @@ async fn invoke_fails_closed_and_releases_reservation_when_witness_expired() {
             .with_obligation_handler(&handler);
 
     let err = host
-        .invoke_json(CapabilityInvocationRequest {
+        .invoke_json(
             context,
-            capability_id: capability_id(),
+            capability_id(),
             estimate,
-            input: json!({"message": "expired witness"}),
-        })
+            json!({"message": "expired witness"}),
+        )
         .await
         .unwrap_err();
 

@@ -39,7 +39,6 @@ pub(super) fn bundle() -> PackageBundle {
         // for the generic credential-setup path, matching `github`'s pattern
         // for tools with a single simple secret.
         onboarding: None,
-        oauth_setup: None,
         // WASM tool package: trust comes from the extension registry, not an
         // admin local-manifest effect grant.
         trust_effects: None,

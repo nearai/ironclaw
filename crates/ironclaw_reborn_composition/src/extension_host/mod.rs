@@ -15,7 +15,6 @@ pub(crate) mod admin_configuration_capability;
 pub(crate) mod available_extension_import;
 pub(crate) mod available_extensions;
 pub(crate) mod bundled_skills;
-pub(crate) mod channel_config;
 pub(crate) mod channel_connection;
 pub(crate) mod channel_delivery;
 pub(crate) mod channel_dm_provisioning;
@@ -39,17 +38,19 @@ pub(crate) mod extension_lifecycle_capabilities;
 pub(crate) mod extension_lifecycle_capabilities_auth_tests;
 pub(crate) mod extension_lifecycle_command;
 pub(crate) mod extension_removal_cleanup;
+pub(crate) mod first_party;
 pub(crate) mod generic_host;
-pub(crate) mod gsuite;
 pub(crate) mod host_api_contracts;
 #[cfg(test)]
 mod host_remediation_contract_tests;
 pub(crate) mod lifecycle;
 pub(crate) mod mcp;
 pub(crate) mod mcp_discovery;
+pub(crate) mod operator_config_capability;
 pub(crate) mod provider_instance_readiness;
 pub(crate) mod reply_contexts;
 pub(crate) mod run_delivery_ports;
+pub(crate) mod skill_auto_activate_capability;
 pub(crate) mod skill_learning;
 pub(crate) mod skill_listing;
 pub(crate) mod web_access_bootstrap;
@@ -62,13 +63,13 @@ pub(crate) use extension_bundle::unzip_extension_bundle;
 
 #[cfg(test)]
 pub(crate) async fn filesystem_installation_store_for_test()
--> ironclaw_extensions::FilesystemExtensionInstallationStore {
+-> ironclaw_extensions::ExtensionInstallationStore {
     use std::sync::Arc;
 
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{HostPortCatalog, VirtualPath};
 
-    ironclaw_extensions::FilesystemExtensionInstallationStore::load_at(
+    ironclaw_extensions::ExtensionInstallationStore::load_at(
         Arc::new(InMemoryBackend::new()),
         VirtualPath::new("/system/extensions/.installations/test").expect("valid test path"),
         HostPortCatalog::empty(),

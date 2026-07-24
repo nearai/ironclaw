@@ -19,9 +19,8 @@ use ironclaw_turns::{
     events::EventCursor,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
-        BatchPolicyKind, CapabilityBatchInvocation, CapabilityDeniedReasonKind,
-        CapabilityDescriptorView, CapabilityInputRef, CapabilityInvocation, CapabilityProgress,
-        CapabilitySurfaceVersion, CommunicationRuntimeContext, ConcurrencyHint,
+        BatchPolicyKind, CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityInputRef,
+        CapabilityProgress, CapabilitySurfaceVersion, CommunicationRuntimeContext, ConcurrencyHint,
         ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState,
         DeliveryTargetSummary, EphemeralInstructionMaterializationStore, FinalizeAssistantMessage,
         HostManagedLoopModelPort, HostManagedLoopPromptPort, InMemoryLoopHostMilestoneSink,
@@ -39,10 +38,11 @@ use ironclaw_turns::{
         LoopModelGatewayError, LoopModelGatewayRequest, LoopModelMessage, LoopModelPolicyGuard,
         LoopModelPort, LoopModelProgressSink, LoopModelRequest, LoopModelResponse,
         LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority,
-        LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-        LoopRunInfoPort, LoopRuntimeContext, LoopSafeSummary, LoopTranscriptPort, ModelWorkOutcome,
-        ModelWorkRequest, ParentLoopOutput, PromptMode, PromptSkillContextMetadata,
-        SkillTrustLevel, VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
+        LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRequest,
+        LoopRequestBatch, LoopRunContext, LoopRunInfoPort, LoopRuntimeContext, LoopSafeSummary,
+        LoopTranscriptPort, ModelWorkOutcome, ModelWorkRequest, ParentLoopOutput, PromptMode,
+        PromptSkillContextMetadata, SkillTrustLevel, VisibleCapabilityRequest,
+        VisibleCapabilitySurface, resolution,
     },
     runner::{ClaimRunRequest, TurnRunTransitionPort},
 };
@@ -2374,7 +2374,7 @@ async fn capability_invocations_must_cite_visible_surface_before_host_dispatch()
     let foreign = CapabilityId::new("demo.foreign").unwrap();
 
     let error = host
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
             capability_id: foreign,
@@ -2454,7 +2454,7 @@ fn loop_host_refs_validate_when_deserialized() {
         "capability_id": "demo.echo",
         "input_ref": {"raw": "RAW_AGENT_LOOP_HOST_SENTINEL"}
     });
-    assert!(serde_json::from_value::<CapabilityInvocation>(invalid_invocation).is_err());
+    assert!(serde_json::from_value::<LoopRequest>(invalid_invocation).is_err());
 
     let invalid_checkpoint = serde_json::json!({
         "kind": "before_block",
@@ -2652,7 +2652,7 @@ impl AgentLoopDriver for CapabilityDriver {
             .await
             .map_err(driver_error)?;
         let outcome = host
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: surface.descriptors[0].capability_id.clone(),
@@ -3222,7 +3222,7 @@ impl LoopCapabilityPort for RecordingAgentLoopHost {
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<ironclaw_host_api::Resolution, AgentLoopHostError> {
         if request.surface_version != self.visible_surface.version
             || !self
@@ -3251,7 +3251,7 @@ impl LoopCapabilityPort for RecordingAgentLoopHost {
 
     async fn invoke_capability_batch(
         &self,
-        _request: CapabilityBatchInvocation,
+        _request: LoopRequestBatch,
     ) -> Result<ironclaw_host_api::ResolutionBatch, AgentLoopHostError> {
         Ok(ironclaw_host_api::ResolutionBatch {
             resolutions: Vec::new(),

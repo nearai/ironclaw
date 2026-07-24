@@ -21,7 +21,11 @@ layer = "app"
 # budget pipeline end-to-end. Enable with `cargo test --features
 # test-support.
 test-support = [
+    "ironclaw_extension_host/test-support",
+    "dep:ironclaw_first_party_extensions",
     "ironclaw_host_runtime/test-support",
+    "ironclaw_outbound/test-support",
+    "ironclaw_product/test-support",
     "ironclaw_runner/test-support",
 ]
 [dependencies]
@@ -42,7 +46,6 @@ ironclaw_event_streams = { path = "../ironclaw_event_streams" }
 ironclaw_events = { path = "../ironclaw_events" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
-ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions" }
 ironclaw_hooks = { path = "../ironclaw_hooks" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_extension_host = { path = "../ironclaw_extension_host" }
@@ -55,9 +58,7 @@ ironclaw_network = { path = "../ironclaw_network" }
 ironclaw_observability = { path = "../ironclaw_observability" }
 ironclaw_outbound = { path = "../ironclaw_outbound" }
 ironclaw_processes = { path = "../ironclaw_processes" }
-ironclaw_product_adapters = { path = "../ironclaw_product_adapters", features = ["host-auth-mint"] }
-ironclaw_product_adapter_registry = { path = "../ironclaw_product_adapter_registry" }
-ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
+ironclaw_product = { path = "../ironclaw_product", features = ["host-auth-mint"] }
 ironclaw_runner = { path = "../ironclaw_runner" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config" }
 ironclaw_reborn_identity = { path = "../ironclaw_reborn_identity" }
@@ -65,6 +66,10 @@ ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store" }
 ironclaw_reborn_openai_compat = { path = "../ironclaw_reborn_openai_compat" }
 ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces" }
 ironclaw_first_party_extension_ports = { path = "../ironclaw_first_party_extension_ports" }
+# DEL-7: composition still does not link concrete first-party extensions in
+# production. The optional edge is enabled only by `test-support` so downstream
+# integration harnesses can mirror the binary's injected bundle/registrar wiring.
+ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions", optional = true }
 ironclaw_resources = { path = "../ironclaw_resources" }
 ironclaw_run_state = { path = "../ironclaw_run_state" }
 ironclaw_runtime_policy = { path = "../ironclaw_runtime_policy" }
@@ -76,7 +81,6 @@ ironclaw_triggers = { path = "../ironclaw_triggers" }
 ironclaw_projects = { path = "../ironclaw_projects" }
 ironclaw_trust = { path = "../ironclaw_trust" }
 ironclaw_turns = { path = "../ironclaw_turns" }
-ironclaw_product_context = { path = "../ironclaw_product_context", version = "0.1.0" }
 nix = { version = "0.30", default-features = false, features = ["process"] }
 # Unpacking uploaded WASM-tool bundles for the WebUI "Install Tool" import flow.
 zip = { version = "8", default-features = false, features = ["deflate"] }
@@ -110,6 +114,11 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 ironclaw_extension_host = { path = "../ironclaw_extension_host", features = ["test-support"] }
+# DEL-7: composition no longer links first-party extensions in production; the
+# binary injects them as neutral data. The dev-dependency stays so the crate's
+# own unit/integration tests (and the test-support inventory helper) can build
+# the catalog and trust policy without the binary.
+ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions" }
 async-trait = "0.1"
 chrono = "0.4"
 hmac = "0.13"
@@ -142,12 +151,12 @@ ironclaw_conversations = { path = "../ironclaw_conversations" }
 ironclaw_reborn_composition = { path = ".", features = ["test-support"] }
 ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_turns = { path = "../ironclaw_turns", features = ["test-support"] }
-ironclaw_product_workflow = { path = "../ironclaw_product_workflow", features = ["test-support"] }
-ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
-# The ported channel-host e2e suite drives the generic assembly with slack
-# fixtures; dev-dependency linkage of concrete extension crates is the
-# sanctioned test exception (DEL-7).
+ironclaw_product = { path = "../ironclaw_product", features = ["test-support"] }
+# The ported channel-host e2e suite drives the generic assembly with real
+# channel adapters; dev-dependency linkage of concrete extension crates is
+# the sanctioned test exception (DEL-7).
 ironclaw_slack_extension = { path = "../ironclaw_slack_extension" }
+ironclaw_telegram_extension = { path = "../ironclaw_telegram_extension" }
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 rust_decimal_macros = "1"
 sha2 = "0.11"

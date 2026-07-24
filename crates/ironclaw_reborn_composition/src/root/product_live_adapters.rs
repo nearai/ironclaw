@@ -41,10 +41,7 @@ use ironclaw_turns::{
     },
 };
 
-use crate::{
-    RebornServices,
-    projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore},
-};
+use crate::projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore};
 
 #[derive(Debug, Error)]
 pub enum ProductLivePlannedRuntimeAdapterError {
@@ -735,11 +732,11 @@ pub struct ProductLivePlannedRuntimeAdapterConfig {
     /// [`GateRecord`]s into and a later resume renders from (§5.2.9). Without it
     /// approval/auth resumes cannot load the gate record, so it is wired into
     /// the capability port exactly as the local-dev path does (#6287).
-    pub gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore>,
+    pub gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort>,
     /// Host-private replay-payload store the capability port persists a gate's
     /// `{input, estimate}` into at the fresh raise and reconstitutes on resume
     /// (§5.3 Stage 2a-i). Without it a resume fails closed with no replay input.
-    pub replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
+    pub replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort>,
 }
 
 /// Adapter bundle consumed by `build_product_live_planned_runtime`.
@@ -773,26 +770,20 @@ pub struct ProductLivePlannedRuntimeAdapters {
     /// bundle wires it via `with_gate_record_store`; without it the turn
     /// executor reloads an empty requirement set on an `AuthRequired` resume and
     /// applies an unactionable auth block (#6299 / #6287 IronLoop).
-    pub gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore>,
+    pub gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort>,
     /// Host-private replay-payload store, retained alongside the gate-record
     /// store for the same reason — the resume reconstitutes `{input, estimate}`
     /// from it, keyed by `InvocationId`.
-    pub replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
+    pub replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort>,
 }
 
 impl ProductLivePlannedRuntimeAdapters {
-    /// Builds the adapter bundle from `RebornServices` and explicit product-live dependencies.
-    ///
-    /// Returns `MissingHostRuntime` when the service graph has no host runtime facade.
-    pub fn from_services(
-        services: &RebornServices,
+    /// Builds the adapter bundle from a composed host runtime and explicit
+    /// product-live dependencies.
+    pub fn from_host_runtime(
+        host_runtime: Arc<dyn HostRuntime>,
         config: ProductLivePlannedRuntimeAdapterConfig,
     ) -> Result<Self, ProductLivePlannedRuntimeAdapterError> {
-        let host_runtime = services
-            .host_runtime
-            .clone()
-            .ok_or(ProductLivePlannedRuntimeAdapterError::MissingHostRuntime)?;
-
         // Retain the host-private stores on the bundle (cheap Arc clones) so a
         // consumer building the runner from this bundle wires the SAME stores
         // the capability factory persists into (#6299). The factory takes owned
@@ -838,8 +829,8 @@ struct ProductLiveLoopCapabilityPortFactory {
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
-    gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore>,
-    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
+    gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort>,
+    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort>,
 }
 
 impl ProductLiveLoopCapabilityPortFactory {
@@ -849,8 +840,8 @@ impl ProductLiveLoopCapabilityPortFactory {
         input_resolver: Arc<dyn LoopCapabilityInputResolver>,
         result_writer: Arc<dyn LoopCapabilityResultWriter>,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
-        gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore>,
-        replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
+        gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort>,
+        replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort>,
     ) -> Self {
         Self {
             runtime,

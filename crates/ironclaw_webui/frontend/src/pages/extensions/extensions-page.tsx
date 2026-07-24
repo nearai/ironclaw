@@ -68,7 +68,6 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
     actionResult,
     clearResult,
     install,
-    activate,
     remove,
     isRemoving,
     importTool,
@@ -90,15 +89,6 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
     });
   }, [extensionToRemove, remove]);
   const handleSaved = React.useCallback(() => invalidate(), [invalidate]);
-  const handleActivateFromModal = React.useCallback(
-    (extension) => {
-      if (!extension) return;
-      activate(extension);
-      setConfiguring(null);
-    },
-    [activate]
-  );
-
   // `mcp` was the pre-unification name of the tools view; keep main-era deep
   // links working while the canonical tab id is `tools` (product taxonomy —
   // MCP is a runtime badge, never a grouping axis).
@@ -159,7 +149,6 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
     channels: (<ChannelsTab
       channels={channels}
       channelRegistry={channelRegistry}
-      onActivate={activate}
       onConfigure={handleConfigure}
       onRemove={setExtensionToRemove}
       onInstall={handleInstall}
@@ -168,7 +157,6 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
     tools: (<ToolsTab
       tools={tools}
       toolRegistry={toolRegistry}
-      onActivate={activate}
       onConfigure={handleConfigure}
       onRemove={setExtensionToRemove}
       onInstall={handleInstall}
@@ -177,7 +165,6 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
     registry: (<RegistryTab
       catalogEntries={catalogEntries}
       onInstall={handleInstall}
-      onActivate={activate}
       onConfigure={handleConfigure}
       onRemove={setExtensionToRemove}
       onImport={handleImport}
@@ -211,7 +198,6 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
       (
         <ConfigureModal
           extension={configuring}
-          onActivate={handleActivateFromModal}
           onClose={handleCloseModal}
           onSaved={handleSaved}
         />

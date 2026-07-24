@@ -25,7 +25,7 @@ use ironclaw_host_api::{
 use ironclaw_resources::ResourceGovernor;
 
 use super::RootFilesystem;
-use super::runtime_adapters::{RuntimeAdapterRequest, RuntimeLaneExecutor};
+use super::runtime_adapters::{RuntimeLaneExecutor, RuntimeLaneRequest};
 
 /// Binds extension packages to their runtime lanes, yielding one
 /// [`ToolAdapter`] per extension (the adapter routes internally by
@@ -146,7 +146,7 @@ where
             .executor
             .dispatch_json(
                 self.lane,
-                RuntimeAdapterRequest {
+                RuntimeLaneRequest {
                     package: &self.package,
                     descriptor,
                     filesystem: self.filesystem.as_ref(),
@@ -160,6 +160,11 @@ where
                     // ToolCall does not carry loop turn-run identity either; only
                     // the first-party coding lane consumes `run_id` today.
                     run_id: None,
+                    // Legacy extension-host calls do not carry a sealed
+                    // invocation origin. They cannot claim scheduled-loop
+                    // lineage; origin-sensitive first-party policy therefore
+                    // sees `None` rather than a fabricated classification.
+                    origin: None,
                     estimate: call.resources.estimate,
                     mounts: call.resources.mounts,
                     resource_reservation: call.resources.reservation,

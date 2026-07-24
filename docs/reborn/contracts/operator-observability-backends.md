@@ -8,6 +8,11 @@ PR #4608 added the WebUI v2 route shells and product-workflow DTOs for operator 
 
 `GET /api/webchat/v2/operator/status` should report a bounded, redacted snapshot of the current Reborn host.
 
+The WebUI route must consume the descriptor-backed ProductSurface query view
+`operator_status`; the legacy `get_operator_status` facade method is a
+compatibility wrapper over that same query path while `RebornServicesApi`
+shrinks toward §5.2.
+
 Required payload shape, nested under the `operator_status` field of the root
 `RebornOperatorCommandPlaneResponse`:
 
@@ -27,6 +32,11 @@ Minimum backend inputs:
 `GET /api/webchat/v2/operator/diagnostics` is the canonical Reborn doctor
 surface. It must aggregate existing typed service evidence rather than
 implementing a separate diagnostic command plane.
+
+The WebUI route must consume the descriptor-backed ProductSurface query view
+`operator_diagnostics`; the legacy `get_operator_diagnostics` facade method is
+a compatibility wrapper over that same query path while `RebornServicesApi`
+shrinks toward §5.2.
 
 Required behavior:
 

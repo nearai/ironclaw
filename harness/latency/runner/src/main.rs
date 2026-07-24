@@ -24,7 +24,7 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_reborn_composition::{
     LibSqlProductionSubstrateConfig, PollSettings, PostgresProductionSubstrateConfig,
-    RebornBuildInput, RebornCompositionProfile, RebornProductionRuntimePolicy, RebornRuntime,
+    RebornHostBindings, RebornCompositionProfile, RebornProductionRuntimePolicy, RebornRuntime,
     RebornRuntimeIdentity, RebornRuntimeInput, build_libsql_production_host_runtime_services,
     build_postgres_production_host_runtime_services, build_reborn_runtime, build_webui_services,
     hosted_single_tenant_runtime_policy, local_runtime_build_input,
@@ -33,15 +33,15 @@ use ironclaw_reborn_event_store::RebornEventStoreConfig;
 use ironclaw_resources::{
     FilesystemResourceGovernor, ResourceAccount, ResourceGovernor, ResourceLimits,
 };
-use ironclaw_run_state::{ApprovalRequestStore, ApprovalStatus, FilesystemApprovalRequestStore};
-use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore, SecretsCrypto};
+use ironclaw_run_state::{ApprovalRequestStore, ApprovalRequestStorePort, ApprovalStatus};
+use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStorePort, SecretsCrypto};
 use ironclaw_triggers::{
     LibSqlTriggerRepository, PostgresTriggerRepository, TriggerId, TriggerRecord,
     TriggerRepository, TriggerSchedule, TriggerSourceKind, TriggerState,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, AllowAllTurnAdmissionPolicy, BlockedReason, CancelRunRequest,
-    CheckpointSchemaId, FilesystemTurnStateRowStore, GateRef, GetLoopCheckpointRequest,
+    CheckpointSchemaId, TurnStateRowStore, GateRef, GetLoopCheckpointRequest,
     GetRunStateRequest, IdempotencyKey, InMemoryRunProfileResolver, LoopCheckpointKind,
     LoopCheckpointStore, PutLoopCheckpointRequest, ReplyTargetBindingRef, ResumeTurnPrecondition,
     ResumeTurnRequest, RunProfileRequest, RunProfileVersion, SanitizedCancelReason,
@@ -304,8 +304,8 @@ struct BackendContext {
     fs: Arc<dyn RootFilesystem>,
     turn_state: Arc<dyn TurnLifecycleStore>,
     trigger_repository: Arc<dyn TriggerRepository>,
-    approval_requests: Arc<dyn ApprovalRequestStore>,
-    secret_store: Arc<dyn SecretStore>,
+    approval_requests: Arc<dyn ApprovalRequestStorePort>,
+    secret_store: Arc<dyn SecretStorePort>,
     resource_governor: Arc<dyn ResourceGovernor>,
     webui_session: Arc<OnceCell<WebuiRuntimeContext>>,
     webui_postgres_pool: Option<deadpool_postgres::Pool>,
@@ -421,12 +421,12 @@ where
     let scoped = Arc::new(ScopedFilesystem::with_fixed_view(fs, mounts));
     // Both backends run the one production turn-state store; `backend` only
     // varies the durable filesystem mounted underneath `scoped` (above).
-    Ok(Arc::new(FilesystemTurnStateRowStore::new(scoped)))
+    Ok(Arc::new(TurnStateRowStore::new(scoped)))
 }
 
 struct ControlPlaneStores {
-    approval_requests: Arc<dyn ApprovalRequestStore>,
-    secret_store: Arc<dyn SecretStore>,
+    approval_requests: Arc<dyn ApprovalRequestStorePort>,
+    secret_store: Arc<dyn SecretStorePort>,
     resource_governor: Arc<dyn ResourceGovernor>,
 }
 
@@ -435,8 +435,8 @@ where
     F: RootFilesystem + 'static,
 {
     let scoped = scoped_control_plane_fs(fs);
-    let approval_requests = Arc::new(FilesystemApprovalRequestStore::new(Arc::clone(&scoped)));
-    let secret_store = Arc::new(FilesystemSecretStore::new(
+    let approval_requests = Arc::new(ApprovalRequestStore::new(Arc::clone(&scoped)));
+    let secret_store = Arc::new(SecretStore::new(
         Arc::clone(&scoped),
         latency_secrets_crypto(),
     ));

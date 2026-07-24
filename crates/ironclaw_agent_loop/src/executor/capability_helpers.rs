@@ -7,11 +7,11 @@ use ironclaw_turns::{
         AgentLoopDriverHost, AppendCapabilityResultRef, CapabilityApprovalResume,
         CapabilityAuthResume, CapabilityCallCandidate, CapabilityDescriptorView, CapabilityFailure,
         CapabilityFailureDetail, CapabilityFailureKind, CapabilityInputIssue,
-        CapabilityInputRepair, CapabilityInvocation, CapabilityRecoveryHint,
-        CapabilityResultMessage, CapabilitySurfaceVersion, ModelVisibleToolObservation,
-        ObservationTrust, ProviderToolCall, ProviderToolCallReference,
-        RegisterProviderToolCallRequest, SameCallRetryConstraint, ToolObservationDetail,
-        ToolObservationStatus, ToolRecoveryObservation, VisibleCapabilitySurface,
+        CapabilityInputRepair, CapabilityRecoveryHint, CapabilityResultMessage,
+        CapabilitySurfaceVersion, LoopRequest, ModelVisibleToolObservation, ObservationTrust,
+        ProviderToolCall, ProviderToolCallReference, RegisterProviderToolCallRequest,
+        SameCallRetryConstraint, ToolObservationDetail, ToolObservationStatus,
+        ToolRecoveryObservation, VisibleCapabilitySurface,
     },
 };
 
@@ -31,8 +31,8 @@ const MAX_MODEL_OBSERVATION_TEXT_BYTES: usize = 256;
 pub(super) fn capability_invocation_from_candidate(
     call: CapabilityCallCandidate,
     approval_resume: Option<CapabilityApprovalResume>,
-) -> CapabilityInvocation {
-    CapabilityInvocation {
+) -> LoopRequest {
+    LoopRequest {
         activity_id: call.activity_id,
         surface_version: call.surface_version,
         capability_id: call.capability_id,
@@ -42,7 +42,7 @@ pub(super) fn capability_invocation_from_candidate(
     }
 }
 
-/// Builds a `CapabilityInvocation` from an auth-resumed candidate.
+/// Builds a `LoopRequest` from an auth-resumed candidate.
 ///
 /// When `pending_auth.resume_token` is set (i.e., the invocation previously
 /// passed an approval gate), the returned invocation carries a
@@ -51,20 +51,26 @@ pub(super) fn capability_invocation_from_candidate(
 pub(super) fn capability_invocation_from_auth_resume_candidate(
     call: CapabilityCallCandidate,
     pending_auth: &PendingAuthResume,
-) -> CapabilityInvocation {
-    let auth_resume = pending_auth
-        .resume_token
-        .as_ref()
-        .map(|token| CapabilityAuthResume {
-            resume_token: token.clone(),
-            prior_approval: pending_auth.prior_approval.as_ref().map(|pa| {
-                ironclaw_turns::run_profile::AuthResumeApprovalIdentity {
-                    approval_request_id: pa.approval_request_id,
-                    correlation_id: pa.correlation_id,
-                }
-            }),
-        });
-    CapabilityInvocation {
+) -> LoopRequest {
+    let auth_resume = if matches!(
+        pending_auth.disposition,
+        Some(ironclaw_turns::GateResumeDisposition::Denied)
+    ) {
+        Some(CapabilityAuthResume::denied())
+    } else {
+        pending_auth.resume_token.as_ref().map(|token| {
+            CapabilityAuthResume::resolved(
+                token.clone(),
+                pending_auth.prior_approval.as_ref().map(|pa| {
+                    ironclaw_turns::run_profile::AuthResumeApprovalIdentity {
+                        approval_request_id: pa.approval_request_id,
+                        correlation_id: pa.correlation_id,
+                    }
+                }),
+            )
+        })
+    };
+    LoopRequest {
         activity_id: call.activity_id,
         surface_version: call.surface_version,
         capability_id: call.capability_id,
@@ -269,17 +275,17 @@ fn model_visible_capability_success_observation(
     result: &CapabilityResultMessage,
 ) -> Option<ModelVisibleToolObservation> {
     call.provider_replay.as_ref()?;
-    // "none" is the static sentinel for successful capability observations and
-    // satisfies CapabilityFailureKind's validation invariants.
-    let failure_kind = CapabilityFailureKind::unknown("none")
-        .expect("static success observation failure kind must be valid"); // safety: static valid sentinel
     Some(ModelVisibleToolObservation {
         schema_version: ironclaw_turns::run_profile::MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
         status: ToolObservationStatus::Success,
         summary: result.safe_summary.clone(),
-        detail: ToolObservationDetail::GenericFailure {
-            failure_kind,
-            detail: None,
+        detail: ToolObservationDetail::ResultReference {
+            result_ref: result.result_ref.as_str().to_string(),
+            byte_len: result.byte_len,
+            preview: None,
+            total_bytes: None,
+            next_offset: None,
+            item_count: None,
         },
         artifacts: Vec::new(),
         recovery: None,
@@ -851,7 +857,7 @@ mod tests {
 
     /// When both `resume_token` and `prior_approval` are set (the invocation
     /// previously passed both an approval gate and is now being resumed after an
-    /// auth gate), the resulting `CapabilityInvocation` must:
+    /// auth gate), the resulting `LoopRequest` must:
     /// - carry `auth_resume: Some(...)` with the resume token,
     /// - carry `auth_resume.prior_approval: Some(...)` with both the
     ///   `approval_request_id` and `correlation_id` from `prior_approval`,
@@ -902,7 +908,8 @@ mod tests {
             .as_ref()
             .expect("auth_resume must be Some when resume_token is set");
         assert_eq!(
-            auth_resume.resume_token, resume_token,
+            auth_resume.resume_token.as_ref(),
+            Some(&resume_token),
             "auth_resume.resume_token must match the pending resume token"
         );
 
@@ -932,7 +939,7 @@ mod tests {
     fn capability_invocation_from_auth_resume_candidate_with_none_resume_token_sets_auth_resume_none()
      {
         // When `PendingAuthResume.resume_token` is None (the invocation never
-        // passed an approval gate), the returned `CapabilityInvocation` must
+        // passed an approval gate), the returned `LoopRequest` must
         // carry `auth_resume: None` so the host routes through `invoke_json`,
         // while preserving the call activity id as the invocation identity.
         use ironclaw_turns::run_profile::CapabilityInputRef;

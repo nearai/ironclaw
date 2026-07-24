@@ -3,13 +3,13 @@
 
 use std::sync::Arc;
 
-use ironclaw_host_api::{RestrictedEgressRequest, RestrictedEgressResponse};
-use ironclaw_product_adapters::test_support::conformance::{
+use ironclaw_host_api::product_adapter::test_support::conformance::{
     ChannelAdapterConformance, ConformanceInbound, run_channel_adapter_conformance,
 };
-use ironclaw_product_adapters::{
+use ironclaw_host_api::product_adapter::{
     ExternalConversationRef, OutboundEnvelope, OutboundPart, OutboundTarget,
 };
+use ironclaw_host_api::{RestrictedEgressRequest, RestrictedEgressResponse};
 use ironclaw_telegram_extension::{TELEGRAM_WEBHOOK_URL_CONFIG, TelegramChannelAdapter};
 use ironclaw_telegram_v2_adapter::GroupTriggerPolicy;
 

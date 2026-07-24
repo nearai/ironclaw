@@ -2,7 +2,7 @@
 //! deployment-first channel resolver (with an active-snapshot compatibility
 //! fallback) and the ingress `reply_context` read half
 //! (ING-11). All delivery semantics live in
-//! `ironclaw_product_workflow::DeliveryCoordinator`; this module only
+//! `ironclaw_product::DeliveryCoordinator`; this module only
 //! implements its ports over the extension host.
 
 use std::sync::Arc;
@@ -11,9 +11,9 @@ use async_trait::async_trait;
 use ironclaw_extension_host::egress::{
     ChannelEgressTransport, DeclaredChannelEgress, PolicyEnforcedChannelEgress,
 };
-use ironclaw_extension_host::ingress::{ReplyContextKey, ReplyContextStore};
+use ironclaw_extension_host::ingress::{ReplyContextKey, ReplyContextStorePort};
 use ironclaw_extension_host::{DeploymentChannelRegistry, SnapshotWatch};
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ChannelDeliveryResolver, DeliveryReplyContextSource, ResolvedChannelDelivery,
 };
 
@@ -107,11 +107,11 @@ impl ChannelDeliveryResolver for SnapshotChannelDeliveryResolver {
 /// storage: the opaque vendor context an adapter attached to the originating
 /// inbound message, keyed by conversation fingerprint.
 pub(crate) struct IngressReplyContextSource {
-    store: Arc<dyn ReplyContextStore>,
+    store: Arc<dyn ReplyContextStorePort>,
 }
 
 impl IngressReplyContextSource {
-    pub(crate) fn new(store: Arc<dyn ReplyContextStore>) -> Self {
+    pub(crate) fn new(store: Arc<dyn ReplyContextStorePort>) -> Self {
         Self { store }
     }
 }

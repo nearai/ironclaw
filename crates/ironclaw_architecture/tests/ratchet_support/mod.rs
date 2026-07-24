@@ -35,6 +35,7 @@ pub fn workspace_root() -> PathBuf {
 /// EXCEPT when every occurrence is `#[cfg(...)]`-gated (mutually exclusive
 /// compile branches of the same type, the factory durable/no-durable pattern).
 /// A mix of gated and ungated occurrences is still flagged.
+#[allow(dead_code)]
 pub fn duplicate_definitions(
     found: &BTreeMap<String, Vec<TypeDefOccurrence>>,
 ) -> Vec<(&str, &Vec<TypeDefOccurrence>)> {

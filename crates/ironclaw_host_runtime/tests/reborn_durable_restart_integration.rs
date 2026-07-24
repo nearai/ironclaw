@@ -7,7 +7,7 @@ use std::{path::Path, sync::Arc, time::Duration};
 use async_trait::async_trait;
 use ironclaw_approvals::LeaseApproval;
 use ironclaw_authorization::{
-    CapabilityLeaseStatus, CapabilityLeaseStore, FilesystemCapabilityLeaseStore, GrantAuthorizer,
+    CapabilityLeaseStatus, CapabilityLeaseStore, CapabilityLeaseStorePort, GrantAuthorizer,
     TrustAwareCapabilityDispatchAuthorizer,
 };
 use ironclaw_events::{
@@ -19,20 +19,19 @@ use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem, Scope
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind,
+    RuntimeFailureKind,
 };
 use ironclaw_processes::{
-    FilesystemProcessResultStore, FilesystemProcessStore, ProcessExecutionRequest,
-    ProcessExecutionResult, ProcessExecutor, ProcessManager, ProcessServices, ProcessStart,
-    ProcessStatus, ProcessStore,
+    ProcessExecutionRequest, ProcessExecutionResult, ProcessExecutor, ProcessManager,
+    ProcessResultStore, ProcessServices, ProcessStart, ProcessStatus, ProcessStore,
+    ProcessStorePort,
 };
 use ironclaw_reborn_event_store::{
     RebornEventStoreConfig, RebornEventStores, RebornProfile, build_reborn_event_stores,
 };
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_run_state::{
-    ApprovalRequestStore, FilesystemApprovalRequestStore, FilesystemRunStateStore, RunStateStore,
-    RunStatus,
+    ApprovalRequestStore, ApprovalRequestStorePort, RunStateStore, RunStateStorePort, RunStatus,
 };
 use ironclaw_scripts::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptRuntime, ScriptRuntimeConfig,
@@ -96,7 +95,7 @@ async fn approval_resume_survives_filesystem_service_restart_and_consumes_lease_
     let resumed = second
         .services
         .host_runtime_for_local_testing()
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context.clone(),
             gate.approval_request_id,
             script_capability_id(),
@@ -170,7 +169,7 @@ async fn approval_resume_survives_filesystem_service_restart_and_consumes_lease_
     let second_resume = third
         .services
         .host_runtime_for_local_testing()
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context,
             gate.approval_request_id,
             script_capability_id(),
@@ -244,7 +243,7 @@ async fn approval_resume_survives_durable_libsql_reopen_and_consumes_lease_once(
     let resumed = second
         .services
         .host_runtime_for_local_testing()
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context.clone(),
             gate.approval_request_id,
             script_capability_id(),
@@ -318,7 +317,7 @@ async fn approval_resume_survives_durable_libsql_reopen_and_consumes_lease_once(
     let second_resume = third
         .services
         .host_runtime_for_local_testing()
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context,
             gate.approval_request_id,
             script_capability_id(),
@@ -419,7 +418,7 @@ async fn jsonl_event_and_audit_replay_survive_reopen_without_raw_sentinels() {
 
     let outcome = services
         .host_runtime_for_local_testing()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
             script_capability_id(),
             ResourceEstimate::default(),
@@ -470,16 +469,14 @@ async fn jsonl_event_and_audit_replay_survive_reopen_without_raw_sentinels() {
     }
 }
 
-type DurableProcessServices = ProcessServices<
-    FilesystemProcessStore<DiskFilesystem>,
-    FilesystemProcessResultStore<DiskFilesystem>,
->;
+type DurableProcessServices =
+    ProcessServices<ProcessStore<DiskFilesystem>, ProcessResultStore<DiskFilesystem>>;
 
 type DurableHostRuntimeServices = HostRuntimeServices<
     DiskFilesystem,
     InMemoryResourceGovernor,
-    FilesystemProcessStore<DiskFilesystem>,
-    FilesystemProcessResultStore<DiskFilesystem>,
+    ProcessStore<DiskFilesystem>,
+    ProcessResultStore<DiskFilesystem>,
 >;
 
 struct DurableServices<F = InMemoryBackend>
@@ -487,9 +484,9 @@ where
     F: RootFilesystem,
 {
     services: DurableHostRuntimeServices,
-    run_state: Arc<FilesystemRunStateStore<F>>,
-    approval_requests: Arc<FilesystemApprovalRequestStore<F>>,
-    capability_leases: Arc<FilesystemCapabilityLeaseStore<DiskFilesystem>>,
+    run_state: Arc<RunStateStore<F>>,
+    approval_requests: Arc<ApprovalRequestStore<F>>,
+    capability_leases: Arc<CapabilityLeaseStore<DiskFilesystem>>,
     events: RebornEventStores,
 }
 
@@ -530,11 +527,9 @@ async fn durable_services(
     let event_stores = jsonl_event_stores(event_root).await;
     let scoped_fs = scoped_engine_filesystem(engine_root);
     let run_state_fs = scoped_run_state_filesystem(shared_run_state_backend);
-    let run_state = Arc::new(FilesystemRunStateStore::new(Arc::clone(&run_state_fs)));
-    let approval_requests = Arc::new(FilesystemApprovalRequestStore::new(Arc::clone(
-        &run_state_fs,
-    )));
-    let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(&scoped_fs)));
+    let run_state = Arc::new(RunStateStore::new(Arc::clone(&run_state_fs)));
+    let approval_requests = Arc::new(ApprovalRequestStore::new(Arc::clone(&run_state_fs)));
+    let capability_leases = Arc::new(CapabilityLeaseStore::new(Arc::clone(&scoped_fs)));
     let services = base_services(
         engine_root,
         event_stores.clone(),
@@ -568,11 +563,9 @@ async fn durable_services_with_libsql_run_state(
     let event_stores = jsonl_event_stores(event_root).await;
     let scoped_fs = scoped_engine_filesystem(engine_root);
     let run_state_fs = scoped_libsql_run_state_filesystem(db_path).await;
-    let run_state = Arc::new(FilesystemRunStateStore::new(Arc::clone(&run_state_fs)));
-    let approval_requests = Arc::new(FilesystemApprovalRequestStore::new(Arc::clone(
-        &run_state_fs,
-    )));
-    let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(&scoped_fs)));
+    let run_state = Arc::new(RunStateStore::new(Arc::clone(&run_state_fs)));
+    let approval_requests = Arc::new(ApprovalRequestStore::new(Arc::clone(&run_state_fs)));
+    let capability_leases = Arc::new(CapabilityLeaseStore::new(Arc::clone(&scoped_fs)));
     let services = base_services(
         engine_root,
         event_stores.clone(),
@@ -727,12 +720,7 @@ async fn block_for_approval(
     input: Value,
 ) -> ironclaw_host_runtime::RuntimeApprovalGate {
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
-            context,
-            script_capability_id(),
-            estimate,
-            input,
-        ))
+        .invoke_capability((context, script_capability_id(), estimate, input))
         .await
         .unwrap();
 
@@ -771,7 +759,7 @@ async fn approve_dispatch_for_services(
 }
 
 async fn assert_blocked_run(
-    run_state: &dyn RunStateStore,
+    run_state: &dyn RunStateStorePort,
     scope: &ResourceScope,
     invocation_id: InvocationId,
     approval_request_id: ApprovalRequestId,
@@ -786,7 +774,7 @@ async fn assert_blocked_run(
 }
 
 async fn wait_for_status(
-    store: &dyn ProcessStore,
+    store: &dyn ProcessStorePort,
     scope: &ResourceScope,
     process_id: ProcessId,
     status: ProcessStatus,

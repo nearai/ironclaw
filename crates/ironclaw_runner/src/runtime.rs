@@ -17,7 +17,7 @@ use ironclaw_loop_host::{
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 use ironclaw_turns::{
-    AgentLoopDriverError, CheckpointStateStore, DefaultTurnCoordinator,
+    AgentLoopDriverError, CheckpointStateStorePort, DefaultTurnCoordinator,
     DefaultTurnLifecycleEventBus, LifecyclePublicationErrorPort, LifecyclePublishingTurnStateStore,
     LoopCheckpointStore, RunProfileResolver, TurnCommittedEventObserver, TurnEventSink,
     TurnLifecycleEventBus, TurnRunWakeNotifier, TurnSpawnTreePort, TurnSpawnTreeStateStore,
@@ -48,7 +48,7 @@ use crate::{
     },
     subagent::{
         capability_surface::SubagentCapabilitySurfaceResolver, flavors,
-        goal_store::SubagentGoalStore, prompt_material::GateBackedSubagentPromptMaterialSource,
+        goal_store::SubagentGoalStorePort, prompt_material::GateBackedSubagentPromptMaterialSource,
     },
     text_loop_driver::TextOnlyModelReplyDriverConfig,
     tool_disclosure_port::ToolDisclosureCapabilityDecorator,
@@ -287,7 +287,7 @@ where
     pub thread_service: Arc<dyn SessionThreadService>,
     pub thread_scope: ThreadScope,
     pub model_gateway: Arc<G>,
-    pub checkpoint_state_store: Arc<dyn CheckpointStateStore>,
+    pub checkpoint_state_store: Arc<dyn CheckpointStateStorePort>,
     pub loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
     pub milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     pub capability_factory: Arc<dyn LoopCapabilityPortFactory>,
@@ -327,7 +327,7 @@ where
     /// record. `None` only for helper/test compositions with no run-state
     /// filesystem (they never raise a durable auth gate); a production `None` is
     /// a bug — the same "genuinely optional" shape as `attachment_read_port`.
-    pub gate_record_store: Option<Arc<dyn ironclaw_run_state::GateRecordStore>>,
+    pub gate_record_store: Option<Arc<dyn ironclaw_run_state::GateRecordStorePort>>,
     pub input_queue: Option<Arc<dyn HostInputQueue>>,
     /// Required by live planned-runtime composition. Helper-level tests may use
     /// a no-op implementation, but the type signature always requires a valid
@@ -365,12 +365,12 @@ where
 }
 
 pub trait RuntimeSubagentGoalStore:
-    SubagentGoalStore + SubagentSpawnGoalStore + Send + Sync
+    SubagentGoalStorePort + SubagentSpawnGoalStore + Send + Sync
 {
 }
 
 impl<T> RuntimeSubagentGoalStore for T where
-    T: SubagentGoalStore + SubagentSpawnGoalStore + Send + Sync
+    T: SubagentGoalStorePort + SubagentSpawnGoalStore + Send + Sync
 {
 }
 
@@ -919,9 +919,9 @@ mod tests {
     use ironclaw_turns::{
         InMemoryRunProfileResolver, RunProfileResolver, TurnId, TurnRunId, TurnScope,
         run_profile::{
-            AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
-            CapabilityDescriptorView, CapabilityInvocation, CapabilitySurfaceVersion,
-            ConcurrencyHint, LoopCapabilityPort, LoopRunContext, RunProfileResolutionRequest,
+            AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDescriptorView,
+            CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort, LoopRequest,
+            LoopRequestBatch, LoopRunContext, RunProfileResolutionRequest,
             VisibleCapabilityRequest, VisibleCapabilitySurface,
         },
     };
@@ -1061,7 +1061,7 @@ mod tests {
 
         async fn invoke_capability(
             &self,
-            _request: CapabilityInvocation,
+            _request: LoopRequest,
         ) -> Result<Resolution, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Unavailable,
@@ -1071,7 +1071,7 @@ mod tests {
 
         async fn invoke_capability_batch(
             &self,
-            _request: CapabilityBatchInvocation,
+            _request: LoopRequestBatch,
         ) -> Result<ResolutionBatch, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Unavailable,
@@ -1117,7 +1117,7 @@ mod tests {
 
         async fn invoke_capability(
             &self,
-            request: CapabilityInvocation,
+            request: LoopRequest,
         ) -> Result<Resolution, AgentLoopHostError> {
             self.log.lock().unwrap().push(self.label);
             self.inner.invoke_capability(request).await
@@ -1125,7 +1125,7 @@ mod tests {
 
         async fn invoke_capability_batch(
             &self,
-            request: CapabilityBatchInvocation,
+            request: LoopRequestBatch,
         ) -> Result<ResolutionBatch, AgentLoopHostError> {
             self.log.lock().unwrap().push(self.label);
             self.inner.invoke_capability_batch(request).await
@@ -1244,7 +1244,7 @@ mod tests {
 
         async fn invoke_capability(
             &self,
-            _request: CapabilityInvocation,
+            _request: LoopRequest,
         ) -> Result<Resolution, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Unavailable,
@@ -1254,7 +1254,7 @@ mod tests {
 
         async fn invoke_capability_batch(
             &self,
-            _request: CapabilityBatchInvocation,
+            _request: LoopRequestBatch,
         ) -> Result<ResolutionBatch, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Unavailable,

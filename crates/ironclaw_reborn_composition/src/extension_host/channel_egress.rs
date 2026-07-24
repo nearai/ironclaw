@@ -22,7 +22,7 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_secrets::SecretMaterial;
 #[cfg(test)]
-use ironclaw_secrets::SecretStore;
+use ironclaw_secrets::SecretStorePort;
 
 /// Fixed capability id channel vendor calls are attributed to in egress
 /// events/audit (mirrors the retiring per-vendor egress capability ids).
@@ -31,7 +31,7 @@ const CHANNEL_EGRESS_CAPABILITY_ID: &str = "channel.egress";
 /// Resolves secret material for a channel-declared credential handle.
 ///
 /// The generic implementation reads the scoped secret store (where
-/// `[channel.config]` secret fields are stored under their handles); bridges
+/// administrator secret fields are stored under their handles); bridges
 /// for legacy per-vendor setup storage implement the same port until their
 /// storage migrates (P6).
 #[async_trait]
@@ -54,13 +54,13 @@ pub(crate) enum ChannelEgressCredentialError {
 /// Generic credentials port over the scoped secret store.
 #[cfg(test)]
 pub(crate) struct SecretStoreChannelEgressCredentials {
-    store: Arc<dyn SecretStore>,
+    store: Arc<dyn SecretStorePort>,
     scope_template: ResourceScope,
 }
 
 #[cfg(test)]
 impl SecretStoreChannelEgressCredentials {
-    pub(crate) fn new(store: Arc<dyn SecretStore>, scope_template: ResourceScope) -> Self {
+    pub(crate) fn new(store: Arc<dyn SecretStorePort>, scope_template: ResourceScope) -> Self {
         Self {
             store,
             scope_template,
@@ -90,20 +90,26 @@ impl ChannelEgressCredentialsPort for SecretStoreChannelEgressCredentials {
 
 /// Production credential bridge over the same effective configuration
 /// resolver used by setup, OAuth, activation, pairing, and ingress.
-pub(crate) struct ChannelConfigEgressCredentials {
-    channel_config: Arc<crate::extension_host::channel_config::ChannelConfigService>,
+pub(crate) struct AdminConfigurationEgressCredentials {
+    admin_configuration_resolver: Arc<
+        crate::extension_host::admin_configuration::ComposedExtensionAdminConfigurationResolver,
+    >,
 }
 
-impl ChannelConfigEgressCredentials {
+impl AdminConfigurationEgressCredentials {
     pub(crate) fn new(
-        channel_config: Arc<crate::extension_host::channel_config::ChannelConfigService>,
+        admin_configuration_resolver: Arc<
+            crate::extension_host::admin_configuration::ComposedExtensionAdminConfigurationResolver,
+        >,
     ) -> Self {
-        Self { channel_config }
+        Self {
+            admin_configuration_resolver,
+        }
     }
 }
 
 #[async_trait]
-impl ChannelEgressCredentialsPort for ChannelConfigEgressCredentials {
+impl ChannelEgressCredentialsPort for AdminConfigurationEgressCredentials {
     async fn channel_secret(
         &self,
         extension_id: &str,
@@ -112,7 +118,7 @@ impl ChannelEgressCredentialsPort for ChannelConfigEgressCredentials {
     ) -> Result<Option<SecretMaterial>, ChannelEgressCredentialError> {
         let extension_id = ExtensionId::new(extension_id)
             .map_err(|_| ChannelEgressCredentialError::Unavailable)?;
-        self.channel_config
+        self.admin_configuration_resolver
             .secret_material(&extension_id, handle)
             .await
             .map_err(|error| {
@@ -124,7 +130,8 @@ impl ChannelEgressCredentialsPort for ChannelConfigEgressCredentials {
 
 /// Wraps the generic scoped-store credentials port with a registration seam
 /// that integration proofs use to inject a static `(extension, handle) →
-/// material` mapping ahead of the store — standing in for `[channel.config]`
+/// material` mapping ahead of the store — standing in for administrator
+/// configuration
 /// secret storage until the configure surface lands (P6/H). The registration
 /// mechanism (`bridges` + [`register`](Self::register)) is `test-support`
 /// only; a production build never registers a bridge and resolves straight
@@ -144,6 +151,7 @@ impl BridgedChannelEgressCredentials {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn register(&self, bridge: Arc<dyn ChannelEgressCredentialsPort>) {
         self.bridges
             .write()
@@ -181,15 +189,17 @@ impl ChannelEgressCredentialsPort for BridgedChannelEgressCredentials {
 }
 
 /// Fixed `(extension_id, handle) → material` mapping, registered as a bridge
-/// by integration proofs standing in for `[channel.config]` secret storage
+/// by integration proofs standing in for administrator secret storage
 /// until the configure surface lands (P6/H). Test-support only.
 #[cfg(feature = "test-support")]
+#[allow(dead_code)]
 pub(crate) struct StaticChannelEgressCredentials {
     entries: Vec<(String, String, SecretMaterial)>,
 }
 
 #[cfg(feature = "test-support")]
 impl StaticChannelEgressCredentials {
+    #[allow(dead_code)]
     pub(crate) fn new(entries: Vec<(String, String, SecretMaterial)>) -> Self {
         Self { entries }
     }
@@ -370,7 +380,7 @@ mod tests {
     };
     use ironclaw_processes::in_memory_backed_process_services;
     use ironclaw_resources::InMemoryResourceGovernor;
-    use ironclaw_secrets::FilesystemSecretStore;
+    use ironclaw_secrets::{SecretStore, SecretStorePort};
     use secrecy::SecretString;
 
     use super::*;
@@ -419,8 +429,8 @@ mod tests {
     fn test_host_runtime_services() -> HostRuntimeServices<
         DiskFilesystem,
         InMemoryResourceGovernor,
-        ironclaw_processes::FilesystemProcessStore<ironclaw_filesystem::InMemoryBackend>,
-        ironclaw_processes::FilesystemProcessResultStore<ironclaw_filesystem::InMemoryBackend>,
+        ironclaw_processes::ProcessStore<ironclaw_filesystem::InMemoryBackend>,
+        ironclaw_processes::ProcessResultStore<ironclaw_filesystem::InMemoryBackend>,
     > {
         HostRuntimeServices::new(
             Arc::new(ExtensionRegistry::new()),
@@ -440,7 +450,7 @@ mod tests {
     ) {
         let requests = network.requests();
         let services = test_host_runtime_services()
-            .with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()))
+            .with_secret_store(Arc::new(SecretStore::ephemeral()))
             .try_with_host_http_egress(network)
             .expect("host HTTP egress should wire");
         let port = services
@@ -462,7 +472,7 @@ mod tests {
         handle: &SecretHandle,
         value: &str,
     ) -> Arc<dyn ChannelEgressCredentialsPort> {
-        let store = Arc::new(FilesystemSecretStore::ephemeral());
+        let store = Arc::new(SecretStore::ephemeral());
         store
             .put(
                 scope.clone(),
@@ -473,7 +483,7 @@ mod tests {
             .await
             .expect("seed channel secret");
         Arc::new(SecretStoreChannelEgressCredentials::new(
-            store as Arc<dyn SecretStore>,
+            store as Arc<dyn SecretStorePort>,
             scope.clone(),
         ))
     }
@@ -614,7 +624,7 @@ mod tests {
         // Credentials port over an EMPTY store: no material seeded.
         let credentials: Arc<dyn ChannelEgressCredentialsPort> =
             Arc::new(SecretStoreChannelEgressCredentials::new(
-                Arc::new(FilesystemSecretStore::ephemeral()) as Arc<dyn SecretStore>,
+                Arc::new(SecretStore::ephemeral()) as Arc<dyn SecretStorePort>,
                 scope.clone(),
             ));
         let (port, requests) = host_egress_port(RecordingNetworkHttpEgress::ok());

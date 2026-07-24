@@ -8,8 +8,7 @@ use ironclaw_turns::{
     TurnCheckpointId, TurnId, TurnRunId, TurnScope,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, AssistantReply,
-        CancellationPolicy, CapabilityBatchInvocation, CapabilityCallCandidate,
-        CapabilityDescriptorView, CapabilityInputRef, CapabilityInvocation,
+        CancellationPolicy, CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInputRef,
         CapabilitySurfaceProfileId, CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId,
         ConcurrencyClass, ContextProfileId, FinalizeAssistantMessage, LoopCancelReasonKind,
         LoopCancellationPort, LoopCancellationSignal, LoopCheckpointKind, LoopCheckpointRequest,
@@ -17,12 +16,12 @@ use ironclaw_turns::{
         LoopContextBundle, LoopContextRequest, LoopDriverId, LoopInputAck, LoopInputAckToken,
         LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopModelMessage, LoopModelRequest,
         LoopModelResponse, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest,
-        LoopRunContext, ModelProfileId, ModelStreamChunk, ParentLoopOutput, PromptMode,
-        ProviderToolCall, ProviderToolCallReplay, RedactedRunProfileProvenance,
-        RegisterProviderToolCallRequest, ResolvedRunProfile, ResourceBudgetPolicy,
-        ResourceBudgetTier, RunClassId, RunProfileFingerprint, RuntimeProfileConstraints,
-        SchedulingClass, StageCheckpointPayloadRequest, SteeringPolicy, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        LoopRequest, LoopRequestBatch, LoopRunContext, ModelProfileId, ModelStreamChunk,
+        ParentLoopOutput, PromptMode, ProviderToolCall, ProviderToolCallReplay,
+        RedactedRunProfileProvenance, RegisterProviderToolCallRequest, ResolvedRunProfile,
+        ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
+        RuntimeProfileConstraints, SchedulingClass, StageCheckpointPayloadRequest, SteeringPolicy,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 
@@ -56,8 +55,8 @@ pub(super) struct MockHost {
     batch_outcomes: Arc<Mutex<VecDeque<ironclaw_host_api::ResolutionBatch>>>,
     single_outcomes: Arc<Mutex<VecDeque<ironclaw_host_api::Resolution>>>,
     checkpoints: Arc<Mutex<Vec<LoopCheckpointKind>>>,
-    batch_invocations: Arc<Mutex<Vec<CapabilityBatchInvocation>>>,
-    single_invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
+    batch_invocations: Arc<Mutex<Vec<LoopRequestBatch>>>,
+    single_invocations: Arc<Mutex<Vec<LoopRequest>>>,
     registered_provider_calls: Arc<Mutex<Vec<ProviderToolCall>>>,
     provider_registration_errors: Arc<Mutex<VecDeque<AgentLoopHostError>>>,
     provider_registration_activity_remap: Arc<Mutex<Option<ironclaw_turns::CapabilityActivityId>>>,
@@ -77,9 +76,11 @@ pub(super) struct MockHost {
     cancel_after_poll_inputs: Arc<Mutex<bool>>,
     cancel_after_prompt_bundle_count: Arc<Mutex<Option<usize>>>,
     cancel_after_checkpoint: Arc<Mutex<Option<LoopCheckpointKind>>>,
+    crash_after_checkpoint_progress: Arc<Mutex<Option<LoopCheckpointKind>>>,
     cancel_after_model_response: Arc<Mutex<bool>>,
     cancel_after_batch_invocation: Arc<Mutex<bool>>,
     fail_checkpoint: Arc<Mutex<Option<LoopCheckpointKind>>>,
+    fail_checkpoint_on_occurrence: Arc<Mutex<Option<(LoopCheckpointKind, usize)>>>,
     fail_checkpoint_payload: Arc<Mutex<Option<(LoopCheckpointKind, AgentLoopHostError)>>>,
     fail_visible_capabilities: bool,
     fail_prompt_bundle: bool,
@@ -123,9 +124,11 @@ impl MockHost {
             cancel_after_poll_inputs: Arc::new(Mutex::new(false)),
             cancel_after_prompt_bundle_count: Arc::new(Mutex::new(None)),
             cancel_after_checkpoint: Arc::new(Mutex::new(None)),
+            crash_after_checkpoint_progress: Arc::new(Mutex::new(None)),
             cancel_after_model_response: Arc::new(Mutex::new(false)),
             cancel_after_batch_invocation: Arc::new(Mutex::new(false)),
             fail_checkpoint: Arc::new(Mutex::new(None)),
+            fail_checkpoint_on_occurrence: Arc::new(Mutex::new(None)),
             fail_checkpoint_payload: Arc::new(Mutex::new(None)),
             fail_visible_capabilities: false,
             fail_prompt_bundle: false,
@@ -248,11 +251,11 @@ impl MockHost {
         self.checkpoints.lock().expect("lock").clone()
     }
 
-    pub(super) fn batch_invocations(&self) -> Vec<CapabilityBatchInvocation> {
+    pub(super) fn batch_invocations(&self) -> Vec<LoopRequestBatch> {
         self.batch_invocations.lock().expect("lock").clone()
     }
 
-    pub(super) fn single_invocations(&self) -> Vec<CapabilityInvocation> {
+    pub(super) fn single_invocations(&self) -> Vec<LoopRequest> {
         self.single_invocations.lock().expect("lock").clone()
     }
 
@@ -319,6 +322,11 @@ impl MockHost {
         self
     }
 
+    pub(super) fn crash_after_checkpoint_progress(self, kind: LoopCheckpointKind) -> Self {
+        *self.crash_after_checkpoint_progress.lock().expect("lock") = Some(kind);
+        self
+    }
+
     pub(super) fn cancel_after_poll_inputs(self) -> Self {
         *self.cancel_after_poll_inputs.lock().expect("lock") = true;
         self
@@ -341,6 +349,15 @@ impl MockHost {
 
     pub(super) fn fail_checkpoint(self, kind: LoopCheckpointKind) -> Self {
         *self.fail_checkpoint.lock().expect("lock") = Some(kind);
+        self
+    }
+
+    pub(super) fn fail_checkpoint_on_occurrence(
+        self,
+        kind: LoopCheckpointKind,
+        occurrence: usize,
+    ) -> Self {
+        *self.fail_checkpoint_on_occurrence.lock().expect("lock") = Some((kind, occurrence));
         self
     }
 
@@ -777,7 +794,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<ironclaw_host_api::Resolution, AgentLoopHostError> {
         self.single_invocations.lock().expect("lock").push(request);
         self.single_outcomes
@@ -791,7 +808,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ironclaw_host_api::ResolutionBatch, AgentLoopHostError> {
         self.batch_invocations.lock().expect("lock").push(request);
         if let Some(kind) = *self.fail_batch_with.lock().expect("lock") {
@@ -863,12 +880,24 @@ impl ironclaw_turns::run_profile::LoopCheckpointPort for MockHost {
             .lock()
             .expect("lock")
             .push(format!("checkpoint:{}", request.kind.as_str()));
-        self.checkpoints.lock().expect("lock").push(request.kind);
+        let occurrence = {
+            let mut checkpoints = self.checkpoints.lock().expect("lock");
+            checkpoints.push(request.kind);
+            checkpoints
+                .iter()
+                .filter(|kind| **kind == request.kind)
+                .count()
+        };
         if self
             .fail_checkpoint
             .lock()
             .expect("lock")
             .is_some_and(|kind| kind == request.kind)
+            || self
+                .fail_checkpoint_on_occurrence
+                .lock()
+                .expect("lock")
+                .is_some_and(|(kind, target)| kind == request.kind && target == occurrence)
         {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::CheckpointRejected,
@@ -918,7 +947,23 @@ impl ironclaw_turns::run_profile::LoopProgressPort for MockHost {
                 "progress sink unavailable",
             ));
         }
+        let checkpoint_kind = match &event {
+            ironclaw_turns::run_profile::LoopProgressEvent::CheckpointWritten { kind, .. } => {
+                Some(*kind)
+            }
+            _ => None,
+        };
         self.progress_events.lock().expect("lock").push(event);
+        let mut crash_after = self.crash_after_checkpoint_progress.lock().expect("lock");
+        let should_crash = checkpoint_kind.is_some_and(|kind| crash_after.as_ref() == Some(&kind));
+        if should_crash {
+            *crash_after = None;
+        }
+        drop(crash_after);
+        assert!(
+            !should_crash,
+            "scripted worker crash after checkpoint commit"
+        );
         Ok(())
     }
 }

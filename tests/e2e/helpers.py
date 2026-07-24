@@ -232,6 +232,9 @@ REBORN_V2_AUTH_TOKEN = "e2e-reborn-v2-bearer-token-0123456789abcdef"
 SEL_V2 = {
     "root":           "#v2-root",          # SPA mount point (index.html)
     "login_token":    "#v2-token",         # token input on the login/connect view
+    "session_check_error": "[data-testid='session-check-error']",
+    "session_check_retry": "[data-testid='session-check-retry']",
+    "session_check_sign_out": "[data-testid='session-check-sign-out']",
     "admin_new_user_button_name": "New user",
     "admin_create_form": "form",
     "admin_display_name_input": 'input[type="text"]',
@@ -249,6 +252,10 @@ SEL_V2 = {
     "admin_suspended_status_name": "Suspended",
     "admin_suspend_button_name": "Suspend",
     "admin_activate_button_name": "Activate",
+    "admin_configuration_group_test_id": "admin-configuration-group",
+    "admin_extension_configuration_heading_name": "Extension configuration",
+    "admin_slack_configuration_heading_name": "Slack deployment configuration",
+    "admin_bot_token_label_pattern": r"^Bot token",
     "admin_user_secrets_panel": "[data-testid='admin-user-secrets-panel']",
     "admin_secret_handle_input": "[data-testid='admin-secret-handle']",
     "admin_secret_value_input": "[data-testid='admin-secret-value']",
@@ -280,6 +287,8 @@ SEL_V2 = {
     "confirm_dialog_cancel": '[data-testid="confirm-dialog-cancel"]',
     "confirm_dialog_confirm": '[data-testid="confirm-dialog-confirm"]',
     "sidebar_toggle": "button[aria-label='Toggle sidebar']",
+    "thread_search": "input[placeholder='Search chats...']",
+    "thread_load_more": "[data-testid='thread-load-more']",
     "sign_out_button": "button[title='Sign out']",
     "appearance_theme_light": "[data-testid='appearance-theme-light']",
     "appearance_theme_dark": "[data-testid='appearance-theme-dark']",

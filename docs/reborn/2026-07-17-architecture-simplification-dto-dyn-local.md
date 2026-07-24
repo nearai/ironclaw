@@ -19,7 +19,7 @@ annotations and `.claude/rules/architecture.md` cite them; additions get
   (§11.1), Slice 0 + URT ordering (§9).
 - **r4** 2026-07-17 — PR #6208 review fixes: served predicate tightened (any
   non-loopback listener/tunnel counts, epoch-synchronized transition, §6);
-  `SpawnedChildRun` correctly non-suspending (§5.3); `ProductSurface`
+  `SpawnedChildRun` correctly non-suspending (§5.3); `ProductSurface` target
   actor-bound at mint (§5.2); product-gesture consent is policy-evaluated
   evidence, not blanket approval skip (§5.2.1); `resolve`/`authorize`/`abort`
   Result-wrapped (§3/§5.3); facade count corrected to the 88-method trait
@@ -63,6 +63,90 @@ annotations and `.claude/rules/architecture.md` cite them; additions get
   No design changes to §1–§13 other than the §5.3.4 addition and the §11.7
   extension noted above; §14 and the status log are mutable, the contract
   above them is frozen.
+- **r9** 2026-07-22 — status-only update for the ProductSurface facade collapse:
+  descriptor-backed reads are underway and the outbound preference mutation now
+  follows the API-only first-party capability + query read-back approach. Skill
+  management now follows the same split: content reads are a view, document
+  install/update/remove and per-skill auto-activation are first-party capability
+  invocations, and the learned auto-activation master toggle is an API-only
+  product capability. Extension install/remove/activate now use lifecycle
+  capability invocations from the WebUI ProductSurface path; activation keeps a
+  query read-back for active state and maps auth-blocked outcomes onto the
+  existing extension onboarding response shape. Extension setup read now uses
+  the descriptor-backed `extension_setup` ProductSurface view, and setup submit
+  uses `builtin.extension_setup_submit` with the same query read-back. Zip
+  import now uses the API-only `builtin.extension_import` ProductSurface
+  capability with upload bytes carried as a base64 JSON field. LLM provider
+  upsert/delete and active-provider selection now use API-only ProductSurface
+  capabilities with `llm_config` view read-back. Automation listing now uses
+  the descriptor-backed `automations` ProductSurface query while retaining the
+  existing product automation facade behind the view builder. Thread listing
+  now uses the descriptor-backed paginated `threads` ProductSurface query while
+  retaining hidden-automation-thread filtering and notification approval
+  shaping behind the view builder; probe and login starts remain explicit
+  follow-ups because they need typed command result payloads.
+- **r10** 2026-07-22 — implementation approach recorded for declaring
+  ProductSurface APIs without adding macro machinery: keep the raw
+  `ProductSurface::invoke`/`query` conduits JSON-shaped, but declare product
+  APIs as typed `ProductView<Params, Output>` and `ProductCapabilityDescriptor`
+  constants. The descriptor helpers own view query construction, payload decode,
+  serializable command input conversion, and capability-id parsing. This keeps
+  capability mappings lightweight for simple API-only commands, avoids one
+  bespoke struct or macro arm per route, and still leaves every product action
+  auditable as an explicit descriptor declaration. Duplicate skill write
+  methods were removed from the composition WebUI skill facade after those
+  writes moved to first-party capabilities; the facade now serves only skill
+  reads used by ProductSurface views.
+- **r11** 2026-07-22 — added §5.2.10, the Urbit/terminal takeaway: channels are
+  terminal-like endpoints that start or resume a durable causal path into the
+  kernel; the target architecture makes the kernel, not adapters, own routing
+  truth from ingress through turn/invocation/gate/outcome/delivery. §5.1/§5.8/
+  §5.10 vocabulary tightened around product terminals vs external channel
+  adapters. §14 refreshed against current `origin/main` after #6386 / #6396 /
+  #6430 / #6432 / #6116 / #6438 / #6447.
+- **r12** 2026-07-23 — status-only update for channel ingress: extension/channel
+  ingress now admits verified normalized messages directly through
+  `ProductSurface` as the host-only `channel.admit_inbound` operation instead
+  of using a separate product workflow facade or constructing
+  `ProductInboundPayload` directly. `ProductInboundEnvelope` now carries `source_channel`, so WebUI,
+  CLI, and external channels converge on one source-channel stamp instead of a
+  separate channel-specific envelope. Slack gate/auth interaction classifiers
+  now return the channel-classification DTO consumed by ProductSurface
+  admission.
+- **r13** 2026-07-23 — status-only correction for the unified extension
+  lifecycle. The public product surface no longer exposes a distinct extension
+  activation action. Install establishes per-user membership; the manifest
+  auth recipe and durable credential/pairing readiness derive either
+  `setup_needed` or `active`; remove deletes that membership. This supersedes
+  the activation-specific status wording in r9 and refreshes mutable §14.
+  ingress now admits verified normalized messages through
+  `host_api::ChannelInboundProductSurface::admit_channel_inbound` instead of a
+  generic ProductSurface command escape hatch or direct
+  `ProductInboundPayload` construction. `ProductInboundEnvelope` now carries
+  `source_channel`, so WebUI, CLI, and external channels converge on one
+  source-channel stamp instead of a separate channel-specific envelope. Slack
+  gate/auth interaction classifiers now return the channel-classification DTO
+  consumed by product admission.
+- **r13** 2026-07-23 — status-only update for the product-surface cleanup stack:
+  product terminals now share `host_api::ProductSurfaceCaller`; the WebUI-only
+  caller and inbound validation wrappers were removed in favor of
+  `ProductSurfaceError` / `ProductSurfaceValidationCode`; `execute_command`,
+  `ProductSurfaceOperation`, and the product-operation descriptor/request/
+  response layer were deleted. WebUI handlers temporarily called typed
+  `ProductSurface` methods directly while the remaining result-bearing methods
+  awaited descriptor or turn-lifecycle classification.
+- **r14** 2026-07-23 — product consumers now share the neutral
+  `host_api::ProductSurface` contract: `invoke`, `query`, and `stream_events`.
+  The product-local `ProductSurface` trait is reduced to the two subscription
+  extension methods that have not moved to host API yet. Former result-bearing
+  WebUI/product methods now route through typed `ProductSurfaceCommandDescriptor`
+  constants or generic capability descriptors; `ProductCapabilityInput` and the
+  transient `dyn ProductSurface` compatibility methods were deleted.
+- **r15** 2026-07-23 — implementation status update: the product-local
+  subscription extension was deleted, caller authority is now bound through
+  `host_api::BoundProductSurface`, and WebUI-specific ProductSurface DTO names
+  were renamed to the neutral `Product*` vocabulary. File/attachment command
+  bytes remain JSON/base64 for now.
 
 This note proposes a **fundamental** simplification of the Reborn host/runtime
 internals. The goal is to remove three recurring costs without weakening any
@@ -106,18 +190,18 @@ Verified request types on the down-path, with what each hop actually adds or dro
 
 | Hop | Type (crate) | Fields | Change vs. previous |
 | --- | --- | --- | --- |
-| 1 | `CapabilityInvocation` (`ironclaw_turns`) | `activity_id, surface_version, capability_id, input_ref, approval_resume?, auth_resume?` | the loop's vocabulary — input by **ref**, resume tokens, pre-trust |
+| 1 | `LoopRequest` (`ironclaw_turns`) | `activity_id, surface_version, capability_id, input_ref, approval_resume?, auth_resume?` | the loop's vocabulary — input by **ref**, resume tokens, pre-trust |
 | 2 | `RuntimeCapabilityRequest` (`ironclaw_host_runtime`) | `context, capability_id, estimate, input, idempotency_key?, trust_decision` | deref `input_ref`→raw `input`; +`estimate`, +`context`; +2 **dead** fields |
 | 3 | `CapabilityInvocationRequest` (`ironclaw_capabilities`) | `context, capability_id, estimate, input, trust_decision` | **identical to hop 2 minus `idempotency_key`** — zero new info |
 | 4 | `CapabilityDispatchRequest` (`ironclaw_host_api`) | `capability_id, scope, authenticated_actor_user_id?, estimate, mounts?, resource_reservation?, input` | decompose `context`→`scope`+`actor`; **drop `trust_decision`**; **+`mounts`, +`resource_reservation`** (authorization outputs) |
-| 5 | `RuntimeAdapterRequest<'a, F, G>` (`ironclaw_dispatcher`) | hop 4 + `package, descriptor, filesystem&, governor&, runtime_policy` | + resolved substrate handles for the lane |
+| 5 | `RuntimeLaneRequest<'a, F, G>` (`ironclaw_dispatcher`) | hop 4 + `package, descriptor, filesystem&, governor&, runtime_policy` | + resolved substrate handles for the lane |
 | — | lane requests (`ScriptExecutionRequest` / `WitToolRequest` / `FirstPartyCapabilityRequest`) | per-lane shapes | final re-wrap into the lane's own type |
 
 Definitions (verified against HEAD, 2026-07-17; cite the symbol — line numbers drift):
-`CapabilityInvocation` `ironclaw_turns/src/run_profile/host.rs:1722`, `RuntimeCapabilityRequest`
+`LoopRequest` `ironclaw_turns/src/run_profile/host.rs:1722`, `RuntimeCapabilityRequest`
 `ironclaw_host_runtime/src/lib.rs:322`, `CapabilityInvocationRequest`
 `ironclaw_capabilities/src/requests.rs:8`, `CapabilityDispatchRequest`
-`ironclaw_host_api/src/dispatch.rs:22`, `RuntimeAdapterRequest` `ironclaw_dispatcher/src/lib.rs:56`.
+`ironclaw_host_api/src/dispatch.rs:22`, `RuntimeLaneRequest` `ironclaw_dispatcher/src/lib.rs:56`.
 The `dyn` impl counts (§1.3) and the 30-day window (`merged:>=2026-06-17`, §1.5) were derived
 the same way.
 
@@ -158,7 +242,7 @@ Four mechanisms produce this, each visible in the code above:
 
 `CapabilityDispatchRequest` already living in `ironclaw_host_api` is the key
 signal: the canonical shape *can* live at the bottom. And
-`RuntimeAdapterRequest<'a, F, G>` — generic over closures with a lifetime — is a
+`RuntimeLaneRequest<'a, F, G>` — generic over closures with a lifetime — is a
 complexity tell: the seam is parameterized for flexibility production wiring does
 not exercise.
 
@@ -237,10 +321,10 @@ turn store alone is two full implementations of the same semantics:
 
 | Domain | In-memory impl | Durable impl | Reimplemented logic |
 | --- | --- | --- | --- |
-| turns | `InMemoryTurnStateStore` (`memory/mod.rs`, ~4,260 LOC) | `FilesystemTurnStateStore` (~1,710 LOC) | lease, active-lock, checkpoint, idempotency, events |
-| processes | `InMemoryProcessStore` + `InMemoryProcessResultStore` (~230 LOC) | `FilesystemProcessStore` + `FilesystemProcessResultStore` (~920 LOC) | process lifecycle + result store |
+| turns | `InMemoryTurnStateStore` (`memory/mod.rs`, ~4,260 LOC) | `TurnStateRowStore` (~1,710 LOC) | lease, active-lock, checkpoint, idempotency, events |
+| processes | `InMemoryProcessStore` + `InMemoryProcessResultStore` (~230 LOC) | `ProcessStore` + `ProcessResultStore` (~920 LOC) | process lifecycle + result store |
 | approvals | `InMemory{AutoApprove, PersistentApprovalPolicy, CapabilityPermissionOverride}Store` | matching `Filesystem*` (×3) | three separate approval stores |
-| authorization | `InMemoryCapabilityLeaseStore` | `FilesystemCapabilityLeaseStore` | lease store |
+| authorization | `InMemoryCapabilityLeaseStore` | `CapabilityLeaseStore` | lease store |
 | run_state | `InMemory{RunState, ApprovalRequest}Store` | matching `Filesystem*` (×2) | two run-state stores |
 
 Every `InMemory*Store` is a local/test-only parallel implementation of logic that
@@ -252,7 +336,7 @@ libSQL + Postgres on top (2–4× per domain). The `InMemory*` structs are the l
 Two mechanisms:
 
 1. **Storage mechanism and domain logic are not separated.** The turn store's
-   `filesystem_store/row_store/` layer (journal / delta / row materialization) is a
+   `turn_state_row_store/row_store/` layer (journal / delta / row materialization) is a
    *partial* gesture at that split, but it is turns-specific and does not unify
    in-memory vs filesystem vs the other domains. Without a shared backend seam, "what
    the turn state *is*" and "how bytes are persisted" are welded together, so each
@@ -404,7 +488,7 @@ fn abort    (auth: Authorized) -> Result<(), HostFailure>;                // not
 - The loop expresses a `LoopRequest` (input by **ref**, resume tokens, pre-trust); the host
   `resolve`s it to `Invocation` at the membrane — the one genuine loop→host transition
   (§1.1). Below that, `RuntimeCapabilityRequest`, `CapabilityInvocationRequest`,
-  `CapabilityDispatchRequest`, and `RuntimeAdapterRequest` disappear — they were `Invocation`
+  `CapabilityDispatchRequest`, and `RuntimeLaneRequest` disappear — they were `Invocation`
   plus fields now carried inside `Authorized`.
 - Because `host_api` is the bottom crate, putting the vocabulary there *satisfies* the
   boundary rule (Golden Boundary #1: `host_api` stays vocabulary-only) — finishing a move
@@ -459,9 +543,9 @@ the dead fields disappear with them:
 
 | Real state | Carried as | Replaces |
 | --- | --- | --- |
-| loop-expressed (pre-trust) | `LoopRequest` (input by ref, resume tokens, `activity_id`) | `CapabilityInvocation` |
+| loop-expressed (pre-trust) | `LoopRequest` (input by ref, resume tokens, `activity_id`) | the old loop invocation mirror |
 | authorized | `Authorized` (the resolved `Invocation` bound to trust/approval/reservation/mounts) | `RuntimeCapabilityRequest`, `CapabilityInvocationRequest`, `CapabilityDispatchRequest` |
-| resolved-for-a-lane | `Authorized` + resolved handles (package, descriptor, filesystem, governor) | `RuntimeAdapterRequest` |
+| resolved-for-a-lane | `Authorized` + resolved handles (package, descriptor, filesystem, governor) | `RuntimeLaneRequest` |
 
 Mechanism 1 (DAG re-declaration) dies because the one authorized shape lives in
 `host_api` and both `host_runtime` and `capabilities` reference it. Mechanism 3's dead
@@ -521,20 +605,20 @@ The realization that reshapes this move: **the single storage seam is already in
 the tree — it is `RootFilesystem`** (`ironclaw_filesystem`). It already has four
 production-grade backends — `InMemoryBackend`, on-disk (`LocalFilesystem`),
 `LibSqlRootFilesystem`, `PostgresRootFilesystem` — and the durable stores are
-**already generic over it**: `FilesystemTurnStateStore<F>`,
-`FilesystemProcessStore<F>`, `FilesystemCapabilityLeaseStore<F>`,
-`FilesystemRunStateStore<F>`, `FilesystemAutoApproveSettingStore<F>`, and so on. The
+**already generic over it**: `TurnStateRowStore<F>`,
+`ProcessStore<F>`, `CapabilityLeaseStore<F>`,
+`RunStateStore<F>`, `AutoApproveSettingStore<F>`, and so on. The
 `RowBackend` I earlier proposed inventing already exists and is already wired.
 
 So the move is subtractive, not additive:
 
 1. **Delete every hand-written `InMemory*Store`.** Tests instantiate the *same*
-   store the deployment runs — `FilesystemTurnStateStore<InMemoryBackend>` — so
+   store the deployment runs — `TurnStateRowStore<InMemoryBackend>` — so
    "in-memory" stops being a store and becomes a **filesystem backend**
    (`InMemoryBackend`, which already implements `RootFilesystem`). One store
    implementation per domain, exercised in tests over the in-memory backend and in
    production over libSQL/Postgres. The ~4,260-LOC `InMemoryTurnStateStore` becomes
-   deletable once `FilesystemTurnStateStore<InMemoryBackend>` covers its cases.
+   deletable once `TurnStateRowStore<InMemoryBackend>` covers its cases.
 
 2. **Backend choice is deployment config, not a type.** Which `RootFilesystem`
    impl backs a run is one value in a `DeploymentConfig` fed to a single
@@ -602,7 +686,7 @@ const LOCAL_DEV: DeploymentConfig = DeploymentConfig {
 };
 ```
 
-`build_runtime(LOCAL_DEV)` wires the ordinary `FilesystemTurnStateStore<InMemoryBackend>`,
+`build_runtime(LOCAL_DEV)` wires the ordinary `TurnStateRowStore<InMemoryBackend>`,
 the ordinary approval/capability/lease substrates, and the ordinary ports — with
 these values. The same is true of hosted and enterprise: each is a `DeploymentConfig`
 constant, and the difference between them is data a reviewer can read in one place,
@@ -757,7 +841,7 @@ exactly two interfaces; and **deployment** as a config value.
 
 | Layer | Component | Owns | Interface | Changes when… |
 | --- | --- | --- | --- | --- |
-| Product | CLI / WebUI / Slack / Telegram | UX, transport, rendering | *consumes* `ProductSurface` | a surface's UX changes |
+| Product terminal / channel | CLI / WebUI / Slack / Telegram | input normalization, identity binding, transport, rendering | *consumes* `ProductSurface` | a terminal/channel UX changes |
 | **Kernel** | Turn coordinator + runner | durable turns, leases, active-lock, recovery | exposes `ProductSurface`, `AgentLoopHost` | the recovery model changes |
 | **Kernel** | Capability mediation | `authorize` + `dispatch` over `Invocation`/`Authorized`/`Outcome` | `AgentLoopHost::invoke` | the authority model changes |
 | **Kernel** | Vocabulary (`host_api`) | neutral authority types, frozen by test (§4.5) | — (types) | the security model changes |
@@ -771,56 +855,42 @@ exactly two interfaces; and **deployment** as a config value.
 | Deployment | `DeploymentConfig` | selects backends + policy per target | *is* a value → `build_runtime` | a deployment target changes |
 
 The kernel is the only layer that owns authority; substrates are mechanism it
-mediates; products and loops are replaceable userland reaching the kernel through
-exactly two interfaces (`ProductSurface`, `AgentLoopHost`).
+mediates; product terminals/channels and loops are replaceable userland reaching
+the kernel through exactly two interfaces (`ProductSurface`, `AgentLoopHost`).
 
-### 5.2 The clean product-surface interface — turn lifecycle plus two generic conduits
+### 5.2 The clean product-surface interface — three generic conduits
 
 Every product talks to the system through **one** narrow interface. An earlier
 draft of this section claimed six conversation methods could carry the whole
 product; that fails by inspection — the proto-`ProductSurface` this replaces
-(`RebornServicesApi`, `ironclaw_product_workflow/src/reborn_services.rs`) has
-**88 trait methods** (trait-block count, 2026-07-17; the file's ~251
-`async fn`s include impls and tests), and most
-are not conversation operations: settings mutations, extension
-install/configure, thread/project listing, LLM admin. A conversation API cannot absorb them, and per-feature
-methods must not return (that was the change-amplification cost — a feature
-touching 5–8 crates because each product method was per-feature). The
-resolution is the repo's own standing rule (`.claude/rules/tools.md`):
-**user-triggered mutations go through capability authorization; pure reads go
-through typed query contracts.** Applied here, the product surface is the
-*turn lifecycle* — the kernel's own state machine, irreducible as methods —
-plus **two generic conduits that never grow: `invoke` for commands, `query`
-for reads.**
+had **87 frozen trait methods** as of 2026-07-22 (the original 2026-07-17 audit
+counted 88 before the first shrink/additive conduit reconciliation; file-wide
+`async fn` counts include impls and tests). As of r15, product consumers share
+only the neutral host contract: `invoke`, `query`, and `stream_events`.
+Thread/project creation, turn submission, file/attachment byte reads,
+account/login probes, admin user bootstrap/secret deletion, automation controls,
+gate/run controls, operator-service lifecycle, and ordinary product mutations
+are descriptors over those conduits, not facade methods. A conversation-only API
+cannot absorb the product, and per-feature methods must not return (that was the
+change-amplification cost — a feature touching 5–8 crates because each product
+method was per-feature). The resolution is the repo's own standing rule
+(`.claude/rules/tools.md`): **user-triggered mutations go through capability
+authorization or typed product commands; pure reads go through typed query
+contracts.**
 
 ```rust
-/// The ONLY surface a product uses. Turn lifecycle + two conduits; frozen.
-///
-/// ACTOR-BOUND AT MINT: ingress constructs one `ProductSurface` per
-/// authenticated session, sealed to that actor — the facade itself is the
-/// capability. Every method operates under the bound actor; conversation/
-/// run/gate IDs are designators only, NEVER bearer authority. Streaming,
-/// cancellation, and gate resolution authorize against the bound actor,
-/// not against knowledge of an ID.
+/// The unbound kernel/facade service implemented by the product workflow.
+/// Trusted ingress constructs a `BoundProductSurface` once per authenticated
+/// caller and passes that actor-bound handle to WebUI, OpenAI-compat, CLI, or
+/// channel/product consumers. Operation request DTOs never carry caller
+/// authority; conversation/run/gate IDs are designators only.
 trait ProductSurface {
-    // ── Turn lifecycle — the kernel's state machine (§11.1); irreducible ──
-    fn open_conversation(&self, source: SourceBinding) -> ConversationId;
-    fn submit_turn(&self, conv: ConversationId, msg: InboundMessage,
-                   idem: IdempotencyKey) -> Result<TurnRunId, SubmitError>;   // all inbound → one door
-    fn events(&self, conv: ConversationId, from: EventCursor) -> EventStream;  // redacted projections, resumable
-    fn reply(&self, run: TurnRunId) -> Result<AssistantReply, ReplyError>;
-    fn resolve_gate(&self, gate: GateRef, decision: GateDecision) -> Result<(), GateError>; // approval/auth
-    fn cancel(&self, run: TurnRunId, idem: IdempotencyKey) -> Result<(), CancelError>;
-
-    // ── Commands: the product-side twin of AgentLoopHost::invoke (§5.4).
-    //    Same resolve → authorize → dispatch pipeline (§3); origin AND actor
-    //    come from the facade's binding, never from the caller. ──
-    fn invoke(&self, capability: CapabilityId, input: Json,
-              idem: IdempotencyKey) -> Result<Resolution, HostFailure>;
-
-    // ── Reads: view descriptors over projections; scope-checked, no dispatch. ──
-    fn query(&self, view: ViewRef, params: Json,
-             cursor: Option<Cursor>) -> Result<ViewPage, QueryError>;
+    fn invoke(caller, request: ProductSurfaceInvokeRequest)
+        -> Result<ProductSurfaceInvokeResponse, ProductSurfaceError>;
+    fn query(caller, request: ProductSurfaceQueryRequest)
+        -> Result<ProductSurfaceQueryPage, ProductSurfaceError>;
+    fn stream_events(caller, request: ProductSurfaceStreamRequest)
+        -> Result<ProductSurfaceStreamResponse, ProductSurfaceError>;
 }
 ```
 
@@ -830,6 +900,15 @@ adds a **capability descriptor** (+ handler on the `FirstParty` lane) and/or a
 stream. Never a method. This generalizes §13.3's synthetic-capability
 promotion: the four synthetic product tools are simply the *first four* facade
 operations to make the migration every mutation makes.
+
+Implementation approach during migration: do not introduce macros for each
+capability or view. Keep descriptor IDs and typed builders explicit, and use
+small helper functions for repeated boundary mechanics: empty-parameter
+validation, JSON serialization into `RebornViewPage`, capability-id parsing,
+and serializable input conversion before `ProductSurface::invoke`. Add input
+structs only when they own real validation, versioned contract shape, secret
+handling, or meaningful `deny_unknown_fields` behavior; trivial adapter
+mappings should pass plain serializable values through the helper.
 
 ### 5.2.1 Origin is part of the `Invocation`; policy is an origin→gate matrix
 
@@ -885,11 +964,13 @@ Three consequences, all landing in the single `authorize()` fold:
    `ironclaw_architecture` test. Granting `LoopRun` access normally means
    `AskAlways` or `GatedUnlessGranted`; `Ungated` for `LoopRun` is the
    exceptional state and requires an entry in a reviewed, checked-in
-   allowlist that **starts empty** (§10). This restates the flat-namespace
+   allowlist (§10). The target architecture starts empty; the 2026-07-22
+   implementation status (§14) records the behavior-preserving reviewed seed
+   currently pinned on `main`. This restates the flat-namespace
    risk precisely: the failure mode is not "an admin capability becomes
    loop-visible" — that is intended — it is "an admin capability becomes
-   loop-invocable *without a gate*," and the empty-until-reviewed `Ungated`
-   allowlist plus the meta-capability floor (§5.2.6) are the structural
+   loop-invocable *without a gate*," and the reviewed `Ungated` allowlist plus
+   the meta-capability floor (§5.2.6) are the structural
    answer. This is still a security *upgrade* over the facade, where the
    loop/product split was implicit in which trait happened to have the
    method; after the change it is one auditable declaration per capability.
@@ -922,18 +1003,19 @@ Three consequences, all landing in the single `authorize()` fold:
 Forcing `GET`-shaped reads through authorize/dispatch/idempotency records is
 ceremony with no invariant behind it, and `tools.md` already draws the line
 ("pure product reads through typed query/facade contracts"). The split is
-CQRS-shaped: **commands are capability descriptors; reads are view
+CQRS-shaped: **commands are command/capability descriptors; reads are view
 descriptors over the read models/projections**, registered as data the same
 way. `query(view, params, cursor)` is the request/response half of the read
-side; `events(conv, cursor)` is the streaming half. Access is scope-checked
-at the view boundary; no dispatch pipeline, no idempotency record.
+side; `stream_events(stream, cursor)` is the streaming half. Access is
+scope-checked at the view boundary; no dispatch pipeline, no idempotency record.
 
 ### 5.2.3 What irreducibly stays as methods
 
-- **Turn lifecycle.** `submit_turn` cannot itself be a capability without
-  circularity — capabilities execute *inside* turns, and the coordinator owns
-  the active-lock and idempotency machinery that gives `submit` its meaning.
-  These six methods are frozen because the *turn model* is frozen (§11.1).
+- **Three conduits.** `invoke`, `query`, and `stream_events` are the shared
+  product vocabulary. Turn lifecycle operations are typed product command
+  descriptors over `invoke`, so WebUI, OpenAI-compat, CLI, and other product
+  terminals do not need route-specific methods to create threads, submit turns,
+  cancel runs, retry, or resolve gates.
 - **Identity/session establishment** (SSO, pairing). An invocation cannot be
   authorized before the actor is known; login lives below the
   `AuthenticatedActor` boundary, in ingress (§5.8).
@@ -961,7 +1043,7 @@ handler, which owns the transaction/rollback — a product never sequences two
 
 ### 5.2.5 Migration and ratchet (feeds §10)
 
-1. **Freeze the facade now.** Check in the current `RebornServicesApi` method
+1. **Freeze the facade now.** Check in the current `ProductSurface` method
    set as a set-membership allowlist in `ironclaw_architecture`; any *new*
    facade method fails CI. New product features land as descriptors from day
    one — the ratchet stops the bleeding before any migration happens.
@@ -972,9 +1054,9 @@ handler, which owns the transaction/rollback — a product never sequences two
    origin→gate matrix for free, from the one pipeline.
 4. **Reads migrate to view descriptors separately and later** — lower risk,
    lower value.
-5. **Definition of done:** the facade *is* this trait — six turn methods +
-   `invoke` + `query` — and the URT's Deletion/Addition tests (§5.9, §10)
-   pass over it.
+5. **Definition of done:** the facade *is* the host API trait —
+   `invoke` + `query` + `stream_events` — operation request DTOs carry no caller
+   authority, and the URT's Deletion/Addition tests (§5.9, §10) pass over it.
 
 One further payoff: a WASM extension's capabilities become invocable from
 `Product` origin under the same descriptor policy — extension settings pages
@@ -1112,6 +1194,52 @@ conformance suite, which drives a gate whose input contains markup,
 spoofed "host-fact-looking" text, and an oversized payload, and asserts the
 rendered projection keeps regions separated and unsummarized.
 
+### 5.2.10 Causal routing: channels are terminals, the kernel owns the path
+
+The Urbit analogy that holds here is not its language/runtime; it is the routing
+discipline. Arvo routes every external event through a small kernel and keeps the
+causal route (the "duct") as the answer to "who caused this, where did it go, and
+where must the result return?" IronClaw needs the same invariant in Reborn terms:
+**a product terminal/channel starts or resumes a durable causal path; it never owns
+the state machine behind that path.**
+
+The product-side path is explicit and boring on purpose:
+
+```text
+IngressRef(channel/vendor event, received_at)
+  -> ProductSurfaceRef(actor-binding target facade)
+  -> ConversationId / TurnRunId
+  -> ActivityId / InvocationOrigin
+  -> GateRef? / Authorized? / RuntimeLane?
+  -> Resolution / HostFailure
+  -> ProjectionCursor / DeliveryAttemptId?
+```
+
+This is not observability garnish in the target architecture; it is the routing
+truth the implementation must converge on. Every `ProductSurface` call either
+starts that path (`open_conversation`, `submit_turn`, `invoke`) or continues it
+(`events`, `reply`, `resolve_gate`, `cancel`, `query`). Every durable event and
+projection emitted for a turn, invocation, gate, outcome, or delivery attempt
+must carry enough typed correlation to answer:
+
+- who or what caused this (`Actor`, `InvocationOrigin`, `RoutineId` /
+  `TurnRunId`);
+- under which scope and authority it ran (`ResourceScope`, `Authorized`,
+  approval/auth/resource gate records);
+- which product terminal/channel can observe or render it (conversation binding,
+  projection cursor, reply target, delivery attempt);
+- whether replay must return a recorded result, re-enter `authorize()`, or report
+  `HostFailure::Uncertain` (§11.3).
+
+The prohibition that falls out is simple: **adapters must render from projected
+path state, not hidden delivery truth.** Slack timestamps, Telegram message ids,
+WebUI tabs, HTTP request ids, and OpenAI-compat request ids are terminal/device
+coordinates. They may be stored as external refs or delivery metadata, but they
+must never become canonical run, gate, invocation, or approval authority. If a
+side effect succeeds, fails, blocks, resumes, or becomes uncertain, the target
+path records that fact in the kernel first and only then renders it back through
+the terminal/channel.
+
 ### 5.3 The kernel capability interface — authorize + dispatch
 
 The vocabulary and signatures are §3's — one definition each: the types and the
@@ -1138,7 +1266,7 @@ and the new vocabulary must carry all of it:
 | `AwaitDependentRun { .. }` | `Resolution::Suspended(Suspension::DependentRun)` | |
 | `ExternalToolPending { .. }` | `Resolution::Suspended(Suspension::ExternalTool)` | host never dispatches; control returns to the API client |
 
-Batch invocation (`CapabilityBatchInvocation`, `stop_on_first_suspension`) is
+Batch invocation (`LoopRequestBatch`, `stop_on_first_suspension`) is
 **not** a tenth row — it is a fold over per-invocation resolutions with its own
 resume state, modeled in §11.1 (the #6137 bug class lives there, not in the
 single-invocation vocabulary).
@@ -1416,7 +1544,7 @@ mediates; and `DeploymentConfig` (data) is the only thing that varies per deploy
 changes when the security/recovery model changes, never when a product or feature is
 added.
 
-### 5.8 Products are adapters over `ProductSurface` — collapse the composition-split surfaces
+### 5.8 Product terminals/channels are adapters over `ProductSurface` — collapse the composition-split surfaces
 
 The corollary of §5.2's one clean interface: **every product is a single adapter that
 owns its whole host side — protocol parse/render, transport (listen + deliver), and
@@ -1424,16 +1552,26 @@ identity binding — and consumes only `ProductSurface`.** `ironclaw_reborn_comp
 must contain *no* product-, channel-, or transport-specific code; it assembles the
 kernel and selects which adapters are active from `DeploymentConfig`.
 
-Today the opposite holds: product host concerns are split across dedicated crates *and*
-hand-wired into the composition god-crate. WebUI alone is four places, and the god-crate
-carries **~108K LOC of product/transport code** — the core of #6168:
+More precisely, direct terminals (WebUI, CLI) may hold an actor-bound
+`ProductSurface` directly. External vendor channels (Slack, Telegram,
+OpenAI-compat-style ingress) terminate protocol-specific ingress/egress first,
+then feed `ProductSurface` through their host/ingress path. Both converge before
+turn submission, capability invocation, gates, projections, and delivery-status
+recording. The shared inbound envelope carries `source_channel`; first-party
+terminals stamp `webui` or `cli`, while vendor channels usually stamp the
+adapter/channel name (`slack`, `telegram`, etc.).
+
+At proposal time the opposite held: product host concerns were split across
+dedicated crates *and* hand-wired into the composition god-crate. WebUI alone was
+four places, and the god-crate carried **~108K LOC of product/transport code** —
+the core of #6168:
 
 | Surface | Split across today | Target |
 | --- | --- | --- |
 | **WebUI** | `ironclaw_webui_v2` (routes, ~7.2K) + `ironclaw_reborn_webui_ingress` (listen/auth/serve, ~6.2K) + `ironclaw_webui_v2_static` (SPA) + `composition/src/webui/` (~4.6K) + `web_access.rs` / `host_ingress.rs` | one `WebUiProductAdapter` over `ProductSurface` (SPA stays an asset bundle) |
-| **Slack** | `ironclaw_slack_v2_adapter` (protocol, ~3K) + `composition/src/slack/` (**~40.6K** host: serve / delivery / egress / setup / identity) | one `SlackProductAdapter` |
-| **Telegram** | `ironclaw_telegram_v2_adapter` (~2.7K) + ~69 refs in composition | one `TelegramProductAdapter` (closest to clean today — the reference shape) |
-| **OpenAI-compat API** | `ironclaw_reborn_openai_compat` (~7.5K) + ~441 refs in composition | one `OpenAiCompatProductAdapter` |
+| **Slack** | `ironclaw_slack_v2_adapter` (protocol, ~3K) + `composition/src/slack/` (**~40.6K** host: serve / delivery / egress / setup / identity) | `ironclaw_slack_extension::SlackChannelAdapter` under the generic extension/channel host (#6116) |
+| **Telegram** | `ironclaw_telegram_v2_adapter` (~2.7K) + ~69 refs in composition | `ironclaw_telegram_extension::TelegramChannelAdapter` under the generic extension/channel host (#6116) |
+| **OpenAI-compat API** | `ironclaw_reborn_openai_compat` (~7.5K) + ~441 refs in composition | one OpenAI-compat terminal over product workflow / `ProductSurface` |
 | **CLI** | canonical `ironclaw` package over the `RebornRuntime` facade | CLI adapter over `ProductSurface` (`RebornRuntime` is today's proto-`ProductSurface`) |
 
 Plus cross-cutting product concerns currently inside composition that belong to the
@@ -1532,14 +1670,16 @@ wrong place:
 
 | # | Surface | What routes through it | What it seals/binds | Trust status |
 | --- | --- | --- | --- | --- |
-| 1 | `ProductSurface` (§5.2) | every user-initiated action: 6 turn-lifecycle methods + `invoke` (all mutations) + `query` (all reads) | **actor-bound at mint** — one facade per authenticated session; IDs are designators, never bearer authority | product boundary (trusted↔trusted) |
+| 1 | `ProductSurface` (§5.2) | every user-initiated action: `invoke` (commands/capabilities), `query` (reads), and `stream_events` (projection streams) | **actor-bound for consumers** — trusted ingress binds caller authority once through `BoundProductSurface`; IDs are designators, never bearer authority. | product boundary (trusted↔trusted) |
 | 2 | `AgentLoopHost` (§5.4) | everything the agent loop may do: prompt, model, invoke, transcript, checkpoint, input, cancellation | the loop's membrane — below it the loop cannot name secrets, the dispatcher, or the network | **trust boundary** (untrusted loop → host) |
 | 3 | `authorize()` + `dispatch()` (§5.3) | every effect, from every origin — both membranes and automation resolve into the same `Invocation` | origin/actor/scope sealed at the membrane; policy folded once; `Authorized` = sealed, single-use, lane-bound, deadline-bounded witness | trusted kernel — the convergence point |
 | 4 | `RuntimeLane` (§4.2, §5.5) | execution of extension/tool code: `FirstParty \| Wasm \| Mcp \| Process` | lane sealed inside `Authorized`; lanes receive only derived mediated handles (`ToolPorts`), never ambient authority; returned data is untrusted | **trust boundary** (host → untrusted execution, and back) |
 | 5 | Substrate ports (§5.5) | all mechanism: `RootFilesystem` (single storage plane), `ProcessSandbox` (only OS-process path, served-predicate gated §6), `SecretBroker`, `NetworkPolicy` | backend/medium is injected config, never a type; changes when a backend is added, **never for a feature** | trusted mechanism, kernel-mediated |
 
 The one-line flow: **product/loop → membrane (1 or 2, origin sealed) → kernel
-pipeline (3) → lane (4) → substrates (5).**
+pipeline (3) → lane (4) → substrates (5)**, with the causal path from §5.2.10
+recorded durably enough to route observations, gate outcomes, retries, and
+delivery attempts back to the right terminal/channel.
 
 Two things deliberately *not* on the list: **`DeploymentConfig` is data, not a
 surface** — nothing routes through it; it selects backends and policy values at
@@ -1561,7 +1701,7 @@ ironclaw_reborn_composition/
 ├── stores.rs        Filesystem*Store<F> instantiation over the one backend (§4.3)
 ├── kernel.rs        turn coordinator + runner/scheduler; authorize()+dispatch() assembly;
 │                    RuntimeLane construction with mediated substrate handles
-├── surfaces.rs      ProductSurface impl (actor-bound mint hook handed to ingress);
+├── surfaces.rs      ProductSurface impl (target actor-bound mint hook handed to ingress);
 │                    AgentLoopHost factory with config-gated decorators (§4.4.1)
 └── registry.rs      accepts descriptor sets (capability + view) and the product-neutral
                      adapter factory registry AS INPUTS; activates DeploymentConfig ids
@@ -1705,7 +1845,7 @@ containment. That is the entire thesis in one incident.
 | `LocalDev*` identifiers | ~66 across 42 files | 0 (one `DeploymentConfig` value) |
 | Deployment modes | struct family (`Local*`/`Hosted*`) | `DeploymentConfig` constants (data) |
 | `host_api` boundary | ~124 types incl. mode/policy | neutral authority vocab, frozen by test |
-| Product facade | 88-method `RebornServicesApi` trait | turn lifecycle + `invoke`/`query` (8 methods); mutations are descriptors with an origin→gate matrix (§5.2.1) |
+| Product facade | `host_api::ProductSurface` is the shared consumer contract (`invoke`, `query`, `stream_events`); product-local `ProductSurface` and subscription extension methods are deleted; callers use actor-bound handles | mutations are command/capability descriptors with an origin→gate matrix (§5.2.1); reads are view descriptors; remaining work is host byte-response refinement for file/attachment commands |
 
 ---
 
@@ -1817,7 +1957,7 @@ divergent local shape at the seam.
 
 - **The turn store consolidation is the trickiest store case.** The in-memory turn
   store is larger than the filesystem one and the runner-lease uses an in-memory
-  overlay; consolidating onto `FilesystemTurnStateStore<InMemoryBackend>` is
+  overlay; consolidating onto `TurnStateRowStore<InMemoryBackend>` is
   reconcile-then-delete, not a blind delete. Do the small domains (Slice A) first to
   build confidence, turns last.
 - **Closed `RuntimeLane` enum** trades open extensibility for exhaustiveness — a
@@ -1850,7 +1990,7 @@ type duplication in `scripts/check-type-duplicates.py`, cross-tenant behavior in
 | `Local*` types (§4.4) | no `Local` / `LocalDev` / `Hosted` / `Enterprise` in public type names | `ironclaw_architecture` | freeze the ~66-identifier allowlist; fail on any new one | allowlist empty |
 | `host_api` freeze (§4.5) | checked-in allowlist of public type names; `runtime_policy` mode enums absent from `host_api` | `ironclaw_architecture` | freeze the allowlist (set membership); a new type needs a justified allowlist entry | mode enums moved to the edge; only neutral authority vocab remains |
 | Products in composition (§5.8) | no `slack` / `webui` / `telegram` / `openai` / HTTP-route / transport identifier in `ironclaw_reborn_composition` | `ironclaw_architecture` | freeze the current product footprint; fail on new product/transport code landing in composition | composition is assembler-only; products are adapters + a `DeploymentConfig` list |
-| Product facade (§5.2) | `RebornServicesApi` method-set allowlist; every capability descriptor declares an origin→gate matrix (§5.2.1) | `ironclaw_architecture` | freeze the current 88-method set, **generated from the trait block itself** (set membership, not a file-wide grep); fail on any new method; fail on any descriptor without a gate matrix; the `Ungated`-for-`LoopRun` allowlist starts **empty** (set membership); the meta-capability set is pinned with its `AskAlways` floor (§5.2.6) | facade = turn lifecycle + `invoke`/`query`; all mutations are matrix-declared descriptors |
+| Product facade (§5.2) | host `ProductSurface` method set; absence of product-local `ProductSurface`; every capability descriptor declares an origin→gate matrix (§5.2.1) | `ironclaw_architecture` | freeze `invoke`/`query`/`stream_events` as the only host methods; fail if `ironclaw_product` reintroduces a local `ProductSurface` trait; fail on any descriptor without a gate matrix; the `Ungated`-for-`LoopRun` allowlist is pinned to its reviewed seed (§14) and may only change by reviewed diff; the meta-capability set is pinned with its `AskAlways` floor (§5.2.6) | consumer contract = `host_api::ProductSurface` plus actor-bound `BoundProductSurface`; product-local subscription extension stays deleted |
 
 Each axis's "hard ban" column is also its **definition of done**: the migration slice for
 that axis is complete when its ratchet flips from a frozen allowlist to an empty one (or the
@@ -1904,7 +2044,7 @@ states where the bugs live*.
 
 - **Turn/run lifecycle:** `Queued → Running → {BlockedApproval | BlockedAuth | WaitingProcess} → Queued(resume) → … → {Completed | Failed | Cancelled}`, plus lease-expiry and crash/recover edges.
 - **Capability invocation:** `LoopRequest → resolve → authorize → {Authorized | Denied | Blocked} → dispatch → {Done | Blocked(Auth) | Suspended | HostFailure}` (§5.3), with resume / auth-resume re-entry, `abort` on the not-dispatched path, and `Uncertain` on crash-mid-dispatch (§11.3).
-- **Batch invocation (#6137's home):** `CapabilityBatchInvocation { invocations, stop_on_first_suspension }` is a fold over per-invocation machines with an explicit batch-resume state: when invocation *k* gates, invocations *k+1..n* are recorded pending; gate resolution re-enters the **batch**, which must redispatch every pending member — not only the first — under their original `activity_id`s. The mixed-resolution states (some `Done`, one `Blocked`, rest pending) are enumerated like any other state; #6137 is the regression test.
+- **Batch invocation (#6137's home):** `LoopRequestBatch { invocations, stop_on_first_suspension }` is a fold over per-invocation machines with an explicit batch-resume state: when invocation *k* gates, invocations *k+1..n* are recorded pending; gate resolution re-enters the **batch**, which must redispatch every pending member — not only the first — under their original `activity_id`s. The mixed-resolution states (some `Done`, one `Blocked`, rest pending) are enumerated like any other state; #6137 is the regression test.
 - **Lease:** `unclaimed → claimed(runner, token) → heartbeat* → {released | expired}`; expiry terminal.
 - **Gate/resume:** `blocked(gate_ref, checkpoint) → resolved → requeue(same run/checkpoint)`.
 
@@ -2072,7 +2212,7 @@ because centralizing on one seam optimizes everything at once — or bottlenecks
 
 | Path | Frequency | Locking / store ops | Remote-latency exposure | Mitigation |
 | --- | --- | --- | --- | --- |
-| **Per-turn state fan-out** | every transition | ~11 durable collections (turn/run/lock/lease/checkpoint/idempotency/events) | 11 sequential round-trips if unbatched | one batched snapshot/delta write per transition — the `filesystem_store/row_store` journal already does this for turns; §4.3 must make it the norm, not per-domain |
+| **Per-turn state fan-out** | every transition | ~11 durable collections (turn/run/lock/lease/checkpoint/idempotency/events) | 11 sequential round-trips if unbatched | one batched snapshot/delta write per transition — the `turn_state_row_store/row_store` journal already does this for turns; §4.3 must make it the norm, not per-domain |
 | **Lease heartbeat ↔ store lock** | every heartbeat, per active run | heartbeat contends on the *same* store lock as the executor (`turn_scheduler.rs:881`); lease TTL (90s) budgets the write | a slow remote store delays the heartbeat past the TTL → false expiry → killed run (the 2026-06-24 wedge) | heartbeat is a tiny isolated write on its own connection, never behind the executor's store work; TTL ≥ k × backend p99 write latency (not a hardcoded 90s) |
 | **libSQL single-writer** | every write | `BEGIN IMMEDIATE` global write lock + a connection pool (`libsql_pool`; the #5751 `SQLITE_MISUSE` fix) | all writes serialize through one writer; §4.3 funnels *every* domain's writes there | already shipped as pain (#6089 governor contention). Prefer Postgres (row-level locking) for multi-tenant/high-concurrency; or shard the libSQL writer by tenant/scope |
 | **Capability `authorize()` reads** | every tool call | reads trust/approval/mounts; resource reservation is write + reconcile (2 writes) | multiple round-trips before dispatch, per call | the §3 single `authorize()` is where to batch the reads and **cache** the read-mostly ones (trust policy, descriptors), scope-keyed per the safety cache rule |
@@ -2182,7 +2322,7 @@ decorator gating and synthetic-capability promotion are settled here.**
   reviewed allowlist** (initially empty). That restores the structural guarantee the
   synthetic mechanism's absence used to provide, while keeping the scope-binding gains.
   This promotion is **Slice 1 of the §5.2.5 facade migration**: the same descriptor +
-  origin→gate-matrix shape then absorbs the `RebornServicesApi` mutations one by one.
+  origin→gate-matrix shape then absorbs the product-surface methods one by one.
 
 **Genuinely remaining (tuning/ops, not architecture):** the lease-TTL latency multiplier
 `k` in `lease_ttl ≥ k × backend_p99_write` (§12), and the default `RootFilesystem` backend
@@ -2191,52 +2331,106 @@ knobs to calibrate against measured latency, not open architectural questions.
 
 ---
 
-## 14. Implementation status (as of 2026-07-20)
+## 14. Implementation status (as of 2026-07-22)
 
 This section tracks what has landed against the slices (§9) and axes (§10). It is
 the **mutable status log** — the design in §1–§13 is the frozen contract; this
 section is expected to churn. "Merged" = on `main`; "in flight" = on a branch or
 open PR not yet on `main`.
 
+### Completion snapshot
+
+| Axis | Current `main` state | Evidence |
+| --- | --- | --- |
+| Result DTO collapse | **Done** — `CapabilityOutcome` and result mirrors are deleted; `host_api::Resolution` is canonical. | `crates/ironclaw_host_api/src/resolution.rs` (`Resolution`, `Outcome`, `Blocked`, `Suspension`); `crates/ironclaw_architecture/tests/reborn_capability_dto_collapse_ratchet.rs` bans retired mirror names. |
+| Request-side DTO collapse | **Done** — retired request mirror DTO names are banned; `LoopRequest`, tuple parts, and private `RuntimeLaneRequest` carry the remaining distinct states. | `crates/ironclaw_architecture/tests/reborn_capability_dto_collapse_ratchet.rs::RETIRED_COLLAPSE_DTOS`; `crates/ironclaw_turns/src/run_profile/host.rs` (`LoopRequest`); `crates/ironclaw_dispatcher/src/lib.rs` (`RuntimeLaneRequest`). |
+| Request/witness vocabulary | **Done** — `Invocation`, `Actor`, `InvocationOrigin`, `Authorized`, and dispatch-through-witness are live. | `crates/ironclaw_host_api/src/invocation.rs`; `crates/ironclaw_host_api/src/authorized.rs`; `crates/ironclaw_host_api/src/dispatch.rs`; `crates/ironclaw_architecture/tests/reborn_authorized_seal_ratchet.rs`. |
+| Pre-flight authority fold | **Done** — trust, grants, approvals, credentials, resources, and lane resolution are folded through `authorize()`. | `crates/ironclaw_capabilities/src/host.rs::CapabilityHost::authorize`, including `evaluate_trust`, `enforce_runtime_policy`, `apply_persistent_approval`, credential pre-flight, obligation preparation, and `seal_authorization`. |
+| Origin→gate matrix | **Live, tightening remains** — matrices are descriptor data and ratcheted; `LoopRun` ungated set is a reviewed 17-id seed to shrink. | `crates/ironclaw_host_api/src/capability.rs` (`OriginGatePolicy`, `OriginGateMatrix`, `UNGATED_LOOP_RUN_CAPABILITIES`); `crates/ironclaw_architecture/tests/reborn_origin_gate_matrix_ratchet.rs`. |
+| `InMemory*Store` mirror deletion | **Done for tracked domain stores** — the ratchet was deleted after the allowlist reached empty. | Deletion landed in #6430; replacement write sites include `crates/ironclaw_secrets/src/secret_store.rs`, `crates/ironclaw_resources/src/gate.rs`, `crates/ironclaw_authorization/src/lib.rs`, and `crates/ironclaw_outbound/src/delivered_gate_routes.rs`. |
+| Generic extension/channel runtime | **Landed** — `ChannelAdapter` + `ironclaw_extension_host`; Slack/Telegram are extension adapters, not bespoke product trees. | `crates/ironclaw_product/src/lib.rs::ChannelAdapter`; `crates/ironclaw_extension_host/src/lib.rs::ExtensionHost`; `crates/ironclaw_slack_extension/src/channel.rs::SlackChannelAdapter`; `crates/ironclaw_telegram_extension/src/channel.rs::TelegramChannelAdapter`; `crates/ironclaw_architecture/tests/reborn_extension_specificity.rs`. |
+| Product facade collapse | **Done for the method collapse** — consumers use `host_api::ProductSurface::{invoke, query, stream_events}`; former typed WebUI/product methods are command descriptors or capability descriptors; `execute_command`, product-operation wrappers, `ProductCapabilityInput`, compatibility trait-object methods, the product-local `ProductSurface`, and the subscription extension are gone. Consumers bind caller authority once with `BoundProductSurface`; file/attachment command bytes remain JSON/base64 pending a later byte-response refinement. | `crates/ironclaw_host_api/src/product_surface.rs` (`ProductSurface`, `BoundProductSurface`, `ProductSurfaceCaller`, `ChannelInboundProductSurface`, `ProductSurfaceError`); `crates/ironclaw_product/src/reborn_services.rs` (`ProductSurfaceCommandDescriptor`, `ProductView`, `ProductCapabilityDescriptor`); `crates/ironclaw_architecture/tests/reborn_facade_method_freeze_ratchet.rs`. |
+| Deployment mode as data | **Partial** — deployment-neutral type renames are live and ratcheted; profile-edge branching still exists. `DeploymentMode` / `RuntimeProfile` remain in `host_api` as shared kernel vocabulary for config parse/audit and resolver input, while execution consumes resolved policy data. | `crates/ironclaw_architecture/tests/reborn_localdev_typename_ratchet.rs`; `crates/ironclaw_architecture/tests/reborn_deployment_mode_typename_ratchet.rs`; `crates/ironclaw_architecture/tests/reborn_deployment_mode_branching_ratchet.rs`; `crates/ironclaw_host_api/src/runtime_policy.rs`. |
+| Causal routing / product terminal path | **Design added here, implementation pending** — no first-class duct/path contract yet. | §5.2.10 is the design target; no event-schema/path-contract/conformance write site exists yet. |
+| Recoverability endgame | **Partial** — vocabulary and model-visible recovery base are live; conformance/diagnostic observation remain. | `crates/ironclaw_host_api/src/resolution.rs`; `crates/ironclaw_host_api/src/result_meta.rs`; `crates/ironclaw_runner/src/failure_classification.rs`; §11.7 still names the missing conformance matrix. |
+
 ### Merged
 
-- **Slice C.1 — the `Invocation` payload vocabulary (§3).** `Invocation` is
-  defined in `crates/ironclaw_host_api/src/invocation.rs` (#6223, under #6168) —
-  the canonical host-side payload the mid-flight request mirrors collapse onto.
-  The `Resolution` / `Blocked` / `Suspension` / `HostFailure` channel enums are
-  **now merged too** — the §5.3 result flip landed on `main` (below).
-- **Slice A — delete in-memory stores (§4.3), most domains done.** Deleted and
-  repointed to `Filesystem*Store<InMemoryBackend>`: approval stores (#6195,
-  #6203), capability-lease (#6197), process stores (#6200, the §9 landed
-  exception), run-state (#6203), budget-gate (#6210), outbound-state (#6212),
-  triggered-run-delivery (#6213). The former `InMemory*Store` allowlist ratchet
-  was removed after its tracked entries were eliminated. **Deferred, by the §9 caveat:** the turns
-  cluster (`InMemoryTurnStateStore` + checkpoint / loop-checkpoint /
-  instruction-materialization) — the trickiest case, gated behind Slice 0's
-  reference model. The follow-on ratchet cleanup removed the remaining
-  allowlisted stores, including the former session-store exception.
-- **Slice B — `Local*` → config (§4.4), renames + ratchets done; config
-  collapse pending.** Bucket 2/3 renames landed: `LocalFilesystem`→`DiskFilesystem`
-  (#6209), `LocalHostProcessPort`→`HostProcessPort` (#6206),
-  `LocalTraceSubmission*`→`NodeTraceSubmission*` (#6207),
-  `LocalDevOutboundStores`→`OutboundStores` (#6220); the redundant
-  `LocalDevRootFilesystem` alias inlined to `CompositeRootFilesystem` (#6218). The
-  `LocalDev*` typename ratchet is frozen (#6205,
-  `reborn_localdev_typename_ratchet.rs`, ~53 identifiers remaining) and the
-  `Hosted*` / `Enterprise*` / `Local*` deployment-mode-typename ratchet added
-  (#6222, `reborn_deployment_mode_typename_ratchet.rs`). **Remaining:** the
-  Bucket-1 collapse of the `LocalDev*` shadow runtime to `DeploymentConfig` data
-  (§4.4.1) — the bulk of the 53 identifiers.
-- **§10 ratchets live.** Seven architecture-test ratchets frozen and enforcing:
-  InMemory-store, LocalDev-typename, deployment-mode-typename,
-  deployment-mode-branching, capability-DTO-collapse, `Authorized`-seal, and the
-  `RebornServicesApi` facade-method freeze (§5.2.5 step 1 — freezes the current
-  88-method surface; a new product operation must be a capability/view
-  descriptor, not a facade method).
+- **Slice C vocabulary + witness are live (§3 / §5.3.2).** `Invocation`
+  (`crates/ironclaw_host_api/src/invocation.rs`) now carries the corrected
+  pre-authorization carrier: `Actor::{Sealed,System}`, `InvocationOrigin`,
+  `CorrelationId`, and process lineage, not just the original 7-field sketch.
+  `Authorized` (`crates/ironclaw_host_api/src/authorized.rs`) is the sealed,
+  lane-bound, deadline-bounded witness; `dispatch()` consumes that witness rather
+  than a caller-rebuildable dispatch DTO.
+- **Pre-flight policy is consolidated into `authorize()` (#6386).** Trust,
+  approval, resource reservation, lane resolution, credential pre-flight, and
+  persistent-approval handling have moved out of host-runtime callers and into
+  the capability-kernel fold. This resolves the 2026-07-20 feasibility blocker
+  below: the missing carrier is no longer a hypothetical blocker; `Invocation` +
+  `Authorized` are the carrier.
+- **Process redispatch authority is sealed (#6438).** Detached process
+  continuations now re-mint an `Authorized` witness only through the kernel-owned
+  `ProcessAuthorizationRemintPort`, after reading the process record and
+  validating the request against the persisted authorized continuation. This
+  closes the non-kernel production caller gap called out in the 2026-07-20
+  feasibility finding.
+- **Slice C request-side mirror DTOs are retired (#6447).** The old loop
+  invocation name, host-runtime invocation/resume/auth-resume request structs,
+  capability invocation/resume/auth-resume request structs, and private runtime
+  adapter request name are gone. The ratchet is now a retired-name ban
+  (`RETIRED_COLLAPSE_DTOS`), not a shrinkable allowlist. The live shape keeps
+  `LoopRequest` at the loop membrane, tuple parts through the object-safe
+  host-runtime facade, direct `CapabilityHost` parameters, and
+  `RuntimeLaneRequest` as a private lane-local assembly value.
+- **Origin→gate matrix is live (#6396 / #6432).** `OriginGatePolicy` /
+  `OriginGateMatrix` live in `ironclaw_host_api::capability`, production
+  descriptors carry matrices, and `reborn_origin_gate_matrix_ratchet.rs` pins the
+  invariants. Implementation note: to preserve pre-matrix behavior, `main` pins a
+  reviewed 17-id `UNGATED_LOOP_RUN_CAPABILITIES` seed for builtins; the target
+  remains to shrink it by reviewed diffs toward the empty ideal in §5.2.1/§10.
+- **The §5.3 result flip is complete (landed on `main` 2026-07-20).**
+  `host_api::Resolution` is the single loop-facing capability result, and
+  `CapabilityOutcome` plus its result mirrors are deleted. The detailed stack is
+  listed below.
+- **Slice A — delete hand-written `InMemory*Store`s (§4.3) is complete for the
+  tracked production/test store mirrors.** Stores were repointed to
+  `Filesystem*Store<InMemoryBackend>` across approvals, authorization leases,
+  process/results, run-state, outbound/delivery, extension installation, WebUI
+  session, OpenAI-compat refs, and subagent goal storage. The
+  `reborn_inmemory_store_ratchet.rs` file was deleted in #6430 because its
+  allowlist reached empty. `InMemoryBackend` and in-memory fakes still exist as
+  backend/test mechanisms; the deleted class is the parallel `InMemory*Store`
+  domain implementation.
+- **Slice B — `Local*` → config (§4.4), ratchets and many renames done; config
+  collapse still pending.** Bucket 2/3 renames landed (`DiskFilesystem`,
+  `HostProcessPort`, `NodeTraceSubmission*`, `OutboundStores`, etc.). The
+  `LocalDev*` typename ratchet and deployment-mode typename/branching ratchets
+  remain live; recent cleanup shrank the deployment-mode branching ratchet
+  further, but `RebornCompositionProfile::{LocalDev,LocalYolo,...}` and some
+  profile-edge branching still exist.
+- **Unified generic extension runtime landed (#6116).** The old
+  `ironclaw_channel_host`, `ironclaw_channel_delivery`,
+  `ironclaw_wasm_product_adapters`, `ironclaw_slack_v2_adapter`, and product-
+  specific composition directories were removed or folded. The live shape is
+  `ironclaw_extension_host` plus `ChannelAdapter` exported from
+  `ironclaw_product`; Slack and Telegram now live as
+  `ironclaw_slack_extension` / `ironclaw_telegram_extension` adapters with
+  conformance tests. Composition still has generic extension/channel host glue,
+  but the concrete `slack/` and `telegram/` product trees are gone.
+- **§10 ratchets live, updated for current shape.** The active architecture
+  ratchets include LocalDev/deployment-mode type and branching guards,
+  capability-DTO collapse, `Authorized` seal, origin→gate matrix, facade-method
+  freeze, extension specificity, manifest reparse, and retired taxonomy. The
+  product-surface ratchet now freezes the host `ProductSurface` method set to
+  `invoke`, `query`, and `stream_events`, and asserts the product-local
+  `ProductSurface` trait stays retired. A new product operation must be a
+  capability/view descriptor, not a new facade method.
 - **Recoverability groundwork (feeds §5.3.4 / #6284).** The collapsed
-  no-run-borking recoverability stack (#5692) and loop resilience — deep
-  availability retries, iteration backstop, model-visible tool-failure reasons
-  (#5959) — are the pre-existing base #6284's endgame builds on.
+  no-run-borking recoverability stack (#5692), loop resilience / model-visible
+  tool-failure reasons (#5959), and "recoverable errors reach the model" stack
+  (#5965) are merged. The remaining #6284 endgame is the conformance and
+  diagnostic-observation work, not the basic result vocabulary.
 
 ### Merged — the §5.3 five-channel result flip (landed on `main` 2026-07-20)
 
@@ -2272,76 +2466,89 @@ loop-facing capability result and every result mirror is deleted.
   collided on the deterministic auth-gate key and the write-once store kept the
   stale record), plus injective scope-list encoding and CodeRabbit test cleanups.
 
-### Not started
-
-- **Slice C down-path (request-side) — the remaining capability-DTO collapse.**
-  The result side is done (above); the **9 request-side mirrors** still stand
-  (`FROZEN_COLLAPSE_DTOS`): `CapabilityInvocation` (turns),
-  `RuntimeCapability{,Resume,AuthResume}Request` (host_runtime),
-  `Capability{Invocation,Resume,AuthResume}Request` (capabilities),
-  `CapabilityDispatchRequest` (host_api), `RuntimeAdapterRequest` (dispatcher).
-
-  **Feasibility finding (2026-07-20, three independent probes — no code changed).**
-  An attempt to slice the retirement per-hop (invoke / resume / dispatch, in
-  parallel) was run as three isolated worktree probes. **All three STOPPED with
-  the same root cause:** the request mirrors carry the *pre-authorization
-  authority envelope* — a full `ExecutionContext` (`grants: CapabilitySet`,
-  `mounts: MountView`, `trust: TrustClass`, `correlation_id`, `extension_id`,
-  `runtime`, `process_id`, `parent_process_id`, `authenticated_actor_user_id`)
-  plus a host-computed `trust_decision` — whereas `host_api::Invocation` (7
-  fields: `activity_id, capability, input, scope, actor, origin, estimate`) is the
-  *post-authorization down-projection* the kernel *already* builds inside
-  `seal_authorization` (`capabilities/src/host.rs`). `Invocation` sits **below**
-  `authorize()`, not at its input. Concretely, retiring the mirrors onto
-  `Invocation` in isolation would:
-  - fresh-mint `correlation_id` (a distinct identity restored from
-    `prior_approval.correlation_id` on auth-resume) — the identity-confusion
-    hazard class of `types.md`;
-  - default `grants`/`trust`/`mounts` that are **authorization inputs**
-    (`authorize_dispatch_with_trust`, `validate()`), changing decisions — and on
-    resume specifically drop the `context.grants` mutation
-    (`apply_persistent_approval_policy`) that exists to prevent the #6299
-    persistent-approval Allow→Deny regression;
-  - be unable to represent actor-less system/one-shot contexts
-    (`Invocation.actor: UserId` is required; `ExecutionContext.authenticated_actor_user_id`
-    is legitimately `None`), which `authorize()` serves today with no witness;
-  - (dispatch) move reservation authority — the `Authorized` witness's
-    `mounts`/`reservation` are synthesized `None`→default, whereas dispatch uses
-    the raw obligation options with a **governor reservation fallback** in the
-    dispatcher; and hit a non-kernel production caller (`RuntimeDispatchProcessExecutor`)
-    that cannot mint `Authorized` (seal restricted to the kernel crate by
-    `reborn_authorized_seal_ratchet`).
-
-  **Corrected sequence — the per-hop retirements are consequences, not
-  precursors.** The load-bearing first slice is the doc's own "authority as a
-  fold" step (§3 / §5.3.2): move authority-envelope *derivation*
-  (`grants`/`mounts`/`trust` resolution) from the caller/membrane **into**
-  `authorize()`, so `authorize(&Invocation)` derives what it needs and the
-  outputs are absorbed by the sealed `Authorized`, rather than a pre-built
-  `ExecutionContext` being threaded through. This is the **security milestone**
-  the earlier plan mislabeled "D5/last" — it is actually first, and it is one
-  security-critical, non-parallelizable slice (the design decision: where
-  `correlation_id`/`grants`/`mounts`/`trust`/`runtime`/`extension_id` live once
-  `ExecutionContext` is retired — expand `Invocation`/`Authorized` to carry them,
-  or have `authorize()` resolve them from `scope` + descriptor + policy). **Only
-  after that carrier exists** do the mirror retirements land, in whatever hop
-  order is convenient — invoke, resume (respecting the #6287/#6299 replay/lease
-  identities), and dispatch (the two-layer `host_api`-vocabulary vs.
-  runtime-handles split collapsing onto `Authorized` + handles) — followed by
-  ratchet-to-empty + measurement (§9 step 4). Until the carrier lands, all nine
-  `FROZEN_COLLAPSE_DTOS` entries must stay frozen.
+### Remaining / not complete
 
 - **Slice 0** — the reference-model property suite (§11.4), prerequisite for
-  consolidating the turns-cluster store (Slice A's deferred remainder).
+  future persistence/concurrency rewrites. It is no longer a prerequisite for
+  deleting the tracked `InMemory*Store` mirrors because those are gone, but it
+  remains the replacement oracle before further turn-store semantic rewrites.
 - **§5.3.4 / #6284 endgame** — the recoverability conformance matrix (§11.7 /
   §11.9), the model-error observation channel, `read_diagnostic(diag_ref)`, and
-  the per-kind remediation generalization. Gated on the flip stack landing
-  #6273's `Resolution` vocabulary.
-- **§5.2 `ProductSurface`** facade collapse — the 88-method `RebornServicesApi`
-  freeze has landed (§10 ratchet, above), so the surface can only shrink; the
-  actual migration of mutations to capability descriptors and reads to view
-  descriptors (Slice 1 = the synthetic-capability promotion, §13.3) has not
-  started, nor has the products-in-composition ratchet (§5.8).
+  the per-kind remediation generalization. The vocabulary prerequisites are now
+  merged; the conformance/observation work remains.
+- **§5.2 `ProductSurface`** facade collapse — the `ProductSurface` freeze has
+  landed (§10 ratchet, above), so the surface can only shrink. Initial reads now
+  flow through view descriptors (`query`) rather than per-feature methods:
+  LLM config, operator status/diagnostics/setup/config validation, extension
+  inventory/registry, skill list/search/content, outbound preferences/targets,
+  trace credits/account traces, and run artifacts. Outbound preference writes
+  now flow through `builtin.outbound_preferences_set`, an API-only first-party
+  capability invoked directly by the WebUI product adapter and verified by
+  reading back `OUTBOUND_PREFERENCES_VIEW`; skill document writes now flow
+  through `builtin.skill_install`, `builtin.skill_update`,
+  `builtin.skill_auto_activate_set`, and `builtin.skill_remove`, with the
+  ProductSurface invoker carrying the scoped skill-management mounts and the
+  install capability's declared network policy. The learned auto-activation
+  master switch uses `builtin.skill_auto_activate_learned_set`, an API-only
+  product capability over the runtime selector flag. Extension install/remove
+  routes now invoke `builtin.extension_install` and `builtin.extension_remove`
+  directly from the WebUI ProductSurface path. Install establishes per-user
+  membership and returns the manifest-driven onboarding or blocked-auth result;
+  after auth completes, `EXTENSIONS_VIEW` derives `setup_needed` or `active`
+  from durable readiness. There is no separate public extension activation
+  capability or lifecycle transition. Extension setup read now flows through the
+  descriptor-backed `extension_setup` view, and setup submit now invokes
+  `builtin.extension_setup_submit` before reading back that view. Zip import now
+  invokes `builtin.extension_import` with upload bytes encoded into an
+  API-only base64 JSON payload. LLM config writes now invoke
+  `builtin.llm_provider_upsert`, `builtin.llm_provider_delete`, and
+  `builtin.llm_active_set`, then read back `LLM_CONFIG_VIEW`; LLM probes and
+  login starts now use typed product command descriptors over the host
+  `invoke` envelope rather than product-local facade methods. The migrated
+  legacy product-surface methods were removed from the ratchet allowlist. This is
+  the migration pattern for product mutations: authenticated product gesture ->
+  `ProductSurface::invoke` -> descriptor-declared first-party handler or
+  product-workflow-owned API capability -> authoritative `query` read-back where
+  an authoritative read model exists.
+  Channel ingress now follows the same facade direction: transport verification,
+  pairing, and pure adapter normalization stay in composition, then the generic
+  channel sink calls the typed
+  `host_api::ChannelInboundProductSurface::admit_channel_inbound` door.
+  Workflow-backed implementations convert into the shared
+  `ProductInboundEnvelope` with `source_channel` stamped before delegating to
+  the durable workflow commit path.
+  Deleted in r13-r15: `execute_command`, `ProductSurfaceOperation`,
+  `ProductOperation*`, WebUI-only caller/validation wrappers,
+  `RebornServicesError`, `ProductCapabilityInput`, and transient trait-object
+  compatibility methods. The product-local subscription extension is gone, and
+  product consumers now use `BoundProductSurface` so callers stop passing
+  authority-bearing caller data into `invoke`/`query`/`stream_events` request
+  DTOs. File/attachment command bytes remain JSON/base64 pending a later host
+  byte-response refinement.
+  r16 tightened the remaining consumer vocabulary: `ProductSurface`,
+  `BoundProductSurface`, `ProductSurfaceCaller`, and `ProductSurfaceError` now
+  live entirely in `ironclaw_host_api`; `ironclaw_product` keeps the
+  product-owned command descriptors, view descriptors, DTOs, and workflow
+  implementation. The former caller helper trait methods are inherent on
+  the host caller, host_api exposes shared HTTP error mapping parts for
+  transports, and the composition projection helpers use product event-stream
+  names instead of WebUI-specific names. WebUI/OpenAI/channel callers now meet
+  on the same host vocabulary and differ only at their wire adapters.
+- **§5.2.10 causal routing / product-terminal path** — design added here and
+  vocabulary aligned around terminals/channels, but no first-class duct/path
+  event contract or conformance suite exists yet. Until that lands, claims in
+  §5.2.10 are target-state requirements, not present-tense implementation facts.
+
+### Validation before merge
+
+For a docs-only update to this file, run:
+
+```bash
+git diff --check
+cd docs
+mint dev
+mint broken-links
+```
 
 ---
 
@@ -2351,7 +2558,13 @@ loop-facing capability result and every result mirror is deleted.
 - `docs/reborn/2026-05-11-trust-boundary-stack-note.md` — trust-boundary baseline invariants.
 - `docs/reborn/2026-04-25-storage-catalog-and-placement.md` — storage placement.
 - `crates/ironclaw_host_api/` — the neutral vocabulary crate (target home for `Invocation`/`Authorized`/`Outcome`); ~124 public types across 21 files (§4.5).
-- `crates/ironclaw_product_workflow/src/reborn_services.rs` — `RebornServicesApi`: the 88-method proto-`ProductSurface` trait that §5.2's `invoke`/`query` conduits replace (methods → matrix-declared capability descriptors + view descriptors).
+- `crates/ironclaw_host_api/src/product_surface.rs` — the host-owned
+  `ProductSurface` conduit (`invoke`, `query`, `stream_events`), sealed caller
+  wrapper, shared caller/error vocabulary, and test support.
+- `crates/ironclaw_product/src/reborn_services.rs` — the product workflow facade
+  behind `ProductSurface`; product-owned command/view descriptors and DTOs stay
+  here while temporary per-feature methods are replaced by matrix-declared
+  capability descriptors + view descriptors.
 - `crates/ironclaw_host_api/src/runtime_policy.rs` — `DeploymentMode` / `RuntimeProfile`: the deployment-mode enums that leaked into the kernel vocabulary (§4.4–§4.5).
 - `crates/ironclaw_runtime_policy/` — `EffectiveRuntimePolicy`: the resolved policy *data* the kernel should consume instead of a mode enum.
 - `crates/ironclaw_filesystem/src/in_memory.rs` — `InMemoryBackend: RootFilesystem`: the existing seam that makes every `InMemory*Store` deletable (§4.3).
@@ -2362,3 +2575,7 @@ loop-facing capability result and every result mirror is deleted.
 - Issues: #6168 (composition god-crate), #6144 (unenforced budget), #6137 / #6138 (gate-resume / capability-path).
 - Issue #6284 (error-recoverability endgame — the recoverability contract on the resolution channels, §5.3.4); its prerequisites #6273 (`Resolution` model-visible diagnostic + denial) and #5965 (recoverable errors reach the model), and its acceptance instances #5583 / #4311 / #5522 / #5192. The §5.3 flip stack that lands the vocabulary: #6271 / #6273 / #6278 / #6275 / #6283 / #6287 (§14).
 - Unified Extension Runtime design note (in progress, BenKurrek) — the detailed extension / adapter / auth design this proposal aligns with (§5.9): https://gist.github.com/BenKurrek/1d0c9189a3b25f5933cb00d4ac188efe
+- Urbit Arvo / Gall routing analogy for §5.2.10: official Arvo overview
+  (`https://docs.urbit.org/build-on-urbit/app-school/1-arvo`), Gall agent
+  overview (`https://docs.urbit.org/build-on-urbit/app-school/2-agent`), and
+  kernel/vane docs (`https://docs.urbit.org/urbit-os/kernel/arvo`).

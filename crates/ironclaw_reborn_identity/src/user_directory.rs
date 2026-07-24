@@ -1,5 +1,5 @@
 //! Admin-facing user directory: enumeration and lifecycle over the canonical
-//! [`StoredUser`](crate::filesystem_store) records this crate already persists.
+//! [`StoredUser`](crate::identity_store) records this crate already persists.
 //!
 //! This is a **separate trait** from [`RebornIdentityResolver`](crate::RebornIdentityResolver)
 //! on purpose. The resolver owns the security-load-bearing mint/link/create
@@ -10,7 +10,7 @@
 //! methods.
 //!
 //! Both traits are implemented by the one
-//! [`FilesystemRebornIdentityStore`](crate::FilesystemRebornIdentityStore), so
+//! [`RebornIdentityStore`](crate::RebornIdentityStore), so
 //! the composition root gets both surfaces from a single `Arc`.
 
 use std::collections::BTreeMap;
@@ -76,12 +76,12 @@ pub struct RebornUserProfileUpdate {
 }
 
 /// Admin CRUD over canonical user records. Implemented by
-/// [`FilesystemRebornIdentityStore`](crate::FilesystemRebornIdentityStore).
+/// [`RebornIdentityStore`](crate::RebornIdentityStore).
 ///
 /// This trait is a **port**: it is defined here (bottom of the Reborn stack)
 /// and its only production implementor is the filesystem store. The composition
 /// root adapts it up to the product-workflow admin service, so admin CRUD never
-/// forces `ironclaw_product_workflow` to depend on this crate (the dependency
+/// forces `ironclaw_product` to depend on this crate (the dependency
 /// boundary the architecture tests enforce).
 #[async_trait]
 pub trait RebornUserDirectory: Send + Sync {

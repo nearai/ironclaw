@@ -1,0 +1,49 @@
+{
+  "model_name": "reborn-qa-qa_10d_slack_channel_membership",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "Using my connected Slack account, list the names of the Slack channels I am a member of — channel names only. Include the exact marker REBORN_QA_10D_MEMBERSHIP_1784642877423 in your answer."
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Using my connected Slack account, list the names of the Slack channels I am a me",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_4ee0e18e5f4b47b289b3b8d8",
+            "name": "slack__list_conversations",
+            "arguments": {
+              "limit": 1000,
+              "types": "public_channel,private_channel"
+            }
+          }
+        ],
+        "input_tokens": 17413,
+        "output_tokens": 88
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Using my connected Slack account, list the names of the Slack channels I am a me",
+        "min_message_count": 4
+      },
+      "response": {
+        "type": "text",
+        "content": "Here are the Slack channels you are a member of:\n\n- **all-ironclaw-testing**\n- **new-channel**\n- **social**\n- **product**\n\nREBORN_QA_10D_MEMBERSHIP_1784642877423",
+        "input_tokens": 17912,
+        "output_tokens": 53
+      }
+    }
+  ],
+  "expects": {
+    "tools_used": [
+      "slack.list_conversations"
+    ]
+  }
+}

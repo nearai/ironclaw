@@ -112,7 +112,7 @@ async fn build_webui_runtime_context(
                     postgres_pool_size
                 )
             })?;
-            RebornBuildInput::hosted_single_tenant_postgres(
+            RebornHostBindings::hosted_single_tenant_postgres(
                 RebornCompositionProfile::HostedSingleTenant,
                 WEBUI_SESSION_RUNTIME_USER,
                 storage_root,
@@ -126,7 +126,7 @@ async fn build_webui_runtime_context(
     let tenant_id = TenantId::new(WEBUI_SESSION_TENANT)?;
     let agent_id = AgentId::new(WEBUI_SESSION_AGENT)?;
     build_input = build_input.with_local_runtime_identity(tenant_id.clone(), agent_id.clone());
-    let runtime_input = RebornRuntimeInput::from_services(build_input)
+    let runtime_input = RebornRuntimeInput::from_build_input(build_input)
         .with_identity(RebornRuntimeIdentity {
             tenant_id: WEBUI_SESSION_TENANT.to_string(),
             agent_id: WEBUI_SESSION_AGENT.to_string(),

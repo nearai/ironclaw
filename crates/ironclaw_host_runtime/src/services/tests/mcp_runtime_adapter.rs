@@ -35,8 +35,9 @@ async fn mcp_adapter_maps_executor_auth_required_to_dispatch_auth_required() {
     );
 
     let result = adapter
-        .dispatch_json(RuntimeAdapterRequest {
+        .dispatch_json(RuntimeLaneRequest {
             run_id: None,
+            origin: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -88,8 +89,9 @@ async fn mcp_adapter_preserves_executor_failure_cause() {
     );
 
     let result = adapter
-        .dispatch_json(RuntimeAdapterRequest {
+        .dispatch_json(RuntimeLaneRequest {
             run_id: None,
+            origin: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,

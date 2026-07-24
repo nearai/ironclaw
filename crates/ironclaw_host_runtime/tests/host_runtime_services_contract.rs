@@ -1,14 +1,20 @@
-// arch-exempt: large_file, mechanical lease-store test repoint to FilesystemCapabilityLeaseStore<InMemoryBackend> helper (arch-simplification §4.3), no new test logic, plan #6168
+// arch-exempt: large_file, mechanical lease-store test repoint to CapabilityLeaseStore<InMemoryBackend> helper (arch-simplification §4.3), no new test logic, plan #6168
 mod support;
 
 use support::host_runtime_harness::*;
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_approvals::LeaseApproval;
 use ironclaw_authorization::{
-    CapabilityLeaseStatus, CapabilityLeaseStore, GrantAuthorizer,
+    CapabilityLeaseStatus, CapabilityLeaseStorePort, GrantAuthorizer,
     TrustAwareCapabilityDispatchAuthorizer, in_memory_backed_capability_lease_store,
 };
 use ironclaw_capabilities::{CapabilityHost, CapabilitySpawnRequest};
@@ -30,13 +36,12 @@ use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationServices, CancelReason, CancelRuntimeWorkRequest, CapabilitySurfaceVersion,
     HostRuntime, HostRuntimeServices, ProductionWiringComponent, ProductionWiringConfig,
-    ProductionWiringIssueKind, RuntimeCapabilityAuthResumeRequest, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind,
-    RuntimeStatusRequest, RuntimeWorkId, TenantSandboxProcessPort, builtin_first_party_handlers,
+    ProductionWiringIssueKind, RuntimeCapabilityOutcome, RuntimeFailureKind, RuntimeStatusRequest,
+    RuntimeWorkId, TenantSandboxProcessPort, builtin_first_party_handlers,
 };
 use ironclaw_processes::{
-    BackgroundProcessManager, FilesystemProcessResultStore, FilesystemProcessStore, ProcessError,
-    ProcessHost, ProcessManager, ProcessResultStore, ProcessStatus, ProcessStore,
+    BackgroundProcessManager, ProcessError, ProcessHost, ProcessManager, ProcessResultStore,
+    ProcessResultStorePort, ProcessStatus, ProcessStore, ProcessStorePort,
 };
 use ironclaw_reborn_event_store::{
     RebornEventStoreConfig, RebornEventStoreError, RebornProfile, build_reborn_event_stores,
@@ -45,14 +50,14 @@ use ironclaw_resources::{
     InMemoryResourceGovernor, JsonFileResourceGovernorStore, PersistentResourceGovernor,
     ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits, ResourceTally,
 };
-use ironclaw_run_state::{ApprovalRequestStore, RunStart, RunStateStore, RunStatus};
-use ironclaw_scripts::{ScriptRuntime, ScriptRuntimeConfig};
-use ironclaw_secrets::{
-    FilesystemSecretStore, InMemoryCredentialBroker, SecretMaterial, SecretStore,
+use ironclaw_run_state::{
+    ApprovalRequestStorePort, RunRecord, RunStart, RunStateError, RunStateStorePort, RunStatus,
 };
+use ironclaw_scripts::{ScriptRuntime, ScriptRuntimeConfig};
+use ironclaw_secrets::{InMemoryCredentialBroker, SecretMaterial, SecretStore, SecretStorePort};
 use ironclaw_triggers::InMemoryTriggerRepository;
-use ironclaw_turns::FilesystemTurnStateRowStore;
 use ironclaw_turns::NoopTurnRunWakeNotifier;
+use ironclaw_turns::TurnStateRowStore;
 use ironclaw_turns::{
     InMemoryRunProfileResolver, SubmitTurnResponse, TurnCoordinator, TurnStateStore,
 };
@@ -88,7 +93,7 @@ fn assert_actor_policy_denied(outcome: RuntimeCapabilityOutcome) {
 }
 
 async fn assert_alice_run_status(
-    run_state: &ironclaw_run_state::FilesystemRunStateStore<ironclaw_filesystem::InMemoryBackend>,
+    run_state: &ironclaw_run_state::RunStateStore<ironclaw_filesystem::InMemoryBackend>,
     scope: &ResourceScope,
     invocation_id: InvocationId,
     expected_status: RunStatus,
@@ -196,7 +201,7 @@ async fn production_wiring_validation_rejects_missing_components_and_local_only_
     );
     assert!(
         report.contains(
-            ProductionWiringComponent::SecretStore,
+            ProductionWiringComponent::SecretStorePort,
             ProductionWiringIssueKind::Missing
         ),
         "missing secret store should be reported: {report:?}"
@@ -217,14 +222,14 @@ async fn production_wiring_validation_rejects_missing_components_and_local_only_
     );
     assert!(
         report.contains(
-            ProductionWiringComponent::ProcessStore,
+            ProductionWiringComponent::ProcessStorePort,
             ProductionWiringIssueKind::LocalOnlyImplementation
         ),
         "in-memory process store should be reported as local-only: {report:?}"
     );
     assert!(
         report.contains(
-            ProductionWiringComponent::ProcessResultStore,
+            ProductionWiringComponent::ProcessResultStorePort,
             ProductionWiringIssueKind::LocalOnlyImplementation
         ),
         "in-memory process result store should be reported as local-only: {report:?}"
@@ -508,7 +513,7 @@ async fn production_wiring_validation_classifies_in_memory_backed_lease_store_as
     // `InMemoryCapabilityLeaseStore`): the production-wiring classifier keyed the
     // now-deleted store as an explicit `LocalOnly` type, and unknown component
     // types default to `ProductionCandidate`. Its replacement — the production
-    // `FilesystemCapabilityLeaseStore<InMemoryBackend>` the no-durable build and
+    // `CapabilityLeaseStore<InMemoryBackend>` the no-durable build and
     // every test seam wire — must classify the same way, or a volatile in-memory
     // lease store could silently satisfy production readiness. Drive the real
     // `HostRuntimeServices` caller so the classification is exercised through the
@@ -533,7 +538,7 @@ async fn production_wiring_validation_classifies_in_memory_backed_lease_store_as
             ProductionWiringComponent::CapabilityLeases,
             ProductionWiringIssueKind::LocalOnlyImplementation,
         ),
-        "FilesystemCapabilityLeaseStore<InMemoryBackend> must classify local-only: {report:?}"
+        "CapabilityLeaseStore<InMemoryBackend> must classify local-only: {report:?}"
     );
     assert!(
         !report.contains(
@@ -698,14 +703,14 @@ async fn production_turn_state_selection_accepts_filesystem_turn_state_store() {
             ProductionWiringComponent::TurnState,
             ProductionWiringIssueKind::Missing
         ),
-        "FilesystemTurnStateRowStore must satisfy production turn-state presence: {report:?}"
+        "TurnStateRowStore must satisfy production turn-state presence: {report:?}"
     );
     assert!(
         !report.contains(
             ProductionWiringComponent::TurnState,
             ProductionWiringIssueKind::LocalOnlyImplementation
         ),
-        "FilesystemTurnStateRowStore over LibSqlRootFilesystem must not be classified local-only: {report:?}"
+        "TurnStateRowStore over LibSqlRootFilesystem must not be classified local-only: {report:?}"
     );
 }
 
@@ -736,7 +741,7 @@ async fn production_turn_coordinator_uses_configured_store_and_notifier() {
     let response = coordinator.submit_turn(request.clone()).await.unwrap();
     let SubmitTurnResponse::Accepted { run_id, .. } = response;
 
-    let reopened = FilesystemTurnStateRowStore::new(scoped);
+    let reopened = TurnStateRowStore::new(scoped);
     let state = reopened
         .get_run_state(ironclaw_turns::GetRunStateRequest {
             scope: request.scope,
@@ -1082,7 +1087,7 @@ async fn production_wiring_validation_accepts_verified_host_http_egress_shape() 
         ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()));
+    .with_secret_store(Arc::new(SecretStore::ephemeral()));
     let services = services
         .try_with_host_http_egress(RecordingNetworkHttpEgress::new())
         .unwrap();
@@ -1116,7 +1121,7 @@ async fn host_http_egress_helper_requires_graph_secret_store() {
     };
 
     assert!(report.contains(
-        ProductionWiringComponent::SecretStore,
+        ProductionWiringComponent::SecretStorePort,
         ProductionWiringIssueKind::Missing
     ));
 }
@@ -1485,7 +1490,7 @@ async fn host_runtime_services_builds_dispatcher_runtime_and_health_from_registe
 
     let runtime = services.host_runtime_for_local_testing();
     let context = execution_context_with_dispatch_grant(script_capability_id());
-    let request = RuntimeCapabilityRequest::new(
+    let request = (
         context,
         script_capability_id(),
         ResourceEstimate::default(),
@@ -1601,7 +1606,7 @@ async fn host_runtime_services_writes_runtime_events_to_durable_event_log_metada
 
     let outcome = services
         .host_runtime_for_local_testing()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
             script_capability_id(),
             ResourceEstimate::default(),
@@ -1697,7 +1702,7 @@ async fn host_runtime_services_consumes_reborn_jsonl_event_store_without_v1_comp
     let scope = sample_scope(InvocationId::new());
     let outcome = services
         .host_runtime_for_local_testing()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
             script_capability_id(),
             ResourceEstimate::default(),
@@ -1763,7 +1768,7 @@ async fn host_runtime_services_durable_event_replay_cursor_and_gap_behavior() {
 
     let outcome = services
         .host_runtime_for_local_testing()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
             script_capability_id(),
             ResourceEstimate::default(),
@@ -1856,7 +1861,7 @@ async fn host_runtime_services_runtime_events_project_through_replay_projection_
 
     let outcome = services
         .host_runtime_for_local_testing()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
             script_capability_id(),
             ResourceEstimate::default(),
@@ -1943,7 +1948,7 @@ async fn host_runtime_services_projection_rejects_foreign_cursor_and_surfaces_re
 
     let outcome = services
         .host_runtime_for_local_testing()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_dispatch_grant_for_scope(
                 script_capability_id(),
                 scope_a.clone(),
@@ -2051,7 +2056,7 @@ async fn host_runtime_services_jsonl_event_store_projects_same_runtime_sequence_
 
     let outcome = services
         .host_runtime_for_local_testing()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
             script_capability_id(),
             ResourceEstimate::default(),
@@ -2151,7 +2156,7 @@ async fn host_runtime_services_approval_resolution_projects_durable_audit_metada
     .await;
     approve_dispatch_for_services(&services, &scope, gate.approval_request_id, None).await;
     let resumed = runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context,
             gate.approval_request_id,
             script_capability_id(),
@@ -2317,19 +2322,17 @@ async fn host_runtime_services_jsonl_approval_audit_projection_rejects_foreign_c
 async fn process_lifecycle_projects_through_durable_replay_without_output_leaks() {
     let event_log = Arc::new(InMemoryDurableEventLog::new());
     let processes_filesystem = ironclaw_processes::in_memory_backed_processes_filesystem();
-    let inner_process_store = Arc::new(FilesystemProcessStore::new(Arc::clone(
-        &processes_filesystem,
-    )));
+    let inner_process_store = Arc::new(ProcessStore::new(Arc::clone(&processes_filesystem)));
     let obligation_services = BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
-        Arc::new(FilesystemSecretStore::ephemeral()),
+        Arc::new(SecretStore::ephemeral()),
         Arc::new(InMemoryResourceGovernor::new()),
     );
     let process_store =
         Arc::new(obligation_services.process_obligation_lifecycle_store(inner_process_store));
     let durable_event_log: Arc<dyn DurableEventLog> = event_log.clone();
     process_store.set_event_sink(Arc::new(DurableEventSink::new(durable_event_log)));
-    let result_store = Arc::new(FilesystemProcessResultStore::new(processes_filesystem));
+    let result_store = Arc::new(ProcessResultStore::new(processes_filesystem));
     let manager = BackgroundProcessManager::new(
         Arc::clone(&process_store),
         Arc::new(BackgroundExecutor::success_with_output(json!({
@@ -2538,7 +2541,7 @@ async fn host_runtime_services_resumes_approved_capability_and_consumes_lease_on
             .await;
 
     let resumed = runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context.clone(),
             gate.approval_request_id,
             script_capability_id(),
@@ -2580,7 +2583,7 @@ async fn host_runtime_services_resumes_approved_capability_and_consumes_lease_on
     );
 
     let second = runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context,
             gate.approval_request_id,
             script_capability_id(),
@@ -2603,7 +2606,7 @@ async fn host_runtime_services_resume_missing_runtime_secret_returns_auth_gate()
     let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
-    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store = Arc::new(SecretStore::ephemeral());
     let secret_handle = SecretHandle::new("approval_resume_token").unwrap();
     let script_runtime = Arc::new(RecordingScriptExecutor::default());
     let services = HostRuntimeServices::new(
@@ -2636,7 +2639,7 @@ async fn host_runtime_services_resume_missing_runtime_secret_returns_auth_gate()
         approve_dispatch_for_services(&services, &scope, gate.approval_request_id, None).await;
 
     let resumed = runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context,
             gate.approval_request_id,
             script_capability_id(),
@@ -2696,7 +2699,7 @@ async fn host_runtime_services_resume_changed_input_fails_before_lease_claim_or_
             .await;
 
     let outcome = runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context,
             gate.approval_request_id,
             script_capability_id(),
@@ -2743,7 +2746,7 @@ async fn host_runtime_services_resume_wrong_user_scope_is_hidden_before_dispatch
         execution_context_with_dispatch_grant_for_scope(script_capability_id(), wrong_scope);
 
     let outcome = runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             wrong_context,
             gate.approval_request_id,
             script_capability_id(),
@@ -2796,7 +2799,7 @@ async fn host_runtime_services_resume_expired_lease_fails_before_dispatch() {
     .await;
 
     let outcome = runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context,
             gate.approval_request_id,
             script_capability_id(),
@@ -2840,7 +2843,7 @@ async fn host_runtime_services_resume_trust_preflight_failure_fails_only_matchin
     };
     let wrong_context = execution_context_without_grants_for_scope(wrong_scope);
     let wrong_scope_outcome = broken_runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             wrong_context,
             gate.approval_request_id,
             script_capability_id(),
@@ -2861,7 +2864,7 @@ async fn host_runtime_services_resume_trust_preflight_failure_fails_only_matchin
     let mut invalid_context = context.clone();
     invalid_context.user_id = UserId::new("tampered-user").unwrap();
     let invalid_context_error = broken_runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             invalid_context,
             gate.approval_request_id,
             script_capability_id(),
@@ -2883,7 +2886,7 @@ async fn host_runtime_services_resume_trust_preflight_failure_fails_only_matchin
     .await;
 
     let matching_outcome = broken_runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context.clone(),
             gate.approval_request_id,
             script_capability_id(),
@@ -2935,7 +2938,7 @@ async fn host_runtime_services_resume_runtime_policy_denial_fails_matching_block
     let denied_runtime = resume_runtime_with_policy(&fixture, network_denied_runtime_policy());
 
     let outcome = denied_runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context.clone(),
             gate.approval_request_id,
             script_capability_id(),
@@ -2997,7 +3000,7 @@ async fn host_runtime_services_resume_rejects_changed_actor_before_preflight_mut
     for attempted_actor in [Some("slack-bob"), None] {
         let attempted_context = with_authenticated_actor(alice_context.clone(), attempted_actor);
         let outcome = broken_runtime
-            .resume_capability(RuntimeCapabilityResumeRequest::new(
+            .resume_capability((
                 attempted_context,
                 gate.approval_request_id,
                 script_capability_id(),
@@ -3033,7 +3036,7 @@ async fn host_runtime_services_resume_rejects_changed_actor_before_preflight_mut
     }
 
     let valid_alice_outcome = broken_runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             alice_context,
             gate.approval_request_id,
             script_capability_id(),
@@ -3082,7 +3085,7 @@ async fn host_runtime_services_auth_resume_rejects_changed_actor_before_prefligh
     for attempted_actor in [Some("slack-bob"), None] {
         let attempted_context = with_authenticated_actor(alice_context.clone(), attempted_actor);
         let outcome = broken_runtime
-            .auth_resume_capability(RuntimeCapabilityAuthResumeRequest::new(
+            .auth_resume_capability((
                 attempted_context,
                 script_capability_id(),
                 estimate.clone(),
@@ -3107,17 +3110,205 @@ async fn host_runtime_services_auth_resume_rejects_changed_actor_before_prefligh
     }
 
     let valid_alice_outcome = broken_runtime
-        .auth_resume_capability(RuntimeCapabilityAuthResumeRequest::new(
-            alice_context,
-            script_capability_id(),
-            estimate,
-            input,
-            None,
-        ))
+        .auth_resume_capability((alice_context, script_capability_id(), estimate, input, None))
         .await
         .unwrap();
 
     assert_failed_outcome(valid_alice_outcome, RuntimeFailureKind::MissingRuntime);
+    assert_alice_run_status(
+        fixture.run_state.as_ref(),
+        &scope,
+        invocation_id,
+        RunStatus::Failed,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn host_runtime_services_auth_decline_terminalizes_matching_blocked_invocation() {
+    let fixture = approval_resume_fixture();
+    let context = with_authenticated_actor(execution_context_without_grants(), Some("slack-alice"));
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    fixture
+        .run_state
+        .start(RunStart {
+            invocation_id,
+            scope: scope.clone(),
+            capability_id: script_capability_id(),
+            authenticated_actor_user_id: context.authenticated_actor_user_id.clone(),
+        })
+        .await
+        .unwrap();
+    fixture
+        .run_state
+        .block_auth(&scope, invocation_id, "AuthRequired".to_string())
+        .await
+        .unwrap();
+    let runtime = resume_runtime_with_empty_registry(&fixture);
+
+    let outcome = runtime
+        .decline_auth_capability((context, script_capability_id()))
+        .await
+        .unwrap();
+
+    assert_failed_outcome(outcome, RuntimeFailureKind::GateDeclined);
+    let record = fixture
+        .run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .expect("blocked invocation remains durably recorded");
+    assert_eq!(record.status, RunStatus::Failed);
+    assert_eq!(record.error_kind.as_deref(), Some("GateDeclined"));
+    assert!(
+        fixture.events.events().is_empty(),
+        "declining auth must not dispatch the capability"
+    );
+}
+
+struct FailOnceAuthDeclineRunStateStore {
+    inner: Arc<ironclaw_run_state::RunStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    fail_attempts: AtomicUsize,
+}
+
+impl FailOnceAuthDeclineRunStateStore {
+    fn new(
+        inner: Arc<ironclaw_run_state::RunStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    ) -> Self {
+        Self {
+            inner,
+            fail_attempts: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl RunStateStorePort for FailOnceAuthDeclineRunStateStore {
+    async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError> {
+        self.inner.start(start).await
+    }
+
+    async fn block_approval(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        approval: ApprovalRequest,
+    ) -> Result<RunRecord, RunStateError> {
+        self.inner
+            .block_approval(scope, invocation_id, approval)
+            .await
+    }
+
+    async fn block_auth(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        error_kind: String,
+    ) -> Result<RunRecord, RunStateError> {
+        self.inner
+            .block_auth(scope, invocation_id, error_kind)
+            .await
+    }
+
+    async fn complete(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<RunRecord, RunStateError> {
+        self.inner.complete(scope, invocation_id).await
+    }
+
+    async fn fail(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        error_kind: String,
+    ) -> Result<RunRecord, RunStateError> {
+        if self.fail_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err(RunStateError::Filesystem(
+                "simulated transient decline failure at /tmp/runstate.db".to_string(),
+            ));
+        }
+        self.inner.fail(scope, invocation_id, error_kind).await
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<Option<RunRecord>, RunStateError> {
+        self.inner.get(scope, invocation_id).await
+    }
+
+    async fn records_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<RunRecord>, RunStateError> {
+        self.inner.records_for_scope(scope).await
+    }
+}
+
+#[tokio::test]
+async fn host_runtime_services_auth_decline_keeps_run_blocked_when_store_is_unavailable() {
+    let fixture = approval_resume_fixture();
+    let context = with_authenticated_actor(execution_context_without_grants(), Some("slack-alice"));
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    fixture
+        .run_state
+        .start(RunStart {
+            invocation_id,
+            scope: scope.clone(),
+            capability_id: script_capability_id(),
+            authenticated_actor_user_id: context.authenticated_actor_user_id.clone(),
+        })
+        .await
+        .unwrap();
+    fixture
+        .run_state
+        .block_auth(&scope, invocation_id, "AuthRequired".to_string())
+        .await
+        .unwrap();
+    let fail_once_run_state = Arc::new(FailOnceAuthDeclineRunStateStore::new(Arc::clone(
+        &fixture.run_state,
+    )));
+    let runtime = HostRuntimeServices::new(
+        Arc::new(ExtensionRegistry::new()),
+        Arc::new(DiskFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenGrantAuthorizer),
+        ironclaw_processes::in_memory_backed_process_services(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability],
+    )))
+    .with_run_state(fail_once_run_state)
+    .host_runtime_for_local_testing();
+
+    let first_error = runtime
+        .decline_auth_capability((context.clone(), script_capability_id()))
+        .await
+        .expect_err("transient durable-store failure must stay retryable");
+    assert!(matches!(
+        first_error,
+        ironclaw_host_runtime::HostRuntimeError::Unavailable { .. }
+    ));
+    assert_alice_run_status(
+        fixture.run_state.as_ref(),
+        &scope,
+        invocation_id,
+        RunStatus::BlockedAuth,
+    )
+    .await;
+
+    let retry = runtime
+        .decline_auth_capability((context, script_capability_id()))
+        .await
+        .expect("retry terminalizes the exact blocked invocation");
+    assert_failed_outcome(retry, RuntimeFailureKind::GateDeclined);
     assert_alice_run_status(
         fixture.run_state.as_ref(),
         &scope,
@@ -3162,7 +3353,7 @@ async fn host_runtime_services_resume_spawn_rejects_changed_actor_before_input_a
     let input = process_sandbox_input();
     let estimate = process_sandbox_estimate();
     let blocked = runtime
-        .spawn_capability(RuntimeCapabilityRequest::new(
+        .spawn_capability((
             alice_context.clone(),
             process_sandbox_capability_id(),
             estimate.clone(),
@@ -3196,7 +3387,7 @@ async fn host_runtime_services_resume_spawn_rejects_changed_actor_before_input_a
     for attempted_actor in [Some("slack-bob"), None] {
         let attempted_context = with_authenticated_actor(alice_context.clone(), attempted_actor);
         let outcome = broken_runtime
-            .resume_spawn_capability(RuntimeCapabilityResumeRequest::new(
+            .resume_spawn_capability((
                 attempted_context,
                 approval_request_id,
                 process_sandbox_capability_id(),
@@ -3235,7 +3426,7 @@ async fn host_runtime_services_resume_spawn_rejects_changed_actor_before_input_a
     }
 
     let invalid_input_outcome = broken_runtime
-        .resume_spawn_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_spawn_capability((
             with_authenticated_actor(alice_context.clone(), Some("slack-bob")),
             approval_request_id,
             process_sandbox_capability_id(),
@@ -3254,7 +3445,7 @@ async fn host_runtime_services_resume_spawn_rejects_changed_actor_before_input_a
     .await;
 
     let valid_alice_outcome = broken_runtime
-        .resume_spawn_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_spawn_capability((
             alice_context,
             approval_request_id,
             process_sandbox_capability_id(),
@@ -3295,7 +3486,7 @@ async fn host_runtime_services_auth_resume_dispatches_blocked_auth_run() {
     let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
-    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store = Arc::new(SecretStore::ephemeral());
     let secret_handle = SecretHandle::new("auth_resume_token").unwrap();
     let script_runtime = Arc::new(RecordingScriptExecutor::default());
     let services = HostRuntimeServices::new(
@@ -3330,7 +3521,7 @@ async fn host_runtime_services_auth_resume_dispatches_blocked_auth_run() {
 
     // Phase 2: resume with credential absent → AuthRequired / BlockedAuth.
     let auth_gate = runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context.clone(),
             gate.approval_request_id,
             script_capability_id(),
@@ -3362,7 +3553,7 @@ async fn host_runtime_services_auth_resume_dispatches_blocked_auth_run() {
         .unwrap();
 
     let auth_resumed = runtime
-        .auth_resume_capability(RuntimeCapabilityAuthResumeRequest::new(
+        .auth_resume_capability((
             context.clone(),
             script_capability_id(),
             estimate.clone(),
@@ -3455,7 +3646,7 @@ async fn host_runtime_services_auth_resume_trust_preflight_failure_fails_blocked
     };
     let wrong_context = execution_context_without_grants_for_scope(wrong_scope);
     let wrong_outcome = broken_runtime
-        .auth_resume_capability(RuntimeCapabilityAuthResumeRequest::new(
+        .auth_resume_capability((
             wrong_context,
             script_capability_id(),
             estimate.clone(),
@@ -3483,7 +3674,7 @@ async fn host_runtime_services_auth_resume_trust_preflight_failure_fails_blocked
     // Pre-fix: the run was left as stale BlockedAuth because
     // fail_matching_blocked_auth_resume_on_preflight_error was not called.
     let matching_outcome = broken_runtime
-        .auth_resume_capability(RuntimeCapabilityAuthResumeRequest::new(
+        .auth_resume_capability((
             context.clone(),
             script_capability_id(),
             estimate.clone(),
@@ -3574,7 +3765,7 @@ async fn host_runtime_services_auth_resume_with_approval_id_fails_blocked_auth_r
     // the run stuck as BlockedAuth.
     let orphan_approval_id = ApprovalRequestId::new();
     let outcome = broken_runtime
-        .auth_resume_capability(RuntimeCapabilityAuthResumeRequest::new(
+        .auth_resume_capability((
             context.clone(),
             script_capability_id(),
             estimate.clone(),
@@ -3622,7 +3813,7 @@ async fn host_runtime_services_resume_without_backing_stores_fails_closed() {
     .host_runtime_for_local_testing();
 
     let outcome = runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             execution_context_without_grants(),
             ApprovalRequestId::new(),
             script_capability_id(),
@@ -3772,7 +3963,7 @@ async fn host_runtime_spawn_process_sandbox_rejects_invalid_plan_before_executor
     .host_runtime_for_local_testing();
     let scope = sample_scope(InvocationId::new());
     let mut request = process_sandbox_runtime_request_for_scope(scope);
-    request.input = invalid_process_sandbox_input();
+    request.3 = invalid_process_sandbox_input();
 
     // A malformed/invalid plan is model-fixable: it must surface as a
     // recoverable, model-visible tool error (InvalidInput) so the run
@@ -3789,6 +3980,12 @@ async fn host_runtime_spawn_process_sandbox_rejects_invalid_plan_before_executor
             assert_eq!(
                 failure.disposition(),
                 ironclaw_host_runtime::CapabilityFailureDisposition::ModelVisibleToolError,
+            );
+            assert!(
+                failure
+                    .model_visible_cause()
+                    .is_some_and(|cause| cause.contains("run command must not be empty")),
+                "public spawn_capability must preserve the corrective validation cause: {failure:?}"
             );
             assert!(
                 failure
@@ -3907,7 +4104,7 @@ async fn host_runtime_spawn_process_sandbox_blocks_for_approval_before_executor(
     let estimate = process_sandbox_estimate();
 
     let blocked = runtime
-        .spawn_capability(RuntimeCapabilityRequest::new(
+        .spawn_capability((
             context.clone(),
             process_sandbox_capability_id(),
             estimate.clone(),
@@ -3930,7 +4127,7 @@ async fn host_runtime_spawn_process_sandbox_blocks_for_approval_before_executor(
 
     approve_spawn_for_services(&services, &scope, approval_request_id, None).await;
     let resumed = runtime
-        .resume_spawn_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_spawn_capability((
             context,
             approval_request_id,
             process_sandbox_capability_id(),
@@ -3979,7 +4176,7 @@ async fn host_runtime_spawn_process_sandbox_resume_changed_input_fails_before_ex
     let estimate = process_sandbox_estimate();
 
     let blocked = runtime
-        .spawn_capability(RuntimeCapabilityRequest::new(
+        .spawn_capability((
             context.clone(),
             process_sandbox_capability_id(),
             estimate.clone(),
@@ -3995,7 +4192,7 @@ async fn host_runtime_spawn_process_sandbox_resume_changed_input_fails_before_ex
     let lease = approve_spawn_for_services(&services, &scope, approval_request_id, None).await;
 
     let outcome = runtime
-        .resume_spawn_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_spawn_capability((
             context,
             approval_request_id,
             process_sandbox_capability_id(),
@@ -4052,7 +4249,7 @@ async fn host_runtime_spawn_process_sandbox_resume_invalid_plan_fails_before_exe
     let estimate = process_sandbox_estimate();
 
     let blocked = runtime
-        .spawn_capability(RuntimeCapabilityRequest::new(
+        .spawn_capability((
             context.clone(),
             process_sandbox_capability_id(),
             estimate.clone(),
@@ -4071,7 +4268,7 @@ async fn host_runtime_spawn_process_sandbox_resume_invalid_plan_fails_before_exe
     // is model-fixable, so it must surface as a recoverable InvalidInput tool
     // error rather than a terminal host runtime error.
     let outcome = runtime
-        .resume_spawn_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_spawn_capability((
             context,
             approval_request_id,
             process_sandbox_capability_id(),
@@ -4087,6 +4284,12 @@ async fn host_runtime_spawn_process_sandbox_resume_invalid_plan_fails_before_exe
             assert_eq!(
                 failure.disposition(),
                 ironclaw_host_runtime::CapabilityFailureDisposition::ModelVisibleToolError,
+            );
+            assert!(
+                failure
+                    .model_visible_cause()
+                    .is_some_and(|cause| cause.contains("run command must not be empty")),
+                "public resume_spawn_capability must preserve the corrective validation cause: {failure:?}"
             );
             assert!(
                 failure
@@ -4146,7 +4349,7 @@ async fn host_runtime_spawn_process_sandbox_resume_host_failure_fails_after_appr
     let estimate = process_sandbox_estimate();
 
     let blocked = runtime
-        .spawn_capability(RuntimeCapabilityRequest::new(
+        .spawn_capability((
             context.clone(),
             process_sandbox_capability_id(),
             estimate.clone(),
@@ -4162,7 +4365,7 @@ async fn host_runtime_spawn_process_sandbox_resume_host_failure_fails_after_appr
     approve_spawn_for_services(&services, &scope, approval_request_id, None).await;
 
     let outcome = runtime
-        .resume_spawn_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_spawn_capability((
             context,
             approval_request_id,
             process_sandbox_capability_id(),
@@ -4204,7 +4407,7 @@ async fn host_runtime_services_installs_builtin_obligation_handler_with_audit_si
 
     let outcome = services
         .host_runtime_for_local_testing()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_dispatch_grant(script_capability_id()),
             script_capability_id(),
             ResourceEstimate::default(),
@@ -4246,7 +4449,7 @@ async fn host_runtime_services_maps_script_exit_failure_through_private_adapter(
 
     let outcome = services
         .host_runtime_for_local_testing()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_dispatch_grant(script_capability_id()),
             script_capability_id(),
             ResourceEstimate::default(),
@@ -4273,7 +4476,7 @@ async fn host_runtime_services_maps_mcp_client_failure_through_private_adapter()
 
     let outcome = services
         .host_runtime_for_local_testing()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_dispatch_grant(mcp_capability_id()),
             mcp_capability_id(),
             ResourceEstimate::default(),
@@ -4283,6 +4486,42 @@ async fn host_runtime_services_maps_mcp_client_failure_through_private_adapter()
         .unwrap();
 
     assert_failed_outcome(outcome, RuntimeFailureKind::Backend);
+}
+
+#[tokio::test]
+async fn host_runtime_services_surfaces_invalid_mcp_catalog_without_retrying() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(MCP_MANIFEST)),
+        Arc::new(DiskFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ObligatingAuthorizer::new(Vec::new())),
+        ironclaw_processes::in_memory_backed_process_services(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::new()))
+    .with_mcp_runtime(Arc::new(InvalidToolCatalogMcpExecutor));
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability((
+            execution_context_with_dispatch_grant(mcp_capability_id()),
+            mcp_capability_id(),
+            ResourceEstimate::default(),
+            json!({"query": "reject an invalid catalog"}),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Failed(failure) => {
+            assert_eq!(failure.kind, RuntimeFailureKind::InvalidOutput);
+            assert_eq!(
+                failure.disposition(),
+                ironclaw_host_runtime::CapabilityFailureDisposition::ModelVisibleToolError,
+            );
+        }
+        other => panic!("expected non-retryable invalid-output failure, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -4319,7 +4558,7 @@ async fn host_runtime_services_applies_scoped_mount_obligation_to_script_runtime
 
     let outcome = services
         .host_runtime_for_local_testing()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             script_capability_id(),
             ResourceEstimate::default(),
@@ -4371,7 +4610,7 @@ async fn host_runtime_services_rejects_broader_scoped_mount_before_dispatch() {
 
     let outcome = services
         .host_runtime_for_local_testing()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             script_capability_id(),
             ResourceEstimate::default(),
@@ -4421,7 +4660,7 @@ async fn host_runtime_services_writes_obligation_audit_records_to_durable_log_me
 
     let outcome = services
         .host_runtime_for_local_testing()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
             script_capability_id(),
             ResourceEstimate::default(),
@@ -4489,7 +4728,7 @@ async fn host_runtime_services_projects_resource_network_secret_obligation_audit
     .unwrap();
     let audit_log = Arc::clone(&stores.audit);
     let governor = Arc::new(governor_with_default_limit(sample_account()));
-    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store = Arc::new(SecretStore::ephemeral());
     let secret_handle = SecretHandle::new("obligation-api-token").unwrap();
     let reservation_id = ResourceReservationId::new();
     let policy = NetworkPolicy {
@@ -4546,7 +4785,7 @@ async fn host_runtime_services_projects_resource_network_secret_obligation_audit
 
     let runtime = services.host_runtime_for_local_testing();
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
             script_capability_id(),
             ResourceEstimate::default()
@@ -4659,7 +4898,7 @@ async fn host_runtime_services_enforces_output_limit_and_reconciles_resource_usa
 
     let outcome = services
         .host_runtime_for_local_testing()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
             script_capability_id(),
             ResourceEstimate::default()
@@ -4717,7 +4956,7 @@ async fn host_runtime_services_releases_reservation_when_dispatch_preflight_fail
 
     let outcome = services
         .host_runtime_for_local_testing()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
             script_capability_id(),
             ResourceEstimate::default().set_concurrency_slots(1),
@@ -4768,7 +5007,7 @@ async fn host_runtime_services_fails_closed_when_durable_obligation_audit_append
 
     let outcome = services
         .host_runtime_for_local_testing()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_dispatch_grant(script_capability_id()),
             script_capability_id(),
             ResourceEstimate::default(),
@@ -4930,7 +5169,7 @@ async fn host_runtime_services_wasm_http_uses_production_staged_network_and_secr
         .await,
     );
     let governor = Arc::new(governor_with_default_limit(sample_account()));
-    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store = Arc::new(SecretStore::ephemeral());
     let secret_handle = SecretHandle::new("api-token").unwrap();
     let policy = wasm_http_policy();
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
@@ -5022,7 +5261,7 @@ async fn host_runtime_services_wasm_http_rejects_secret_store_lease_before_trans
         .await,
     );
     let governor = Arc::new(governor_with_default_limit(sample_account()));
-    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store = Arc::new(SecretStore::ephemeral());
     let secret_handle = SecretHandle::new("api-token").unwrap();
     let policy = wasm_http_policy();
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
@@ -5107,7 +5346,7 @@ async fn host_runtime_services_wasm_http_missing_staged_secret_stays_before_tran
         ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()))
+    .with_secret_store(Arc::new(SecretStore::ephemeral()))
     .with_wasm_runtime_credential_provider(Arc::new(WasmStagedRuntimeCredentials::new(vec![
         WasmStagedRuntimeCredential::for_exact_url(
             secret_handle,
@@ -5481,7 +5720,7 @@ async fn process_obligation_lifecycle_cleans_record_started_before_wrapper_exist
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let obligation_services = BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
-        Arc::new(FilesystemSecretStore::ephemeral()),
+        Arc::new(SecretStore::ephemeral()),
         governor.clone(),
     );
     let invocation_id = InvocationId::new();
@@ -5525,7 +5764,7 @@ async fn process_obligation_lifecycle_cleans_legacy_handoffs_without_resource_re
     let inner_store = Arc::new(ironclaw_processes::in_memory_backed_process_store());
     let obligation_services = BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
-        Arc::new(FilesystemSecretStore::ephemeral()),
+        Arc::new(SecretStore::ephemeral()),
         Arc::new(InMemoryResourceGovernor::new()),
     );
     let invocation_id = InvocationId::new();
@@ -5554,7 +5793,7 @@ async fn process_obligation_lifecycle_rejects_second_active_handoff_for_same_sco
     let inner_store = Arc::new(ironclaw_processes::in_memory_backed_process_store());
     let obligation_services = BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
-        Arc::new(FilesystemSecretStore::ephemeral()),
+        Arc::new(SecretStore::ephemeral()),
         Arc::new(InMemoryResourceGovernor::new()),
     );
     let invocation_id = InvocationId::new();
@@ -5641,7 +5880,7 @@ async fn process_obligation_lifecycle_does_not_clean_handoffs_twice_after_backgr
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let obligation_services = BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
-        Arc::new(FilesystemSecretStore::ephemeral()),
+        Arc::new(SecretStore::ephemeral()),
         governor.clone(),
     );
     let invocation_id = InvocationId::new();
@@ -5692,7 +5931,7 @@ async fn process_obligation_lifecycle_surfaces_resource_cleanup_errors_after_ter
     let governor = Arc::new(FailingCleanupResourceGovernor);
     let obligation_services = BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
-        Arc::new(FilesystemSecretStore::ephemeral()),
+        Arc::new(SecretStore::ephemeral()),
         governor.clone(),
     );
     let invocation_id = InvocationId::new();
@@ -6036,7 +6275,7 @@ async fn invoke_capability_missing_credential_returns_auth_before_approval() {
     let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
-    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store = Arc::new(SecretStore::ephemeral());
     // Note: the secret "script_api_token" is deliberately NOT inserted.
     let secret_handle = SecretHandle::new("script_api_token").unwrap();
     let script_runtime = Arc::new(RecordingScriptExecutor::default());
@@ -6066,12 +6305,7 @@ async fn invoke_capability_missing_credential_returns_auth_before_approval() {
     let input = json!({"message": "needs credential"});
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
-            context,
-            script_capability_id(),
-            estimate,
-            input,
-        ))
+        .invoke_capability((context, script_capability_id(), estimate, input))
         .await
         .unwrap();
 
@@ -6108,7 +6342,7 @@ async fn invoke_capability_present_credential_proceeds_to_approval() {
     let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
-    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store = Arc::new(SecretStore::ephemeral());
     let secret_handle = SecretHandle::new("script_api_token").unwrap();
     // Build the request context FIRST so we can seed the secret under the same
     // resource_scope that the invocation will use. Using a separate
@@ -6152,12 +6386,7 @@ async fn invoke_capability_present_credential_proceeds_to_approval() {
     let input = json!({"message": "has credential"});
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
-            context,
-            script_capability_id(),
-            estimate,
-            input,
-        ))
+        .invoke_capability((context, script_capability_id(), estimate, input))
         .await
         .unwrap();
 
@@ -6188,7 +6417,7 @@ async fn spawn_capability_present_credential_proceeds_to_approval() {
     let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
-    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store = Arc::new(SecretStore::ephemeral());
     let secret_handle = SecretHandle::new("script_api_token").unwrap();
     // Build the request context FIRST so we can seed the secret under the same
     // resource_scope that the invocation will use. Using a separate
@@ -6234,12 +6463,7 @@ async fn spawn_capability_present_credential_proceeds_to_approval() {
     let input = json!({"message": "spawn has credential"});
 
     let outcome = runtime
-        .spawn_capability(RuntimeCapabilityRequest::new(
-            context,
-            script_capability_id(),
-            estimate,
-            input,
-        ))
+        .spawn_capability((context, script_capability_id(), estimate, input))
         .await
         .unwrap();
 
@@ -6273,12 +6497,7 @@ async fn invoke_capability_no_credential_requirement_proceeds_normally() {
     let input = json!({"message": "no credential needed"});
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
-            context,
-            script_capability_id(),
-            estimate,
-            input,
-        ))
+        .invoke_capability((context, script_capability_id(), estimate, input))
         .await
         .unwrap();
 
@@ -6300,7 +6519,7 @@ async fn spawn_capability_missing_credential_returns_auth_before_approval() {
     let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
-    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store = Arc::new(SecretStore::ephemeral());
     // Note: the secret "script_api_token" is deliberately NOT inserted.
     let secret_handle = SecretHandle::new("script_api_token").unwrap();
     let script_runtime = Arc::new(RecordingScriptExecutor::default());
@@ -6330,12 +6549,7 @@ async fn spawn_capability_missing_credential_returns_auth_before_approval() {
     let input = json!({"message": "needs credential via spawn"});
 
     let outcome = runtime
-        .spawn_capability(RuntimeCapabilityRequest::new(
-            context,
-            script_capability_id(),
-            estimate,
-            input,
-        ))
+        .spawn_capability((context, script_capability_id(), estimate, input))
         .await
         .unwrap();
 
@@ -6375,7 +6589,7 @@ async fn invoke_capability_no_credential_requirement_with_wired_store_proceeds_n
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     // SCRIPT_MANIFEST has no runtime_credentials; wire a secret store anyway to
     // confirm the is_empty() early-exit branch is taken, not the no-store branch.
-    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store = Arc::new(SecretStore::ephemeral());
     let secret_handle = SecretHandle::new("any_token").unwrap();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -6403,12 +6617,7 @@ async fn invoke_capability_no_credential_requirement_with_wired_store_proceeds_n
     let input = json!({"message": "no credential needed"});
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
-            context,
-            script_capability_id(),
-            estimate,
-            input,
-        ))
+        .invoke_capability((context, script_capability_id(), estimate, input))
         .await
         .unwrap();
 
@@ -6492,7 +6701,7 @@ async fn invoke_capability_secret_store_error_skips_preflight() {
 
     // Step 1: store error → pre-flight skips → approval gate fires.
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context.clone(),
             script_capability_id(),
             estimate.clone(),
@@ -6570,7 +6779,7 @@ async fn invoke_capability_secret_store_error_skips_preflight() {
         .unwrap();
 
     let resumed = runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context,
             gate.approval_request_id,
             script_capability_id(),

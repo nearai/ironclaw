@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { test, vi } from "vitest";
 import {
+  adminUserActionErrorMessage,
   formatRelativeTime,
   formatUserRole,
   formatUserStatus,
@@ -10,6 +11,21 @@ import {
 function keyedT(key, params = {}) {
   return params.count == null ? key : `${key}:${params.count}`;
 }
+
+test("admin action errors localize the stable last-admin marker", () => {
+  assert.equal(
+    adminUserActionErrorMessage(
+      { message: "Conflict (last_admin)", payload: { field: "last_admin" } },
+      keyedT,
+    ),
+    "admin.users.lastAdminRequired",
+  );
+  assert.equal(
+    adminUserActionErrorMessage({ message: "Service unavailable" }, (key, params) =>
+      params?.message ? `${key}:${params.message}` : key),
+    "admin.users.actionFailed:Service unavailable",
+  );
+});
 
 test("user role and status labels use i18n keys", () => {
   assert.equal(formatUserRole("admin", keyedT), "admin.users.admin");

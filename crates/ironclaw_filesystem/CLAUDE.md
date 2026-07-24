@@ -39,7 +39,7 @@ codified in `docs/reborn/2026-05-14-universal-fs-dispatch.md` (the new ADR).
   path prevention).
 - `FaultInjecting` (`src/fault.rs`, behind the `test-support` feature) — a
   fault-injecting + op-recording `RootFilesystem` decorator. Downstream tests
-  wrap the real backend in it (`FilesystemSecretStore::ephemeral_over`,
+  wrap the real backend in it (`SecretStore::ephemeral_over`,
   `FaultInjecting::new(InMemoryBackend::new()).with_fault(...)`) and drive their
   **genuine** `Filesystem*Store` against injected backend faults — exercising
   the store's real encryption/CAS/`FilesystemError -> DomainError` mapping.
@@ -116,7 +116,7 @@ codified in `docs/reborn/2026-05-14-universal-fs-dispatch.md` (the new ADR).
    and do not treat a store's absence from this list as license to write a
    new local retry loop instead of calling `cas_update`.
 
-   - `ironclaw_turns` runner-lease sidecar (`filesystem_store/runner_lease.rs`,
+   - `ironclaw_turns` runner-lease sidecar (`turn_state_row_store/runner_lease.rs`,
      landed independently in #5232) drives its per-run lease records through
      a local `put_with_cas` + `cas_retry_backoff` retry loop; the main
      turn-state snapshot RMW already goes through `cas_update`. Migration
@@ -132,8 +132,8 @@ codified in `docs/reborn/2026-05-14-universal-fs-dispatch.md` (the new ADR).
      so they are not the convoy hazard `cas_update` was introduced to fix;
      migration to `cas_update`'s fail-closed semantics is a deferred
      follow-up tracked as a sibling to #5274.
-   - `ironclaw_conversations::filesystem_store::save_state` and
-     `ironclaw_product_workflow::filesystem_ledger`
+   - `ironclaw_conversations::conversation_state_store::save_state` and
+     `ironclaw_product::filesystem_ledger`
      (`begin_or_replay` / `settle` / `release` / `try_acquire_prune_lease`)
      are further pre-existing examples of the same lock-free retry-loop
      pattern, pending the same migration.

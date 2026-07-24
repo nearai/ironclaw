@@ -34,11 +34,11 @@ use ironclaw_host_api::{
 };
 use ironclaw_llm::Role;
 use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
-use ironclaw_product_adapters::{ProductInboundAck, ProductTriggerReason, ProductWorkflow};
-use ironclaw_product_workflow::{
-    ConversationBindingService, DefaultProductWorkflow, ProductConversationRouteKind,
+use ironclaw_product::{
+    ConversationBindingService, DefaultProductSurface, ProductConversationRouteKind,
     ResolveBindingRequest, ResolvedBinding,
 };
+use ironclaw_product::{ProductInboundAck, ProductTriggerReason};
 use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_runner::runtime::ToolDisclosureMode;
 use ironclaw_threads::ThreadScope;
@@ -46,23 +46,26 @@ use ironclaw_turns::run_profile::{
     CommunicationContextProvider, InstructionSafetyContext, LoopHostMilestone,
 };
 use ironclaw_turns::{
-    CancelRunRequest, CancelRunResponse, FilesystemTurnStateRowStore, GateRef,
-    GateResumeDisposition, GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef,
-    ResumeTurnPrecondition, ResumeTurnRequest, SanitizedCancelReason, SourceBindingRef, TurnActor,
-    TurnCoordinator, TurnRunId, TurnRunState, TurnScope, TurnStateStore, TurnStatus,
+    CancelRunRequest, CancelRunResponse, GateRef, GateResumeDisposition, GetRunStateRequest,
+    IdempotencyKey, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
+    SanitizedCancelReason, SourceBindingRef, TurnActor, TurnCoordinator, TurnRunId, TurnRunState,
+    TurnScope, TurnStateRowStore, TurnStateStore, TurnStatus,
 };
 
 use super::capability_backend::{
     CapabilityScriptingInputs, MOCK_MCP_PROVIDER_ID, RebornCapabilityBackend, ShellMode,
 };
 use super::doubles::ParkingCapabilityGate;
-use super::group::{GroupCapability, GroupSharedStorage, RebornIntegrationGroup};
+use super::group::{GroupCapability, GroupSharedStorage, RebornIntegrationGroup, ThreadModelMode};
 use super::harness::{HarnessCapabilityRecorder, HarnessTurnBackend, RecordedCapabilityResult};
 use super::http_matcher::ScriptedHttpResponse;
 use super::planned_runtime_parts_shape::DefaultPlannedRuntimePartsShape;
 use super::process::ScriptedProcessResult;
 use super::reply::RebornScriptedReply;
-use super::scripted_provider::ParkingModelGate;
+use super::scripted_provider::{
+    ErrLlmKind, ModelProviderCallProbe, ParkingModelGate, RecoverableModelFailure,
+    RecoverableModelFailureScript,
+};
 use super::session_thread::RebornThreadHarness;
 use super::test_adapter::RebornTestIngress;
 use crate::support::trace_llm::TraceLlm;
@@ -142,13 +145,9 @@ pub struct RebornIntegrationHarnessBuilder {
     /// construction — the last shell-selecting builder method wins, and a live
     /// runtime can never carry a stale scripted result.
     shell_mode: ShellMode,
-    /// E-GATEWAY: when set, the model call parks until released, enabling a
-    /// mid-turn cancel test. Threaded into the degenerate one-thread group.
-    park_gate: Option<ParkingModelGate>,
-    /// E-GATEWAY (C-ERRORS): when `true`, the model call always fails with a
-    /// fixed non-retryable `LlmError`. Threaded into the degenerate one-thread
-    /// group. See [`RebornThreadBuilder::fail_model`].
-    fail_model: bool,
+    /// Mutually exclusive raw-provider behavior for this one-thread harness.
+    /// Each model-selecting builder method replaces the previous mode.
+    model_mode: ThreadModelMode,
     /// C-TRACECAP seam: install an in-memory `TurnEventSink` when `true`.
     turn_event_sink: bool,
     /// Force `ToolDisclosureMode::Bridged` into the underlying group's ONE
@@ -168,6 +167,9 @@ pub struct RebornIntegrationHarnessBuilder {
     /// threaded into the degenerate one-thread group (see
     /// `RebornIntegrationGroupBuilder::hook_dispatcher_builder_factory`).
     hook_dispatcher_builder_factory: Option<HookDispatcherBuilderFactory>,
+    /// C-TRAJECTORY: optional run trajectory observer threaded into the
+    /// degenerate one-thread group's production capability-port factory.
+    trajectory_observer: Option<Arc<dyn ironclaw_reborn_composition::RebornTrajectoryObserver>>,
     /// E-GATEWAY tool-path analog of `park_gate`: when set, this harness's
     /// `BuiltinHttpTools` capability dispatch parks until released (issue
     /// #5476 lease-wedge coverage). Threaded into `RebornCapabilityBackend::install`.
@@ -242,11 +244,22 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Wire a raw trajectory observer into this harness's underlying group so
+    /// capability input/result callbacks fire through the production
+    /// capability-port factory. Defaults `None`.
+    pub fn with_raw_trajectory_observer(
+        mut self,
+        observer: Arc<dyn ironclaw_reborn_composition::RebornTrajectoryObserver>,
+    ) -> Self {
+        self.trajectory_observer = Some(observer);
+        self
+    }
+
     /// Park this harness's model call until `gate` is released (E-GATEWAY seam),
     /// so a test can cancel the run mid-turn. See
     /// [`RebornThreadBuilder::park_model`].
     pub fn park_model(mut self, gate: ParkingModelGate) -> Self {
-        self.park_gate = Some(gate);
+        self.model_mode = ThreadModelMode::Parked(gate);
         self
     }
 
@@ -254,7 +267,51 @@ impl RebornIntegrationHarnessBuilder {
     /// `LlmError` (E-GATEWAY seam, C-ERRORS). See
     /// [`RebornThreadBuilder::fail_model`](super::group::RebornThreadBuilder::fail_model).
     pub fn fail_model(mut self) -> Self {
-        self.fail_model = true;
+        self.model_mode = ThreadModelMode::Failing(ErrLlmKind::ContextLength);
+        self
+    }
+
+    /// Credentials arm of [`Self::fail_model`]: the model call always fails
+    /// with non-retryable `LlmError::AuthFailed`, driving the pinned
+    /// `model_credentials_unavailable` failure category through the real
+    /// provider-error mapping (E-GATEWAY seam, C-ERRORS).
+    pub fn fail_model_auth(mut self) -> Self {
+        self.model_mode = ThreadModelMode::Failing(ErrLlmKind::AuthFailed);
+        self
+    }
+
+    /// Report one provider content-filter finish reason, then resume scripted
+    /// playback through the real model gateway and recovery path.
+    pub fn content_filter_model_once(mut self) -> Self {
+        self.model_mode = ThreadModelMode::Recoverable(RecoverableModelFailureScript::new(
+            RecoverableModelFailure::ContentFiltered,
+            1,
+        ));
+        self
+    }
+
+    /// Allow `successful_calls` interactive requests before reporting context
+    /// overflow `failures` times. This lets a test establish compactable thread
+    /// history before exercising recovery.
+    pub fn context_overflow_model_after(
+        mut self,
+        successful_calls: usize,
+        failures: usize,
+    ) -> Self {
+        self.model_mode = ThreadModelMode::Recoverable(
+            RecoverableModelFailureScript::new(RecoverableModelFailure::ContextOverflow, failures)
+                .after_successful_calls(successful_calls),
+        );
+        self
+    }
+
+    /// Return structurally invalid output `failures` times, then resume
+    /// scripted playback through the real model gateway and recovery path.
+    pub fn invalid_output_model_times(mut self, failures: usize) -> Self {
+        self.model_mode = ThreadModelMode::Recoverable(RecoverableModelFailureScript::new(
+            RecoverableModelFailure::InvalidOutput,
+            failures,
+        ));
         self
     }
 
@@ -330,6 +387,15 @@ impl RebornIntegrationHarnessBuilder {
     /// for tool-calling tests; a text-only turn needs only the default echo backend.
     pub fn with_builtin_http_tools(mut self) -> Self {
         self.capability = RebornCapabilityBackend::BuiltinHttpTools;
+        self
+    }
+
+    /// Same built-in first-party tool runtime as
+    /// [`Self::with_builtin_http_tools`], but backed by the REAL
+    /// `StagedCapabilityIo` so trajectory result callbacks and durable
+    /// result-reference reads use the same IO path production composes.
+    pub fn with_durable_capability_io_builtin_http_tools(mut self) -> Self {
+        self.capability = RebornCapabilityBackend::BuiltinHttpToolsDurableIo;
         self
     }
 
@@ -548,6 +614,9 @@ impl RebornIntegrationHarnessBuilder {
         if let Some(factory) = self.hook_dispatcher_builder_factory {
             group_builder = group_builder.hook_dispatcher_builder_factory(factory);
         }
+        if let Some(observer) = self.trajectory_observer {
+            group_builder = group_builder.with_raw_trajectory_observer(observer);
+        }
         if let Some(ttl) = self.runner_lease_ttl {
             group_builder = group_builder.with_runner_lease_ttl_for_test(ttl);
         }
@@ -560,8 +629,7 @@ impl RebornIntegrationHarnessBuilder {
         group
             .thread(self.conversation_id)
             .script(self.replies)
-            .park_model_opt(self.park_gate)
-            .fail_model_opt(self.fail_model)
+            .model_mode(self.model_mode)
             .build()
             .await
     }
@@ -571,7 +639,7 @@ impl RebornIntegrationHarnessBuilder {
 /// the real decorator chain. See module docs.
 pub struct RebornIntegrationHarness {
     pub(crate) ingress: RebornTestIngress,
-    pub(crate) workflow: std::sync::Arc<DefaultProductWorkflow>,
+    pub(crate) workflow: std::sync::Arc<DefaultProductSurface>,
     pub(crate) conversation_id: String,
     /// External (raw, pre-resolution) actor id every submit for this thread is
     /// made under. Defaults to `HARNESS_ACTOR_ID`; a group thread built with
@@ -588,7 +656,7 @@ pub struct RebornIntegrationHarness {
     pub(crate) actor_id: String,
     pub(crate) binding: ResolvedBinding,
     pub(crate) turn_scope: TurnScope,
-    pub(crate) turn_store: Arc<FilesystemTurnStateRowStore<HarnessTurnBackend>>,
+    pub(crate) turn_store: Arc<TurnStateRowStore<HarnessTurnBackend>>,
     pub(crate) thread_harness: RebornThreadHarness<CompositeRootFilesystem>,
     /// Turn coordinator, used to resume a `BlockedApproval`/`BlockedAuth` run
     /// after `approve_gate`/`deny_gate` resolves the gate. Mirrors the binary-E2E
@@ -603,6 +671,9 @@ pub struct RebornIntegrationHarness {
     /// Retained even when parked (`park_model`, E-GATEWAY): `ParkingLlm` only
     /// wraps this SAME `TraceLlm`.
     pub(crate) scripted_llm: Arc<TraceLlm>,
+    /// Requests captured by the recoverable-failure provider wrapper before it
+    /// either injects a failure or delegates to `scripted_llm`.
+    pub(crate) model_provider_call_probe: Option<ModelProviderCallProbe>,
     /// Shared storage bundle keeping the composite, TempDir, product harness, and
     /// capability alive for this harness's lifetime. For a single-shot harness the
     /// Arc is the sole owner; for a group thread it is shared with the group and
@@ -656,13 +727,13 @@ impl RebornIntegrationHarness {
             storage: StorageMode::default(),
             safety_context: None,
             shell_mode: ShellMode::default(),
-            park_gate: None,
-            fail_model: false,
+            model_mode: ThreadModelMode::Normal,
             turn_event_sink: false,
             tool_disclosure: None,
             budget_accounting: false,
             communication_context_provider: None,
             hook_dispatcher_builder_factory: None,
+            trajectory_observer: None,
             park_tool_gate: None,
             runner_lease_ttl: None,
             lease_recovery_interval: None,
@@ -730,7 +801,7 @@ impl RebornIntegrationHarness {
     /// to complete (C-ATTACH). Lands `bytes` through the harness's real
     /// `InboundAttachmentLander` (production `ProjectScopedAttachmentLander` over
     /// the local-dev workspace filesystem — wired only by `.attachment_tools()`
-    /// groups) via `DefaultProductWorkflow::submit_inbound_with_attachments`, the
+    /// groups) via `DefaultProductSurface::submit_inbound_with_attachments`, the
     /// same production entry point a synchronous host surface (e.g. the
     /// OpenAI-compatible API) uses for inline image bytes. Errors clearly if the
     /// harness has no lander wired.
@@ -809,7 +880,7 @@ impl RebornIntegrationHarness {
     fn build_user_envelope(
         &self,
         text: &str,
-    ) -> HarnessResult<(String, ironclaw_product_adapters::ProductInboundEnvelope)> {
+    ) -> HarnessResult<(String, ironclaw_product::ProductInboundEnvelope)> {
         let event_id = format!("evt-{}", self.event_seq.fetch_add(1, Ordering::Relaxed));
         let envelope = self.ingress.verified_text_envelope_with_trigger(
             &event_id,
@@ -849,11 +920,10 @@ impl RebornIntegrationHarness {
         Ok(self.workflow.submit_inbound(envelope).await?)
     }
 
-    /// The REAL per-thread `DefaultProductWorkflow` (durable idempotency
-    /// ledger → conversation binding → turn submission) as the
-    /// `ProductWorkflow` seam — the generic channel inbound sink submits
-    /// through this exact instance.
-    pub(crate) fn product_workflow_for_test(&self) -> std::sync::Arc<DefaultProductWorkflow> {
+    /// The REAL per-thread `DefaultProductSurface` (durable idempotency
+    /// ledger → conversation binding → turn submission). The generic channel
+    /// inbound sink submits through this exact instance.
+    pub(crate) fn product_workflow_for_test(&self) -> std::sync::Arc<DefaultProductSurface> {
         std::sync::Arc::clone(&self.workflow)
     }
 
@@ -886,9 +956,7 @@ impl RebornIntegrationHarness {
     /// [`Self::turn_coordinator_for_test`]. Composition test seams that must
     /// inspect or resume the caller's real runs use this pair instead of the
     /// capability harness's disjoint bootstrap store.
-    pub(crate) fn turn_state_store_for_test(
-        &self,
-    ) -> Arc<FilesystemTurnStateRowStore<HarnessTurnBackend>> {
+    pub(crate) fn turn_state_store_for_test(&self) -> Arc<TurnStateRowStore<HarnessTurnBackend>> {
         Arc::clone(&self._shared.turn_store)
     }
 
@@ -958,7 +1026,7 @@ impl RebornIntegrationHarness {
     pub async fn submit_approval_resolution(
         &self,
         gate_ref: &GateRef,
-        decision: ironclaw_product_adapters::ApprovalDecision,
+        decision: ironclaw_product::ApprovalDecision,
     ) -> HarnessResult<ProductInboundAck> {
         let event_id = format!("evt-{}", self.event_seq.fetch_add(1, Ordering::Relaxed));
         let envelope = self.ingress.verified_approval_resolution_envelope(
@@ -978,7 +1046,7 @@ impl RebornIntegrationHarness {
     pub async fn submit_auth_resolution(
         &self,
         gate_ref: &GateRef,
-        result: ironclaw_product_adapters::AuthResolutionResult,
+        result: ironclaw_product::AuthResolutionResult,
     ) -> HarnessResult<ProductInboundAck> {
         let event_id = format!("evt-{}", self.event_seq.fetch_add(1, Ordering::Relaxed));
         let envelope = self.ingress.verified_auth_resolution_envelope(
@@ -1080,7 +1148,7 @@ impl RebornIntegrationHarness {
             // The live store exposes its hot snapshot before a critical append's
             // caller receives the durable ack. Rebuild this fresh row-store view
             // on every attempt so an early Running read is not cached indefinitely.
-            let fresh_turn_store = FilesystemTurnStateRowStore::new(scoped_turns_fs_composite(
+            let fresh_turn_store = TurnStateRowStore::new(scoped_turns_fs_composite(
                 Arc::clone(&fresh_composite),
                 &self._shared.canonical_binding,
             )?);
@@ -1119,7 +1187,7 @@ impl RebornIntegrationHarness {
     }
 
     /// E-DURABLE: assert an installed extension survives an independent reopen
-    /// of the capability composite. Opens a FRESH `ExtensionInstallationStore`
+    /// of the capability composite. Opens a FRESH `ExtensionInstallationStorePort`
     /// at the capability harness's on-disk `storage_root` (a handle independent
     /// of the live `Arc`) and asserts `extension_id` is present — proving the
     /// install persisted to disk, not just to in-memory state. Parallels
@@ -1174,6 +1242,28 @@ impl RebornIntegrationHarness {
             .map(|invocation| invocation.capability_id.as_str())
             .collect();
         Err(format!("capability {capability_id:?} was invoked; saw {seen:?}").into())
+    }
+
+    /// Assert every capability invoked by this harness belongs to the explicit
+    /// allowlist. This provider-neutral negative assertion is useful when a
+    /// product workflow must stay on host-owned operations and must not fall
+    /// back to any integration/provider tool whose concrete id is deliberately
+    /// not part of the contract.
+    pub async fn assert_only_tools_invoked(&self, allowed: &[&str]) -> HarnessResult<()> {
+        let all = self.capability_recorder.invocations();
+        let delta = &all[self.baseline_invocation_count..];
+        let unexpected: Vec<&str> = delta
+            .iter()
+            .map(|invocation| invocation.capability_id.as_str())
+            .filter(|capability_id| !allowed.contains(capability_id))
+            .collect();
+        if unexpected.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "capabilities outside the host-owned allowlist were invoked; allowed={allowed:?}, unexpected={unexpected:?}"
+        )
+        .into())
     }
 
     /// S2 seam: assert the named capability produced EXACTLY `expected`
@@ -1756,7 +1846,7 @@ impl RebornIntegrationHarness {
     }
 
     /// Flip the per-`(tenant, user)` auto-approve toggle back ON for the run's
-    /// capability scope via the real CAS-persisted `AutoApproveSettingStore` (the
+    /// capability scope via the real CAS-persisted `AutoApproveSettingStorePort` (the
     /// no-gate / approve-always arm: with auto-approve on, the same capability
     /// completes without a gate, and the flip persists across threads in the
     /// group because the store is shared).
@@ -2088,7 +2178,7 @@ pub(crate) fn apply_hermetic_env() {
 /// Assemble a `ResolveBindingRequest` from a verified inbound envelope. This
 /// harness only submits DirectChat turns, so the route kind is `Direct`.
 pub(crate) fn binding_request(
-    envelope: &ironclaw_product_adapters::ProductInboundEnvelope,
+    envelope: &ironclaw_product::ProductInboundEnvelope,
 ) -> ResolveBindingRequest {
     ResolveBindingRequest {
         adapter_id: envelope.adapter_id().clone(),
@@ -2112,6 +2202,34 @@ pub(crate) fn thread_scope_from_binding(binding: &ResolvedBinding) -> HarnessRes
         owner_user_id: binding.subject_user_id.clone(),
         mission_id: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn last_model_mode_selection_wins() {
+        let failing = RebornIntegrationHarness::test_default()
+            .park_model(ParkingModelGate::new())
+            .fail_model();
+        assert!(matches!(
+            failing.model_mode,
+            ThreadModelMode::Failing(ErrLlmKind::ContextLength)
+        ));
+
+        let recoverable = RebornIntegrationHarness::test_default()
+            .fail_model_auth()
+            .content_filter_model_once();
+        assert!(matches!(
+            recoverable.model_mode,
+            ThreadModelMode::Recoverable(RecoverableModelFailureScript {
+                failure: RecoverableModelFailure::ContentFiltered,
+                failures: 1,
+                ..
+            })
+        ));
+    }
 }
 
 // The shared planned-runtime assembly (`RebornIntegrationGroupBuilder::into_group`)

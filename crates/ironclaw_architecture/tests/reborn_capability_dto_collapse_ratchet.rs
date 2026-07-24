@@ -37,37 +37,24 @@
 
 mod ratchet_support;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
-use ratchet_support::{
-    TypeDefOccurrence, collect_type_defs, duplicate_definitions, scan_type_defs, workspace_root,
-};
+use ratchet_support::{TypeDefOccurrence, collect_type_defs, scan_type_defs, workspace_root};
 
 const KEYWORDS: &[&str] = &["struct ", "enum ", "trait ", "type "];
 
-/// The capability-path mirror DTOs the collapse retires (§3.1). Each is a
-/// request/result shape that `Invocation`/`Authorized`/`Resolution` subsume.
-/// Remove an entry in the same PR that deletes its type; never add one.
-const FROZEN_COLLAPSE_DTOS: &[&str] = &[
-    // ── request side: the ~5 near-identical shapes (§1.1) ──
-    // turns (§1.1 hop 1 — the loop's expression; `LoopRequest` replaces it, §3.1)
+/// Retired capability-path mirror DTO names (§3.1). These request/result shapes
+/// are subsumed by `Invocation`/`Authorized`/`Resolution` or by tuple parts at
+/// the object-safe runtime boundary. They must not reappear.
+const RETIRED_COLLAPSE_DTOS: &[&str] = &[
     "CapabilityInvocation",
-    // host_runtime (the upper mirrors)
     "RuntimeCapabilityRequest",
     "RuntimeCapabilityResumeRequest",
     "RuntimeCapabilityAuthResumeRequest",
-    // capabilities (the kernel-facing mirrors — `Invocation` replaces them)
     "CapabilityInvocationRequest",
     "CapabilityResumeRequest",
     "CapabilityAuthResumeRequest",
-    // dispatcher (`Authorized` + resolved handles replace it, §3.1)
     "RuntimeAdapterRequest",
-    // ── result side: the overloaded ten-variant enum (§1.2 → `Resolution`) ──
-    // `CapabilityOutcome` (and its `CapabilityBatchOutcome`/`CapabilityResultMessage`/
-    // `CapabilityFailure`/`CapabilityDenied`/`ProcessHandleSummary` payloads) are
-    // DELETED (§5.3 Stage 2b): producers emit `host_api::Resolution` directly via
-    // the `ironclaw_turns::run_profile::resolution::*` constructors. The result-lane
-    // collapse is complete; only the request-side shapes above remain to retire.
 ];
 
 /// Matches exactly the frozen collapse-target names (exact identifier, not a
@@ -76,11 +63,11 @@ const FROZEN_COLLAPSE_DTOS: &[&str] = &[
 /// so the ratchet's job is to force the known shapes to *shrink to empty*, and to
 /// flag a re-declaration (a second definition of a frozen name).
 fn is_collapse_dto(ident: &str) -> bool {
-    FROZEN_COLLAPSE_DTOS.contains(&ident)
+    RETIRED_COLLAPSE_DTOS.contains(&ident)
 }
 
 #[test]
-fn reborn_capability_dto_allowlist_is_frozen_and_only_shrinks() {
+fn reborn_capability_dto_names_stay_retired() {
     let crates_dir = workspace_root().join("crates");
     let mut found: BTreeMap<String, Vec<TypeDefOccurrence>> = BTreeMap::new();
     collect_type_defs(
@@ -91,37 +78,11 @@ fn reborn_capability_dto_allowlist_is_frozen_and_only_shrinks() {
         &mut found,
     );
 
-    let frozen: BTreeSet<&str> = FROZEN_COLLAPSE_DTOS.iter().copied().collect();
-    let found_refs: BTreeSet<&str> = found.keys().map(String::as_str).collect();
-
-    // A frozen name appearing a SECOND time = a re-declared mirror (§1.1
-    // Mechanism 1). This is the "no new mirror hiding behind an allowlist entry"
-    // guard the exact-name predicate can enforce.
-    let duplicated = duplicate_definitions(&found);
     assert!(
-        duplicated.is_empty(),
-        "A collapse-target DTO is defined more than once — a re-declared mirror \
-         (arch-simplification §1.1 Mechanism 1 / §10). Import the one definition \
-         instead of re-declaring it: {duplicated:?}"
-    );
-
-    let removed: Vec<&&str> = frozen.difference(&found_refs).collect();
-    assert!(
-        removed.is_empty(),
-        "FROZEN_COLLAPSE_DTOS lists types that no longer exist: {removed:?}. The \
-         capability-path collapse deleted one (good — §3 progress!) — trim it from \
-         the allowlist in the same PR so this ratchet shrinks toward empty (§10). \
-         When the last entry goes, delete this file."
-    );
-
-    // Unlike the pattern-matching ratchets (which keep guarding against NEW
-    // matches at an empty allowlist), an exact-name ratchet with an empty list
-    // can never fail again — so the end state is enforced as deletion, not an
-    // eternally-green dead test.
-    assert!(
-        !FROZEN_COLLAPSE_DTOS.is_empty(),
-        "The capability-path DTO collapse is complete (§3 end state reached). \
-         This exact-name ratchet can no longer catch anything — delete this file."
+        found.is_empty(),
+        "Retired capability-path mirror DTO names were reintroduced. Use \
+         `Invocation`/`Authorized`/`Resolution`, `LoopRequest`, runtime tuple \
+         parts, or the private lane request instead: {found:?}"
     );
 }
 
@@ -129,8 +90,8 @@ fn reborn_capability_dto_allowlist_is_frozen_and_only_shrinks() {
 #[test]
 fn collapse_dto_predicate_is_exact_name() {
     let sample = r#"
-        pub struct RuntimeCapabilityRequest { a: u8 }     // frozen -> flagged
-        pub struct CapabilityAuthResumeRequest { a: u8 }  // frozen -> flagged
+        pub struct RuntimeCapabilityRequest { a: u8 }     // retired -> flagged
+        pub struct CapabilityAuthResumeRequest { a: u8 }  // retired -> flagged
         pub struct RuntimeAdapterRequestBuilder;          // suffix -> NOT flagged
         pub struct Invocation;                            // the target -> NOT flagged
         pub struct CapabilityDispatchResult;              // sibling result -> NOT flagged

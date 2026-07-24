@@ -1,9 +1,22 @@
 """Legacy Responses API coverage ported to standalone Reborn."""
 
 import asyncio
+import time
+import uuid
 
 import httpx
 import pytest
+
+# Retry statuses that indicate a transient/cold-start condition worth resending.
+# 429 = under load; 502/503/504 = the first request racing the backend/LLM
+# warm-up (a cold-start 503 flaked this smoke).
+_TRANSIENT_STATUSES = {429, 502, 503, 504}
+_MAX_ATTEMPTS = 6
+# Cap the WHOLE retry sequence well under the 120s E2E test timeout. Each attempt
+# is given only the remaining budget as its timeout, so even a hung backend
+# cannot blow past this deadline — the test fails fast instead of being killed by
+# the outer pytest timeout with a less useful error.
+_RETRY_DEADLINE_SECONDS = 100.0
 
 from reborn_webui_harness import (
     close_reborn_server,
@@ -54,12 +67,32 @@ def _response_output_text(response: dict) -> str:
 
 
 async def _create_response(client: httpx.AsyncClient, path="/v1/responses", **payload):
+    # One idempotency key per logical create, reused on every retry. A transient
+    # 5xx can be returned AFTER the Responses handler has already accepted the run,
+    # so a keyless resend would create a duplicate run; the Responses API dedupes
+    # on the `Idempotency-Key` header (see `create_response` → `idempotency_key_
+    # from_headers`), making the resend safe.
+    headers = {"Idempotency-Key": str(uuid.uuid4())}
     response = None
-    for attempt in range(6):
-        response = await client.post(path, json={"model": "default", **payload})
-        if response.status_code != 429 and not _is_retryable_service_unavailable(response):
+    deadline = time.monotonic() + _RETRY_DEADLINE_SECONDS
+    for attempt in range(_MAX_ATTEMPTS):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             break
-        await asyncio.sleep(1 + attempt * 0.5)
+        response = await client.post(
+            path,
+            json={"model": "default", **payload},
+            headers=headers,
+            timeout=remaining,
+        )
+        # Break on a non-transient status; retrying would not change the outcome.
+        if response.status_code not in _TRANSIENT_STATUSES:
+            break
+        # No point sleeping after the final attempt, or once the budget is spent.
+        backoff = 1 + attempt * 0.5
+        if attempt == _MAX_ATTEMPTS - 1 or time.monotonic() + backoff >= deadline:
+            break
+        await asyncio.sleep(backoff)
     assert response is not None
     assert response.status_code == 200, response.text
     body = response.json()
@@ -68,19 +101,88 @@ async def _create_response(client: httpx.AsyncClient, path="/v1/responses", **pa
     return body
 
 
-def _is_retryable_service_unavailable(response: httpx.Response) -> bool:
-    if response.status_code != 503:
-        return False
-    try:
-        body = response.json()
-    except ValueError:
-        return False
-    if not isinstance(body, dict):
-        return False
-    error = body.get("error")
-    if isinstance(error, dict) and error.get("code") == "service_unavailable":
-        return True
-    return error == "service_unavailable" or body.get("kind") == "service_unavailable"
+# --- `_create_response` retry-semantics unit coverage (mocked client) ----------
+# These exercise the helper's retry contract without a live server: transient
+# statuses retry, non-transient statuses stop immediately, retries are capped and
+# never sleep after the final attempt, a single idempotency key is reused across
+# attempts, and each attempt is bounded by the remaining budget.
+
+
+class _FakeResponse:
+    def __init__(self, status_code):
+        self.status_code = status_code
+        self.text = f"status {status_code}"
+
+    def json(self):
+        return {"id": "resp_mock", "object": "response"}
+
+
+class _RecordingClient:
+    """Minimal `httpx.AsyncClient` stand-in that replays scripted statuses."""
+
+    def __init__(self, statuses):
+        self._statuses = list(statuses)
+        self.posts = []
+
+    async def post(self, path, json, headers, timeout):
+        index = min(len(self.posts), len(self._statuses) - 1)
+        self.posts.append({"headers": dict(headers), "timeout": timeout})
+        return _FakeResponse(self._statuses[index])
+
+
+@pytest.fixture()
+def _recorded_sleeps(monkeypatch):
+    sleeps = []
+
+    async def _fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(asyncio, "sleep", _fake_sleep)
+    return sleeps
+
+
+async def test_create_response_retries_transient_then_succeeds(_recorded_sleeps):
+    # Every transient status (503/502/504/429) must be retried — a sequence that
+    # exercises all four fails if any is dropped from `_TRANSIENT_STATUSES`.
+    client = _RecordingClient([503, 502, 504, 429, 200])
+    body = await _create_response(client, input="hi")
+    assert body["object"] == "response"
+    assert len(client.posts) == 5  # four transient retries, then success
+    assert len(_recorded_sleeps) == 4  # one backoff between each retry, none after 200
+    # A single idempotency key is reused on every attempt so an accepted-then-5xx
+    # run is deduped rather than duplicated.
+    keys = {post["headers"]["Idempotency-Key"] for post in client.posts}
+    assert len(keys) == 1
+
+
+async def test_create_response_succeeds_without_retry_or_sleep(_recorded_sleeps):
+    client = _RecordingClient([200])
+    await _create_response(client, input="hi")
+    assert len(client.posts) == 1
+    assert _recorded_sleeps == []
+
+
+async def test_create_response_does_not_retry_non_transient_status(_recorded_sleeps):
+    client = _RecordingClient([400])
+    with pytest.raises(AssertionError):  # helper asserts a 200
+        await _create_response(client, input="hi")
+    assert len(client.posts) == 1  # a 4xx is not retried
+    assert _recorded_sleeps == []
+
+
+async def test_create_response_caps_attempts_without_trailing_sleep(_recorded_sleeps):
+    client = _RecordingClient([503] * (_MAX_ATTEMPTS + 2))
+    with pytest.raises(AssertionError):  # never reaches a 200
+        await _create_response(client, input="hi")
+    assert len(client.posts) == _MAX_ATTEMPTS  # capped at the attempt ceiling
+    assert len(_recorded_sleeps) == _MAX_ATTEMPTS - 1  # no sleep after the last try
+
+
+async def test_create_response_bounds_each_attempt_by_remaining_budget(_recorded_sleeps):
+    client = _RecordingClient([200])
+    await _create_response(client, input="hi")
+    timeout = client.posts[0]["timeout"]
+    assert 0 < timeout <= _RETRY_DEADLINE_SECONDS  # never an unbounded per-call wait
 
 
 async def test_reborn_legacy_responses_non_streaming_text_input(

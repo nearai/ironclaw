@@ -25,6 +25,10 @@ pub(super) enum RebornCapabilityBackend {
     /// Real first-party tool runtime (`builtin.http` + friends) with the recording
     /// `RuntimeHttpEgress` (scripted body, no network) — the §3.7 Tier-2 capture.
     BuiltinHttpTools,
+    /// Same as [`Self::BuiltinHttpTools`], but backed by real
+    /// `StagedCapabilityIo` so trajectory result callbacks and durable
+    /// result-reference reads go through production-shaped IO.
+    BuiltinHttpToolsDurableIo,
     /// Real MCP runtime wired to a loopback mock MCP server (slice 6 §3.6).
     /// Uses `LoopbackMcpRuntimeHttpEgress` which makes real HTTP connections to
     /// the mock server; no real credentials or network policy are required.
@@ -38,8 +42,9 @@ pub(super) enum RebornCapabilityBackend {
     GithubIssueTools,
     /// Real first-party `web-access.search` / `web-access.get_content`
     /// capabilities (C-WEBACCESS), dispatched through the real
-    /// `WebAccessExecutor` via the production
-    /// `register_bundled_web_access_first_party_handlers` registration.
+    /// `WebAccessExecutor` via the harness's `register_web_access_first_party_handlers`
+    /// wrapper (the same thin wrapper the production binary supplies — DEL-7
+    /// moved it out of composition into the assembling binary).
     /// web-access declares no `runtime_credentials`, so this wires the plain default
     /// `GrantAuthorizer` — no credential-injecting authorizer is needed.
     WebAccessTools,
@@ -150,6 +155,22 @@ impl RebornCapabilityBackend {
                     Some(gate) => host_runtime.park_capability_dispatch(gate),
                     None => host_runtime,
                 };
+                GroupCapability::HostRuntime(Arc::new(host_runtime))
+            }
+            RebornCapabilityBackend::BuiltinHttpToolsDurableIo => {
+                if !matches!(shell_mode, ShellMode::Inert) {
+                    return Err(
+                        "durable builtin-http harness does not support shell mode overrides".into(),
+                    );
+                }
+                if park_capability_gate.is_some() {
+                    return Err("park_tool_dispatch is only supported by \
+                         RebornCapabilityBackend::BuiltinHttpTools"
+                        .into());
+                }
+                let host_runtime =
+                    core_builtin::core_builtin_tools_with_durable_capability_io().await?;
+                host_runtime.install_http_responses(keyed_http_responses)?;
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
             RebornCapabilityBackend::MockMcp { mcp_url } => {

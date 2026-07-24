@@ -326,7 +326,6 @@ cargo test test_name
 ```
 
 - **渠道**：参见 [docs/channels/overview.mdx](docs/channels/overview.mdx) 了解 Telegram、Discord 和其他渠道的设置。
-- **修改渠道源码**：在 `cargo build` 之前运行 `./channels-src/telegram/build.sh` 以便打包更新后的 WASM。
 
 ## OpenClaw 传承
 

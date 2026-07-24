@@ -4,9 +4,9 @@ use async_trait::async_trait;
 use ironclaw_approvals::{LeaseApproval, permission_mode_allows_persistent_approval};
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_host_api::{EffectKind, MountView, Principal};
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ApprovalGateRecord, ApprovalInteractionRejectionKind, ApprovalLeaseTermsProvider,
-    ProductWorkflowError,
+    LifecycleProductContext, LifecycleProductSurfaceContext, ProductWorkflowError,
 };
 
 use crate::builtin_capability_policy::{
@@ -15,7 +15,7 @@ use crate::builtin_capability_policy::{
 };
 use crate::outbound::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID;
 
-use super::local_dev::extension_surface::ExtensionCapabilitySurfaceSource;
+use super::extension_surface::ExtensionCapabilitySurfaceSource;
 
 pub(super) struct PolicyApprovalLeaseTermsProvider {
     policy: Arc<BuiltinCapabilityPolicy>,
@@ -69,7 +69,7 @@ impl PolicyApprovalLeaseTermsProvider {
         };
         let surface = self
             .extension_surface_source
-            .snapshot()
+            .snapshot(lifecycle_context_for_gate(gate))
             .await
             .map_err(|error| {
                 tracing::error!(%error, "local-dev extension approval lease terms are unavailable");
@@ -103,11 +103,12 @@ impl PolicyApprovalLeaseTermsProvider {
 
     async fn active_extension_persistent_approval_allowed(
         &self,
+        gate: &ApprovalGateRecord,
         action: BuiltinApprovalPolicyAction<'_>,
     ) -> Result<bool, ProductWorkflowError> {
         let surface = self
             .extension_surface_source
-            .snapshot()
+            .snapshot(lifecycle_context_for_gate(gate))
             .await
             .map_err(|error| {
                 tracing::error!(%error, "local-dev extension approval surface is unavailable");
@@ -172,8 +173,19 @@ impl ApprovalLeaseTermsProvider for PolicyApprovalLeaseTermsProvider {
             .ok_or(ProductWorkflowError::ApprovalInteractionRejected {
                 kind: ApprovalInteractionRejectionKind::UnsupportedAction,
             })?;
-        if let Some(descriptor) = self.registry.get_capability(action.capability_id()) {
-            if permission_mode_allows_persistent_approval(descriptor.default_permission) {
+        if self
+            .registry
+            .get_capability(action.capability_id())
+            .is_some()
+        {
+            // Registry presence is provider-global package metadata, not
+            // caller authority. Require the same caller-scoped active surface
+            // used for model visibility and dispatch before issuing durable
+            // approval authority for a registry-backed extension capability.
+            if self
+                .active_extension_persistent_approval_allowed(gate, action)
+                .await?
+            {
                 return Ok(());
             }
             return Err(ProductWorkflowError::ApprovalInteractionRejected {
@@ -200,7 +212,7 @@ impl ApprovalLeaseTermsProvider for PolicyApprovalLeaseTermsProvider {
             }
         }
         if self
-            .active_extension_persistent_approval_allowed(action)
+            .active_extension_persistent_approval_allowed(gate, action)
             .await?
         {
             Ok(())
@@ -210,6 +222,16 @@ impl ApprovalLeaseTermsProvider for PolicyApprovalLeaseTermsProvider {
             })
         }
     }
+}
+
+fn lifecycle_context_for_gate(gate: &ApprovalGateRecord) -> LifecycleProductContext {
+    let scope = gate.resource_scope();
+    LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
+        tenant_id: scope.tenant_id.clone(),
+        user_id: scope.user_id.clone(),
+        agent_id: scope.agent_id.clone(),
+        project_id: scope.project_id.clone(),
+    })
 }
 
 fn lease_terms_unavailable() -> ProductWorkflowError {
@@ -227,12 +249,12 @@ mod tests {
         ExtensionId, InvocationId, PermissionMode, ResourceEstimate, ResourceScope, SecretHandle,
         TenantId, ThreadId, UserId,
     };
-    use ironclaw_product_workflow::approval_gate_ref;
+    use ironclaw_product::approval_gate_ref;
     use ironclaw_turns::{GateRef, TurnRunId};
 
     use crate::builtin_capability_policy::builtin_capability_policy;
     use crate::extension_host::extension_lifecycle::ActiveExtensionCapability;
-    use crate::runtime::local_dev::extension_surface::{
+    use crate::runtime::extension_surface::{
         ExtensionCapabilitySurface, ExtensionCapabilitySurfaceSource,
     };
 
@@ -251,6 +273,7 @@ mod tests {
                 default_permission: PermissionMode::Allow,
                 runtime_credentials: Vec::new(),
                 network_targets: Vec::new(),
+                max_egress_bytes: None,
                 owner: ironclaw_extensions::InstallationOwner::Tenant,
             }]),
         );
@@ -323,6 +346,7 @@ mod tests {
                     required: true,
                 }],
                 network_targets: Vec::new(),
+                max_egress_bytes: None,
                 owner: ironclaw_extensions::InstallationOwner::Tenant,
             }]),
         );
@@ -376,6 +400,7 @@ mod tests {
                 default_permission: PermissionMode::Allow,
                 runtime_credentials: Vec::new(),
                 network_targets: Vec::new(),
+                max_egress_bytes: None,
                 owner: ironclaw_extensions::InstallationOwner::Tenant,
             }]),
         );
@@ -416,6 +441,7 @@ mod tests {
                 default_permission: PermissionMode::Ask,
                 runtime_credentials: Vec::new(),
                 network_targets: Vec::new(),
+                max_egress_bytes: None,
                 owner: ironclaw_extensions::InstallationOwner::Tenant,
             }]),
         );
@@ -485,6 +511,7 @@ mod tests {
                 default_permission: PermissionMode::Deny,
                 runtime_credentials: Vec::new(),
                 network_targets: Vec::new(),
+                max_egress_bytes: None,
                 owner: ironclaw_extensions::InstallationOwner::Tenant,
             }]),
         );

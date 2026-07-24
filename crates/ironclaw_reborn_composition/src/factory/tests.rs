@@ -1,15 +1,15 @@
 // arch-exempt: large_file, pre-existing >1500-line factory test module; this PR only adds the mandatory `owner` field to an outbound-target entry fixture for the registry caller-scoping hardening, plan #6389
 use super::*;
-use ironclaw_approvals::{AutoApproveSettingInput, AutoApproveSettingStore};
+use ironclaw_approvals::{AutoApproveSettingInput, AutoApproveSettingStorePort};
 use ironclaw_auth::{
     AuthProductScope, AuthSurface, CredentialAccountLabel, CredentialAccountStatus,
     CredentialOwnership, GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
     NewCredentialAccount, ProviderScope,
 };
-use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStore, GrantAuthorizer};
+use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStorePort, GrantAuthorizer};
 use ironclaw_filesystem::FilesystemError;
+use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::InstallationState;
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext,
     ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant, MountPermissions,
@@ -22,12 +22,13 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind,
+    RuntimeCapabilityOutcome, RuntimeFailureKind, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
     SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
-    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
+    SKILL_UPDATE_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID,
 };
 use ironclaw_host_runtime::{RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver};
-use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef};
+use ironclaw_product::{LifecyclePackageKind, LifecyclePackageRef, LifecyclePublicState};
 
 use rust_decimal_macros::dec;
 use secrecy::ExposeSecret;
@@ -50,6 +51,49 @@ fn libsql_build_resource_governor_guard_requires_singleton_authority() {
 }
 
 #[tokio::test]
+async fn production_store_bundle_new_validates_runtime_storage_before_store_assembly() {
+    let filesystem = empty_composite_filesystem();
+    let error = match ProductionStoreBundle::new(
+        Arc::clone(&filesystem),
+        filesystem_resource_governor(&filesystem),
+        test_secret_master_key(),
+        ironclaw_reborn_event_store::RebornEventStoreConfig::InMemory,
+    )
+    .await
+    {
+        Ok(_) => panic!("missing runtime storage plane must fail bundle construction"),
+        Err(error) => error,
+    };
+
+    assert_runtime_storage_validation_error(&error);
+}
+
+#[tokio::test]
+async fn production_store_bundle_with_secret_credentials_validates_runtime_storage_first() {
+    let credential_filesystem = empty_composite_filesystem();
+    let secret_credentials = SecretCredentialStores::from_master_key(
+        crate::wrap_scoped(Arc::clone(&credential_filesystem)),
+        test_secret_master_key(),
+    )
+    .expect("test secret stores should construct");
+    let filesystem = empty_composite_filesystem();
+
+    let error = match ProductionStoreBundle::with_secret_credentials(
+        Arc::clone(&filesystem),
+        filesystem_resource_governor(&filesystem),
+        secret_credentials,
+        ironclaw_reborn_event_store::RebornEventStoreConfig::InMemory,
+    )
+    .await
+    {
+        Ok(_) => panic!("missing runtime storage plane must fail bundle construction"),
+        Err(error) => error,
+    };
+
+    assert_runtime_storage_validation_error(&error);
+}
+
+#[tokio::test]
 async fn production_turn_state_store_uses_row_layout() {
     let view = MountView::new(vec![MountGrant::new(
         MountAlias::new("/turns").expect("turns mount alias"),
@@ -63,7 +107,7 @@ async fn production_turn_state_store_uses_row_layout() {
     ));
 
     // `production_turn_state_store` returns the concrete
-    // `FilesystemTurnStateRowStore` by type, so "production uses the row
+    // `TurnStateRowStore` by type, so "production uses the row
     // layout" is now a compile-time guarantee. This exercises the factory
     // end-to-end and confirms the constructed store answers reads.
     let store =
@@ -73,8 +117,33 @@ async fn production_turn_state_store_uses_row_layout() {
     assert!(snapshot.runs.is_empty());
 }
 
+fn empty_composite_filesystem() -> Arc<CompositeRootFilesystem> {
+    Arc::new(CompositeRootFilesystem::new())
+}
+
+fn filesystem_resource_governor(
+    filesystem: &Arc<CompositeRootFilesystem>,
+) -> ComposedResourceGovernor {
+    FilesystemResourceGovernor::new(crate::wrap_scoped(Arc::clone(filesystem)))
+}
+
+fn test_secret_master_key() -> ironclaw_secrets::SecretMaterial {
+    ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901")
+}
+
+fn assert_runtime_storage_validation_error(error: &RebornBuildError) {
+    assert!(
+        matches!(
+            error,
+            RebornBuildError::InvalidConfig { reason }
+                if reason.contains("runtime storage plane `tenant scoped state` requires `/tenants`")
+        ),
+        "{error}"
+    );
+}
+
 #[test]
-fn build_reborn_services_uses_filesystem_resource_governor() {
+fn build_runtime_substrate_uses_filesystem_resource_governor() {
     let dir = tempfile::tempdir().expect("tempdir");
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -82,12 +151,14 @@ fn build_reborn_services_uses_filesystem_resource_governor() {
         .expect("tokio runtime");
 
     let services = runtime
-        .block_on(build_reborn_services(RebornBuildInput::local_dev(
-            "resource-governor-enabled-env-owner",
-            dir.path().join("local-dev"),
-        )))
+        .block_on(build_runtime_substrate(
+            crate::deployment::local_dev_build_input(
+                "resource-governor-enabled-env-owner",
+                dir.path().join("local-dev"),
+            ),
+        ))
         .expect("local-dev services build");
-    let local_runtime = services.local_runtime.as_ref().expect("local runtime");
+    let runtime_surfaces = services.local_runtime_for_test().expect("local runtime");
     let scope = ResourceScope {
         tenant_id: TenantId::new("resource-governor-tenant").expect("tenant"),
         user_id: UserId::new("resource-governor-user").expect("user"),
@@ -99,17 +170,17 @@ fn build_reborn_services_uses_filesystem_resource_governor() {
     };
     let account = ironclaw_resources::ResourceAccount::tenant(scope.tenant_id.clone());
 
-    let reservation = local_runtime
+    let reservation = runtime_surfaces
         .resource_governor
         .reserve(scope, ResourceEstimate::default().set_usd(dec!(0.10)))
         .expect("reservation");
-    local_runtime
+    runtime_surfaces
         .resource_governor
         .reconcile(reservation.id, ResourceUsage::default().set_usd(dec!(0.10)))
         .expect("reconcile");
 
     assert_eq!(
-        local_runtime
+        runtime_surfaces
             .resource_governor
             .usage_for(&account)
             .expect("usage")
@@ -119,48 +190,10 @@ fn build_reborn_services_uses_filesystem_resource_governor() {
 }
 
 #[test]
-fn extension_installation_state_path_stays_legacy_for_local_dev() {
-    let path =
-        local_dev_extension_installation_state_path(RebornCompositionProfile::LocalDev, None)
-            .expect("state path");
+fn extension_installation_state_path_is_single_runtime_default() {
+    let path = ExtensionInstallationStore::default_state_path().expect("state path");
 
     assert_eq!(path.as_str(), "/system/extensions/.installations");
-}
-
-#[test]
-fn extension_installation_state_path_uses_durable_tenant_root_for_hosted() {
-    let identity = RebornLocalRuntimeIdentity {
-        tenant_id: TenantId::new("acme").expect("tenant id"),
-        agent_id: ironclaw_host_api::AgentId::new("agent").expect("agent id"),
-    };
-    let path = local_dev_extension_installation_state_path(
-        RebornCompositionProfile::HostedSingleTenant,
-        Some(&identity),
-    )
-    .expect("state path");
-
-    assert_eq!(
-        path.as_str(),
-        "/tenants/acme/system/extensions/.installations"
-    );
-}
-
-#[test]
-fn extension_installation_state_path_uses_durable_tenant_root_for_hosted_volume() {
-    let identity = RebornLocalRuntimeIdentity {
-        tenant_id: TenantId::new("acme").expect("tenant id"),
-        agent_id: ironclaw_host_api::AgentId::new("agent").expect("agent id"),
-    };
-    let path = local_dev_extension_installation_state_path(
-        RebornCompositionProfile::HostedSingleTenantVolume,
-        Some(&identity),
-    )
-    .expect("state path");
-
-    assert_eq!(
-        path.as_str(),
-        "/tenants/acme/system/extensions/.installations"
-    );
 }
 
 struct FailingConversationActorPairingService;
@@ -229,14 +262,12 @@ impl ConversationActorPairingService for FailingConversationActorPairingService 
 /// closed as `DeliveryTargetInvalid`.
 #[tokio::test]
 async fn trigger_delivery_target_validation_resolves_through_the_outbound_registry() {
-    use crate::outbound::outbound_preferences::{
-        OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner,
+    use crate::outbound::{
+        DeliveryTargetCapabilities, MutableOutboundDeliveryTargetRegistry,
+        OutboundDeliveryTargetEntry, OutboundDeliveryTargetId, OutboundDeliveryTargetOwner,
+        OutboundDeliveryTargetProvider, OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary,
     };
-    use crate::outbound::{MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetProvider};
-    use ironclaw_product_workflow::{
-        RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
-        RebornOutboundDeliveryTargetSummary, RebornServicesError, WebUiAuthenticatedCaller,
-    };
+    use ironclaw_outbound::OutboundError;
 
     struct OneTargetProvider {
         entry: OutboundDeliveryTargetEntry,
@@ -246,15 +277,15 @@ async fn trigger_delivery_target_validation_resolves_through_the_outbound_regist
     impl OutboundDeliveryTargetProvider for OneTargetProvider {
         async fn list_outbound_delivery_targets(
             &self,
-            caller: &WebUiAuthenticatedCaller,
-        ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
+            caller: &OutboundDeliveryTargetScope,
+        ) -> Result<Vec<OutboundDeliveryTargetEntry>, OutboundError> {
             // Fixture available to whichever caller asks: claim the querying
             // caller as owner so it survives the registry caller-scoping filter.
             Ok(vec![OutboundDeliveryTargetEntry {
                 summary: self.entry.summary.clone(),
                 capabilities: self.entry.capabilities.clone(),
-                reply_target_binding_ref: self.entry.reply_target_binding_ref.clone(),
-                owner: OutboundDeliveryTargetOwner::for_caller(caller),
+                destination: self.entry.destination.clone(),
+                owner: OutboundDeliveryTargetOwner::for_scope(caller),
             }])
         }
     }
@@ -286,22 +317,26 @@ async fn trigger_delivery_target_validation_resolves_through_the_outbound_regist
 
     // Registered provider that resolves the id for the caller → accept.
     let entry = OutboundDeliveryTargetEntry {
-        summary: RebornOutboundDeliveryTargetSummary::new(
-            RebornOutboundDeliveryTargetId::new("slack:personal-dm:T1:me").expect("id"),
+        summary: OutboundDeliveryTargetSummary::new(
+            OutboundDeliveryTargetId::new("slack:personal-dm:T1:me").expect("id"),
             "slack",
             "Slack DM".to_string(),
             None,
         )
         .expect("summary"),
-        capabilities: RebornOutboundDeliveryTargetCapabilities {
+        capabilities: DeliveryTargetCapabilities {
             final_replies: true,
+            progress: false,
             gate_prompts: true,
             auth_prompts: true,
+            modalities: Vec::new(),
         },
-        reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
-            "reply:registry-validation",
-        )
-        .expect("binding ref"),
+        destination: ironclaw_outbound::RunFinalReplyDestination::External {
+            reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
+                "reply:registry-validation",
+            )
+            .expect("binding ref"),
+        },
         // Overwritten with the querying caller by `OneTargetProvider::list`;
         // set to the scope identity here for clarity.
         owner: OutboundDeliveryTargetOwner::new(
@@ -362,17 +397,7 @@ async fn pair_trigger_creator_maps_pairing_failure_to_sanitized_backend_error() 
     assert_eq!(reason, "trigger creator actor pairing failed");
 }
 
-async fn local_runtime_with_failing_trigger_conversations() -> Arc<RebornRuntimeSubstrate> {
-    let local_dev_root = tempfile::tempdir().expect("tempdir");
-    let owner_user_id = "pairing-owner";
-    let services = build_reborn_services(RebornBuildInput::local_dev(
-        owner_user_id,
-        local_dev_root.path().join("local-dev"),
-    ))
-    .await
-    .expect("local-dev services build");
-
-    let base_runtime = services.local_runtime.expect("local runtime");
+fn failing_trigger_conversation_filesystem() -> Arc<ScopedFilesystem<CompositeRootFilesystem>> {
     let mut failing_root = CompositeRootFilesystem::new();
     failing_root
         .mount(
@@ -399,80 +424,22 @@ async fn local_runtime_with_failing_trigger_conversations() -> Arc<RebornRuntime
             ),
         )
         .expect("mount failing backend");
-    Arc::new(RebornRuntimeSubstrate {
-        extension_lifecycle_surface_context: base_runtime
-            .extension_lifecycle_surface_context
-            .clone(),
-        owner_user_id: base_runtime.owner_user_id.clone(),
-        approval_requests: Arc::clone(&base_runtime.approval_requests),
-        capability_leases: Arc::clone(&base_runtime.capability_leases),
-        external_tool_catalog: Arc::clone(&base_runtime.external_tool_catalog),
-        runtime_policy: base_runtime.runtime_policy.clone(),
-        capability_policy: Arc::clone(&base_runtime.capability_policy),
-        persistent_approval_policies: Arc::clone(&base_runtime.persistent_approval_policies),
-        tool_permission_overrides: Arc::clone(&base_runtime.tool_permission_overrides),
-        outbound_delivery_targets: Arc::clone(&base_runtime.outbound_delivery_targets),
-        auto_approve_settings: Arc::clone(&base_runtime.auto_approve_settings),
-        turn_state: Arc::clone(&base_runtime.turn_state),
-        trigger_repository: Arc::clone(&base_runtime.trigger_repository),
-        project_service: Arc::clone(&base_runtime.project_service),
-        outbound_preferences: Arc::clone(&base_runtime.outbound_preferences),
-        skill_auto_activate_learned: Arc::clone(&base_runtime.skill_auto_activate_learned),
-        outbound_state: Arc::clone(&base_runtime.outbound_state),
-        delivered_gate_routes: Arc::clone(&base_runtime.delivered_gate_routes),
-        triggered_run_delivery: Arc::clone(&base_runtime.triggered_run_delivery),
-        trigger_conversation_services: tokio::sync::OnceCell::new(),
-        checkpoint_state_store: Arc::clone(&base_runtime.checkpoint_state_store),
-        loop_checkpoint_store: Arc::clone(&base_runtime.loop_checkpoint_store),
-        thread_service: Arc::clone(&base_runtime.thread_service),
-        resource_governor: Arc::clone(&base_runtime.resource_governor),
-        budget_event_sink: Arc::clone(&base_runtime.budget_event_sink),
-        in_memory_budget_event_sink: Arc::clone(&base_runtime.in_memory_budget_event_sink),
-        broadcast_budget_event_sink: Arc::clone(&base_runtime.broadcast_budget_event_sink),
-        budget_gate_store: Arc::clone(&base_runtime.budget_gate_store),
-        skill_management: Arc::clone(&base_runtime.skill_management),
-        extension_management: base_runtime.extension_management.clone(),
-        channel_config: base_runtime.channel_config.clone(),
-        admin_configuration: base_runtime.admin_configuration.clone(),
-        admin_configuration_uses: Arc::clone(&base_runtime.admin_configuration_uses),
-        channel_identity_store: base_runtime.channel_identity_store.clone(),
-        channel_dm_target_store: base_runtime.channel_dm_target_store.clone(),
-        channel_disconnect_slot: Arc::clone(&base_runtime.channel_disconnect_slot),
-        runtime_http_egress: base_runtime.runtime_http_egress.clone(),
-        host_runtime_http_egress: base_runtime.host_runtime_http_egress.clone(),
-        skill_mounts: base_runtime.skill_mounts.clone(),
-        memory_mounts: base_runtime.memory_mounts.clone(),
-        system_extensions_lifecycle_mounts: base_runtime.system_extensions_lifecycle_mounts.clone(),
-        skill_filesystem: Arc::clone(&base_runtime.skill_filesystem),
-        workspace_filesystem: Arc::clone(&base_runtime.workspace_filesystem),
-        identity_filesystem: Arc::clone(&base_runtime.identity_filesystem),
-        admin_secret_provisioner: base_runtime.admin_secret_provisioner.clone(),
-        identity_substrate_db: base_runtime.identity_substrate_db.clone(),
-        subagent_goal_filesystem: Arc::new(ScopedFilesystem::with_fixed_view(
-            Arc::new(failing_root),
-            MountView::new(vec![MountGrant::new(
-                MountAlias::new("/conversations").expect("mount alias"),
-                VirtualPath::new("/conversations").expect("virtual path"),
-                MountPermissions::read_write_list_delete(),
-            )])
-            .expect("mount view"),
-        )),
-        extension_filesystem: Arc::clone(&base_runtime.extension_filesystem),
-        workspace_mounts: base_runtime.workspace_mounts.clone(),
-        local_dev_storage_root: base_runtime.local_dev_storage_root.clone(),
-        default_system_prompt_path: base_runtime.default_system_prompt_path.clone(),
-        event_log: Arc::clone(&base_runtime.event_log),
-        audit_log: Arc::clone(&base_runtime.audit_log),
-        extension_registry: Arc::clone(&base_runtime.extension_registry),
-        shared_extension_registry: base_runtime.shared_extension_registry.clone(),
-    })
+    Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::new(failing_root),
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/conversations").expect("mount alias"),
+            VirtualPath::new("/conversations").expect("virtual path"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("mount view"),
+    ))
 }
 
 #[tokio::test]
 async fn durable_trigger_conversation_services_propagates_init_error() {
-    let runtime = local_runtime_with_failing_trigger_conversations().await;
+    let filesystem = failing_trigger_conversation_filesystem();
 
-    let error = match runtime.durable_trigger_conversation_services().await {
+    let error = match RebornFilesystemConversationServices::new(filesystem).await {
         Ok(_) => panic!("conversation service init should fail"),
         Err(error) => error,
     };
@@ -485,8 +452,26 @@ async fn durable_trigger_conversation_services_propagates_init_error() {
 
 #[tokio::test]
 async fn local_runtime_trigger_create_hook_maps_conversation_init_error_to_backend() {
+    let local_dev_root = tempfile::tempdir().expect("tempdir");
+    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
+        "pairing-owner",
+        local_dev_root.path().join("local-dev"),
+    ))
+    .await
+    .expect("local-dev services build");
+    let runtime = services.local_runtime_for_test().expect("local runtime");
     let hook = LocalRuntimeTriggerCreatorPairingHook {
-        runtime: local_runtime_with_failing_trigger_conversations().await,
+        outbound_delivery_targets: Arc::clone(runtime.outbound_delivery_targets_for_test()),
+        scoped_filesystem: failing_trigger_conversation_filesystem(),
+        conversations: tokio::sync::OnceCell::new(),
+        delivery_target_service: Arc::new(ironclaw_product::TriggerFinalReplyTargetService::new(
+            Arc::new(LateBoundTriggerSourceTurnStateStore {
+                source_turn_state: Arc::clone(&services.trigger_source_turn_state_store),
+            }),
+            Arc::clone(&services.outbound_state),
+            Arc::clone(&services.current_delivery_targets)
+                as Arc<dyn CurrentDeliveryTargetResolver>,
+        )),
     };
     let record = trigger_record_for_pairing_test();
 
@@ -504,61 +489,66 @@ async fn local_runtime_trigger_create_hook_maps_conversation_init_error_to_backe
 #[tokio::test]
 async fn local_dev_services_include_repl_runtime_substrate() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(RebornBuildInput::local_dev(
+    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
         "local-dev-substrate-owner",
         dir.path().join("local-dev"),
     ))
     .await
     .expect("local-dev services build");
 
-    assert!(services.host_runtime.is_some());
-    assert!(services.turn_coordinator.is_some());
-    assert!(services.product_auth.is_some());
-    assert!(services.local_runtime.is_some());
-    assert!(
-        services
-            .local_runtime
-            .as_ref()
-            .expect("local runtime")
-            .extension_management
-            .is_some()
-    );
+    let _ = &services.host_runtime;
+    let _ = &services.turn_coordinator;
+    let _ = &services.product_auth;
+    assert!(services.local_runtime_for_test().is_some());
+    let _ = &services.scoped_filesystem;
+    let _ = &services.turn_state;
+    let _ = &services
+        .local_runtime_for_test()
+        .expect("local runtime")
+        .extension_management;
     assert_eq!(services.readiness.state, RebornReadinessState::DevOnly);
 }
 
 #[tokio::test]
 async fn hosted_single_tenant_rejects_local_dev_storage_input() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let input = RebornBuildInput::local_dev(
+    let input = crate::deployment::local_dev_build_input(
         "hosted-single-tenant-local-storage-owner",
         dir.path().join("local-dev"),
     );
-    // Deliberate mismatch: a hosted single-tenant deployment paired with a
-    // local-dev storage input must be rejected by the storage-shape guard.
+    // Deliberate mismatch: swap the local-dev deployment for a hosted
+    // single-tenant one while keeping the local-dev storage input. In
+    // production this pairing is unreachable — storage is derived from the
+    // deployment — so the dedicated storage-shape guard string
+    // ("hosted single-tenant Postgres storage input") was removed in commit
+    // 975bcd2ce ("Unify reborn runtime assembly"). What must survive is that the
+    // build still FAILS CLOSED on the mismatch rather than silently composing a
+    // hosted deployment over local storage. Swapping the deployment drops its
+    // resolved runtime policy (policy lives on the deployment since Phase A), so
+    // the surviving fail-closed guard is `MissingRuntimePolicy`.
     let input = input.with_deployment(crate::deployment::DeploymentConfig::for_profile(
         RebornCompositionProfile::HostedSingleTenant,
         false,
     ));
 
-    let error = match build_reborn_services(input).await {
+    let error = match build_runtime_substrate(input).await {
         Ok(_) => {
-            panic!("hosted single-tenant must use hosted single-tenant Postgres storage")
+            panic!(
+                "mismatched hosted-single-tenant deployment over local-dev storage must fail closed"
+            )
         }
         Err(error) => error,
     };
-    let RebornBuildError::InvalidConfig { reason } = error else {
-        panic!("expected invalid config, got {error:?}");
-    };
     assert!(
-        reason.contains("hosted single-tenant Postgres storage input"),
-        "reason: {reason}"
+        matches!(error, RebornBuildError::MissingRuntimePolicy),
+        "expected the mismatched pairing to fail closed on the runtime-policy guard, got {error:?}"
     );
 }
 
 #[tokio::test]
 async fn local_dev_memory_first_party_tools_use_mounted_memory_root() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(RebornBuildInput::local_dev(
+    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
         "local-dev-memory-owner",
         dir.path().join("local-dev"),
     ))
@@ -611,10 +601,12 @@ async fn local_dev_memory_documents_persist_across_rebuilds() {
     let local_dev_root = dir.path().join("local-dev");
     let owner = "local-dev-durable-memory-owner";
 
-    let services =
-        build_reborn_services(RebornBuildInput::local_dev(owner, local_dev_root.clone()))
-            .await
-            .expect("first local-dev services build");
+    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
+        owner,
+        local_dev_root.clone(),
+    ))
+    .await
+    .expect("first local-dev services build");
     invoke_json(
         &services,
         MEMORY_WRITE_CAPABILITY_ID,
@@ -629,9 +621,12 @@ async fn local_dev_memory_documents_persist_across_rebuilds() {
     .expect("memory_write should persist through the libsql /memory root");
     drop(services);
 
-    let rebuilt = build_reborn_services(RebornBuildInput::local_dev(owner, local_dev_root.clone()))
-        .await
-        .expect("rebuilt local-dev services");
+    let rebuilt = build_runtime_substrate(crate::deployment::local_dev_build_input(
+        owner,
+        local_dev_root.clone(),
+    ))
+    .await
+    .expect("rebuilt local-dev services");
 
     let tree = invoke_json(
         &rebuilt,
@@ -666,11 +661,13 @@ async fn local_dev_default_product_auth_preserves_manual_token_across_rebuilds()
     let dir = tempfile::tempdir().expect("tempdir");
     let local_dev_root = dir.path().join("local-dev");
     let owner = "local-dev-durable-auth-owner";
-    let services =
-        build_reborn_services(RebornBuildInput::local_dev(owner, local_dev_root.clone()))
-            .await
-            .expect("local-dev services build");
-    let product_auth = services.product_auth.as_ref().expect("product auth");
+    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
+        owner,
+        local_dev_root.clone(),
+    ))
+    .await
+    .expect("local-dev services build");
+    let product_auth = &services.product_auth;
     let scope = AuthProductScope::new(
         ResourceScope::local_default(UserId::new(owner).unwrap(), InvocationId::new()).unwrap(),
         AuthSurface::Callback,
@@ -709,13 +706,16 @@ async fn local_dev_default_product_auth_preserves_manual_token_across_rebuilds()
     let access_secret = account.access_secret.expect("manual token access secret");
     assert!(
         access_secret.as_str().starts_with("product-auth-manual-"),
-        "local-dev default product-auth must create durable SecretStore-backed handles"
+        "local-dev default product-auth must create durable SecretStorePort-backed handles"
     );
 
-    let rebuilt = build_reborn_services(RebornBuildInput::local_dev(owner, local_dev_root.clone()))
-        .await
-        .expect("local-dev services rebuild");
-    let rebuilt_product_auth = rebuilt.product_auth.as_ref().expect("product auth");
+    let rebuilt = build_runtime_substrate(crate::deployment::local_dev_build_input(
+        owner,
+        local_dev_root.clone(),
+    ))
+    .await
+    .expect("local-dev services rebuild");
+    let rebuilt_product_auth = rebuilt.product_auth.as_ref();
     let rebuilt_account = rebuilt_product_auth
         .credential_account_service()
         .get_account(ironclaw_auth::CredentialAccountLookupRequest::new(
@@ -1079,44 +1079,43 @@ async fn open_local_dev_secret_store_is_visible_across_reopens_of_the_same_root(
 #[tokio::test]
 async fn local_dev_gsuite_installs_activates_and_dispatches_through_host_runtime() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(RebornBuildInput::local_dev(
+    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
         "local-dev-gsuite-owner",
         dir.path().join("local-dev"),
     ))
     .await
     .expect("local-dev services build");
-    let local_runtime = services.local_runtime.as_ref().expect("local runtime");
-    let extension_management = local_runtime
-        .extension_management
-        .as_ref()
-        .expect("extension management");
+    let runtime_surfaces = services.local_runtime_for_test().expect("local runtime");
+    let extension_management = &runtime_surfaces.extension_management;
     let gmail_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "gmail").expect("valid ref");
     let calendar_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "google-calendar")
         .expect("valid ref");
 
+    // #6520 removed the port-side operator accessor: install as the owner the
+    // runtime was constructed with.
+    let caller = UserId::new("local-dev-gsuite-owner").expect("valid lifecycle caller");
     extension_management
-        .install(
-            gmail_ref.clone(),
-            extension_management.tenant_operator_user_id_for_test(),
-        )
+        .install(gmail_ref.clone(), &caller)
         .await
         .expect("install Gmail");
     extension_management
-        .activate_with_prechecked_credentials_for_test(gmail_ref, ExtensionActivationMode::Static)
+        .activate_with_prechecked_credentials_for_test(
+            gmail_ref,
+            ExtensionActivationMode::Static,
+            &caller,
+        )
         .await
         .expect("activate Gmail");
     extension_management
-        .install(
-            calendar_ref.clone(),
-            extension_management.tenant_operator_user_id_for_test(),
-        )
+        .install(calendar_ref.clone(), &caller)
         .await
         .expect("install Google Calendar");
     extension_management
         .activate_with_prechecked_credentials_for_test(
             calendar_ref,
             ExtensionActivationMode::Static,
+            &caller,
         )
         .await
         .expect("activate Google Calendar");
@@ -1126,22 +1125,23 @@ async fn local_dev_gsuite_installs_activates_and_dispatches_through_host_runtime
     let gmail_capability =
         CapabilityId::new("gmail.send_message").expect("valid Gmail capability id");
     assert!(matches!(
-        local_runtime.capability_policy.lease_approval_for(
-            BuiltinApprovalPolicyAction::Dispatch {
-                capability: &gmail_capability,
-            },
-            &local_runtime.workspace_mounts,
-            &local_runtime.skill_mounts,
-            &local_runtime.memory_mounts,
-            &local_runtime.system_extensions_lifecycle_mounts,
-        ),
+        runtime_surfaces
+            .capability_policy_for_test()
+            .lease_approval_for(
+                BuiltinApprovalPolicyAction::Dispatch {
+                    capability: &gmail_capability,
+                },
+                runtime_surfaces.workspace_mounts_for_test(),
+                runtime_surfaces.skill_mounts_for_test(),
+                runtime_surfaces.memory_mounts_for_test(),
+                runtime_surfaces.system_extensions_lifecycle_mounts_for_test(),
+            ),
         Err(BuiltinCapabilityPolicyError::MissingGrant { .. })
     ));
     let auth_scope = AuthProductScope::new(gmail_context.resource_scope.clone(), AuthSurface::Api);
     services
         .product_auth
         .as_ref()
-        .expect("product auth")
         .credential_account_service()
         .create_account(NewCredentialAccount {
             scope: auth_scope,
@@ -1162,7 +1162,7 @@ async fn local_dev_gsuite_installs_activates_and_dispatches_through_host_runtime
         .await
         .expect("create Google account");
 
-    disable_global_auto_approve(local_runtime, &gmail_context).await;
+    disable_global_auto_approve(runtime_surfaces, &gmail_context).await;
     let failure = invoke_json(
         &services,
         "gmail.send_message",
@@ -1173,8 +1173,8 @@ async fn local_dev_gsuite_installs_activates_and_dispatches_through_host_runtime
     .expect_err("missing token should fail after approval resume");
     assert_ne!(failure, RuntimeFailureKind::Authorization);
     assert_ne!(failure, RuntimeFailureKind::MissingRuntime);
-    let gmail_leases = local_runtime
-        .capability_leases
+    let gmail_leases = runtime_surfaces
+        .capability_leases_for_test()
         .leases_for_scope(&gmail_scope)
         .await;
     assert_eq!(gmail_leases.len(), 1);
@@ -1183,7 +1183,7 @@ async fn local_dev_gsuite_installs_activates_and_dispatches_through_host_runtime
     assert_eq!(gmail_leases[0].status, CapabilityLeaseStatus::Revoked);
 
     let calendar_context = gsuite_context("google-calendar.create_event");
-    disable_global_auto_approve(local_runtime, &calendar_context).await;
+    disable_global_auto_approve(runtime_surfaces, &calendar_context).await;
     let failure = invoke_json(
         &services,
         "google-calendar.create_event",
@@ -1202,8 +1202,8 @@ async fn local_dev_gsuite_installs_activates_and_dispatches_through_host_runtime
 #[tokio::test]
 async fn local_dev_notion_mcp_installs_activates_and_reaches_auth_gate() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(
-        RebornBuildInput::local_dev_with_profile(
+    let services = build_runtime_substrate(
+        crate::deployment::local_dev_build_input_with_profile(
             RebornCompositionProfile::LocalDevYolo,
             "local-dev-notion-mcp-owner",
             dir.path().join("local-dev"),
@@ -1212,11 +1212,8 @@ async fn local_dev_notion_mcp_installs_activates_and_reaches_auth_gate() {
     )
     .await
     .expect("local-dev services build");
-    let local_runtime = services.local_runtime.as_ref().expect("local runtime");
-    let extension_management = local_runtime
-        .extension_management
-        .as_ref()
-        .expect("extension management");
+    let runtime_surfaces = services.local_runtime_for_test().expect("local runtime");
+    let extension_management = &runtime_surfaces.extension_management;
     let notion_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("valid ref");
     let catalog =
@@ -1240,37 +1237,34 @@ async fn local_dev_notion_mcp_installs_activates_and_reaches_auth_gate() {
         ironclaw_extensions::CapabilityVisibility::HostInternal
     );
 
+    // #6520 removed the port-side operator accessor: install as the owner the
+    // runtime was constructed with.
+    let caller = UserId::new("local-dev-notion-mcp-owner").expect("valid lifecycle caller");
     extension_management
-        .install(
-            notion_ref.clone(),
-            extension_management.tenant_operator_user_id_for_test(),
-        )
+        .install(notion_ref.clone(), &caller)
         .await
         .expect("install Notion MCP");
     extension_management
         .activate_with_prechecked_credentials_for_test(
             notion_ref,
             ExtensionActivationMode::HostedMcpDiscovery {
-                scope: ResourceScope::local_default(
-                    UserId::new("local-dev-notion-mcp-owner").expect("valid user"),
-                    InvocationId::new(),
-                )
-                .expect("valid scope"),
+                scope: ResourceScope::local_default(caller.clone(), InvocationId::new())
+                    .expect("valid scope"),
                 runtime_http_egress: Arc::new(
                     HostedMcpDiscoveryEgress::with_tool_name("notion-search").read_only(),
                 ),
             },
+            &caller,
         )
         .await
         .expect("activate Notion MCP with scripted discovery");
 
     let context = notion_mcp_context("notion.notion-search");
-    enable_global_auto_approve_for_context(local_runtime, &context).await;
+    enable_global_auto_approve_for_context(runtime_surfaces, &context).await;
     let outcome = services
         .host_runtime
         .as_ref()
-        .expect("host runtime")
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             CapabilityId::new("notion.notion-search").unwrap(),
             ResourceEstimate::default(),
@@ -1288,8 +1282,8 @@ async fn local_dev_notion_mcp_installs_activates_and_reaches_auth_gate() {
 #[tokio::test]
 async fn local_dev_web_access_is_auto_installed_activated_and_dispatches_through_host_runtime() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(
-        RebornBuildInput::local_dev_with_profile(
+    let services = build_runtime_substrate(
+        crate::deployment::local_dev_build_input_with_profile(
             RebornCompositionProfile::LocalDevYolo,
             "local-dev-web-access-owner",
             dir.path().join("local-dev"),
@@ -1298,7 +1292,7 @@ async fn local_dev_web_access_is_auto_installed_activated_and_dispatches_through
     )
     .await
     .expect("local-dev services build");
-    let local_runtime = services.local_runtime.as_ref().expect("local runtime");
+    let local_runtime = services.local_runtime_for_test().expect("local runtime");
 
     // No explicit install/activate here: `build_reborn_services` auto-bootstraps
     // `web-access` (see `web_access_bootstrap::bootstrap_web_access`) precisely so
@@ -1309,8 +1303,7 @@ async fn local_dev_web_access_is_auto_installed_activated_and_dispatches_through
     let outcome = services
         .host_runtime
         .as_ref()
-        .expect("host runtime")
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             CapabilityId::new("web-access.search").unwrap(),
             ResourceEstimate::default(),
@@ -1340,19 +1333,19 @@ async fn local_dev_web_search_brave_is_auto_installed_and_activated_when_configu
     let owner = "local-dev-web-search-owner";
     // Match `ExecutionContext::local_default`'s tenant/agent below (both
     // resolve to `LOCAL_DEFAULT_TENANT_ID`/`LOCAL_DEFAULT_AGENT_ID` when no
-    // explicit identity is threaded through) — this is exactly the
+    // explicit identity is threaded through) -- this is exactly the
     // scope-mismatch bug this test now guards against: the bootstrap
     // must provision the secret under the SAME (tenant, user) a real
     // capability invocation will look it up under, not whatever internal
     // fallback identity composition happens to default to.
-    let runtime_identity = RebornLocalRuntimeIdentity {
+    let runtime_identity = RuntimeOwnerIdentity {
         tenant_id: ironclaw_host_api::TenantId::new(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
             .expect("valid tenant id"),
         agent_id: ironclaw_host_api::AgentId::new(ironclaw_host_api::LOCAL_DEFAULT_AGENT_ID)
             .expect("valid agent id"),
     };
-    let services = build_reborn_services(
-        RebornBuildInput::local_dev(owner, dir.path().join("local-dev"))
+    let services = build_runtime_substrate(
+        crate::deployment::local_dev_build_input(owner, dir.path().join("local-dev"))
             .with_local_runtime_identity(
                 runtime_identity.tenant_id.clone(),
                 runtime_identity.agent_id.clone(),
@@ -1360,39 +1353,27 @@ async fn local_dev_web_search_brave_is_auto_installed_and_activated_when_configu
     )
     .await
     .expect("local-dev services build");
-    let local_runtime = services.local_runtime.as_ref().expect("local runtime");
-    let extension_management = local_runtime
-        .extension_management
-        .as_ref()
-        .expect("extension management");
-    let admin_secret_provisioner = local_runtime
-        .admin_secret_provisioner
-        .as_ref()
-        .expect("admin secret provisioner");
-    let owner_scope = local_dev_nearai_mcp_owner_scope(
-        UserId::new(owner).expect("valid owner"),
-        Some(&runtime_identity),
-    )
-    .expect("owner scope");
+    let local_runtime = services.local_runtime_for_test().expect("local runtime");
+    let extension_management = &local_runtime.extension_management;
+    let admin_secret_provisioner = &local_runtime.admin_secret_provisioner;
+    let owner_scope =
+        configured_runtime_owner_scope(UserId::new(owner).expect("valid owner"), &runtime_identity);
 
-    // Without a configured key, `build_reborn_services` above already ran
-    // `bootstrap_web_search_brave(None, ...)` — assert it left `web_search`
-    // untouched (still just the neutral never-installed `Installed` state
-    // `project()` reports for an uninstalled package, matching the
+    // Without a configured key, `build_runtime_substrate` above already ran
+    // `bootstrap_web_search_brave(None, ...)` -- assert it left `web_search`
+    // untouched (still just the neutral never-installed `Uninstalled` public
+    // state `project()` reports for an uninstalled package, matching the
     // fallback-to-Exa behavior the mutual-exclusion logic in
-    // `build_local_runtime` relies on) before exercising the configured path
-    // directly.
+    // `build_backend_production` relies on) before exercising the configured
+    // path directly.
     let web_search_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "web_search").expect("valid ref");
     let phase_before = extension_management
-        .project(
-            web_search_ref.clone(),
-            extension_management.tenant_operator_user_id_for_test(),
-        )
+        .project(web_search_ref.clone(), &owner_scope.user_id, None)
         .await
         .expect("project web_search before bootstrap")
         .phase;
-    assert_eq!(phase_before, InstallationState::Installed);
+    assert_eq!(phase_before, LifecyclePublicState::Uninstalled);
 
     let outcome = crate::extension_host::web_search_bootstrap::bootstrap_web_search_brave(
         Some(secrecy::SecretString::from("test-brave-key".to_string())),
@@ -1409,22 +1390,19 @@ async fn local_dev_web_search_brave_is_auto_installed_and_activated_when_configu
     assert!(!outcome.leaves_web_access_available());
 
     let phase_after = extension_management
-        .project(
-            web_search_ref,
-            extension_management.tenant_operator_user_id_for_test(),
-        )
+        .project(web_search_ref, &owner_scope.user_id, None)
         .await
         .expect("project web_search after bootstrap")
         .phase;
-    assert_eq!(phase_after, InstallationState::Active);
+    assert_eq!(phase_after, LifecyclePublicState::Active);
 
     // Must be provisioned under the TENANT-SHARED scope, not the
-    // bootstrap caller's own (tenant, user) — `secret_owner_scope` (the
+    // bootstrap caller's own (tenant, user) -- `secret_owner_scope` (the
     // dispatch-time credential pre-flight in ironclaw_host_runtime) only
     // ever checks the real invocation caller's own scope, then falls back
     // to `caller_scope.tenant_shared_managed_scope()`, never an arbitrary
     // third scope. Provisioning anywhere else leaves the secret invisible
-    // to every real capability invocation regardless of who calls it —
+    // to every real capability invocation regardless of who calls it --
     // this regressed once already (dispatch-time pre-flight kept
     // reporting the secret absent and surfacing AuthRequired, so Brave
     // was never actually called end-to-end despite `web_search`
@@ -1449,21 +1427,17 @@ async fn local_dev_web_search_brave_is_auto_installed_and_activated_when_configu
     // the secret was provisioned under a scope no real invocation could
     // ever read back. Whatever happens after the credential check (a real
     // network call to Brave with a fake key, which can be slow to fail)
-    // is out of scope here — bounded by a short timeout so a slow/hanging
+    // is out of scope here -- bounded by a short timeout so a slow/hanging
     // egress attempt can't turn this into a multi-minute test; a timeout
     // still proves the credential gate itself was cleared.
     let context = web_search_context("web_search.search");
     enable_global_auto_approve_for_context(local_runtime, &context).await;
-    let invocation = services
-        .host_runtime
-        .as_ref()
-        .expect("host runtime")
-        .invoke_capability(RuntimeCapabilityRequest::new(
-            context,
-            CapabilityId::new("web_search.search").unwrap(),
-            ResourceEstimate::default(),
-            serde_json::json!({ "query": "ironclaw reborn" }),
-        ));
+    let invocation = services.host_runtime.as_ref().invoke_capability((
+        context,
+        CapabilityId::new("web_search.search").unwrap(),
+        ResourceEstimate::default(),
+        serde_json::json!({ "query": "ironclaw reborn" }),
+    ));
     match tokio::time::timeout(std::time::Duration::from_secs(10), invocation).await {
         Ok(result) => {
             let outcome = result.expect("runtime invocation completes");
@@ -1475,7 +1449,7 @@ async fn local_dev_web_search_brave_is_auto_installed_and_activated_when_configu
         }
         Err(_) => {
             // Timed out past the credential gate (presumably stuck on the
-            // real network call with a fake key) — the gate itself was
+            // real network call with a fake key) -- the gate itself was
             // cleared, which is all this test asserts.
         }
     }
@@ -1486,8 +1460,8 @@ fn nearai_bootstrap_input_with_base(
     root: PathBuf,
     base_url: &str,
     api_key: &str,
-) -> RebornBuildInput {
-    RebornBuildInput::local_dev(owner, root).with_nearai_mcp_bootstrap_config(
+) -> RebornHostBindings {
+    crate::deployment::local_dev_build_input(owner, root).with_nearai_mcp_bootstrap_config(
         crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig::new(
             base_url,
             secrecy::SecretString::from(api_key.to_string()),
@@ -1496,20 +1470,19 @@ fn nearai_bootstrap_input_with_base(
     )
 }
 
-fn nearai_bootstrap_input(owner: &str, root: PathBuf, api_key: &str) -> RebornBuildInput {
+fn nearai_bootstrap_input(owner: &str, root: PathBuf, api_key: &str) -> RebornHostBindings {
     nearai_bootstrap_input_with_base(owner, root, "https://private.near.ai", api_key)
 }
 
 #[test]
 fn hosted_single_tenant_nearai_mcp_bootstrap_scope_uses_runtime_identity() {
     let owner = UserId::new("hosted-nearai-owner").expect("owner");
-    let identity = RebornLocalRuntimeIdentity {
+    let identity = RuntimeOwnerIdentity {
         tenant_id: ironclaw_host_api::TenantId::new("hosted-nearai-tenant").expect("tenant"),
         agent_id: ironclaw_host_api::AgentId::new("hosted-nearai-agent").expect("agent"),
     };
 
-    let scope = local_dev_nearai_mcp_owner_scope(owner.clone(), Some(&identity))
-        .expect("hosted NEAR AI bootstrap scope");
+    let scope = configured_runtime_owner_scope(owner.clone(), &identity);
 
     assert_eq!(scope.tenant_id, identity.tenant_id);
     assert_eq!(scope.user_id, owner);
@@ -1545,7 +1518,7 @@ fn turn_state_filesystem_routes_global_store_ops_to_owner_turns_path() {
 #[test]
 fn runtime_owner_scope_uses_configured_runtime_identity_for_turn_state() {
     let owner = UserId::new("configured-owner").expect("owner");
-    let identity = RebornLocalRuntimeIdentity {
+    let identity = RuntimeOwnerIdentity {
         tenant_id: TenantId::new("configured-tenant").expect("tenant"),
         agent_id: ironclaw_host_api::AgentId::new("configured-agent").expect("agent"),
     };
@@ -1554,6 +1527,32 @@ fn runtime_owner_scope_uses_configured_runtime_identity_for_turn_state() {
     assert_eq!(scope.tenant_id, identity.tenant_id);
     assert_eq!(scope.user_id, owner);
     assert_eq!(scope.agent_id, Some(identity.agent_id));
+}
+
+#[tokio::test]
+async fn production_database_root_filesystem_mounts_canonical_runtime_roots() {
+    let filesystem =
+        production_database_root_filesystem(Arc::new(InMemoryBackend::new()), "production-test")
+            .expect("production composite filesystem");
+    let mounted_roots: Vec<String> = filesystem
+        .mounts()
+        .await
+        .expect("production composite mounts")
+        .into_iter()
+        .map(|descriptor| descriptor.virtual_root.as_str().to_owned())
+        .collect();
+    assert_eq!(
+        mounted_roots,
+        vec![
+            "/events",
+            "/memory",
+            "/projects",
+            "/system/extensions",
+            "/system/settings",
+            "/system/skills",
+            "/tenants",
+        ]
+    );
 }
 
 #[tokio::test]
@@ -1569,8 +1568,8 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
     let owner = UserId::new("configured-owner").expect("owner");
     let tenant = TenantId::new("configured-tenant").expect("tenant");
     let agent = ironclaw_host_api::AgentId::new("configured-agent").expect("agent");
-    let services = build_reborn_services(
-        RebornBuildInput::libsql(
+    let services = build_runtime_substrate(
+        RebornHostBindings::libsql(
             RebornCompositionProfile::Production,
             owner.as_str(),
             db,
@@ -1597,16 +1596,16 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
     .await
     .expect("production libsql services build");
 
-    let production_runtime = services
-        .production_runtime
-        .as_ref()
-        .expect("production runtime");
-    let graph = match production_runtime {
-        RebornProductionRuntimeServices::LibSql(graph) => graph,
-        RebornProductionRuntimeServices::Postgres(_) => {
-            panic!("expected libsql production runtime")
-        }
-    };
+    let turn_state = &services.turn_state;
+    // Runtime-store unification (branch `unify-runtime-store-graph`): every
+    // build — production libsql included — now composes the single unified
+    // runtime store graph (`extension_lifecycle_surface_context` is no longer
+    // optional; `local_runtime_for_test` is unconditionally `Some`). The old
+    // split-runtime premise ("production has no local runtime") no longer holds,
+    // so this assertion tracks the new-but-correct unified shape. The test's
+    // real subject — turn_state keyed by the configured runtime identity —
+    // continues below.
+    assert!(services.local_runtime_for_test().is_some());
     let scope = ironclaw_turns::TurnScope::new_with_owner(
         tenant,
         Some(agent),
@@ -1637,7 +1636,7 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
         product_context: None,
     };
     ironclaw_turns::TurnStateStore::submit_turn(
-        graph.turn_state.as_ref(),
+        turn_state.as_ref(),
         submit,
         &ironclaw_turns::AllowAllTurnAdmissionPolicy,
         &InMemoryRunProfileResolver::default(),
@@ -1682,8 +1681,8 @@ async fn production_libsql_turn_state_uses_default_runtime_identity_when_unconfi
     );
     let assertion_filesystem = LibSqlRootFilesystem::new(Arc::clone(&db));
     let owner = UserId::new("default-owner").expect("owner");
-    let services = build_reborn_services(
-        RebornBuildInput::libsql(
+    let services = build_runtime_substrate(
+        RebornHostBindings::libsql(
             RebornCompositionProfile::Production,
             owner.as_str(),
             db,
@@ -1709,16 +1708,7 @@ async fn production_libsql_turn_state_uses_default_runtime_identity_when_unconfi
     .await
     .expect("production libsql services build");
 
-    let production_runtime = services
-        .production_runtime
-        .as_ref()
-        .expect("production runtime");
-    let graph = match production_runtime {
-        RebornProductionRuntimeServices::LibSql(graph) => graph,
-        RebornProductionRuntimeServices::Postgres(_) => {
-            panic!("expected libsql production runtime")
-        }
-    };
+    let turn_state = &services.turn_state;
     let default_path =
         VirtualPath::new("/tenants/reborn-cli/users/default-owner/turns/rows/v1/deltas/log")
             .expect("default turn-state row delta log path");
@@ -1757,7 +1747,7 @@ async fn production_libsql_turn_state_uses_default_runtime_identity_when_unconfi
         product_context: None,
     };
     ironclaw_turns::TurnStateStore::submit_turn(
-        graph.turn_state.as_ref(),
+        turn_state.as_ref(),
         submit,
         &ironclaw_turns::AllowAllTurnAdmissionPolicy,
         &InMemoryRunProfileResolver::default(),
@@ -1807,8 +1797,8 @@ async fn production_libsql_builder_rejects_invalid_owner_id_at_composition_bound
             .expect("build libsql database"),
     );
 
-    let result = build_reborn_services(
-        RebornBuildInput::libsql(
+    let result = build_runtime_substrate(
+        RebornHostBindings::libsql(
             RebornCompositionProfile::Production,
             "",
             db,
@@ -1843,7 +1833,7 @@ async fn production_libsql_builder_rejects_invalid_owner_id_at_composition_bound
 async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
     let dir = tempfile::tempdir().expect("tempdir");
     let owner = "local-dev-nearai-mcp-owner";
-    let services = build_reborn_services(nearai_bootstrap_input_with_base(
+    let services = build_runtime_substrate(nearai_bootstrap_input_with_base(
         owner,
         dir.path().join("local-dev"),
         "https://nearai-db.example.test:9443/v1",
@@ -1851,22 +1841,30 @@ async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
     ))
     .await
     .expect("local-dev services build");
-    let local_runtime = services.local_runtime.as_ref().expect("local runtime");
-    let extension_management = local_runtime
-        .extension_management
-        .as_ref()
-        .expect("extension management");
+    let runtime_surfaces = services.local_runtime_for_test().expect("local runtime");
+    let extension_management = &runtime_surfaces.extension_management;
     let nearai_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
 
+    // #6520 lifecycle projection is caller-scoped and takes the production
+    // credential gate; the owner is the operator this runtime was built with.
+    let owner_scope =
+        default_runtime_owner_scope(UserId::new(owner).unwrap()).expect("NEAR AI MCP owner scope");
+    let credential_gate = crate::extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate::new(
+        owner_scope.clone(),
+        services
+            .product_auth
+            .runtime_credential_account_selection_service(),
+    );
     let projection = extension_management
         .project(
             nearai_ref.clone(),
-            extension_management.tenant_operator_user_id_for_test(),
+            &owner_scope.user_id,
+            Some(&credential_gate),
         )
         .await
         .expect("NEAR AI MCP projected");
-    assert_eq!(projection.phase, InstallationState::Active);
+    assert_eq!(projection.phase, LifecyclePublicState::Active);
 
     // v3 hosted-MCP surface: boot-time bootstrap activates the package
     // statically, publishing the host-internal MCP connection template
@@ -1914,6 +1912,7 @@ async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
                     "web_search",
                 )),
             },
+            &UserId::new(owner).expect("valid lifecycle caller"),
         )
         .await
         .expect("scripted NEAR AI discovery activation");
@@ -1950,14 +1949,12 @@ async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
     assert_eq!(search.runtime_credentials[0].audience.port, None);
 
     let auth_scope = AuthProductScope::new(
-        local_dev_nearai_mcp_owner_scope(UserId::new(owner).unwrap(), None)
-            .expect("NEAR AI MCP owner scope"),
+        default_runtime_owner_scope(UserId::new(owner).unwrap()).expect("NEAR AI MCP owner scope"),
         AuthSurface::Api,
     );
     let accounts = services
         .product_auth
         .as_ref()
-        .expect("product auth")
         .credential_account_record_source()
         .accounts_for_owner(&auth_scope)
         .await
@@ -1976,13 +1973,9 @@ async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
     let resolver = ProductAuthRuntimeCredentialResolver::new_with_refresh(
         services
             .product_auth
-            .as_ref()
-            .expect("product auth")
             .runtime_credential_account_selection_service(),
         services
             .product_auth
-            .as_ref()
-            .expect("product auth")
             .runtime_credential_account_refresh_service(),
     );
     let sso_scope = ResourceScope {
@@ -2014,18 +2007,16 @@ async fn local_dev_nearai_mcp_rebootstrap_reuses_existing_account() {
     let root = dir.path().join("local-dev");
     let owner = "local-dev-nearai-mcp-idempotent-owner";
     let auth_scope = AuthProductScope::new(
-        local_dev_nearai_mcp_owner_scope(UserId::new(owner).unwrap(), None)
-            .expect("NEAR AI MCP owner scope"),
+        default_runtime_owner_scope(UserId::new(owner).unwrap()).expect("NEAR AI MCP owner scope"),
         AuthSurface::Api,
     );
 
-    let first = build_reborn_services(nearai_bootstrap_input(owner, root, "nearai-first-key"))
+    let first = build_runtime_substrate(nearai_bootstrap_input(owner, root, "nearai-first-key"))
         .await
         .expect("first local-dev services build");
     let first_account = first
         .product_auth
         .as_ref()
-        .expect("product auth")
         .credential_account_record_source()
         .accounts_for_owner(&auth_scope)
         .await
@@ -2033,13 +2024,10 @@ async fn local_dev_nearai_mcp_rebootstrap_reuses_existing_account() {
         .into_iter()
         .find(|account| account.provider.as_str() == "nearai")
         .expect("NEAR AI product-auth account");
-    let extension_management = first
-        .local_runtime
-        .as_ref()
+    let extension_management = &first
+        .local_runtime_for_test()
         .expect("local runtime")
-        .extension_management
-        .as_ref()
-        .expect("extension management");
+        .extension_management;
     let outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
         Some(
             crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig::new(
@@ -2048,7 +2036,7 @@ async fn local_dev_nearai_mcp_rebootstrap_reuses_existing_account() {
             )
             .expect("valid NEAR AI MCP bootstrap config"),
         ),
-        first.product_auth.as_ref().expect("product auth"),
+        &first.product_auth,
         extension_management,
         auth_scope.resource.clone(),
     )
@@ -2060,8 +2048,6 @@ async fn local_dev_nearai_mcp_rebootstrap_reuses_existing_account() {
     );
     let accounts = first
         .product_auth
-        .as_ref()
-        .expect("product auth")
         .credential_account_record_source()
         .accounts_for_owner(&auth_scope)
         .await
@@ -2091,20 +2077,17 @@ async fn local_dev_nearai_mcp_bootstrap_reinstalls_discovered_reused_credential(
     let nearai_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
 
-    let services = build_reborn_services(nearai_bootstrap_input(
+    let services = build_runtime_substrate(nearai_bootstrap_input(
         owner,
         dir.path().join("local-dev"),
         "nearai-test-key",
     ))
     .await
     .expect("local-dev services build");
-    let extension_management = services
-        .local_runtime
-        .as_ref()
+    let extension_management = &services
+        .local_runtime_for_test()
         .expect("local runtime")
-        .extension_management
-        .as_ref()
-        .expect("extension management");
+        .extension_management;
     let removal_scope = ironclaw_host_api::ResourceScope::local_default(
         ironclaw_host_api::UserId::new(owner).expect("valid user"),
         ironclaw_host_api::InvocationId::new(),
@@ -2126,10 +2109,9 @@ async fn local_dev_nearai_mcp_bootstrap_reinstalls_discovered_reused_credential(
             )
             .expect("valid NEAR AI MCP bootstrap config"),
         ),
-        services.product_auth.as_ref().expect("product auth"),
+        &services.product_auth,
         extension_management,
-        local_dev_nearai_mcp_owner_scope(UserId::new(owner).unwrap(), None)
-            .expect("NEAR AI MCP owner scope"),
+        default_runtime_owner_scope(UserId::new(owner).unwrap()).expect("NEAR AI MCP owner scope"),
     )
     .await
     .expect("bootstrap should reinstall discovered extension");
@@ -2137,14 +2119,21 @@ async fn local_dev_nearai_mcp_bootstrap_reinstalls_discovered_reused_credential(
         outcome,
         crate::llm_admin::nearai_mcp::NearAiMcpBootstrapOutcome::Activated
     );
+    // #6520 lifecycle projection is caller-scoped and takes the production
+    // credential gate; the owner is the operator this runtime was built with.
+    let owner_scope =
+        default_runtime_owner_scope(UserId::new(owner).unwrap()).expect("NEAR AI MCP owner scope");
+    let credential_gate = crate::extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate::new(
+        owner_scope.clone(),
+        services
+            .product_auth
+            .runtime_credential_account_selection_service(),
+    );
     let projection = extension_management
-        .project(
-            nearai_ref,
-            extension_management.tenant_operator_user_id_for_test(),
-        )
+        .project(nearai_ref, &owner_scope.user_id, Some(&credential_gate))
         .await
         .expect("NEAR AI MCP projected");
-    assert_eq!(projection.phase, InstallationState::Active);
+    assert_eq!(projection.phase, LifecyclePublicState::Active);
 
     // v3 hosted-MCP surface: reinstall-and-activate publishes the
     // host-internal MCP connection template plus the statically pinned
@@ -2184,8 +2173,8 @@ async fn local_dev_nearai_mcp_invalid_base_url_fails_build() {
         secrecy::SecretString::from("nearai-test-key"),
     )
     .expect("config shape");
-    let error = build_reborn_services(
-        RebornBuildInput::local_dev(
+    let error = build_runtime_substrate(
+        crate::deployment::local_dev_build_input(
             "local-dev-nearai-mcp-invalid-owner",
             dir.path().join("local-dev"),
         )
@@ -2229,13 +2218,14 @@ async fn local_dev_services_persist_thread_records_across_rebuilds() {
     };
     let thread_id = ironclaw_host_api::ThreadId::new("persisted-thread").unwrap();
 
-    let services =
-        build_reborn_services(RebornBuildInput::local_dev("persist-owner", root.clone()))
-            .await
-            .expect("first local-dev services build");
+    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
+        "persist-owner",
+        root.clone(),
+    ))
+    .await
+    .expect("first local-dev services build");
     services
-        .local_runtime
-        .as_ref()
+        .local_runtime_for_test()
         .expect("local runtime")
         .thread_service
         .ensure_thread(ironclaw_threads::EnsureThreadRequest {
@@ -2249,12 +2239,14 @@ async fn local_dev_services_persist_thread_records_across_rebuilds() {
         .expect("persist thread");
     drop(services);
 
-    let rebuilt = build_reborn_services(RebornBuildInput::local_dev("persist-owner", root.clone()))
-        .await
-        .expect("rebuilt local-dev services");
+    let rebuilt = build_runtime_substrate(crate::deployment::local_dev_build_input(
+        "persist-owner",
+        root.clone(),
+    ))
+    .await
+    .expect("rebuilt local-dev services");
     let history = rebuilt
-        .local_runtime
-        .as_ref()
+        .local_runtime_for_test()
         .expect("rebuilt local runtime")
         .thread_service
         .list_thread_history(ironclaw_threads::ThreadHistoryRequest {
@@ -2279,15 +2271,14 @@ async fn local_dev_setup_marker_workspace_filesystem_is_read_only() {
     std::fs::create_dir_all(marker_path.parent().expect("marker parent"))
         .expect("marker directory");
     std::fs::write(&marker_path, "done").expect("marker file");
-    let services = build_reborn_services(RebornBuildInput::local_dev(
+    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
         "local-dev-marker-workspace-owner",
         storage_root,
     ))
     .await
     .expect("local-dev services build");
-    let local_runtime = services
-        .local_runtime
-        .as_ref()
+    let runtime_surfaces = services
+        .local_runtime_for_test()
         .expect("local-dev runtime substrate");
     let scope = ResourceScope::local_default(
         UserId::new("local-dev-marker-user").expect("valid user"),
@@ -2295,8 +2286,8 @@ async fn local_dev_setup_marker_workspace_filesystem_is_read_only() {
     )
     .expect("valid resource scope");
 
-    let stat = local_runtime
-        .workspace_filesystem
+    let stat = runtime_surfaces
+        .workspace_filesystem_for_test()
         .stat(
             &scope,
             &ScopedPath::new("/workspace/markers/setup.done").expect("valid marker path"),
@@ -2305,8 +2296,8 @@ async fn local_dev_setup_marker_workspace_filesystem_is_read_only() {
         .expect("marker stat succeeds");
     assert_eq!(stat.len, 4);
 
-    let error = local_runtime
-        .workspace_filesystem
+    let error = runtime_surfaces
+        .workspace_filesystem_for_test()
         .write_file(
             &scope,
             &ScopedPath::new("/workspace/markers/new.done").expect("valid marker path"),
@@ -2321,7 +2312,7 @@ async fn local_dev_setup_marker_workspace_filesystem_is_read_only() {
 async fn local_dev_skill_management_invokes_through_first_party_runtime() {
     let dir = tempfile::tempdir().expect("tempdir");
     let storage_root = dir.path().join("local-dev");
-    let services = build_reborn_services(RebornBuildInput::local_dev(
+    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
         "local-dev-skill-tools-owner",
         storage_root.clone(),
     ))
@@ -2362,6 +2353,41 @@ async fn local_dev_skill_management_invokes_through_first_party_runtime() {
             .any(|skill| { skill["name"] == "runtime-sentinel" && skill["source"] == "user" })
     );
 
+    let update_output = invoke_json(
+        &services,
+        SKILL_UPDATE_CAPABILITY_ID,
+        skill_context(SKILL_UPDATE_CAPABILITY_ID),
+        serde_json::json!({
+            "name": "runtime-sentinel",
+            "content": skill_md("runtime-sentinel", "updated runtime skill", "UPDATED_SENTINEL")
+        }),
+    )
+    .await
+    .expect("skill update succeeds");
+    assert_eq!(update_output["updated"], true);
+    assert_eq!(update_output["name"], "runtime-sentinel");
+
+    let auto_activate_output = invoke_json(
+        &services,
+        SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
+        skill_context(SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID),
+        serde_json::json!({
+            "name": "runtime-sentinel",
+            "enabled": false
+        }),
+    )
+    .await
+    .expect("skill auto-activate update succeeds");
+    assert_eq!(auto_activate_output["updated"], true);
+    assert_eq!(auto_activate_output["name"], "runtime-sentinel");
+    assert_eq!(auto_activate_output["auto_activate"], false);
+    let updated_skill = std::fs::read_to_string(
+        storage_root
+            .join("tenants/default/users/local-dev-test-user/skills/runtime-sentinel/SKILL.md"),
+    )
+    .expect("updated skill");
+    assert!(updated_skill.contains("auto_activate: false"));
+
     let remove_output = invoke_json(
         &services,
         SKILL_REMOVE_CAPABILITY_ID,
@@ -2382,7 +2408,7 @@ async fn local_dev_skill_management_invokes_through_first_party_runtime() {
 async fn local_dev_workspace_mounts_do_not_authorize_skill_writes() {
     let dir = tempfile::tempdir().expect("tempdir");
     let storage_root = dir.path().join("local-dev");
-    let services = build_reborn_services(RebornBuildInput::local_dev(
+    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
         "local-dev-workspace-skill-boundary-owner",
         storage_root.clone(),
     ))
@@ -2503,6 +2529,8 @@ fn builtin_first_party_package_declares_skill_management_tools() {
     assert!(ids.contains(&SKILL_LIST_CAPABILITY_ID));
     assert!(!ids.contains(&SKILL_ACTIVATE_CAPABILITY_ID));
     assert!(ids.contains(&SKILL_INSTALL_CAPABILITY_ID));
+    assert!(ids.contains(&SKILL_UPDATE_CAPABILITY_ID));
+    assert!(ids.contains(&SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID));
     assert!(ids.contains(&SKILL_REMOVE_CAPABILITY_ID));
     assert!(ids.contains(&TRIGGER_CREATE_CAPABILITY_ID));
     assert!(ids.contains(&TRIGGER_LIST_CAPABILITY_ID));
@@ -2515,6 +2543,8 @@ fn builtin_first_party_package_declares_skill_management_tools() {
     for id in [
         SKILL_LIST_CAPABILITY_ID,
         SKILL_INSTALL_CAPABILITY_ID,
+        SKILL_UPDATE_CAPABILITY_ID,
+        SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
         SKILL_REMOVE_CAPABILITY_ID,
         TRIGGER_CREATE_CAPABILITY_ID,
         TRIGGER_LIST_CAPABILITY_ID,
@@ -2555,17 +2585,6 @@ fn production_skill_management_mounts_use_production_namespace() {
         .find(|mount| mount.alias.as_str() == "/system/skills")
         .expect("system skills mount");
     assert_eq!(system_mount.target.as_str(), "/system/skills");
-}
-
-#[test]
-fn disabled_services_do_not_include_repl_runtime_substrate() {
-    let services = RebornServices::disabled();
-
-    assert!(services.host_runtime.is_none());
-    assert!(services.turn_coordinator.is_none());
-    assert!(services.product_auth.is_none());
-    assert!(services.local_runtime.is_none());
-    assert_eq!(services.readiness.state, RebornReadinessState::Disabled);
 }
 
 #[test]
@@ -2617,7 +2636,7 @@ fn readiness_for_profile_diagnostics_cover_cutover_states() {
 }
 
 async fn invoke_json(
-    services: &RebornServices,
+    services: &RebornRuntimeStores,
     capability_id: &str,
     context: ExecutionContext,
     input: serde_json::Value,
@@ -2688,11 +2707,11 @@ fn gsuite_context(capability_id: &str) -> ExecutionContext {
 /// first-party tool dispatch; enabling it here mirrors the operator
 /// having flipped it on before letting the agent run tools.
 async fn enable_global_auto_approve_for_context(
-    local_runtime: &RebornRuntimeSubstrate,
+    runtime_surfaces: &RebornRuntimeStores,
     context: &ExecutionContext,
 ) {
-    local_runtime
-        .auto_approve_settings
+    runtime_surfaces
+        .auto_approve_settings_for_test()
         .set(AutoApproveSettingInput {
             updated_by: Principal::User(context.resource_scope.user_id.clone()),
             scope: context.resource_scope.clone(),
@@ -2934,30 +2953,30 @@ fn skill_md(name: &str, description: &str, prompt: &str) -> String {
 }
 
 /// Verify that the durable `local_dev_outbound_store` bundle (libsql or postgres)
-/// shares a single `FilesystemOutboundStateStore` allocation across all four
+/// shares a single `OutboundStateStore` allocation across all four
 /// trait-object roles.
 ///
 /// The assertion reads the four trait-object pointers from the built
-/// `RebornRuntimeSubstrate` and compares their data halves via
+/// `RebornRuntimeStores` and compares their data halves via
 /// `std::ptr::addr_eq` (trait objects of different traits cannot be compared
 /// with `Arc::ptr_eq` directly).
 #[tokio::test]
 async fn local_dev_outbound_store_durable_shares_one_allocation_across_all_roles() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(RebornBuildInput::local_dev(
+    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
         "outbound-store-alloc-owner",
         dir.path().join("local-dev"),
     ))
     .await
     .expect("local-dev services build");
 
-    let local_runtime = services.local_runtime.as_ref().expect("local runtime");
+    let runtime_surfaces = services.local_runtime_for_test().expect("local runtime");
 
     // Cast each fat-pointer's data half to *const () for cross-trait comparison.
-    let pref_ptr = Arc::as_ptr(&local_runtime.outbound_preferences) as *const ();
-    let state_ptr = Arc::as_ptr(&local_runtime.outbound_state) as *const ();
-    let gate_ptr = Arc::as_ptr(&local_runtime.delivered_gate_routes) as *const ();
-    let delivery_ptr = Arc::as_ptr(&local_runtime.triggered_run_delivery) as *const ();
+    let pref_ptr = Arc::as_ptr(runtime_surfaces.outbound_preferences_for_test()) as *const ();
+    let state_ptr = Arc::as_ptr(runtime_surfaces.outbound_state_for_test()) as *const ();
+    let gate_ptr = Arc::as_ptr(runtime_surfaces.delivered_gate_routes_for_test()) as *const ();
+    let delivery_ptr = Arc::as_ptr(runtime_surfaces.triggered_run_delivery_for_test()) as *const ();
 
     assert!(
         std::ptr::addr_eq(pref_ptr, state_ptr),
@@ -3116,4 +3135,269 @@ fn builtin_first_party_trust_policy_grants_migrated_gmail_via_inventory() {
     )
     .expect("wrong digest gmail identity should evaluate");
     assert_eq!(wrong_digest.effective_trust.class(), TrustClass::Sandbox);
+}
+
+/// Regression (#6520 merge reconciliation): the production factory composes
+/// `lifecycle_auth_continuation_dispatcher` over the base product-auth
+/// dispatcher, so a completed extension-card OAuth (a `LifecycleActivation`
+/// continuation) re-enters the canonical lifecycle install/readiness command
+/// instead of being durably fenced un-activated. Pre-fix the base dispatcher
+/// answered `Ok` ("deferred to follow-up handler"), the fence stamped, and the
+/// extension could never activate.
+#[tokio::test]
+async fn completed_lifecycle_activation_continuation_installs_the_extension() {
+    use ironclaw_auth::{
+        AuthChallenge, AuthContinuationRef, AuthFlowKind, AuthProductScope, AuthProviderId,
+        AuthSurface, AuthorizationCodeHash, CredentialAccountLabel, NewAuthFlow,
+        OAuthAuthorizationUrl, OAuthCallbackClaimRequest, OAuthCallbackInput,
+        OAuthProviderExchange, OpaqueStateHash, PkceVerifierHash, ProviderCallbackOutcome,
+        ProviderScope,
+    };
+    use ironclaw_host_api::SecretHandle;
+
+    fn fake_digest(value: &str) -> String {
+        format!(
+            "{:064x}",
+            value.bytes().fold(0_u64, |hash, byte| {
+                hash.wrapping_mul(31).wrapping_add(u64::from(byte))
+            })
+        )
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let owner = "lifecycle-continuation-owner";
+    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
+        owner,
+        dir.path().join("local-dev"),
+    ))
+    .await
+    .expect("local-dev services build");
+    let runtime_surfaces = services.local_runtime_for_test().expect("local runtime");
+    let product_auth = Arc::clone(&services.product_auth);
+    let user = UserId::new(owner).expect("owner user id");
+    let scope = AuthProductScope::new(
+        ironclaw_host_api::ResourceScope::local_default(
+            user.clone(),
+            ironclaw_host_api::InvocationId::new(),
+        )
+        .expect("owner scope"),
+        AuthSurface::Api,
+    );
+    let provider = AuthProviderId::new("github").expect("provider id");
+    // The auth-flow continuation carries the string-shaped auth package ref;
+    // the lifecycle wrapper converts it to the workflow ref internally.
+    let package_ref =
+        ironclaw_auth::LifecyclePackageRef::new("github").expect("github package ref");
+    let expires_at = chrono::Utc::now() + chrono::Duration::minutes(5);
+    let state_hash = OpaqueStateHash::new(fake_digest("lifecycle-state")).unwrap();
+    let pkce_hash = PkceVerifierHash::new(fake_digest("lifecycle-pkce")).unwrap();
+
+    let flow = product_auth
+        .flow_manager()
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: provider.clone(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
+                    .unwrap(),
+                expires_at,
+            },
+            continuation: AuthContinuationRef::LifecycleActivation {
+                package_ref: package_ref.clone(),
+            },
+            update_binding: None,
+            opaque_state_hash: Some(state_hash.clone()),
+            pkce_verifier_hash: Some(pkce_hash.clone()),
+            expires_at,
+        })
+        .await
+        .expect("create lifecycle-activation flow");
+    product_auth
+        .flow_manager()
+        .claim_oauth_callback(
+            &scope,
+            OAuthCallbackClaimRequest {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash.clone(),
+                provider: provider.clone(),
+                pkce_verifier_hash: pkce_hash.clone(),
+            },
+        )
+        .await
+        .expect("claim callback");
+    product_auth
+        .flow_manager()
+        .complete_oauth_callback(
+            &scope,
+            OAuthCallbackInput {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash,
+                outcome: ProviderCallbackOutcome::Authorized {
+                    exchange: Box::new(OAuthProviderExchange {
+                        provider: provider.clone(),
+                        account_label: CredentialAccountLabel::new("GitHub Account").unwrap(),
+                        authorization_code_hash: AuthorizationCodeHash::new(fake_digest(
+                            "lifecycle-code",
+                        ))
+                        .unwrap(),
+                        pkce_verifier_hash: pkce_hash,
+                        access_secret: SecretHandle::new("lifecycle-github-access").unwrap(),
+                        refresh_secret: None,
+                        scopes: vec![ProviderScope::new("repo.readonly").unwrap()],
+                        account_id: None,
+                        provider_identity: None,
+                    }),
+                },
+            },
+        )
+        .await
+        .expect("complete callback");
+
+    // Reconciling the completed-but-unfenced flow drives the composed
+    // dispatcher: the lifecycle wrapper re-enters the canonical install
+    // command, the just-minted github credential account satisfies the
+    // credential gate, and install auto-advances the extension to Active
+    // before the fan-out settles the flow. Pre-fix the base dispatcher
+    // answered `Ok` without installing anything.
+    let status = product_auth
+        .reconcile_oauth_flow(&scope, flow.id)
+        .await
+        .expect("lifecycle continuation reconciles");
+    assert_eq!(status, ironclaw_auth::AuthFlowStatus::Completed);
+
+    let installation = runtime_surfaces
+        .extension_management
+        .installation_store_for_test()
+        .list_installations()
+        .await
+        .expect("list installations")
+        .into_iter()
+        .find(|installation| installation.extension_id().as_str() == "github")
+        .expect("lifecycle continuation must install the github extension");
+    assert!(
+        installation.owner().visible_to(&user),
+        "the continuation's caller must hold the installation membership"
+    );
+    // Install drove readiness all the way to runtime publication: the github
+    // tool surface is model-visible without any separate Activate action.
+    let capabilities = runtime_surfaces
+        .extension_management
+        .active_model_visible_capabilities()
+        .await
+        .expect("active capabilities");
+    assert!(
+        capabilities
+            .iter()
+            .any(|capability| capability.provider.as_str() == "github"),
+        "github capabilities must be published after the continuation"
+    );
+
+    // A fanned-out continuation stamps the durable fence exactly once.
+    let record = product_auth
+        .flow_manager()
+        .get_flow(&scope, flow.id)
+        .await
+        .expect("get flow")
+        .expect("flow record exists");
+    assert!(
+        record.continuation_emitted_at.is_some(),
+        "a fanned-out continuation must stamp the durable fence"
+    );
+}
+
+/// #6520 live-repro regression: a completed channel pairing must run the SAME
+/// lifecycle-wrapped continuation dispatcher product-auth uses — readiness
+/// reconciliation (runtime publication) before the blocked-run fan-out. When
+/// composition handed pairing a bare turn-resume dispatcher instead, a
+/// freshly paired channel extension (telegram: remove → install → pair) sat
+/// at setup_needed forever because nothing re-published it. Pinned by pointer
+/// identity at the composition seam: every pairing service's dispatcher IS
+/// product-auth's composed dispatcher.
+#[tokio::test]
+async fn channel_pairing_completions_run_the_lifecycle_wrapped_continuation_dispatcher() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
+        "local-dev-pairing-continuation-owner",
+        dir.path().join("local-dev"),
+    ))
+    .await
+    .expect("local-dev services build");
+
+    let product_auth_dispatcher = services.product_auth.continuation_dispatcher_for_test();
+    let channel_pairing = services
+        .channel_pairing
+        .as_ref()
+        .expect("local-dev build composes the channel pairing registry");
+    let mut pairing_services_checked = 0usize;
+    for extension_id in ["telegram", "slack"] {
+        let Some(pairing) = channel_pairing.get(extension_id) else {
+            continue;
+        };
+        pairing_services_checked += 1;
+        assert!(
+            Arc::ptr_eq(
+                &pairing.continuation_dispatcher_for_test(),
+                &product_auth_dispatcher,
+            ),
+            "{extension_id} pairing completions must dispatch through product-auth's \
+             lifecycle-wrapped continuation dispatcher, not a bare turn-resume one",
+        );
+    }
+    assert!(
+        pairing_services_checked > 0,
+        "expected at least one bundled channel extension with a pairing service",
+    );
+}
+
+/// Live-repro regression (demo-stack defect): removing an installed channel
+/// extension through the lifecycle port with an authenticated actor must
+/// actually delete the caller's durable membership — and must be POSSIBLE in
+/// every composition that can install one (the channel-connection disconnect
+/// slot is filled at factory tier, not only in `build_reborn_runtime`).
+#[tokio::test]
+async fn telegram_remove_with_authenticated_actor_deletes_the_membership() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
+        "local-dev-telegram-remove-owner",
+        dir.path().join("local-dev"),
+    ))
+    .await
+    .expect("local-dev services build");
+    let runtime_surfaces = services.local_runtime_for_test().expect("local runtime");
+    let extension_management = &runtime_surfaces.extension_management;
+    let caller = UserId::new("telegram-remove-user").expect("user id");
+    let telegram_ref =
+        LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram").expect("valid ref");
+
+    extension_management
+        .install(telegram_ref.clone(), &caller)
+        .await
+        .expect("install telegram");
+
+    let removal_scope =
+        default_runtime_owner_scope(caller.clone()).expect("telegram removal scope");
+    let removed = extension_management
+        .remove(telegram_ref.clone(), &removal_scope, Some(&caller))
+        .await
+        .expect("remove telegram");
+    assert!(
+        matches!(
+            removed.payload.as_ref(),
+            Some(ironclaw_product::LifecycleProductPayload::ExtensionRemove { removed: true })
+        ),
+        "remove must report the membership it deleted, got {:?}",
+        removed.payload
+    );
+
+    let projection = extension_management
+        .project(telegram_ref, &caller, None)
+        .await
+        .expect("project telegram after remove");
+    assert_eq!(
+        projection.phase,
+        ironclaw_product::LifecyclePublicState::Uninstalled,
+        "removed telegram must project uninstalled for its former member",
+    );
 }

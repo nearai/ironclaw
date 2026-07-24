@@ -64,7 +64,24 @@ where
     D: serde::Deserializer<'de>,
 {
     let raw = String::deserialize(deserializer)?;
-    match raw.as_str() {
+    trusted_runtime_kind_from_str(&raw).map_err(serde::de::Error::custom)
+}
+
+pub fn deserialize_trusted_optional_runtime_kind<'de, D>(
+    deserializer: D,
+) -> Result<Option<RuntimeKind>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<String>::deserialize(deserializer)?;
+    raw.as_deref()
+        .map(trusted_runtime_kind_from_str)
+        .transpose()
+        .map_err(serde::de::Error::custom)
+}
+
+fn trusted_runtime_kind_from_str(raw: &str) -> Result<RuntimeKind, serde::de::value::Error> {
+    match raw {
         // Only the `#[serde(skip_deserializing)]` host-assigned variants are
         // hand-mapped; everything else delegates to the derived `Deserialize`,
         // so a future non-privileged variant round-trips here without edits
@@ -107,6 +124,15 @@ mod tests {
         runtime: RuntimeKind,
     }
 
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct OptionalDurableHolder {
+        #[serde(
+            default,
+            deserialize_with = "deserialize_trusted_optional_runtime_kind"
+        )]
+        runtime: Option<RuntimeKind>,
+    }
+
     // Regression (arch-simplification §4.3): a durable host-written record must
     // round-trip EVERY runtime kind, including the host-assigned `System`/
     // `FirstParty` that the InMemory process store never serialized but the
@@ -125,6 +151,19 @@ mod tests {
             let back: DurableHolder = serde_json::from_str(&json).unwrap();
             assert_eq!(back.runtime, kind, "trusted path must round-trip {kind}");
         }
+    }
+
+    #[test]
+    fn trusted_optional_runtime_kind_round_trips_privileged_variants() {
+        let json = serde_json::to_string(&OptionalDurableHolder {
+            runtime: Some(RuntimeKind::FirstParty),
+        })
+        .unwrap();
+        let back: OptionalDurableHolder = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.runtime, Some(RuntimeKind::FirstParty));
+
+        let back: OptionalDurableHolder = serde_json::from_str("{}").unwrap();
+        assert_eq!(back.runtime, None);
     }
 
     // The security boundary the trusted path must NOT weaken: the *derived*

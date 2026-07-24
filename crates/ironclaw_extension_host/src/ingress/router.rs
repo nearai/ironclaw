@@ -14,9 +14,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use ironclaw_extensions::ResolvedExtensionManifest;
 use ironclaw_host_api::{ChannelIngressDescriptor, ChannelIngressMethod, SecretHandle};
-use ironclaw_product_adapters::{
-    ChannelAdapter, InboundOutcome, NormalizedInboundMessage, VerifiedInbound,
-};
+use ironclaw_product::{ChannelAdapter, InboundOutcome, NormalizedInboundMessage, VerifiedInbound};
 
 use crate::active::ActiveExtension;
 use crate::deployment_channels::{DeploymentChannelBinding, DeploymentChannelRegistry};
@@ -98,14 +96,14 @@ pub struct ReplyContextKey {
     pub extension_id: String,
     pub installation_id: String,
     /// The conversation fingerprint
-    /// ([`ironclaw_product_adapters::ExternalConversationRef::conversation_fingerprint`]).
+    /// ([`ironclaw_product::ExternalConversationRef::conversation_fingerprint`]).
     pub conversation: String,
 }
 
 /// Host-side `reply_context` storage. Stored before admission commits;
 /// the delivery coordinator (P5) reads it back for source-route replies.
 #[async_trait]
-pub trait ReplyContextStore: Send + Sync {
+pub trait ReplyContextStorePort: Send + Sync {
     async fn put(&self, key: ReplyContextKey, context: Vec<u8>) -> Result<(), IngressPortError>;
     async fn get(&self, key: &ReplyContextKey) -> Result<Option<Vec<u8>>, IngressPortError>;
 }
@@ -187,7 +185,7 @@ impl IngressResponse {
 pub struct ExtensionIngressRouterDeps {
     pub secrets: Arc<dyn IngressSecretsPort>,
     pub sink: Arc<dyn InboundSink>,
-    pub reply_context: Arc<dyn ReplyContextStore>,
+    pub reply_context: Arc<dyn ReplyContextStorePort>,
 }
 
 /// The generic ingress router. One instance serves every active extension's

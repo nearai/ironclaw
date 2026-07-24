@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use ironclaw_host_api::{
     Authorized, CapabilityAuthorizer, CapabilityId, Invocation, ProcessId, Timestamp,
 };
-use ironclaw_processes::{ProcessError, ProcessExecutionRequest, ProcessStatus, ProcessStore};
+use ironclaw_processes::{ProcessError, ProcessExecutionRequest, ProcessStatus, ProcessStorePort};
 use thiserror::Error;
 
 /// Kernel-owned re-minting surface for detached process continuations.
@@ -51,14 +51,14 @@ impl ProcessAuthorizationRemintError {
 }
 
 pub fn process_authorization_remint_port(
-    process_store: Arc<dyn ProcessStore>,
+    process_store: Arc<dyn ProcessStorePort>,
 ) -> Arc<dyn ProcessAuthorizationRemintPort> {
     Arc::new(StoreBackedProcessAuthorizationReminter { process_store })
 }
 
 #[derive(Clone)]
 struct StoreBackedProcessAuthorizationReminter {
-    process_store: Arc<dyn ProcessStore>,
+    process_store: Arc<dyn ProcessStorePort>,
 }
 
 impl CapabilityAuthorizer for StoreBackedProcessAuthorizationReminter {}

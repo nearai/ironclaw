@@ -1,4 +1,4 @@
-// arch-exempt: large_file, mechanical §4.3 secret-store swap only (FilesystemSecretStore -> FilesystemSecretStore::ephemeral), plan #6168
+// arch-exempt: large_file, mechanical §4.3 secret-store swap only (SecretStore -> SecretStore::ephemeral), plan #6168
 //! Composition-side implementation of the WebChat v2 LLM-config port.
 //!
 //! Ties together the read/set-active surface ([`RebornProviderAdmin`]), the
@@ -23,15 +23,16 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use ironclaw_host_api::ProductSurfaceCaller;
 use ironclaw_llm::registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};
 use ironclaw_llm::{
     NearWalletSignedMessage, OpenAiCodexConfig, OpenAiCodexSessionManager, default_nearai_base_url,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     CodexLoginStart, LlmActiveSelection, LlmConfigService, LlmConfigServiceError,
     LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
     NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest, NearAiWalletLoginResult,
-    SetActiveLlmRequest, UpsertLlmProviderRequest, WebUiAuthenticatedCaller,
+    SetActiveLlmRequest, UpsertLlmProviderRequest,
 };
 use ironclaw_reborn_config::{LlmSlotSelection, RebornBootConfig};
 use secrecy::{ExposeSecret as _, SecretString};
@@ -518,14 +519,14 @@ impl RebornLlmConfigService {
 impl LlmConfigService for RebornLlmConfigService {
     async fn snapshot(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
     ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
         self.build_snapshot().await
     }
 
     async fn upsert_provider(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: UpsertLlmProviderRequest,
     ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
         let id = validate_provider_id(&request.id)?;
@@ -620,7 +621,7 @@ impl LlmConfigService for RebornLlmConfigService {
 
     async fn delete_provider(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         provider_id: String,
     ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
         let id = validate_provider_id(&provider_id)?;
@@ -660,7 +661,7 @@ impl LlmConfigService for RebornLlmConfigService {
 
     async fn set_active(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: SetActiveLlmRequest,
     ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
         let id = validate_provider_id(&request.provider_id)?;
@@ -673,7 +674,7 @@ impl LlmConfigService for RebornLlmConfigService {
 
     async fn test_connection(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         request: LlmProbeRequest,
     ) -> Result<LlmProbeResult, LlmConfigServiceError> {
         let endpoint = probe_endpoint_label(&request);
@@ -709,7 +710,7 @@ impl LlmConfigService for RebornLlmConfigService {
 
     async fn list_models(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         request: LlmProbeRequest,
     ) -> Result<LlmModelsResult, LlmConfigServiceError> {
         let provider = self.probe_provider(&request).await?;
@@ -737,7 +738,7 @@ impl LlmConfigService for RebornLlmConfigService {
 
     async fn start_nearai_login(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         request: NearAiLoginRequest,
     ) -> Result<NearAiLoginStart, LlmConfigServiceError> {
         let session = self
@@ -775,7 +776,7 @@ impl LlmConfigService for RebornLlmConfigService {
 
     async fn start_codex_login(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
     ) -> Result<CodexLoginStart, LlmConfigServiceError> {
         let attempt_key = codex_login_attempt_key(&caller);
         let attempt_id = uuid::Uuid::new_v4();
@@ -883,7 +884,7 @@ impl LlmConfigService for RebornLlmConfigService {
 
     async fn complete_nearai_wallet_login(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         request: NearAiWalletLoginRequest,
     ) -> Result<NearAiWalletLoginResult, LlmConfigServiceError> {
         let session = self
@@ -950,7 +951,7 @@ fn nonempty_env(key: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn codex_login_attempt_key(caller: &WebUiAuthenticatedCaller) -> String {
+fn codex_login_attempt_key(caller: &ProductSurfaceCaller) -> String {
     format!("{}:{}", caller.tenant_id.as_str(), caller.user_id.as_str())
 }
 
@@ -1335,7 +1336,7 @@ mod tests {
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
     use ironclaw_llm::NEARAI_CLOUD_DEFAULT_BASE_URL;
     use ironclaw_reborn_config::{RebornHome, RebornProfile};
-    use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial};
+    use ironclaw_secrets::{SecretMaterial, SecretStore};
 
     fn boot_for_home(reborn_home: &std::path::Path) -> RebornBootConfig {
         let home = RebornHome::resolve_from_env_parts(
@@ -1348,10 +1349,10 @@ mod tests {
     }
 
     fn key_store() -> LlmKeyStore {
-        LlmKeyStore::new(Arc::new(FilesystemSecretStore::ephemeral()))
+        LlmKeyStore::new(Arc::new(SecretStore::ephemeral()))
     }
 
-    /// The real `FilesystemSecretStore` over a plain recording [`FaultInjecting`]
+    /// The real `SecretStore` over a plain recording [`FaultInjecting`]
     /// backend, plus the fault handle. Replaces the former whole-trait
     /// `CountingMetadataSecretStore` observer fake: the store now runs its
     /// genuine `metadata`/`metadata_for_scope` path and tests count the backend
@@ -1359,11 +1360,11 @@ mod tests {
     /// batched `metadata_for_scope`) instead of a bespoke `AtomicUsize` inside a
     /// fake.
     fn recording_secret_store() -> (
-        Arc<FilesystemSecretStore<FaultInjecting<InMemoryBackend>>>,
+        Arc<SecretStore<FaultInjecting<InMemoryBackend>>>,
         Arc<FaultInjecting<InMemoryBackend>>,
     ) {
         let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
-        let store = Arc::new(FilesystemSecretStore::ephemeral_over(backend.clone()));
+        let store = Arc::new(SecretStore::ephemeral_over(backend.clone()));
         (store, backend)
     }
 
@@ -1374,8 +1375,7 @@ mod tests {
     /// real `FilesystemError::Backend -> SecretStoreError::StoreUnavailable`
     /// mapping fire (a `NotFound` fault would instead surface as `Ok(empty)` /
     /// `Ok(None)` and never error).
-    fn metadata_unavailable_secret_store()
-    -> Arc<FilesystemSecretStore<FaultInjecting<InMemoryBackend>>> {
+    fn metadata_unavailable_secret_store() -> Arc<SecretStore<FaultInjecting<InMemoryBackend>>> {
         let backend = Arc::new(
             FaultInjecting::new(InMemoryBackend::new())
                 .with_fault(
@@ -1389,7 +1389,7 @@ mod tests {
                         .backend("metadata index unavailable"),
                 ),
         );
-        Arc::new(FilesystemSecretStore::ephemeral_over(backend))
+        Arc::new(SecretStore::ephemeral_over(backend))
     }
 
     /// The real store over a [`FaultInjecting`] backend armed to fail every
@@ -1398,8 +1398,7 @@ mod tests {
     /// removed): the injected backend fault flows through the store's real
     /// `delete` -> `FilesystemError::Backend -> SecretStoreError::StoreUnavailable`
     /// mapping.
-    fn delete_unavailable_secret_store()
-    -> Arc<FilesystemSecretStore<FaultInjecting<InMemoryBackend>>> {
+    fn delete_unavailable_secret_store() -> Arc<SecretStore<FaultInjecting<InMemoryBackend>>> {
         let backend = Arc::new(
             FaultInjecting::new(InMemoryBackend::new()).with_fault(
                 Fault::on(FilesystemOperation::Delete)
@@ -1407,11 +1406,11 @@ mod tests {
                     .backend("secret delete unavailable"),
             ),
         );
-        Arc::new(FilesystemSecretStore::ephemeral_over(backend))
+        Arc::new(SecretStore::ephemeral_over(backend))
     }
 
-    fn caller() -> WebUiAuthenticatedCaller {
-        WebUiAuthenticatedCaller::new(
+    fn caller() -> ProductSurfaceCaller {
+        ProductSurfaceCaller::new(
             TenantId::new("tenant-alpha").expect("tenant"),
             UserId::new("user-alpha").expect("user"),
             Some(AgentId::new("agent-alpha").expect("agent")),
@@ -1427,26 +1426,30 @@ mod tests {
             .expect("nearai provider in snapshot")
     }
 
-    /// Clear the runtime-overlay NEARAI_* entries so overlay state from other
-    /// tests cannot leak into snapshot assertions. A real `NEARAI_API_KEY`
-    /// exported by the developer shell is deliberately tolerated: the
-    /// snapshot assertions below only depend on the base URL, and this
-    /// `#![forbid(unsafe_code)]` crate cannot remove real process env vars.
-    /// `NEARAI_BASE_URL` would change the asserted base URL, so its absence
-    /// from the real env is still checked loudly.
-    fn clear_nearai_snapshot_env() {
-        for key in ["NEARAI_API_KEY", "NEARAI_BASE_URL"] {
-            ironclaw_common::env_helpers::remove_runtime_env(key);
+    struct NearAiSnapshotEnvGuard {
+        snapshots: Vec<ironclaw_common::env_helpers::RuntimeEnvSnapshot>,
+    }
+
+    impl Drop for NearAiSnapshotEnvGuard {
+        fn drop(&mut self) {
+            for snapshot in self.snapshots.drain(..).rev() {
+                ironclaw_common::env_helpers::restore_runtime_env(snapshot);
+            }
         }
-        // An EMPTY value is semantically unset to `env_or_override`, so only a
-        // non-empty real value can change the asserted base URL — treat empty
-        // as absent to keep the precondition environment-independent.
-        assert!(
-            std::env::var_os("NEARAI_BASE_URL")
-                .map(|value| value.is_empty())
-                .unwrap_or(true),
-            "NEARAI_BASE_URL must be unset (or empty) in the real environment for this snapshot test"
-        );
+    }
+
+    /// Mask NEARAI_* entries so developer shell env cannot leak into snapshot
+    /// assertions. The guard restores the exact prior runtime overlay state.
+    fn clear_nearai_snapshot_env() -> NearAiSnapshotEnvGuard {
+        let keys = ["NEARAI_API_KEY", "NEARAI_BASE_URL"];
+        let snapshots = keys
+            .iter()
+            .map(|key| ironclaw_common::env_helpers::snapshot_runtime_env(key))
+            .collect::<Vec<_>>();
+        for key in keys {
+            ironclaw_common::env_helpers::mask_runtime_env(key);
+        }
+        NearAiSnapshotEnvGuard { snapshots }
     }
 
     /// nearai has exactly one default now — cloud — regardless of whether an
@@ -1493,6 +1496,7 @@ mod tests {
     ) -> UpsertLlmProviderRequest {
         UpsertLlmProviderRequest {
             id: id.to_string(),
+            client_action_id: None,
             name: Some("Acme".to_string()),
             adapter: "open_ai_completions".to_string(),
             base_url: Some("https://api.acme.test/v1".to_string()),
@@ -2159,7 +2163,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     async fn nearai_snapshot_exposes_effective_default_base_url() {
         let _env_lock = ironclaw_common::env_helpers::lock_env();
-        clear_nearai_snapshot_env();
+        let _snapshot_env = clear_nearai_snapshot_env();
         let temp = tempfile::tempdir().expect("tempdir");
         let reborn_home = temp.path().join("reborn-home");
         let boot = boot_for_home(&reborn_home);
@@ -2183,7 +2187,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     async fn nearai_snapshot_uses_cloud_default_with_stored_api_key() {
         let _env_lock = ironclaw_common::env_helpers::lock_env();
-        clear_nearai_snapshot_env();
+        let _snapshot_env = clear_nearai_snapshot_env();
         let temp = tempfile::tempdir().expect("tempdir");
         let reborn_home = temp.path().join("reborn-home");
         let boot = boot_for_home(&reborn_home);
@@ -2227,11 +2231,11 @@ mod tests {
     /// returns `service_unavailable` even though Test connection succeeds. This
     /// wires the secret store EXACTLY as production `ironclaw-reborn serve` does
     /// — the dynamic `invocation_mount_view` scoped filesystem behind a real
-    /// `FilesystemSecretStore` — instead of the in-memory store the other tests
+    /// `SecretStore` — instead of the in-memory store the other tests
     /// use, so a system-scope write/read regression in that path is caught.
     #[tokio::test]
     async fn upsert_builtin_nearai_with_production_secret_store_succeeds() {
-        use ironclaw_secrets::{FilesystemSecretStore, SecretsCrypto};
+        use ironclaw_secrets::{SecretStore, SecretsCrypto};
 
         let temp = tempfile::tempdir().expect("tempdir");
         let reborn_home = temp.path().join("reborn-home");
@@ -2245,10 +2249,11 @@ mod tests {
             ))
             .expect("valid master key"),
         );
-        let keys = LlmKeyStore::new(Arc::new(FilesystemSecretStore::new(scoped, crypto)));
+        let keys = LlmKeyStore::new(Arc::new(SecretStore::new(scoped, crypto)));
 
         let nearai_request = || UpsertLlmProviderRequest {
             id: "nearai".to_string(),
+            client_action_id: None,
             name: Some("NEAR AI".to_string()),
             adapter: "near_ai".to_string(),
             base_url: Some("https://cloud-api.near.ai".to_string()),

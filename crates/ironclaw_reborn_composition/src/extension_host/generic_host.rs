@@ -36,7 +36,7 @@ use ironclaw_extension_host::{
     RehydratedInstallationRecordStore, SnapshotToolResolver,
 };
 use ironclaw_extensions::{
-    ExtensionActivationState, ExtensionInstallationStore, ExtensionManifest, ExtensionPackage,
+    ExtensionHealthStatus, ExtensionInstallationStorePort, ExtensionManifest, ExtensionPackage,
     ResolvedExtensionManifest,
 };
 use ironclaw_host_api::{
@@ -44,7 +44,7 @@ use ironclaw_host_api::{
     RestrictedEgressResponse, ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult, VirtualPath,
 };
 use ironclaw_host_runtime::{ExtensionLaneToolBinder, ExtensionToolBindError};
-use ironclaw_product_adapters::{
+use ironclaw_product::{
     ChannelAdapter, ChannelContext, ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope,
     VerifiedInbound,
 };
@@ -63,9 +63,12 @@ pub(crate) struct GenericExtensionHostParams {
     pub(crate) binder: ExtensionLaneToolBinder,
     pub(crate) native_factories: Vec<Arc<dyn NativeExtensionFactory>>,
     pub(crate) channel_adapters: Vec<(String, Arc<dyn ChannelAdapter>)>,
-    pub(crate) installation_store: Arc<dyn ExtensionInstallationStore>,
-    pub(crate) channel_config:
-        Option<Arc<crate::extension_host::channel_config::ChannelConfigService>>,
+    pub(crate) installation_store: Arc<dyn ExtensionInstallationStorePort>,
+    pub(crate) admin_configuration_resolver: Option<
+        Arc<
+            crate::extension_host::admin_configuration::ComposedExtensionAdminConfigurationResolver,
+        >,
+    >,
     pub(crate) governor: Arc<dyn ResourceGovernor>,
     pub(crate) reserved_capability_ids: BTreeSet<CapabilityId>,
     pub(crate) reserved_ingress_routes: BTreeSet<String>,
@@ -74,8 +77,7 @@ pub(crate) struct GenericExtensionHostParams {
 }
 
 /// Construct the generic extension host over the host-runtime lanes and
-/// hydrate it from the facade's durable installation state (every `Enabled`
-/// installation activates into the first published generation).
+/// hydrate it from the facade's durable installation memberships.
 pub(crate) async fn build_generic_extension_host(
     params: GenericExtensionHostParams,
 ) -> Result<GenericExtensionHost, crate::RebornBuildError> {
@@ -84,7 +86,7 @@ pub(crate) async fn build_generic_extension_host(
         native_factories,
         channel_adapters,
         installation_store,
-        channel_config,
+        admin_configuration_resolver,
         governor,
         reserved_capability_ids,
         reserved_ingress_routes,
@@ -126,11 +128,11 @@ pub(crate) async fn build_generic_extension_host(
         .await,
     );
 
-    // Hydrate: every Enabled installation the facade restored activates into
-    // the snapshot. A failure records the host record's terminal Failed state
-    // (with a redacted last_error) and must not block boot; the durable
-    // installation stays Enabled, so the extension projects `Failed` until a
-    // successful (re)activation clears it.
+    // Hydrate every installation membership restored by the facade into the
+    // snapshot. Membership is the durable runtime-presence signal; caller
+    // readiness is derived separately. A failure records the host record's
+    // terminal Failed state (with a redacted last_error) and must not block
+    // boot.
     for installation in installation_store
         .list_installations()
         .await
@@ -138,9 +140,6 @@ pub(crate) async fn build_generic_extension_host(
             reason: format!("extension installations could not be listed: {error}"),
         })?
     {
-        if installation.activation_state() != ExtensionActivationState::Enabled {
-            continue;
-        }
         let extension_id = installation.extension_id().clone();
         let Some(manifest_record) = installation_store
             .get_manifest(&extension_id)
@@ -151,11 +150,49 @@ pub(crate) async fn build_generic_extension_host(
         else {
             continue;
         };
-        // Durable per-installation `[channel.config]` values ride into the
-        // host's working record so `ChannelAdapter::activate` revalidates
-        // them on boot exactly as it did on the configure-time cycle.
-        let config = match &channel_config {
-            Some(channel_config) => channel_config
+        let package = ExtensionPackage::from_manifest(
+            ExtensionManifest::try_from(manifest_record.manifest().clone()).map_err(|error| {
+                crate::RebornBuildError::InvalidConfig {
+                    reason: format!("extension manifest could not be rebuilt: {error}"),
+                }
+            })?,
+            VirtualPath::new(format!("/system/extensions/{extension_id}")).map_err(|error| {
+                crate::RebornBuildError::InvalidConfig {
+                    reason: format!("extension root could not be rebuilt: {error}"),
+                }
+            })?,
+        )
+        .map_err(|error| crate::RebornBuildError::InvalidConfig {
+            reason: format!("extension package could not be rebuilt: {error}"),
+        })?;
+        // Hosted HTTP MCP tool catalogs are live-discovered for the caller
+        // and are intentionally not durable. Do not stage or publish the
+        // bundled connection template at boot: the caller's idempotent
+        // install/setup reconciliation must rediscover tools first.
+        if crate::extension_host::mcp_discovery::is_hosted_http_mcp_package(&package) {
+            continue;
+        }
+        // A durable installation recorded as terminally unhealthy is the
+        // persisted `InstallationState::Failed` projection (overview.md §6.1):
+        // it "does not auto-retry". Boot restore must honor that contract —
+        // re-publishing here would silently re-run activation on every boot
+        // and, on success, mask the recorded failure as active. Skip it,
+        // leaving the membership installed-but-not-served and remediable via an
+        // explicit caller re-activation, without ever re-attempting activation.
+        // (Hosted-MCP rehydration is decided above and is unaffected.)
+        if installation.health().status() == ExtensionHealthStatus::Unhealthy {
+            tracing::debug!(
+                extension_id = extension_id.as_str(),
+                "generic extension host skips boot re-publication of a terminally failed installation"
+            );
+            continue;
+        }
+        // Deployment-owned non-secret values come only from the manifest's
+        // administrator configuration projection. Compositions without that
+        // projection pass no deployment configuration; installation state is
+        // never a fallback configuration store.
+        let config = match &admin_configuration_resolver {
+            Some(admin_configuration_resolver) => admin_configuration_resolver
                 .effective_non_secret_config(&extension_id)
                 .await
                 .map_err(|error| crate::RebornBuildError::InvalidConfig {
@@ -163,12 +200,7 @@ pub(crate) async fn build_generic_extension_host(
                         "effective extension configuration could not be loaded: {error}"
                     ),
                 })?,
-            None => installation_store
-                .channel_config(&extension_id)
-                .await
-                .map_err(|error| crate::RebornBuildError::InvalidConfig {
-                    reason: format!("extension channel config could not be loaded: {error}"),
-                })?,
+            None => Vec::new(),
         };
         let record = InstallationRecord {
             extension_id: extension_id.as_str().to_string(),
@@ -178,19 +210,11 @@ pub(crate) async fn build_generic_extension_host(
             config,
             last_error: None,
         };
-        if let Err(error) = host.install(record).await {
+        if let Err(error) = host.publish_candidate(record).await {
             tracing::warn!(
                 extension_id = extension_id.as_str(),
                 error = %error,
-                "generic extension host could not stage installation at boot"
-            );
-            continue;
-        }
-        if let Err(error) = host.activate(extension_id.as_str()).await {
-            tracing::warn!(
-                extension_id = extension_id.as_str(),
-                error = %error,
-                "generic extension host could not activate installation at boot"
+                "generic extension host could not publish installation at boot"
             );
         }
     }
@@ -224,7 +248,7 @@ struct CompositionExtensionLoader {
     /// adapter lands.
     channel_adapters: HashMap<String, Arc<dyn ChannelAdapter>>,
     governor: Arc<dyn ResourceGovernor>,
-    installation_store: Arc<dyn ExtensionInstallationStore>,
+    installation_store: Arc<dyn ExtensionInstallationStorePort>,
 }
 
 #[async_trait]
@@ -490,9 +514,10 @@ mod tests {
     use ironclaw_authorization::GrantAuthorizer;
     use ironclaw_extension_host::test_support::{FakeEntrypoint, FakeToolAdapter};
     use ironclaw_extensions::{
-        ExtensionInstallation, ExtensionInstallationId, ExtensionManifestRecord,
-        ExtensionManifestRef, ExtensionRegistry, FilesystemExtensionInstallationStore,
-        MANIFEST_SCHEMA_VERSION, ManifestSource,
+        ExtensionHealthMessage, ExtensionHealthSnapshot, ExtensionHealthStatus,
+        ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStore,
+        ExtensionManifestRecord, ExtensionManifestRef, ExtensionRegistry, MANIFEST_SCHEMA_VERSION,
+        ManifestSource,
     };
     use ironclaw_filesystem::DiskFilesystem;
     use ironclaw_host_api::ids::ExtensionId;
@@ -538,6 +563,38 @@ input_schema_ref = "schemas/echo.input.json"
         )
     }
 
+    fn hosted_mcp_fixture_manifest_toml(id: &str) -> String {
+        format!(
+            r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "{id}"
+name = "Hosted MCP hydration fixture"
+version = "0.1.0"
+description = "boot hydration must not publish a stale MCP template"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "https://mcp.example.com/mcp"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "{id}.template"
+description = "Connection template, not a discovered tool"
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/template.input.json"
+"#,
+        )
+    }
+
     /// A native factory whose entrypoint binds a no-op tool adapter — the
     /// first_party loader branch, no runtime lane required.
     struct FixtureNativeFactory;
@@ -560,13 +617,17 @@ input_schema_ref = "schemas/echo.input.json"
         }
     }
 
-    async fn seed_installation(
-        store: &FilesystemExtensionInstallationStore,
+    async fn seed_installation(store: &ExtensionInstallationStore, id: &str) {
+        seed_installation_with_manifest(store, id, fixture_manifest_toml(id)).await;
+    }
+
+    async fn seed_installation_with_manifest(
+        store: &ExtensionInstallationStore,
         id: &str,
-        state: ExtensionActivationState,
+        manifest_toml: String,
     ) {
         let record = ExtensionManifestRecord::from_toml(
-            fixture_manifest_toml(id),
+            manifest_toml,
             ManifestSource::HostBundled,
             &ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
             None,
@@ -580,11 +641,13 @@ input_schema_ref = "schemas/echo.input.json"
                 ExtensionInstallation::new(
                     ExtensionInstallationId::new(id.to_string()).expect("installation id"),
                     extension_id.clone(),
-                    state,
                     ExtensionManifestRef::new(extension_id, None),
                     Vec::new(),
                     chrono::Utc::now(),
-                    ironclaw_extensions::InstallationOwner::Tenant,
+                    ironclaw_extensions::InstallationOwner::user(
+                        ironclaw_host_api::UserId::new(format!("user:{id}"))
+                            .expect("fixture user id"),
+                    ),
                 )
                 .expect("installation record"),
             )
@@ -604,23 +667,21 @@ input_schema_ref = "schemas/echo.input.json"
         .extension_lane_tool_binder()
     }
 
-    /// H.5 / MIG-4: the durable binary activation state backfills into the
-    /// generic host's standard seven-state records at boot — a durable
-    /// `Enabled` installation hydrates to an Active record in the first
-    /// published generation (snapshot presence + resolvable capability),
-    /// while a durable `Disabled` installation never activates.
+    /// Durable installation memberships hydrate into the generic host's
+    /// runtime records at boot. Readiness remains derived by the lifecycle
+    /// caller rather than persisted as a parallel activation state.
     #[tokio::test]
-    async fn boot_hydration_activates_enabled_and_skips_disabled_installations() {
+    async fn boot_hydration_loads_each_durable_installation_membership() {
         let store = Arc::new(crate::extension_host::filesystem_installation_store_for_test().await);
-        seed_installation(&store, "h5-enabled", ExtensionActivationState::Enabled).await;
-        seed_installation(&store, "h5-disabled", ExtensionActivationState::Disabled).await;
+        seed_installation(&store, "h5-first").await;
+        seed_installation(&store, "h5-second").await;
 
         let generic = build_generic_extension_host(GenericExtensionHostParams {
             binder: test_binder(),
             native_factories: vec![Arc::new(FixtureNativeFactory)],
             channel_adapters: Vec::new(),
-            installation_store: Arc::clone(&store) as Arc<dyn ExtensionInstallationStore>,
-            channel_config: None,
+            installation_store: Arc::clone(&store) as Arc<dyn ExtensionInstallationStorePort>,
+            admin_configuration_resolver: None,
             governor: Arc::new(InMemoryResourceGovernor::new()),
             reserved_capability_ids: BTreeSet::new(),
             reserved_ingress_routes: BTreeSet::new(),
@@ -631,19 +692,117 @@ input_schema_ref = "schemas/echo.input.json"
 
         let snapshot = generic.host.snapshot().await;
         assert!(
-            snapshot.extension("h5-enabled").is_some(),
-            "durable Enabled installation must hydrate to an Active record \
-             in the first published generation"
+            snapshot.extension("h5-first").is_some(),
+            "the first durable membership must hydrate into the first published generation"
         );
         assert!(
             snapshot
-                .resolve_tool(&CapabilityId::new("h5-enabled.echo").expect("capability id"))
+                .resolve_tool(&CapabilityId::new("h5-first.echo").expect("capability id"))
                 .is_some(),
-            "the hydrated Active extension's capability must resolve from the snapshot"
+            "the first hydrated extension capability must resolve from the snapshot"
         );
         assert!(
-            snapshot.extension("h5-disabled").is_none(),
-            "durable Disabled installation must stay inactive after restart"
+            snapshot.extension("h5-second").is_some(),
+            "the second durable membership must hydrate independently"
+        );
+    }
+
+    #[tokio::test]
+    async fn boot_hydration_does_not_publish_hosted_mcp_without_live_discovery() {
+        let store = Arc::new(crate::extension_host::filesystem_installation_store_for_test().await);
+        seed_installation_with_manifest(
+            &store,
+            "hosted-mcp",
+            hosted_mcp_fixture_manifest_toml("hosted-mcp"),
+        )
+        .await;
+
+        let generic = build_generic_extension_host(GenericExtensionHostParams {
+            binder: test_binder(),
+            native_factories: Vec::new(),
+            channel_adapters: Vec::new(),
+            installation_store: Arc::clone(&store) as Arc<dyn ExtensionInstallationStorePort>,
+            admin_configuration_resolver: None,
+            governor: Arc::new(InMemoryResourceGovernor::new()),
+            reserved_capability_ids: BTreeSet::new(),
+            reserved_ingress_routes: BTreeSet::new(),
+            channel_egress_transport: None,
+        })
+        .await
+        .expect("generic host builds");
+
+        let snapshot = generic.host.snapshot().await;
+        assert!(
+            snapshot.extension("hosted-mcp").is_none(),
+            "boot must not claim a hosted MCP is active before live tool discovery"
+        );
+        assert!(
+            snapshot
+                .resolve_tool(&CapabilityId::new("hosted-mcp.template").expect("capability id"))
+                .is_none(),
+            "the bundled connection template must never be exposed as a discovered MCP tool"
+        );
+    }
+
+    /// A durable installation persisted as terminally unhealthy is the §6.1
+    /// `InstallationState::Failed` projection ("does not auto-retry"). Boot
+    /// restore must not re-publish or re-activate it — that would re-run
+    /// activation every boot and, since the fixture factory activates cleanly,
+    /// mask the recorded failure as active. A healthy sibling still hydrates.
+    #[tokio::test]
+    async fn boot_hydration_skips_terminally_failed_installation() {
+        let store = Arc::new(crate::extension_host::filesystem_installation_store_for_test().await);
+        seed_installation(&store, "h5-healthy").await;
+        seed_installation(&store, "h5-failed").await;
+        // Persist the durable terminal-failure health for one installation. In
+        // production the lifecycle facade records this on an activation failure;
+        // here it stands in for a boot that follows a prior failed activation.
+        store
+            .update_health(
+                &ExtensionInstallationId::new("h5-failed".to_string()).expect("installation id"),
+                ExtensionHealthSnapshot::new(
+                    ExtensionHealthStatus::Unhealthy,
+                    Some(ExtensionHealthMessage::new("activation failed")),
+                    chrono::Utc::now(),
+                ),
+            )
+            .await
+            .expect("persist terminal-failure health");
+
+        let generic = build_generic_extension_host(GenericExtensionHostParams {
+            binder: test_binder(),
+            native_factories: vec![Arc::new(FixtureNativeFactory)],
+            channel_adapters: Vec::new(),
+            installation_store: Arc::clone(&store) as Arc<dyn ExtensionInstallationStorePort>,
+            admin_configuration_resolver: None,
+            governor: Arc::new(InMemoryResourceGovernor::new()),
+            reserved_capability_ids: BTreeSet::new(),
+            reserved_ingress_routes: BTreeSet::new(),
+            channel_egress_transport: None,
+        })
+        .await
+        .expect("generic host builds");
+
+        let snapshot = generic.host.snapshot().await;
+        assert!(
+            snapshot.extension("h5-healthy").is_some(),
+            "a healthy durable membership still restores at boot"
+        );
+        assert!(
+            snapshot.extension("h5-failed").is_none(),
+            "a terminally failed installation must not be re-published/re-activated at boot"
+        );
+        // Skipped, not re-attempted: the host holds no working activation record
+        // for the failed installation (a re-attempt would have either activated
+        // it into the snapshot above or recorded a fresh Failed error here).
+        assert!(
+            !generic
+                .host
+                .installation_errors()
+                .await
+                .expect("installation errors")
+                .contains_key("h5-failed"),
+            "boot restore must not re-run activation for a terminally failed installation"
         );
     }
 }

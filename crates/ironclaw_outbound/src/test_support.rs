@@ -11,7 +11,7 @@
 //! `deliveries/`, `communication-preferences/`, `delivered-gate-routes/`) — so
 //! tests instantiate the same store a deployment runs.
 //!
-//! Note on isolation: [`FilesystemOutboundStateStore`] encodes the record scope
+//! Note on isolation: [`OutboundStateStore`] encodes the record scope
 //! (thread-scope key, hashed communication-preference key, subscription/delivery
 //! key) in the path, and tenant/user isolation lives in the `MountView`. The
 //! single fixed mount below therefore isolates by those in-path scope keys but
@@ -20,8 +20,8 @@
 //! the per-tenant-mount tests in `tests/outbound_state_store_contract.rs`.
 //!
 //! Unlike the deleted `InMemoryOutboundStateStore` (which implemented only
-//! `CommunicationPreferenceRepository` + `OutboundStateStore`),
-//! `FilesystemOutboundStateStore` implements all four outbound-store traits, so
+//! `CommunicationPreferenceRepository` + `OutboundStateStorePort`),
+//! `OutboundStateStore` implements all four outbound-store traits, so
 //! a single instance from this helper can back every role — the same
 //! consolidation the durable (libsql/postgres) composition already relies on.
 //!
@@ -34,7 +34,7 @@ use std::sync::Arc;
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
 
-use crate::FilesystemOutboundStateStore;
+use crate::OutboundStateStore;
 
 /// A fresh, volatile `ScopedFilesystem<InMemoryBackend>` mounting `/outbound` —
 /// the in-memory backend seam the outbound-state store persists under.
@@ -54,10 +54,10 @@ pub fn in_memory_backed_outbound_filesystem() -> Arc<ScopedFilesystem<InMemoryBa
 /// The production outbound-state store over a fresh in-memory backend — the
 /// drop-in replacement for the deleted `InMemoryOutboundStateStore`. A single
 /// instance implements all four outbound-store traits.
-pub fn in_memory_backed_outbound_state_store() -> FilesystemOutboundStateStore<InMemoryBackend> {
-    // The `disallowed_methods` lint reserves `FilesystemOutboundStateStore::new`
+pub fn in_memory_backed_outbound_state_store() -> OutboundStateStore<InMemoryBackend> {
+    // The `disallowed_methods` lint reserves `OutboundStateStore::new`
     // for composition's owned construction site; this test-support constructor
     // is the sanctioned volatile-backend seam for tests (arch-simplification §4.3).
     #[allow(clippy::disallowed_methods)]
-    FilesystemOutboundStateStore::new(in_memory_backed_outbound_filesystem())
+    OutboundStateStore::new(in_memory_backed_outbound_filesystem())
 }

@@ -6,6 +6,7 @@ Function-scoped: fresh browser context and page per test.
 
 import asyncio
 from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack, aclosing, asynccontextmanager
 import json
 import os
 import signal
@@ -30,12 +31,12 @@ from helpers import (
     wait_for_port_line,
     wait_for_ready,
 )
+from provider_fault_proxy import ProviderFaultProxyWorld
 
 # Project root (two levels up from tests/e2e/)
 ROOT = Path(__file__).resolve().parent.parent.parent
 
-# Git main repo root (for worktree support — WASM build artifacts live
-# in the main repo's tools-src/*/target/ and aren't shared across worktrees)
+# Git main repo root (for worktree support).
 _MAIN_ROOT = None
 try:
     import subprocess as _sp
@@ -63,6 +64,7 @@ _WASM_TOOLS_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-wasm-tools
 _WASM_CHANNELS_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-wasm-channels-")
 
 EMULATE_NPM_PACKAGE = "emulate@0.7.0"
+EMULATE_CLI_PATH = os.environ.get("IRONCLAW_EMULATE_CLI")
 EMULATE_GOOGLE_SEED = ROOT / "tests/e2e/fixtures/emulate/google_gmail.yaml"
 EMULATE_SLACK_SEED = ROOT / "tests/e2e/fixtures/emulate/slack.yaml"
 EMULATE_GITHUB_SEED = ROOT / "tests/e2e/fixtures/emulate/github.yaml"
@@ -140,8 +142,6 @@ def _binary_needs_rebuild(binary: Path) -> bool:
         ROOT / "Cargo.lock",
         ROOT / "build.rs",
         ROOT / "providers.json",
-        ROOT / "src",
-        ROOT / "channels-src",
         ROOT / "crates",
     ]
     return any(_latest_mtime(path) > binary_mtime for path in inputs)
@@ -169,7 +169,11 @@ def _reserve_loopback_sockets(count: int) -> list[socket.socket]:
         raise
 
 async def _stop_process(
-    proc: asyncio.subprocess.Process, *, sig: int | None = None, timeout: float
+    proc: asyncio.subprocess.Process,
+    *,
+    sig: int | None = None,
+    timeout: float,
+    process_group: bool = False,
 ) -> None:
     """Signal a subprocess and wait briefly without masking exit races."""
     async def _drain_pipes() -> None:
@@ -178,12 +182,11 @@ async def _stop_process(
         except (asyncio.TimeoutError, ValueError):
             pass
 
-    if proc.returncode is not None:
-        await _drain_pipes()
-        return
-
+    signal_to_send = signal.SIGKILL if sig is None else sig
     try:
-        if sig is None:
+        if process_group:
+            os.killpg(proc.pid, signal_to_send)
+        elif sig is None:
             proc.kill()
         else:
             proc.send_signal(sig)
@@ -194,10 +197,11 @@ async def _stop_process(
             pass
         return
 
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=timeout)
-    except asyncio.TimeoutError:
-        pass
+    if proc.returncode is None:
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            pass
     await _drain_pipes()
 
 
@@ -457,8 +461,6 @@ def ironclaw_reborn_openai_compat_binary():
         _latest_mtime(ROOT / "Cargo.lock"),
         _latest_mtime(ROOT / "build.rs"),
         _latest_mtime(ROOT / "providers.json"),
-        _latest_mtime(ROOT / "src"),
-        _latest_mtime(ROOT / "channels-src"),
         _latest_mtime(ROOT / "crates"),
     )
     if (
@@ -531,14 +533,28 @@ async def _run_emulate_server(
     ready_path: str,
     ready_headers: dict[str, str],
     ready_json: dict[str, Any] | None = None,
+    port: int | None = None,
 ) -> AsyncIterator[dict[str, str]]:
     """Start a pinned Emulate service and wait for a seeded endpoint."""
-    if shutil.which("npx") is None:
+    if EMULATE_CLI_PATH:
+        emulate_cli = Path(EMULATE_CLI_PATH)
+        if not emulate_cli.is_file():
+            _emulate_unavailable(
+                f"IRONCLAW_EMULATE_CLI does not exist: {emulate_cli}"
+            )
+        if shutil.which("node") is None:
+            _emulate_unavailable(
+                f"node is required to run the Emulate {service} E2E fixture"
+            )
+        command = ["node", str(emulate_cli)]
+    elif shutil.which("npx") is None:
         _emulate_unavailable(
             f"npx is required to run the Emulate {service} E2E fixture"
         )
+    else:
+        command = ["npx", "--yes", EMULATE_NPM_PACKAGE]
 
-    port = _find_free_port()
+    port = port or _find_free_port()
     url = f"http://127.0.0.1:{port}"
     env = {
         **os.environ,
@@ -546,9 +562,7 @@ async def _run_emulate_server(
         "EMULATE_PORT": str(port),
     }
     proc = await asyncio.create_subprocess_exec(
-        "npx",
-        "--yes",
-        EMULATE_NPM_PACKAGE,
+        *command,
         "--service",
         service,
         "--port",
@@ -558,6 +572,7 @@ async def _run_emulate_server(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
+        start_new_session=True,
     )
 
     try:
@@ -596,9 +611,219 @@ async def _run_emulate_server(
         )
     finally:
         if proc.returncode is None:
-            await _stop_process(proc, sig=signal.SIGINT, timeout=5)
-            if proc.returncode is None:
-                await _stop_process(proc, timeout=2)
+            await _stop_process(
+                proc, sig=signal.SIGINT, timeout=5, process_group=True
+            )
+        await _stop_process(proc, timeout=2, process_group=True)
+
+
+async def _bootstrap_emulate_github_access(
+    client: httpx.AsyncClient, url: str
+) -> None:
+    """Grant the primary fixture actor write access to the seeded org repo."""
+    headers = {"Authorization": f"Bearer {EMULATE_GITHUB_READY_TOKEN}"}
+    team = await client.post(
+        f"{url}/orgs/nearai/teams",
+        headers=headers,
+        json={
+            "name": "Provider Contract",
+            "permission": "push",
+            "privacy": "closed",
+        },
+        timeout=5,
+    )
+    if team.status_code != 201:
+        raise RuntimeError(
+            "Failed to create Emulate GitHub provider team: "
+            f"{team.status_code} {team.text[:400]}"
+        )
+    membership = await client.put(
+        f"{url}/orgs/nearai/teams/provider-contract/memberships/reborn-dev",
+        headers=headers,
+        json={"role": "maintainer"},
+        timeout=5,
+    )
+    if membership.status_code != 200:
+        raise RuntimeError(
+            "Failed to grant Emulate GitHub provider membership: "
+            f"{membership.status_code} {membership.text[:400]}"
+        )
+
+
+@asynccontextmanager
+async def _emulate_service(
+    *,
+    service: str,
+    seed_path: Path,
+    ready_method: str,
+    ready_path: str,
+    ready_headers: dict[str, str],
+    port: int | None = None,
+) -> AsyncIterator[dict[str, str]]:
+    generator = _run_emulate_server(
+        service=service,
+        seed_path=seed_path,
+        ready_method=ready_method,
+        ready_path=ready_path,
+        ready_headers=ready_headers,
+        port=port,
+    )
+    async with aclosing(generator):
+        async for server in generator:
+            yield server
+
+
+@asynccontextmanager
+async def _emulate_github_service(
+    *, port: int | None = None
+) -> AsyncIterator[dict[str, str]]:
+    """Start GitHub Emulate and grant the seeded actor repository access."""
+    async with _emulate_service(
+        service="github",
+        seed_path=EMULATE_GITHUB_SEED,
+        ready_method="GET",
+        ready_path="/user",
+        ready_headers={
+            "Authorization": f"Bearer {EMULATE_GITHUB_READY_TOKEN}",
+        },
+        port=port,
+    ) as server:
+        async with httpx.AsyncClient() as client:
+            await _bootstrap_emulate_github_access(client, server["url"])
+        yield server
+
+
+class ResettableEmulateProviderWorld:
+    """Restart seeded provider processes on stable ports between journeys."""
+
+    def __init__(self) -> None:
+        reserved = _reserve_loopback_sockets(3)
+        services = ("google", "slack", "github")
+        self._ports = {
+            service: sock.getsockname()[1]
+            for service, sock in zip(services, reserved, strict=True)
+        }
+        self._reservations = dict(zip(services, reserved, strict=True))
+        self._stacks: dict[str, AsyncExitStack] = {}
+
+    @property
+    def servers(self) -> dict[str, dict[str, str]]:
+        return {
+            service: {"url": f"http://127.0.0.1:{port}"}
+            for service, port in self._ports.items()
+        }
+
+    async def start(self, services: set[str] | None = None) -> None:
+        selected = set(self._ports) if services is None else services
+        for service in sorted(selected):
+            if service in self._stacks:
+                raise RuntimeError(f"Emulate {service} provider is already running")
+            await self._start_service(service)
+
+    async def _start_service(self, service: str) -> None:
+        stack = AsyncExitStack()
+        try:
+            if service == "google":
+                context = _emulate_service(
+                    service=service,
+                    seed_path=EMULATE_GOOGLE_SEED,
+                    ready_method="GET",
+                    ready_path="/gmail/v1/users/me/messages",
+                    ready_headers={
+                        "Authorization": f"Bearer {EMULATE_GOOGLE_READY_TOKEN}",
+                    },
+                    port=self._ports[service],
+                )
+            elif service == "slack":
+                context = _emulate_service(
+                    service=service,
+                    seed_path=EMULATE_SLACK_SEED,
+                    ready_method="POST",
+                    ready_path="/api/auth.test",
+                    ready_headers={
+                        "Authorization": f"Bearer {EMULATE_SLACK_READY_TOKEN}",
+                    },
+                    port=self._ports[service],
+                )
+            elif service == "github":
+                context = _emulate_github_service(port=self._ports[service])
+            else:
+                raise ValueError(f"Unknown Emulate provider service: {service}")
+            reservation = self._reservations.pop(service, None)
+            if reservation is not None:
+                reservation.close()
+            await stack.enter_async_context(context)
+        except BaseException:
+            await stack.aclose()
+            raise
+        self._stacks[service] = stack
+
+    async def reset(self, services: set[str]) -> None:
+        await self.close(services, reserve=True)
+        await self.start(services)
+
+    async def close(
+        self,
+        services: set[str] | None = None,
+        *,
+        reserve: bool = False,
+    ) -> None:
+        selected = set(self._stacks) if services is None else services
+        for service in sorted(selected, reverse=True):
+            stack = self._stacks.pop(service, None)
+            if stack is not None:
+                await stack.aclose()
+            if reserve:
+                self._reservations[service] = await self._reserve_service_port(
+                    service
+                )
+        if services is None:
+            reservations, self._reservations = self._reservations, {}
+            for sock in reservations.values():
+                sock.close()
+
+    async def _reserve_service_port(self, service: str) -> socket.socket:
+        last_error: OSError | None = None
+        for _ in range(20):
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("127.0.0.1", self._ports[service]))
+                return sock
+            except OSError as exc:
+                sock.close()
+                last_error = exc
+                await asyncio.sleep(0.1)
+        raise last_error or OSError(
+            f"could not reserve Emulate {service} port {self._ports[service]}"
+        )
+
+
+@pytest.fixture(scope="module")
+async def resettable_emulate_provider_world():
+    """Keep stable provider URLs while restoring seed state per journey."""
+    world = ResettableEmulateProviderWorld()
+    try:
+        await world.start()
+        yield world
+    finally:
+        await world.close()
+
+
+@pytest.fixture(scope="module")
+async def provider_fault_proxy_world(resettable_emulate_provider_world):
+    """Proxy stable Emulate worlds through independently resettable faults."""
+    world = ProviderFaultProxyWorld(
+        {
+            service: server["url"]
+            for service, server in resettable_emulate_provider_world.servers.items()
+        }
+    )
+    try:
+        await world.start()
+        yield world
+    finally:
+        await world.close()
 
 
 @pytest.fixture(scope="session")
@@ -634,15 +859,7 @@ async def emulate_slack_server():
 @pytest.fixture(scope="session")
 async def emulate_github_server():
     """Start Emulate GitHub with a seeded user, org, and repository."""
-    async for server in _run_emulate_server(
-        service="github",
-        seed_path=EMULATE_GITHUB_SEED,
-        ready_method="GET",
-        ready_path="/user",
-        ready_headers={
-            "Authorization": f"Bearer {EMULATE_GITHUB_READY_TOKEN}",
-        },
-    ):
+    async with _emulate_github_service() as server:
         yield server
 
 
@@ -669,6 +886,11 @@ async def reset_mock_llm_state(mock_llm_server):
         response.raise_for_status()
         response = await client.post(
             f"{mock_llm_server}/__mock/chat_requests/reset",
+            timeout=10,
+        )
+        response.raise_for_status()
+        response = await client.post(
+            f"{mock_llm_server}/__mock/llm_trace/reset",
             timeout=10,
         )
         response.raise_for_status()
@@ -719,33 +941,8 @@ def wasm_tools_dir(_wasm_build_symlinks):
 
 @pytest.fixture(scope="session", autouse=True)
 def _wasm_build_symlinks():
-    """Symlink WASM build artifacts from the main repo into the worktree.
-
-    In a git worktree, tools-src/*/target/ directories don't exist because
-    Cargo build artifacts aren't shared. The install API's source fallback
-    checks these paths. Symlinking makes the fallback work without rebuilding.
-    """
-    if _MAIN_ROOT is None or _MAIN_ROOT == ROOT:
-        yield
-        return
-
-    created = []
-    for src_dir_name in ("tools-src", "channels-src"):
-        src_dir = ROOT / src_dir_name
-        main_src_dir = _MAIN_ROOT / src_dir_name
-        if src_dir.is_dir() and main_src_dir.is_dir():
-            for child in src_dir.iterdir():
-                if not child.is_dir():
-                    continue
-                target = child / "target"
-                main_target = main_src_dir / child.name / "target"
-                if not target.exists() and main_target.is_dir():
-                    target.symlink_to(main_target)
-                    created.append(target)
+    """Compatibility fixture retained for older worktrees."""
     yield
-    for link in created:
-        if link.is_symlink():
-            link.unlink()
 
 
 @pytest.fixture(scope="session")
@@ -986,6 +1183,7 @@ async def hosted_google_emulate_server(
     rewrite_map = {
         "gmail.googleapis.com": emulate_google_server["url"],
         "www.googleapis.com": emulate_google_server["url"],
+        "slides.googleapis.com": emulate_google_server["url"],
     }
     async for server in _run_hosted_oauth_refresh_server(
         ironclaw_binary,
@@ -1033,6 +1231,7 @@ async def hosted_provider_emulate_server(
     rewrite_map = {
         "gmail.googleapis.com": emulate_google_server["url"],
         "www.googleapis.com": emulate_google_server["url"],
+        "slides.googleapis.com": emulate_google_server["url"],
         "api.github.com": emulate_github_server["url"],
         "slack.com": emulate_slack_server["url"],
     }

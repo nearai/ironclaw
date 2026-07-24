@@ -4,7 +4,7 @@
 
 **Goal:** Preserve PR #6159's Telegram behavior while moving delivery and Telegram runtime policy to their proper owners, deleting test-only abstraction layers and mirror DTOs, and pinning the resulting architecture with executable ratchets.
 
-**Architecture:** `ironclaw_channel_delivery` becomes the product-neutral delivery engine and `ironclaw_product_workflow` owns reusable auth/approval projection and extension account-setup contracts. `ironclaw_telegram_extension` owns one concrete filesystem-backed host state, its concrete Bot API/egress clients, revision-aware runtime construction, and focused setup/pairing/ingress/delivery modules; composition supplies already-built neutral services and mounts/registers the returned facades only.
+**Architecture:** `ironclaw_channel_delivery` becomes the product-neutral delivery engine and `ironclaw_product` owns reusable auth/approval projection and extension account-setup contracts. `ironclaw_telegram_extension` owns one concrete filesystem-backed host state, its concrete Bot API/egress clients, revision-aware runtime construction, and focused setup/pairing/ingress/delivery modules; composition supplies already-built neutral services and mounts/registers the returned facades only.
 
 **Tech Stack:** Rust 2024, Tokio, Axum, `async-trait`, `ScopedFilesystem<dyn RootFilesystem>`, host-mediated HTTP egress, Cargo workspace tests, Clippy, repository architecture tests.
 
@@ -34,7 +34,8 @@ both present where the finding requires behavioral proof.
 - [x] Unconfigured/broken dynamic trigger hooks persist terminal outcomes.
 - [x] Ingress builds identity, secret, adapter, and workflow from one atomic setup snapshot.
 - [x] Pairing codes are bound to the authenticated bot installation.
-- [x] Pairing continuation work is durable and retried from status polling.
+- [x] Pairing continuation work is durable; ingress awaits generic fan-out
+      acceptance and transient failures rely on provider redelivery.
 - [x] Unpair cleanup keeps durable metadata until actor and DM cleanup finish.
 - [x] Product connection status never exposes backend diagnostics.
 - [x] Pairing uses one validated `PairingCode` contract type.
@@ -80,7 +81,7 @@ crates/ironclaw_channel_delivery/
   src/triggered.rs
   src/tests.rs
 
-crates/ironclaw_product_workflow/src/
+crates/ironclaw_product/src/
   auth_prompt.rs
   approval_prompt.rs
   extension_account_setup.rs
@@ -177,9 +178,9 @@ git commit -m "test(reborn): pin PR 6159 simplification boundaries"
 ### Task 2: Move reusable auth and approval projection contracts to product workflow
 
 **Files:**
-- Create: `crates/ironclaw_product_workflow/src/auth_prompt.rs`
-- Create: `crates/ironclaw_product_workflow/src/approval_prompt.rs`
-- Modify: `crates/ironclaw_product_workflow/src/lib.rs`
+- Create: `crates/ironclaw_product/src/auth_prompt.rs`
+- Create: `crates/ironclaw_product/src/approval_prompt.rs`
+- Modify: `crates/ironclaw_product/src/lib.rs`
 - Modify: `crates/ironclaw_reborn_composition/src/product_auth/api/auth_prompt.rs`
 - Modify: `crates/ironclaw_reborn_composition/src/product_auth/api/mod.rs`
 - Modify: `crates/ironclaw_reborn_composition/src/projection/turn_events.rs`
@@ -214,7 +215,7 @@ pub struct ApprovalPromptLookup {
 }
 
 pub async fn approval_prompt_lookup(
-    approval_requests: Option<&dyn ApprovalRequestStore>,
+    approval_requests: Option<&dyn ApprovalRequestStorePort>,
     gate_ref: &GateRef,
     owner_user_id: &UserId,
     turn_scope: &TurnScope,
@@ -230,8 +231,8 @@ Move the existing requirement-fallback and approval-context cases to module test
 Run:
 
 ```bash
-cargo test -p ironclaw_product_workflow auth_prompt
-cargo test -p ironclaw_product_workflow approval_prompt
+cargo test -p ironclaw_product auth_prompt
+cargo test -p ironclaw_product approval_prompt
 ```
 
 Expected: compilation fails because the new modules/exports do not exist.
@@ -245,8 +246,8 @@ Move the existing bodies without changing error mapping. Delete `BlockedAuthProm
 Run:
 
 ```bash
-cargo test -p ironclaw_product_workflow auth_prompt
-cargo test -p ironclaw_product_workflow approval_prompt
+cargo test -p ironclaw_product auth_prompt
+cargo test -p ironclaw_product approval_prompt
 cargo test -p ironclaw_reborn_composition --features test-support,webui-v2-beta,slack-v2-host-beta,telegram-v2-host-beta,libsql --lib projection
 ```
 
@@ -255,7 +256,7 @@ Expected: all selected tests pass with composition implementing and re-exporting
 - [x] **Step 5: Commit the contract move**
 
 ```bash
-git add crates/ironclaw_product_workflow crates/ironclaw_reborn_composition
+git add crates/ironclaw_product crates/ironclaw_reborn_composition
 git commit -m "refactor(reborn): move prompt projection contracts below composition"
 ```
 
@@ -279,7 +280,7 @@ git commit -m "refactor(reborn): move prompt projection contracts below composit
 
 - [x] **Step 1: Create the crate manifest and a failing public API compile test**
 
-The manifest has layer `products`, no default features, and only neutral production dependencies: `async-trait`, `chrono`, `ironclaw_channel_host`, `ironclaw_conversations`, `ironclaw_host_api`, `ironclaw_outbound`, `ironclaw_product_adapters`, `ironclaw_product_workflow`, `ironclaw_run_state`, `ironclaw_threads`, `ironclaw_triggers`, `ironclaw_turns`, `ironclaw_wasm_product_adapters`, `tokio`, and `tracing`. The two additional authority/conversation crates are required by the preserved gate-route and fallback-agent signatures; neither owns a concrete channel or composition policy.
+The manifest has layer `products`, no default features, and only neutral production dependencies: `async-trait`, `chrono`, `ironclaw_channel_host`, `ironclaw_conversations`, `ironclaw_host_api`, `ironclaw_outbound`, `ironclaw_product_adapters`, `ironclaw_product`, `ironclaw_run_state`, `ironclaw_threads`, `ironclaw_triggers`, `ironclaw_turns`, `ironclaw_wasm_product_adapters`, `tokio`, and `tracing`. The two additional authority/conversation crates are required by the preserved gate-route and fallback-agent signatures; neither owns a concrete channel or composition policy.
 
 Add a crate test that constructs `FinalReplyDeliverySettings::default()` and asserts all four bounds are non-zero. Run `cargo test -p ironclaw_channel_delivery`; expected compilation failure because the exported types are absent.
 
@@ -327,8 +328,8 @@ git commit -m "refactor(reborn): extract generic channel delivery engine"
 ### Task 4: Replace the Telegram lifecycle slot with an ExtensionId-keyed registry
 
 **Files:**
-- Create: `crates/ironclaw_product_workflow/src/extension_account_setup.rs`
-- Modify: `crates/ironclaw_product_workflow/src/lib.rs`
+- Create: `crates/ironclaw_product/src/extension_account_setup.rs`
+- Modify: `crates/ironclaw_product/src/lib.rs`
 - Modify: `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs`
 - Modify: Telegram host assembly and lifecycle tests.
 - Delete: `crates/ironclaw_channel_host/src/paired_status.rs`
@@ -348,7 +349,7 @@ pub struct ExtensionAccountSetupDescriptor {
     pub extension_id: ExtensionId,
     pub auth_requirement: RuntimeCredentialAuthRequirement,
     pub connection_requirement: ChannelConnectionRequirement,
-    pub activation_success_message: String,
+    pub connection_success_message: String,
 }
 
 #[derive(Clone, Default)]
@@ -374,7 +375,7 @@ impl ExtensionAccountSetupRegistry {
 
 - [x] **Step 1: Add registry state-transition tests**
 
-Test undeclared extension, declared-but-unconnected fail-closed, connected/disconnected users, duplicate declaration, duplicate connection, and status outage. Run `cargo test -p ironclaw_product_workflow extension_account_setup`; expected compile failure.
+Test undeclared extension, declared-but-unconnected fail-closed, connected/disconnected users, duplicate declaration, duplicate connection, and status outage. Run `cargo test -p ironclaw_product extension_account_setup`; expected compile failure.
 
 - [x] **Step 2: Implement the registry with a bounded owner-controlled map**
 
@@ -391,7 +392,7 @@ Telegram exports `telegram_account_setup_descriptor() -> Result<ExtensionAccount
 - [x] **Step 5: Delete the old channel-host slot and run lifecycle regressions**
 
 ```bash
-cargo test -p ironclaw_product_workflow extension_account_setup
+cargo test -p ironclaw_product extension_account_setup
 cargo test -p ironclaw_reborn_composition --features test-support,webui-v2-beta,telegram-v2-host-beta,libsql --lib extension_lifecycle
 cargo test -p ironclaw_architecture --test telegram_extension_gates generic_extension_lifecycle_has_no_telegram_knowledge
 ```
@@ -401,7 +402,7 @@ Expected: all pass, including fail-closed and transient-error caller tests.
 - [x] **Step 6: Commit the registry**
 
 ```bash
-git add crates/ironclaw_product_workflow crates/ironclaw_channel_host crates/ironclaw_reborn_composition crates/ironclaw_telegram_extension
+git add crates/ironclaw_product crates/ironclaw_channel_host crates/ironclaw_reborn_composition crates/ironclaw_telegram_extension
 git commit -m "refactor(reborn): generalize extension account setup gating"
 ```
 
@@ -605,7 +606,7 @@ pub struct TelegramHostConfig { /* same five identity/public-origin fields */ }
 pub struct TelegramHostInput {
     pub config: TelegramHostConfig,
     pub state: Arc<FilesystemTelegramHostState>,
-    pub secret_store: Arc<dyn SecretStore>,
+    pub secret_store: Arc<dyn SecretStorePort>,
     pub host_egress: HostRuntimeHttpEgressPort,
     pub continuation: Arc<dyn RebornAuthContinuationDispatcher>,
     pub conversation_bindings: Arc<dyn ironclaw_conversations::ConversationBindingService>,

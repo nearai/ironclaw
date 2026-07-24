@@ -137,7 +137,7 @@ async fn build_timeline_runtime(root: &tempfile::TempDir) -> RebornRuntime {
     .expect("local-yolo runtime input")
     .with_local_dev_confirmed_host_home_root(host_home_root);
 
-    let input = RebornRuntimeInput::from_services(input)
+    let input = RebornRuntimeInput::from_build_input(input)
         .with_identity(RebornRuntimeIdentity {
             tenant_id: TENANT.to_string(),
             agent_id: AGENT.to_string(),
@@ -350,7 +350,7 @@ async fn fire_trigger_and_get_run_thread_id(
     agent_id: &AgentId,
     trigger_name: &str,
 ) -> (TriggerId, String) {
-    let repo = runtime.trigger_repository().expect("trigger repository");
+    let repo = runtime.trigger_repository();
     let pairing = runtime
         .trigger_conversation_pairing()
         .expect("conversation pairing");

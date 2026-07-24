@@ -19,23 +19,46 @@ mod support;
 
 // Modules are alphabetical (rustfmt reorders `mod` decls); execution order is
 // set by the `report.record(...)` sequence below, not declaration order.
-mod scenario_activate_then_active_cross_thread;
 mod scenario_credential_extension_lifecycle_state_machine;
-mod scenario_extension_activation_github_normal_gate;
-mod scenario_extension_activation_instance_not_configured;
-mod scenario_extension_activation_reauth_gate;
+mod scenario_existing_member_reinstall_reconciles_to_active;
+mod scenario_extension_install_github_normal_gate;
+mod scenario_extension_install_instance_not_configured;
+mod scenario_extension_install_reauth_gate;
 mod scenario_google_family_install_gate_and_shared_account;
+mod scenario_install_then_active_cross_thread;
 mod scenario_install_then_visible_cross_thread;
 mod scenario_install_unknown_extension_id_fails_safely;
+mod scenario_malformed_lifecycle_arguments_are_structured;
 mod scenario_remove_then_absent_cross_thread;
 mod scenario_slack_channel_lifecycle_state_machine;
 mod scenario_slack_state_survives_reopen;
-mod scenario_uninstalled_tool_call_denied_until_activated;
+mod scenario_uninstalled_tool_call_denied_until_active;
 
 use reborn_support::group::{RebornIntegrationGroup, ScenarioReport};
 
-#[tokio::test]
-async fn extensions_group_e2e() {
+#[test]
+fn malformed_lifecycle_arguments_are_structured() {
+    run_async_test_with_stack(
+        "malformed_lifecycle_arguments_are_structured",
+        malformed_lifecycle_arguments_are_structured_inner,
+    );
+}
+
+async fn malformed_lifecycle_arguments_are_structured_inner() {
+    let g = RebornIntegrationGroup::extension_lifecycle()
+        .await
+        .expect("group builds");
+    scenario_malformed_lifecycle_arguments_are_structured::run(&g)
+        .await
+        .expect("malformed lifecycle arguments retain structured repair detail");
+}
+
+#[test]
+fn extensions_group_e2e() {
+    run_async_test_with_stack("extensions_group_e2e", extensions_group_e2e_inner);
+}
+
+async fn extensions_group_e2e_inner() {
     let g = RebornIntegrationGroup::extension_lifecycle()
         .await
         .expect("group builds");
@@ -55,12 +78,12 @@ async fn extensions_group_e2e() {
         scenario_remove_then_absent_cross_thread::run(&g).await,
     );
 
-    // Scenario 3: install → activate → search across three threads; closes the
-    // extension_activate int-tier gap. Uses "web-access" (credential-free,
+    // Scenario 3: install → active → search across three threads; closes the
+    // extension-install reconciliation int-tier gap. Uses "web-access" (credential-free,
     // untouched by Scenarios 1-2) to stay self-contained.
     report.record(
-        "activate_then_active_cross_thread",
-        scenario_activate_then_active_cross_thread::run(&g).await,
+        "install_then_active_cross_thread",
+        scenario_install_then_active_cross_thread::run(&g).await,
     );
 
     // Scenario 4 (W4-EXT-MANIFEST-ERR): an unknown extension_id fails
@@ -72,11 +95,11 @@ async fn extensions_group_e2e() {
     );
 
     // Scenario 4.5 (provider-instance readiness map, two-phase — see the
-    // module doc): Phase 1 — activating a google-family
+    // module doc): Phase 1 — installing a google-family
     // extension with NO Google OAuth backend configured (this harness's
-    // default state — never wired otherwise) must fail early with a
-    // model-visible `config set google.client_id` remediation and keep
-    // running, not park an unresolvable BlockedAuth gate. Phase 2 — a
+    // default state — never wired otherwise) must fail early with a generic,
+    // caller-safe unavailable result and keep running without exposing the
+    // administrator schema or parking an unresolvable BlockedAuth gate. Phase 2 — a
     // SEPARATE, freshly built group with a Google OAuth backend configured
     // must fall through to the ordinary per-account BlockedAuth gate instead
     // (already green today). The readiness-map chokepoint gates the "google"
@@ -84,54 +107,57 @@ async fn extensions_group_e2e() {
     // now runs on its OWN isolated, Google-OAuth-configured group instead of
     // `g` — see that scenario's module doc.
     report.record(
-        "extension_activation_instance_not_configured",
-        scenario_extension_activation_instance_not_configured::run(&g).await,
+        "extension_install_instance_not_configured",
+        scenario_extension_install_instance_not_configured::run(&g).await,
     );
 
     // Scenario 4.6: negative case pinning current behavior — a provider with
     // no instance-config requirement (github: manual-token, user-credential
     // gate) must keep raising the normal per-account BlockedAuth gate,
-    // proving the readiness check doesn't false-positive on it. Activates
-    // github's EXISTING install from Scenario 1 (never activated there); runs
-    // before Scenario 7 (which later activates github for real with a seeded
+    // proving the readiness check doesn't false-positive on it. Retries
+    // github's EXISTING setup-needed install from Scenario 1; runs
+    // before Scenario 7 (which later finishes setup with a seeded
     // credential — a denied gate here leaves no persistent credential state,
     // matching the notion reauth-gate scenario's proven deny-then-reconfigure
     // shape).
     report.record(
-        "extension_activation_github_normal_gate",
-        scenario_extension_activation_github_normal_gate::run(&g).await,
+        "extension_install_github_normal_gate",
+        scenario_extension_install_github_normal_gate::run(&g).await,
     );
 
     // Scenario 5: a model call to a not-installed extension capability is
-    // rejected fail-closed at the model gateway until real install+activate
+    // rejected fail-closed at the model gateway until install publishes it
     // publishes it. Uses "gmail" on its own isolated, Google-OAuth-configured
     // group (see that scenario's module doc) — `g` itself is passed but
     // unused, kept for call-site symmetry with every other scenario.
     report.record(
-        "uninstalled_tool_call_denied_until_activated",
-        scenario_uninstalled_tool_call_denied_until_activated::run(&g).await,
+        "uninstalled_tool_call_denied_until_active",
+        scenario_uninstalled_tool_call_denied_until_active::run(&g).await,
     );
 
     // Scenario 6 (issue #6105): the Slack channel lifecycle state machine —
-    // install → activate → connect → use → remove (real personal-connection
+    // install → connect → use → remove (real personal-connection
     // cleanup) → reconnect → reinstall → use again, asserting connection
     // state, durable bindings, lifecycle phase, and tool dispatchability stay
-    // consistent at every transition. Uses "slack" (untouched by 1-5).
+    // consistent at every transition. Uses the delivery-profile group because
+    // Slack's channel binding is assembled there.
     // dependent: must pass before scenario 8 consumes its reconnected end
     // state — `.expect()` (not `report.record`) so a lifecycle regression is
     // reported HERE, not misattributed to the restart-survival probe.
-    scenario_slack_channel_lifecycle_state_machine::run(&g)
+    let slack_g = RebornIntegrationGroup::extension_delivery()
+        .await
+        .expect("slack delivery group builds");
+    scenario_slack_channel_lifecycle_state_machine::run(&slack_g)
         .await
         .expect("slack_channel_lifecycle_state_machine");
 
     // Scenario 7 (issue #6105, T3): exit edges for a credential-injection
-    // extension — activate → use → remove (#6029's wedged edge) → surfaces
-    // flip → reconfigure + reactivate → use again. Reuses "github" AFTER
+    // extension — finish setup → use → remove (#6029's wedged edge) → surfaces
+    // flip → reconfigure + reinstall → use again. Reuses "github" AFTER
     // every earlier scenario that reads it has run (scenario 1 leaves it
-    // installed and active-phase-free), so phase 1 activates the
-    // already-installed package — the exact Extensions-page state #6029
-    // bites in (same-member re-INSTALL is rejected "already installed" by
-    // design; the reinstall arm scenario 7 drives is post-remove, phase 5).
+    // installed but setup-needed), so phase 1 retries the idempotent install
+    // after seeding credentials. The reinstall arm scenario 7 drives is
+    // post-remove, phase 5.
     report.record(
         "credential_extension_lifecycle_state_machine",
         scenario_credential_extension_lifecycle_state_machine::run(&g).await,
@@ -144,23 +170,23 @@ async fn extensions_group_e2e() {
     // end state this consumes.
     report.record(
         "slack_state_survives_reopen",
-        scenario_slack_state_survives_reopen::run(&g).await,
+        scenario_slack_state_survives_reopen::run(&slack_g).await,
     );
 
-    // Scenario 9 (issue #6105 bucket-3 arms): activation-time re-auth gate —
-    // activate over a REVOKED credential parks BlockedAuth with a renderable
+    // Scenario 9 (issue #6105 bucket-3 arms): install-time re-auth gate —
+    // install over a REVOKED credential parks BlockedAuth with a renderable
     // provider requirement (#6043 shape), persists no misleading Failed error
-    // (#5878's reported extension_activate surface), and a reconfigure
+    // (#5878's reported readiness-reconciliation surface), and a reconfigure
     // unwedges it. Uses "notion" (removed by scenario 2; credentials
     // untouched by every other scenario).
     report.record(
-        "extension_activation_reauth_gate",
-        scenario_extension_activation_reauth_gate::run(&g).await,
+        "extension_install_reauth_gate",
+        scenario_extension_install_reauth_gate::run(&g).await,
     );
 
     // Scenario 10: the Google-family install-and-connect journeys — a
     // wrongly-scoped shared google account must not satisfy a calendar
-    // activation (parks a renderable google gate), bulk installs park
+    // install (parks a renderable google gate), bulk installs park
     // INDEPENDENT gates, denial leaves a clean retry, and one
     // correctly-scoped google account then unlocks calendar AND drive. Like
     // Scenario 5, it builds an isolated Google-OAuth-configured group so the
@@ -170,5 +196,36 @@ async fn extensions_group_e2e() {
         scenario_google_family_install_gate_and_shared_account::run(&g).await,
     );
 
+    // Scenario 11: the retired Activate action's structural successor — an
+    // EXISTING member's idempotent install retry reconciles setup_needed →
+    // active on the shared store (distinct actor via `with_actor_id`, so no
+    // scenario-order coupling; no remove in between; positively pins the
+    // intermediate setup_needed phase cross-thread).
+    report.record(
+        "existing_member_reinstall_reconciles_to_active",
+        scenario_existing_member_reinstall_reconciles_to_active::run(&g).await,
+    );
+
     report.assert_all_passed();
+}
+
+fn run_async_test_with_stack<F, Fut>(name: &'static str, test: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio test runtime")
+                .block_on(test());
+        })
+        .expect("spawn stack-sized test thread");
+    if let Err(panic) = handle.join() {
+        std::panic::resume_unwind(panic);
+    }
 }

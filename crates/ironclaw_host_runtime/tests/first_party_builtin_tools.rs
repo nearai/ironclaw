@@ -29,17 +29,19 @@ use ironclaw_host_runtime::{
     GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime,
     HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeProcessError,
-    RuntimeProcessPort, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
-    SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind,
-    TIME_CAPABILITY_ID, TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
-    TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
-    TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
-    TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
-    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
-    TenantSandboxProcessPort, ToolCallHttpEgress, TriggerCreateHook, VisibleCapabilityAccess,
-    VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID, PROFILE_SET_CAPABILITY_ID,
+    READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
+    RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort, SHELL_CAPABILITY_ID,
+    SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
+    SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
+    SandboxCommandTransport, SurfaceKind, TIME_CAPABILITY_ID,
+    TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID,
+    TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
+    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, TenantSandboxProcessPort,
+    ToolCallHttpEgress, TriggerCreateHook, VisibleCapabilityAccess, VisibleCapabilityRequest,
+    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
     builtin_first_party_handlers_for_process_backend,
     builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
     builtin_first_party_package_for_process_backend,
@@ -53,7 +55,7 @@ use ironclaw_network::{
     NetworkResolver, NetworkTransportRequest, NetworkUsage, PolicyNetworkHttpEgress,
 };
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
-use ironclaw_secrets::FilesystemSecretStore;
+use ironclaw_secrets::SecretStore;
 use ironclaw_triggers::{
     ClaimDueFireRequest, ClearActiveFireRequest, FireAcceptedRequest, InMemoryTriggerRepository,
     MAX_TRIGGER_NAME_BYTES, MAX_TRIGGER_PROMPT_BYTES, MissingTriggerActiveRunLookup, TriggerError,
@@ -86,6 +88,8 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
             | SHELL_CAPABILITY_ID
             | SPAWN_SUBAGENT_CAPABILITY_ID
             | SKILL_INSTALL_CAPABILITY_ID
+            | SKILL_UPDATE_CAPABILITY_ID
+            | SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID
             | SKILL_REMOVE_CAPABILITY_ID
             | TRIGGER_CREATE_CAPABILITY_ID
             | TRIGGER_PAUSE_CAPABILITY_ID
@@ -211,10 +215,15 @@ async fn builtin_first_party_package_declares_behavior_neutral_origin_gate_matri
             "{}: ConsentSufficient is Product-only; not valid on automation",
             descriptor.id
         );
+        let expected_product =
+            if product_surface_builtin_capabilities().contains(&descriptor.id.as_str()) {
+                OriginGatePolicy::ConsentSufficient
+            } else {
+                OriginGatePolicy::Forbidden
+            };
         assert_eq!(
-            matrix.product,
-            OriginGatePolicy::Forbidden,
-            "{} product must be deny-by-default",
+            matrix.product, expected_product,
+            "{} product origin policy mismatch",
             descriptor.id
         );
         assert_eq!(
@@ -263,6 +272,7 @@ async fn builtin_first_party_package_declares_behavior_neutral_origin_gate_matri
         MEMORY_WRITE_CAPABILITY_ID,
         SKILL_INSTALL_CAPABILITY_ID,
         TRIGGER_CREATE_CAPABILITY_ID,
+        OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
     ] {
         assert_eq!(
             loop_run(gated),
@@ -270,6 +280,15 @@ async fn builtin_first_party_package_declares_behavior_neutral_origin_gate_matri
             "{gated}"
         );
     }
+}
+
+fn product_surface_builtin_capabilities() -> &'static [&'static str] {
+    &[
+        SKILL_INSTALL_CAPABILITY_ID,
+        "builtin.skill_update",
+        "builtin.skill_auto_activate_set",
+        SKILL_REMOVE_CAPABILITY_ID,
+    ]
 }
 
 #[tokio::test]
@@ -676,6 +695,79 @@ async fn builtin_trigger_create_stamps_caller_scope_and_persists_record() {
     assert_eq!(records[0].project_id, context.resource_scope.project_id);
 }
 
+/// Regression: a trigger-fired loop carries typed scheduled lineage all the
+/// way to the first-party capability boundary. Every model-visible mutation
+/// verb is denied there, while the same caller's ordinary interactive create
+/// and read-only list remain available.
+#[tokio::test]
+async fn scheduled_loop_origin_denies_every_trigger_mutation_at_handler_boundary() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let mut context = execution_context([
+        TRIGGER_CREATE_CAPABILITY_ID,
+        TRIGGER_LIST_CAPABILITY_ID,
+        TRIGGER_PAUSE_CAPABILITY_ID,
+        TRIGGER_RESUME_CAPABILITY_ID,
+        TRIGGER_REMOVE_CAPABILITY_ID,
+    ]);
+
+    let created = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "interactive control",
+            "prompt": "remain scheduled",
+            "schedule": { "kind": "once", "at": "2999-01-01T00:00:00", "timezone": "UTC" }
+        }),
+        context.clone(),
+    )
+    .await
+    .expect("ordinary interactive caller can create a trigger");
+    let trigger_id = created["trigger"]["trigger_id"]
+        .as_str()
+        .expect("created trigger id")
+        .to_string();
+
+    let run_id = ironclaw_host_api::RunId::new();
+    context.run_id = Some(run_id);
+    context.origin = Some(ironclaw_host_api::InvocationOrigin::ScheduledLoopRun(
+        run_id,
+    ));
+    for (capability_id, input) in [
+        (
+            TRIGGER_CREATE_CAPABILITY_ID,
+            json!({
+                "name": "forbidden child",
+                "prompt": "replicate",
+                "schedule": { "kind": "once", "at": "2999-01-02T00:00:00", "timezone": "UTC" }
+            }),
+        ),
+        (
+            TRIGGER_PAUSE_CAPABILITY_ID,
+            json!({"trigger_id": trigger_id}),
+        ),
+        (
+            TRIGGER_RESUME_CAPABILITY_ID,
+            json!({"trigger_id": trigger_id}),
+        ),
+        (
+            TRIGGER_REMOVE_CAPABILITY_ID,
+            json!({"trigger_id": trigger_id}),
+        ),
+    ] {
+        let error = invoke_with_context(&runtime, capability_id, input, context.clone())
+            .await
+            .expect_err("scheduled loop mutation must be denied");
+        assert_eq!(error, RuntimeFailureKind::PolicyDenied, "{capability_id}");
+    }
+
+    let listed = invoke_with_context(&runtime, TRIGGER_LIST_CAPABILITY_ID, json!({}), context)
+        .await
+        .expect("scheduled loop retains read-only trigger_list");
+    assert_eq!(listed["triggers"].as_array().map(Vec::len), Some(1));
+    assert_eq!(listed["triggers"][0]["state"], json!("scheduled"));
+}
+
 /// Per-trigger delivery routing: a model-supplied `delivery_target_id` is
 /// shape-validated, host-validated through the create hook, persisted on the
 /// record, and echoed in the model-facing output — so one automation's
@@ -724,6 +816,48 @@ async fn builtin_trigger_create_with_delivery_target_persists_it_when_host_valid
             .as_ref()
             .map(|target| target.as_str()),
         Some("slack:personal-dm:T123:user-a")
+    );
+}
+
+/// When the model omits `delivery_target_id`, the host hook still receives the
+/// trusted loop run id and may seal a source-derived target into the record.
+/// This is the authority path used for an automation created from an external
+/// conversation; prompt text never supplies the target.
+#[tokio::test]
+async fn builtin_trigger_create_can_inherit_delivery_target_from_trusted_run_context() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let inherited = "external:source-conversation";
+    let hook = Arc::new(SourceResolvingTriggerCreateHook::new(inherited));
+    let runtime = runtime_with_trigger_repository_and_create_hook(repository.clone(), hook.clone());
+    let mut context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+    let run_id = ironclaw_host_api::RunId::new();
+    context.run_id = Some(run_id);
+
+    let output = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Source-routed summary",
+            "prompt": "Summarize yesterday",
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(output["trigger"]["delivery_target_id"], json!(inherited));
+    assert_eq!(hook.seen_run_ids(), vec![Some(run_id)]);
+    let records = repository
+        .list_triggers(context.resource_scope.tenant_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        records[0]
+            .delivery_target
+            .as_ref()
+            .map(|target| target.as_str()),
+        Some(inherited)
     );
 }
 
@@ -2505,7 +2639,7 @@ async fn builtin_trigger_list_maps_batch_run_history_repository_error_to_backend
 #[tokio::test]
 async fn builtin_rejects_oversized_inputs_before_dispatch() {
     let outcome = runtime()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context([JSON_CAPABILITY_ID]),
             capability_id(JSON_CAPABILITY_ID),
             ResourceEstimate::default(),
@@ -2523,7 +2657,7 @@ async fn builtin_rejects_oversized_inputs_before_dispatch() {
 #[tokio::test]
 async fn builtin_rejects_oversized_outputs_before_return() {
     let outcome = runtime()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context([JSON_CAPABILITY_ID]),
             capability_id(JSON_CAPABILITY_ID),
             ResourceEstimate::default(),
@@ -3362,7 +3496,7 @@ async fn builtin_spawn_subagent_authorization_invokes_through_host_runtime() {
 #[tokio::test]
 async fn builtin_shell_invokes_copied_shell_core_through_host_runtime() {
     let outcome = runtime()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_network([SHELL_CAPABILITY_ID], shell_test_policy()),
             capability_id(SHELL_CAPABILITY_ID),
             ResourceEstimate::default(),
@@ -3992,7 +4126,7 @@ async fn builtin_json_stringify_rejects_invalid_json_strings() {
 #[tokio::test]
 async fn builtin_json_rejects_v1_tool_output_stash_refs_without_leaking_input() {
     let outcome = runtime()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context([JSON_CAPABILITY_ID]),
             capability_id(JSON_CAPABILITY_ID),
             ResourceEstimate::default(),
@@ -6151,16 +6285,11 @@ async fn builtin_skill_install_url_path_accounts_wall_clock_time() {
     });
     let runtime = runtime_with_filesystem_and_http_egress(filesystem, egress);
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
-            execution_context_with_mounts_and_network(
+        .invoke_capability((execution_context_with_mounts_and_network(
                 [SKILL_INSTALL_CAPABILITY_ID],
                 mounts,
                 http_test_policy(),
-            ),
-            capability_id(SKILL_INSTALL_CAPABILITY_ID),
-            ResourceEstimate::default(),
-            json!({"url": "https://raw.githubusercontent.com/Pika-Labs/Pika-Skills/main/slow-helper/SKILL.md"})
-        ))
+            ), capability_id(SKILL_INSTALL_CAPABILITY_ID), ResourceEstimate::default(), json!({"url": "https://raw.githubusercontent.com/Pika-Labs/Pika-Skills/main/slow-helper/SKILL.md"})))
         .await
         .unwrap();
 
@@ -6200,7 +6329,7 @@ async fn builtin_http_runtime_policy_denial_stops_before_egress() {
     let runtime = runtime_with_http_egress_and_policy(Arc::clone(&egress), network_denied_policy());
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
             capability_id(HTTP_CAPABILITY_ID),
             ResourceEstimate::default(),
@@ -8164,7 +8293,7 @@ async fn builtin_coding_write_is_denied_by_read_only_mount() {
 #[tokio::test]
 async fn builtin_missing_grant_denies_before_handler_dispatch() {
     let outcome = runtime()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context(std::iter::empty::<&str>()),
             capability_id(ECHO_CAPABILITY_ID),
             ResourceEstimate::default(),
@@ -8202,7 +8331,7 @@ async fn invoke_with_context<R: HostRuntime + ?Sized>(
     context: ExecutionContext,
 ) -> Result<Value, RuntimeFailureKind> {
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             capability_id(capability),
             ResourceEstimate::default(),
@@ -8224,7 +8353,7 @@ async fn invoke_failure_with_context<R: HostRuntime + ?Sized>(
     context: ExecutionContext,
 ) -> RuntimeCapabilityFailure {
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             capability_id(capability),
             ResourceEstimate::default(),
@@ -8440,6 +8569,43 @@ impl TriggerCreateHook for FailingTriggerCreateHook {
 struct DeliveryTargetValidatingTriggerCreateHook {
     accepted: String,
     validated: std::sync::Mutex<Vec<String>>,
+}
+
+struct SourceResolvingTriggerCreateHook {
+    target: String,
+    seen_run_ids: std::sync::Mutex<Vec<Option<ironclaw_host_api::RunId>>>,
+}
+
+impl SourceResolvingTriggerCreateHook {
+    fn new(target: &str) -> Self {
+        Self {
+            target: target.to_string(),
+            seen_run_ids: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn seen_run_ids(&self) -> Vec<Option<ironclaw_host_api::RunId>> {
+        self.seen_run_ids.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl TriggerCreateHook for SourceResolvingTriggerCreateHook {
+    async fn resolve_implicit_delivery_target(
+        &self,
+        _scope: &ironclaw_host_api::ResourceScope,
+        run_id: Option<ironclaw_host_api::RunId>,
+    ) -> Result<Option<ironclaw_triggers::TriggerDeliveryTargetId>, TriggerError> {
+        self.seen_run_ids.lock().unwrap().push(run_id);
+        Ok(Some(
+            ironclaw_triggers::TriggerDeliveryTargetId::new(self.target.clone())
+                .expect("fixture target id"),
+        ))
+    }
+
+    async fn after_trigger_persisted(&self, _record: &TriggerRecord) -> Result<(), TriggerError> {
+        Ok(())
+    }
 }
 
 impl DeliveryTargetValidatingTriggerCreateHook {
@@ -9257,7 +9423,7 @@ where
         ironclaw_processes::ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()))
+    .with_secret_store(Arc::new(SecretStore::ephemeral()))
     .with_first_party_capabilities(Arc::new(
         builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
     ))
@@ -9299,6 +9465,7 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
         TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
         PROFILE_SET_CAPABILITY_ID,
+        OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
         MEMORY_SEARCH_CAPABILITY_ID,
         MEMORY_WRITE_CAPABILITY_ID,
         MEMORY_READ_CAPABILITY_ID,
@@ -9311,6 +9478,8 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         APPLY_PATCH_CAPABILITY_ID,
         SKILL_LIST_CAPABILITY_ID,
         SKILL_INSTALL_CAPABILITY_ID,
+        SKILL_UPDATE_CAPABILITY_ID,
+        SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
         SKILL_REMOVE_CAPABILITY_ID,
         TRIGGER_CREATE_CAPABILITY_ID,
         TRIGGER_LIST_CAPABILITY_ID,

@@ -1,5 +1,6 @@
-use ironclaw_product_adapters::{ProductAdapterError, ProductWorkflowRejectionKind};
-use ironclaw_product_adapters::{ProductRejection, ProductRejectionKind};
+use ironclaw_host_api::{ProductSurfaceError, ProductSurfaceErrorCode};
+use ironclaw_product::{ProductAdapterError, ProductWorkflowRejectionKind};
+use ironclaw_product::{ProductRejection, ProductRejectionKind};
 use serde::{Deserialize, Serialize};
 
 use crate::OpenAiCompatRefError;
@@ -192,6 +193,21 @@ impl OpenAiCompatHttpError {
         }
     }
 
+    pub fn from_product_surface_error(error: ProductSurfaceError) -> Self {
+        let parts = error.into_http_parts();
+        let kind = match parts.code {
+            ProductSurfaceErrorCode::InvalidRequest => OpenAiCompatErrorKind::Validation,
+            ProductSurfaceErrorCode::Unauthenticated => OpenAiCompatErrorKind::Authentication,
+            ProductSurfaceErrorCode::Forbidden => OpenAiCompatErrorKind::PermissionDenied,
+            ProductSurfaceErrorCode::NotFound => OpenAiCompatErrorKind::NotFound,
+            ProductSurfaceErrorCode::Conflict => OpenAiCompatErrorKind::Conflict,
+            ProductSurfaceErrorCode::RateLimited => OpenAiCompatErrorKind::RateLimited,
+            ProductSurfaceErrorCode::Unavailable => OpenAiCompatErrorKind::ServiceUnavailable,
+            ProductSurfaceErrorCode::Internal => OpenAiCompatErrorKind::Internal,
+        };
+        Self::from_kind(parts.status_code, parts.retryable, kind, parts.field)
+    }
+
     pub fn internal() -> Self {
         Self::from_kind(500, false, OpenAiCompatErrorKind::Internal, None)
     }
@@ -212,6 +228,12 @@ impl OpenAiCompatHttpError {
 impl From<ProductAdapterError> for OpenAiCompatHttpError {
     fn from(error: ProductAdapterError) -> Self {
         Self::from_product_adapter_error(error)
+    }
+}
+
+impl From<ProductSurfaceError> for OpenAiCompatHttpError {
+    fn from(error: ProductSurfaceError) -> Self {
+        Self::from_product_surface_error(error)
     }
 }
 
@@ -454,7 +476,7 @@ fn contains_no_exposure_sentinel(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_product_adapters::{ProductRejection, ProductRejectionKind};
+    use ironclaw_product::{ProductRejection, ProductRejectionKind};
 
     use super::product_rejection_to_openai_error;
 

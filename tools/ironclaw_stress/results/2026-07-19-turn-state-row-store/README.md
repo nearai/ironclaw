@@ -1,6 +1,6 @@
 # Turn-state row store vs direct in-memory authority — 2026-07-19 (#6263 Phase 1)
 
-Measures whether `FilesystemTurnStateRowStore` (typed journal/delta rows +
+Measures whether `TurnStateRowStore` (typed journal/delta rows +
 process-local hot snapshot cache) meets the latency envelope of the direct
 `InMemoryTurnStateStore` authority under the same-user contention scenario from
 `results/2026-06-30-turn-state-inmemory/`. Two questions:
@@ -12,7 +12,7 @@ process-local hot snapshot cache) meets the latency envelope of the direct
 
 ## What was added to the harness
 
-- `--turn-state-backend row-memory` — the same `FilesystemTurnStateRowStore`
+- `--turn-state-backend row-memory` — the same `TurnStateRowStore`
   the `filesystem-row` variant wires (shared per-tenant/user store cache, same
   `.with_limits(...)`), but scoped over one shared in-process
   `ironclaw_filesystem::InMemoryBackend` instead of the durable libSQL root.

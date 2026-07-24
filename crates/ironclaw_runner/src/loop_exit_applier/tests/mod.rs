@@ -1,4 +1,4 @@
-// arch-exempt: large_file, mechanical §4.3 store swap only — InMemory{CheckpointState,LoopCheckpoint}Store deleted; test helper added over FilesystemCheckpointStateStore<InMemoryBackend> (arch-simplification §4.3), plan #6168
+// arch-exempt: large_file, mechanical §4.3 store swap only — InMemory{CheckpointState,LoopCheckpoint}Store deleted; test helper added over CheckpointStateStore<InMemoryBackend> (arch-simplification §4.3), plan #6168
 use std::sync::Arc;
 
 use ironclaw_host_api::{AgentId, ApprovalRequestId, TenantId, ThreadId, UserId};
@@ -10,7 +10,7 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::test_support::in_memory_turn_state_store;
 use ironclaw_turns::{
-    CheckpointStateStore, GateRef, LoopBlocked, LoopBlockedKind, LoopCheckpointKind,
+    CheckpointStateStorePort, GateRef, LoopBlocked, LoopBlockedKind, LoopCheckpointKind,
     LoopCheckpointStateRef, LoopCheckpointStore, LoopCompleted, LoopCompletionKind, LoopExit,
     LoopFailed, LoopFailureKind, LoopGateRef, LoopMessageRef, LoopResultRef,
     PutCheckpointStateRequest, PutLoopCheckpointRequest, TurnActor, TurnCheckpointId, TurnError,
@@ -42,9 +42,12 @@ async fn loop_exit_applier_rejects_driver_supplied_evidence_policy() {
         .expect("applied");
 
     assert_eq!(state.status, TurnStatus::Failed);
+    let failure = state.failure.expect("failure");
+    assert_eq!(failure.category(), "driver_protocol_violation");
     assert_eq!(
-        state.failure.expect("failure").category(),
-        "driver_protocol_violation"
+        failure.detail(),
+        Some("loop exit violation: unverified_completion_reference"),
+        "the specific violation kind must survive on the durable failure detail"
     );
 }
 
@@ -150,9 +153,12 @@ async fn blocked_exit_requires_before_block_checkpoint() {
         .expect("applied");
 
     assert_eq!(state.status, TurnStatus::Failed);
+    let failure = state.failure.expect("failure");
+    assert_eq!(failure.category(), "driver_protocol_violation");
     assert_eq!(
-        state.failure.expect("failure").category(),
-        "driver_protocol_violation"
+        failure.detail(),
+        Some("loop exit violation: unverified_blocked_evidence"),
+        "the specific violation kind must survive on the durable failure detail"
     );
 }
 
@@ -205,9 +211,12 @@ async fn cancelled_exit_requires_observed_cancel_input() {
         .expect("applied");
 
     assert_eq!(state.status, TurnStatus::Failed);
+    let failure = state.failure.expect("failure");
+    assert_eq!(failure.category(), "interrupted_unexpectedly");
     assert_eq!(
-        state.failure.expect("failure").category(),
-        "interrupted_unexpectedly"
+        failure.detail(),
+        Some("loop exit violation: cancellation_not_observed"),
+        "the specific violation kind must survive on the durable failure detail"
     );
 }
 
