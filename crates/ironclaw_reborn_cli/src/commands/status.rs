@@ -355,10 +355,10 @@ mod tests {
     /// exact process environment (including non-UTF-8 values) on drop.
     fn cleared_google_oauth_env() -> Vec<crate::runtime::test_env::EnvGuard> {
         [
-            "IRONCLAW_REBORN_GOOGLE_CLIENT_ID",
-            "IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI",
-            "IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET",
-            "IRONCLAW_REBORN_GOOGLE_HOSTED_DOMAIN_HINT",
+            "IRONCLAW_GOOGLE_CLIENT_ID",
+            "IRONCLAW_GOOGLE_OAUTH_REDIRECT_URI",
+            "IRONCLAW_GOOGLE_CLIENT_SECRET",
+            "IRONCLAW_GOOGLE_HOSTED_DOMAIN_HINT",
             "GOOGLE_CLIENT_ID",
             "GOOGLE_OAUTH_REDIRECT_URI",
             "GOOGLE_CLIENT_SECRET",
@@ -424,7 +424,7 @@ redirect_uri = "http://127.0.0.1:3000/oauth/google/callback"
         let _guard = crate::runtime::test_env::lock_runtime_env();
         let _env = cleared_google_oauth_env();
         let _client_id = crate::runtime::test_env::EnvGuard::set(
-            "IRONCLAW_REBORN_GOOGLE_CLIENT_ID",
+            "IRONCLAW_GOOGLE_CLIENT_ID",
             "reborn-client.apps.googleusercontent.com",
         );
 
@@ -448,7 +448,7 @@ redirect_uri = "http://127.0.0.1:3000/oauth/google/callback"
         let _guard = crate::runtime::test_env::lock_runtime_env();
         let _env = cleared_google_oauth_env();
         let _redirect_uri = crate::runtime::test_env::EnvGuard::set(
-            "IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI",
+            "IRONCLAW_GOOGLE_OAUTH_REDIRECT_URI",
             "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
         );
 

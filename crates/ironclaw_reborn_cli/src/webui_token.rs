@@ -31,7 +31,7 @@ pub(crate) const WEBUI_TOKEN_FILENAME: &str = "webui-token";
 /// `serve` (which reads it) and `config set webui.token --rotate` (which
 /// checks it before rotating, since rotating the file has no effect while
 /// this env var is set and non-empty — see `commands::config::set`).
-pub(crate) const DEFAULT_ENV_TOKEN_VAR: &str = "IRONCLAW_REBORN_WEBUI_TOKEN";
+pub(crate) const DEFAULT_ENV_TOKEN_VAR: &str = "IRONCLAW_WEBUI_TOKEN";
 
 /// Minimum byte length for the WebChat v2 bearer token, mirroring the
 /// server-side session-signing entropy floor: an attacker who obtains
@@ -332,7 +332,7 @@ fn write_token_file(path: &Path, token: &str) -> anyhow::Result<()> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WebuiTokenSource {
     /// Resolved from the operator's env var (`[webui].env_token_var`,
-    /// default `IRONCLAW_REBORN_WEBUI_TOKEN`).
+    /// default `IRONCLAW_WEBUI_TOKEN`).
     Env,
     /// Resolved from the onboarding-provisioned
     /// `<reborn_home>/webui-token` fallback file.
@@ -363,7 +363,7 @@ impl std::fmt::Debug for ResolvedWebuiToken {
 /// Resolve the WebChat v2 bearer token with precedence:
 ///
 /// 1. `env_value` — the value of the operator's `[webui].env_token_var`
-///    (default `IRONCLAW_REBORN_WEBUI_TOKEN`) — when `Some` and
+///    (default `IRONCLAW_WEBUI_TOKEN`) — when `Some` and
 ///    non-empty;
 /// 2. `<reborn_home>/webui-token`, trimmed, when it exists and is
 ///    non-empty (the `onboard`-provisioned fallback — see the module
@@ -877,7 +877,7 @@ mod tests {
     #[test]
     fn env_token_is_active_true_when_env_var_set_and_non_empty() {
         let _guard = crate::runtime::test_env::lock_runtime_env();
-        const VAR: &str = "IRONCLAW_REBORN_CLI_TEST_TOKEN_SOURCE_ACTIVE_VAR";
+        const VAR: &str = "IRONCLAW_CLI_TEST_TOKEN_SOURCE_ACTIVE_VAR";
         // SAFETY: serialized by `lock_runtime_env`; restored below.
         unsafe { std::env::set_var(VAR, "some-token-value") };
         let active = env_token_is_active(VAR);
@@ -892,7 +892,7 @@ mod tests {
     #[test]
     fn env_token_is_active_false_when_unset_or_empty() {
         let _guard = crate::runtime::test_env::lock_runtime_env();
-        const VAR: &str = "IRONCLAW_REBORN_CLI_TEST_TOKEN_SOURCE_INACTIVE_VAR";
+        const VAR: &str = "IRONCLAW_CLI_TEST_TOKEN_SOURCE_INACTIVE_VAR";
         // SAFETY: serialized by `lock_runtime_env`.
         unsafe { std::env::remove_var(VAR) };
         assert!(
@@ -921,7 +921,7 @@ mod tests {
         use std::os::unix::ffi::OsStringExt as _;
 
         let _guard = crate::runtime::test_env::lock_runtime_env();
-        const VAR: &str = "IRONCLAW_REBORN_CLI_TEST_TOKEN_SOURCE_NON_UNICODE_VAR";
+        const VAR: &str = "IRONCLAW_CLI_TEST_TOKEN_SOURCE_NON_UNICODE_VAR";
         let invalid_utf8 = std::ffi::OsString::from_vec(vec![0xFF, 0xFE, 0xFD]);
         // SAFETY: serialized by `lock_runtime_env`; restored below.
         unsafe { std::env::set_var(VAR, &invalid_utf8) };

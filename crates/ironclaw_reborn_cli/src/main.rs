@@ -24,5 +24,6 @@ fn main() -> anyhow::Result<()> {
     {
         eprintln!("warning: failed to load .env: {error}");
     }
+    operator_env::install_legacy_env_aliases();
     cli::run()
 }

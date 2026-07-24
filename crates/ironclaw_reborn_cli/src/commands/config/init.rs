@@ -225,10 +225,10 @@ regex_activation_enabled = true
 # # database URL value is env-only; this file may name the variable but must
 # # never contain the raw URL.
 # # Managed remote Postgres providers must use TLS, e.g. append
-# # `sslmode=require` to IRONCLAW_REBORN_POSTGRES_URL.
+# # `sslmode=require` to IRONCLAW_POSTGRES_URL.
 # backend = "postgres"
-# url_env = "IRONCLAW_REBORN_POSTGRES_URL"
-# secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+# url_env = "IRONCLAW_POSTGRES_URL"
+# secret_master_key_env = "IRONCLAW_SECRET_MASTER_KEY"
 # # Optional; defaults to 2. Keep below the PostgreSQL server or managed
 # # session-pool cap after reserving capacity for restarts/operator sessions.
 # pool_max_size = 2

@@ -7,7 +7,9 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use ironclaw_reborn_config::{REBORN_HOME_ENV, REBORN_PROFILE_ENV, RebornBootConfig};
+use ironclaw_reborn_config::{
+    IRONCLAW_HOME_ENV, IRONCLAW_PROFILE_ENV, REBORN_PROFILE_ENV, RebornBootConfig,
+};
 
 /// A fully resolved way to launch `ironclaw serve` as a child
 /// process: the binary path, its arguments, and the environment pairs a
@@ -22,9 +24,9 @@ pub struct ServeInvocation {
 
 /// Resolve the current executable and the `serve` invocation environment.
 ///
-/// `IRONCLAW_REBORN_HOME` is always included — the resolved home path —
+/// `IRONCLAW_HOME` is always included — the resolved home path —
 /// so a spawned `serve` always agrees with the spawning process on where
-/// state lives. `IRONCLAW_REBORN_PROFILE` is included only when the
+/// state lives. `IRONCLAW_PROFILE` is included only when the
 /// operator set it explicitly: this reads the raw env var rather than
 /// `RebornBootConfig::profile()` (which always resolves to a default),
 /// because baking a silently-defaulted profile into a long-lived service
@@ -35,11 +37,16 @@ pub fn serve_invocation() -> Result<ServeInvocation> {
         .context("failed to resolve IronClaw home for the serve invocation")?;
 
     let mut env = vec![(
-        REBORN_HOME_ENV.to_string(),
+        IRONCLAW_HOME_ENV.to_string(),
         boot_config.home().path().display().to_string(),
     )];
-    if let Ok(profile) = std::env::var(REBORN_PROFILE_ENV) {
-        env.push((REBORN_PROFILE_ENV.to_string(), profile));
+    if std::env::var_os(IRONCLAW_PROFILE_ENV).is_some()
+        || std::env::var_os(REBORN_PROFILE_ENV).is_some()
+    {
+        env.push((
+            IRONCLAW_PROFILE_ENV.to_string(),
+            boot_config.profile().to_string(),
+        ));
     }
 
     Ok(ServeInvocation {
@@ -120,7 +127,7 @@ mod tests {
         assert_eq!(
             invocation.env,
             vec![(
-                "IRONCLAW_REBORN_HOME".to_string(),
+                "IRONCLAW_HOME".to_string(),
                 tmp.path().display().to_string()
             )]
         );
@@ -139,13 +146,10 @@ mod tests {
             invocation.env,
             vec![
                 (
-                    "IRONCLAW_REBORN_HOME".to_string(),
+                    "IRONCLAW_HOME".to_string(),
                     tmp.path().display().to_string()
                 ),
-                (
-                    "IRONCLAW_REBORN_PROFILE".to_string(),
-                    "production".to_string()
-                ),
+                ("IRONCLAW_PROFILE".to_string(), "production".to_string()),
             ]
         );
     }

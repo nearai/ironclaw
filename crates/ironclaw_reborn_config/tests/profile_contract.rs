@@ -1,7 +1,7 @@
 use std::{ffi::OsString, str::FromStr};
 
 use ironclaw_reborn_config::{
-    REBORN_PROFILE_ENV, RebornBootConfig, RebornConfigError, RebornProfile,
+    IRONCLAW_PROFILE_ENV, RebornBootConfig, RebornConfigError, RebornProfile,
 };
 
 #[test]
@@ -124,7 +124,7 @@ fn invalid_profile_is_rejected() {
     assert_eq!(
         err,
         RebornConfigError::InvalidProfile {
-            name: REBORN_PROFILE_ENV,
+            name: IRONCLAW_PROFILE_ENV,
             value: "prod".to_string(),
         }
     );
@@ -161,6 +161,27 @@ fn boot_config_defaults_profile_to_local_dev() {
 }
 
 #[test]
+fn canonical_profile_wins_over_legacy_profile() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let config = RebornBootConfig::resolve_from_env_parts_with_legacy(
+        Some(temp.path().join("ironclaw-home").into_os_string()),
+        Some(temp.path().join("legacy-home").into_os_string()),
+        None,
+        None,
+        Some(OsString::from("production")),
+        Some(OsString::from("local-dev")),
+    )
+    .expect("canonical profile and home should win");
+
+    assert_eq!(config.profile(), RebornProfile::Production);
+    assert_eq!(
+        config.home().path(),
+        temp.path().join("ironclaw-home").as_path()
+    );
+}
+
+#[test]
 fn boot_config_rejects_invalid_profile_from_env_parts() {
     let temp = tempfile::tempdir().expect("tempdir");
 
@@ -175,7 +196,7 @@ fn boot_config_rejects_invalid_profile_from_env_parts() {
     assert_eq!(
         error,
         RebornConfigError::InvalidProfile {
-            name: REBORN_PROFILE_ENV,
+            name: IRONCLAW_PROFILE_ENV,
             value: "prod".to_string(),
         }
     );
@@ -196,7 +217,7 @@ fn boot_config_rejects_empty_profile_from_env_parts() {
     assert_eq!(
         error,
         RebornConfigError::InvalidProfile {
-            name: REBORN_PROFILE_ENV,
+            name: IRONCLAW_PROFILE_ENV,
             value: String::new(),
         }
     );

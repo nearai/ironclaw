@@ -1,3 +1,65 @@
+use std::collections::HashSet;
+use std::ffi::{OsStr, OsString};
+
+const DEFAULT_ENV_PREFIX: &str = "IRONCLAW_";
+const LEGACY_ENV_PREFIX: &str = "IRONCLAW_REBORN_";
+
+/// Project the default `IRONCLAW_*` environment contract onto the legacy
+/// `IRONCLAW_REBORN_*` names still consumed by lower-level compatibility
+/// code.
+///
+/// This runs once during single-threaded process startup, after `.env` is
+/// loaded and before CLI parsing or runtime construction. Default names win
+/// when both forms are present. The compatibility projection can be removed
+/// after the legacy environment contract reaches end of life.
+pub(crate) fn install_legacy_env_aliases() {
+    let environment = std::env::vars_os().collect::<Vec<_>>();
+    let present_names = environment
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<HashSet<_>>();
+    let legacy_fallbacks = environment
+        .iter()
+        .filter_map(|(name, value)| {
+            let default_name = default_name_for_legacy_alias(name)?;
+            (!present_names.contains(&default_name)).then(|| (default_name, value.clone()))
+        })
+        .collect::<Vec<_>>();
+    let preferred_aliases = environment
+        .iter()
+        .filter_map(|(name, value)| {
+            legacy_alias_for_default_name(name).map(|alias| (alias, value.clone()))
+        })
+        .collect::<Vec<_>>();
+
+    for (name, value) in legacy_fallbacks.into_iter().chain(preferred_aliases) {
+        // SAFETY: `main` calls this before CLI parsing, runtime construction,
+        // or any worker thread is started. No concurrent environment access
+        // exists at this point.
+        unsafe {
+            std::env::set_var(name, value); // env-hermetic: single-threaded startup shim
+        }
+    }
+}
+
+fn legacy_alias_for_default_name(name: &OsStr) -> Option<OsString> {
+    let name = name.to_str()?;
+    let suffix = name.strip_prefix(DEFAULT_ENV_PREFIX)?;
+    if suffix.is_empty() || name.starts_with(LEGACY_ENV_PREFIX) {
+        return None;
+    }
+    Some(format!("{LEGACY_ENV_PREFIX}{suffix}").into())
+}
+
+fn default_name_for_legacy_alias(name: &OsStr) -> Option<OsString> {
+    let name = name.to_str()?;
+    let suffix = name.strip_prefix(LEGACY_ENV_PREFIX)?;
+    if suffix.is_empty() || matches!(suffix, "HOME" | "PROFILE") {
+        return None;
+    }
+    Some(format!("{DEFAULT_ENV_PREFIX}{suffix}").into())
+}
+
 /// Read an operator-control env var with strict presence semantics.
 ///
 /// These env vars are control-plane knobs: presence is authoritative, not
@@ -81,6 +143,36 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_environment_names_project_to_legacy_names() {
+        assert_eq!(
+            legacy_alias_for_default_name(OsStr::new("IRONCLAW_WEBUI_TOKEN")),
+            Some(OsString::from("IRONCLAW_REBORN_WEBUI_TOKEN"))
+        );
+        assert_eq!(
+            legacy_alias_for_default_name(OsStr::new("IRONCLAW_HOME")),
+            Some(OsString::from("IRONCLAW_REBORN_HOME"))
+        );
+    }
+
+    #[test]
+    fn legacy_and_unrelated_environment_names_are_not_projected() {
+        assert_eq!(
+            legacy_alias_for_default_name(OsStr::new("IRONCLAW_REBORN_HOME")),
+            None
+        );
+        assert_eq!(legacy_alias_for_default_name(OsStr::new("HOME")), None);
+        assert_eq!(
+            default_name_for_legacy_alias(OsStr::new("IRONCLAW_REBORN_WEBUI_TOKEN")),
+            Some(OsString::from("IRONCLAW_WEBUI_TOKEN"))
+        );
+        assert_eq!(
+            default_name_for_legacy_alias(OsStr::new("IRONCLAW_REBORN_PROFILE")),
+            None
+        );
+        assert_eq!(default_name_for_legacy_alias(OsStr::new("HOME")), None);
+    }
 
     #[test]
     fn truncate_keeps_short_values_intact() {

@@ -112,7 +112,7 @@ fn execute_lifecycle_command(
         runtime
             .shutdown()
             .await
-            .context("failed to shut down Reborn runtime after extension lifecycle command")?;
+            .context("failed to shut down IronClaw runtime after extension lifecycle command")?;
         Ok(response)
     })
 }

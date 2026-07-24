@@ -99,7 +99,9 @@ Required behavior:
 Initial backend:
 
 - Local composition wires an allowlisted launchd/systemd user-service manager for
-  the fixed `com.ironclaw.reborn` / `ironclaw-reborn.service` unit.
+  the fixed `com.ironclaw` / `ironclaw.service` unit. The CLI keeps management
+  compatibility for existing `com.ironclaw.reborn` /
+  `ironclaw-reborn.service` installations.
 - Unsupported OS targets return `unsupported` with remediation instead of
   pretending success.
 - The backend returns stable typed state only; raw command output and host paths

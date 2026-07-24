@@ -11,9 +11,9 @@ EnvironmentFile=/opt/ironclaw/.env
 # or replace the tag below when deploying a new release.
 ExecStartPre=/bin/bash -c 'docker pull us-central1-docker.pkg.dev/ironclaw-prod/ironclaw/agent:${IRONCLAW_VERSION:-latest}'
 # The Reborn image entrypoint (docker/reborn/entrypoint.sh) defaults to
-# `serve --host $IRONCLAW_REBORN_SERVE_HOST --port $PORT` when invoked with no
-# arguments. Set IRONCLAW_REBORN_SERVE_HOST=0.0.0.0 in /opt/ironclaw/.env so
-# the published port is reachable, and IRONCLAW_REBORN_PROFILE=production to
+# `serve --host $IRONCLAW_SERVE_HOST --port $PORT` when invoked with no
+# arguments. Set IRONCLAW_SERVE_HOST=0.0.0.0 in /opt/ironclaw/.env so
+# the published port is reachable, and IRONCLAW_PROFILE=production to
 # select Postgres-backed hosted storage. Do NOT pass legacy v1 flags such as
 # `--no-onboard` here — they are not accepted by the Reborn `ironclaw` binary.
 ExecStart=/bin/bash -c 'docker run --rm \

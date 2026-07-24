@@ -661,7 +661,7 @@ async fn post_oauth_start(app: &axum::Router, body: serde_json::Value) -> axum::
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/api/reborn/product-auth/oauth/start")
+                .uri("/api/product-auth/oauth/start")
                 .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(body.to_string()))
@@ -681,7 +681,7 @@ async fn get_oauth_flow_status(
             Request::builder()
                 .method(Method::GET)
                 .uri(format!(
-                    "/api/reborn/product-auth/oauth/flow/{flow_id}/status{query}"
+                    "/api/product-auth/oauth/flow/{flow_id}/status{query}"
                 ))
                 .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
                 .body(Body::empty())
@@ -978,7 +978,7 @@ async fn post_manual_token_submit(
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/api/reborn/product-auth/manual-token/submit")
+                .uri("/api/product-auth/manual-token/submit")
                 .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(body.to_string()))
@@ -2086,7 +2086,10 @@ async fn product_auth_google_oauth_callback_missing_code_is_rejected_without_exc
     assert_eq!(status_response.status(), StatusCode::OK);
     let status_body = read_body_string(status_response).await;
     let status_json: serde_json::Value = serde_json::from_str(&status_body).expect("status json");
-    assert_eq!(status_json["status"], "pending");
+    assert_eq!(
+        status_json["status"], "awaiting_user",
+        "a retryable callback error must preserve the flow's current user-action state"
+    );
     assert!(!status_body.contains(&state));
 }
 

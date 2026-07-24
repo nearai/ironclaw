@@ -5,7 +5,7 @@ not the legacy v1 Slack WASM channel.
 
 Slack support ships in the binary. It has one gate: runtime config must set
 `[slack].enabled = true`, or the deployment env must set
-`IRONCLAW_REBORN_SLACK_ENABLED=true`.
+`IRONCLAW_SLACK_ENABLED=true`.
 
 Slack bot token and signing secret are configured in WebUI Slack setup and
 stored in the Reborn secret store. Do not put OAuth client secrets or LLM keys
@@ -44,7 +44,7 @@ Slack user OAuth must also redirect back to the Reborn product-auth
 callback:
 
 ```text
-https://<public-host>/api/reborn/product-auth/oauth/slack/callback
+https://<public-host>/api/product-auth/oauth/slack/callback
 ```
 
 For local development, expose the local listener through a tunnel and use the
@@ -52,7 +52,7 @@ tunnel URL in Slack. The listener defaults to `127.0.0.1:3000`; use
 `serve --host 0.0.0.0 --port 3000` only when intentionally exposing it behind a
 proxy, tunnel, or container port.
 
-Do not use `IRONCLAW_REBORN_PROFILE=local-dev-yolo` for a public listener.
+Do not use `IRONCLAW_PROFILE=local-dev-yolo` for a public listener.
 That profile grants trusted host access and `serve` refuses non-loopback binds.
 
 ## Environment Variables
@@ -60,12 +60,12 @@ That profile grants trusted host access and `serve` refuses non-loopback binds.
 Minimum local env shape:
 
 ```bash
-export IRONCLAW_REBORN_HOME="$PWD/.reborn-home"
-export IRONCLAW_REBORN_PROFILE="local-dev"
+export IRONCLAW_HOME="$PWD/.reborn-home"
+export IRONCLAW_PROFILE="local-dev"
 
 # WebUI env-bearer auth; required by `ironclaw serve`.
-export IRONCLAW_REBORN_WEBUI_TOKEN="$(openssl rand -hex 32)"
-export IRONCLAW_REBORN_WEBUI_USER_ID="reborn-cli"
+export IRONCLAW_WEBUI_TOKEN="$(openssl rand -hex 32)"
+export IRONCLAW_WEBUI_USER_ID="reborn-cli"
 
 # LLM provider selected by [llm.default] in config.toml.
 export OPENAI_API_KEY="sk-..."
@@ -73,25 +73,25 @@ export OPENAI_API_KEY="sk-..."
 ```
 
 Optional public WebUI login or OAuth flows may also need
-`IRONCLAW_REBORN_WEBUI_BASE_URL` and provider-specific SSO variables. The Slack
+`IRONCLAW_WEBUI_BASE_URL` and provider-specific SSO variables. The Slack
 Events API route itself does not require WebUI SSO.
 
 Docker/Railway env shape:
 
 ```bash
-IRONCLAW_REBORN_SERVE_HOST=0.0.0.0
+IRONCLAW_SERVE_HOST=0.0.0.0
 PORT=3000
-IRONCLAW_REBORN_HOME=/data/ironclaw-reborn
-IRONCLAW_REBORN_PROFILE=local-dev
-IRONCLAW_REBORN_WEBUI_TOKEN=<random-hex-32-bytes-or-longer>
-IRONCLAW_REBORN_WEBUI_USER_ID=reborn-cli
-IRONCLAW_REBORN_SLACK_ENABLED=true
+IRONCLAW_HOME=/data/ironclaw-reborn
+IRONCLAW_PROFILE=local-dev
+IRONCLAW_WEBUI_TOKEN=<random-hex-32-bytes-or-longer>
+IRONCLAW_WEBUI_USER_ID=reborn-cli
+IRONCLAW_SLACK_ENABLED=true
 OPENAI_API_KEY=sk-...
 ```
 
 ## Reborn Config
 
-Edit `$IRONCLAW_REBORN_HOME/config.toml`. If the file does not exist yet, run
+Edit `$IRONCLAW_HOME/config.toml`. If the file does not exist yet, run
 `ironclaw config init` or start the Docker image once to seed it.
 
 Minimal Slack config:
@@ -102,7 +102,7 @@ enabled = true
 ```
 
 `enabled` is the only Slack boot setting. You can also set
-`IRONCLAW_REBORN_SLACK_ENABLED=true` instead of editing config. The env var
+`IRONCLAW_SLACK_ENABLED=true` instead of editing config. The env var
 overrides only the route enablement gate: `true`/`1` mounts Slack, while
 `false`/`0` acts as a deployment kill switch.
 
@@ -152,7 +152,7 @@ OAuth & Permissions:
 - Add the redirect URL:
 
 ```text
-https://<public-host>/api/reborn/product-auth/oauth/slack/callback
+https://<public-host>/api/product-auth/oauth/slack/callback
 ```
 
 - Add bot token scopes:
@@ -206,7 +206,7 @@ features:
     always_online: false
 oauth_config:
   redirect_urls:
-    - https://<public-host>/api/reborn/product-auth/oauth/slack/callback
+    - https://<public-host>/api/product-auth/oauth/slack/callback
   scopes:
     bot:
       - chat:write
@@ -273,7 +273,7 @@ Verification checklist:
 
 ### Slack routes are not mounted
 
-Confirm the Reborn config sets [slack].enabled = true, or that the deployment env sets IRONCLAW_REBORN_SLACK_ENABLED=true, then restart `ironclaw`.
+Confirm the Reborn config sets [slack].enabled = true, or that the deployment env sets IRONCLAW_SLACK_ENABLED=true, then restart `ironclaw`.
 
 ### Slack route never receives events
 
@@ -289,7 +289,7 @@ Add or confirm chat:write, reinstall the Slack app, and update the bot token in 
 
 ### Slack OAuth callback fails
 
-Confirm the Slack redirect URL is exactly https://<public-host>/api/reborn/product-auth/oauth/slack/callback, the user scope includes users:read, the app was reinstalled after changing OAuth settings, and the Admin Configuration Slack client id/client secret match the Slack app.
+Confirm the Slack redirect URL is exactly https://<public-host>/api/product-auth/oauth/slack/callback, the user scope includes users:read, the app was reinstalled after changing OAuth settings, and the Admin Configuration Slack client id/client secret match the Slack app.
 
 ### Channel mention does not reach Reborn
 

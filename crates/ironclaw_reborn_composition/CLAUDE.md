@@ -160,7 +160,7 @@ fail-closed reservation can represent those overlaps safely.
 When `bundle.product_auth` is present, `webui_v2_app` also mounts the
 Reborn-native product-auth surface:
 
-- `POST /api/reborn/product-auth/oauth/start` is inside the existing
+- `POST /api/product-auth/oauth/start` is inside the existing
   bearer-auth layer. It derives `AuthProductScope` from the
   `ProductSurfaceCaller` inserted by host composition, hashes raw
   state/PKCE once, rejects caller-supplied expiry beyond the route TTL,
@@ -177,7 +177,7 @@ Reborn-native product-auth surface:
   the lifecycle setup projection; raw browser provider/scope fields are not
   accepted, and the global recipe registry is not extension authority. The
   route emits a server-owned `LifecycleActivation` continuation.
-- `GET /api/reborn/product-auth/oauth/callback/{flow_id}` is a hosted
+- `GET /api/product-auth/oauth/callback/{flow_id}` is a hosted
   callback route and is intentionally not behind WebUI bearer auth. It
   bounds the raw query string, reconstructs the scoped callback owner from
   host/callback metadata, hashes raw state/code/PKCE verifier material, and calls
@@ -185,7 +185,7 @@ Reborn-native product-auth surface:
   exchanges provider tokens, activates extensions, resumes turns, or
   writes secrets directly. Its descriptor declares `NoBody` and a
   transport-peer-IP public callback rate limit.
-- `POST /api/reborn/product-auth/manual-token/submit` is inside the
+- `POST /api/product-auth/manual-token/submit` is inside the
   same bearer-auth layer as OAuth start. It derives `AuthProductScope`
   from `ProductSurfaceCaller`, validates the provider/account/token
   fields, creates a short-lived manual-token interaction with a

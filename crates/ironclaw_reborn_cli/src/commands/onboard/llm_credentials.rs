@@ -31,7 +31,7 @@ pub(crate) enum LlmCredentialProvisionOutcome {
     /// and `[llm.default]` seeded via `set_provider`. The detected API key is
     /// also persisted to the encrypted secret store (same path the menu flow
     /// uses) so a background service — which only carries
-    /// `IRONCLAW_REBORN_HOME`, not the operator's shell env — can still
+    /// `IRONCLAW_HOME`, not the operator's shell env — can still
     /// resolve it. Reached via interactive "use it?" confirm or silently on
     /// a headless run.
     /// - Idempotency: once seeded, drift between slot and live env is accepted
@@ -271,7 +271,7 @@ fn provision_headless_from_env(
 /// Persist the env-detected key for `provider_id` into the encrypted secret
 /// store — used by both the interactive confirm-yes and headless env-seed
 /// branches above. The installed service inherits only
-/// `IRONCLAW_REBORN_HOME`, not the shell env that ran onboard, so a key left
+/// `IRONCLAW_HOME`, not the shell env that ran onboard, so a key left
 /// only in the env var is invisible to it at boot; the store is the only
 /// channel that reaches the daemon. A no-op when the env no longer resolves
 /// a key for `provider_id` (keyless provider, or the env changed between
@@ -1415,7 +1415,7 @@ mod tests {
     /// set), an interactive session must ask to confirm using it, and "yes"
     /// must seed `[llm.default]` from the DETECTED provider/model via
     /// `set_provider` AND persist the detected key into the encrypted secret
-    /// store. The installed service only inherits `IRONCLAW_REBORN_HOME`,
+    /// store. The installed service only inherits `IRONCLAW_HOME`,
     /// not the operator's shell env, so a key left only in `OPENAI_API_KEY`
     /// is invisible to it at boot — the store is the only channel that
     /// reaches the daemon. See `provision_llm_credentials`'s doc.
@@ -1536,7 +1536,7 @@ mod tests {
     /// A non-interactive session with a complete `openai` config in the
     /// environment must seed `[llm.default]` from it SILENTLY (no prompt
     /// possible) AND persist the detected key into the encrypted secret
-    /// store — the installed service inherits only `IRONCLAW_REBORN_HOME`,
+    /// store — the installed service inherits only `IRONCLAW_HOME`,
     /// not the seeding shell's env, so the store is the only channel that
     /// reaches the daemon.
     #[test]

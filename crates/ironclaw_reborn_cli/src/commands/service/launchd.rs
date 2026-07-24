@@ -1,4 +1,4 @@
-// arch-exempt: large_file, service command backend awaits composition helper extraction, plan #4471
+// arch-exempt: large_file, legacy service compatibility stays at the existing launchd command seam, plan #6551
 //! macOS launchd generators, path resolution, status matching, and verb
 //! bodies for `ironclaw service`.
 
@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use crate::context::RebornCliContext;
 use crate::serve_invocation::ServeInvocation;
 
-use super::{SERVICE_LABEL, ServiceCommandRunner, home_dir};
+use super::{LEGACY_SERVICE_LABEL, SERVICE_LABEL, ServiceCommandRunner, home_dir};
 
 // ── Escaping ────────────────────────────────────────────────────
 
@@ -88,10 +88,27 @@ fn plist_content(
 // ── Path helpers ────────────────────────────────────────────────
 
 fn plist_path() -> Result<PathBuf> {
+    plist_path_for(SERVICE_LABEL)
+}
+
+fn plist_path_for(label: &str) -> Result<PathBuf> {
     Ok(home_dir()?
         .join("Library")
         .join("LaunchAgents")
-        .join(format!("{SERVICE_LABEL}.plist")))
+        .join(format!("{label}.plist")))
+}
+
+fn installed_plist() -> Result<(&'static str, PathBuf)> {
+    let canonical = plist_path_for(SERVICE_LABEL)?;
+    if canonical.exists() {
+        return Ok((SERVICE_LABEL, canonical));
+    }
+    let legacy = plist_path_for(LEGACY_SERVICE_LABEL)?;
+    if legacy.exists() {
+        Ok((LEGACY_SERVICE_LABEL, legacy))
+    } else {
+        Ok((SERVICE_LABEL, canonical))
+    }
 }
 
 // ── Status matching ─────────────────────────────────────────────
@@ -134,12 +151,30 @@ fn launchd_status_from_line(line: &str) -> Option<(LaunchdStatus, &str)> {
 /// The status of our label's line in `launchctl list`, if it appears at
 /// all (i.e. the job is currently loaded, running or not).
 fn find_label_status(launchctl_list_output: &str) -> Option<LaunchdStatus> {
+    find_label_status_for(launchctl_list_output, SERVICE_LABEL)
+}
+
+fn find_label_status_for(
+    launchctl_list_output: &str,
+    expected_label: &str,
+) -> Option<LaunchdStatus> {
     launchctl_list_output.lines().find_map(|line| {
         launchd_status_from_line(line)
-            .and_then(|(status, label)| (label == SERVICE_LABEL).then_some(status))
+            .and_then(|(status, label)| (label == expected_label).then_some(status))
     })
 }
 
+fn installed_label_from_list(launchctl_list_output: &str) -> Option<&'static str> {
+    if find_label_status_for(launchctl_list_output, SERVICE_LABEL).is_some() {
+        Some(SERVICE_LABEL)
+    } else if find_label_status_for(launchctl_list_output, LEGACY_SERVICE_LABEL).is_some() {
+        Some(LEGACY_SERVICE_LABEL)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
 fn service_running(launchctl_list_output: &str) -> bool {
     find_label_status(launchctl_list_output) == Some(LaunchdStatus::Running)
 }
@@ -185,6 +220,14 @@ pub(super) fn install_with_runner(
     runner: &mut dyn ServiceCommandRunner,
 ) -> Result<bool> {
     let file = plist_path()?;
+    let legacy_file = plist_path_for(LEGACY_SERVICE_LABEL)?;
+    let list =
+        runner.run_capture_checked("launchctl list", Command::new("launchctl").arg("list"))?;
+    if legacy_file.exists() || find_label_status_for(&list, LEGACY_SERVICE_LABEL).is_some() {
+        bail!(
+            "Legacy launchd service {LEGACY_SERVICE_LABEL} is still installed or loaded; unload and remove it explicitly before installing {SERVICE_LABEL} to avoid running two IronClaw daemons"
+        );
+    }
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
@@ -195,8 +238,6 @@ pub(super) fn install_with_runner(
     // add it externally if long-running installs need it.
     let stdout_log = logs_dir.join("serve.stdout.log");
     let stderr_log = logs_dir.join("serve.stderr.log");
-    let list =
-        runner.run_capture_checked("launchctl list", Command::new("launchctl").arg("list"))?;
     let was_loaded = service_loaded(&list);
     // Captured before the write: a pre-existing file at this path may
     // have been installed by this CLI's own prior run, or by the WebUI
@@ -251,7 +292,7 @@ fn start_with_runner_quiet(runner: &mut dyn ServiceCommandRunner) -> Result<()> 
 }
 
 fn start_with_runner_impl(runner: &mut dyn ServiceCommandRunner, verbose: bool) -> Result<()> {
-    let plist = plist_path()?;
+    let (label, plist) = installed_plist()?;
     if !plist.exists() {
         bail!("Service not installed. Run `ironclaw service install` first.");
     }
@@ -262,7 +303,7 @@ fn start_with_runner_impl(runner: &mut dyn ServiceCommandRunner, verbose: bool) 
     // not-loaded label needs the `load` step.
     let list =
         runner.run_capture_checked("launchctl list", Command::new("launchctl").arg("list"))?;
-    if !service_loaded(&list) {
+    if find_label_status_for(&list, label).is_none() {
         runner.run_checked(
             "launchctl load",
             Command::new("launchctl").arg("load").arg("-w").arg(&plist),
@@ -270,7 +311,7 @@ fn start_with_runner_impl(runner: &mut dyn ServiceCommandRunner, verbose: bool) 
     }
     runner.run_checked(
         "launchctl start",
-        Command::new("launchctl").arg("start").arg(SERVICE_LABEL),
+        Command::new("launchctl").arg("start").arg(label),
     )?;
     if verbose {
         println!("Service started");
@@ -289,7 +330,7 @@ fn stop_with_runner_quiet(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
 }
 
 fn stop_with_runner_impl(runner: &mut dyn ServiceCommandRunner, verbose: bool) -> Result<()> {
-    let plist = plist_path()?;
+    let (label, plist) = installed_plist()?;
     if !plist.exists() {
         if verbose {
             println!("Service stopped");
@@ -298,7 +339,7 @@ fn stop_with_runner_impl(runner: &mut dyn ServiceCommandRunner, verbose: bool) -
     }
     let list =
         runner.run_capture_checked("launchctl list", Command::new("launchctl").arg("list"))?;
-    if !service_loaded(&list) {
+    if find_label_status_for(&list, label).is_none() {
         if verbose {
             println!("Service stopped");
         }
@@ -310,7 +351,7 @@ fn stop_with_runner_impl(runner: &mut dyn ServiceCommandRunner, verbose: bool) -
     // loaded-but-stopped KeepAlive job undisturbed.
     runner.run_checked(
         "launchctl stop",
-        Command::new("launchctl").arg("stop").arg(SERVICE_LABEL),
+        Command::new("launchctl").arg("stop").arg(label),
     )?;
     runner.run_checked(
         "launchctl unload",
@@ -335,12 +376,12 @@ fn stop_with_runner_impl(runner: &mut dyn ServiceCommandRunner, verbose: bool) -
 /// `service_loaded`, so this subsumes the previously-running case without
 /// changing its behavior.
 pub(super) fn restart_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
-    let plist = plist_path()?;
+    let (label, plist) = installed_plist()?;
     let installed = plist.exists();
     let was_active = if installed {
         let list =
             runner.run_capture_checked("launchctl list", Command::new("launchctl").arg("list"))?;
-        service_loaded(&list)
+        find_label_status_for(&list, label).is_some()
     } else {
         false
     };
@@ -362,19 +403,22 @@ struct LaunchdStatusInfo {
 }
 
 fn resolve_status_info(runner: &mut dyn ServiceCommandRunner) -> Result<LaunchdStatusInfo> {
-    let file_exists = plist_path()?.exists();
+    let (_, file) = installed_plist()?;
+    let file_exists = file.exists();
     // Query launchctl unconditionally — a plist that was removed
     // out-of-band while the job is still loaded is an orphan we must
     // still report as installed, not silently claim "not installed".
     let list =
         runner.run_capture_checked("launchctl list", Command::new("launchctl").arg("list"))?;
-    let running = service_running(&list);
-    let installed = resolve_installed(file_exists, service_loaded(&list));
+    let loaded_label = installed_label_from_list(&list);
+    let running = loaded_label
+        .is_some_and(|label| find_label_status_for(&list, label) == Some(LaunchdStatus::Running));
+    let installed = resolve_installed(file_exists, loaded_label.is_some());
     Ok(LaunchdStatusInfo { installed, running })
 }
 
 pub(super) fn status_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
-    let plist = plist_path()?;
+    let (_, plist) = installed_plist()?;
     let info = resolve_status_info(runner)?;
     println!(
         "Service: {}",
@@ -398,17 +442,24 @@ pub(super) fn current_state_with_runner(
 }
 
 pub(super) fn uninstall_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
-    let file = plist_path()?;
+    let (file_label, file) = installed_plist()?;
     let list =
         runner.run_capture_checked("launchctl list", Command::new("launchctl").arg("list"))?;
-    if service_loaded(&list) {
+    let loaded_label = if find_label_status_for(&list, file_label).is_some() {
+        Some(file_label)
+    } else if file.exists() {
+        None
+    } else {
+        installed_label_from_list(&list)
+    };
+    if let Some(label) = loaded_label {
         // `stop` alone is insufficient for a KeepAlive agent: launchd
         // immediately restarts it. Target the registered label so a loaded
         // job left behind by an older broken uninstall can still be removed
         // even when its plist path is already absent.
         runner.run_checked(
             "launchctl stop",
-            Command::new("launchctl").arg("stop").arg(SERVICE_LABEL),
+            Command::new("launchctl").arg("stop").arg(label),
         )?;
         let uid = runner
             .run_capture_checked("id -u", Command::new("id").arg("-u"))?
@@ -419,13 +470,16 @@ pub(super) fn uninstall_with_runner(runner: &mut dyn ServiceCommandRunner) -> Re
             "launchctl bootout",
             Command::new("launchctl")
                 .arg("bootout")
-                .arg(format!("gui/{uid}/{SERVICE_LABEL}")),
+                .arg(format!("gui/{uid}/{label}")),
         )?;
     }
     if file.exists() {
         std::fs::remove_file(&file).with_context(|| format!("remove {}", file.display()))?;
     }
     println!("Service uninstalled ({})", file.display());
+    if file_label == LEGACY_SERVICE_LABEL {
+        println!("Removed legacy IronClaw service identity");
+    }
     Ok(())
 }
 
@@ -506,7 +560,7 @@ mod tests {
             exe: PathBuf::from("/usr/local/bin/ironclaw"),
             args: vec!["serve".to_string()],
             env: vec![(
-                "IRONCLAW_REBORN_HOME".to_string(),
+                "IRONCLAW_HOME".to_string(),
                 "/home/op/.ironclaw/reborn".to_string(),
             )],
         }
@@ -553,6 +607,67 @@ mod tests {
             !replaced,
             "a fresh install (no prior plist) must not report a replacement"
         );
+    }
+
+    #[test]
+    fn install_refuses_to_create_canonical_plist_beside_legacy_service() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let home_tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", home_tmp.path()) };
+        let (_ctx_tmp, context) = RebornCliContext::test_context();
+        let legacy = plist_path_for(LEGACY_SERVICE_LABEL).expect("legacy plist path");
+        std::fs::create_dir_all(legacy.parent().expect("plist parent")).expect("create parent");
+        std::fs::write(&legacy, "legacy plist").expect("write legacy plist");
+        let canonical = plist_path().expect("canonical plist path");
+        let mut runner = RecordingRunner::default();
+
+        let result = install_with_runner(&context, &sample_invocation(), &mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        let error = result.expect_err("install must refuse a second service identity");
+        assert!(error.to_string().contains(LEGACY_SERVICE_LABEL));
+        assert!(!canonical.exists(), "canonical plist must not be created");
+        assert_eq!(
+            runner.labels,
+            ["launchctl list"],
+            "only the legacy-service preflight query may run"
+        );
+    }
+
+    #[test]
+    fn install_refuses_when_legacy_launchd_label_is_loaded_without_plist() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let home_tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", home_tmp.path()) };
+        let (_ctx_tmp, context) = RebornCliContext::test_context();
+        let canonical = plist_path().expect("canonical plist path");
+        let mut runner = RecordingRunner {
+            launchctl_list: format!("123\t0\t{LEGACY_SERVICE_LABEL}\n"),
+            ..RecordingRunner::default()
+        };
+
+        let result = install_with_runner(&context, &sample_invocation(), &mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        let error = result.expect_err("loaded legacy label must block install");
+        assert!(error.to_string().contains(LEGACY_SERVICE_LABEL));
+        assert!(!canonical.exists(), "canonical plist must not be created");
     }
 
     #[test]
@@ -748,7 +863,7 @@ mod tests {
             Path::new("/tmp/o.log"),
             Path::new("/tmp/e.log"),
         );
-        assert!(plist.contains("<key>IRONCLAW_REBORN_HOME</key>"));
+        assert!(plist.contains("<key>IRONCLAW_HOME</key>"));
         assert!(plist.contains("<string>/home/op/.ironclaw/reborn</string>"));
     }
 
@@ -805,10 +920,7 @@ mod tests {
         let invocation = ServeInvocation {
             exe: PathBuf::from("/usr/local/bin/ironclaw"),
             args: vec!["serve".to_string()],
-            env: vec![(
-                "IRONCLAW_REBORN_PROFILE".to_string(),
-                "a&b<c>d\"e'f".to_string(),
-            )],
+            env: vec![("IRONCLAW_PROFILE".to_string(), "a&b<c>d\"e'f".to_string())],
         };
         let plist = plist_content(
             &invocation,
@@ -836,14 +948,14 @@ mod tests {
         }
         assert_eq!(
             path.expect("must resolve"),
-            PathBuf::from("/home/op/Library/LaunchAgents/com.ironclaw.reborn.plist")
+            PathBuf::from("/home/op/Library/LaunchAgents/com.ironclaw.plist")
         );
     }
 
     #[test]
     fn service_running_matches_only_the_label_line() {
-        let output = "-\t0\tcom.apple.something\n123\t0\tcom.ironclaw.reborn\n";
-        assert!(service_running(output));
+        let output = format!("-\t0\tcom.apple.something\n123\t0\t{SERVICE_LABEL}\n");
+        assert!(service_running(&output));
     }
 
     #[test]
@@ -853,6 +965,47 @@ mod tests {
         assert!(!service_running(&format!(
             "123\t0\t{SERVICE_LABEL}.helper\n"
         )));
+    }
+
+    #[test]
+    fn legacy_launchd_label_is_detected_for_compatibility() {
+        let output = format!("123\t0\t{LEGACY_SERVICE_LABEL}\n");
+        assert_eq!(
+            installed_label_from_list(&output),
+            Some(LEGACY_SERVICE_LABEL)
+        );
+    }
+
+    #[test]
+    fn start_uses_an_existing_legacy_plist() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let file = plist_path_for(LEGACY_SERVICE_LABEL).expect("legacy plist path");
+        std::fs::create_dir_all(file.parent().expect("plist parent")).expect("create parent");
+        std::fs::write(&file, "legacy plist").expect("write legacy plist");
+        let mut runner = RecordingRunner::default();
+
+        let result = start_with_runner(&mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        result.expect("legacy service should remain manageable");
+        assert_eq!(
+            runner.args,
+            [
+                vec!["list"],
+                vec!["load", "-w", file.to_string_lossy().as_ref()],
+                vec!["start", LEGACY_SERVICE_LABEL],
+            ]
+        );
     }
 
     #[test]
@@ -893,10 +1046,7 @@ mod tests {
         assert_eq!(runner.args[2], ["-u"]);
         assert_eq!(
             runner.args[3],
-            [
-                "bootout".to_string(),
-                "gui/501/com.ironclaw.reborn".to_string()
-            ]
+            ["bootout".to_string(), format!("gui/501/{SERVICE_LABEL}")]
         );
     }
 
@@ -912,7 +1062,7 @@ mod tests {
         std::fs::write(&file, "plist").expect("write plist");
         let mut runner = RecordingRunner {
             launchctl_list: format!("123\t0\t{SERVICE_LABEL}\n"),
-            fail_args: Some(vec!["bootout", "gui/501/com.ironclaw.reborn"]),
+            fail_args: Some(vec!["bootout", "gui/501/com.ironclaw"]),
             ..RecordingRunner::default()
         };
         let result = uninstall_with_runner(&mut runner);
@@ -976,7 +1126,7 @@ mod tests {
                 vec!["list"],
                 vec!["stop", SERVICE_LABEL],
                 vec!["-u"],
-                vec!["bootout", "gui/501/com.ironclaw.reborn"]
+                vec!["bootout", "gui/501/com.ironclaw"]
             ]
         );
     }

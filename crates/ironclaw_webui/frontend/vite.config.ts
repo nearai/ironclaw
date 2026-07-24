@@ -33,6 +33,7 @@ export default defineConfig({
     proxy: {
       "/api/webchat/v2": "http://127.0.0.1:3000",
       "/api/reborn": "http://127.0.0.1:3000",
+      "/api/product-auth": "http://127.0.0.1:3000",
       "/auth": "http://127.0.0.1:3000",
       "/assets": "http://127.0.0.1:3000",
       "/vendor": "http://127.0.0.1:3000",

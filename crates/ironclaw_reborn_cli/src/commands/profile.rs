@@ -1,5 +1,5 @@
 use clap::{Args, Subcommand};
-use ironclaw_reborn_config::{REBORN_PROFILE_ENV, RebornProfile};
+use ironclaw_reborn_config::{IRONCLAW_PROFILE_ENV, RebornProfile};
 
 #[derive(Debug, Args)]
 pub(crate) struct ProfileCommand {
@@ -43,7 +43,7 @@ impl ProfileListCommand {
                 "{}",
                 serde_json::json!({
                     "profiles": profiles.collect::<Vec<_>>(),
-                    "selector": REBORN_PROFILE_ENV,
+                    "selector": IRONCLAW_PROFILE_ENV,
                 })
             );
         } else {
@@ -55,7 +55,7 @@ impl ProfileListCommand {
                     println!("- {}", profile);
                 }
             }
-            println!("Select with {}=<profile>", REBORN_PROFILE_ENV);
+            println!("Select with {}=<profile>", IRONCLAW_PROFILE_ENV);
         }
 
         Ok(())

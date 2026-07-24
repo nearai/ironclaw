@@ -72,28 +72,43 @@ use crate::{
     RebornOAuthCallbackResponse, RebornProductAuthServices,
 };
 
-pub(crate) const OAUTH_START_PATH: &str = "/api/reborn/product-auth/oauth/start";
-pub(crate) const OAUTH_CALLBACK_PATH: &str = "/api/reborn/product-auth/oauth/callback/{flow_id}";
-pub(crate) const OAUTH_FLOW_STATUS_PATH: &str =
-    "/api/reborn/product-auth/oauth/flow/{flow_id}/status";
+pub(crate) const OAUTH_START_PATH: &str = "/api/product-auth/oauth/start";
+pub(crate) const OAUTH_CALLBACK_PATH: &str = "/api/product-auth/oauth/callback/{flow_id}";
+pub(crate) const OAUTH_FLOW_STATUS_PATH: &str = "/api/product-auth/oauth/flow/{flow_id}/status";
 pub(crate) const OAUTH_FLOW_RECONCILE_PATH: &str =
-    "/api/reborn/product-auth/oauth/flow/{flow_id}/reconcile";
+    "/api/product-auth/oauth/flow/{flow_id}/reconcile";
 /// One public callback per vendor, `{provider}` resolved as recipe data —
 /// the path shape vendor-registered redirect URLs already point at
 /// (checklist AUTH-13).
-pub(crate) const VENDOR_OAUTH_CALLBACK_PATH: &str =
-    "/api/reborn/product-auth/oauth/{provider}/callback";
+pub(crate) const VENDOR_OAUTH_CALLBACK_PATH: &str = "/api/product-auth/oauth/{provider}/callback";
 pub(crate) const EXTENSION_OAUTH_START_PATH: &str =
     "/api/webchat/v2/extensions/{package_id}/setup/oauth/start";
-pub(crate) const MANUAL_TOKEN_SUBMIT_PATH: &str = "/api/reborn/product-auth/manual-token/submit";
-pub(crate) const MANUAL_TOKEN_SETUP_PATH: &str = "/api/reborn/product-auth/manual-token/setup";
+pub(crate) const MANUAL_TOKEN_SUBMIT_PATH: &str = "/api/product-auth/manual-token/submit";
+pub(crate) const MANUAL_TOKEN_SETUP_PATH: &str = "/api/product-auth/manual-token/setup";
 pub(crate) const MANUAL_TOKEN_SECRET_SUBMIT_PATH: &str =
+    "/api/product-auth/manual-token/secret-submit";
+pub(crate) const ACCOUNTS_LIST_PATH: &str = "/api/product-auth/accounts/list";
+pub(crate) const ACCOUNTS_SELECT_PATH: &str = "/api/product-auth/accounts/select";
+pub(crate) const ACCOUNTS_RECOVERY_PATH: &str = "/api/product-auth/accounts/recovery";
+pub(crate) const ACCOUNTS_REFRESH_PATH: &str = "/api/product-auth/accounts/refresh";
+pub(crate) const LIFECYCLE_CLEANUP_PATH: &str = "/api/product-auth/lifecycle/cleanup";
+
+const LEGACY_OAUTH_START_PATH: &str = "/api/reborn/product-auth/oauth/start";
+const LEGACY_OAUTH_CALLBACK_PATH: &str = "/api/reborn/product-auth/oauth/callback/{flow_id}";
+const LEGACY_OAUTH_FLOW_STATUS_PATH: &str = "/api/reborn/product-auth/oauth/flow/{flow_id}/status";
+const LEGACY_OAUTH_FLOW_RECONCILE_PATH: &str =
+    "/api/reborn/product-auth/oauth/flow/{flow_id}/reconcile";
+const LEGACY_VENDOR_OAUTH_CALLBACK_PATH: &str =
+    "/api/reborn/product-auth/oauth/{provider}/callback";
+const LEGACY_MANUAL_TOKEN_SUBMIT_PATH: &str = "/api/reborn/product-auth/manual-token/submit";
+const LEGACY_MANUAL_TOKEN_SETUP_PATH: &str = "/api/reborn/product-auth/manual-token/setup";
+const LEGACY_MANUAL_TOKEN_SECRET_SUBMIT_PATH: &str =
     "/api/reborn/product-auth/manual-token/secret-submit";
-pub(crate) const ACCOUNTS_LIST_PATH: &str = "/api/reborn/product-auth/accounts/list";
-pub(crate) const ACCOUNTS_SELECT_PATH: &str = "/api/reborn/product-auth/accounts/select";
-pub(crate) const ACCOUNTS_RECOVERY_PATH: &str = "/api/reborn/product-auth/accounts/recovery";
-pub(crate) const ACCOUNTS_REFRESH_PATH: &str = "/api/reborn/product-auth/accounts/refresh";
-pub(crate) const LIFECYCLE_CLEANUP_PATH: &str = "/api/reborn/product-auth/lifecycle/cleanup";
+const LEGACY_ACCOUNTS_LIST_PATH: &str = "/api/reborn/product-auth/accounts/list";
+const LEGACY_ACCOUNTS_SELECT_PATH: &str = "/api/reborn/product-auth/accounts/select";
+const LEGACY_ACCOUNTS_RECOVERY_PATH: &str = "/api/reborn/product-auth/accounts/recovery";
+const LEGACY_ACCOUNTS_REFRESH_PATH: &str = "/api/reborn/product-auth/accounts/refresh";
+const LEGACY_LIFECYCLE_CLEANUP_PATH: &str = "/api/reborn/product-auth/lifecycle/cleanup";
 
 const OAUTH_START_ROUTE_ID: &str = "product_auth.oauth.start";
 const OAUTH_CALLBACK_ROUTE_ID: &str = "product_auth.oauth.callback";
@@ -599,19 +614,36 @@ pub fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductAuthRout
     let public = Router::new()
         .route(OAUTH_CALLBACK_PATH, get(oauth::oauth_callback_handler))
         .route(
+            LEGACY_OAUTH_CALLBACK_PATH,
+            get(oauth::oauth_callback_handler),
+        )
+        .route(
             VENDOR_OAUTH_CALLBACK_PATH,
+            get(oauth::vendor_oauth_callback_handler),
+        )
+        .route(
+            LEGACY_VENDOR_OAUTH_CALLBACK_PATH,
             get(oauth::vendor_oauth_callback_handler),
         );
 
     ProductAuthRouteMount {
         protected: Router::new()
             .route(OAUTH_START_PATH, post(oauth::oauth_start_handler))
+            .route(LEGACY_OAUTH_START_PATH, post(oauth::oauth_start_handler))
             .route(
                 OAUTH_FLOW_STATUS_PATH,
                 get(oauth::oauth_flow_status_handler),
             )
             .route(
+                LEGACY_OAUTH_FLOW_STATUS_PATH,
+                get(oauth::oauth_flow_status_handler),
+            )
+            .route(
                 OAUTH_FLOW_RECONCILE_PATH,
+                post(oauth::oauth_flow_reconcile_handler),
+            )
+            .route(
+                LEGACY_OAUTH_FLOW_RECONCILE_PATH,
                 post(oauth::oauth_flow_reconcile_handler),
             )
             .route(
@@ -623,16 +655,36 @@ pub fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductAuthRout
                 post(manual_token::manual_token_submit_handler),
             )
             .route(
+                LEGACY_MANUAL_TOKEN_SUBMIT_PATH,
+                post(manual_token::manual_token_submit_handler),
+            )
+            .route(
                 MANUAL_TOKEN_SETUP_PATH,
+                post(manual_token::manual_token_setup_handler),
+            )
+            .route(
+                LEGACY_MANUAL_TOKEN_SETUP_PATH,
                 post(manual_token::manual_token_setup_handler),
             )
             .route(
                 MANUAL_TOKEN_SECRET_SUBMIT_PATH,
                 post(manual_token::manual_token_secret_submit_handler),
             )
+            .route(
+                LEGACY_MANUAL_TOKEN_SECRET_SUBMIT_PATH,
+                post(manual_token::manual_token_secret_submit_handler),
+            )
             .route(ACCOUNTS_LIST_PATH, post(accounts::accounts_list_handler))
             .route(
+                LEGACY_ACCOUNTS_LIST_PATH,
+                post(accounts::accounts_list_handler),
+            )
+            .route(
                 ACCOUNTS_SELECT_PATH,
+                post(accounts::accounts_select_handler),
+            )
+            .route(
+                LEGACY_ACCOUNTS_SELECT_PATH,
                 post(accounts::accounts_select_handler),
             )
             .route(
@@ -640,11 +692,23 @@ pub fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductAuthRout
                 post(accounts::accounts_recovery_handler),
             )
             .route(
+                LEGACY_ACCOUNTS_RECOVERY_PATH,
+                post(accounts::accounts_recovery_handler),
+            )
+            .route(
                 ACCOUNTS_REFRESH_PATH,
                 post(accounts::accounts_refresh_handler),
             )
             .route(
+                LEGACY_ACCOUNTS_REFRESH_PATH,
+                post(accounts::accounts_refresh_handler),
+            )
+            .route(
                 LIFECYCLE_CLEANUP_PATH,
+                post(lifecycle::lifecycle_cleanup_handler),
+            )
+            .route(
+                LEGACY_LIFECYCLE_CLEANUP_PATH,
                 post(lifecycle::lifecycle_cleanup_handler),
             )
             .with_state(state.clone()),
@@ -713,6 +777,83 @@ pub(crate) fn product_auth_route_descriptors() -> Vec<IngressRouteDescriptor> {
         VENDOR_OAUTH_CALLBACK_ROUTE_ID,
         NetworkMethod::Get,
         VENDOR_OAUTH_CALLBACK_PATH,
+        callback_policy(),
+    ));
+    descriptors.extend(legacy_product_auth_route_descriptors());
+    descriptors
+}
+
+fn legacy_product_auth_route_descriptors() -> Vec<IngressRouteDescriptor> {
+    const LEGACY_PROTECTED_MUTATIONS: &[(&str, &str)] = &[
+        ("product_auth.oauth.start.legacy", LEGACY_OAUTH_START_PATH),
+        (
+            "product_auth.manual_token.submit.legacy",
+            LEGACY_MANUAL_TOKEN_SUBMIT_PATH,
+        ),
+        (
+            "product_auth.manual_token.setup.legacy",
+            LEGACY_MANUAL_TOKEN_SETUP_PATH,
+        ),
+        (
+            "product_auth.manual_token.secret_submit.legacy",
+            LEGACY_MANUAL_TOKEN_SECRET_SUBMIT_PATH,
+        ),
+        (
+            "product_auth.accounts.list.legacy",
+            LEGACY_ACCOUNTS_LIST_PATH,
+        ),
+        (
+            "product_auth.accounts.select.legacy",
+            LEGACY_ACCOUNTS_SELECT_PATH,
+        ),
+        (
+            "product_auth.accounts.recovery.legacy",
+            LEGACY_ACCOUNTS_RECOVERY_PATH,
+        ),
+        (
+            "product_auth.lifecycle.cleanup.legacy",
+            LEGACY_LIFECYCLE_CLEANUP_PATH,
+        ),
+    ];
+    let mut descriptors = LEGACY_PROTECTED_MUTATIONS
+        .iter()
+        .map(|(route_id, path)| {
+            descriptor(
+                route_id,
+                NetworkMethod::Post,
+                path,
+                protected_mutation_policy(),
+            )
+        })
+        .collect::<Vec<_>>();
+    descriptors.push(descriptor(
+        "product_auth.accounts.refresh.legacy",
+        NetworkMethod::Post,
+        LEGACY_ACCOUNTS_REFRESH_PATH,
+        accounts_refresh_policy(),
+    ));
+    descriptors.push(descriptor(
+        "product_auth.oauth.flow_status.legacy",
+        NetworkMethod::Get,
+        LEGACY_OAUTH_FLOW_STATUS_PATH,
+        flow_status_policy(),
+    ));
+    descriptors.push(descriptor(
+        "product_auth.oauth.flow_reconcile.legacy",
+        NetworkMethod::Post,
+        LEGACY_OAUTH_FLOW_RECONCILE_PATH,
+        flow_reconcile_policy(),
+    ));
+    descriptors.push(descriptor(
+        "product_auth.oauth.callback.legacy",
+        NetworkMethod::Get,
+        LEGACY_OAUTH_CALLBACK_PATH,
+        callback_policy(),
+    ));
+    descriptors.push(descriptor(
+        "product_auth.oauth.vendor.callback.legacy",
+        NetworkMethod::Get,
+        LEGACY_VENDOR_OAUTH_CALLBACK_PATH,
         callback_policy(),
     ));
     descriptors
@@ -1772,6 +1913,41 @@ mod tests {
     }
 
     #[test]
+    fn legacy_routes_keep_the_same_ingress_policy_as_default_routes() {
+        let descriptors = product_auth_route_descriptors();
+        for (default_id, legacy_id) in [
+            (OAUTH_START_ROUTE_ID, "product_auth.oauth.start.legacy"),
+            (
+                OAUTH_FLOW_STATUS_ROUTE_ID,
+                "product_auth.oauth.flow_status.legacy",
+            ),
+            (
+                OAUTH_FLOW_RECONCILE_ROUTE_ID,
+                "product_auth.oauth.flow_reconcile.legacy",
+            ),
+            (
+                VENDOR_OAUTH_CALLBACK_ROUTE_ID,
+                "product_auth.oauth.vendor.callback.legacy",
+            ),
+            (
+                MANUAL_TOKEN_SUBMIT_ROUTE_ID,
+                "product_auth.manual_token.submit.legacy",
+            ),
+        ] {
+            let default = descriptors
+                .iter()
+                .find(|descriptor| descriptor.route_id().as_str() == default_id)
+                .expect("default route descriptor");
+            let legacy = descriptors
+                .iter()
+                .find(|descriptor| descriptor.route_id().as_str() == legacy_id)
+                .expect("legacy route descriptor");
+            assert_eq!(legacy.method(), default.method());
+            assert_eq!(legacy.policy(), default.policy());
+        }
+    }
+
+    #[test]
     fn flow_reconcile_route_descriptor_locks_authenticated_no_body_policy() {
         let descriptors = product_auth_route_descriptors();
         let reconcile = descriptors
@@ -1883,11 +2059,20 @@ mod tests {
         )
     }
 
-    fn reconcile_uri(flow: &ironclaw_auth::AuthFlowRecord) -> String {
+    fn reconcile_uri_for(path_template: &str, flow: &ironclaw_auth::AuthFlowRecord) -> String {
         format!(
-            "/api/reborn/product-auth/oauth/flow/{}/reconcile?invocation_id={}",
-            flow.id, flow.scope.resource.invocation_id
+            "{}?invocation_id={}",
+            path_template.replace("{flow_id}", &flow.id.to_string()),
+            flow.scope.resource.invocation_id
         )
+    }
+
+    fn reconcile_uri(flow: &ironclaw_auth::AuthFlowRecord) -> String {
+        reconcile_uri_for(OAUTH_FLOW_RECONCILE_PATH, flow)
+    }
+
+    fn legacy_reconcile_uri(flow: &ironclaw_auth::AuthFlowRecord) -> String {
+        reconcile_uri_for(LEGACY_OAUTH_FLOW_RECONCILE_PATH, flow)
     }
 
     #[tokio::test]
@@ -1903,13 +2088,13 @@ mod tests {
             .protected
             .layer(axum::Extension(test_caller()));
 
-        for _ in 0..2 {
+        for uri in [reconcile_uri(&flow), legacy_reconcile_uri(&flow)] {
             let response = app
                 .clone()
                 .oneshot(
                     Request::builder()
                         .method(Method::POST)
-                        .uri(reconcile_uri(&flow))
+                        .uri(uri)
                         .body(Body::empty())
                         .expect("request"),
                 )

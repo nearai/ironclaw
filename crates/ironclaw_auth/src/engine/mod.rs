@@ -136,7 +136,7 @@ pub trait EngineClientCredentialsSource: Send + Sync + fmt::Debug {
 
 /// The static callback base every vendor callback hangs off:
 /// `{base}/{vendor}/callback` (AUTH-13 keeps the existing
-/// `/api/reborn/product-auth/oauth/{provider}/callback` shape).
+/// `/api/product-auth/oauth/{provider}/callback` shape).
 #[derive(Debug, Clone)]
 pub struct EngineCallbackBase {
     base: String,

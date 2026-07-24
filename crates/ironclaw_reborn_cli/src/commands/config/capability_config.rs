@@ -411,7 +411,7 @@ mod tests {
         // The redirect-URI env var the host-beta lane read is gone on the
         // unified extension model — the guidance must not teach a dead step.
         assert!(
-            !slack.contains("IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI"),
+            !slack.contains("IRONCLAW_SLACK_PERSONAL_OAUTH_REDIRECT_URI"),
             "the retired redirect-URI env var must not be advertised: {slack}"
         );
         assert_eq!(

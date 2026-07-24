@@ -2,9 +2,9 @@
 //! binary as an OS-native service.
 //!
 //! - **macOS**: launchd user agent at
-//!   `~/Library/LaunchAgents/com.ironclaw.reborn.plist`.
+//!   `~/Library/LaunchAgents/com.ironclaw.plist`.
 //! - **Linux**: systemd user unit at
-//!   `~/.config/systemd/user/ironclaw-reborn.service`.
+//!   `~/.config/systemd/user/ironclaw.service`.
 //!
 //! The installed service runs `<current_exe> serve`, restarting
 //! automatically on failure. Mirrors v1's `src/service.rs` shape with
@@ -60,9 +60,11 @@ mod systemd;
 /// install from either surface atomically replaces the other's file at
 /// this same path; do not fork these constants to "avoid collisions"
 /// without updating both sides together.
-const SERVICE_LABEL: &str = "com.ironclaw.reborn";
+const SERVICE_LABEL: &str = "com.ironclaw";
+const LEGACY_SERVICE_LABEL: &str = "com.ironclaw.reborn";
 /// See [`SERVICE_LABEL`] — same shared-identity contract, Linux side.
-const SYSTEMD_UNIT: &str = "ironclaw-reborn.service";
+const SYSTEMD_UNIT: &str = "ironclaw.service";
+const LEGACY_SYSTEMD_UNIT: &str = "ironclaw-reborn.service";
 const UNSUPPORTED_OS_MESSAGE: &str = "Service management is only supported on macOS and Linux";
 
 // ── Clap surface ────────────────────────────────────────────────
@@ -265,7 +267,7 @@ pub(crate) fn install_and_start(context: &RebornCliContext) -> Result<()> {
 
 /// The OS user's real home directory (`$HOME`), used only for the
 /// service-definition file location. Distinct from the Reborn home
-/// (`IRONCLAW_REBORN_HOME`), which holds operator config/logs and may
+/// (`IRONCLAW_HOME`), which holds operator config/logs and may
 /// point anywhere. Windows never reaches this — `ServicePlatform::detect`
 /// bails first — so only `$HOME` (POSIX) is read.
 fn home_dir() -> Result<PathBuf> {
@@ -813,7 +815,7 @@ mod tests {
     // ── Command-level file lifecycle (temp-$HOME) ──────────────────
 
     /// RAII guard pointing the OS home (`$HOME`, read by `home_dir()`)
-    /// at a tempdir, clearing IRONCLAW_REBORN_HOME so the derived
+    /// at a tempdir, clearing IRONCLAW_HOME so the derived
     /// Reborn home nests under the same tempdir (RebornHome falls back
     /// to `$HOME/.ironclaw/reborn` when unset), and clearing
     /// `$XDG_CONFIG_HOME` so `systemd::unit_path()` resolves under the
@@ -831,12 +833,12 @@ mod tests {
     impl TempHomeGuard {
         fn set(tmp: &std::path::Path) -> Self {
             let prior_home = std::env::var_os("HOME");
-            let prior_reborn_home = std::env::var_os("IRONCLAW_REBORN_HOME");
+            let prior_reborn_home = std::env::var_os("IRONCLAW_HOME");
             let prior_xdg = std::env::var_os("XDG_CONFIG_HOME");
             // SAFETY: caller holds `lock_runtime_env()` for this guard's lifetime.
             unsafe {
                 std::env::set_var("HOME", tmp);
-                std::env::remove_var("IRONCLAW_REBORN_HOME");
+                std::env::remove_var("IRONCLAW_HOME");
                 std::env::remove_var("XDG_CONFIG_HOME");
             }
             Self {
@@ -856,8 +858,8 @@ mod tests {
                     None => std::env::remove_var("HOME"),
                 }
                 match self.prior_reborn_home.take() {
-                    Some(v) => std::env::set_var("IRONCLAW_REBORN_HOME", v),
-                    None => std::env::remove_var("IRONCLAW_REBORN_HOME"),
+                    Some(v) => std::env::set_var("IRONCLAW_HOME", v),
+                    None => std::env::remove_var("IRONCLAW_HOME"),
                 }
                 match self.prior_xdg.take() {
                     Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
@@ -881,13 +883,17 @@ mod tests {
         let mut runner = SuccessfulServiceCommandRunner::default();
         let fresh_replaced = systemd::install_with_runner(&context, &invocation, &mut runner)
             .expect("install must succeed");
-        let unit_path = tmp
-            .path()
-            .join(".config/systemd/user/ironclaw-reborn.service");
+        let systemd_user_dir = tmp.path().join(".config/systemd/user");
+        let unit_path = systemd_user_dir.join(SYSTEMD_UNIT);
+        let legacy_unit_path = systemd_user_dir.join(LEGACY_SYSTEMD_UNIT);
         assert!(unit_path.exists(), "unit file must be written");
+        assert!(
+            !legacy_unit_path.exists(),
+            "fresh install must not create the legacy unit identity"
+        );
         let contents = std::fs::read_to_string(&unit_path).expect("read unit file");
         assert!(contents.contains("ExecStart="));
-        assert!(contents.contains("IRONCLAW_REBORN_HOME="));
+        assert!(contents.contains("IRONCLAW_HOME="));
         let reborn_home = context.boot_config().home().path().to_path_buf();
         let expected_working_directory = reborn_home.join("workspace");
         assert!(
@@ -954,13 +960,11 @@ mod tests {
 
         launchd::install_with_runner(&context, &invocation, &mut runner)
             .expect("install must succeed");
-        let plist_path = tmp
-            .path()
-            .join("Library/LaunchAgents/com.ironclaw.reborn.plist");
+        let plist_path = tmp.path().join("Library/LaunchAgents/com.ironclaw.plist");
         assert!(plist_path.exists(), "plist file must be written");
         let contents = std::fs::read_to_string(&plist_path).expect("read plist file");
         assert!(contents.contains(SERVICE_LABEL));
-        assert!(contents.contains("<key>IRONCLAW_REBORN_HOME</key>"));
+        assert!(contents.contains("<key>IRONCLAW_HOME</key>"));
         let reborn_home = context.boot_config().home().path().to_path_buf();
         let expected_working_directory = reborn_home.join("workspace");
         assert!(

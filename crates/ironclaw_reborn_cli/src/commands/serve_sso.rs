@@ -25,7 +25,7 @@ use ironclaw_webui::{
 };
 use secrecy::SecretString;
 
-const WEBUI_BASE_URL_ENV: &str = "IRONCLAW_REBORN_WEBUI_BASE_URL";
+const WEBUI_BASE_URL_ENV: &str = "IRONCLAW_WEBUI_BASE_URL";
 
 /// Resolved SSO startup config: the providers to mount plus the public
 /// base URL their callback URLs are built from. Constructed by
@@ -62,7 +62,7 @@ pub(crate) fn sso_startup_config_from_env(
     reject_cleartext_oauth(&base_url, listen_addr)?;
 
     let allowed_email_domains = parse_allowed_email_domains(
-        non_empty_env("IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS")
+        non_empty_env("IRONCLAW_WEBUI_ALLOWED_EMAIL_DOMAINS")
             .as_deref()
             .unwrap_or_default(),
     );
@@ -137,7 +137,7 @@ fn require_admission_allowlist(allowed_email_domains: &[String]) -> anyhow::Resu
     if allowed_email_domains.is_empty() {
         anyhow::bail!(
             "WebChat v2 SSO providers are configured but \
-             IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS is empty. Without an \
+             IRONCLAW_WEBUI_ALLOWED_EMAIL_DOMAINS is empty. Without an \
              allowlist, any Google/GitHub account that completes login would be \
              admitted (open registration). Set it to a comma-separated list of \
              allowed verified-email domains (e.g. example.com,team.example.com)."
@@ -154,7 +154,7 @@ fn reject_cleartext_oauth(base_url: &str, listen_addr: SocketAddr) -> anyhow::Re
         anyhow::bail!(
             "hosted WebUI OAuth base URL `{base_url}` uses http:// on a non-loopback interface, \
              which would transmit OAuth authorization codes in cleartext. Set \
-             IRONCLAW_REBORN_WEBUI_BASE_URL to an https:// URL."
+             IRONCLAW_WEBUI_BASE_URL to an https:// URL."
         );
     }
     Ok(())
@@ -163,7 +163,7 @@ fn reject_cleartext_oauth(base_url: &str, listen_addr: SocketAddr) -> anyhow::Re
 /// Whether `base_url` uses the cleartext `http` scheme. URL schemes are
 /// case-insensitive (RFC 3986 §3.1), so `HTTP://` and `Http://` are
 /// cleartext too. A literal `starts_with("http://")` check would let
-/// `IRONCLAW_REBORN_WEBUI_BASE_URL=HTTP://example.com` slip past the
+/// `IRONCLAW_WEBUI_BASE_URL=HTTP://example.com` slip past the
 /// non-loopback guard while still building a cleartext callback URL —
 /// comparing the scheme case-insensitively closes that bypass.
 pub(crate) fn is_cleartext_http_scheme(base_url: &str) -> bool {
@@ -173,17 +173,17 @@ pub(crate) fn is_cleartext_http_scheme(base_url: &str) -> bool {
 }
 
 /// Collect the configured OAuth providers from env. A provider is
-/// opted in by setting its `IRONCLAW_REBORN_WEBUI_*_CLIENT_ID`. The
+/// opted in by setting its `IRONCLAW_WEBUI_*_CLIENT_ID`. The
 /// matching `*_CLIENT_SECRET` is then REQUIRED: opting a provider in
 /// without its secret is a misconfiguration, not an optional feature —
 /// registering it would surface a login button whose code exchange
 /// always fails at the provider — so it fails startup loudly rather than
 /// silently skipping with a buried log line.
 ///
-/// These WebChat-login vars live in the `IRONCLAW_REBORN_WEBUI_*`
-/// namespace — the same one as `IRONCLAW_REBORN_WEBUI_TOKEN` /
-/// `IRONCLAW_REBORN_WEBUI_USER_ID` — deliberately separate from the
-/// bare `GOOGLE_CLIENT_ID` / `IRONCLAW_REBORN_GOOGLE_*` vars that the
+/// These WebChat-login vars live in the `IRONCLAW_WEBUI_*`
+/// namespace — the same one as `IRONCLAW_WEBUI_TOKEN` /
+/// `IRONCLAW_WEBUI_USER_ID` — deliberately separate from the
+/// bare `GOOGLE_CLIENT_ID` / `IRONCLAW_GOOGLE_*` vars that the
 /// product-auth credential-connection flow reads. Sharing the bare
 /// names would couple two unrelated surfaces: setting `GOOGLE_CLIENT_ID`
 /// just to enable login would also activate the product-auth Google
@@ -200,29 +200,29 @@ fn oauth_providers_from_env() -> anyhow::Result<Vec<Arc<dyn OAuthProvider>>> {
     // the provider (e.g. `github.com`) where the default times out.
     let http_timeout = oauth_http_timeout_from_env();
 
-    if let Some(client_id) = non_empty_env("IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID") {
-        let client_secret = non_empty_env("IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET")
-            .ok_or_else(|| {
+    if let Some(client_id) = non_empty_env("IRONCLAW_WEBUI_GOOGLE_CLIENT_ID") {
+        let client_secret =
+            non_empty_env("IRONCLAW_WEBUI_GOOGLE_CLIENT_SECRET").ok_or_else(|| {
                 anyhow!(
-                    "IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID is set but \
-                     IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET is missing"
+                    "IRONCLAW_WEBUI_GOOGLE_CLIENT_ID is set but \
+                     IRONCLAW_WEBUI_GOOGLE_CLIENT_SECRET is missing"
                 )
             })?;
-        let allowed_hd = non_empty_env("IRONCLAW_REBORN_WEBUI_GOOGLE_ALLOWED_HD");
+        let allowed_hd = non_empty_env("IRONCLAW_WEBUI_GOOGLE_ALLOWED_HD");
         // `allowed_hd` is an additional Google-side restriction (the ID
         // token's `hd` claim must match a Workspace domain). It is
         // independent of — and narrower than — the cross-provider
         // verified-email-domain allowlist the host `UserDirectory`
         // enforces. When unset, Google login is still gated by
-        // `IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS` (admission cannot
+        // `IRONCLAW_WEBUI_ALLOWED_EMAIL_DOMAINS` (admission cannot
         // be open), but consumer Gmail accounts in an allowed email domain
         // are not additionally excluded; warn so operators can opt into
         // the stricter Workspace-only check.
         if allowed_hd.is_none() {
             tracing::warn!(
                 target = "ironclaw::reborn::cli::serve",
-                "IRONCLAW_REBORN_WEBUI_GOOGLE_ALLOWED_HD is unset — Google login is gated \
-                 only by IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS, not by a Workspace \
+                "IRONCLAW_WEBUI_GOOGLE_ALLOWED_HD is unset — Google login is gated \
+                 only by IRONCLAW_WEBUI_ALLOWED_EMAIL_DOMAINS, not by a Workspace \
                  hosted domain; set it to also require a specific hd claim",
             );
         }
@@ -244,12 +244,12 @@ fn oauth_providers_from_env() -> anyhow::Result<Vec<Arc<dyn OAuthProvider>>> {
         providers.push(Arc::new(provider));
     }
 
-    if let Some(client_id) = non_empty_env("IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_ID") {
-        let client_secret = non_empty_env("IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_SECRET")
-            .ok_or_else(|| {
+    if let Some(client_id) = non_empty_env("IRONCLAW_WEBUI_GITHUB_CLIENT_ID") {
+        let client_secret =
+            non_empty_env("IRONCLAW_WEBUI_GITHUB_CLIENT_SECRET").ok_or_else(|| {
                 anyhow!(
-                    "IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_ID is set but \
-                     IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_SECRET is missing"
+                    "IRONCLAW_WEBUI_GITHUB_CLIENT_ID is set but \
+                     IRONCLAW_WEBUI_GITHUB_CLIENT_SECRET is missing"
                 )
             })?;
         log_provider_config("github", &client_id, client_secret.len());
@@ -283,7 +283,7 @@ fn log_provider_config(provider: &str, client_id: &str, client_secret_len: usize
 /// **trimmed** value otherwise.
 ///
 /// Trimming is the fix for a silent OAuth failure: an
-/// `IRONCLAW_REBORN_WEBUI_*_CLIENT_SECRET` pasted into a deployment
+/// `IRONCLAW_WEBUI_*_CLIENT_SECRET` pasted into a deployment
 /// dashboard with a trailing newline / surrounding space used to be
 /// forwarded to the provider verbatim. The `client_secret` is the one
 /// credential a provider checks *only* at the token endpoint (never at
@@ -317,14 +317,14 @@ fn non_empty_env(name: &str) -> Option<String> {
 /// non-positive or unparseable value is ignored with a warning rather
 /// than failing startup — a timeout typo should not take down `serve`.
 fn oauth_http_timeout_from_env() -> Option<Duration> {
-    let raw = non_empty_env("IRONCLAW_REBORN_WEBUI_OAUTH_HTTP_TIMEOUT_SECS")?;
+    let raw = non_empty_env("IRONCLAW_WEBUI_OAUTH_HTTP_TIMEOUT_SECS")?;
     match raw.trim().parse::<u64>() {
         Ok(secs) if secs > 0 => Some(Duration::from_secs(secs)),
         _ => {
             tracing::warn!(
                 target = "ironclaw::reborn::cli::serve",
                 value = %raw,
-                "IRONCLAW_REBORN_WEBUI_OAUTH_HTTP_TIMEOUT_SECS is not a positive integer; \
+                "IRONCLAW_WEBUI_OAUTH_HTTP_TIMEOUT_SECS is not a positive integer; \
                  using the provider default timeout",
             );
             None
@@ -431,13 +431,13 @@ mod tests {
     }
 
     const SSO_ENV_VARS: &[&str] = &[
-        "IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID",
-        "IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET",
-        "IRONCLAW_REBORN_WEBUI_GOOGLE_ALLOWED_HD",
-        "IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_ID",
-        "IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_SECRET",
+        "IRONCLAW_WEBUI_GOOGLE_CLIENT_ID",
+        "IRONCLAW_WEBUI_GOOGLE_CLIENT_SECRET",
+        "IRONCLAW_WEBUI_GOOGLE_ALLOWED_HD",
+        "IRONCLAW_WEBUI_GITHUB_CLIENT_ID",
+        "IRONCLAW_WEBUI_GITHUB_CLIENT_SECRET",
         WEBUI_BASE_URL_ENV,
-        "IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS",
+        "IRONCLAW_WEBUI_ALLOWED_EMAIL_DOMAINS",
     ];
 
     fn clear_sso_env() {
@@ -460,11 +460,8 @@ mod tests {
         clear_sso_env();
         // SAFETY: serialized by the shared crate process-env lock; cleaned up before the guard drops.
         unsafe {
-            std::env::set_var("IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID", "client-id");
-            std::env::set_var(
-                "IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET",
-                "client-secret",
-            );
+            std::env::set_var("IRONCLAW_WEBUI_GOOGLE_CLIENT_ID", "client-id");
+            std::env::set_var("IRONCLAW_WEBUI_GOOGLE_CLIENT_SECRET", "client-secret");
         }
 
         // Allowlist unset → fail closed (no config mounted).
@@ -477,7 +474,7 @@ mod tests {
         // Blank allowlist → same fail-closed result.
         // SAFETY: serialized by the shared crate process-env lock.
         unsafe {
-            std::env::set_var("IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS", "  , ,");
+            std::env::set_var("IRONCLAW_WEBUI_ALLOWED_EMAIL_DOMAINS", "  , ,");
         }
         assert!(
             sso_startup_config_from_env(addr("127.0.0.1:3000")).is_err(),
@@ -487,7 +484,7 @@ mod tests {
         // Supplying the allowlist makes the same caller succeed.
         // SAFETY: serialized by the shared crate process-env lock.
         unsafe {
-            std::env::set_var("IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS", "example.com");
+            std::env::set_var("IRONCLAW_WEBUI_ALLOWED_EMAIL_DOMAINS", "example.com");
         }
         let ok = sso_startup_config_from_env(addr("127.0.0.1:3000"))
             .expect("a configured provider WITH an allowlist must start")
@@ -509,8 +506,8 @@ mod tests {
         let _guard = crate::runtime::test_env::lock_runtime_env();
 
         for id_var in [
-            "IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID",
-            "IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_ID",
+            "IRONCLAW_WEBUI_GOOGLE_CLIENT_ID",
+            "IRONCLAW_WEBUI_GITHUB_CLIENT_ID",
         ] {
             clear_sso_env();
             // SAFETY: serialized by the shared crate process-env lock; cleared before/after.
@@ -586,12 +583,9 @@ mod tests {
         clear_sso_env();
         // SAFETY: serialized by the shared crate process-env lock; cleaned up before the guard drops.
         unsafe {
-            std::env::set_var("IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID", "client-id");
-            std::env::set_var(
-                "IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET",
-                "client-secret",
-            );
-            std::env::set_var("IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS", "example.com");
+            std::env::set_var("IRONCLAW_WEBUI_GOOGLE_CLIENT_ID", "client-id");
+            std::env::set_var("IRONCLAW_WEBUI_GOOGLE_CLIENT_SECRET", "client-secret");
+            std::env::set_var("IRONCLAW_WEBUI_ALLOWED_EMAIL_DOMAINS", "example.com");
             std::env::set_var(WEBUI_BASE_URL_ENV, " https://configured.example/ ");
         }
 
@@ -634,12 +628,12 @@ mod tests {
         // SAFETY: serialized by the shared crate process-env lock; cleared before/after.
         unsafe {
             std::env::set_var(
-                "IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET",
+                "IRONCLAW_WEBUI_GOOGLE_CLIENT_SECRET",
                 "  GOCSPX-trailing-newline\n",
             );
         }
         assert_eq!(
-            non_empty_env("IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET").as_deref(),
+            non_empty_env("IRONCLAW_WEBUI_GOOGLE_CLIENT_SECRET").as_deref(),
             Some("GOCSPX-trailing-newline"),
             "surrounding whitespace (a trailing newline from a pasted secret) must be trimmed",
         );
@@ -647,10 +641,10 @@ mod tests {
         // Whitespace-only stays None — it is not a configured value.
         // SAFETY: serialized by the shared crate process-env lock.
         unsafe {
-            std::env::set_var("IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET", "   \n\t");
+            std::env::set_var("IRONCLAW_WEBUI_GOOGLE_CLIENT_SECRET", "   \n\t");
         }
         assert_eq!(
-            non_empty_env("IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET"),
+            non_empty_env("IRONCLAW_WEBUI_GOOGLE_CLIENT_SECRET"),
             None,
             "a whitespace-only value is treated as unset",
         );
@@ -669,12 +663,9 @@ mod tests {
         clear_sso_env();
         // SAFETY: serialized by the shared crate process-env lock; cleared before/after.
         unsafe {
-            std::env::set_var("IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID", "  client-id\n");
-            std::env::set_var(
-                "IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET",
-                " client-secret \n",
-            );
-            std::env::set_var("IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS", "example.com");
+            std::env::set_var("IRONCLAW_WEBUI_GOOGLE_CLIENT_ID", "  client-id\n");
+            std::env::set_var("IRONCLAW_WEBUI_GOOGLE_CLIENT_SECRET", " client-secret \n");
+            std::env::set_var("IRONCLAW_WEBUI_ALLOWED_EMAIL_DOMAINS", "example.com");
         }
 
         let resolved = sso_startup_config_from_env(addr("127.0.0.1:3000"))

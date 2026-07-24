@@ -52,12 +52,13 @@ fn setup_fake_entrypoint() -> FakeEntrypoint {
     std::fs::create_dir_all(&bin_dir).expect("bin dir");
     write_executable(
         &bin_dir.join("ironclaw"),
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$IRONCLAW_REBORN_TEST_ARGS_FILE\"\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$IRONCLAW_TEST_ARGS_FILE\"\n",
     );
     write_executable(
         &bin_dir.join("cp"),
         "#!/bin/sh\nprintf '%s\\n' 'api_version = \"ironclaw.runtime/v1\"' > \"$2\"\n",
     );
+    install_fake_realpath(&bin_dir);
 
     FakeEntrypoint {
         _temp: temp,
@@ -78,12 +79,13 @@ fn setup_fake_entrypoint_recording_cp() -> FakeEntrypoint {
     std::fs::create_dir_all(&bin_dir).expect("bin dir");
     write_executable(
         &bin_dir.join("ironclaw"),
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$IRONCLAW_REBORN_TEST_ARGS_FILE\"\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$IRONCLAW_TEST_ARGS_FILE\"\n",
     );
     write_executable(
         &bin_dir.join("cp"),
         "#!/bin/sh\nprintf '%s\\n[storage]\\n' \"$1\" > \"$2\"\n",
     );
+    install_fake_realpath(&bin_dir);
 
     FakeEntrypoint {
         _temp: temp,
@@ -102,6 +104,14 @@ fn write_executable(path: &std::path::Path, content: &str) {
         .permissions();
     permissions.set_mode(0o755);
     std::fs::set_permissions(path, permissions).expect("executable permissions");
+}
+
+#[cfg(unix)]
+fn install_fake_realpath(bin_dir: &std::path::Path) {
+    write_executable(
+        &bin_dir.join("realpath"),
+        "#!/bin/sh\n[ \"${1:-}\" != \"-e\" ] || shift\n[ \"${1:-}\" != \"--\" ] || shift\nprintf '%s\\n' \"$1\"\n",
+    );
 }
 
 #[test]
@@ -151,8 +161,9 @@ fn reborn_dockerfile_keeps_bundled_skills_in_build_context() {
 }
 
 #[test]
-fn reborn_dockerfile_uses_feature_matched_cache_and_loopback_default() {
+fn reborn_dockerfile_uses_feature_matched_cache_without_baking_serve_host() {
     let dockerfile = read_repo_file("Dockerfile");
+    let entrypoint = read_repo_file("docker/reborn/entrypoint.sh");
 
     assert!(
         dockerfile.contains(
@@ -161,8 +172,13 @@ fn reborn_dockerfile_uses_feature_matched_cache_and_loopback_default() {
         "cargo chef cook must target the Reborn CLI package"
     );
     assert!(
-        dockerfile.contains("IRONCLAW_REBORN_SERVE_HOST=127.0.0.1"),
-        "image default serve host must stay loopback; Railway should override to 0.0.0.0"
+        !dockerfile.contains("IRONCLAW_SERVE_HOST="),
+        "the image must not make the local loopback default look explicit and block Railway auto-detection"
+    );
+    assert!(
+        entrypoint.contains("elif railway_runtime_detected; then\n  host=\"0.0.0.0\"")
+            && entrypoint.contains("else\n  host=\"127.0.0.1\"\nfi"),
+        "the entrypoint must own platform-sensitive serve-host defaults"
     );
     assert!(
         dockerfile.contains("config.hosted-single-tenant.toml"),
@@ -290,16 +306,56 @@ fn reborn_deployment_docs_keep_webui_sso_separate_from_product_auth() {
 #[cfg(unix)]
 fn reborn_entrypoint_copies_config_and_builds_default_serve_args() {
     let fake = setup_fake_entrypoint();
+    let ignored_legacy_home = fake.home_dir.with_extension("legacy");
+    let output = Command::new("sh")
+        .arg(repo_file("docker/reborn/entrypoint.sh"))
+        .env_clear()
+        .env("PATH", fake.path_env())
+        .env("IRONCLAW_HOME", &fake.home_dir)
+        .env("IRONCLAW_REBORN_HOME", &ignored_legacy_home)
+        .env("IRONCLAW_DEFAULT_CONFIG", &fake.default_config)
+        .env("IRONCLAW_SERVE_HOST", "0.0.0.0")
+        .env("IRONCLAW_REBORN_SERVE_HOST", "127.0.0.1")
+        .env("PORT", "4321")
+        .env("IRONCLAW_CONFIRM_HOST_ACCESS", "true")
+        .env("IRONCLAW_TEST_ARGS_FILE", &fake.args_file)
+        .output()
+        .expect("entrypoint should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(fake.home_dir.join("config.toml")).expect("copied config"),
+        "api_version = \"ironclaw.runtime/v1\"\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&fake.args_file).expect("captured args"),
+        "serve\n--host\n0.0.0.0\n--port\n4321\n--confirm-host-access\n"
+    );
+    assert!(
+        !ignored_legacy_home.exists(),
+        "neutral deployment variables must win over legacy aliases"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn reborn_entrypoint_accepts_legacy_deployment_variable_aliases() {
+    let fake = setup_fake_entrypoint();
     let output = Command::new("sh")
         .arg(repo_file("docker/reborn/entrypoint.sh"))
         .env_clear()
         .env("PATH", fake.path_env())
         .env("IRONCLAW_REBORN_HOME", &fake.home_dir)
         .env("IRONCLAW_REBORN_DEFAULT_CONFIG", &fake.default_config)
+        .env("IRONCLAW_REBORN_PROFILE", "local-dev")
         .env("IRONCLAW_REBORN_SERVE_HOST", "0.0.0.0")
-        .env("PORT", "4321")
+        .env("IRONCLAW_REBORN_SERVE_PORT", "4321")
         .env("IRONCLAW_REBORN_CONFIRM_HOST_ACCESS", "true")
-        .env("IRONCLAW_REBORN_TEST_ARGS_FILE", &fake.args_file)
+        .env("IRONCLAW_TEST_ARGS_FILE", &fake.args_file)
         .output()
         .expect("entrypoint should run");
 
@@ -320,8 +376,67 @@ fn reborn_entrypoint_copies_config_and_builds_default_serve_args() {
 
 #[test]
 #[cfg(unix)]
+fn reborn_entrypoint_preserves_legacy_home_for_image_downgrade() {
+    // A deployment that keeps the retired variable and home path must be able
+    // to run this image without moving state. That leaves the same environment
+    // and path consumable by the previous image during a rollback.
+    let fake = setup_fake_entrypoint();
+    let legacy_home = fake._temp.path().join("legacy-home");
+    let user_home = fake._temp.path().join("user-home");
+    let recorded_home = fake._temp.path().join("recorded-home.txt");
+    let state_path = legacy_home.join("state.db");
+    std::fs::create_dir_all(&legacy_home).expect("legacy home");
+    std::fs::write(
+        legacy_home.join("config.toml"),
+        "api_version = \"legacy.volume/v1\"\n",
+    )
+    .expect("legacy config");
+    std::fs::write(&state_path, b"pre-upgrade-state").expect("legacy state");
+    write_executable(
+        &fake.bin_dir.join("ironclaw"),
+        "#!/bin/sh\nprintf '%s\\n' \"$IRONCLAW_HOME\" > \"$IRONCLAW_TEST_HOME_FILE\"\nprintf '%s\\n' \"$@\" > \"$IRONCLAW_TEST_ARGS_FILE\"\n",
+    );
+
+    let output = Command::new("sh")
+        .arg(repo_file("docker/reborn/entrypoint.sh"))
+        .args(["serve", "--help"])
+        .env_clear()
+        .env("PATH", fake.path_env())
+        .env("HOME", &user_home)
+        .env("IRONCLAW_REBORN_HOME", &legacy_home)
+        .env("IRONCLAW_REBORN_DEFAULT_CONFIG", &fake.default_config)
+        .env("IRONCLAW_TEST_HOME_FILE", &recorded_home)
+        .env("IRONCLAW_TEST_ARGS_FILE", &fake.args_file)
+        .output()
+        .expect("entrypoint should run with the rollback-compatible home");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&recorded_home).expect("recorded home"),
+        format!("{}\n", legacy_home.display())
+    );
+    assert_eq!(
+        std::fs::read_to_string(legacy_home.join("config.toml")).expect("legacy config"),
+        "api_version = \"legacy.volume/v1\"\n"
+    );
+    assert_eq!(
+        std::fs::read(&state_path).expect("legacy state"),
+        b"pre-upgrade-state"
+    );
+    assert!(
+        !user_home.join(".ironclaw").exists(),
+        "the canonical default home must not be created beside rollback-compatible state"
+    );
+}
+
+#[test]
+#[cfg(unix)]
 fn reborn_entrypoint_binds_all_interfaces_on_railway_without_explicit_host() {
-    // Regression: with no explicit IRONCLAW_REBORN_SERVE_HOST, a Railway
+    // Regression: with no explicit IRONCLAW_SERVE_HOST, a Railway
     // deployment (detected via RAILWAY_* markers) must bind 0.0.0.0 so the
     // platform health check / ingress can reach the container. A loopback bind
     // fails the deploy — the class the checked-in Railway config previously hit.
@@ -330,12 +445,12 @@ fn reborn_entrypoint_binds_all_interfaces_on_railway_without_explicit_host() {
         .arg(repo_file("docker/reborn/entrypoint.sh"))
         .env_clear()
         .env("PATH", fake.path_env())
-        .env("IRONCLAW_REBORN_HOME", &fake.home_dir)
-        .env("IRONCLAW_REBORN_DEFAULT_CONFIG", &fake.default_config)
+        .env("IRONCLAW_HOME", &fake.home_dir)
+        .env("IRONCLAW_DEFAULT_CONFIG", &fake.default_config)
         .env("RAILWAY_ENVIRONMENT", "production")
-        .env("IRONCLAW_REBORN_ALLOW_EPHEMERAL_RAILWAY", "true")
+        .env("IRONCLAW_ALLOW_EPHEMERAL_RAILWAY", "true")
         .env("PORT", "8080")
-        .env("IRONCLAW_REBORN_TEST_ARGS_FILE", &fake.args_file)
+        .env("IRONCLAW_TEST_ARGS_FILE", &fake.args_file)
         .output()
         .expect("entrypoint should run");
 
@@ -361,10 +476,10 @@ fn reborn_entrypoint_keeps_loopback_default_off_railway() {
         .arg(repo_file("docker/reborn/entrypoint.sh"))
         .env_clear()
         .env("PATH", fake.path_env())
-        .env("IRONCLAW_REBORN_HOME", &fake.home_dir)
-        .env("IRONCLAW_REBORN_DEFAULT_CONFIG", &fake.default_config)
+        .env("IRONCLAW_HOME", &fake.home_dir)
+        .env("IRONCLAW_DEFAULT_CONFIG", &fake.default_config)
         .env("PORT", "8080")
-        .env("IRONCLAW_REBORN_TEST_ARGS_FILE", &fake.args_file)
+        .env("IRONCLAW_TEST_ARGS_FILE", &fake.args_file)
         .output()
         .expect("entrypoint should run");
 
@@ -387,10 +502,10 @@ fn reborn_entrypoint_selects_hosted_single_tenant_seed_config() {
         .arg(repo_file("docker/reborn/entrypoint.sh"))
         .env_clear()
         .env("PATH", fake.path_env())
-        .env("IRONCLAW_REBORN_HOME", &fake.home_dir)
-        .env("IRONCLAW_REBORN_PROFILE", "hosted-single-tenant")
-        .env("IRONCLAW_REBORN_ALLOW_EPHEMERAL_RAILWAY", "true")
-        .env("IRONCLAW_REBORN_TEST_ARGS_FILE", &fake.args_file)
+        .env("IRONCLAW_HOME", &fake.home_dir)
+        .env("IRONCLAW_PROFILE", "hosted-single-tenant")
+        .env("IRONCLAW_ALLOW_EPHEMERAL_RAILWAY", "true")
+        .env("IRONCLAW_TEST_ARGS_FILE", &fake.args_file)
         .output()
         .expect("entrypoint should run");
 
@@ -413,10 +528,10 @@ fn reborn_entrypoint_selects_hosted_single_tenant_volume_seed_config() {
         .arg(repo_file("docker/reborn/entrypoint.sh"))
         .env_clear()
         .env("PATH", fake.path_env())
-        .env("IRONCLAW_REBORN_HOME", &fake.home_dir)
-        .env("IRONCLAW_REBORN_PROFILE", "hosted-single-tenant-volume")
-        .env("IRONCLAW_REBORN_ALLOW_EPHEMERAL_RAILWAY", "true")
-        .env("IRONCLAW_REBORN_TEST_ARGS_FILE", &fake.args_file)
+        .env("IRONCLAW_HOME", &fake.home_dir)
+        .env("IRONCLAW_PROFILE", "hosted-single-tenant-volume")
+        .env("IRONCLAW_ALLOW_EPHEMERAL_RAILWAY", "true")
+        .env("IRONCLAW_TEST_ARGS_FILE", &fake.args_file)
         .output()
         .expect("entrypoint should run");
 
@@ -440,9 +555,9 @@ fn reborn_entrypoint_passes_explicit_args_through() {
         .args(["serve", "--help"])
         .env_clear()
         .env("PATH", fake.path_env())
-        .env("IRONCLAW_REBORN_HOME", &fake.home_dir)
-        .env("IRONCLAW_REBORN_DEFAULT_CONFIG", &fake.default_config)
-        .env("IRONCLAW_REBORN_TEST_ARGS_FILE", &fake.args_file)
+        .env("IRONCLAW_HOME", &fake.home_dir)
+        .env("IRONCLAW_DEFAULT_CONFIG", &fake.default_config)
+        .env("IRONCLAW_TEST_ARGS_FILE", &fake.args_file)
         .output()
         .expect("entrypoint should run");
 
@@ -463,20 +578,48 @@ fn reborn_entrypoint_resolves_known_env_placeholders_in_explicit_args() {
     let fake = setup_fake_entrypoint();
     let output = Command::new("sh")
         .arg(repo_file("docker/reborn/entrypoint.sh"))
+        .args(["serve", "--host", "$IRONCLAW_SERVE_HOST", "--port", "$PORT"])
+        .env_clear()
+        .env("PATH", fake.path_env())
+        .env("IRONCLAW_HOME", &fake.home_dir)
+        .env("IRONCLAW_DEFAULT_CONFIG", &fake.default_config)
+        .env("IRONCLAW_SERVE_HOST", "0.0.0.0")
+        .env("PORT", "4321")
+        .env("IRONCLAW_TEST_ARGS_FILE", &fake.args_file)
+        .output()
+        .expect("entrypoint should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&fake.args_file).expect("captured args"),
+        "serve\n--host\n0.0.0.0\n--port\n4321\n"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn reborn_entrypoint_resolves_legacy_env_placeholders_in_explicit_args() {
+    let fake = setup_fake_entrypoint();
+    let output = Command::new("sh")
+        .arg(repo_file("docker/reborn/entrypoint.sh"))
         .args([
             "serve",
             "--host",
             "$IRONCLAW_REBORN_SERVE_HOST",
             "--port",
-            "$PORT",
+            "${IRONCLAW_REBORN_SERVE_PORT}",
         ])
         .env_clear()
         .env("PATH", fake.path_env())
         .env("IRONCLAW_REBORN_HOME", &fake.home_dir)
         .env("IRONCLAW_REBORN_DEFAULT_CONFIG", &fake.default_config)
         .env("IRONCLAW_REBORN_SERVE_HOST", "0.0.0.0")
-        .env("PORT", "4321")
-        .env("IRONCLAW_REBORN_TEST_ARGS_FILE", &fake.args_file)
+        .env("IRONCLAW_REBORN_SERVE_PORT", "4321")
+        .env("IRONCLAW_TEST_ARGS_FILE", &fake.args_file)
         .output()
         .expect("entrypoint should run");
 
@@ -507,9 +650,9 @@ fn reborn_entrypoint_preserves_existing_config() {
         .args(["serve", "--help"])
         .env_clear()
         .env("PATH", fake.path_env())
-        .env("IRONCLAW_REBORN_HOME", &fake.home_dir)
-        .env("IRONCLAW_REBORN_DEFAULT_CONFIG", &fake.default_config)
-        .env("IRONCLAW_REBORN_TEST_ARGS_FILE", &fake.args_file)
+        .env("IRONCLAW_HOME", &fake.home_dir)
+        .env("IRONCLAW_DEFAULT_CONFIG", &fake.default_config)
+        .env("IRONCLAW_TEST_ARGS_FILE", &fake.args_file)
         .output()
         .expect("entrypoint should run");
 
@@ -538,8 +681,8 @@ profile = "hosted-single-tenant-volume"
 
 [slack]
 enabled = false
-signing_secret_env = "IRONCLAW_REBORN_SLACK_SIGNING_SECRET"
-bot_token_env = "IRONCLAW_REBORN_SLACK_BOT_TOKEN"
+signing_secret_env = "IRONCLAW_SLACK_SIGNING_SECRET"
+bot_token_env = "IRONCLAW_SLACK_BOT_TOKEN"
 "#,
     )
     .expect("existing config");
@@ -548,10 +691,10 @@ bot_token_env = "IRONCLAW_REBORN_SLACK_BOT_TOKEN"
         .arg(repo_file("docker/reborn/entrypoint.sh"))
         .env_clear()
         .env("PATH", fake.path_env())
-        .env("IRONCLAW_REBORN_HOME", &fake.home_dir)
-        .env("IRONCLAW_REBORN_PROFILE", "hosted-single-tenant-volume")
-        .env("IRONCLAW_REBORN_ALLOW_EPHEMERAL_RAILWAY", "true")
-        .env("IRONCLAW_REBORN_TEST_ARGS_FILE", &fake.args_file)
+        .env("IRONCLAW_HOME", &fake.home_dir)
+        .env("IRONCLAW_PROFILE", "hosted-single-tenant-volume")
+        .env("IRONCLAW_ALLOW_EPHEMERAL_RAILWAY", "true")
+        .env("IRONCLAW_TEST_ARGS_FILE", &fake.args_file)
         .output()
         .expect("entrypoint should run");
 
@@ -580,16 +723,45 @@ fn reborn_entrypoint_rejects_default_config_outside_opt_ironclaw() {
         .arg(repo_file("docker/reborn/entrypoint.sh"))
         .env_clear()
         .env("PATH", fake.path_env())
-        .env("IRONCLAW_REBORN_HOME", &fake.home_dir)
-        .env("IRONCLAW_REBORN_DEFAULT_CONFIG", "/etc/passwd")
-        .env("IRONCLAW_REBORN_TEST_ARGS_FILE", &fake.args_file)
+        .env("IRONCLAW_HOME", &fake.home_dir)
+        .env("IRONCLAW_DEFAULT_CONFIG", "/etc/passwd")
+        .env("IRONCLAW_TEST_ARGS_FILE", &fake.args_file)
         .output()
         .expect("entrypoint should run");
 
     assert!(!output.status.success(), "entrypoint should reject path");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("IRONCLAW_REBORN_DEFAULT_CONFIG must be under /opt/ironclaw"),
+        stderr.contains("IRONCLAW_DEFAULT_CONFIG must be under /opt/ironclaw"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn reborn_entrypoint_rejects_default_config_that_resolves_outside_opt_ironclaw() {
+    let fake = setup_fake_entrypoint();
+    write_executable(
+        &fake.bin_dir.join("realpath"),
+        "#!/bin/sh\nprintf '%s\\n' '/etc/passwd'\n",
+    );
+    let output = Command::new("sh")
+        .arg(repo_file("docker/reborn/entrypoint.sh"))
+        .env_clear()
+        .env("PATH", fake.path_env())
+        .env("IRONCLAW_HOME", &fake.home_dir)
+        .env(
+            "IRONCLAW_DEFAULT_CONFIG",
+            "/opt/ironclaw/reborn/config.toml",
+        )
+        .env("IRONCLAW_TEST_ARGS_FILE", &fake.args_file)
+        .output()
+        .expect("entrypoint should run");
+
+    assert!(!output.status.success(), "entrypoint should reject path");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("IRONCLAW_DEFAULT_CONFIG must resolve under /opt/ironclaw"),
         "stderr: {stderr}"
     );
 }

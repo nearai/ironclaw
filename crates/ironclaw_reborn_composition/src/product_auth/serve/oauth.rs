@@ -325,7 +325,7 @@ pub(super) async fn oauth_callback_handler(
 }
 
 /// One OAuth callback handler for every vendor at the static
-/// `/api/reborn/product-auth/oauth/{provider}/callback` path (AUTH-13).
+/// `/api/product-auth/oauth/{provider}/callback` path (AUTH-13).
 ///
 /// Safety-preserving invariants (identical for every vendor): the raw `state`
 /// is hashed once and claimed through `AuthFlowManager` (CSRF/state-hash +

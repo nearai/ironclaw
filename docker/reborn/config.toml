@@ -24,8 +24,8 @@ poll_interval_ms = 200
 regex_activation_enabled = true
 
 [webui]
-env_token_var = "IRONCLAW_REBORN_WEBUI_TOKEN"
-env_user_id_var = "IRONCLAW_REBORN_WEBUI_USER_ID"
+env_token_var = "IRONCLAW_WEBUI_TOKEN"
+env_user_id_var = "IRONCLAW_WEBUI_USER_ID"
 
 # No [llm.default] slot shipped (intentional):
 # - config.toml is sole source of truth for [llm.default], set only explicitly

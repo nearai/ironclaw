@@ -5,7 +5,9 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-/// Environment variable that selects the standalone Reborn state root.
+/// Default environment variable that selects the IronClaw state root.
+pub const IRONCLAW_HOME_ENV: &str = "IRONCLAW_HOME";
+/// Legacy environment variable retained for compatibility.
 pub const REBORN_HOME_ENV: &str = "IRONCLAW_REBORN_HOME";
 
 const V1_BASE_DIR_ENV: &str = "IRONCLAW_BASE_DIR";
@@ -14,14 +16,18 @@ const V1_BASE_DIR_ENV: &str = "IRONCLAW_BASE_DIR";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RebornHomeSource {
     Env,
+    LegacyEnv,
     Default,
+    LegacyDefault,
 }
 
 impl RebornHomeSource {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Env => REBORN_HOME_ENV,
+            Self::Env => IRONCLAW_HOME_ENV,
+            Self::LegacyEnv => REBORN_HOME_ENV,
             Self::Default => "default",
+            Self::LegacyDefault => "legacy-default",
         }
     }
 }
@@ -36,6 +42,7 @@ pub struct RebornHome {
 impl RebornHome {
     pub fn resolve_from_env() -> Result<Self, RebornConfigError> {
         Self::resolve_from_env_parts_with_v1_base(
+            env::var_os(IRONCLAW_HOME_ENV),
             env::var_os(REBORN_HOME_ENV),
             env::var_os("HOME"),
             env::var_os("USERPROFILE"),
@@ -44,20 +51,48 @@ impl RebornHome {
     }
 
     pub fn resolve_from_env_parts(
-        reborn_home: Option<OsString>,
+        ironclaw_home: Option<OsString>,
         home: Option<OsString>,
         userprofile: Option<OsString>,
     ) -> Result<Self, RebornConfigError> {
-        Self::resolve_from_env_parts_with_v1_base(reborn_home, home, userprofile, None)
+        Self::resolve_from_env_parts_with_v1_base(ironclaw_home, None, home, userprofile, None)
+    }
+
+    pub fn resolve_from_env_parts_with_legacy(
+        ironclaw_home: Option<OsString>,
+        legacy_reborn_home: Option<OsString>,
+        home: Option<OsString>,
+        userprofile: Option<OsString>,
+    ) -> Result<Self, RebornConfigError> {
+        Self::resolve_from_env_parts_with_v1_base(
+            ironclaw_home,
+            legacy_reborn_home,
+            home,
+            userprofile,
+            None,
+        )
     }
 
     fn resolve_from_env_parts_with_v1_base(
-        reborn_home: Option<OsString>,
+        ironclaw_home: Option<OsString>,
+        legacy_reborn_home: Option<OsString>,
         home: Option<OsString>,
         userprofile: Option<OsString>,
         v1_base_dir: Option<OsString>,
     ) -> Result<Self, RebornConfigError> {
-        if let Some(raw_home) = reborn_home {
+        if let Some(raw_home) = ironclaw_home {
+            validate_non_empty(&raw_home, IRONCLAW_HOME_ENV)?;
+            let path = PathBuf::from(raw_home);
+            validate_absolute(&path, IRONCLAW_HOME_ENV)?;
+            validate_no_parent_components(&path, IRONCLAW_HOME_ENV)?;
+            validate_not_root(&path, IRONCLAW_HOME_ENV)?;
+            return Ok(Self {
+                path,
+                source: RebornHomeSource::Env,
+            });
+        }
+
+        if let Some(raw_home) = legacy_reborn_home {
             validate_non_empty(&raw_home, REBORN_HOME_ENV)?;
             let path = PathBuf::from(raw_home);
             validate_absolute(&path, REBORN_HOME_ENV)?;
@@ -71,7 +106,7 @@ impl RebornHome {
             )?;
             return Ok(Self {
                 path,
-                source: RebornHomeSource::Env,
+                source: RebornHomeSource::LegacyEnv,
             });
         }
 
@@ -81,11 +116,8 @@ impl RebornHome {
                 continue;
             };
             match default_home_from_candidate(raw_home, label) {
-                Ok(path) => {
-                    return Ok(Self {
-                        path,
-                        source: RebornHomeSource::Default,
-                    });
+                Ok((path, source)) => {
+                    return Ok(Self { path, source });
                 }
                 Err(error) => {
                     if first_error.is_none() {
@@ -116,7 +148,7 @@ impl RebornHome {
 
     /// Absolute path of the operator-edited boot config TOML.
     ///
-    /// `$IRONCLAW_REBORN_HOME/config.toml`. The file is **optional**:
+    /// `$IRONCLAW_HOME/config.toml`. The file is **optional**:
     /// `RebornConfigFile::load` returns `Ok(None)` when it doesn't
     /// exist, and the runtime falls back to compiled-in defaults.
     pub fn config_file_path(&self) -> PathBuf {
@@ -125,7 +157,7 @@ impl RebornHome {
 
     /// Absolute path of the user-overlay LLM provider catalog.
     ///
-    /// `$IRONCLAW_REBORN_HOME/providers.json`. Same JSON shape as v1's
+    /// `$IRONCLAW_HOME/providers.json`. Same JSON shape as v1's
     /// `~/.ironclaw/providers.json` so the same editor tooling and
     /// operator muscle memory apply. The file is **optional**: when
     /// it's missing, the runtime uses only the compiled-in built-in
@@ -147,13 +179,19 @@ fn validate_non_empty(value: &OsString, name: &'static str) -> Result<(), Reborn
 fn default_home_from_candidate(
     raw_home: OsString,
     label: &'static str,
-) -> Result<PathBuf, RebornConfigError> {
+) -> Result<(PathBuf, RebornHomeSource), RebornConfigError> {
     validate_non_empty(&raw_home, label)?;
     let path = PathBuf::from(raw_home);
     validate_absolute(&path, label)?;
     validate_no_parent_components(&path, label)?;
     validate_not_root(&path, label)?;
-    Ok(path.join(".ironclaw").join("reborn"))
+    let default = path.join(".ironclaw");
+    let legacy = default.join("reborn");
+    if legacy.exists() {
+        Ok((legacy, RebornHomeSource::LegacyDefault))
+    } else {
+        Ok((default, RebornHomeSource::Default))
+    }
 }
 
 fn validate_absolute(path: &Path, name: &'static str) -> Result<(), RebornConfigError> {

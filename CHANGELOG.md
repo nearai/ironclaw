@@ -12,9 +12,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Product identity:** present the shipping CLI, WebUI, health responses, and
   built-in capability descriptions as IronClaw without the former “Reborn”
   qualifier.
+- **Default contracts:** prefer neutral `IRONCLAW_*` configuration,
+  `~/.ironclaw` state, `/api/product-auth/*` routes, and neutral OS service
+  identities while preserving legacy environment, state, route, and installed
+  service compatibility.
 
 ### Fixed
 
+- **Railway health checks:** avoid baking the local loopback serve host into
+  the container image so Railway runtime detection can bind the WebUI listener
+  to `0.0.0.0`.
 - **Model recovery:** preserve typed, sanitized context-overflow,
   content-filter, and invalid-output recovery controls across checkpoints so a
   restarted turn can still ask the model to recover without exposing provider

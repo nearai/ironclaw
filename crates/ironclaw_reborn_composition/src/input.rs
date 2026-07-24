@@ -23,14 +23,13 @@ use crate::RebornBuildError;
 use crate::deployment::DeploymentConfig;
 use crate::{RebornCompositionProfile, RebornProductAuthServicePorts};
 
-const DEFAULT_REBORN_POSTGRES_URL_ENV: &str = "IRONCLAW_REBORN_POSTGRES_URL";
-const DEFAULT_REBORN_SECRET_MASTER_KEY_ENV: &str = "IRONCLAW_REBORN_SECRET_MASTER_KEY";
-const REBORN_POSTGRES_POOL_MAX_SIZE_ENV: &str = "IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE";
+const DEFAULT_REBORN_POSTGRES_URL_ENV: &str = "IRONCLAW_POSTGRES_URL";
+const DEFAULT_REBORN_SECRET_MASTER_KEY_ENV: &str = "IRONCLAW_SECRET_MASTER_KEY";
+const REBORN_POSTGRES_POOL_MAX_SIZE_ENV: &str = "IRONCLAW_POSTGRES_POOL_MAX_SIZE";
 const REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON_ENV: &str =
-    "IRONCLAW_REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON";
+    "IRONCLAW_POSTGRES_RESOURCE_GOVERNOR_SINGLETON";
 const DATABASE_SSLMODE_ENV: &str = "DATABASE_SSLMODE";
-const ALLOW_REMOTE_POSTGRES_CLEAR_TEXT_ENV: &str =
-    "IRONCLAW_REBORN_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT";
+const ALLOW_REMOTE_POSTGRES_CLEAR_TEXT_ENV: &str = "IRONCLAW_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT";
 
 /// Composition-time OAuth client metadata.
 ///
@@ -1059,7 +1058,7 @@ fn resolve_production_runtime_policy(
 fn resolve_postgres_pool_max_size(
     configured: Option<usize>,
 ) -> Result<(usize, &'static str), RebornBuildError> {
-    match std::env::var(REBORN_POSTGRES_POOL_MAX_SIZE_ENV) {
+    match env_var_with_legacy(REBORN_POSTGRES_POOL_MAX_SIZE_ENV) {
         Ok(raw) => {
             let trimmed = raw.trim();
             let parsed = trimmed
@@ -1094,7 +1093,7 @@ fn required_production_url_env(
     description: &str,
     config_field: &str,
 ) -> Result<SecretString, RebornBuildError> {
-    let value = std::env::var(env_name).map_err(|_| RebornBuildError::InvalidConfig {
+    let value = env_var_with_legacy(env_name).map_err(|_| RebornBuildError::InvalidConfig {
         reason: format!(
             "{env_name} must be set to the {description}; config.toml may only name this env var via [{config_field}], never contain the secret value"
         ),
@@ -1113,7 +1112,7 @@ fn required_production_key_env(
     description: &str,
     config_field: &str,
 ) -> Result<SecretString, RebornBuildError> {
-    let value = std::env::var(env_name).map_err(|_| RebornBuildError::InvalidConfig {
+    let value = env_var_with_legacy(env_name).map_err(|_| RebornBuildError::InvalidConfig {
         reason: format!(
             "{env_name} must be set to the {description}; config.toml may only name this env var via [{config_field}], never contain the secret value"
         ),
@@ -1127,7 +1126,7 @@ fn required_production_key_env(
 }
 
 fn require_postgres_resource_governor_singleton_env() -> Result<bool, RebornBuildError> {
-    match std::env::var(REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON_ENV) {
+    match env_var_with_legacy(REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON_ENV) {
         Ok(value) => match parse_bool_opt_in(&value) {
             Some(true) => Ok(true),
             Some(false) => Err(RebornBuildError::InvalidConfig {
@@ -1172,7 +1171,7 @@ fn postgres_pool_tls_options_from_env() -> Result<PostgresPoolTlsOptions, Reborn
             });
         }
     };
-    let allow_remote_cleartext = match std::env::var(ALLOW_REMOTE_POSTGRES_CLEAR_TEXT_ENV) {
+    let allow_remote_cleartext = match env_var_with_legacy(ALLOW_REMOTE_POSTGRES_CLEAR_TEXT_ENV) {
         Ok(value) => parse_bool_opt_in(&value).ok_or_else(|| {
             RebornBuildError::InvalidConfig {
                 reason: format!(
@@ -1192,6 +1191,29 @@ fn postgres_pool_tls_options_from_env() -> Result<PostgresPoolTlsOptions, Reborn
         ssl_mode_override,
         allow_remote_cleartext,
     })
+}
+
+fn env_var_with_legacy(name: &str) -> Result<String, std::env::VarError> {
+    env_var_with_legacy_from(name, |candidate| std::env::var(candidate))
+}
+
+fn env_var_with_legacy_from(
+    name: &str,
+    mut lookup: impl FnMut(&str) -> Result<String, std::env::VarError>,
+) -> Result<String, std::env::VarError> {
+    match lookup(name) {
+        Ok(value) => Ok(value),
+        Err(std::env::VarError::NotPresent) => {
+            let Some(suffix) = name.strip_prefix("IRONCLAW_") else {
+                return Err(std::env::VarError::NotPresent);
+            };
+            if suffix.starts_with("REBORN_") {
+                return Err(std::env::VarError::NotPresent);
+            }
+            lookup(&format!("IRONCLAW_REBORN_{suffix}"))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn parse_bool_opt_in(value: &str) -> Option<bool> {
@@ -1236,5 +1258,32 @@ mod tests {
             .with_product_auth_ports(product_auth.clone());
 
         assert!(input.product_auth_ports.is_some());
+    }
+
+    #[test]
+    fn default_environment_name_wins_and_legacy_name_remains_a_fallback() {
+        const DEFAULT: &str = "IRONCLAW_TEST_DEFAULT_CONTRACT";
+        const LEGACY: &str = "IRONCLAW_REBORN_TEST_DEFAULT_CONTRACT";
+
+        let legacy_only = |name: &str| match name {
+            LEGACY => Ok("legacy".to_string()),
+            _ => Err(std::env::VarError::NotPresent),
+        };
+        assert_eq!(
+            env_var_with_legacy_from(DEFAULT, legacy_only).as_deref(),
+            Ok("legacy"),
+            "legacy names must remain accepted"
+        );
+
+        let both = |name: &str| match name {
+            DEFAULT => Ok("default".to_string()),
+            LEGACY => Ok("legacy".to_string()),
+            _ => Err(std::env::VarError::NotPresent),
+        };
+        assert_eq!(
+            env_var_with_legacy_from(DEFAULT, both).as_deref(),
+            Ok("default"),
+            "the neutral name must win when both are present"
+        );
     }
 }

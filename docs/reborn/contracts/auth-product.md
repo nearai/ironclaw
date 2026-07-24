@@ -156,6 +156,12 @@ V1 OAuth routes, extension-manager authority, or route-local credential state.
 Dedicated HTTP route mounting for manual-token and OAuth callback transports
 remains a host-composition concern around `RebornProductAuthServices`.
 
+The default host-owned route prefix is `/api/product-auth/*`. During the
+compatibility window, `/api/reborn/product-auth/*` is mounted to the same
+handlers and must carry identical ingress policies. This preserves existing
+provider-registered redirect URIs without giving the legacy alias a separate
+authorization, rate-limit, body-limit, scope, CORS, audit, or effect path.
+
 ---
 
 ## Source Of Truth
@@ -518,21 +524,22 @@ tenant/user fields.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/api/reborn/product-auth/oauth/start` | Open an OAuth setup flow; returns redacted authorization URL + invocation scope. |
+| `POST` | `/api/product-auth/oauth/start` | Open an OAuth setup flow; returns redacted authorization URL + invocation scope. |
 | `POST` | `/api/webchat/v2/extensions/{package_id}/setup/oauth/start` | Open an installed extension's manifest-declared OAuth requirement by opaque requirement name; provider, label, scopes, and lifecycle continuation are server-owned. |
-| `GET`  | `/api/reborn/product-auth/oauth/callback/{provider}` | Public OAuth callback; validates the scoped flow and state hash before any product effect. |
-| `GET` | `/api/reborn/product-auth/oauth/flow/{flow_id}/status` | Observational caller-scoped durable status read. It performs no continuation dispatch, activation, compensation, provider cleanup, or other writes. |
-| `POST` | `/api/reborn/product-auth/oauth/flow/{flow_id}/reconcile` | Explicit bounded recovery command that retries only a completed flow's unfenced internal continuation. It never repeats provider exchange, revokes a valid credential, or performs uninstall cleanup. |
-| `POST` | `/api/reborn/product-auth/oauth/google/start` | Open a Google product-auth setup flow from configured Reborn Google OAuth client metadata; returns a Google authorization URL with PKCE/offline consent and invocation scope. |
-| `GET`  | `/api/reborn/product-auth/oauth/google/callback` | Public static Google OAuth callback; resolves flow/scope from auth-owned encoded state, validates the durable state hash/PKCE claim, and completes through `RebornProductAuthServices`. |
-| `POST` | `/api/reborn/product-auth/manual-token/submit` | One-shot manual-token setup + secret-submit (legacy WebUI shape, compatibility). |
-| `POST` | `/api/reborn/product-auth/manual-token/setup` | Mint a manual-token interaction challenge; returns `interaction_id` + `invocation_id`. |
-| `POST` | `/api/reborn/product-auth/manual-token/secret-submit` | Submit the raw token for an existing `interaction_id`; model transcript, tool arguments, logs, and durable events only ever see the redacted `credential_submitted` / `auth_failed` projection. |
-| `POST` | `/api/reborn/product-auth/accounts/list` | List redacted credential account projections for a provider. |
-| `POST` | `/api/reborn/product-auth/accounts/select` | Select a single configured account by id; returns its redacted projection. |
-| `POST` | `/api/reborn/product-auth/accounts/recovery` | Project the stable recovery state for a provider (configured / setup_required / reauthorize_required / account_selection_required). |
-| `POST` | `/api/reborn/product-auth/accounts/refresh` | Refresh / reauthorize an account; returns `CredentialRefreshReport` + projected recovery state. |
-| `POST` | `/api/reborn/product-auth/lifecycle/cleanup` | Apply ownership-aware deactivate/uninstall cleanup for an extension; returns a redacted `SecretCleanupReport`. |
+| `GET`  | `/api/product-auth/oauth/callback/{flow_id}` | Compatibility flow-specific OAuth callback; validates scope/state hash before any product effect. |
+| `GET`  | `/api/product-auth/oauth/{provider}/callback` | Provider callback; validates the scoped flow, provider, and state hash before any product effect. |
+| `GET` | `/api/product-auth/oauth/flow/{flow_id}/status` | Observational caller-scoped durable status read. It performs no continuation dispatch, activation, compensation, provider cleanup, or other writes. |
+| `POST` | `/api/product-auth/oauth/flow/{flow_id}/reconcile` | Explicit bounded recovery command that retries only a completed flow's unfenced internal continuation. It never repeats provider exchange, revokes a valid credential, or performs uninstall cleanup. |
+| `POST` | `/api/product-auth/oauth/google/start` | Open a Google product-auth setup flow from configured IronClaw Google OAuth client metadata; returns a Google authorization URL with PKCE/offline consent and invocation scope. |
+| `GET`  | `/api/product-auth/oauth/google/callback` | Public static Google OAuth callback; resolves flow/scope from auth-owned encoded state, validates the durable state hash/PKCE claim, and completes through `RebornProductAuthServices`. |
+| `POST` | `/api/product-auth/manual-token/submit` | One-shot manual-token setup + secret-submit (legacy WebUI shape, compatibility). |
+| `POST` | `/api/product-auth/manual-token/setup` | Mint a manual-token interaction challenge; returns `interaction_id` + `invocation_id`. |
+| `POST` | `/api/product-auth/manual-token/secret-submit` | Submit the raw token for an existing `interaction_id`; model transcript, tool arguments, logs, and durable events only ever see the redacted `credential_submitted` / `auth_failed` projection. |
+| `POST` | `/api/product-auth/accounts/list` | List redacted credential account projections for a provider. |
+| `POST` | `/api/product-auth/accounts/select` | Select a single configured account by id; returns its redacted projection. |
+| `POST` | `/api/product-auth/accounts/recovery` | Project the stable recovery state for a provider (configured / setup_required / reauthorize_required / account_selection_required). |
+| `POST` | `/api/product-auth/accounts/refresh` | Refresh / reauthorize an account; returns `CredentialRefreshReport` + projected recovery state. |
+| `POST` | `/api/product-auth/lifecycle/cleanup` | Apply ownership-aware deactivate/uninstall cleanup for an extension; returns a redacted `SecretCleanupReport`. |
 
 Rules:
 
@@ -554,12 +561,13 @@ Rules:
 - Manual-token setup and secret-submit are linked by `interaction_id` plus an
   `invocation_id` round-tripped through the browser, matching the OAuth
   start/callback pattern.
-- Google OAuth setup is configured in the Reborn host process from env-only
-  values: `IRONCLAW_REBORN_GOOGLE_CLIENT_ID`,
-  `IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI`, optional
-  `IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET`, and optional
-  `IRONCLAW_REBORN_GOOGLE_HOSTED_DOMAIN_HINT`. For bootstrap compatibility, Reborn
-  also accepts `GOOGLE_CLIENT_ID`, `GOOGLE_OAUTH_REDIRECT_URI`,
+- Google OAuth setup is configured in the IronClaw host process from env-only
+  values: `IRONCLAW_GOOGLE_CLIENT_ID`,
+  `IRONCLAW_GOOGLE_OAUTH_REDIRECT_URI`, optional
+  `IRONCLAW_GOOGLE_CLIENT_SECRET`, and optional
+  `IRONCLAW_GOOGLE_HOSTED_DOMAIN_HINT`. The corresponding
+  `IRONCLAW_REBORN_GOOGLE_*` names remain compatibility aliases. For bootstrap
+  compatibility, IronClaw also accepts `GOOGLE_CLIENT_ID`, `GOOGLE_OAUTH_REDIRECT_URI`,
   `GOOGLE_CLIENT_SECRET`, and `GOOGLE_ALLOWED_HD` as a hosted-domain hint when
   the redirect URI opt-in is present. The hint only adds Google's `hd=`
   authorization parameter; product-auth setup does not treat it as a server-side
