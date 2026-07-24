@@ -661,7 +661,7 @@ test("ModalShell moves, traps, and restores keyboard focus", () => {
     onClose: () => {
       closeCalls += 1;
     },
-    returnFocusTo: opener,
+    returnFocusTo: () => opener,
     title: "Configure Slack",
     children: null,
   });

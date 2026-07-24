@@ -362,7 +362,7 @@ function ModalShell({ onClose, returnFocusTo, title, children }) {
   const titleId = React.useId();
   const dialogRef = React.useRef(null);
   React.useEffect(() => {
-    const previouslyFocused = returnFocusTo || document.activeElement;
+    const returnTarget = returnFocusTo || document.activeElement;
     const dialog = dialogRef.current;
     const initialFocus = focusableElements(dialog)[0] || dialog;
     initialFocus?.focus({ preventScroll: true });
@@ -396,6 +396,8 @@ function ModalShell({ onClose, returnFocusTo, title, children }) {
     window.addEventListener("keydown", handleKey);
     return () => {
       window.removeEventListener("keydown", handleKey);
+      const previouslyFocused =
+        typeof returnTarget === "function" ? returnTarget() : returnTarget;
       if (
         previouslyFocused?.isConnected &&
         typeof previouslyFocused.focus === "function"

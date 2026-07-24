@@ -272,6 +272,7 @@ export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
           <Button
             variant="secondary"
             size="sm"
+            data-extension-primary-action="true"
             onClick={(event) => primary.run(event.currentTarget)}
             disabled={isBusy}
           >
@@ -341,11 +342,11 @@ export function RegistryCard({ entry, onInstall = null, isBusy, statusLabel = un
           <Button
             variant="outline"
             size="sm"
-            onClick={() =>
+            onClick={(event) =>
               onInstall({
                 packageRef: entry.package_ref,
                 displayName,
-              })}
+              }, event.currentTarget)}
             disabled={isBusy}
           >
             <Icon name="plus" className="mr-1.5 h-3.5 w-3.5" />

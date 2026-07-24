@@ -239,6 +239,37 @@ test("card class keeps grid siblings at natural height", () => {
   assert.ok(!cardClass.includes("h-full"), "CARD must not stretch to grid row height");
 });
 
+test("RegistryCard passes the Install trigger to the install workflow", () => {
+  let installPayload = null;
+  let installTrigger = null;
+  const context = makeContext();
+  vm.runInNewContext(extensionCardSourceForTest(), context);
+  const { RegistryCard } = context.globalThis.__testExports;
+  const rendered = RegistryCard({
+    entry: {
+      package_ref: { kind: "extension", id: "github" },
+      display_name: "GitHub",
+      runtime: "wasm",
+    },
+    onInstall(payload, trigger) {
+      installPayload = payload;
+      installTrigger = trigger;
+    },
+    isBusy: false,
+  });
+  const [installButton] = findComponentNodes(rendered, context.Button);
+  const trigger = { id: "install-trigger" };
+
+  installButton.props.onClick({ currentTarget: trigger });
+
+  assert.deepEqual(installPayload.packageRef, {
+    kind: "extension",
+    id: "github",
+  });
+  assert.equal(installPayload.displayName, "GitHub");
+  assert.equal(installTrigger, trigger);
+});
+
 test("setup-needed cards never expose a separate Activate action", () => {
   const channel = renderExtensionCard({
     package_ref: { id: "slack" },

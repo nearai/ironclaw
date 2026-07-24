@@ -45,6 +45,24 @@ function CatalogErrorBanner({ isCatalogError = true, isRefetching, onRetry }) {
   );
 }
 
+function installReturnFocusTarget(packageRef, installTrigger) {
+  const extensionId =
+    typeof packageRef === "string" ? packageRef : packageRef?.id;
+  return () => {
+    if (installTrigger?.isConnected) return installTrigger;
+    if (!extensionId) return null;
+
+    const installedCard = Array.from(
+      document.querySelectorAll("[data-extension-id]"),
+    ).find(
+      (card) => card.getAttribute("data-extension-id") === extensionId,
+    );
+    return installedCard?.querySelector(
+      "[data-extension-primary-action]",
+    ) || null;
+  };
+}
+
 export function ExtensionsPage({ isAdmin = false } = {}) {
   const t = useT();
   const { tab = "registry" } = useParams();
@@ -81,7 +99,17 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
     setConfiguring(extension);
   }, []);
   const handleInstall = React.useCallback(
-    (payload) => install({ ...payload, onNeedsSetup: handleConfigure }),
+    (payload, installTrigger) => {
+      const returnFocusTo = installReturnFocusTarget(
+        payload.packageRef,
+        installTrigger,
+      );
+      install({
+        ...payload,
+        onNeedsSetup: (extension) =>
+          handleConfigure(extension, returnFocusTo),
+      });
+    },
     [handleConfigure, install]
   );
   const handleImport = React.useCallback((file) => importTool({ file }), [importTool]);
