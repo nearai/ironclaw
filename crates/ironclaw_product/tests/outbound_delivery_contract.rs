@@ -1,4 +1,4 @@
-// arch-exempt: large_file, mechanical FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend> -> FilesystemOutboundStateStore<InMemoryBackend> §4.3 store consolidation, no logic change, plan #6168
+// arch-exempt: large_file, mechanical OutboundStateStore<ironclaw_filesystem::InMemoryBackend> -> OutboundStateStore<InMemoryBackend> §4.3 store consolidation, no logic change, plan #6168
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
@@ -9,12 +9,12 @@ use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
     CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
-    CommunicationPreferenceVersion, DeliveryDefaultScope, FilesystemOutboundStateStore,
-    OutboundDeliveryAttempt, OutboundError, OutboundPolicyService, OutboundStateStorePort,
-    ReplyTargetBindingClaim, ReplyTargetBindingValidator, RunNotificationContext,
-    RunNotificationEventKind, RunNotificationOrigin, ThreadProjectionAccessClaim,
-    ThreadProjectionAccessPolicy, ThreadProjectionAccessRequest, TriggerFireSlot, TriggerOriginRef,
-    TriggerSourceKind, VersionedCommunicationPreferenceRecord, WriteCommunicationPreferenceRequest,
+    CommunicationPreferenceVersion, DeliveryDefaultScope, OutboundDeliveryAttempt, OutboundError,
+    OutboundPolicyService, OutboundStateStore, OutboundStateStorePort, ReplyTargetBindingClaim,
+    ReplyTargetBindingValidator, RunNotificationContext, RunNotificationEventKind,
+    RunNotificationOrigin, ThreadProjectionAccessClaim, ThreadProjectionAccessPolicy,
+    ThreadProjectionAccessRequest, TriggerFireSlot, TriggerOriginRef, TriggerSourceKind,
+    VersionedCommunicationPreferenceRecord, WriteCommunicationPreferenceRequest,
 };
 use ironclaw_product::{ExternalActorRef, ExternalConversationRef};
 use ironclaw_product::{
@@ -203,7 +203,7 @@ fn trigger_context() -> ironclaw_outbound::TriggerCommunicationContext {
 }
 
 fn configured_policy<'a>(
-    store: &'a FilesystemOutboundStateStore<InMemoryBackend>,
+    store: &'a OutboundStateStore<InMemoryBackend>,
     validator: &'a FakeReplyTargetBindingValidator,
 ) -> OutboundPolicyService<'a> {
     OutboundPolicyService::new(store, &ACCESS_POLICY, validator)
@@ -263,13 +263,13 @@ struct ScriptedChannelAdapter {
     reports: Mutex<VecDeque<Result<DeliveryReport, ChannelError>>>,
     envelopes: Mutex<Vec<OutboundEnvelope>>,
     observed_status: Mutex<Vec<ironclaw_outbound::OutboundDeliveryStatus>>,
-    store: Arc<FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     scope: TurnScope,
 }
 
 impl ScriptedChannelAdapter {
     fn new(
-        store: Arc<FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+        store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
         scope: TurnScope,
         reports: Vec<Result<DeliveryReport, ChannelError>>,
     ) -> Self {
@@ -375,7 +375,7 @@ fn retryable_part() -> PartDeliveryOutcome {
 }
 
 fn coordinator_over(
-    store: &Arc<FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    store: &Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     adapter: &Arc<ScriptedChannelAdapter>,
 ) -> DeliveryCoordinator {
     DeliveryCoordinator::new(

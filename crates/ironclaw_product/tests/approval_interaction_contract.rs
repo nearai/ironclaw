@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_approvals::{
-    CapabilityPermissionOverrideStore, DenyApproval, LeaseApproval, PersistentApprovalAction,
+    CapabilityPermissionOverrideStorePort, DenyApproval, LeaseApproval, PersistentApprovalAction,
     PersistentApprovalPolicy, PersistentApprovalPolicyError, PersistentApprovalPolicyInput,
     PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort, ToolPermissionOverride,
     ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStorePort,
@@ -757,7 +757,7 @@ fn approval_request_by(reason: &str, requested_by: Principal) -> ApprovalRequest
 fn caller_level_store_pair(
     prefix: &str,
 ) -> [(Arc<dyn PersistentApprovalPolicyStorePort>, String); 2] {
-    // Both entries are the one production `FilesystemPersistentApprovalPolicyStore`
+    // Both entries are the one production `PersistentApprovalPolicyStore`
     // over the in-memory backend; they differ only in mount configuration — the
     // helper's default `/approvals` mount vs. the tenant/user-scoped mount that
     // the settings-scope fix exercises.
@@ -767,12 +767,9 @@ fn caller_level_store_pair(
             format!("{prefix}-default-mount"),
         ),
         (
-            Arc::new(
-                ironclaw_approvals::FilesystemPersistentApprovalPolicyStore::new(scoped_fs(
-                    "tenant-alpha",
-                    "user-alpha",
-                )),
-            ),
+            Arc::new(ironclaw_approvals::PersistentApprovalPolicyStore::new(
+                scoped_fs("tenant-alpha", "user-alpha"),
+            )),
             format!("{prefix}-scoped-mount"),
         ),
     ]

@@ -1,10 +1,6 @@
 use super::*;
 
-use crate::{
-    AuthChallengeProvider, AuthChallengeView, AuthPromptChallengeKind,
-    ChannelConnectionRequirement, ChannelPairingCode, ChannelPairingIssue,
-    PairingAuthChallengeView, RebornChannelConnectStrategy,
-};
+use crate::{AuthChallengeProvider, AuthChallengeView, AuthPromptChallengeKind};
 use ironclaw_auth::{AuthProviderId, OAuthAuthorizationUrl};
 use ironclaw_host_api::{
     RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, VendorId,
@@ -45,7 +41,6 @@ impl AuthChallengeProvider for FakeAuthChallengeProvider {
                     .unwrap(),
             ),
             expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(10)),
-            pairing: None,
         }))
     }
 }
@@ -80,22 +75,6 @@ impl AuthChallengeProvider for FakePairingAuthChallengeProvider {
             account_label: None,
             authorization_url: None,
             expires_at: None,
-            pairing: Some(PairingAuthChallengeView {
-                issue: ChannelPairingIssue {
-                    code: ChannelPairingCode::new("ABCDEFGH").unwrap(),
-                    deep_link: Some("https://t.me/ironclaw_bot?start=ABCDEFGH".to_string()),
-                    expires_at: chrono::Utc::now() + chrono::Duration::minutes(15),
-                },
-                connection: ChannelConnectionRequirement {
-                    channel: "telegram".to_string(),
-                    display_name: "Telegram".to_string(),
-                    strategy: RebornChannelConnectStrategy::WebGeneratedCode,
-                    instructions: "Send the generated code to the Telegram bot.".to_string(),
-                    input_placeholder: String::new(),
-                    submit_label: "Open pairing".to_string(),
-                    error_message: "Telegram pairing failed.".to_string(),
-                },
-            }),
         }))
     }
 }
@@ -191,7 +170,7 @@ async fn product_event_stream_enriches_auth_prompt_through_projection_stream() {
 }
 
 #[tokio::test]
-async fn product_event_stream_projects_pairing_prompt_without_text_input_placeholder() {
+async fn product_event_stream_does_not_invent_pairing_prompt_context() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();
     let agent_id = AgentId::new("webui-events-agent").unwrap();
@@ -269,18 +248,8 @@ async fn product_event_stream_projects_pairing_prompt_without_text_input_placeho
         Some(AuthPromptChallengeKind::Pairing)
     );
     assert_eq!(prompt.provider.as_deref(), Some("telegram"));
-    assert_eq!(
-        prompt
-            .connection
-            .as_ref()
-            .expect("connection context")
-            .input_placeholder,
-        None
-    );
-    assert_eq!(
-        prompt.pairing.as_ref().expect("pairing context").code,
-        "ABCDEFGH"
-    );
+    assert!(prompt.connection.is_none());
+    assert!(prompt.pairing.is_none());
 
     let auth_context = events
         .iter()
@@ -298,22 +267,8 @@ async fn product_event_stream_projects_pairing_prompt_without_text_input_placeho
             _ => None,
         })
         .expect("projected pairing auth context");
-    assert_eq!(
-        auth_context
-            .connection
-            .as_ref()
-            .expect("projected connection context")
-            .input_placeholder,
-        None
-    );
-    assert_eq!(
-        auth_context
-            .pairing
-            .as_ref()
-            .expect("projected pairing context")
-            .code,
-        "ABCDEFGH"
-    );
+    assert!(auth_context.connection.is_none());
+    assert!(auth_context.pairing.is_none());
 }
 
 #[tokio::test]

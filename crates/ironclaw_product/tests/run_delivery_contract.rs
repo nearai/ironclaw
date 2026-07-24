@@ -16,9 +16,9 @@ use chrono::Utc;
 use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
 use ironclaw_outbound::{
     CommunicationModality, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
-    DeliveredGateRouteStore, DeliveryDefaultScope, FilesystemOutboundStateStore,
-    OutboundStateStorePort, TriggerCommunicationContext, TriggerFireSlot, TriggerOriginRef,
-    TriggerSourceKind, TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryStore,
+    DeliveredGateRouteStore, DeliveryDefaultScope, OutboundStateStore, OutboundStateStorePort,
+    TriggerCommunicationContext, TriggerFireSlot, TriggerOriginRef, TriggerSourceKind,
+    TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryStore,
 };
 use ironclaw_product::{
     AdapterInstallationId, AuthPromptView, AuthRequirement, ChannelAdapter, ChannelError,
@@ -368,6 +368,7 @@ impl BlockedAuthPromptSource for OAuthPromptSource {
             authorization_url: self.authorization_url.clone(),
             expires_at: None,
             connection: None,
+            pairing: None,
         })
     }
 }
@@ -525,8 +526,8 @@ struct Harness {
     observer: Arc<RunDeliveryObserver>,
     connection_notices: ChannelConnectionNoticePolicy,
     adapter: Arc<RecordingChannelAdapter>,
-    store: Arc<FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
-    route_store: Arc<FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    route_store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     turns: Arc<ScriptedTurnCoordinator>,
     threads: Arc<InMemorySessionThreadService>,
 }
@@ -1323,8 +1324,8 @@ fn triggered_request(run_id: TurnRunId, project_scoped: bool) -> TriggeredRunDel
 struct TriggeredHarness {
     driver: TriggeredRunDeliveryDriver,
     adapter: Arc<RecordingChannelAdapter>,
-    store: Arc<FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
-    delivery_store: Arc<FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    delivery_store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     turns: Arc<ScriptedTurnCoordinator>,
     threads: Arc<InMemorySessionThreadService>,
 }
@@ -1400,9 +1401,7 @@ fn build_triggered_harness(
     }
 }
 
-async fn seed_preference(
-    store: &FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>,
-) {
+async fn seed_preference(store: &OutboundStateStore<ironclaw_filesystem::InMemoryBackend>) {
     store
         .put_communication_preference(CommunicationPreferenceRecord {
             scope: DeliveryDefaultScope::personal(tenant(), user()),
@@ -1419,7 +1418,7 @@ async fn seed_preference(
 }
 
 async fn wait_for_outcome(
-    store: &FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>,
+    store: &OutboundStateStore<ironclaw_filesystem::InMemoryBackend>,
     run_id: TurnRunId,
 ) -> TriggeredRunDeliveryOutcomeKind {
     for _ in 0..500 {

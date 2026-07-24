@@ -10377,11 +10377,7 @@ fn services_with_operator_approval_config() -> OperatorConfigServices {
 
 fn services_with_operator_approval_config_parts() -> (
     OperatorConfigServices,
-    Arc<
-        ironclaw_approvals::FilesystemPersistentApprovalPolicyStore<
-            ironclaw_filesystem::InMemoryBackend,
-        >,
-    >,
+    Arc<ironclaw_approvals::PersistentApprovalPolicyStore<ironclaw_filesystem::InMemoryBackend>>,
 ) {
     let persistent_policies = Arc::new(
         ironclaw_approvals::test_support::in_memory_backed_persistent_approval_policy_store(),

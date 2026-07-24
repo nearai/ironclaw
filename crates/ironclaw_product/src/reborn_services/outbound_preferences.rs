@@ -1412,7 +1412,9 @@ mod tests {
                 auth_prompts: true,
                 modalities: Vec::new(),
             },
-            reply_target_binding_ref: reply_ref(reply_target),
+            destination: RunFinalReplyDestination::External {
+                reply_target_binding_ref: reply_ref(reply_target),
+            },
             // Existing registry-path tests query as tenant-alpha/user-alpha, so
             // fixtures claim that owner and survive the caller-scoping filter.
             owner: OutboundDeliveryTargetOwner::new(tenant("tenant-alpha"), user("user-alpha")),
