@@ -23,6 +23,15 @@ run_test() {
   echo "::endgroup::"
 }
 
+run_lib_test() {
+  local package="$1"
+  local test_filter="$2"
+  echo "::group::cargo test -p ${package} ${test_filter}"
+  # shellcheck disable=SC2086 # extra_args intentionally expands into cargo's trailing args.
+  cargo test -p "${package}" "${test_filter}" ${extra_args}
+  echo "::endgroup::"
+}
+
 run_architecture() {
   run_test ironclaw_architecture reborn_dependency_boundaries
   # Pins docs/reborn/contracts/telegram-v2.md: retired-taxonomy telegram
@@ -43,6 +52,9 @@ run_architecture() {
   run_test ironclaw_capabilities capability_host_run_state_contract
   run_test ironclaw_capabilities capability_host_spawn_contract
   run_test ironclaw_capabilities capability_obligation_handler_contract
+  # Pins docs/reborn/contracts/events.md: product snapshots and cursor resumes
+  # keep nested dispatcher failures attached to capability activity, not runs.
+  run_lib_test ironclaw_reborn_composition projection::tests::nested_dispatch_stream
 }
 
 run_runtimes() {
@@ -68,6 +80,9 @@ run_runtimes() {
 
 run_substrates() {
   run_test ironclaw_events durable_log_contract
+  # Pins docs/reborn/contracts/events.md: runtime snapshot/replay projections
+  # preserve nested dispatcher failures without synthesizing child run rows.
+  run_test ironclaw_event_projections nested_dispatch_projection_contract
   run_test ironclaw_filesystem catalog_contract
   run_test ironclaw_filesystem filesystem_contract
   run_test ironclaw_network boundary_contract

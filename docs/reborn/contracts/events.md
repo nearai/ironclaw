@@ -30,6 +30,7 @@ pub struct RuntimeEvent {
     pub timestamp: Timestamp,
     pub kind: RuntimeEventKind,
     pub scope: ResourceScope,
+    pub parent_invocation_id: Option<InvocationId>,
     pub capability_id: CapabilityId,
     pub provider: Option<ExtensionId>,
     pub runtime: Option<RuntimeKind>,
@@ -171,6 +172,13 @@ For non-process loop-origin capability calls, every dispatcher lifecycle event
 `dispatch_failed`) carries the enclosing loop run as `parent_invocation_id`.
 The dispatched capability invocation remains the event scope; the parent field
 preserves its relationship to the authoritative loop run.
+
+Snapshot and cursor-resume projection behavior is pinned by:
+
+```bash
+cargo test -p ironclaw_event_projections --test nested_dispatch_projection_contract
+cargo test -p ironclaw_reborn_composition projection::tests::nested_dispatch_stream
+```
 
 Runtime dispatcher event emission is best-effort observability. If the configured `EventSink` fails, the dispatcher ignores that sink error and still returns the original dispatch success or original dispatch failure.
 
