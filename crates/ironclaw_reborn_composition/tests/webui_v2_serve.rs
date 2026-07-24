@@ -9,6 +9,7 @@
 //! facade is mocked so the regression target stays the gateway-layer
 //! composition.
 
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -1213,6 +1214,10 @@ async fn read_body_string(response: axum::response::Response) -> String {
 
 async fn served_static_text(path: &str) -> String {
     let (app, _) = build_app();
+    served_static_text_from(app, path).await
+}
+
+async fn served_static_text_from(app: axum::Router, path: &str) -> String {
     let response = app
         .oneshot(
             Request::builder()
@@ -1230,12 +1235,43 @@ async fn served_static_text(path: &str) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-async fn served_app_javascript() -> String {
-    served_app_vite_asset(".js").await
+async fn served_bundled_javascript() -> String {
+    let (app, _) = build_app();
+    let shell = served_static_text_from(app.clone(), "/").await;
+    let app_asset_path = shell_vite_asset_path(&shell, ".js");
+    let app_javascript = served_static_text_from(app.clone(), &app_asset_path).await;
+    let chunk_paths = vite_javascript_asset_paths(&app_javascript);
+    let mut bundle = app_javascript;
+
+    // Vite records every statically imported and lazy-loaded JavaScript chunk
+    // in the app entry's preload table. Request those paths through the
+    // composed router so caller-level source-contract assertions cover the
+    // complete bundle graph without reaching into ironclaw_webui internals.
+    for path in chunk_paths {
+        bundle.push('\n');
+        bundle.push_str(&served_static_text_from(app.clone(), &path).await);
+    }
+
+    bundle
 }
 
 async fn served_app_stylesheet() -> String {
     served_app_vite_asset(".css").await
+}
+
+fn vite_javascript_asset_paths(app_javascript: &str) -> BTreeSet<String> {
+    app_javascript
+        .match_indices("assets/")
+        .filter_map(|(start, _)| {
+            let path = app_javascript[start..]
+                .chars()
+                .take_while(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '/' | '.' | '_' | '-')
+                })
+                .collect::<String>();
+            path.ends_with(".js").then(|| format!("/{path}"))
+        })
+        .collect()
 }
 
 async fn served_app_vite_asset(suffix: &str) -> String {
@@ -2603,7 +2639,7 @@ async fn static_js_asset_returns_javascript_content_type() {
 
 #[tokio::test]
 async fn static_chat_oauth_card_exposes_https_only_authorization_link() {
-    let body = served_app_javascript().await;
+    let body = served_bundled_javascript().await;
 
     assert!(
         body.contains("new URL(e.authorizationUrl).protocol===`https:`"),
@@ -2625,7 +2661,7 @@ async fn static_chat_oauth_card_exposes_https_only_authorization_link() {
 
 #[tokio::test]
 async fn static_chat_hook_listens_for_oauth_callback_completion() {
-    let body = served_app_javascript().await;
+    let body = served_bundled_javascript().await;
 
     // The Vite app bundle must retain the shared OAuth completion transport and
     // the chat hook's gate-matching behavior. Source-level details for the
@@ -2661,7 +2697,7 @@ async fn static_chat_hook_listens_for_oauth_callback_completion() {
 
 #[tokio::test]
 async fn static_chat_events_clear_gate_when_run_resumes() {
-    let body = served_app_javascript().await;
+    let body = served_bundled_javascript().await;
 
     assert!(
         body.contains("blocked_auth")
@@ -2739,7 +2775,7 @@ async fn static_i18n_module_guards_locale_race_and_clears_failed_pack_cache() {
     // note below), so this locks the served bundle shape; a behavioral provider
     // test driving `setLang('es')` through an unloaded pack belongs in
     // the deferred JS/e2e scaffold.
-    let body = served_app_javascript().await;
+    let body = served_bundled_javascript().await;
     let loader_segment = bundle_segment(&body, "ironclaw_language", "createContext({lang:");
     let provider_segment = bundle_segment(&body, "createContext({lang:", "QueryClient");
 
@@ -3260,7 +3296,7 @@ fn public_route_mount_with_static_owned_root_namespace_fails_composition() {
 
 #[tokio::test]
 async fn static_automations_presenters_label_sub_hourly_schedules() {
-    let body = served_app_javascript().await;
+    let body = served_bundled_javascript().await;
 
     // The cadence labels are now localized: the presenter selects an i18n key
     // for each sub-hourly/hourly branch and the English copy lives in en.js.
@@ -3279,7 +3315,7 @@ async fn static_automations_presenters_label_sub_hourly_schedules() {
 
     // And the English pack must carry the human-readable copy for those keys,
     // so a clean install still reads "Every minute" / "Hourly at :MM".
-    let en_body = served_app_javascript().await;
+    let en_body = &body;
     assert!(
         en_body.contains("automations.schedule.everyMinute\":`Every minute`"),
         "en.js must label `* * * * *` as `Every minute` instead of `Custom schedule`"
@@ -3296,7 +3332,7 @@ async fn static_automations_presenters_label_sub_hourly_schedules() {
 
 #[tokio::test]
 async fn static_automations_summary_reflows_cards_and_shrinks_next_run() {
-    let body = served_app_javascript().await;
+    let body = served_bundled_javascript().await;
 
     assert!(
         body.contains("lg:grid-cols-3"),
@@ -3314,7 +3350,7 @@ async fn static_automations_summary_reflows_cards_and_shrinks_next_run() {
 
 #[tokio::test]
 async fn static_automations_run_row_spaces_action_button_icons() {
-    let body = served_app_javascript().await;
+    let body = served_bundled_javascript().await;
 
     assert!(
         body.contains("name:`chat`,className:`mr-1.5 h-4 w-4`"),
@@ -3328,7 +3364,7 @@ async fn static_automations_run_row_spaces_action_button_icons() {
 
 #[tokio::test]
 async fn static_automations_delivery_surfaces_save_error_and_gates_slack_hint() {
-    let body = served_app_javascript().await;
+    let body = served_bundled_javascript().await;
 
     assert!(
         body.contains("e.saveError&&!a"),

@@ -11,7 +11,8 @@
   },
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "build": "vite build",
+    "build": "vite build && pnpm check:bundle",
+    "check:bundle": "node --experimental-strip-types scripts/check-bundle-budgets.ts",
     "typecheck": "tsc --noEmit",
     "lint": "pnpm lint:conventions && pnpm typecheck",
     "lint:conventions": "node --experimental-strip-types scripts/check-source-conventions.ts",
@@ -38,6 +39,7 @@
     "@types/react": "19.2.17",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "6.0.3",
+    "happy-dom": "20.11.1",
     "tailwindcss": "4.3.2",
     "typescript": "6.0.3",
     "vite": "8.1.3",

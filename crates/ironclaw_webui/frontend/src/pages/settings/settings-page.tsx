@@ -2,19 +2,31 @@
 import { Navigate, useOutletContext, useParams } from "react-router";
 import React from "react";
 import { useT } from "../../lib/i18n";
-import { AgentTab } from "./components/agent-tab";
-import { AppearanceTab } from "./components/appearance-tab";
-import { ChannelsTab } from "./components/channels-tab";
-import { InferenceTab } from "./components/inference-tab";
-import { LanguageTab } from "./components/language-tab";
-import { NetworkingTab } from "./components/networking-tab";
+import { RouteLoadBoundary } from "../../app/route-load-boundary";
 import { RestartBanner } from "./components/restart-banner";
-import { SkillsTab } from "./components/skills-tab";
 import { SettingsToolbar } from "./components/settings-toolbar";
-import { ToolsTab } from "./components/tools-tab";
-import { TraceCommonsTab } from "./components/trace-commons-tab";
-import { UsersTab } from "./components/users-tab";
 import { useSettings } from "./hooks/useSettings";
+
+const AppearanceTab = React.lazy(() =>
+  import("./components/appearance-tab").then(({ AppearanceTab }) => ({ default: AppearanceTab }))
+);
+const InferenceTab = React.lazy(() =>
+  import("./components/inference-tab").then(({ InferenceTab }) => ({ default: InferenceTab }))
+);
+const LanguageTab = React.lazy(() =>
+  import("./components/language-tab").then(({ LanguageTab }) => ({ default: LanguageTab }))
+);
+const SkillsTab = React.lazy(() =>
+  import("./components/skills-tab").then(({ SkillsTab }) => ({ default: SkillsTab }))
+);
+const ToolsTab = React.lazy(() =>
+  import("./components/tools-tab").then(({ ToolsTab }) => ({ default: ToolsTab }))
+);
+const TraceCommonsTab = React.lazy(() =>
+  import("./components/trace-commons-tab").then(({ TraceCommonsTab }) => ({
+    default: TraceCommonsTab,
+  }))
+);
 
 export function SettingsPage() {
   const t = useT();
@@ -60,21 +72,6 @@ export function SettingsPage() {
       theme={theme}
       onThemeChange={setTheme}
     />),
-    agent: (<AgentTab
-      settings={settings}
-      onSave={save}
-      savedKeys={savedKeys}
-      isLoading={isLoading}
-      searchQuery={searchQuery}
-    />),
-    channels: (<ChannelsTab searchQuery={searchQuery} />),
-    networking: (<NetworkingTab
-      settings={settings}
-      onSave={save}
-      savedKeys={savedKeys}
-      isLoading={isLoading}
-      searchQuery={searchQuery}
-    />),
     tools: (<ToolsTab
       settings={settings}
       onSave={save}
@@ -84,11 +81,10 @@ export function SettingsPage() {
     />),
     skills: (<SkillsTab searchQuery={searchQuery} />),
     traces: (<TraceCommonsTab searchQuery={searchQuery} />),
-    users: (<UsersTab searchQuery={searchQuery} />),
     language: (<LanguageTab searchQuery={searchQuery} />),
   };
 
-  const isOperatorTab = (id) => id === "users" || id === "inference";
+  const isOperatorTab = (id) => id === "inference";
   const tabContentHas = (id) => Object.prototype.hasOwnProperty.call(tabContent, id);
   const visibleTabIds = Object.keys(tabContent).filter((id) => isAdmin || !isOperatorTab(id));
   const defaultTabIsVisible = tabContentHas(defaultTab) && visibleTabIds.includes(defaultTab);
@@ -131,7 +127,7 @@ export function SettingsPage() {
               canGoBack={false}
             />
 
-            {tabContent[tab]}
+            <RouteLoadBoundary>{tabContent[tab]}</RouteLoadBoundary>
           </div>
         </div>
       </div>
