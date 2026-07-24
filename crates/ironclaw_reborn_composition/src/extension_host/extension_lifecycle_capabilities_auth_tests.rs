@@ -279,10 +279,10 @@ async fn install_inactive_for_user(
     caller: &UserId,
 ) -> Result<(), ironclaw_product::ProductSurfaceFailure> {
     let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id)
-        .expect("valid extension package ref");
+        .expect("valid extension package ref"); // safety: test helper callers pass static extension ids.
     services
         .local_runtime_for_test()
-        .expect("local runtime substrate")
+        .expect("local runtime substrate") // safety: this helper is only used with local-runtime test substrates.
         .extension_management
         .install(package_ref, caller)
         .await

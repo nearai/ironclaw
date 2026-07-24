@@ -546,9 +546,9 @@ async fn configured_channel_config() -> Arc<ChannelConfigService> {
                 |_scope| {
                     MountView::new(vec![MountGrant::new(
                         MountAlias::new("/extension-admin-configuration")
-                            .expect("valid mount alias"),
+                            .expect("valid mount alias"), // safety: test-only fixture mount alias is static and valid.
                         VirtualPath::new(format!("/tenants/{TENANT}/shared/admin-configuration"))
-                            .expect("valid virtual path"),
+                            .expect("valid virtual path"), // safety: test-only fixture virtual path is built from a static tenant.
                         MountPermissions::read_write_list_delete(),
                     )])
                 },
@@ -556,7 +556,7 @@ async fn configured_channel_config() -> Arc<ChannelConfigService> {
             admin_secrets,
             admin_configuration,
         )
-        .expect("admin configuration service"),
+        .expect("admin configuration service"), // safety: test-only fixture uses valid in-memory admin config inputs.
     );
     let channel_config = Arc::new(
         ChannelConfigService::new(
