@@ -963,6 +963,46 @@ def _extension_setup_secret_readiness(status: object) -> dict[str, object]:
     }
 
 
+def _map_admin_configuration_values(
+    fields: dict[str, object],
+    declared_handles: set[str],
+) -> tuple[dict[str, object], list[str]]:
+    """Map bare setup-source names onto the admin group's declared handles.
+
+    Same exact-or-``_{name}``-suffix rule the secrets matcher uses. Returns
+    the mapped values plus the sorted unmapped source names. A source that
+    would overwrite an already-mapped handle (e.g. declared ``foo_bar`` fed
+    by both ``foo_bar`` and ``bar``) is ambiguous and raises: the submitted
+    value must never depend on dict order.
+    """
+    declared: dict[str, object] = {}
+    mapped_sources: dict[str, str] = {}
+    unmapped: list[str] = []
+    for source_name, value in fields.items():
+        if source_name in declared_handles:
+            target = source_name
+        else:
+            matches = [
+                handle
+                for handle in declared_handles
+                if handle.endswith(f"_{source_name}")
+            ]
+            if len(matches) != 1:
+                unmapped.append(source_name)
+                continue
+            target = matches[0]
+        if target in declared:
+            raise LiveQaError(
+                "Ambiguous admin-configuration mapping: sources "
+                f"{mapped_sources[target]!r} and {source_name!r} both resolve to "
+                f"declared handle {target!r}"
+            )
+        declared[target] = value
+        mapped_sources[target] = source_name
+    return declared, sorted(unmapped)
+
+
+
 async def _apply_extension_setup_api_after_start(
     *,
     base_url: str,
@@ -1012,11 +1052,46 @@ async def _apply_extension_setup_api_after_start(
                 headers=headers,
             )
             catalog_response.raise_for_status()
-            revision = 0
-            for group in catalog_response.json().get("groups", []):
-                if isinstance(group, dict) and group.get("group_id") == f"extension.{package_id}":
-                    revision = int(group.get("revision") or 0)
-                    break
+            # Fail closed on catalog drift: an absent group would otherwise
+            # degrade to revision=0 + an empty payload and resurface later as
+            # an opaque conflict or missing-field error.
+            group = next(
+                (
+                    entry
+                    for entry in catalog_response.json().get("groups", [])
+                    if isinstance(entry, dict)
+                    and entry.get("group_id") == f"extension.{package_id}"
+                ),
+                None,
+            )
+            if group is None or group.get("revision") is None:
+                raise LiveQaError(
+                    f"Operator catalog does not declare group extension.{package_id} "
+                    "with a revision; cannot route non-secret setup values"
+                )
+            revision = int(group.get("revision") or 0)
+            declared_handles: set[str] = set()
+            for descriptor in group.get("fields") or []:
+                handle = descriptor.get("handle") if isinstance(descriptor, dict) else None
+                if isinstance(handle, str) and handle:
+                    declared_handles.add(handle)
+            if not declared_handles:
+                raise LiveQaError(
+                    f"Operator group extension.{package_id} declares no field handles; "
+                    "cannot route non-secret setup values"
+                )
+            # The capability rejects handles the group does not declare. The
+            # setup payload uses bare source names (team_id, bot_user_id, ...);
+            # map each onto the group's declared handle (see
+            # _map_admin_configuration_values), send only mapped ones, and
+            # surface leftovers loudly so a real gap fails later at the
+            # group-complete/setup assertions with context.
+            declared, undeclared = _map_admin_configuration_values(fields, declared_handles)
+            if undeclared:
+                print(
+                    "[reborn-webui-v2-live-qa] WARNING: skipping values undeclared by "
+                    f"extension.{package_id} admin group: {undeclared}"
+                )
             admin_response = await client.put(
                 admin_url,
                 headers=headers,
@@ -1025,7 +1100,7 @@ async def _apply_extension_setup_api_after_start(
                     # entries, not a map (Vec<ExtensionAdminConfigurationValue>).
                     "values": [
                         {"handle": handle, "value": value}
-                        for handle, value in fields.items()
+                        for handle, value in declared.items()
                     ],
                     "expected_revision": revision,
                     "idempotency_key": f"live-qa-{uuid.uuid4()}",
@@ -1034,7 +1109,8 @@ async def _apply_extension_setup_api_after_start(
             if admin_response.status_code != 200:
                 raise LiveQaError(
                     "Operator extension-configuration save failed: "
-                    f"HTTP {admin_response.status_code}: {admin_response.text[:300]}"
+                    f"HTTP {admin_response.status_code}: {admin_response.text[:300]}; "
+                    f"sent_handles={sorted(declared)} undeclared_skipped={undeclared}"
                 )
         response = await client.post(
             setup_url,

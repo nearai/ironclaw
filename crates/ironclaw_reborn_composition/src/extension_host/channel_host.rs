@@ -47,7 +47,8 @@ use ironclaw_product::{
     DefaultProductSurface, DeliveryCoordinator, PreferenceTargetCodec,
     ProductActorUserResolutionRequest, ProductActorUserResolver,
     ProductConversationSubjectRouteResolver, ProductInstallationKey, ProductInstallationScope,
-    ProductWorkflowError, ResolvedProductActorUser, RunDeliveryObserver, RunDeliveryServices,
+    ProductWorkflowError, ResolveStoredProductReplyTargetRequest, ResolvedProductActorUser,
+    ResolvedStoredProductReplyTarget, RunDeliveryObserver, RunDeliveryServices,
     StaticProductInstallationResolver, TriggeredRunDeliveryChannel,
 };
 use ironclaw_threads::SessionThreadService;
@@ -160,7 +161,6 @@ enum ReconciledChannel {
     /// Assembly-built generic graph for exactly this channel source.
     Generic {
         source: HostedChannelSource,
-        #[cfg(feature = "test-support")]
         conversation_binding: Arc<dyn ConversationBindingService>,
         /// The post-admission observer registered with the sink (test seam:
         /// gate-resolution acks arriving from non-channel surfaces are
@@ -215,7 +215,6 @@ impl HostedChannelSource {
 
 struct BuiltGenericChannelGraph {
     registration: ChannelIngressRegistration,
-    #[cfg(feature = "test-support")]
     conversation_binding: Arc<dyn ConversationBindingService>,
     #[cfg(feature = "test-support")]
     observer: Option<Arc<dyn PostAdmissionObserver>>,
@@ -329,6 +328,40 @@ impl GenericChannelHostAssembly {
                     .map(|codec| (extension_id, codec))
             })
             .collect()
+    }
+
+    /// Resolve an opaque run-state reply binding through the active channel
+    /// conversation stores. Each channel owns a separate durable binding
+    /// root, so misses are expected until the owning channel is reached.
+    pub(crate) async fn resolve_stored_reply_target(
+        &self,
+        request: ResolveStoredProductReplyTargetRequest,
+    ) -> Result<Option<ResolvedStoredProductReplyTarget>, ProductWorkflowError> {
+        let bindings = {
+            let reconciled = self.reconciled.lock().await;
+            reconciled
+                .values()
+                .filter_map(|channel| match channel {
+                    ReconciledChannel::Generic {
+                        conversation_binding,
+                        ..
+                    } => Some(Arc::clone(conversation_binding)),
+                    ReconciledChannel::Untouched { .. } => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        for binding in bindings {
+            match binding.resolve_stored_reply_target(request.clone()).await {
+                Ok(target) => return Ok(Some(target)),
+                // The product binding deliberately maps both an absent opaque
+                // ref and denied access to this fail-closed result. Continue
+                // across extension-scoped stores; no denied binding is ever
+                // returned or used as routing authority.
+                Err(ProductWorkflowError::BindingAccessDenied) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(None)
     }
 
     /// Currently assembled channel lanes for product-owned triggered-run
@@ -466,7 +499,6 @@ impl GenericChannelHostAssembly {
                                 extension_id.clone(),
                                 ReconciledChannel::Generic {
                                     source,
-                                    #[cfg(feature = "test-support")]
                                     conversation_binding: graph.conversation_binding,
                                     #[cfg(feature = "test-support")]
                                     observer: graph.observer,
@@ -598,7 +630,6 @@ impl GenericChannelHostAssembly {
         };
         Ok(Some(BuiltGenericChannelGraph {
             registration,
-            #[cfg(feature = "test-support")]
             conversation_binding: binding,
             #[cfg(feature = "test-support")]
             observer: observer.map(|observer| observer as Arc<dyn PostAdmissionObserver>),

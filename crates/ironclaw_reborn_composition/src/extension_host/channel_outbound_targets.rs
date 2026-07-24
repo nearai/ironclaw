@@ -30,6 +30,8 @@ use ironclaw_host_api::{AgentId, ExtensionId, ProjectId, ResourceScope, TenantId
 use ironclaw_outbound::{OutboundDeliveryTargetProvider, OutboundError, RunFinalReplyDestination};
 use ironclaw_product::{
     AdapterInstallationId, ExternalConversationRef, PreferenceTargetEncodeRequest,
+    ProductConversationRouteKind, ResolveStoredProductReplyTargetRequest,
+    StoredProductReplyTargetAccess,
 };
 use ironclaw_product::{
     CurrentDeliveryTarget, CurrentDeliveryTargetResolver, PreferenceTargetCodec,
@@ -165,12 +167,73 @@ impl CurrentDeliveryTargetResolver for ComposedCurrentDeliveryTargetResolver {
         target: &ReplyTargetBindingRef,
     ) -> Result<Option<OutboundDeliveryTargetId>, ProductWorkflowError> {
         let caller = Self::outbound_scope(scope.tenant_id.clone(), scope.user_id.clone());
-        self.targets
+        let resolved = self
+            .targets
             .resolve_reply_target_binding(&caller, target)
             .await
-            .map(|entry| entry.map(|entry| entry.summary.target_id))
-            .map_err(map_current_target_error)
+            .map_err(map_current_target_error)?;
+        if let Some(entry) = resolved {
+            return Ok(Some(entry.summary.target_id));
+        }
+
+        let Some(thread_id) = scope.thread_id.clone() else {
+            return Ok(None);
+        };
+        let Some(assembly) = self.assembly()? else {
+            return Ok(None);
+        };
+        let stored = assembly
+            .resolve_stored_reply_target(ResolveStoredProductReplyTargetRequest {
+                scope: TurnScope::new_with_owner(
+                    scope.tenant_id.clone(),
+                    scope.agent_id.clone(),
+                    scope.project_id.clone(),
+                    thread_id,
+                    Some(scope.user_id.clone()),
+                ),
+                actor: TurnActor::new(scope.user_id.clone()),
+                reply_target_binding_ref: target.clone(),
+                access: StoredProductReplyTargetAccess::OrdinaryReply,
+            })
+            .await?;
+        let Some(stored) = stored else {
+            return Ok(None);
+        };
+        let Some(codec) = assembly.preference_target_codec(stored.adapter_id.as_str()) else {
+            return Ok(None);
+        };
+        let expects_direct_message = stored.route_kind == ProductConversationRouteKind::Direct;
+        let entries = self
+            .targets
+            .list_outbound_delivery_targets(&caller)
+            .await
+            .map_err(map_current_target_error)?;
+        Ok(entries.into_iter().find_map(|entry| {
+            if entry.summary.channel.as_str() != stored.adapter_id.as_str() {
+                return None;
+            }
+            let RunFinalReplyDestination::External {
+                reply_target_binding_ref,
+            } = &entry.destination
+            else {
+                return None;
+            };
+            if codec.is_personal_direct_message(reply_target_binding_ref) != expects_direct_message
+            {
+                return None;
+            }
+            let conversation = codec.conversation_for_target(reply_target_binding_ref)?;
+            same_channel_destination(&conversation, &stored.external_conversation_ref)
+                .then_some(entry.summary.target_id)
+        }))
     }
+}
+
+fn same_channel_destination(
+    left: &ExternalConversationRef,
+    right: &ExternalConversationRef,
+) -> bool {
+    left == right
 }
 
 fn map_current_target_error(error: OutboundError) -> ProductWorkflowError {

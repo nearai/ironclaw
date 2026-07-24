@@ -54,7 +54,7 @@ use ironclaw_product::{
     AdapterInstallationId, AuthRequirement, AuthResolutionPayload, AuthResolutionResult,
     ExternalActorRef, ExternalConversationRef, ExternalEventId, ParsedProductInbound,
     ProductAdapterId, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
-    ProtocolAuthEvidence, TrustedInboundContext,
+    ProductTriggerReason, ProtocolAuthEvidence, TrustedInboundContext, UserMessagePayload,
 };
 use ironclaw_product::{
     ApprovalInteractionActionView, ApprovalInteractionDecision, ApprovalInteractionScope,
@@ -494,10 +494,16 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         },
     ));
 
-    let identity_lookup = Arc::new(RecordingUserIdentityLookup::new([(
-        format!("{INSTALLATION}:{SLACK_USER}"),
-        UserId::new(USER).expect("user"), // safety: static test user id is valid.
-    )]));
+    let identity_lookup = Arc::new(RecordingUserIdentityLookup::new([
+        (
+            format!("{INSTALLATION}:{SLACK_USER}"),
+            UserId::new(USER).expect("user"), // safety: static test user id is valid.
+        ),
+        (
+            format!("{TELEGRAM_INSTALLATION}:{TELEGRAM_USER}"),
+            UserId::new(USER).expect("user"), // safety: static test user id is valid.
+        ),
+    ]));
     let outbound_delivery_targets =
         Arc::new(crate::outbound::MutableOutboundDeliveryTargetRegistry::default());
     let current_delivery_targets = Arc::new(
@@ -5351,6 +5357,149 @@ async fn telegram_target_is_enumerated_resolved_and_delivered_through_generic_wi
             provider as Arc<dyn OutboundDeliveryTargetProvider>,
         )
         .expect("register target provider");
+    registry
+        .register_provider(
+            "telegram-topicless-parent",
+            Arc::new(
+                ironclaw_outbound::HostOwnedOutboundDeliveryTargetProvider::new(
+                    ironclaw_outbound::OutboundDeliveryTargetSummary::new(
+                        ironclaw_outbound::OutboundDeliveryTargetId::new(
+                            "telegram:shared-channel:-100123",
+                        )
+                        .expect("target id"),
+                        "telegram",
+                        "Telegram parent chat",
+                        None,
+                    )
+                    .expect("target summary"),
+                    ironclaw_outbound::DeliveryTargetCapabilities {
+                        final_replies: true,
+                        ..Default::default()
+                    },
+                    ironclaw_outbound::RunFinalReplyDestination::External {
+                        reply_target_binding_ref: ReplyTargetBindingRef::new("tg:-100123:_:_")
+                            .expect("topicless Telegram parent target"),
+                    },
+                ),
+            ),
+        )
+        .expect("register topicless Telegram parent target");
+    let current_targets = current_target_resolver(&harness.assembly, Arc::clone(&registry));
+
+    let binding_service = harness
+        .assembly
+        .binding_service_for_extension_for_test("telegram")
+        .expect("Telegram binding service");
+    let adapter_id = ProductAdapterId::new("telegram").expect("adapter id");
+    let installation_id =
+        AdapterInstallationId::new(TELEGRAM_INSTALLATION).expect("installation id");
+    let evidence = ProtocolAuthEvidence::test_verified(
+        AuthRequirement::SharedSecretHeader {
+            header_name: "X-Telegram-Bot-Api-Secret-Token".to_string(),
+        },
+        installation_id.as_str(),
+    );
+    let topic_context = TrustedInboundContext::from_verified_evidence(
+        adapter_id.clone(),
+        installation_id.clone(),
+        chrono::Utc::now(),
+        &evidence,
+    )
+    .expect("trusted Telegram topic context");
+    let topic_parsed = ParsedProductInbound::new(
+        ExternalEventId::new("telegram:event:implicit-topic-target").expect("event id"),
+        ExternalActorRef::new("telegram_user", TELEGRAM_USER, None::<String>)
+            .expect("Telegram actor"),
+        ExternalConversationRef::new(None, "-100123", Some("77"), None)
+            .expect("Telegram topic conversation"),
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new(
+                "send me a random number every minute",
+                Vec::new(),
+                ProductTriggerReason::BotMention,
+            )
+            .expect("Telegram topic message"),
+        ),
+    )
+    .expect("parsed Telegram topic inbound");
+    let topic_envelope = ProductInboundEnvelope::from_trusted_parse(topic_context, topic_parsed)
+        .expect("Telegram topic envelope");
+    let topic_binding = binding_service
+        .resolve_binding(ResolveBindingRequest::from_envelope(&topic_envelope))
+        .await
+        .expect("Telegram topic binds");
+    let topic_scope = ResourceScope {
+        tenant_id: TenantId::new(TENANT).expect("tenant"),
+        user_id: user.clone(),
+        agent_id: Some(AgentId::new(AGENT).expect("agent")),
+        project_id: Some(ProjectId::new(PROJECT).expect("project")),
+        mission_id: None,
+        thread_id: Some(topic_binding.thread_id),
+        invocation_id: InvocationId::new(),
+    };
+    assert!(
+        current_targets
+            .resolve_current_target_id(&topic_scope, &topic_binding.reply_target_binding_ref)
+            .await
+            .expect("implicit topic target lookup")
+            .is_none(),
+        "a topic-scoped source must not downgrade to the topicless parent chat"
+    );
+
+    let context = TrustedInboundContext::from_verified_evidence(
+        adapter_id,
+        installation_id,
+        chrono::Utc::now(),
+        &evidence,
+    )
+    .expect("trusted Telegram context");
+    let parsed = ParsedProductInbound::new(
+        ExternalEventId::new("telegram:event:implicit-trigger-target").expect("event id"),
+        ExternalActorRef::new("telegram_user", TELEGRAM_USER, None::<String>)
+            .expect("Telegram actor"),
+        ExternalConversationRef::new(None, TELEGRAM_USER, None, None)
+            .expect("Telegram conversation"),
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new(
+                "send me a random number every minute",
+                Vec::new(),
+                ProductTriggerReason::DirectChat,
+            )
+            .expect("Telegram message"),
+        ),
+    )
+    .expect("parsed Telegram inbound");
+    let envelope =
+        ProductInboundEnvelope::from_trusted_parse(context, parsed).expect("Telegram envelope");
+    let source_binding = binding_service
+        .resolve_binding(ResolveBindingRequest::from_envelope(&envelope))
+        .await
+        .expect("Telegram conversation binds");
+    assert!(
+        source_binding
+            .reply_target_binding_ref
+            .as_str()
+            .starts_with("reply:"),
+        "source runs carry the conversation store's opaque binding"
+    );
+    let source_scope = ResourceScope {
+        tenant_id: TenantId::new(TENANT).expect("tenant"),
+        user_id: user.clone(),
+        agent_id: Some(AgentId::new(AGENT).expect("agent")),
+        project_id: Some(ProjectId::new(PROJECT).expect("project")),
+        mission_id: None,
+        thread_id: Some(source_binding.thread_id),
+        invocation_id: InvocationId::new(),
+    };
+    let inherited_target = current_targets
+        .resolve_current_target_id(&source_scope, &source_binding.reply_target_binding_ref)
+        .await
+        .expect("implicit source target lookup")
+        .expect("opaque Telegram source binding resolves to a current target");
+    assert_eq!(
+        inherited_target, telegram.summary.target_id,
+        "implicit trigger delivery inherits the source Telegram DM"
+    );
 
     let scope = foreign_run_scope();
     harness.ensure_scope_thread(&scope).await;
@@ -5372,7 +5521,7 @@ async fn telegram_target_is_enumerated_resolved_and_delivered_through_generic_wi
         Arc::clone(&harness.assembly),
         Arc::clone(&delivery_store) as Arc<dyn TriggeredRunDeliveryStore>,
         harness.outbound.clone() as Arc<dyn CommunicationPreferenceRepository>,
-        current_target_resolver(&harness.assembly, registry),
+        current_targets,
         Arc::clone(&harness.event_router),
     );
     let fire = TriggerFire {
