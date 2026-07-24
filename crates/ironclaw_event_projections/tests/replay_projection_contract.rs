@@ -1829,37 +1829,65 @@ async fn replay_projection_keeps_spawned_process_run_active_until_terminal_proce
 
 #[tokio::test]
 async fn replay_projection_orders_runs_by_recent_activity_descending() {
+    // Six invocations, not two. `RuntimeProjectionState::runs` is a `HashMap`,
+    // so with two entries its iteration order matches sorted order about half
+    // the time and this test passes by luck even when the sort is gone —
+    // mutation testing confirmed `sort_runs_for_projection` could be replaced
+    // with a no-op while the suite stayed green. Six entries make accidental
+    // agreement a 1-in-720 coincidence, and the UUIDs below are deliberately
+    // not in append order so hash order cannot trivially match it either.
     let log = Arc::new(InMemoryDurableEventLog::new());
     let service = ReplayEventProjectionService::new(Arc::clone(&log));
     let thread = ThreadId::new("thread-a").unwrap();
-    let older_invocation = InvocationId::parse("00000000-0000-4000-8000-000000000001").unwrap();
-    let newer_invocation = InvocationId::parse("ffffffff-ffff-4fff-8fff-ffffffffffff").unwrap();
-    let older_scope = scope_for_thread_with_invocation(thread.clone(), older_invocation);
-    let newer_scope = scope_for_thread_with_invocation(thread, newer_invocation);
     let capability = capability_id();
+    let invocations = [
+        "00000000-0000-4000-8000-000000000001",
+        "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        "7f7f7f7f-7f7f-4f7f-8f7f-7f7f7f7f7f7f",
+        "11111111-1111-4111-8111-111111111111",
+        "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "3a3a3a3a-3a3a-4a3a-8a3a-3a3a3a3a3a3a",
+    ]
+    .map(|raw| InvocationId::parse(raw).unwrap());
 
-    log.append(RuntimeEvent::dispatch_requested(
-        older_scope.clone(),
-        capability.clone(),
-    ))
-    .await
-    .unwrap();
-    log.append(RuntimeEvent::dispatch_requested(newer_scope, capability))
+    let mut scopes = Vec::new();
+    for invocation in &invocations {
+        let scope = scope_for_thread_with_invocation(thread.clone(), *invocation);
+        log.append(RuntimeEvent::dispatch_requested(
+            scope.clone(),
+            capability.clone(),
+        ))
         .await
         .unwrap();
+        scopes.push(scope);
+    }
 
     let snapshot = service
         .snapshot(ProjectionRequest {
-            scope: ProjectionScope::from_resource_scope(&older_scope),
+            scope: ProjectionScope::from_resource_scope(&scopes[0]),
             after: None,
             limit: 16,
         })
         .await
         .unwrap();
 
-    assert_eq!(snapshot.runs.len(), 2);
-    assert_eq!(snapshot.runs[0].invocation_id, newer_invocation);
-    assert_eq!(snapshot.runs[1].invocation_id, older_invocation);
+    assert_eq!(
+        snapshot.runs.len(),
+        invocations.len(),
+        "{:?}",
+        snapshot.runs
+    );
+    // Most recent activity first, so exactly the reverse of append order.
+    let expected = invocations.iter().rev().copied().collect::<Vec<_>>();
+    assert_eq!(
+        snapshot
+            .runs
+            .iter()
+            .map(|run| run.invocation_id)
+            .collect::<Vec<_>>(),
+        expected,
+        "runs must be ordered most-recent-first, not in HashMap iteration order"
+    );
 }
 
 #[tokio::test]
