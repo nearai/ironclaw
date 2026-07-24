@@ -333,11 +333,16 @@ impl InstructionBundleBuilder {
             }
         }
 
-        let mut memory_snippets = request.context_bundle.memory_snippets;
+        // Memory snippets arrive already ordered by the host's two-lane retrieval
+        // (short-term before long-term) so the active conversation keeps priority
+        // under the shared budget. Preserve that insertion order — do NOT re-sort
+        // by opaque ref like instruction snippets do, which would scramble the lane
+        // priority before the model sees it. (CR review: lane priority at the
+        // render boundary.)
+        let memory_snippets = request.context_bundle.memory_snippets;
         if !memory_snippets.is_empty() {
             requires_materialization_store = true;
         }
-        memory_snippets.sort_by(compare_snippet_refs);
         for (ordinal, snippet) in memory_snippets.into_iter().enumerate() {
             let content_ref =
                 snippet_message_ref("memory", &snippet, ordinal, &mut synthetic_refs)?;

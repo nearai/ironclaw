@@ -17,9 +17,10 @@
 //! `harness/profiles/*.rs` domain's `capability_ids` — read from that
 //! domain's REAL `ToolsProfile`/harness constructor, never a hand-copied
 //! table — is a subset of production's real capability surface
-//! (`builtin_first_party_package()` + the github/bundled-extension
-//! manifest-derived id sets), modulo a skip-list of deliberately synthetic
-//! local-dev-only ids. See `production_capability_surface()`'s doc for one
+//! (`builtin_first_party_package()` + `native_memory_first_party_package()` +
+//! the github/bundled-extension manifest-derived id sets), modulo a skip-list
+//! of deliberately synthetic local-dev-only ids. See
+//! `production_capability_surface()`'s doc for one
 //! known, deliberately-excluded gap (the extension-lifecycle ids) that is
 //! visibility-blocked rather than papered over.
 
@@ -59,12 +60,14 @@ use reborn_support::planned_runtime_parts_shape::DefaultPlannedRuntimePartsShape
 /// below for the exact code path.
 const EXPECTED_PRODUCTION_SHAPE: DefaultPlannedRuntimePartsShape =
     DefaultPlannedRuntimePartsShape {
-        model_route_resolver: false, // :3406 hardcoded None
-        cancellation_factory: false, // :3407 hardcoded None
-        skill_context_source: true,  // :2917-2929 local_dev_filesystem_skill_context_source
-        attachment_read_port: true,  // :3372-3376 local_runtime.map(ProjectScopedAttachmentReader)
+        model_route_resolver: false,    // :3406 hardcoded None
+        cancellation_factory: false,    // :3407 hardcoded None
+        skill_context_source: true,     // :2917-2929 local_dev_filesystem_skill_context_source
+        attachment_read_port: true, // :3372-3376 local_runtime.map(ProjectScopedAttachmentReader)
         gate_record_store: true, // local_runtime.map(gate_record_store) — always Some when local_runtime present
         input_queue: false,      // hardcoded None
+        memory_context_service: true, // :3481-3494 local_runtime + native MemoryServiceResolver
+        after_turn_memory_writer: true, // :3500-3509 local_runtime + native MemoryServiceResolver
         model_policy_guard: false, // hardcoded None
         // :3027-3073 — scope: this constant models the NO-LLM local-dev
         // shape. When `model_gateway_override` is set (the harness's
@@ -116,6 +119,18 @@ const ALLOWED_DIVERGENCES: &[(&str, &str)] = &[
          production: always Some, no config gate (runtime.rs:3453)",
     ),
     (
+        "memory_context_service",
+        "harness: None in generic group runtime (group.rs); focused memory/runtime tests \
+         cover this lane directly; production: Some via local_runtime memory_service_resolver \
+         (runtime.rs:3481-3494)",
+    ),
+    (
+        "after_turn_memory_writer",
+        "harness: None in generic group runtime (group.rs); focused memory/runtime tests \
+         cover this lane directly; production: Some via local_runtime memory_service_resolver \
+         (runtime.rs:3500-3509)",
+    ),
+    (
         "communication_context_provider",
         "harness: None unless .communication_context_provider() was called (group.rs); \
          production: always Some whenever local_runtime is present (runtime.rs:3337-3357)",
@@ -138,6 +153,10 @@ fn mask(
         "attachment_read_port" => shape.attachment_read_port = from.attachment_read_port,
         "gate_record_store" => shape.gate_record_store = from.gate_record_store,
         "input_queue" => shape.input_queue = from.input_queue,
+        "memory_context_service" => shape.memory_context_service = from.memory_context_service,
+        "after_turn_memory_writer" => {
+            shape.after_turn_memory_writer = from.after_turn_memory_writer
+        }
         "model_policy_guard" => shape.model_policy_guard = from.model_policy_guard,
         "model_budget_accountant" => shape.model_budget_accountant = from.model_budget_accountant,
         "safety_context" => shape.safety_context = from.safety_context,
@@ -275,9 +294,10 @@ const SYNTHETIC_CAPABILITY_SKIP_LIST: &[(&str, &str)] = &[
     ),
 ];
 
-/// The production capability surface: `builtin_first_party_package()`'s
-/// declared capabilities, unioned with two independently production-derived
-/// sources — the github extension's real manifest-derived ids
+/// The production capability surface: the always-on first-party packages
+/// (`builtin_first_party_package()` and the sibling
+/// `native_memory_first_party_package()`), unioned with two independently
+/// production-derived sources — the github extension's real manifest-derived ids
 /// (`github_support::capability_ids()`) and every OTHER bundled extension's
 /// real manifest-derived ids
 /// (`extension_surface::bundled_extension_manifest_capability_ids()`) — both
@@ -307,6 +327,14 @@ fn production_capability_surface() -> HashSet<String> {
         .iter()
         .map(|capability| capability.id.as_str().to_string())
         .collect();
+    surface.extend(
+        ironclaw_host_runtime::native_memory_first_party_package()
+            .expect("native memory first-party package parses")
+            .manifest
+            .capabilities
+            .iter()
+            .map(|capability| capability.id.as_str().to_string()),
+    );
     surface.extend(
         reborn_support::github::capability_ids()
             .expect("github extension manifest parses")

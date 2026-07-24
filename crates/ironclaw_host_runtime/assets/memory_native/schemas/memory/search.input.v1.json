@@ -1,0 +1,40 @@
+{
+  "type": "object",
+  "description": "Search only Reborn internal persistent memory documents in the current tenant/user/agent/project scope; this does not search connected app or extension data.",
+  "properties": {
+    "query": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Preferred natural language search query for Reborn internal persistent memory"
+    },
+    "q": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Alias for query"
+    },
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Alias for query"
+    },
+    "pattern": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Alias for query"
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 20,
+      "default": 5,
+      "description": "Maximum number of memory results to return"
+    }
+  },
+  "oneOf": [
+    { "required": ["query"] },
+    { "required": ["q"] },
+    { "required": ["text"] },
+    { "required": ["pattern"] }
+  ],
+  "additionalProperties": false
+}

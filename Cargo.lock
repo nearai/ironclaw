@@ -3941,9 +3941,27 @@ dependencies = [
  "chrono-tz",
  "hex",
  "ironclaw_host_api",
+ "ironclaw_prompt_envelope",
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ironclaw_memory_mem0"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ironclaw_host_api",
+ "ironclaw_memory",
+ "ironclaw_memory_mem0",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
  "tracing",
 ]
 
@@ -4162,6 +4180,8 @@ dependencies = [
  "ironclaw_loop_host",
  "ironclaw_mcp",
  "ironclaw_memory",
+ "ironclaw_memory_mem0",
+ "ironclaw_memory_native",
  "ironclaw_network",
  "ironclaw_observability",
  "ironclaw_outbound",
@@ -4477,6 +4497,8 @@ dependencies = [
  "ironclaw_host_runtime",
  "ironclaw_llm",
  "ironclaw_loop_host",
+ "ironclaw_memory",
+ "ironclaw_memory_native",
  "ironclaw_observability",
  "ironclaw_processes",
  "ironclaw_reborn_event_store",

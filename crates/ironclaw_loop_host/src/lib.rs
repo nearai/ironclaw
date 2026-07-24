@@ -35,6 +35,7 @@ mod filesystem_skill_bundle_source;
 pub mod identity_context;
 mod input_port;
 mod input_queue;
+mod memory_context;
 mod model_capability_view;
 mod model_visible_scrub;
 mod prompt_context_budget;
@@ -154,11 +155,12 @@ use ironclaw_turns::{
         CapabilitySurfaceVersion, FinalizeAssistantMessage, InstructionMaterializationStore,
         LoopCapabilityPort, LoopContextBundle, LoopContextCompactionKind,
         LoopContextCompactionMetadata, LoopContextMessage, LoopContextPort, LoopContextRequest,
-        LoopDriverNoteKind, LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInputCursor,
-        LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse, LoopModelUsage,
-        LoopPromptBundleAuthority, LoopRequest, LoopRequestBatch, LoopRunContext, LoopRunInfoPort,
-        LoopSafeSummary, LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput, PromptMode,
-        UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
+        LoopContextSnippet, LoopDriverNoteKind, LoopHostMilestoneEmitter, LoopHostMilestoneSink,
+        LoopInputCursor, LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse,
+        LoopModelUsage, LoopPromptBundleAuthority, LoopRequest, LoopRequestBatch, LoopRunContext,
+        LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, MemoryPromptContextService,
+        ModelStreamChunk, ParentLoopOutput, PromptMode, UpdateAssistantDraft,
+        VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
         sanitize_model_visible_text, sort_instruction_snippets_for_prompt,
     },
 };
@@ -258,6 +260,18 @@ where
     context_window_cache: Option<Arc<ThreadContextWindowCache>>,
     identity_candidates: Arc<IdentityCandidateCache>,
     milestone_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
+    /// Optional proactive-memory source. When wired, memory snippets are fetched
+    /// ONCE per run (cached in `memory_snippets_cache`) and surfaced into the
+    /// prompt's `"memory"` section; when absent, `memory_snippets` stays empty.
+    /// Optional; production wires `None` pending #5013 — a composition without a
+    /// memory backend degrades to no memory, never failing the turn. (Unlike the
+    /// non-optional null-object `user_profile_source`, this is a genuine `Option`.)
+    // arch-exempt: optional_arc, deferred production wiring, issue #5013
+    memory_context_service: Option<Arc<dyn MemoryPromptContextService>>,
+    /// Per-run cache for the fetched memory snippets. Shared across clones via
+    /// `Arc` so the "fetch once per run" guarantee holds even if the port is
+    /// cloned, exactly like `identity_candidates`.
+    memory_snippets_cache: Arc<OnceCell<Vec<LoopContextSnippet>>>,
 }
 
 struct IdentityCandidateCache {
@@ -325,11 +339,25 @@ where
             context_window_cache: None,
             identity_candidates: Arc::new(IdentityCandidateCache::new()),
             milestone_sink: None,
+            memory_context_service: None,
+            memory_snippets_cache: Arc::new(OnceCell::new()),
         }
     }
 
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
         self.skill_context_source = Some(source);
+        self
+    }
+
+    /// Installs the proactive-memory source. When wired, the loop fetches both
+    /// the short-term (per-thread) and long-term memory lanes ONCE at the first
+    /// prompt build of the run, caches the admitted snippets, and surfaces them
+    /// into the prompt every turn. When not called the loop carries no memory.
+    pub fn with_memory_context_service(
+        mut self,
+        service: Arc<dyn MemoryPromptContextService>,
+    ) -> Self {
+        self.memory_context_service = Some(service);
         self
     }
 
@@ -476,6 +504,11 @@ where
             tokio::try_join!(context_window, skill_snippets, identity_context)?;
         self.publish_personal_context_admitted(mode, &admitted_personal_context_paths);
 
+        // Proactive memory: fetch both lanes ONCE per run (cached) using the
+        // latest user message as the query, and surface them into the prompt's
+        // "memory" section. Derived from `context.messages` before the move below.
+        let memory_snippets = self.load_memory_snippets_once(&context.messages).await;
+
         let started_at = ironclaw_observability::live_latency_started_at();
         let compaction_message_index = context
             .messages
@@ -502,7 +535,7 @@ where
                 .collect(),
             compaction_message_index,
             instruction_snippets,
-            memory_snippets: Vec::new(),
+            memory_snippets,
         })
     }
 }
@@ -2312,7 +2345,65 @@ fn safe_model_summary(kind: HostManagedModelErrorKind) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use crate::memory_context::latest_user_message_text;
+
     use super::*;
+
+    fn ctx_msg(sequence: u64, kind: MessageKind, content: &str) -> ContextMessage {
+        ContextMessage {
+            message_id: None,
+            summary_id: None,
+            sequence,
+            kind,
+            tool_result_provider_call: None,
+            content: content.to_string(),
+            image_attachments: Vec::new(),
+        }
+    }
+
+    /// CR review: `latest_user_message_text` returns the latest NON-BLANK user
+    /// message — a blank trailing user turn must not drop memory for the run when
+    /// an earlier user turn has content, and non-user rows are skipped.
+    #[test]
+    fn latest_user_message_text_uses_latest_non_blank_user_turn() {
+        // A blank newest user turn must fall back to the earlier non-blank one.
+        let blank_trailing = vec![
+            ctx_msg(1, MessageKind::User, "remember the launch is friday"),
+            ctx_msg(2, MessageKind::User, "   \n  "),
+        ];
+        assert_eq!(
+            latest_user_message_text(&blank_trailing).as_deref(),
+            Some("remember the launch is friday"),
+            "a blank trailing user turn must not drop the earlier non-blank one"
+        );
+
+        // All-blank user rows → None (nothing to query memory with).
+        let all_blank = vec![
+            ctx_msg(1, MessageKind::User, "   "),
+            ctx_msg(2, MessageKind::User, ""),
+        ];
+        assert_eq!(latest_user_message_text(&all_blank), None);
+
+        // The newest non-blank user turn wins over an older one.
+        let two_users = vec![
+            ctx_msg(1, MessageKind::User, "older"),
+            ctx_msg(2, MessageKind::User, "newest"),
+        ];
+        assert_eq!(
+            latest_user_message_text(&two_users).as_deref(),
+            Some("newest")
+        );
+
+        // A newer non-user row is skipped in favor of the latest user turn.
+        let user_then_assistant = vec![
+            ctx_msg(1, MessageKind::User, "the user turn"),
+            ctx_msg(2, MessageKind::Assistant, "model reply"),
+        ];
+        assert_eq!(
+            latest_user_message_text(&user_then_assistant).as_deref(),
+            Some("the user turn")
+        );
+    }
 
     #[test]
     fn model_gateway_error_threads_detail_into_host_error() {

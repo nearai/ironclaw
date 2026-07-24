@@ -1,3 +1,10 @@
+//! Local runs need `RUST_MIN_STACK=67108864`: these smokes build a full
+//! Reborn runtime and drive whole turns on the libtest current-thread stack,
+//! and the combined debug async frames overflow the 8 MiB default (the
+//! bundled-extension surface smoke measures ~10 MiB). CI sets the same value
+//! on the root-tests job; `reborn_qa_recorded_behavior.rs` documents the same
+//! pathology for its recorder.
+
 #[allow(dead_code)]
 #[path = "support/reborn_parity_qa/mod.rs"]
 mod parity_qa_support;

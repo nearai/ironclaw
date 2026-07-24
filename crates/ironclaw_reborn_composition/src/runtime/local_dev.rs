@@ -12,7 +12,7 @@ use ironclaw_host_api::{
     ResourceScope, RuntimeKind, TrustClass, UserId,
 };
 use ironclaw_host_runtime::{
-    CapabilitySurfacePolicy, HostRuntime, SurfaceKind,
+    CapabilitySurfacePolicy, HostRuntime, NATIVE_MEMORY_FIRST_PARTY_PROVIDER, SurfaceKind,
     VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
 use ironclaw_loop_host::{
@@ -1166,6 +1166,26 @@ fn visible_capability_request(
             effective_trust: EffectiveTrustClass::user_trusted(),
             authority_ceiling: AuthorityCeiling {
                 allowed_effects: inputs.policy.provider.authority_effects.clone(),
+                max_resource_ceiling: None,
+            },
+            provenance: TrustProvenance::AdminConfig,
+            evaluated_at: Utc::now(),
+        },
+    );
+    // Native memory rides the same always-on first-party lane as builtin (not the
+    // catalog extension surface), so it is trusted here directly. Its authority
+    // ceiling is the document-store provider's needs only: dispatch + read/write
+    // filesystem (matching the builtin provider's first-party effects).
+    provider_trust.insert(
+        ExtensionId::new(NATIVE_MEMORY_FIRST_PARTY_PROVIDER).map_err(host_api_agent_loop_error)?,
+        TrustDecision {
+            effective_trust: EffectiveTrustClass::user_trusted(),
+            authority_ceiling: AuthorityCeiling {
+                allowed_effects: vec![
+                    EffectKind::DispatchCapability,
+                    EffectKind::ReadFilesystem,
+                    EffectKind::WriteFilesystem,
+                ],
                 max_resource_ceiling: None,
             },
             provenance: TrustProvenance::AdminConfig,

@@ -1073,6 +1073,12 @@ impl RebornIntegrationGroupBuilder {
             // the SAME `Arc` is also stashed on `GroupSharedStorage` for a
             // profile-round-trip test to read directly.
             user_profile_source: Arc::clone(&user_profile_source),
+            // E-MEMORY: group tests do not yet replay the production memory
+            // context/after-turn writer lanes; wiring_parity.rs carries the
+            // explicit divergence while focused memory tests cover the runtime
+            // path directly.
+            memory_context_service: None,
+            after_turn_memory_writer: None,
             model_policy_guard: None,
             // C-BUDGET: production `build_default_budget_accountant` (Some only
             // for `budget_accounting()` groups; `None` otherwise, so all existing

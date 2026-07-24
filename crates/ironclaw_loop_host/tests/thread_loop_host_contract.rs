@@ -4995,3 +4995,88 @@ impl LoopCapabilityPort for StaticToolDefinitionPort {
     }
 }
 // arch-exempt: large_file, thread loop host contract remains one integration suite, plan #6175
+
+/// Records every memory request and returns one fixed snippet, so the
+/// caller-level test can assert both the captured request and the once-per-run
+/// fetch guarantee.
+struct RecordingMemoryPromptContextService {
+    calls: Mutex<Vec<ironclaw_turns::run_profile::MemoryPromptContextRequest>>,
+}
+
+#[async_trait]
+impl ironclaw_turns::run_profile::MemoryPromptContextService
+    for RecordingMemoryPromptContextService
+{
+    async fn load_memory_snippets(
+        &self,
+        request: ironclaw_turns::run_profile::MemoryPromptContextRequest,
+    ) -> Result<Vec<LoopContextSnippet>, AgentLoopHostError> {
+        self.calls.lock().expect("memory calls lock").push(request);
+        Ok(vec![LoopContextSnippet {
+            snippet_ref: "memory-snippet:test".to_string(),
+            model_content: "remembered fact".to_string(),
+            safe_summary: "remembered fact".to_string(),
+            metadata: None,
+        }])
+    }
+}
+
+/// Caller-level proof of the proactive-memory lane through the REAL
+/// `LoopContextPort::load_loop_context` path (not the message-selection helper
+/// alone): the wired service is queried with the latest user message as the
+/// query, its snippets surface on `LoopContextBundle.memory_snippets`, and the
+/// fetch happens ONCE per run — the second prompt build reuses the cache.
+#[tokio::test]
+async fn thread_context_port_loads_memory_snippets_through_wired_service_once_per_run() {
+    let fixture = ThreadFixture::new().await;
+    let service = Arc::new(RecordingMemoryPromptContextService {
+        calls: Mutex::new(Vec::new()),
+    });
+    // Memory retrieval is keyed to the acting human user; a context without an
+    // actor deliberately skips the fetch, so stamp one like production does —
+    // the actor must be the thread-scope owner or scope validation fails.
+    let owner = fixture
+        .thread_scope
+        .owner_user_id
+        .clone()
+        .expect("fixture thread scope carries an owner");
+    let run_context = fixture
+        .run_context
+        .clone()
+        .with_actor(TurnActor::new(owner.clone()));
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        run_context.clone(),
+        16,
+    )
+    .with_memory_context_service(Arc::clone(&service) as Arc<_>);
+
+    let request = || LoopContextRequest {
+        after: None,
+        limit: 16,
+        mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+    };
+    let first = adapter.load_loop_context(request()).await.unwrap();
+    let second = adapter.load_loop_context(request()).await.unwrap();
+
+    for bundle in [&first, &second] {
+        assert_eq!(bundle.memory_snippets.len(), 1);
+        assert_eq!(bundle.memory_snippets[0].snippet_ref, "memory-snippet:test");
+        assert_eq!(bundle.memory_snippets[0].model_content, "remembered fact");
+    }
+
+    let calls = service.calls.lock().expect("memory calls lock");
+    assert_eq!(
+        calls.len(),
+        1,
+        "memory is fetched once per run and cached; the second prompt build must reuse it"
+    );
+    assert_eq!(
+        calls[0].query, "hello reborn",
+        "the retrieval query is the latest user message"
+    );
+    assert_eq!(calls[0].max_snippets, 8);
+    assert_eq!(calls[0].scope, run_context.scope);
+    assert_eq!(calls[0].actor.user_id, owner);
+}

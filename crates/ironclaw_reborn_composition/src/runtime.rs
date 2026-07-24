@@ -93,6 +93,7 @@ use ironclaw_turns::{
 
 use ironclaw_host_runtime::HostRuntime;
 use ironclaw_host_runtime::MemoryBackedUserProfileSource;
+use ironclaw_host_runtime::memory_context::ProductionMemoryPromptContextService;
 use ironclaw_outbound::CommunicationPreferenceRepository;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_outbound::OutboundDeliveryTargetRegistrationOutcome;
@@ -101,7 +102,7 @@ use ironclaw_outbound::OutboundError;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_product::RebornOutboundDeliveryTargetId;
 use ironclaw_turns::ExternalToolCatalog;
-use ironclaw_turns::run_profile::UserProfileContext;
+use ironclaw_turns::run_profile::{MemoryPromptContextService, UserProfileContext};
 
 use self::latency::{trace_runtime_latency_error, trace_runtime_latency_ok};
 use self::runtime_turn_scheduler::RuntimeTurnScheduler;
@@ -1471,7 +1472,7 @@ impl RebornRuntime {
     /// firing a trigger.
     #[cfg(any(test, feature = "test-support"))]
     pub fn active_channel_preference_codec_ids_for_test(&self) -> Vec<String> {
-        self.channel_host_assembly
+        self._channel_host_assembly
             .as_ref()
             .map(|assembly| {
                 assembly
@@ -3953,6 +3954,19 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
     // disclosure-protocol injection agree on a single value.
     let resolved_tool_disclosure = tool_disclosure.unwrap_or_else(ToolDisclosureMode::from_env);
     let default_runtime_config = DefaultPlannedRuntimeConfig::default();
+    // Resolve the bound memory document-store provider once (issue #3537): the
+    // profile source, prompt-context lane, and after-turn writer all fan out from
+    // this single resolution, so they agree on the bound provider (native, or
+    // `None` for a disabled/third-party-without-a-provider binding).
+    let resolved_memory_document_store = local_runtime.and_then(|local_runtime| {
+        local_runtime
+            .memory_service_resolver
+            .resolve_document_store(
+                Arc::clone(&local_runtime.extension_filesystem)
+                    as Arc<dyn ironclaw_filesystem::RootFilesystem>,
+                None,
+            )
+    });
 
     // Deferred bind (§ await-edge resolver ordering note above,
     // `RuntimeStoreParts`'s doc comment): the resolver was assembled inside
@@ -4086,16 +4100,37 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         // production equivalents for these optional context sources is a single
         // deferred follow-up (identity + profile together, to keep them paired); do not
         // wire only one of them here, or they will diverge. See issue #5013.
-        user_profile_source: match local_runtime {
-            Some(local_runtime) => {
-                let extension_filesystem = &local_runtime.extension_filesystem;
-                Arc::new(MemoryBackedUserProfileSourceAdapter(
-                    MemoryBackedUserProfileSource::new(Arc::clone(extension_filesystem)
-                        as Arc<dyn ironclaw_filesystem::RootFilesystem>),
-                )) as Arc<dyn HostUserProfileSource>
-            }
+        //
+        // Profile reads go through the same memory provider resolver as the
+        // memory tools (issue #3537): the profile source is native-backed only
+        // when the resolver yields a document-store provider. A disabled or
+        // third-party binding resolves to `None`, so this degrades to `Empty`
+        // (profile unknown) rather than silently reading native — keeping
+        // profile reads and tools consistent, from one construction point.
+        user_profile_source: match resolved_memory_document_store
+            .clone()
+            .map(MemoryBackedUserProfileSource::new)
+        {
+            Some(source) => Arc::new(MemoryBackedUserProfileSourceAdapter(source))
+                as Arc<dyn HostUserProfileSource>,
             None => Arc::new(EmptyUserProfileSource) as Arc<dyn HostUserProfileSource>,
         },
+        // Proactive memory (#3537 / mem0 flow): fan out from the SAME resolved
+        // document-store provider the profile source and after-turn writer use,
+        // wrap it in the host's prompt-context adapter, and let the loop surface
+        // both lanes into the prompt once per run. A disabled or
+        // third-party-without-a-provider binding resolves to `None` — degrading to
+        // no memory rather than silently reading native (issue #5013).
+        memory_context_service: resolved_memory_document_store
+            .clone()
+            .map(ProductionMemoryPromptContextService::new)
+            .map(|service| Arc::new(service) as Arc<dyn MemoryPromptContextService>),
+        // After-turn memory recording (#3537 / mem0 `add`): the RAW document-store
+        // provider — the SAME resolved provider the profile source and prompt-context
+        // lane use, NOT wrapped in `ProductionMemoryPromptContextService`. The
+        // executor forwards each Completed run's transcript to `record_interaction`.
+        // `None` degrades to no after-turn recording (issue #5013).
+        after_turn_memory_writer: resolved_memory_document_store,
         model_policy_guard: None,
         model_budget_accountant,
         safety_context: None,

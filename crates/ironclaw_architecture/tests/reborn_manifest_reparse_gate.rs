@@ -76,6 +76,12 @@ const ALLOWLIST: &[(&str, usize, ReparseCategory, &str)] = &[
         ReparseCategory::Compiler,
         "install-time compile of an imported (zip-uploaded) manifest into its resolved record",
     ),
+    (
+        "crates/ironclaw_host_runtime/src/memory_native_extension.rs",
+        1,
+        ReparseCategory::BundledAsset,
+        "native_memory_first_party_package — compiles the bundled ironclaw.memory manifest asset (include_str! of assets/memory_native/manifest.toml); a host-bundled descriptor has no installed resolved record to project from",
+    ),
 ];
 
 fn is_test_source_path(path: &Path) -> bool {

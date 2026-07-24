@@ -64,7 +64,6 @@ pub(crate) fn insert_handler(
 fn manifest() -> Result<CapabilityManifest, ExtensionError> {
     Ok(CapabilityManifest {
         id: CapabilityId::new(OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID)?,
-        implements: Vec::new(),
         description: "Set the authenticated operator's global auto-approve-tools setting."
             .to_string(),
         effects: vec![EffectKind::ModifyApproval],
@@ -94,7 +93,6 @@ fn manifest() -> Result<CapabilityManifest, ExtensionError> {
 fn tool_permission_manifest() -> Result<CapabilityManifest, ExtensionError> {
     Ok(CapabilityManifest {
         id: CapabilityId::new(OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY_ID)?,
-        implements: Vec::new(),
         description: "Set the authenticated operator's permission for one tool.".to_string(),
         effects: vec![EffectKind::ModifyApproval],
         default_permission: PermissionMode::Allow,

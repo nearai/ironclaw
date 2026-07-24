@@ -1,0 +1,17 @@
+schema_version = "reborn.extension_manifest.v3"
+id = "mem0.local.memory"
+name = "mem0 Memory"
+version = "0.1.0"
+description = "Self-hosted mem0 OSS backend for the always-on memory adapter (issue #5264). A compose-time [memory] binding can select this provider in place of the native filesystem backend; the ironclaw.memory.* tools and the host-managed retrieve-before / record-after lifecycle are unchanged and route to mem0. This manifest declares the mem0 provider identity only — it carries no tools of its own (the memory tool surface is the adapter's). mem0 is off by default and compiled only under the `memory-mem0` feature; it requires a self-hosted mem0 base URL (never the hosted cloud) supplied through the `[memory]` config, and fails closed otherwise."
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "mem0_memory_provider"
+
+# The [memory] surface marks this extension a backend for the host memory
+# adapter. mem0 backs the same operation families as the native provider; the
+# compose-time [memory] binding selects exactly one provider (native by default,
+# mem0 when explicitly bound + configured).
+[memory]
+operations = ["document_store", "context_retrieval", "interaction_log"]

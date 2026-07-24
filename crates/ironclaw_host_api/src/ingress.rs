@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     CapabilityId, HostApiError, HostPortId, NetworkMethod,
-    dotted_id::{PrefixRule, VersionRule, validate_dotted_id},
+    dotted_id::{PrefixRule, validate_dotted_id},
 };
 
 fn validate_ingress_route_id(value: &str) -> Result<(), HostApiError> {
@@ -22,7 +22,6 @@ fn validate_ingress_route_id(value: &str) -> Result<(), HostApiError> {
         2,
         "must have at least surface and route segments",
         PrefixRule::Any,
-        VersionRule::Unversioned,
     )
 }
 

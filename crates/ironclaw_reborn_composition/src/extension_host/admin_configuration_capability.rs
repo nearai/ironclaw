@@ -58,7 +58,6 @@ pub(crate) fn insert_handler(
 fn manifest() -> Result<CapabilityManifest, ExtensionError> {
     Ok(CapabilityManifest {
         id: CapabilityId::new(ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID)?,
-        implements: Vec::new(),
         description: "Replace one manifest-declared tenant administrator configuration group through an authenticated operator gesture.".to_string(),
         effects: vec![
             EffectKind::ReadFilesystem,
