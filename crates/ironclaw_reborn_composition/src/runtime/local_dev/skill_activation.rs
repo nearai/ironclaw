@@ -1,9 +1,9 @@
-use std::{collections::HashSet, sync::Arc};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_first_party_extension_ports::DEFAULT_MAX_ACTIVE_SKILLS;
 use ironclaw_host_api::{InvocationId, Resolution};
-use ironclaw_loop_host::{CapabilityResultWrite, DurablePersistence};
+use ironclaw_loop_host::{CapabilityResultWrite, DurablePersistence, SkillBundleId};
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureKind, ConcurrencyHint, resolution,
 };
@@ -18,7 +18,7 @@ use crate::runtime::{
 
 pub(crate) const SKILL_ACTIVATE_CAPABILITY_ID: &str = "builtin.skill_activate";
 const SKILL_ACTIVATE_PROVIDER_TOOL_NAME: &str = "builtin__skill_activate";
-const SKILL_ACTIVATE_DESCRIPTION: &str = "Load full instructions for one or more skills from the available-skills list. Call this before answering when a listed skill could help with any part of the task; use only exact listed names. Choose the smallest relevant set, with at most four active skills total per run; large skills may reduce that number. Ambiguous names fail without loading a skill.";
+const SKILL_ACTIVATE_DESCRIPTION: &str = "Load full instructions for one or more skills from the available-skills list. Call this before answering when a listed skill could help with any part of the task; use the exact canonical identifiers shown there. Choose the smallest relevant set, with at most four active skills total per run; large skills may reduce that number. A bare name remains valid only when it resolves to one visible trusted skill.";
 
 pub(super) fn skill_activation_capability(
     skill_activation_source: Arc<ComposedSelectableSkillContextSource>,
@@ -54,18 +54,7 @@ impl SyntheticCapabilityHandler for SkillActivationHandler {
         &self,
         invocation: SyntheticCapabilityInvocation,
     ) -> Result<Resolution, AgentLoopHostError> {
-        // Normalise to lowercase at the parse boundary so that `names` (passed
-        // to `activate_skills_for_run`) and the response-filter set both use the
-        // same canonical form. `activate_skills_for_run` matches with
-        // `eq_ignore_ascii_case`, so lowercase input is always accepted. Without
-        // this normalisation, the original-case `names` would be passed to the
-        // registry while the filter set was lowercased, causing a mismatch when
-        // `activation.name` differs in case from the caller's input.
-        let names = parse_skill_activate_names(&invocation.input)?
-            .into_iter()
-            .map(|name| name.to_ascii_lowercase())
-            .collect::<Vec<_>>();
-        let requested_names = names.iter().cloned().collect::<HashSet<_>>();
+        let names = parse_skill_activate_names(&invocation.input)?;
         let plan = match self
             .skill_activation_source
             .activate_skills_for_run(&invocation.run_context, &names)
@@ -86,8 +75,13 @@ impl SyntheticCapabilityHandler for SkillActivationHandler {
             .selection
             .activations
             .iter()
-            .filter(|activation| requested_names.contains(&activation.name.to_ascii_lowercase()))
-            .map(|activation| activation.name.clone())
+            .filter_map(|activation| {
+                let bundle_id = activation.bundle_id.as_ref()?;
+                let requested = names
+                    .iter()
+                    .any(|requested| requested_skill_matches(requested, bundle_id));
+                requested.then(|| bundle_id.to_string())
+            })
             .collect::<Vec<_>>();
         let output = serde_json::json!({
             "activated": activated,
@@ -117,6 +111,13 @@ impl SyntheticCapabilityHandler for SkillActivationHandler {
     }
 }
 
+fn requested_skill_matches(requested: &str, bundle_id: &SkillBundleId) -> bool {
+    match requested.parse::<SkillBundleId>() {
+        Ok(requested_bundle_id) => requested_bundle_id == *bundle_id,
+        Err(_) => bundle_id.name().eq_ignore_ascii_case(requested),
+    }
+}
+
 fn skill_activate_input_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -126,7 +127,7 @@ fn skill_activate_input_schema() -> serde_json::Value {
                 "items": { "type": "string" },
                 "minItems": 1,
                 "maxItems": DEFAULT_MAX_ACTIVE_SKILLS,
-                "description": "Exact skill names copied from the available-skills list; at most four total per run"
+                "description": "Canonical skill identifiers copied from the available-skills list; unique bare names are also accepted; at most four total per run"
             }
         },
         "required": ["names"],
@@ -234,11 +235,25 @@ fn skill_activation_selection_outcome(
             "skill activation exceeds the per-run skill context budget; activate fewer or smaller skills".to_string(),
             None,
         )),
-        SelectionError::AmbiguousSkill { .. } => Ok(resolution::failed(
-            CapabilityFailureKind::InvalidInput,
-            "ambiguous skill name; specify a single unique skill to activate".to_string(),
-            None,
-        )),
+        SelectionError::AmbiguousSkill {
+            name,
+            mut alternatives,
+        } => {
+            alternatives.sort_unstable();
+            alternatives.dedup();
+            let alternatives = alternatives
+                .into_iter()
+                .map(|bundle_id| bundle_id.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Ok(resolution::failed(
+                CapabilityFailureKind::InvalidInput,
+                format!(
+                    "ambiguous skill name '{name}'; choose one canonical identifier: {alternatives}"
+                ),
+                None,
+            ))
+        }
         other => Err(skill_activation_host_error(other)),
     }
 }
@@ -296,12 +311,26 @@ mod tests {
         let outcome = skill_activation_selection_outcome(
             ironclaw_first_party_extension_ports::SkillActivationSelectionError::AmbiguousSkill {
                 name: "deploy".to_string(),
-                sources: Vec::new(),
+                alternatives: vec![
+                    SkillBundleId::new(ironclaw_loop_host::SkillSourceKind::System, "deploy")
+                        .expect("valid system bundle id"),
+                    SkillBundleId::new(ironclaw_loop_host::SkillSourceKind::User, "deploy")
+                        .expect("valid user bundle id"),
+                ],
             },
         )
         .expect("ambiguous skill must be a model-visible failure, not a terminal host error");
 
         assert_recoverable_invalid_input(&outcome);
+    }
+
+    #[test]
+    fn requested_bare_skill_matches_bundle_id_not_manifest_name() {
+        let bundle_id =
+            SkillBundleId::new(ironclaw_loop_host::SkillSourceKind::User, "code-review")
+                .expect("valid user bundle id");
+
+        assert!(requested_skill_matches("code-review", &bundle_id));
     }
 
     /// A recoverable model-visible failure is `Resolution::Done` carrying a

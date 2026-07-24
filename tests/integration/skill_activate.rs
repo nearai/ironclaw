@@ -59,15 +59,15 @@ async fn skill_activate_dispatches_and_injects_skill_context() {
         .await
         .expect("skill_activate reported one skill activated");
     harness
-        .assert_tool_result_contains("\"activated\":[\"greet\"]")
+        .assert_tool_result_contains("\"activated\":[\"system:greet\"]")
         .await
-        .expect("skill_activate reported the explicitly requested skill");
+        .expect("skill_activate reported the canonical id of the explicitly requested skill");
 
     // Model-invoked skill discovery: before activation the skill advertises
-    // itself as a one-line `- name: description` listing entry (the first
+    // itself as a one-line `- canonical-id: description` listing entry (the first
     // model request is built before `skill_activate` runs).
     harness
-        .assert_model_request_contains("- greet: greets the user warmly")
+        .assert_model_request_contains("- system:greet: greets the user warmly")
         .await
         .expect("discovered skill must appear as a one-line listing entry");
 
@@ -126,18 +126,18 @@ async fn skill_criteria_auto_activation_stays_off_on_coordinator_path() {
 
     // Listing-mode discovery (default `IRONCLAW_REBORN_SKILL_INJECTION=listing`):
     // the non-activated skill still ADVERTISES itself as a one-line
-    // `- name: description` entry under the skill_activate header, so the
+    // `- canonical-id: description` entry under the skill_activate header, so the
     // model can choose to activate it — its body stays out (asserted above).
     harness
-        .assert_model_request_contains("- greet: greets the user warmly")
+        .assert_model_request_contains("- system:greet: greets the user warmly")
         .await
         .expect("non-activated skill must appear as a one-line listing entry");
     harness
         .assert_model_message_content_in_order(&[
             "Review the available skills below before answering.",
-            "If a listed skill could help with any part of the task, call builtin.skill_activate with its exact name before continuing; its full instructions will then be loaded.",
+            "If a listed skill could help with any part of the task, call builtin.skill_activate with its exact canonical identifier before continuing; its full instructions will then be loaded.",
             "Choose the smallest relevant set, with at most four active skills total per run; large skills may reduce that number.",
-            "If activation reports an ambiguous name, do not guess; explain the conflict.",
+            "Bare skill names are accepted only when unique. If activation reports an ambiguous name, retry with one of the canonical identifiers it provides.",
             "Do not activate skills that are unrelated to the task.",
         ])
         .await
@@ -193,9 +193,9 @@ async fn coordinator_listing_uses_descriptor_order_without_criteria_input() {
 
     harness
         .assert_model_message_content_in_order(&[
-            "- greet: greets the user warmly",
-            "- alpha: alpha baseline skill",
-            "- zulu: zulu baseline skill",
+            "- system:greet: greets the user warmly",
+            "- user:alpha: alpha baseline skill",
+            "- user:zulu: zulu baseline skill",
         ])
         .await
         .expect("coordinator listing must preserve source-then-name descriptor order");
@@ -286,7 +286,7 @@ async fn installed_skill_is_listed_but_not_model_activatable() {
         .expect("turn completes despite installed skill trust");
 
     harness
-        .assert_model_request_contains("- remote-helper: a remotely installed helper")
+        .assert_model_request_contains("- user:remote-helper: a remotely installed helper")
         .await
         .expect("installed skill remains safely discoverable");
     harness
@@ -379,9 +379,9 @@ fn skill_activate_over_budget_surfaces_recoverable_failed() {
 /// `ContextBudgetExceeded` arm above. Proves neither candidate's instructions
 /// leak into a later model request despite the name matching both.
 #[test]
-fn skill_activate_ambiguous_name_surfaces_recoverable_failed() {
+fn skill_activate_ambiguous_bare_name_returns_canonical_alternatives() {
     run_async_test_with_stack(
-        "skill_activate_ambiguous_name_surfaces_recoverable_failed",
+        "skill_activate_ambiguous_bare_name_returns_canonical_alternatives",
         || async {
             let group = RebornIntegrationGroup::skill_activation_tools()
                 .await
@@ -433,19 +433,25 @@ fn skill_activate_ambiguous_name_surfaces_recoverable_failed() {
                 .await
                 .expect("ambiguous skill name surfaced as a recoverable Failed tool error");
             harness
+                .assert_tool_error(ToolErrorClass::Failed, "system:duplicate")
+                .await
+                .expect("ambiguity error offered the system canonical id");
+            harness
+                .assert_tool_error(ToolErrorClass::Failed, "user:duplicate")
+                .await
+                .expect("ambiguity error offered the user canonical id");
+            harness
                 .assert_reply_contains("that name is ambiguous")
                 .await
                 .expect("run recovered and finalized");
             harness
                 .assert_model_message_content_in_order(&[
-                    "- duplicate: a system-scoped skill",
-                    "- greet: greets the user warmly",
-                    "- duplicate: a user-scoped skill",
+                    "- system:duplicate: a system-scoped skill",
+                    "- system:greet: greets the user warmly",
+                    "- user:duplicate: a user-scoped skill",
                 ])
                 .await
-                .expect(
-                    "the baseline listing exposes ambiguous bare names without qualified recovery identifiers",
-                );
+                .expect("the listing exposes stable canonical identifiers");
             // Neither candidate's instructions may leak into a later model request —
             // an ambiguous selection activates nothing.
             for sentinel in [
@@ -463,6 +469,77 @@ fn skill_activate_ambiguous_name_surfaces_recoverable_failed() {
                     "expected the intended \"not found\" assertion failure, got a different harness error: {err}"
                 );
             }
+        },
+    );
+}
+
+#[test]
+fn skill_activate_canonical_id_selects_requested_source() {
+    run_async_test_with_stack(
+        "skill_activate_canonical_id_selects_requested_source",
+        || async {
+            let group = RebornIntegrationGroup::skill_activation_tools()
+                .await
+                .expect("skill-activation group builds");
+            let capability_harness = group
+                .capability_harness()
+                .expect("skill-activation group has a host-runtime capability harness");
+            capability_harness
+                .seed_system_skill_for_test(
+                    "duplicate",
+                    "a system-scoped skill",
+                    "SYSTEM_DUPLICATE_SKILL_SENTINEL",
+                )
+                .expect("system-scoped duplicate skill seeds");
+
+            let harness = group
+                .thread("conv-skill-activate-canonical")
+                .script([
+                    RebornScriptedReply::tool_call(
+                        "builtin.skill_activate",
+                        json!({"names": ["user:Duplicate"]}),
+                    ),
+                    RebornScriptedReply::text("activated the user skill"),
+                ])
+                .build()
+                .await
+                .expect("thread builds");
+            capability_harness
+                .seed_user_skill_for_test(
+                    &harness.binding.tenant_id,
+                    &harness.binding.actor_user_id,
+                    "Duplicate",
+                    "a user-scoped skill",
+                    "USER_DUPLICATE_SKILL_SENTINEL",
+                )
+                .expect("user-scoped duplicate skill seeds");
+
+            harness
+                .submit_turn("activate the user duplicate skill")
+                .await
+                .expect("turn completes");
+
+            harness
+                .assert_tool_result_contains("\"activated\":[\"user:Duplicate\"]")
+                .await
+                .expect("skill_activate reported the selected canonical id");
+            harness
+                .assert_tool_result_contains("\"count\":1")
+                .await
+                .expect("exactly one skill activated");
+            harness
+                .assert_model_request_contains("USER_DUPLICATE_SKILL_SENTINEL")
+                .await
+                .expect("the selected user skill reached a later model request");
+
+            let err = harness
+                .assert_model_request_contains("SYSTEM_DUPLICATE_SKILL_SENTINEL")
+                .await
+                .expect_err("the unselected system skill must stay out of model context");
+            assert!(
+                err.to_string().starts_with("no model request contained"),
+                "expected the intended \"not found\" assertion failure, got a different harness error: {err}"
+            );
         },
     );
 }

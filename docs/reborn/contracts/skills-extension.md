@@ -112,17 +112,24 @@ Approved `SKILL.md` instruction content transformed into loop snippets through
 become model-visible runtime context.
 
 Reborn local-dev selection follows a catalog/list-first flow: the model receives
-a bounded visible `name: description` listing and is instructed to review it
-before answering, then request full context for chosen exact skill names through
-the local-dev synthetic `skill_activate` capability. Natural-language activation
-criteria may rank or describe skills, but they must not inject full runtime
-skill context in this flow. Explicit `$skill-name` mentions remain a direct
-activation path. If more than one visible skill has the requested bare name,
-activation fails recoverably and the model must report the ambiguity rather
-than guessing; source-qualified activation is deferred. The model-facing
-instruction is covered by
-`tests/integration/skill_activate.rs::skill_criteria_auto_activation_stays_off_on_coordinator_path`
-(`cargo test --test reborn_integration_skill_activate`).
+a bounded visible `source:name: description` listing and is instructed to review
+it before answering, then request full context for chosen canonical skill IDs
+through the local-dev synthetic `skill_activate` capability. Natural-language
+activation criteria may rank or describe skills, but they must not inject full
+runtime skill context in this flow. Explicit `$skill-name` mentions remain a
+direct activation path. A bare name remains a compatibility alias only when one
+visible trusted candidate matches. If more than one candidate matches,
+activation fails recoverably with deterministic canonical alternatives the
+model can retry. The model-facing and activation contracts are covered by
+`tests/integration/skill_activate.rs`:
+
+- `skill_criteria_auto_activation_stays_off_on_coordinator_path`;
+- `skill_activate_dispatches_and_injects_skill_context`;
+- `skill_activate_canonical_id_selects_requested_source`;
+- `skill_activate_ambiguous_bare_name_returns_canonical_alternatives`.
+
+Run them with `cargo test --test reborn_integration_skill_activate`; the same
+test binary is part of `scripts/reborn-e2e-rust.sh architecture`.
 
 Implementations must not reuse a catalog/admin descriptor as a model selection
 descriptor, and must not reuse either descriptor as runtime skill context.

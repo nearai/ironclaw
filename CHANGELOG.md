@@ -11,7 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Skill selection:** instruct the model to review visible skills before
   answering and clarify that `skill_activate` loads full instructions for
-  relevant skills selected by exact listed name.
+  relevant skills selected by canonical source-qualified ID; unique bare names
+  remain compatible, while collisions return exact IDs the model can retry.
 - **Model recovery:** preserve typed, sanitized context-overflow,
   content-filter, and invalid-output recovery controls across checkpoints so a
   restarted turn can still ask the model to recover without exposing provider

@@ -114,6 +114,23 @@ impl std::fmt::Display for SkillBundleId {
     }
 }
 
+impl std::str::FromStr for SkillBundleId {
+    type Err = SkillBundleSourceError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (source, name) = value
+            .split_once(':')
+            .ok_or(SkillBundleSourceError::InvalidBundleId)?;
+        let source_kind = match source {
+            "system" => SkillSourceKind::System,
+            "tenant_shared" => SkillSourceKind::TenantShared,
+            "user" => SkillSourceKind::User,
+            _ => return Err(SkillBundleSourceError::InvalidBundleId),
+        };
+        Self::new(source_kind, name)
+    }
+}
+
 /// Bundle-relative file path.
 ///
 /// This is intentionally not a host path. It rejects absolute paths, URL-like
@@ -364,6 +381,26 @@ mod tests {
             "ümlaut",
         ] {
             assert!(SkillBundleId::new(SkillSourceKind::User, invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn skill_bundle_id_parses_canonical_identifier() {
+        assert_eq!(
+            "tenant_shared:code-review"
+                .parse::<SkillBundleId>()
+                .unwrap(),
+            SkillBundleId::new(SkillSourceKind::TenantShared, "code-review").unwrap()
+        );
+
+        for invalid in [
+            "code-review",
+            "unknown:code-review",
+            "user:",
+            ":code-review",
+            "user:code:review",
+        ] {
+            assert!(invalid.parse::<SkillBundleId>().is_err());
         }
     }
 

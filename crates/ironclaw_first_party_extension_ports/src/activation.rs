@@ -84,10 +84,11 @@ pub enum SkillInjectionMode {
     /// Legacy behavior: criteria-selected (keyword/regex-scored) skill bodies
     /// inject directly into model context by score alone.
     Full,
-    /// Non-activated skills contribute only a one-line `- name: description`
-    /// listing; full bodies inject only for explicit `$name`/`/name` mentions
-    /// and model-selected (`skill_activate`) activations. The keyword-scoring
-    /// pipeline still runs and ranks the listing.
+    /// Non-activated skills contribute only a one-line
+    /// `- source:name: description` listing; full bodies inject only for
+    /// explicit `$name`/`/name` mentions and model-selected (`skill_activate`)
+    /// activations. The keyword-scoring pipeline still runs and ranks the
+    /// listing.
     Listing,
 }
 
@@ -208,10 +209,10 @@ pub(crate) struct CapturedSkillActivationPlan {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum SkillActivationSelectionError {
-    #[error("ambiguous skill activation for '{name}': {sources:?}")]
+    #[error("ambiguous skill activation for '{name}': {alternatives:?}")]
     AmbiguousSkill {
         name: String,
-        sources: Vec<SkillSourceKind>,
+        alternatives: Vec<SkillBundleId>,
     },
     #[error("skill activation source unavailable")]
     SourceUnavailable,
@@ -231,8 +232,8 @@ impl SkillActivationSelectionError {
     fn into_context_error(self) -> HostSkillContextBuildError {
         match self {
             Self::SourceUnavailable => HostSkillContextBuildError::SourceUnavailable,
-            Self::AmbiguousSkill { name, sources } => {
-                HostSkillContextBuildError::AmbiguousSkill { name, sources }
+            Self::AmbiguousSkill { name, alternatives } => {
+                HostSkillContextBuildError::AmbiguousSkill { name, alternatives }
             }
             Self::ParseFailed => HostSkillContextBuildError::ParseFailed,
             Self::TrustDataMissing => HostSkillContextBuildError::TrustDataMissing,
@@ -641,15 +642,13 @@ where
         skill_names: &[String],
     ) -> Result<ActivationCandidateSet, SkillActivationSelectionError> {
         let descriptors = self.load_activation_descriptors(run_context).await?;
-        let requested_names = skill_names
+        let targets = skill_names
             .iter()
-            .map(|name| name.to_ascii_lowercase())
-            .collect::<HashSet<_>>();
+            .map(|name| SkillActivationTarget::parse(name))
+            .collect::<Vec<_>>();
         let descriptors = descriptors
             .into_iter()
-            .filter(|descriptor| {
-                requested_names.contains(&descriptor.id().name().to_ascii_lowercase())
-            })
+            .filter(|descriptor| targets.iter().any(|target| target.matches(descriptor.id())))
             .collect::<Vec<_>>();
         self.load_activation_candidate_set_for_descriptors(run_context, descriptors)
             .await
@@ -927,6 +926,7 @@ where
             }
         }
         selection.feedback.extend(next.selection.feedback);
+        validate_selected_names_are_unambiguous(&selection.activations)?;
         let merged = SkillActivationPlan::new(selection, activated_bundles);
         active.insert(key, merged.clone())?;
         Ok(merged)
@@ -1146,13 +1146,13 @@ fn body_eligible_bundle_ids(plan: &SkillActivationPlan) -> HashSet<SkillBundleId
 
 #[derive(Debug, Clone)]
 struct SkillListingEntry {
-    name: String,
+    identifier: String,
     description: String,
 }
 
 fn listing_entry_for_descriptor(descriptor: &SkillBundleDescriptor) -> SkillListingEntry {
     SkillListingEntry {
-        name: descriptor.id().name().to_string(),
+        identifier: descriptor.id().to_string(),
         description: single_line_truncated(descriptor.description(), MAX_LISTING_DESCRIPTION_CHARS),
     }
 }
@@ -1177,7 +1177,7 @@ fn skill_listing_candidate(entries: &[SkillListingEntry]) -> Option<HostSkillCon
     listing.push('\n');
     for entry in entries.iter().take(MAX_LISTED_SKILLS) {
         listing.push_str("\n- ");
-        listing.push_str(&entry.name);
+        listing.push_str(&entry.identifier);
         listing.push_str(": ");
         listing.push_str(&entry.description);
     }
@@ -1399,16 +1399,20 @@ fn select_named_skill_activations(
     let mut remaining_slots = config.max_active_skills;
     let mut remaining_tokens = config.max_context_tokens;
 
-    validate_explicit_mentions_are_unambiguous(skill_names, &active_candidates)?;
-    for name in skill_names {
+    let targets = skill_names
+        .iter()
+        .map(|name| SkillActivationTarget::parse(name))
+        .collect::<Vec<_>>();
+    validate_activation_targets_are_unambiguous(&targets, &active_candidates)?;
+    for target in targets {
         let Some(candidate) = active_candidates
             .iter()
-            .find(|candidate| candidate.loaded.manifest.name.eq_ignore_ascii_case(name))
+            .find(|candidate| target.matches(candidate.descriptor.id()))
             .copied()
         else {
             feedback.push(format!(
                 "{}: requested skill is not available",
-                feedback_skill_name(name)
+                target.feedback_identifier()
             ));
             continue;
         };
@@ -1429,7 +1433,7 @@ fn select_named_skill_activations(
             ));
             feedback.push(format!(
                 "{}: activated after model selection",
-                feedback_skill_name(&candidate.loaded.manifest.name)
+                candidate.descriptor.id()
             ));
         }
     }
@@ -1441,6 +1445,35 @@ fn select_named_skill_activations(
         rewritten_message: String::new(),
         feedback,
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SkillActivationTarget {
+    Canonical(SkillBundleId),
+    BareName(String),
+}
+
+impl SkillActivationTarget {
+    fn parse(value: &str) -> Self {
+        match value.parse::<SkillBundleId>() {
+            Ok(bundle_id) => Self::Canonical(bundle_id),
+            Err(_) => Self::BareName(value.to_string()),
+        }
+    }
+
+    fn matches(&self, bundle_id: &SkillBundleId) -> bool {
+        match self {
+            Self::Canonical(target) => target == bundle_id,
+            Self::BareName(name) => bundle_id.name().eq_ignore_ascii_case(name),
+        }
+    }
+
+    fn feedback_identifier(&self) -> String {
+        match self {
+            Self::Canonical(bundle_id) => bundle_id.to_string(),
+            Self::BareName(name) => feedback_skill_name(name),
+        }
+    }
 }
 
 fn feedback_skill_name(name: &str) -> String {
@@ -1542,16 +1575,46 @@ fn validate_explicit_mentions_are_unambiguous(
     candidates: &[&ActivationCandidate],
 ) -> Result<(), SkillActivationSelectionError> {
     for name in explicit_names {
-        let sources: Vec<SkillSourceKind> = candidates
+        let mut alternatives = candidates
             .iter()
             .filter(|candidate| candidate.loaded.manifest.name.eq_ignore_ascii_case(name))
-            .map(|candidate| candidate.descriptor.id().source_kind())
-            .collect();
-        let unique_sources: HashSet<SkillSourceKind> = sources.iter().copied().collect();
-        if unique_sources.len() > 1 {
+            .map(|candidate| candidate.descriptor.id().clone())
+            .collect::<Vec<_>>();
+        alternatives.sort_unstable();
+        alternatives.dedup();
+        if alternatives.len() > 1 {
+            let canonical_name = alternatives
+                .first()
+                .map(|bundle_id| bundle_id.name().to_string())
+                .unwrap_or_else(|| name.clone());
+            return Err(SkillActivationSelectionError::AmbiguousSkill {
+                name: canonical_name,
+                alternatives,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_activation_targets_are_unambiguous(
+    targets: &[SkillActivationTarget],
+    candidates: &[&ActivationCandidate],
+) -> Result<(), SkillActivationSelectionError> {
+    for target in targets {
+        let SkillActivationTarget::BareName(name) = target else {
+            continue;
+        };
+        let mut alternatives = candidates
+            .iter()
+            .filter(|candidate| candidate.descriptor.id().name().eq_ignore_ascii_case(name))
+            .map(|candidate| candidate.descriptor.id().clone())
+            .collect::<Vec<_>>();
+        alternatives.sort_unstable();
+        alternatives.dedup();
+        if alternatives.len() > 1 {
             return Err(SkillActivationSelectionError::AmbiguousSkill {
                 name: name.clone(),
-                sources,
+                alternatives,
             });
         }
     }
@@ -1561,21 +1624,20 @@ fn validate_explicit_mentions_are_unambiguous(
 fn validate_selected_names_are_unambiguous(
     activations: &[SkillActivationRequest],
 ) -> Result<(), SkillActivationSelectionError> {
-    let mut sources_by_name: HashMap<&str, HashSet<SkillSourceKind>> = HashMap::new();
+    let mut alternatives_by_name: HashMap<String, Vec<SkillBundleId>> = HashMap::new();
     for activation in activations {
-        if let Some(source) = activation.source {
-            sources_by_name
-                .entry(activation.name.as_str())
+        if let Some(bundle_id) = &activation.bundle_id {
+            alternatives_by_name
+                .entry(bundle_id.name().to_ascii_lowercase())
                 .or_default()
-                .insert(source);
+                .push(bundle_id.clone());
         }
     }
-    for (name, sources) in sources_by_name {
-        if sources.len() > 1 {
-            return Err(SkillActivationSelectionError::AmbiguousSkill {
-                name: name.to_string(),
-                sources: sources.into_iter().collect(),
-            });
+    for (name, mut alternatives) in alternatives_by_name {
+        alternatives.sort_unstable();
+        alternatives.dedup();
+        if alternatives.len() > 1 {
+            return Err(SkillActivationSelectionError::AmbiguousSkill { name, alternatives });
         }
     }
     Ok(())
@@ -2217,11 +2279,15 @@ mod tests {
             listing.contains("builtin.skill_activate"),
             "listing header must explain activation: {listing}"
         );
-        assert!(listing.contains("- code-review: code-review description"));
-        assert!(listing.contains("- spreadsheet: spreadsheet description"));
+        assert!(listing.contains("- system:code-review: code-review description"));
+        assert!(listing.contains("- user:spreadsheet: spreadsheet description"));
         assert!(!listing.contains("CODE_REVIEW_SENTINEL"));
-        let review_at = listing.find("- code-review:").expect("code-review line");
-        let sheet_at = listing.find("- spreadsheet:").expect("spreadsheet line");
+        let review_at = listing
+            .find("- system:code-review:")
+            .expect("code-review line");
+        let sheet_at = listing
+            .find("- user:spreadsheet:")
+            .expect("spreadsheet line");
         assert!(
             review_at < sheet_at,
             "criteria-scored skill must rank first in the listing"
@@ -2254,9 +2320,9 @@ mod tests {
             "explicit mention must still inject the full body"
         );
         let listing = listing_text(&selected);
-        assert!(listing.contains("- spreadsheet:"));
+        assert!(listing.contains("- user:spreadsheet:"));
         assert!(
-            !listing.contains("- code-review:"),
+            !listing.contains("- system:code-review:"),
             "an activated skill must not repeat in the listing"
         );
     }
@@ -2276,7 +2342,7 @@ mod tests {
                 .iter()
                 .all(|candidate| candidate.loaded_skill_md().is_none())
         );
-        assert!(listing_text(&before).contains("- code-review:"));
+        assert!(listing_text(&before).contains("- system:code-review:"));
 
         selectable
             .activate_skills_for_run(&context, &["code-review".to_string()])
@@ -2296,8 +2362,8 @@ mod tests {
             "model-selected skill body must inject on the next prompt build"
         );
         let listing = listing_text(&after);
-        assert!(listing.contains("- spreadsheet:"));
-        assert!(!listing.contains("- code-review:"));
+        assert!(listing.contains("- user:spreadsheet:"));
+        assert!(!listing.contains("- system:code-review:"));
     }
 
     #[tokio::test]
@@ -2324,7 +2390,7 @@ mod tests {
                 .all(|candidate| candidate.loaded_skill_md().is_none()),
             "criteria match must stay listing-only before activation"
         );
-        assert!(listing_text(&before).contains("- code-review:"));
+        assert!(listing_text(&before).contains("- system:code-review:"));
 
         // Turn 2: the model activates the same skill via `skill_activate`. The
         // merge must UPGRADE the existing criteria entry to `ModelSelected`
@@ -2355,9 +2421,9 @@ mod tests {
             "skill_activate on a criteria-listed skill must inject the body on the next prompt build"
         );
         let listing = listing_text(&after);
-        assert!(listing.contains("- spreadsheet:"));
+        assert!(listing.contains("- user:spreadsheet:"));
         assert!(
-            !listing.contains("- code-review:"),
+            !listing.contains("- system:code-review:"),
             "an upgraded activation must leave the listing"
         );
     }
@@ -2382,7 +2448,7 @@ mod tests {
         // The composed listing is bounded: at most MAX_LISTED_SKILLS entries.
         let entries: Vec<SkillListingEntry> = (0..MAX_LISTED_SKILLS + 5)
             .map(|index| SkillListingEntry {
-                name: format!("skill-{index:03}"),
+                identifier: format!("system:skill-{index:03}"),
                 description: "listed".to_string(),
             })
             .collect();
@@ -2643,6 +2709,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn model_selected_canonical_id_preserves_skill_name_case() {
+        let source = Arc::new(StaticSkillBundleSource::new(vec![(
+            SkillSourceKind::User,
+            "Code-Review",
+            &skill_md(
+                "Code-Review",
+                "Review code",
+                &[],
+                "MIXED_CASE_REVIEW_SENTINEL",
+            ),
+        )]));
+        let selectable =
+            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let context = run_context().await;
+
+        let plan = selectable
+            .activate_skills_for_run(&context, &["user:Code-Review".to_string()])
+            .await
+            .expect("canonical mixed-case skill id activates");
+
+        assert_eq!(
+            plan.activated_bundles(),
+            &[SkillBundleId::new(SkillSourceKind::User, "Code-Review").unwrap()]
+        );
+    }
+
+    #[tokio::test]
+    async fn model_selected_bare_name_rejects_case_variant_collision() {
+        let source = Arc::new(StaticSkillBundleSource::new(vec![
+            (
+                SkillSourceKind::User,
+                "Deploy",
+                &skill_md(
+                    "upper-deploy-manifest",
+                    "Uppercase deploy",
+                    &[],
+                    "UPPER_DEPLOY_SENTINEL",
+                ),
+            ),
+            (
+                SkillSourceKind::User,
+                "deploy",
+                &skill_md(
+                    "lower-deploy-manifest",
+                    "Lowercase deploy",
+                    &[],
+                    "LOWER_DEPLOY_SENTINEL",
+                ),
+            ),
+        ]));
+        let selectable =
+            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let context = run_context().await;
+
+        let error = selectable
+            .activate_skills_for_run(&context, &["deploy".to_string()])
+            .await
+            .expect_err("a bare alias matching two bundles must be ambiguous");
+
+        let SkillActivationSelectionError::AmbiguousSkill { alternatives, .. } = error else {
+            panic!("expected an ambiguous skill error");
+        };
+        assert_eq!(
+            alternatives
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            vec!["user:Deploy", "user:deploy"]
+        );
+    }
+
+    #[tokio::test]
     async fn model_selected_activation_reads_only_requested_skill_bodies() {
         let source = Arc::new(ReadCountingSkillBundleSource::new(vec![
             (
@@ -2746,6 +2884,57 @@ mod tests {
             .await
             .expect("active plan context loads");
         assert_eq!(selected.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn merge_active_plan_rejects_colliding_sources_across_two_activate_calls() {
+        let source = Arc::new(StaticSkillBundleSource::new(vec![
+            (
+                SkillSourceKind::System,
+                "deploy",
+                &skill_md(
+                    "system-deploy-manifest",
+                    "System deploy",
+                    &[],
+                    "SYSTEM_DEPLOY_SENTINEL",
+                ),
+            ),
+            (
+                SkillSourceKind::User,
+                "deploy",
+                &skill_md(
+                    "user-deploy-manifest",
+                    "User deploy",
+                    &[],
+                    "USER_DEPLOY_SENTINEL",
+                ),
+            ),
+        ]));
+        let selectable =
+            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let context = run_context().await;
+
+        selectable
+            .activate_skills_for_run(&context, &["system:deploy".to_string()])
+            .await
+            .expect("first canonical activation succeeds");
+        let error = selectable
+            .activate_skills_for_run(&context, &["user:deploy".to_string()])
+            .await
+            .expect_err("a later colliding canonical activation must fail");
+
+        assert!(matches!(
+            error,
+            SkillActivationSelectionError::AmbiguousSkill { .. }
+        ));
+        let active = selectable
+            .active_plan(&context)
+            .expect("active plan lookup succeeds")
+            .expect("the first activation remains active");
+        assert_eq!(
+            active.activated_bundles(),
+            &[SkillBundleId::new(SkillSourceKind::System, "deploy").unwrap()]
+        );
     }
 
     #[tokio::test]
