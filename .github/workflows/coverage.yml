@@ -48,6 +48,23 @@ jobs:
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
+      # `--workspace` below runs BOTH root-package test tiers in one job: the
+      # Reborn integration suites (tests/integration/*) and the root QA suites
+      # (tests/reborn_qa_*). Both overrun libtest's 2 MiB default test-thread
+      # stack and abort the whole run with `has overflowed its stack` (SIGABRT)
+      # instead of failing a test:
+      #   * integration tier — llvm-cov inflates async frames past the harness's
+      #     own depth (group build -> submit_turn -> composition). reborn-tests.
+      #     yml's reborn-integration-coverage lane carries 8 MiB for this.
+      #   * root QA tier — reborn_qa_smoke_scenarios_e2e drives whole turns on
+      #     the libtest stack and measures ~10 MiB *uninstrumented*, so 8 MiB is
+      #     not enough. reborn-tests.yml's root-reborn-parity-tests lane carries
+      #     64 MiB for this.
+      # This job's scope is the union, so it takes the larger of the two. The
+      # depth lives in shared harness code, so per-test Box::pin only moves the
+      # crash to the next-deepest test.
+      # Pinned by tests/coverage_lane_stack_headroom.rs.
+      RUST_MIN_STACK: "67108864"
     permissions:
       id-token: write
       contents: read
