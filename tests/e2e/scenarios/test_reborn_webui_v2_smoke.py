@@ -210,6 +210,92 @@ async def test_reborn_v2_serves_shell_and_gates_auth(reborn_v2_server, reborn_v2
         await anon_ctx.close()
 
 
+async def test_reborn_v2_lazy_routes_preserve_direct_navigation(
+    reborn_v2_server, reborn_v2_browser
+):
+    """A deep route loads only its page chunks, then SPA navigation loads Chat."""
+    context = await reborn_v2_browser.new_context(
+        viewport={"width": 1280, "height": 720}
+    )
+    page = await context.new_page()
+    javascript_assets: list[str] = []
+
+    def record_javascript(response) -> None:
+        path = urlparse(response.url).path
+        if path.endswith(".js"):
+            javascript_assets.append(path)
+
+    page.on("response", record_javascript)
+    try:
+        await page.goto(
+            f"{reborn_v2_server}/settings/appearance"
+            f"?token={REBORN_V2_AUTH_TOKEN}"
+        )
+        await expect(
+            page.locator(SEL_V2["appearance_theme_light"])
+        ).to_be_visible(timeout=15000)
+        await page.wait_for_url(
+            re.compile(r".*/settings/appearance(?:[?#].*)?$"), timeout=15000
+        )
+
+        assert any("/settings-page-" in path for path in javascript_assets)
+        assert any("/appearance-tab-" in path for path in javascript_assets)
+        for inactive_chunk in (
+            "/chat-page-",
+            "/admin-page-",
+            "/automations-page-",
+            "/extensions-page-",
+        ):
+            assert not any(inactive_chunk in path for path in javascript_assets), (
+                f"inactive route chunk loaded during Settings startup: {inactive_chunk}"
+            )
+
+        javascript_assets.clear()
+        await page.locator('a[href="/chat"]').first.click()
+        await expect(page.locator(SEL_V2["chat_composer"])).to_be_visible(
+            timeout=15000
+        )
+        await page.wait_for_url(re.compile(r".*/chat(?:[?#].*)?$"), timeout=15000)
+        assert any("/chat-page-" in path for path in javascript_assets)
+    finally:
+        await context.close()
+
+
+async def test_reborn_v2_chunk_failure_can_reload_and_recover(reborn_v2_page):
+    """A failed route import offers a reload that retries from the same URL."""
+    settings_chunk_requests = 0
+
+    async def fail_first_settings_chunk(route) -> None:
+        nonlocal settings_chunk_requests
+        settings_chunk_requests += 1
+        if settings_chunk_requests == 1:
+            await route.abort()
+            return
+        await route.continue_()
+
+    await reborn_v2_page.route(
+        "**/assets/settings-page-*.js", fail_first_settings_chunk
+    )
+    await reborn_v2_page.locator('a[href="/settings/inference"]').first.click()
+
+    load_error = reborn_v2_page.get_by_role("alert").filter(
+        has_text="This page couldn't be loaded"
+    )
+    await expect(load_error).to_be_visible(timeout=15000)
+    await expect(load_error).to_contain_text(
+        "A new version may be available or the connection was interrupted"
+    )
+    assert urlparse(reborn_v2_page.url).path == "/settings/inference"
+
+    await load_error.get_by_role("button", name="Reload page").click()
+    await expect(
+        reborn_v2_page.locator(SEL_V2["settings_search_input"])
+    ).to_be_visible(timeout=15000)
+    await expect(load_error).to_have_count(0)
+    assert settings_chunk_requests == 2
+    assert urlparse(reborn_v2_page.url).path == "/settings/inference"
+
+
 async def test_reborn_v2_session_check_failure_blocks_app_and_retries(
     reborn_v2_page,
 ):
