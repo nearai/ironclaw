@@ -1531,6 +1531,36 @@ impl HostRuntimeCapabilityHarness {
         Ok(())
     }
 
+    /// C-SKILL baseline: seed the same user-scoped bundle shape as
+    /// [`Self::seed_user_skill_for_test`], then add the URL-install provenance
+    /// sidecar that makes the production filesystem source downgrade its trust
+    /// to `Installed`. This drives the caller-level "listed but not
+    /// model-activatable" behavior without bypassing descriptor discovery.
+    pub(crate) fn seed_installed_user_skill_for_test(
+        &self,
+        tenant: &TenantId,
+        user: &UserId,
+        name: &str,
+        description: &str,
+        prompt: &str,
+    ) -> HarnessResult<()> {
+        self.seed_user_skill_for_test(tenant, user, name, description, prompt)?;
+        let metadata_path = self
+            .storage_root_for_test()
+            .join("tenants")
+            .join(tenant.as_str())
+            .join("users")
+            .join(user.as_str())
+            .join("skills")
+            .join(name)
+            .join(".ironclaw-install.json");
+        std::fs::write(
+            metadata_path,
+            br#"{"source":"installed_url","source_url":"https://skills.example.test/SKILL.md"}"#,
+        )?;
+        Ok(())
+    }
+
     /// C-ATTACH: the attachment read port + inbound lander over this harness's
     /// local-dev workspace filesystem, for wiring `DefaultPlannedRuntimeParts.attachment_read_port`
     /// and `DefaultInboundTurnService::with_inbound_attachments` — mirrors

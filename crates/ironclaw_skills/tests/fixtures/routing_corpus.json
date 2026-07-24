@@ -1,0 +1,169 @@
+{
+  "schema_version": 1,
+  "top_k": 5,
+  "cases": [
+    {
+      "id": "hacker-news-search-no-skill",
+      "class": "negative",
+      "prompt": "search Hacker News for any recent posts mentioning 'IronClaw' or 'NEAR AI'",
+      "relevant": [],
+      "forbidden": ["tech-debt-tracker"],
+      "expect_no_match": true,
+      "baseline_selected": ["tech-debt-tracker"],
+      "source_issue": 5417
+    },
+    {
+      "id": "generic-market-research-no-skill",
+      "class": "negative",
+      "prompt": "Research the latest market share numbers for database vendors and summarize the sources.",
+      "relevant": [],
+      "forbidden": ["portfolio", "product-prioritization"],
+      "expect_no_match": true,
+      "baseline_selected": ["coding", "llm-council"]
+    },
+    {
+      "id": "single-pr-code-review",
+      "class": "positive",
+      "prompt": "Review this pull request for bugs, missing tests, and undocumented assumptions.",
+      "relevant": ["code-review"],
+      "forbidden": ["parallel-pr-review"],
+      "expect_no_match": false,
+      "baseline_selected": ["code-review", "github", "coding", "review-checklist", "qa-review"]
+    },
+    {
+      "id": "batch-pr-review",
+      "class": "conflict",
+      "prompt": "Review the open PRs in this repository and synthesize the findings.",
+      "relevant": ["parallel-pr-review"],
+      "forbidden": ["review-readiness"],
+      "expect_no_match": false,
+      "baseline_selected": ["parallel-pr-review", "review-checklist", "qa-review", "review-readiness", "security-review"]
+    },
+    {
+      "id": "security-audit",
+      "class": "positive",
+      "prompt": "Audit these code changes for OWASP issues, injection, and secrets exposure.",
+      "relevant": ["security-review"],
+      "forbidden": ["review-readiness"],
+      "expect_no_match": false,
+      "baseline_selected": ["security-review", "coding"]
+    },
+    {
+      "id": "qa-test-plan",
+      "class": "positive",
+      "prompt": "Generate a QA test plan and identify the edge cases and missing regression coverage.",
+      "relevant": ["qa-review"],
+      "forbidden": ["review-readiness"],
+      "expect_no_match": false,
+      "baseline_selected": ["qa-review", "coding"]
+    },
+    {
+      "id": "merge-readiness",
+      "class": "conflict",
+      "prompt": "Is this PR ready to merge, and which checks or reviews are still missing?",
+      "relevant": ["review-readiness"],
+      "forbidden": ["parallel-pr-review"],
+      "expect_no_match": false,
+      "baseline_selected": ["review-checklist", "review-readiness", "qa-review", "security-review"]
+    },
+    {
+      "id": "create-autonomous-project",
+      "class": "conflict",
+      "prompt": "Create a new autonomous project for customer research.",
+      "relevant": ["new-project"],
+      "forbidden": ["project-setup"],
+      "expect_no_match": false,
+      "baseline_selected": ["new-project", "llm-council", "plan-mode"]
+    },
+    {
+      "id": "track-github-repository",
+      "class": "conflict",
+      "prompt": "Add nearai/ironclaw as a tracked repository project and set up its workflow.",
+      "relevant": ["project-setup"],
+      "forbidden": ["new-project"],
+      "expect_no_match": false,
+      "baseline_selected": ["coding", "new-project", "routine-advisor", "github-workflow", "github"]
+    },
+    {
+      "id": "commit-staged-changes",
+      "class": "positive",
+      "prompt": "Write a git commit message for my staged changes.",
+      "relevant": ["commit"],
+      "forbidden": ["coding"],
+      "expect_no_match": false,
+      "baseline_selected": ["commit", "coding", "github"]
+    },
+    {
+      "id": "record-architecture-decision",
+      "class": "positive",
+      "prompt": "Record this decision: use bounded CAS instead of a process-local mutex.",
+      "relevant": ["decision-capture"],
+      "forbidden": ["idea-parking"],
+      "expect_no_match": false,
+      "baseline_selected": ["decision-capture", "review-readiness"]
+    },
+    {
+      "id": "park-product-idea",
+      "class": "positive",
+      "prompt": "Park this idea for later: build a flaky-test quarantine dashboard.",
+      "relevant": ["idea-parking"],
+      "forbidden": ["decision-capture"],
+      "expect_no_match": false,
+      "baseline_selected": ["idea-parking", "coding"]
+    },
+    {
+      "id": "show-commitments",
+      "class": "positive",
+      "prompt": "Show my open commitments and what is overdue.",
+      "relevant": ["commitment-digest"],
+      "forbidden": ["commitment-setup"],
+      "expect_no_match": false,
+      "baseline_selected": ["commitment-digest", "commitment-triage", "commit", "ceo-setup", "decision-capture"]
+    },
+    {
+      "id": "setup-commitment-system",
+      "class": "conflict",
+      "prompt": "Set up the commitment tracking system for me.",
+      "relevant": ["commitment-setup"],
+      "forbidden": ["commitment-digest"],
+      "expect_no_match": false,
+      "baseline_selected": ["commitment-setup", "commitment-triage", "commitment-digest", "commit"]
+    },
+    {
+      "id": "recurring-monitor",
+      "class": "conflict",
+      "prompt": "Check this repository every morning and notify me when new issues appear.",
+      "relevant": ["routine-advisor"],
+      "forbidden": ["delegation"],
+      "expect_no_match": false,
+      "baseline_selected": ["routine-advisor"]
+    },
+    {
+      "id": "defi-portfolio",
+      "class": "positive",
+      "prompt": "Analyze my DeFi portfolio positions and suggest a rebalance.",
+      "relevant": ["portfolio"],
+      "forbidden": ["trader-setup"],
+      "expect_no_match": false,
+      "baseline_selected": ["portfolio"]
+    },
+    {
+      "id": "multi-model-opinions",
+      "class": "positive",
+      "prompt": "Ask multiple models for a second opinion and compare their answers.",
+      "relevant": ["llm-council"],
+      "forbidden": [],
+      "expect_no_match": false,
+      "baseline_selected": ["llm-council"]
+    },
+    {
+      "id": "local-web-ui-validation",
+      "class": "multi_skill",
+      "prompt": "Run the web UI locally in Docker and test the browser flow.",
+      "relevant": ["local-test", "web-ui-test"],
+      "forbidden": [],
+      "expect_no_match": false,
+      "baseline_selected": ["web-ui-test", "coding"]
+    }
+  ]
+}
