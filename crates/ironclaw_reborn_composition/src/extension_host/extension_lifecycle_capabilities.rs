@@ -735,6 +735,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn model_visible_extension_search_preserves_web_generated_code_guidance() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
+            "extension-search-web-generated-code-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+
+        let search = invoke_json(
+            &services,
+            EXTENSION_SEARCH_CAPABILITY_ID,
+            serde_json::json!({"query": "telegram"}),
+        )
+        .await
+        .expect("Telegram search succeeds");
+        let telegram = search["payload"]["extensions"]
+            .as_array()
+            .expect("extensions array")
+            .iter()
+            .find(|extension| extension["package_ref"]["id"] == "telegram")
+            .expect("Telegram search result");
+        let connection = telegram
+            .get("channel_connection")
+            .expect("WebGeneratedCode guidance remains model-visible");
+
+        assert_eq!(connection["strategy"], "web_generated_code");
+        assert!(
+            connection["instructions"]
+                .as_str()
+                .is_some_and(|instructions| instructions.contains("IronClaw pairing panel")),
+            "manifest-authored connection guidance must survive extension search: {connection}"
+        );
+    }
+
+    #[tokio::test]
     async fn local_dev_extension_lifecycle_tools_manage_visible_extension_surface() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
