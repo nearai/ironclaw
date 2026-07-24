@@ -12,7 +12,6 @@ mod checkpoint_state;
 mod coordinator;
 pub mod events;
 mod external_tool_catalog;
-mod filesystem_store;
 mod ids;
 mod lifecycle;
 pub mod loop_exit;
@@ -28,6 +27,7 @@ mod status;
 mod store;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
+mod turn_state_row_store;
 
 pub use admission::{
     AllowAllTurnAdmissionLimitProvider, StaticTurnAdmissionLimitProvider, TurnAdmissionAxisKind,
@@ -58,9 +58,6 @@ pub use events::{
 pub use external_tool_catalog::{
     ExternalToolCatalog, ExternalToolCatalogError, ExternalToolSpec, ExternalToolSpecError,
     InMemoryExternalToolCatalog, PendingExternalCall,
-};
-pub use filesystem_store::{
-    FilesystemTurnStateBlockPersistence, TurnStateRowStore, TurnStateStoreLimits,
 };
 pub use ids::{
     AcceptedMessageRef, CapabilityActivityId, GateRef, IdempotencyKey, LoopDiagnosticRef,
@@ -116,4 +113,7 @@ pub use store::{
     TurnIdempotencyOutcomeKind, TurnIdempotencyRecord, TurnIdempotencyReplay, TurnLockVersion,
     TurnPersistenceSnapshot, TurnRecord, TurnRunRecord, TurnSpawnTreeStateStore, TurnStateStore,
     active_run_ref_state,
+};
+pub use turn_state_row_store::{
+    FilesystemTurnStateBlockPersistence, TurnStateRowStore, TurnStateStoreLimits,
 };

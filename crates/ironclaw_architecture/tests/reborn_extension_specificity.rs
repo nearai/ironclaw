@@ -364,7 +364,7 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
         "Gemini OAuth scope host in the multi-provider LLM crate",
     ),
     (
-        "crates/ironclaw_reborn_identity/src/filesystem_store.rs",
+        "crates/ironclaw_reborn_identity/src/identity_store.rs",
         "slack",
         "credential-authority ProviderKind vocabulary (persisted identity keys), not the extensions vendor",
     ),

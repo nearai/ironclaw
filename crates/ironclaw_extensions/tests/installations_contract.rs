@@ -24,7 +24,7 @@ fn manifest_hash(value: &str) -> ManifestHash {
     ManifestHash::new(value).unwrap()
 }
 
-async fn filesystem_store() -> ExtensionInstallationStore {
+async fn installation_store() -> ExtensionInstallationStore {
     ExtensionInstallationStore::load_at(
         Arc::new(InMemoryBackend::new()),
         VirtualPath::new("/system/extensions/.installations/test").unwrap(),
@@ -151,7 +151,7 @@ fn top_level_capabilities_are_rejected_for_every_source() {
 
 #[tokio::test]
 async fn upsert_installation_rejects_unknown_manifest() {
-    let store = filesystem_store().await;
+    let store = installation_store().await;
 
     let err = store
         .upsert_installation(
@@ -179,7 +179,7 @@ async fn upsert_installation_rejects_unknown_manifest() {
 
 #[tokio::test]
 async fn upsert_manifest_rejects_manifest_hash_change_for_existing_installation() {
-    let store = filesystem_store().await;
+    let store = installation_store().await;
     store.upsert_manifest(manifest("sha256:old")).await.unwrap();
     store
         .upsert_installation(installation("sha256:old"))
@@ -199,7 +199,7 @@ async fn upsert_manifest_rejects_manifest_hash_change_for_existing_installation(
 
 #[tokio::test]
 async fn upsert_manifest_and_installation_replaces_coherent_manifest_hash_pair() {
-    let store = filesystem_store().await;
+    let store = installation_store().await;
     store.upsert_manifest(manifest("sha256:old")).await.unwrap();
     store
         .upsert_installation(installation("sha256:old"))
@@ -230,7 +230,7 @@ async fn upsert_manifest_and_installation_replaces_coherent_manifest_hash_pair()
 
 #[tokio::test]
 async fn upsert_manifest_and_installation_rejects_mismatched_manifest_hash_pair() {
-    let store = filesystem_store().await;
+    let store = installation_store().await;
 
     let err = store
         .upsert_manifest_and_installation(manifest("sha256:new"), installation("sha256:old"))
@@ -259,7 +259,7 @@ async fn upsert_manifest_and_installation_rejects_mismatched_manifest_hash_pair(
 
 #[tokio::test]
 async fn missing_installation_mutations_return_not_found() {
-    let store = filesystem_store().await;
+    let store = installation_store().await;
     let missing = installation_id("missing-prod");
 
     let health_err = store
@@ -274,7 +274,7 @@ async fn missing_installation_mutations_return_not_found() {
 
 #[tokio::test]
 async fn manifest_hash_presence_mismatch_is_rejected() {
-    let store = filesystem_store().await;
+    let store = installation_store().await;
     store.upsert_manifest(manifest("sha256:abc")).await.unwrap();
 
     let missing_ref_hash = store
@@ -286,7 +286,7 @@ async fn manifest_hash_presence_mismatch_is_rejected() {
         ExtensionInstallationError::ManifestHashMismatch { .. }
     ));
 
-    let store = filesystem_store().await;
+    let store = installation_store().await;
     let manifest_without_hash = ExtensionManifestRecord::from_toml(
         raw_capability_provider_manifest(),
         ManifestSource::HostBundled,
@@ -447,7 +447,7 @@ async fn installations_sort_by_id() {
     let newer = chrono::DateTime::parse_from_rfc3339("2026-01-02T00:00:00Z")
         .unwrap()
         .with_timezone(&Utc);
-    let store = filesystem_store().await;
+    let store = installation_store().await;
     store.upsert_manifest(manifest("sha256:abc")).await.unwrap();
 
     for (id, updated_at) in [
@@ -485,7 +485,7 @@ async fn installations_sort_by_id() {
 }
 
 #[tokio::test]
-async fn filesystem_store_persists_manifest_and_installation_as_rows() {
+async fn installation_store_persists_manifest_and_installation_as_rows() {
     let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
     let root = VirtualPath::new("/system/extensions/.installations/reload").unwrap();
     let store = ExtensionInstallationStore::load_at(

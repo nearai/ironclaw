@@ -21,8 +21,8 @@ use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{ProcessId, ResourceReservation, ResourceScope};
 
 use crate::cancellation::ProcessCancellationRegistry;
-use crate::filesystem_store::{ProcessResultStore, ProcessStore};
 use crate::host::ProcessHost;
+use crate::process_store::{ProcessResultStore, ProcessStore};
 use crate::types::{
     ProcessError, ProcessExecutionRequest, ProcessExecutor, ProcessManager, ProcessRecord,
     ProcessResultStorePort, ProcessStart, ProcessStatus, ProcessStorePort,

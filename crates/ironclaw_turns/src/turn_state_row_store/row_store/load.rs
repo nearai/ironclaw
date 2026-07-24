@@ -11,7 +11,7 @@ use ironclaw_filesystem::{
 use ironclaw_host_api::{ResourceScope, ScopedPath, UserId};
 use serde::de::DeserializeOwned;
 
-use crate::filesystem_store::{io as legacy_blob_io, projection};
+use crate::turn_state_row_store::{io as legacy_blob_io, projection};
 use crate::{
     EventCursor, GetLoopCheckpointRequest, GetRunStateRequest, LoopCheckpointRecord,
     MAX_TURN_EVENT_PROJECTION_LIMIT, TurnError, TurnEventPage, TurnLifecycleEvent,

@@ -28,7 +28,7 @@ use super::{
     },
     turn_state_write_span,
 };
-use crate::filesystem_store::{
+use crate::turn_state_row_store::{
     profile_resolver::PreResolvedRunProfileResolver, projection, runner_lease::RunnerLeaseOverlay,
 };
 

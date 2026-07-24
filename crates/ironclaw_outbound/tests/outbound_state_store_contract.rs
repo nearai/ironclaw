@@ -61,7 +61,7 @@ fn build_outbound_store_with_permissions<F: RootFilesystem>(
 }
 
 #[tokio::test]
-async fn filesystem_store_satisfies_outbound_contract_on_in_memory_backend() {
+async fn outbound_state_store_satisfies_outbound_contract_on_in_memory_backend() {
     // The new OutboundStateStore runs the same contract suite as
     // the in-memory and SQL backends, demonstrating that it satisfies the
     // OutboundStateStore trait identically. The InMemoryBackend from
@@ -79,9 +79,10 @@ async fn filesystem_store_satisfies_outbound_contract_on_in_memory_backend() {
     communication_preference_update_inserts_absent_record(&store).await;
     communication_preference_stale_version_conflicts_without_writing(&store).await;
     communication_preference_update_rejects_invalid_or_mismatched_record(&store).await;
-    filesystem_store_rejects_communication_preference_put_cas_conflict(&backend).await;
-    filesystem_store_rejects_communication_preference_update_cas_conflict(&backend).await;
-    filesystem_store_rejects_mismatched_communication_preference_identity(&backend, &store).await;
+    outbound_state_store_rejects_communication_preference_put_cas_conflict(&backend).await;
+    outbound_state_store_rejects_communication_preference_update_cas_conflict(&backend).await;
+    outbound_state_store_rejects_mismatched_communication_preference_identity(&backend, &store)
+        .await;
     durable_policy_subscription_delivery_flow(&store).await;
     subscription_cursor_rejects_mismatched_scope(&store).await;
     subscription_ids_are_scoped_not_global(&store).await;
@@ -642,7 +643,7 @@ where
     assert_eq!(load_preference_record(store, key).await, Some(record));
 }
 
-async fn filesystem_store_rejects_mismatched_communication_preference_identity(
+async fn outbound_state_store_rejects_mismatched_communication_preference_identity(
     backend: &Arc<InMemoryBackend>,
     store: &OutboundStateStore<InMemoryBackend>,
 ) {
@@ -723,7 +724,7 @@ async fn filesystem_store_rejects_mismatched_communication_preference_identity(
 }
 
 #[tokio::test]
-async fn filesystem_store_personal_and_shared_agent_hashes_are_always_distinct() {
+async fn outbound_state_store_personal_and_shared_agent_hashes_are_always_distinct() {
     let backend = Arc::new(InMemoryBackend::new());
     let store = build_outbound_store_for_backend(Arc::clone(&backend));
     let tenant_id = TenantId::new("tenant-outbound-hash-distinct").unwrap();
@@ -776,7 +777,7 @@ async fn filesystem_store_personal_and_shared_agent_hashes_are_always_distinct()
     );
 }
 
-async fn filesystem_store_rejects_communication_preference_put_cas_conflict(
+async fn outbound_state_store_rejects_communication_preference_put_cas_conflict(
     backend: &Arc<InMemoryBackend>,
 ) {
     let racing = Arc::new(VersionRacingBackend::new(Arc::clone(backend)));
@@ -810,7 +811,7 @@ async fn filesystem_store_rejects_communication_preference_put_cas_conflict(
     assert_eq!(racing.injected_count().await, 1);
 }
 
-async fn filesystem_store_rejects_communication_preference_update_cas_conflict(
+async fn outbound_state_store_rejects_communication_preference_update_cas_conflict(
     backend: &Arc<InMemoryBackend>,
 ) {
     let racing = Arc::new(VersionRacingBackend::new(Arc::clone(backend)));
@@ -864,7 +865,7 @@ async fn filesystem_store_rejects_communication_preference_update_cas_conflict(
 }
 
 #[tokio::test]
-async fn filesystem_store_rejects_communication_preference_write_on_unsupported_cas_mount() {
+async fn outbound_state_store_rejects_communication_preference_write_on_unsupported_cas_mount() {
     let inner = Arc::new(InMemoryBackend::new());
     let backend = Arc::new(UnsupportedCriticalCasBackend::new(Arc::clone(&inner)));
     let store = OutboundStateStore::new(build_scoped_fs(
@@ -2307,7 +2308,7 @@ async fn list_delivery_attempts_drains_more_than_page_max_limit() {
 }
 
 /// Regression test mirroring the engine-store
-/// `filesystem_store_isolates_two_tenants_with_same_user_project_ids`
+/// `outbound_state_store_isolates_two_tenants_with_same_user_project_ids`
 /// shape: the outbound store must enforce tenant isolation through the
 /// [`ScopedFilesystem`] mount permission boundary, not assume path strings
 /// inside outbound code already encode tenant identity.

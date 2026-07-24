@@ -73,7 +73,7 @@ runtime-breaking read-after-write defect at the store tier:
 
 - `TurnStateRowStore::get_run_state` (and the other durable-read query
   methods) read **materialized rows, not the hot cache**
-  (`filesystem_store/row_store/traits.rs`). Under WriteBehind a just-submitted
+  (`turn_state_row_store/row_store/traits.rs`). Under WriteBehind a just-submitted
   run's row is still async-materializing, so `get_run_state` returns
   `ScopeNotFound`.
 - The runtime reads state right after submit (`send_user_message` →

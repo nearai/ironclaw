@@ -543,7 +543,7 @@ async fn process_host_kill_does_not_cancel_other_scope_process() {
 }
 
 #[tokio::test]
-async fn background_process_manager_can_use_owned_filesystem_store() {
+async fn background_process_manager_can_use_owned_process_store() {
     let filesystem = engine_filesystem();
     let store = Arc::new(ProcessStore::from_arc(filesystem));
     let executor = Arc::new(CountingExecutor::success());
@@ -2698,7 +2698,7 @@ fn scoped_result_path(scope: &ResourceScope, process_id: ProcessId) -> ScopedPat
 
 /// Build the alias-relative `/processes/...` owner prefix for a request
 /// scope. Mirrors the production `scope_owner_root_string` in
-/// `filesystem_store.rs` but lives in test code so a drift between
+/// `process_store.rs` but lives in test code so a drift between
 /// production and fixture path layouts shows up as a test failure.
 fn alias_relative_owner_root(scope: &ResourceScope) -> String {
     let mut base = String::from("/processes");

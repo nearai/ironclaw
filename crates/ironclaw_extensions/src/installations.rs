@@ -1799,7 +1799,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_manifest_rejects_active_installations() {
-        let store = filesystem_store().await;
+        let store = installation_store().await;
         let manifest = manifest_record("fixture", Some("hash-1"));
         let extension_id = manifest.extension_id().clone();
         store
@@ -1823,7 +1823,7 @@ mod tests {
         assert!(store.get_manifest(&extension_id).await.unwrap().is_some());
     }
 
-    async fn filesystem_store() -> ExtensionInstallationStore {
+    async fn installation_store() -> ExtensionInstallationStore {
         ExtensionInstallationStore::load_at(
             Arc::new(InMemoryBackend::new()),
             VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),

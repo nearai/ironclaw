@@ -820,7 +820,7 @@ impl RebornIntegrationGroupBuilder {
         let scope_gateway = Arc::new(ScopeRegistryGateway::new());
 
         // Issue #5476 lease-wedge coverage: `.with_limits` is the store's own
-        // public builder method (`ironclaw_turns::filesystem_store`); this only
+        // public builder method (`ironclaw_turns::turn_state_row_store`); this only
         // calls it a second time with a shortened `runner_lease_ttl` when a test
         // opts in via `with_runner_lease_ttl_for_test`. `None` (default) leaves
         // `TurnStateStoreLimits::default()` untouched, byte-identical to

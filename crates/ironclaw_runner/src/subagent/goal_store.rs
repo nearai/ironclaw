@@ -398,7 +398,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn filesystem_store_keys_goals_by_scope_and_run_id() {
+    async fn goal_store_keys_goals_by_scope_and_run_id() {
         let store = in_memory_backed_subagent_goal_store();
         let first_scope = scope("thread-goal-a");
         let second_scope = scope("thread-goal-b");

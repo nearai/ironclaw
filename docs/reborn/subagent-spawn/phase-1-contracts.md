@@ -2058,7 +2058,7 @@ In `subagent/goal_store.rs` `#[cfg(test)] mod tests`:
 4. **`put_rejects_duplicate_key`** — `put_goal` twice for the same `run_id` → second
    call `Err(DuplicateKey { .. })`.
 
-5. **`filesystem_store_keys_goals_by_scope_and_run_id`** — write the same
+5. **`goal_store_keys_goals_by_scope_and_run_id`** — write the same
    `TurnRunId` under distinct owner scopes and assert lookups are isolated by
    scope and run id.
 

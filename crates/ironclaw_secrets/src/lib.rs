@@ -9,11 +9,11 @@
 #![warn(unreachable_pub)]
 
 mod crypto;
-mod filesystem_store;
 pub mod keychain;
 mod legacy_store;
+mod secret_store;
 
-pub use filesystem_store::{CredentialBroker, SecretStore};
+pub use secret_store::{CredentialBroker, SecretStore};
 
 use std::collections::HashMap;
 use std::fmt;
@@ -391,7 +391,7 @@ pub struct CredentialSession {
 /// to avoid duplicating that constructor for every backend.
 // arch-exempt: too_many_args, needs CredentialSession reconstruction context, plan #4088
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn __internal_session_for_filesystem_store(
+pub(crate) fn __internal_session_for_secret_store(
     scope: ResourceScope,
     invocation_id: InvocationId,
     capability_id: CapabilityId,

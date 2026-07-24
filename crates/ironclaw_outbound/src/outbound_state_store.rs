@@ -208,7 +208,7 @@ where
     /// metadata-stripped opaque write + `CasExpectation::Any` for backends
     /// that reject record-shape entries or non-`Any` CAS (e.g.
     /// `DiskFilesystem`). Mirrors
-    /// [`ironclaw_processes::filesystem_store::put_with_byte_fallback`] so
+    /// [`ironclaw_processes::outbound_state_store::put_with_byte_fallback`] so
     /// every byte-only mount in the workspace stays writeable through the
     /// new filesystem stores.
     async fn put_with_byte_fallback(
@@ -1847,7 +1847,7 @@ where
                     Ok(p) => p,
                     Err(_) => {
                         tracing::debug!(
-                            target = "ironclaw::outbound::filesystem_store",
+                            target = "ironclaw::outbound::outbound_state_store",
                             name = %entry.name,
                             "delivered gate route sweep: skipping entry with invalid scoped path"
                         );
@@ -1860,7 +1860,7 @@ where
                 Ok(None) => continue,
                 Err(e) => {
                     tracing::debug!(
-                        target = "ironclaw::outbound::filesystem_store",
+                        target = "ironclaw::outbound::outbound_state_store",
                         name = %entry.name,
                         error = %e,
                         "delivered gate route sweep: skipping unreadable file"
@@ -1874,7 +1874,7 @@ where
                     Ok(r) => r,
                     Err(e) => {
                         tracing::debug!(
-                            target = "ironclaw::outbound::filesystem_store",
+                            target = "ironclaw::outbound::outbound_state_store",
                             name = %entry.name,
                             error = %e,
                             "delivered gate route sweep: skipping undeserializable file"
@@ -1893,7 +1893,7 @@ where
                 // silent-ok: stale index entries are filtered by the membership
                 // check and re-swept next pass.
                 tracing::debug!(
-                    target = "ironclaw::outbound::filesystem_store",
+                    target = "ironclaw::outbound::outbound_state_store",
                     name = %entry.name,
                     error = %e,
                     "delivered gate route sweep: failed to delete conversation indexes (best-effort)"
@@ -1910,7 +1910,7 @@ where
                     // silent-ok: the record will be re-visited on the next sweep
                     // and filtered out at lookup time (is_expired check).
                     tracing::debug!(
-                        target = "ironclaw::outbound::filesystem_store",
+                        target = "ironclaw::outbound::outbound_state_store",
                         name = %entry.name,
                         error = %e,
                         "delivered gate route sweep: failed to delete expired file (best-effort)"

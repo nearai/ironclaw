@@ -1807,7 +1807,7 @@ async fn filesystem_budget_gate_store_fails_closed_on_byte_only_backend() {
 /// Backend wrapper that races *every* versioned `put` against a watched
 /// path, ported verbatim (mechanics) from `ironclaw_secrets`'s
 /// `AlwaysRacingBackend`
-/// (crates/ironclaw_secrets/src/filesystem_store.rs:2085-2127) for the PR
+/// (crates/ironclaw_secrets/src/resource_store.rs:2085-2127) for the PR
 /// #5234 review follow-up (Medium): no resource-caller test in this crate
 /// drove a *persistent* `FilesystemError::VersionMismatch` through
 /// `ResourceGovernorStore`/`BudgetGateStore` to pin

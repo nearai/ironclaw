@@ -11,7 +11,7 @@
 //! a sanitized `exit_application_failed` catch-all instead of `Completed`,
 //! root-caused to `TurnStateRowStore`'s lock-free CAS retry churning
 //! a fresh libsql connection per attempt under concurrent contention (see
-//! `crates/ironclaw_turns/src/filesystem_store.rs`'s `cas_update`). #5751
+//! `crates/ironclaw_turns/src/turn_state_row_store.rs`'s `cas_update`). #5751
 //! fixed the root cause with a bounded deadpool connection pool. Verified
 //! here (cycle-3 fix lane, PR #5819): 50 real `StorageMode::LibSql` runs and
 //! 40 `InMemory` runs, 0 failures and 0 tolerated-flake occurrences in

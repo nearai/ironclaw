@@ -17,7 +17,7 @@
 //! deleted `InMemoryBudgetGateStore` did — one shared snapshot regardless of the
 //! per-op `ResourceScope` — which is what the single-scope gate-lifecycle tests
 //! (open/get/resolve/list/expire under one scope) need. Cross-tenant isolation is
-//! exercised by the per-tenant-mount tests in `filesystem_store.rs`.
+//! exercised by the per-tenant-mount tests in `resource_store.rs`.
 //!
 //! Terminal retention is disabled ([`with_terminal_retention(None)`]) so tests
 //! can inspect resolved/expired gates without a time window — matching the

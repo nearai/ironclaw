@@ -19,7 +19,7 @@ use ironclaw_turns::{
 // Checkpoint *payload* store behavior (round trips, scope/run/schema
 // mismatches, size limits) is contract-tested against the one production
 // implementation — `CheckpointStateStore` — in
-// `crates/ironclaw_loop_host/tests/filesystem_checkpoint_state_contract.rs`
+// `crates/ironclaw_loop_host/tests/checkpoint_state_store_contract.rs`
 // (arch-simplification §4.3). This file keeps the checkpoint *metadata*
 // (`LoopCheckpointStore`) contract for the turn-state-backed implementation
 // plus the type-level redaction/serde contracts owned by this crate.

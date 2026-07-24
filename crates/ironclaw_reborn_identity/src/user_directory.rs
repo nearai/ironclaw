@@ -1,5 +1,5 @@
 //! Admin-facing user directory: enumeration and lifecycle over the canonical
-//! [`StoredUser`](crate::filesystem_store) records this crate already persists.
+//! [`StoredUser`](crate::identity_store) records this crate already persists.
 //!
 //! This is a **separate trait** from [`RebornIdentityResolver`](crate::RebornIdentityResolver)
 //! on purpose. The resolver owns the security-load-bearing mint/link/create

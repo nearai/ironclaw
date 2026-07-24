@@ -176,7 +176,7 @@ impl SerializableCredentialSession {
                 reason: format!("invalid stored session id: {error}"),
             }
         })?;
-        Ok(crate::__internal_session_for_filesystem_store(
+        Ok(crate::__internal_session_for_secret_store(
             self.scope,
             self.invocation_id,
             self.capability_id,

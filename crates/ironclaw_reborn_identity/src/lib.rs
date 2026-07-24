@@ -25,11 +25,11 @@
 //! and host ownership stay centralized in the filesystem layer rather than
 //! this crate holding a raw database handle.
 
-mod filesystem_store;
+mod identity_store;
 mod key;
 mod user_directory;
 
-pub use filesystem_store::RebornIdentityStore;
+pub use identity_store::RebornIdentityStore;
 pub use key::{ExternalSubjectId, IdentityKeyError, ProviderInstanceId, ProviderKind};
 pub use user_directory::{
     RebornUser, RebornUserDirectory, RebornUserProfileUpdate, RebornUserRole, RebornUserStatus,

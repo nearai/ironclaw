@@ -21,9 +21,9 @@
 mod cas_snapshot;
 mod event;
 mod filesystem_governor;
-mod filesystem_store;
 mod gate;
 mod period;
+mod resource_store;
 // arch-exempt: large_file, +test_support module decl for §4.3 budget-gate store consolidation (delete InMemoryBudgetGateStore), no logic change, plan #6168
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
@@ -33,7 +33,6 @@ pub use event::{
     InMemoryBudgetEventSink, NoOpBudgetEventSink,
 };
 pub use filesystem_governor::FilesystemResourceGovernor;
-pub use filesystem_store::{BudgetGateStore, ResourceGovernorStore};
 pub use gate::{
     BudgetApprovalGate, BudgetGateError, BudgetGateId, BudgetGateOutcome, BudgetGateStatus,
     BudgetGateStorePort,
@@ -42,6 +41,7 @@ pub use period::{
     BudgetPeriod, BudgetThresholds, BudgetThresholdsError, PeriodUnit, period_bounds,
     period_has_rolled_over,
 };
+pub use resource_store::{BudgetGateStore, ResourceGovernorStore};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};

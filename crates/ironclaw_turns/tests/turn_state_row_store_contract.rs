@@ -992,7 +992,7 @@ async fn filesystem_turn_state_row_store_refreshes_stale_active_lock_cache_befor
 /// (now-unconditional) write-behind — the single-writer authority model, where
 /// a live SECOND instance over the same backend is not a supported production
 /// shape (each scope has exactly one authoritative writer/reader instance;
-/// see `filesystem_store/row_store.rs`). The refresh-from-durable-rows path
+/// see `turn_state_row_store/row_store.rs`). The refresh-from-durable-rows path
 /// this test locks is REOPEN after a drop (crash/restart), not a second live
 /// instance staying open alongside the first.
 #[tokio::test]

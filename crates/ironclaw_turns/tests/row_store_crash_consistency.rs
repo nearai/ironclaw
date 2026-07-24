@@ -2431,7 +2431,7 @@ async fn fail_before_durable_leaves_run_redrivable() {
 ///
 /// The fix makes an empty durable delta a true no-op that does not advance the
 /// reservation sequence (`apply` / `apply_with_targeted_delta` in
-/// `crates/ironclaw_turns/src/filesystem_store/row_store`). The assertion below
+/// `crates/ironclaw_turns/src/turn_state_row_store/row_store`). The assertion below
 /// holds after the fix.
 #[tokio::test]
 async fn noop_claim_does_not_leak_active_lock_across_crash() {

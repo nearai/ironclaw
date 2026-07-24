@@ -3,7 +3,7 @@
 //! `with_fixed_view`, §4.5a) — every method takes the caller's live
 //! `TurnScope`/axes as an explicit argument; the resolver recomputes the
 //! `MountView` for that scope on that call, exactly like
-//! `ironclaw_conversations::filesystem_store` and
+//! `ironclaw_conversations::conversation_state_store` and
 //! `ironclaw_reborn_composition::llm_admin::llm_key_store` already do.
 
 use std::sync::Arc;
