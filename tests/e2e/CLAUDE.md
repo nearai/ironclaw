@@ -114,6 +114,7 @@ full-path Emulate tests still start the legacy gateway binary.
 | `test_emulate_reborn_provider_contracts.py` | Reborn Emulate fixture contracts: Google account isolation and stateful reads/writes, Slack QA 9/10 provider shapes and strict-scope failures, and GitHub identity plus positive/negative state transitions |
 | `test_provider_fault_proxy.py` | Harness self-tests for reusable provider status, response, timeout, connection-reset, and lost-acknowledgement profiles plus safe request evidence and reset |
 | `test_provider_capability_inventory.py` | Fast completeness gate derived from shipped first-party manifests. Every static provider capability must be tested, live-only, unsupported, or covered by an owned waiver in `fixtures/provider_capability_coverage.toml`; non-Emulate evidence names its exact Cargo target, source, and executable test. |
+| `test_journey_coverage.py` | Fast whole-path completeness gate. Harvested provider traces are typed `JourneyCase` entries, while representative WebUI, Slack, Telegram, and scheduled-trigger journeys name exact executable Pytest or Cargo evidence. Production channel manifests cannot add an inbound or outbound surface without journey evidence. |
 | `test_reborn_qa_trace_full_path.py` | Harvested and typed provider operations through standalone Reborn and Emulate, including representative read/idempotent-write/non-idempotent-write fault cases with provider readback |
 | `test_reborn_emulate_full_path.py` | Install/auth a first-party extension, drive scripted Gmail/Calendar/Drive/GitHub tool calls, assert provider state and cleanup via Emulate |
 | `test_oauth_refresh.py` | Hosted Gmail OAuth refresh: expire token, real tool call, refresh via mock proxy without leaking `client_secret` |
@@ -202,6 +203,14 @@ success plus provider readback rather than recorded final-answer wording.
 baseline, and readback cases for operations not yet present in harvested
 journeys. These cases reuse the same Reborn process and reset only their mutable
 provider world.
+`JourneyCase` is the small composition layer above those operation contracts.
+It declares the trace (when recorded), provider worlds, ingress, execution
+lane, delivery target, observable assertions, and exact executable evidence.
+The harvested provider runner consumes these declarations directly; provider
+setup, normalization, and readback remain in provider-owned helpers rather
+than moving into a generic DSL. The journey coverage gate derives channel
+ingress and delivery requirements from shipped manifests and adds the built-in
+WebUI and scheduled-trigger surfaces.
 `ProviderFaultProfile` places a transparent proxy between that Reborn process
 and Emulate. Reusable profiles cover HTTP 400/401/403/404/409/429/5xx,
 timeout, connection reset, malformed/truncated/missing-field responses, and a
