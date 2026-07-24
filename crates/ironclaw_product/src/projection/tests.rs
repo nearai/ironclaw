@@ -16,7 +16,7 @@ use ironclaw_events::{InMemoryDurableEventLog, RuntimeEvent};
 use ironclaw_host_api::{
     Action, AgentId, ApprovalRequest, ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId,
     InvocationId, NetworkMethod, NetworkScheme, NetworkTarget, Principal, ProcessId,
-    ResourceEstimate, ResourceScope, RuntimeKind, TenantId, ThreadId, UserId,
+    ResourceEstimate, ResourceScope, RuntimeKind, ScopedPath, TenantId, ThreadId, UserId,
 };
 use ironclaw_run_state::{ApprovalRecord, ApprovalRequestStorePort, RunStateError};
 use ironclaw_turns::{
@@ -62,6 +62,40 @@ fn resource_scope(
         thread_id: Some(thread_id.clone()),
         invocation_id,
     }
+}
+
+#[tokio::test]
+async fn projection_outbound_store_mount_is_tenant_user_scoped() {
+    let scoped = outbound_scoped(Arc::new(InMemoryBackend::new()));
+    let agent_id = AgentId::new("projection-outbound-agent").unwrap();
+    let thread_id = ThreadId::new("projection-outbound-thread").unwrap();
+    let scope_a = resource_scope(
+        &TenantId::new("projection-outbound-tenant-a").unwrap(),
+        &UserId::new("projection-outbound-user-a").unwrap(),
+        &agent_id,
+        &thread_id,
+        InvocationId::new(),
+    );
+    let scope_b = resource_scope(
+        &TenantId::new("projection-outbound-tenant-b").unwrap(),
+        &UserId::new("projection-outbound-user-b").unwrap(),
+        &agent_id,
+        &thread_id,
+        InvocationId::new(),
+    );
+    let path = ScopedPath::new("/outbound/subscriptions/shared-key.json").unwrap();
+
+    scoped
+        .write_bytes(&scope_a, &path, br#"{"owner":"a"}"#.to_vec())
+        .await
+        .unwrap();
+
+    let owner_a = scoped.read_bytes(&scope_a, &path).await.unwrap();
+    assert_eq!(owner_a, br#"{"owner":"a"}"#);
+    assert!(
+        scoped.read_bytes(&scope_b, &path).await.is_err(),
+        "same outbound alias path must not cross tenant/user mount roots"
+    );
 }
 
 fn contains_run_status(

@@ -223,8 +223,9 @@ pub fn build_reborn_projection_services(
         // §4.3: the local-dev projection bundle's EventStreamManager keeps its
         // own ephemeral, volatile outbound-delivery bookkeeping — the drop-in
         // for the deleted throwaway `InMemoryOutboundStateStore::default()`.
-        // A fixed scoped view over a fresh `InMemoryBackend` mounts `/outbound`; the
-        // durable outbound store is composed separately in the factory.
+        // A tenant/user-scoped view over a fresh `InMemoryBackend` mounts
+        // `/outbound`; the durable outbound store is composed separately in the
+        // factory.
         {
             #[allow(clippy::disallowed_methods)]
             Arc::new(OutboundStateStore::new(outbound_scoped(Arc::new(
@@ -253,12 +254,24 @@ where
     Arc::new(ScopedFilesystem::new(root, outbound_mount_view))
 }
 
-fn outbound_mount_view(_scope: &ResourceScope) -> Result<MountView, HostApiError> {
+fn outbound_mount_view(scope: &ResourceScope) -> Result<MountView, HostApiError> {
+    let tenant_id = outbound_scope_path_segment(scope.tenant_id.as_str());
+    let user_id = outbound_scope_path_segment(scope.user_id.as_str());
     MountView::new(vec![MountGrant::new(
         MountAlias::new("/outbound")?,
-        VirtualPath::new("/engine/outbound")?,
+        VirtualPath::new(format!(
+            "/engine/tenants/{tenant_id}/users/{user_id}/outbound"
+        ))?,
         MountPermissions::read_write_list_delete(),
     )])
+}
+
+fn outbound_scope_path_segment(value: &str) -> &str {
+    if value == ironclaw_host_api::SYSTEM_RESERVED_ID {
+        "__system__"
+    } else {
+        value
+    }
 }
 
 #[derive(Debug, Clone)]
