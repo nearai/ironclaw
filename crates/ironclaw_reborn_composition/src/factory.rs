@@ -120,7 +120,7 @@ use ironclaw_host_api::runtime_policy::{
 use ironclaw_host_api::{
     CapabilitySet, CorrelationId, CredentialStageError, ExtensionId, HostApiError, HostPath,
     InvocationId, MountAlias, MountGrant, MountPermissions, MountView, NetworkPolicy, Obligation,
-    PackageId, RecipeClientCredentials, ResourceEstimate, ResourceScope, RuntimeHttpEgress,
+    PackageId, RecipeClientCredentials, ResourceEstimate, ResourceScope, RunId, RuntimeHttpEgress,
     RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind,
     TrustClass, UserId, VendorId, VirtualPath, sha256_digest_token,
 };
@@ -163,11 +163,11 @@ use ironclaw_triggers::{
     TriggerRepository,
 };
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
-use ironclaw_turns::InMemoryRunProfileResolver;
 use ironclaw_turns::TurnStateRowStore;
 use ironclaw_turns::{
     CheckpointStateStorePort, ExternalToolCatalog, InMemoryExternalToolCatalog, LoopCheckpointStore,
 };
+use ironclaw_turns::{GetRunStateRequest, InMemoryRunProfileResolver, TurnScope, TurnStateStore};
 use secrecy::SecretString;
 
 /// Display name sent with RFC 7591 dynamic client registration.
@@ -1744,12 +1744,27 @@ impl ironclaw_turns::TurnStateStore for LateBoundTriggerSourceTurnStateStore {
 
 struct LocalRuntimeTriggerCreatorPairingHook {
     outbound_delivery_targets: Arc<crate::outbound::MutableOutboundDeliveryTargetRegistry>,
+    source_turn_state: Arc<dyn TurnStateStore>,
     scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     conversations: tokio::sync::OnceCell<RebornFilesystemConversationServices>,
 }
 
 #[async_trait::async_trait]
 impl TriggerCreateHook for LocalRuntimeTriggerCreatorPairingHook {
+    async fn resolve_implicit_delivery_target(
+        &self,
+        scope: &ironclaw_host_api::ResourceScope,
+        run_id: Option<RunId>,
+    ) -> Result<Option<ironclaw_triggers::TriggerDeliveryTargetId>, TriggerError> {
+        resolve_current_run_delivery_target(
+            self.source_turn_state.as_ref(),
+            &self.outbound_delivery_targets,
+            scope,
+            run_id,
+        )
+        .await
+    }
+
     async fn validate_delivery_target(
         &self,
         scope: &ironclaw_host_api::ResourceScope,
@@ -1776,6 +1791,74 @@ impl TriggerCreateHook for LocalRuntimeTriggerCreatorPairingHook {
             })?;
         pair_trigger_creator(conversations, record).await
     }
+}
+
+async fn resolve_current_run_delivery_target(
+    turn_state: &dyn TurnStateStore,
+    registry: &crate::outbound::MutableOutboundDeliveryTargetRegistry,
+    scope: &ResourceScope,
+    run_id: Option<RunId>,
+) -> Result<Option<ironclaw_triggers::TriggerDeliveryTargetId>, TriggerError> {
+    let Some(run_id) = run_id else {
+        return Ok(None);
+    };
+    let Some(thread_id) = scope.thread_id.clone() else {
+        return Ok(None);
+    };
+    let turn_scope = TurnScope::new_with_owner(
+        scope.tenant_id.clone(),
+        scope.agent_id.clone(),
+        scope.project_id.clone(),
+        thread_id,
+        Some(scope.user_id.clone()),
+    );
+    let run_state = turn_state
+        .get_run_state(GetRunStateRequest {
+            scope: turn_scope,
+            run_id: ironclaw_turns::TurnRunId::from_uuid(run_id.as_uuid()),
+        })
+        .await
+        .map_err(|error| {
+            tracing::warn!(
+                target = "ironclaw::reborn::trigger_create",
+                %error,
+                %run_id,
+                "source run lookup failed during implicit trigger delivery-target resolution"
+            );
+            TriggerError::Backend {
+                reason: "source run lookup unavailable".to_string(),
+            }
+        })?;
+    let caller = crate::outbound::OutboundDeliveryTargetScope::new(
+        scope.tenant_id.clone(),
+        scope.user_id.clone(),
+    );
+    use crate::outbound::OutboundDeliveryTargetProvider as _;
+    let entry = registry
+        .resolve_reply_target_binding(&caller, &run_state.reply_target_binding_ref)
+        .await
+        .map_err(|error| {
+            tracing::warn!(
+                target = "ironclaw::reborn::trigger_create",
+                %error,
+                %run_id,
+                "outbound target lookup failed during implicit trigger delivery-target resolution"
+            );
+            TriggerError::Backend {
+                reason: "outbound delivery target lookup unavailable".to_string(),
+            }
+        })?;
+    entry
+        .map(|entry| {
+            ironclaw_triggers::TriggerDeliveryTargetId::new(
+                entry.summary.target_id.as_str().to_string(),
+            )
+            .map_err(|reason| TriggerError::InvalidRecord {
+                kind: ironclaw_triggers::TriggerRecordValidationKind::DeliveryTargetInvalid,
+                reason,
+            })
+        })
+        .transpose()
 }
 
 async fn pair_trigger_creator(
@@ -4502,8 +4585,17 @@ async fn build_backend_production(
     > = Arc::new(std::sync::RwLock::new(
         Arc::clone(&turn_state) as Arc<dyn ironclaw_turns::TurnStateStore>
     ));
+    #[cfg(any(test, feature = "test-support"))]
+    let trigger_create_source_turn_state: Arc<dyn ironclaw_turns::TurnStateStore> =
+        Arc::new(LateBoundTriggerSourceTurnStateStore {
+            source_turn_state: Arc::clone(&trigger_source_turn_state_store),
+        });
+    #[cfg(not(any(test, feature = "test-support")))]
+    let trigger_create_source_turn_state: Arc<dyn ironclaw_turns::TurnStateStore> =
+        Arc::clone(&turn_state) as Arc<dyn ironclaw_turns::TurnStateStore>;
     let trigger_create_hook = Arc::new(LocalRuntimeTriggerCreatorPairingHook {
         outbound_delivery_targets: Arc::clone(&outbound_delivery_targets),
+        source_turn_state: trigger_create_source_turn_state,
         scoped_filesystem: Arc::clone(&stores.scoped_filesystem),
         conversations: tokio::sync::OnceCell::new(),
     });
@@ -4825,7 +4917,6 @@ async fn build_backend_production(
     // Manifest-derived account-setup declarations (#6520): every catalog
     // package's `[account_setup]` projection joins the binary-injected extras
     // from the deployment seam. Duplicates fail loudly at `declare()` below.
-    let account_setup_descriptors = account_setup_descriptors;
     let admin_configuration_uses = available_extensions.admin_configuration_uses();
     let mut admin_configuration_consumers = std::collections::BTreeMap::new();
     for usage in &admin_configuration_uses {

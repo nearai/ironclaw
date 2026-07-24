@@ -116,9 +116,9 @@ use crate::deployment::{DeploymentConfig, TrafficPolicy};
 use crate::extension_host::admin_configuration::{
     ComposedAdminConfigurationService, ComposedExtensionAdminConfigurationResolver,
 };
-use crate::extension_host::channel_pairing::{
-    ChannelPairingConsumeOutcome, ChannelPairingRegistry,
-};
+#[cfg(any(test, feature = "test-support"))]
+use crate::extension_host::channel_pairing::ChannelPairingConsumeOutcome;
+use crate::extension_host::channel_pairing::ChannelPairingRegistry;
 use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
 use crate::extension_host::lifecycle::RebornLocalSkillManagementPort;
 use crate::factory::{

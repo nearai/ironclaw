@@ -127,7 +127,7 @@ fn build_fixture() -> AppFixture {
     )
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
     .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-    .with_split_route_mount(product_auth_mount.into());
+    .with_split_route_mount(product_auth_mount);
     let app = webui_v2_app(product_surface, config).expect("webui v2 app");
     AppFixture { app, shared }
 }

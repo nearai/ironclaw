@@ -628,7 +628,6 @@ async fn product_event_stream_creates_vendor_oauth_prompt_for_runtime_credential
                     .unwrap(),
                 ),
                 expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(10)),
-                pairing: None,
             }))
         }
     }

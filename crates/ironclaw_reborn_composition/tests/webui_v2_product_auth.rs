@@ -369,7 +369,7 @@ fn build_app_with_product_auth_service_config_and_extensions(
     )
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
     .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-    .with_split_route_mount(product_auth_mount.into());
+    .with_split_route_mount(product_auth_mount);
     webui_v2_app(product_surface, config).expect("webui v2 app")
 }
 

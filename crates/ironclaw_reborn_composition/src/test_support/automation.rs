@@ -8,7 +8,7 @@ use std::sync::Arc;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_product::AutomationProductService;
 use ironclaw_triggers::{TriggerActiveRunLookup, TriggerRepository};
-use ironclaw_turns::TurnStateRowStore;
+use ironclaw_turns::{TurnStateRowStore, TurnStateStore};
 
 use crate::automation::trigger_poller::SnapshotActiveRunLookup;
 use crate::turn_run_snapshot::TurnRunSnapshotSource;
@@ -55,4 +55,31 @@ where
     Arc::new(SnapshotActiveRunLookup::new(
         turn_state as Arc<dyn TurnRunSnapshotSource>,
     ))
+}
+
+/// Repoint the local-dev runtime's trigger-source lookup seams at the harness
+/// turn-state store. Integration groups build the capability harness before the
+/// group coordinator owns its store, so production's single-store wiring must
+/// be late-bound for both active-run listing and trigger delivery inheritance.
+#[cfg(feature = "test-support")]
+pub fn rebind_local_dev_trigger_source_turn_state_for_test<F>(
+    runtime: &crate::RebornRuntime,
+    turn_state: Arc<TurnStateRowStore<F>>,
+) -> Result<(), String>
+where
+    F: RootFilesystem + Send + Sync + 'static,
+{
+    let snapshot_source = Arc::clone(&turn_state) as Arc<dyn TurnRunSnapshotSource>;
+    let state_store = turn_state as Arc<dyn TurnStateStore>;
+    *runtime
+        .trigger_source_turn_state
+        .write()
+        .map_err(|error| format!("trigger source snapshot lock unavailable: {error}"))? =
+        snapshot_source;
+    *runtime
+        .trigger_source_turn_state_store
+        .write()
+        .map_err(|error| format!("trigger source turn-state lock unavailable: {error}"))? =
+        state_store;
+    Ok(())
 }
