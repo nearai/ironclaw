@@ -230,7 +230,8 @@ def _assert_rust_test_declaration(
     source = _rust_code_without_comments_or_strings(source)
     declaration = re.compile(
         rf"(?P<attributes>(?:^[ \t]*#\s*\[[^\n]+\][ \t]*\n)+)"
-        rf"^[ \t]*(?:pub\s+)?(?:async\s+)?fn\s+{re.escape(test_name)}\s*\(",
+        rf"^[ \t]*(?:pub\s+)?(?P<async>async\s+)?"
+        rf"fn\s+{re.escape(test_name)}\s*\(",
         re.MULTILINE,
     ).search(source)
     assert declaration, f"Rust evidence {test_name!r} is missing from {source_label}"
@@ -240,9 +241,12 @@ def _assert_rust_test_declaration(
             declaration.group("attributes"),
         )
     )
-    assert attributes & {"test", "tokio::test"}, (
-        f"Rust evidence {test_name!r} is not executable"
-    )
+    if declaration.group("async"):
+        assert "tokio::test" in attributes, (
+            f"Rust evidence {test_name!r} lacks an async-compatible test attribute"
+        )
+    else:
+        assert "test" in attributes, f"Rust evidence {test_name!r} is not executable"
     assert not attributes & {"cfg", "cfg_attr", "ignore"}, (
         f"Rust evidence {test_name!r} is disabled"
     )
@@ -444,6 +448,13 @@ def test_python_evidence_rejects_disabled_tests(source: str):
 def test_rust_evidence_rejects_disabled_or_commented_tests(source: str):
     """Disabled or commented Rust declarations cannot satisfy the gate."""
     with pytest.raises(AssertionError, match=r"(disabled|missing)"):
+        _assert_rust_test_declaration(source, "required_journey", "synthetic.rs")
+
+
+def test_rust_evidence_rejects_plain_test_attribute_on_async_function():
+    """Cargo's plain test harness cannot execute an async test function."""
+    source = "#[test]\nasync fn required_journey() {}\n"
+    with pytest.raises(AssertionError, match="async-compatible"):
         _assert_rust_test_declaration(source, "required_journey", "synthetic.rs")
 
 
