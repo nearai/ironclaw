@@ -139,6 +139,68 @@ test("failureMessageForRequestError localizes client-derived API errors", () => 
   );
 });
 
+test("failureMessageForRequestError only renders bounded typed payload details", () => {
+  assert.equal(
+    failureMessageForRequestError(
+      {
+        name: "ApiError",
+        message: "Invalid value (model_id)",
+        payload: {
+          validation_code: "invalid_value",
+          field: "model_id",
+        },
+      },
+      t,
+    ),
+    "The request failed: invalid_value (model_id).",
+  );
+  assert.equal(
+    failureMessageForRequestError(
+      {
+        name: "ApiError",
+        message: "Invalid value",
+        payload: {
+          validation_code: "invalid_value",
+          field: "a".repeat(65),
+        },
+      },
+      t,
+    ),
+    "The request failed: invalid_value.",
+  );
+});
+
+test("failureMessageForRequestError rejects arbitrary structured error text", () => {
+  assert.equal(
+    failureMessageForRequestError(
+      {
+        name: "ApiError",
+        message: "Provider secret leaked",
+        payload: {
+          error: "customer email alice@example.com and token super-secret",
+          field: "api_key=super-secret",
+        },
+      },
+      t,
+    ),
+    "The request failed before it could be sent.",
+  );
+  assert.equal(
+    failureMessageForRequestError(
+      {
+        name: "ApiError",
+        message: "Unknown validation failure",
+        payload: {
+          validation_code: "customer_secret_123456789",
+          kind: "provider said alice@example.com",
+        },
+      },
+      t,
+    ),
+    "The request failed before it could be sent.",
+  );
+});
+
 test("failureMessageForRequestError preserves safe server prose", () => {
   assert.equal(
     failureMessageForRequestError(
@@ -161,6 +223,33 @@ test("failureMessageForStreamError humanizes redacted stream tokens", () => {
       retryable: true,
     }, t),
     "The chat stream hit a retryable error: Service unavailable.",
+  );
+});
+
+test("failureMessageForStreamError never renders the raw stream error", () => {
+  assert.equal(
+    failureMessageForStreamError({
+      error: "provider leaked alice@example.com token super-secret",
+      kind: null,
+      retryable: false,
+    }, t),
+    "The chat stream failed: Stream error.",
+  );
+  assert.equal(
+    failureMessageForStreamError({
+      error: "provider leaked alice@example.com token super-secret",
+      kind: "service_unavailable",
+      retryable: false,
+    }, t),
+    "The chat stream failed: Service unavailable.",
+  );
+  assert.equal(
+    failureMessageForStreamError({
+      error: "unavailable",
+      kind: "customer_secret_123456789",
+      retryable: false,
+    }, t),
+    "The chat stream failed: Stream error.",
   );
 });
 

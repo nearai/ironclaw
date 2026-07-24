@@ -91,10 +91,51 @@ const SENSITIVE_ERROR_MESSAGE_PATTERNS = [
   /\bapi[_ -]?key\b.{0,80}\b[A-Za-z0-9_-]{24,}\b/i,
 ];
 
+const PRODUCT_SURFACE_ERROR_KINDS = new Set([
+  "validation",
+  "duplicate",
+  "busy",
+  "participant_denied",
+  "blocked_approval",
+  "blocked_authentication",
+  "blocked_resource",
+  "replay_unavailable",
+  "timeline_unavailable",
+  "service_unavailable",
+  "not_found",
+  "conflict",
+  "internal",
+]);
+
+const PRODUCT_SURFACE_VALIDATION_CODES = new Set([
+  "missing_field",
+  "blank",
+  "too_long",
+  "invalid_id",
+  "invalid_control_character",
+  "invalid_value",
+  "unknown_key",
+]);
+
+const SAFE_FIELD_IDENTIFIER_PATTERN = /^[a-z][a-z0-9_.-]{0,63}$/;
+
 function messageContainsSensitiveCredential(message: string): boolean {
   return SENSITIVE_ERROR_MESSAGE_PATTERNS.some((pattern) =>
     pattern.test(message),
   );
+}
+
+function allowlistedWireToken(
+  value: unknown,
+  allowed: ReadonlySet<string>,
+): string {
+  const token = normalizeText(value);
+  return allowed.has(token) ? token : "";
+}
+
+function boundedFieldIdentifier(value: unknown): string {
+  const field = normalizeText(value);
+  return SAFE_FIELD_IDENTIFIER_PATTERN.test(field) ? field : "";
 }
 
 function isClientGeneratedRequestMessage(
@@ -135,14 +176,16 @@ function structuredRequestErrorDetail(error: unknown): string {
   const errorPayload = payload as {
     validation_code?: unknown;
     kind?: unknown;
-    error?: unknown;
     field?: unknown;
   };
-  const code = normalizeText(
-    errorPayload.validation_code || errorPayload.kind || errorPayload.error,
-  );
+  const code =
+    allowlistedWireToken(
+      errorPayload.validation_code,
+      PRODUCT_SURFACE_VALIDATION_CODES,
+    ) ||
+    allowlistedWireToken(errorPayload.kind, PRODUCT_SURFACE_ERROR_KINDS);
   if (!code) return "";
-  const field = normalizeText(errorPayload.field);
+  const field = boundedFieldIdentifier(errorPayload.field);
   return field ? `${code} (${field})` : code;
 }
 
@@ -162,10 +205,11 @@ export function failureMessageForRequestError(
 }
 
 export function failureMessageForStreamError(
-  { error, kind, retryable }: StreamFailureMessageInput,
+  { kind, retryable }: StreamFailureMessageInput,
   t: Translate,
 ): string {
-  const detail = humanizeFailureToken(kind || error || "stream_error");
+  const safeKind = allowlistedWireToken(kind, PRODUCT_SURFACE_ERROR_KINDS);
+  const detail = humanizeFailureToken(safeKind || "stream_error");
   return retryable
     ? t("chat.failure.streamRetryable", { detail })
     : t("chat.failure.stream", { detail });
