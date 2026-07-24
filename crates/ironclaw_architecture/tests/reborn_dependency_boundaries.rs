@@ -2809,9 +2809,9 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // handlers dispatch through. It still must not pull lower
             // substrate handles, product adapters, or v1 surface code into
             // the binary path. Reaches the rest of Reborn through
-            // ironclaw_reborn_composition's facade (Router + WebuiAuthenticator
-            // trait + WebuiServeConfig + mount vocabulary + product-auth mount
-            // builders).
+            // ironclaw_reborn_composition's facade (ProductSurface/runtime
+            // handles + product-auth mount builders) and the neutral
+            // ironclaw_host_ingress Axum mount carriers.
             crate_name: "ironclaw_webui",
             forbidden: vec![
                 "ironclaw_legacy",
