@@ -14,6 +14,7 @@ export function AutomationsList({
   onFilterChange,
   onRefresh,
   isRefreshing,
+  isFilterTransition,
   isMutating,
   selectedAutomationId,
   onSelectAutomation,
@@ -23,7 +24,9 @@ export function AutomationsList({
   onDeleteAutomation,
 }) {
   const t = useT();
-  const filtered = filterAutomations(automations, filter);
+  const filtered = isFilterTransition
+    ? automations
+    : filterAutomations(automations, filter);
   const hasAutomations = automations.length > 0;
   const selectedAutomation =
     filtered.find((automation) => automation.automation_id === selectedAutomationId) ||

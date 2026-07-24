@@ -102,6 +102,7 @@ export function AutomationsPage() {
                         onFilterChange={setFilter}
                         onRefresh={handleRefresh}
                         isRefreshing={isRefreshing}
+                        isFilterTransition={automationsState.isFilterTransition}
                         isMutating={automationsState.isMutating}
                         selectedAutomationId={selectedAutomationId}
                         onSelectAutomation={setSelectedAutomationId}
