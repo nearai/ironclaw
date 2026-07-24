@@ -772,7 +772,7 @@ impl ExtensionManagementPort {
                 count,
             },
         );
-        if extension_search_has_installed_external_channel_result(response.payload.as_ref()) {
+        if extension_search_has_setup_needed_external_channel_result(response.payload.as_ref()) {
             response.message = Some(
                 "Search found external channel results whose personal setup is incomplete. For an explicit connect, pair, authenticate, or account-access request, call builtin.extension_install for the matching extension id so the manifest-declared connection flow can continue. For routine, trigger, or notification delivery, prefer the configured outbound delivery target when one is available."
                     .to_string(),
@@ -3045,11 +3045,7 @@ fn extension_search_has_ready_result(payload: Option<&LifecycleProductPayload>) 
         matches!(
             extension.installation_phase,
             Some(LifecyclePublicState::Active)
-        ) && !extension
-            .summary
-            .surface_kinds
-            .contains(&CapabilitySurfaceKind::Channel)
-            && extension.summary.credential_requirements.is_empty()
+        ) && extension.summary.credential_requirements.is_empty()
             && extension.summary.onboarding.is_none()
     })
 }
@@ -3071,20 +3067,18 @@ fn extension_search_has_inactive_installed_result(
     })
 }
 
-fn extension_search_has_installed_external_channel_result(
+fn extension_search_has_setup_needed_external_channel_result(
     payload: Option<&LifecycleProductPayload>,
 ) -> bool {
     let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) = payload else {
         return false;
     };
     extensions.iter().any(|extension| {
-        matches!(
-            extension.installation_phase,
-            Some(LifecyclePublicState::SetupNeeded | LifecyclePublicState::Active)
-        ) && extension
-            .summary
-            .surface_kinds
-            .contains(&CapabilitySurfaceKind::Channel)
+        extension.installation_phase == Some(LifecyclePublicState::SetupNeeded)
+            && extension
+                .summary
+                .surface_kinds
+                .contains(&CapabilitySurfaceKind::Channel)
     })
 }
 
@@ -3390,7 +3384,7 @@ mod tests {
     }
 
     #[test]
-    fn installed_external_channel_search_result_gets_activation_guidance() {
+    fn setup_needed_external_channel_search_result_gets_activation_guidance() {
         let payload = LifecycleProductPayload::ExtensionSearch {
             extensions: vec![LifecycleSearchExtensionSummary {
                 summary: LifecycleExtensionSummary {
@@ -3418,7 +3412,7 @@ mod tests {
             count: 1,
         };
 
-        assert!(extension_search_has_installed_external_channel_result(
+        assert!(extension_search_has_setup_needed_external_channel_result(
             Some(&payload)
         ));
         assert!(!extension_search_has_ready_result(Some(&payload)));
@@ -4847,11 +4841,11 @@ supports_threads = true
     }
 
     #[tokio::test]
-    async fn extension_search_distinguishes_external_channel_connect_from_delivery() {
-        // Generic external-channel search guidance. Uses a neutral `example_bot`
-        // fixture rather than the real Slack bot: under model B `slack_bot` is
-        // hidden from search, so a Slack-named fixture would be filtered out and
-        // this generic guidance would go untested.
+    async fn active_external_channel_search_result_gets_ready_guidance() {
+        // Uses a neutral `example_bot` fixture rather than the real Slack bot:
+        // under model B `slack_bot` is hidden from search, so a Slack-named
+        // fixture would be filtered out and this generic guidance would go
+        // untested.
         let (_dir, _storage_root, facade, _active_registry, _installation_store) =
             extension_lifecycle_fixture_with_catalog_and_service(
                 AvailableExtensionCatalog::from_packages(vec![fixture_external_channel_package(
@@ -4883,16 +4877,13 @@ supports_threads = true
 
         let message = search.message.as_deref().expect("search guidance");
         assert!(
-            message.contains("external channel")
-                && message.contains("explicit connect")
-                && message.contains("builtin.extension_install")
-                && message.contains("outbound delivery target")
-                && message.contains("personal setup is incomplete"),
-            "active external channel search should distinguish connect requests from delivery, got: {message}"
+            message.contains("Treat those results as ready"),
+            "active external channel search must use ready guidance, got: {message}"
         );
         assert!(
-            !message.contains("Treat those results as ready"),
-            "active external channels must not use ready-extension guidance: {message}"
+            !message.contains("setup is incomplete")
+                && !message.contains("builtin.extension_install"),
+            "active external channel search must not emit setup guidance: {message}"
         );
         let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) =
             search.payload.as_ref()
