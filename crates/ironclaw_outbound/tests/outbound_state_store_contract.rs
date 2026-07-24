@@ -2591,6 +2591,7 @@ async fn run_final_reply_target_is_durable_and_exactly_scoped() {
         destination: RunFinalReplyDestination::External {
             reply_target_binding_ref: reply_ref("reply:run-scoped-slack-dm"),
         },
+        downgrade: None,
     };
 
     first

@@ -17,8 +17,9 @@ use ironclaw_outbound::{
     CommunicationModality, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
     DeliveredGateRouteStore, DeliveryDefaultScope, FilesystemOutboundStateStore,
     OutboundStateStore, RunDeliveryCleanupRequest, RunFinalReplyDestination,
-    RunFinalReplyTargetRecord, TriggerCommunicationContext, TriggerFireSlot, TriggerOriginRef,
-    TriggerSourceKind, TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryStore,
+    RunFinalReplyDowngradeReason, RunFinalReplyTargetRecord, RunFinalReplyTargetRequest,
+    TriggerCommunicationContext, TriggerFireSlot, TriggerOriginRef, TriggerSourceKind,
+    TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryStore,
 };
 use ironclaw_product::{
     AdapterInstallationId, AuthPromptChallengeKind, AuthPromptView, AuthRequirement,
@@ -36,10 +37,12 @@ use ironclaw_product::{
     DeliveryCoordinator, DeliveryReplyContextSource, DeliveryRetryPolicy,
     ProductConversationRouteKind, ProductWorkflowError, ResolveBindingRequest,
     ResolveStoredProductReplyTargetRequest, ResolvedChannelDelivery,
-    ResolvedStoredProductReplyTarget, RunDeliveryEventHandler, RunDeliveryEventRouter,
-    RunDeliveryObserver, RunDeliveryServices, TriggeredRunDeliveryDriver,
+    ResolvedStoredProductReplyTarget, RetiredChannelRouteAuthority, RunDeliveryEventHandler,
+    RunDeliveryEventRouter, RunDeliveryObserver, RunDeliveryServices, TriggeredRunDeliveryDriver,
     TriggeredRunDeliveryRequest, TriggeredRunExternalDeliveryTarget,
 };
+// Appended regression tests for the retired-channel-route downgrade live at
+// the end of this file (`unowned_handoff_*`).
 use ironclaw_threads::{
     AppendFinalizedAssistantMessageRequest, EnsureThreadRequest, InMemorySessionThreadService,
     MessageContent, SessionThreadService, ThreadScope,
@@ -2675,6 +2678,7 @@ async fn cross_channel_handoff_stays_pending_when_source_cleanup_fails_then_reop
             destination: RunFinalReplyDestination::External {
                 reply_target_binding_ref: target_ref,
             },
+            downgrade: None,
         })
         .await
         .expect("persist explicit destination");
@@ -3692,4 +3696,146 @@ async fn triggered_non_serviceable_typed_auth_cancels_with_exact_safe_notice() {
             "{challenge_kind:?} must not echo prompt or credential material"
         );
     }
+}
+
+/// Answers retired only for one adapter id — the double for "the extension
+/// was removed and can never re-register a handler".
+struct StaticRetiredRouteAuthority {
+    retired_adapter: &'static str,
+}
+
+#[async_trait]
+impl RetiredChannelRouteAuthority for StaticRetiredRouteAuthority {
+    async fn channel_route_is_retired(
+        &self,
+        adapter_id: &str,
+    ) -> Result<bool, ProductWorkflowError> {
+        Ok(adapter_id == self.retired_adapter)
+    }
+}
+
+/// Self-removal regression (live incident: "uninstall telegram" asked in
+/// telegram): a completed channel-origin run whose owning extension was
+/// removed mid-run has an unowned handoff no handler will ever claim. Without
+/// the retired-route authority it pends forever (the pre-fix drop). With it,
+/// the router downgrades the sealed destination to the WebApp transcript with
+/// typed evidence and completes the handoff.
+#[tokio::test]
+async fn unowned_handoff_of_retired_channel_route_downgrades_to_web_app() {
+    let run_id = TurnRunId::new();
+    let mut state = event_run_state(run_id, ProductConversationRouteKind::Direct);
+    state.status = TurnStatus::Completed;
+    state.event_cursor = EventCursor(1);
+    let completed_event =
+        TurnLifecycleEvent::from_run_state(&state, TurnEventKind::Completed, None);
+    let scope = state.scope.clone();
+    let actor = state.actor.clone().expect("fixture run has an actor");
+    let turns = Arc::new(RunMapTurnCoordinator {
+        states: HashMap::from([(run_id, state)]),
+    });
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let event_log = Arc::new(StaticDurableTurnEventLog::new(vec![completed_event]));
+    let router = RunDeliveryEventRouter::new(
+        event_log as Arc<dyn TurnEventProjectionSource>,
+        run_state_store(Arc::clone(&turns) as Arc<dyn TurnCoordinator>),
+        Arc::clone(&store) as Arc<dyn OutboundStateStore>,
+    );
+    router.wait_until_durable_replay_idle().await;
+    let pending = store
+        .list_pending_run_final_reply_handoffs_after(None, 8)
+        .await
+        .expect("pending handoffs list");
+    assert_eq!(
+        pending.len(),
+        1,
+        "an unowned handoff without a retired-route authority must stay pending, not vanish"
+    );
+
+    assert!(
+        router.set_retired_route_authority(Arc::new(StaticRetiredRouteAuthority {
+            retired_adapter: EXTENSION_ID,
+        })),
+        "the durable router accepts one retired-route authority"
+    );
+    router.wait_until_durable_replay_idle().await;
+
+    let pending = store
+        .list_pending_run_final_reply_handoffs_after(None, 8)
+        .await
+        .expect("pending handoffs list");
+    assert!(
+        pending.is_empty(),
+        "the retired route's handoff must settle instead of pending forever: {pending:?}"
+    );
+    let record = store
+        .load_run_final_reply_target(RunFinalReplyTargetRequest {
+            run_id,
+            scope,
+            actor,
+        })
+        .await
+        .expect("downgraded record reads")
+        .expect("the downgrade writes a durable run target record");
+    assert_eq!(record.destination, RunFinalReplyDestination::WebApp);
+    let downgrade = record
+        .downgrade
+        .expect("the downgraded record carries typed evidence");
+    assert_eq!(
+        downgrade.reason,
+        RunFinalReplyDowngradeReason::RetiredChannelRoute
+    );
+    assert_eq!(downgrade.retired_adapter, EXTENSION_ID);
+}
+
+/// The discriminator half: an adapter that is merely unregistered (startup
+/// window) is NOT retired — the handoff must keep waiting for its handler and
+/// no downgrade may be written.
+#[tokio::test]
+async fn unowned_handoff_of_live_channel_route_stays_pending() {
+    let run_id = TurnRunId::new();
+    let mut state = event_run_state(run_id, ProductConversationRouteKind::Direct);
+    state.status = TurnStatus::Completed;
+    state.event_cursor = EventCursor(1);
+    let completed_event =
+        TurnLifecycleEvent::from_run_state(&state, TurnEventKind::Completed, None);
+    let scope = state.scope.clone();
+    let actor = state.actor.clone().expect("fixture run has an actor");
+    let turns = Arc::new(RunMapTurnCoordinator {
+        states: HashMap::from([(run_id, state)]),
+    });
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let event_log = Arc::new(StaticDurableTurnEventLog::new(vec![completed_event]));
+    let router = RunDeliveryEventRouter::new(
+        event_log as Arc<dyn TurnEventProjectionSource>,
+        run_state_store(Arc::clone(&turns) as Arc<dyn TurnCoordinator>),
+        Arc::clone(&store) as Arc<dyn OutboundStateStore>,
+    );
+    assert!(
+        router.set_retired_route_authority(Arc::new(StaticRetiredRouteAuthority {
+            retired_adapter: "some-other-extension",
+        }))
+    );
+    router.wait_until_durable_replay_idle().await;
+
+    let pending = store
+        .list_pending_run_final_reply_handoffs_after(None, 8)
+        .await
+        .expect("pending handoffs list");
+    assert_eq!(
+        pending.len(),
+        1,
+        "a live (merely unregistered) route must keep its handoff pending"
+    );
+    assert!(
+        store
+            .load_run_final_reply_target(RunFinalReplyTargetRequest {
+                run_id,
+                scope,
+                actor,
+            })
+            .await
+            .expect("run target record reads")
+            .is_none(),
+        "no downgrade may be written for a live route"
+    );
 }

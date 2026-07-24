@@ -2071,3 +2071,380 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
     ingress.drain().await;
     assert_delivered_attempt(services, &repaired_scope).await;
 }
+
+const SELF_REMOVAL_REPLY: &str = "Telegram is uninstalled; this is the goodbye reply.";
+
+/// First model call: dispatch `builtin.extension_remove` for the channel the
+/// conversation rides on. Second call: the goodbye reply the delivery stack
+/// must not drop.
+#[derive(Debug, Default)]
+struct SelfRemovalGateway {
+    calls: Mutex<usize>,
+}
+
+#[async_trait::async_trait]
+impl HostManagedModelGateway for SelfRemovalGateway {
+    async fn stream_model(
+        &self,
+        _request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        Err(HostManagedModelError::safe(
+            ironclaw_loop_host::HostManagedModelErrorKind::InvalidRequest,
+            "self-removal gateway expects the capability-aware model path",
+        ))
+    }
+
+    async fn stream_model_with_capabilities(
+        &self,
+        _request: HostManagedModelRequest,
+        capabilities: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let call_index = {
+            let mut calls = self.calls.lock().expect("self-removal gateway lock");
+            let index = *calls;
+            *calls += 1;
+            index
+        };
+        if call_index > 0 {
+            return Ok(HostManagedModelResponse::assistant_reply(
+                SELF_REMOVAL_REPLY,
+            ));
+        }
+        let candidate = capabilities
+            .register_provider_tool_call(
+                ironclaw_turns::run_profile::RegisterProviderToolCallRequest::new(
+                    ironclaw_turns::run_profile::ProviderToolCall {
+                        provider_id: "test-provider".to_string(),
+                        provider_model_id: "test-model".to_string(),
+                        turn_id: Some("provider-turn-self-removal".to_string()),
+                        id: "call-self-removal".to_string(),
+                        name: ironclaw_host_api::ProviderToolName::new("builtin__extension_remove")
+                            .expect("provider tool name"),
+                        arguments: json!({ "extension_id": "telegram" }),
+                        response_reasoning: None,
+                        reasoning: None,
+                        signature: None,
+                    },
+                ),
+            )
+            .await
+            .map_err(|error| {
+                HostManagedModelError::safe(
+                    ironclaw_loop_host::HostManagedModelErrorKind::InvalidRequest,
+                    format!("self-removal tool call registration failed: {error}"),
+                )
+            })?;
+        Ok(HostManagedModelResponse::capability_calls(
+            vec![candidate],
+            "",
+        ))
+    }
+}
+
+/// Installation-backed retired-route authority mirroring the production
+/// composition wiring (`InstallationBackedRetiredRouteAuthority`): a missing
+/// installation row is the durable proof the route can never be re-owned.
+struct InstallationRetiredRouteAuthority {
+    installations: Arc<dyn ironclaw_extensions::ExtensionInstallationStore>,
+}
+
+#[async_trait::async_trait]
+impl ironclaw_product::RetiredChannelRouteAuthority for InstallationRetiredRouteAuthority {
+    async fn channel_route_is_retired(
+        &self,
+        adapter_id: &str,
+    ) -> Result<bool, ironclaw_product::ProductWorkflowError> {
+        let installation_id = ironclaw_extensions::ExtensionInstallationId::new(
+            adapter_id.to_string(),
+        )
+        .map_err(|error| ironclaw_product::ProductWorkflowError::Transient {
+            reason: format!("retired-route adapter id invalid: {error}"),
+        })?;
+        self.installations
+            .get_installation(&installation_id)
+            .await
+            .map(|installation| installation.is_none())
+            .map_err(|error| ironclaw_product::ProductWorkflowError::Transient {
+                reason: format!("retired-route installation read failed: {error}"),
+            })
+    }
+}
+
+/// Live-incident regression (run 5916438c…: "can you uninstall telegram"
+/// asked IN telegram): the run really removes the channel — then its final
+/// reply's sealed route belongs to an extension that no longer exists. The
+/// pre-fix contract dropped the reply and left the durable handoff pending
+/// forever. Post-fix, the durable run-delivery replay proves the route is
+/// retired against the REAL installation store (the same rows the REAL
+/// `builtin.extension_remove` deleted mid-run) and downgrades the reply to
+/// the WebApp transcript with typed evidence, never re-sending on the wire.
+#[tokio::test]
+async fn self_removed_channel_final_reply_downgrades_to_web_app() {
+    let group = RebornIntegrationGroup::builder()
+        .storage(StorageMode::LibSql)
+        .extension_delivery()
+        .await
+        .expect("delivery group builds on this backend");
+    let services = reborn_services(&group);
+
+    let inbound = group
+        .thread("conv-telegram-self-removal-inbound")
+        .script([RebornScriptedReply::text("unused")])
+        .build()
+        .await
+        .expect("inbound thread builds");
+    let event_router = group
+        .run_delivery_events()
+        .expect("delivery group wires the canonical run-delivery event router");
+    let assembly = services
+        .start_channel_host_assembly_for_test(ChannelHostAssemblyTestWiring {
+            thread_service: inbound
+                .thread_service_for_test()
+                .expect("group thread service"),
+            turn_coordinator: inbound.turn_coordinator_for_test(),
+            run_delivery_events: Arc::clone(&event_router),
+            identity: ChannelHostIdentity {
+                tenant_id: inbound.binding.tenant_id.clone(),
+                agent_id: inbound.binding.agent_id.clone().expect("binding agent id"),
+                project_id: inbound.binding.project_id.clone(),
+                operator_user_id: inbound
+                    .binding
+                    .subject_user_id
+                    .clone()
+                    .expect("binding subject user id"),
+            },
+        })
+        .expect("the production channel host assembly starts over the composed runtime");
+
+    let lifecycle = group
+        .thread("conv-telegram-self-removal-lifecycle")
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.extension_install",
+                json!({"extension_id": "telegram"}),
+            ),
+            RebornScriptedReply::text("installed and ready"),
+        ])
+        .build()
+        .await
+        .expect("telegram lifecycle thread builds");
+    configure_admin_group(
+        &group,
+        "extension.telegram",
+        0,
+        json!([
+            {"handle": "telegram_webhook_url", "value": "https://hooks.example.test/webhooks/extensions/telegram/updates"},
+            {"handle": "telegram_bot_token", "value": TELEGRAM_BOT_TOKEN},
+            {"handle": "telegram_webhook_secret", "value": TELEGRAM_WEBHOOK_SECRET},
+            {"handle": "bot_username", "value": "itest_self_removal_bot"}
+        ]),
+    )
+    .await;
+    let (install_run_id, _gate_ref) = lifecycle
+        .submit_turn_until_auth_blocked("install telegram")
+        .await
+        .expect("unpaired Telegram install parks on its pairing requirement");
+    let paired_user = inbound
+        .binding
+        .subject_user_id
+        .clone()
+        .expect("binding subject user id");
+    let bootstrap_code = services
+        .pairing_mint_for_test("telegram", &paired_user)
+        .await
+        .expect("setup-needed Telegram exposes pairing before readiness");
+    assert_eq!(
+        services
+            .pairing_consume_for_test(
+                "telegram",
+                TELEGRAM_INSTALLATION,
+                &bootstrap_code,
+                ("user", "7331", None, "5550001"),
+                (
+                    lifecycle.turn_coordinator_for_test(),
+                    lifecycle.turn_state_store_for_test(),
+                    inbound.binding.tenant_id.clone(),
+                ),
+            )
+            .await
+            .expect("bootstrap pairing completes")
+            .as_ref(),
+        Some(&paired_user)
+    );
+    lifecycle
+        .wait_for_status(install_run_id, ironclaw_turns::TurnStatus::Completed)
+        .await
+        .expect("pairing continuation resumes the exact blocked install");
+
+    let telegram_binding_service =
+        wait_for_production_registration(&assembly, services, "telegram").await;
+    let ingress = VendorIngress::production(
+        services
+            .extension_ingress_parts()
+            .expect("composition built the generic ingress"),
+    );
+    let evidence = ironclaw_product::auth::mark_shared_secret_header_verified(
+        "X-Telegram-Bot-Api-Secret-Token".to_string(),
+        TELEGRAM_INSTALLATION,
+    );
+    let chat_body = json!({
+        "update_id": 901,
+        "message": {
+            "message_id": 12,
+            "date": 1710000000,
+            "text": "please uninstall telegram",
+            "from": {"id": 7331, "is_bot": false, "first_name": "Sam"},
+            "chat": {"id": 5550001, "type": "private"}
+        }
+    })
+    .to_string();
+    let vendor_scope = preresolve_vendor_turn_scope(
+        &telegram_binding_service,
+        &ironclaw_telegram_extension::TelegramChannelAdapter::default(),
+        "telegram",
+        TELEGRAM_INSTALLATION,
+        &evidence,
+        &chat_body,
+    )
+    .await;
+    assert_eq!(vendor_scope.explicit_owner_user_id(), Some(&paired_user));
+    inbound.register_scope_gateway_for_test(
+        vendor_scope.clone(),
+        Arc::new(SelfRemovalGateway::default()),
+    );
+
+    let status = ingress
+        .post(
+            TELEGRAM_ROUTE,
+            &chat_body,
+            vec![(
+                "X-Telegram-Bot-Api-Secret-Token",
+                TELEGRAM_WEBHOOK_SECRET.to_string(),
+            )],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    ingress.drain().await;
+
+    // The removal is REAL: the run's `builtin.extension_remove` deletes the
+    // durable installation row the retired-route authority reads.
+    let installation_store = services
+        .extension_installation_store_for_test()
+        .expect("extension delivery profile carries the lifecycle store");
+    let installation_id = ironclaw_extensions::ExtensionInstallationId::new(TELEGRAM_INSTALLATION)
+        .expect("Telegram installation id");
+    let removal_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if installation_store
+            .get_installation(&installation_id)
+            .await
+            .expect("installation state reads")
+            .is_none()
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < removal_deadline,
+            "the scripted run must actually remove the telegram installation"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    // The durable replay path (the production router shape) over the group's
+    // REAL turn-event log and outbound store: the completed run materializes a
+    // handoff no live handler owns, the installation-backed authority proves
+    // the route retired, and the reply downgrades to the WebApp transcript.
+    let (outbound_store, _route_store, _preferences) = services
+        .outbound_delivery_stores_for_test()
+        .expect("delivery group exposes the composed outbound stores");
+    let turn_store = lifecycle.turn_state_store_for_test();
+    let authority = Arc::new(InstallationRetiredRouteAuthority {
+        installations: Arc::clone(&installation_store),
+    });
+    let downgrade_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let downgraded = loop {
+        let replay_router = ironclaw_product::RunDeliveryEventRouter::new(
+            Arc::clone(&turn_store) as Arc<dyn ironclaw_turns::TurnEventProjectionSource>,
+            Arc::clone(&turn_store) as Arc<dyn ironclaw_turns::TurnStateStore>,
+            Arc::clone(&outbound_store) as Arc<dyn ironclaw_outbound::OutboundStateStore>,
+        );
+        assert!(replay_router.set_retired_route_authority(Arc::clone(&authority) as _));
+        replay_router.wait_until_durable_replay_idle().await;
+        let pending = outbound_store
+            .list_pending_run_final_reply_handoffs_after(None, 64)
+            .await
+            .expect("pending handoffs list");
+        if let Some(handoff) = pending.iter().find(|handoff| handoff.scope == vendor_scope) {
+            // Materialized but not yet settled: the run may still be
+            // completing its removal teardown — keep polling.
+            assert!(
+                tokio::time::Instant::now() < downgrade_deadline,
+                "the retired route's handoff must settle, got pending {handoff:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            continue;
+        }
+        // Either not yet materialized or already settled: the downgraded
+        // record is the durable proof of settlement. The record is keyed by
+        // run id; discover it from the durable event log by scanning for the
+        // vendor-scope Completed run.
+        let page = ironclaw_turns::TurnEventProjectionSource::read_turn_event_log_after(
+            turn_store.as_ref(),
+            None,
+            256,
+        )
+        .await
+        .expect("turn event log reads");
+        let completed_run = page
+            .entries
+            .iter()
+            .filter(|event| {
+                event.scope == vendor_scope
+                    && event.kind == ironclaw_turns::TurnEventKind::Completed
+            })
+            .map(|event| event.run_id)
+            .next_back();
+        if let Some(run_id) = completed_run {
+            let record = outbound_store
+                .load_run_final_reply_target(ironclaw_outbound::RunFinalReplyTargetRequest {
+                    run_id,
+                    scope: vendor_scope.clone(),
+                    actor: ironclaw_turns::TurnActor::new(paired_user.clone()),
+                })
+                .await
+                .expect("run final-reply target reads");
+            if let Some(record) = record
+                && record.downgrade.is_some()
+            {
+                break record;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < downgrade_deadline,
+            "the self-removal run's reply must downgrade to the WebApp transcript"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(
+        downgraded.destination,
+        ironclaw_outbound::RunFinalReplyDestination::WebApp
+    );
+    let downgrade = downgraded.downgrade.expect("typed downgrade evidence");
+    assert_eq!(
+        downgrade.reason,
+        ironclaw_outbound::RunFinalReplyDowngradeReason::RetiredChannelRoute
+    );
+    assert_eq!(downgrade.retired_adapter, TELEGRAM_INSTALLATION);
+
+    // The goodbye reply must never reach the removed channel's wire.
+    assert!(
+        !inbound
+            .captured_network_requests_for_test()
+            .iter()
+            .any(|request| {
+                request.url.ends_with("/sendMessage")
+                    && String::from_utf8_lossy(&request.body).contains(SELF_REMOVAL_REPLY)
+            }),
+        "a removed channel must not receive the final reply on the wire"
+    );
+}

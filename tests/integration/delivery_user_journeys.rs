@@ -285,6 +285,7 @@ impl MatrixOutboundFacade {
                 destination: RunFinalReplyDestination::External {
                     reply_target_binding_ref: self.reply_target_binding_ref.clone(),
                 },
+                downgrade: None,
             })
             .await
             .map_err(|_| {
@@ -1510,6 +1511,7 @@ async fn web_app_source_can_seal_the_current_run_to_web_app_without_external_egr
             scope: harness.turn_scope.clone(),
             actor: caller.actor(),
             destination: RunFinalReplyDestination::WebApp,
+            downgrade: None,
         })
         .await
         .expect("the host-owned WebUI destination is sealed onto this run");

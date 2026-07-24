@@ -3797,6 +3797,18 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         Arc::clone(&turn_state_store) as Arc<dyn ironclaw_turns::TurnStateStore>,
         Arc::clone(&services.outbound_state),
     ));
+    // A run that removes its own channel extension mid-run completes with a
+    // sealed route no handler will ever own again. The installation-backed
+    // authority lets the router prove that retirement and downgrade the final
+    // reply to the WebApp transcript instead of leaving a permanently pending
+    // handoff (and a user staring at a never-finalized channel status).
+    if let Some(local_runtime) = local_runtime {
+        channel_run_delivery_events.set_retired_route_authority(Arc::new(
+            crate::extension_host::retired_route_authority::InstallationBackedRetiredRouteAuthority::new(
+                local_runtime.extension_management.installation_store_handle(),
+            ),
+        ));
+    }
     // Skill learning shares the turn-end seam with trace capture (composed
     // additively, so the trace-capture path is unchanged). It is active only
     // when a learning model is configured (a stronger model than the run's, via

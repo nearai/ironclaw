@@ -61,8 +61,8 @@ pub use run_delivery_cleanup::{
 pub use run_final_reply_handoff::{MAX_RUN_FINAL_REPLY_HANDOFF_PAGE, RunFinalReplyHandoffRecord};
 pub use run_final_reply_target::{
     RouteCurrentRunFinalReply, RouteCurrentRunFinalReplyError, RouteCurrentRunFinalReplyRequest,
-    RunFinalReplyDestination, RunFinalReplyTargetRecord, RunFinalReplyTargetRequest,
-    WEB_APP_OUTBOUND_DELIVERY_TARGET_ID,
+    RunFinalReplyDestination, RunFinalReplyDowngrade, RunFinalReplyDowngradeReason,
+    RunFinalReplyTargetRecord, RunFinalReplyTargetRequest, WEB_APP_OUTBOUND_DELIVERY_TARGET_ID,
 };
 pub use service::{
     OutboundPolicyService, ReplyTargetBindingValidator, ThreadProjectionAccessPolicy,

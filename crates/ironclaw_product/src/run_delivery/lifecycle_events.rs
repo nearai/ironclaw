@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 
 use crate::{
     AuthPromptChallengeKind, OutboundPart, ProductInboundAck, ProductInboundEnvelope,
@@ -20,7 +20,8 @@ use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
     OutboundError, OutboundPolicyService, OutboundStateStore, PrepareCommunicationDeliveryRequest,
     ProjectionUpdateRef, RunDeliveryCleanupRecord, RunDeliveryCleanupRequest,
-    RunFinalReplyDestination, RunFinalReplyHandoffRecord, RunFinalReplyTargetRequest,
+    RunFinalReplyDestination, RunFinalReplyDowngrade, RunFinalReplyDowngradeReason,
+    RunFinalReplyHandoffRecord, RunFinalReplyTargetRecord, RunFinalReplyTargetRequest,
     RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin, SourceRouteContext,
 };
 use ironclaw_threads::{FinalizedAssistantMessageByRunRequest, ThreadScope};
@@ -85,9 +86,29 @@ struct DurableRunDeliveryReplay {
     /// leaks a permanent pending row that every later drain re-scans.
     run_state: Arc<dyn TurnStateStore>,
     outbound_state: Arc<dyn OutboundStateStore>,
+    /// Late-bound authority deciding whether an unowned handoff's route can
+    /// ever be owned again (its channel extension was removed). Without it, a
+    /// run that removes its own channel mid-run leaves a permanently pending
+    /// handoff and a reply nobody delivers; with it, the reply is downgraded
+    /// to the WebApp transcript with typed evidence. Composition fills the
+    /// slot once its installation authority exists.
+    route_authority: OnceLock<Arc<dyn RetiredChannelRouteAuthority>>,
     active: AtomicBool,
     dirty: AtomicBool,
     idle: Notify,
+}
+
+/// Host-side authority answering "can any handler for this adapter ever
+/// register again?" — true only when the owning channel extension is durably
+/// gone (removed), never merely unregistered during startup. Generic: the
+/// router names no concrete extension; composition implements this over the
+/// installation authority.
+#[async_trait]
+pub trait RetiredChannelRouteAuthority: Send + Sync {
+    async fn channel_route_is_retired(
+        &self,
+        adapter_id: &str,
+    ) -> Result<bool, ProductWorkflowError>;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -167,6 +188,7 @@ impl RunDeliveryEventRouter {
             source,
             run_state,
             outbound_state,
+            route_authority: OnceLock::new(),
             active: AtomicBool::new(false),
             dirty: AtomicBool::new(false),
             idle: Notify::new(),
@@ -176,6 +198,25 @@ impl RunDeliveryEventRouter {
         // wakes the same drain so those rows remain recoverable.
         router.wake_durable_replay();
         router
+    }
+
+    /// Connect the retired-route authority once (composition, after its
+    /// installation authority exists). Returns `false` when the router has no
+    /// durable replay (ephemeral test routers) or the slot was already
+    /// connected. Wakes the durable drain so already-orphaned handoffs are
+    /// re-examined under the new authority.
+    pub fn set_retired_route_authority(
+        &self,
+        authority: Arc<dyn RetiredChannelRouteAuthority>,
+    ) -> bool {
+        let Some(replay) = self.inner.durable_replay.as_ref() else {
+            return false;
+        };
+        let connected = replay.route_authority.set(authority).is_ok();
+        if connected {
+            self.wake_durable_replay();
+        }
+        connected
     }
 
     /// Construct an in-memory enqueue-only router for tests that exercise
@@ -527,14 +568,20 @@ impl RunDeliveryEventRouter {
                         .complete_run_final_reply_handoff(&handoff)
                         .await?;
                 } else if !saw_deferred {
-                    // No registered handler proved ownership yet. This is
-                    // expected while channel graphs register during startup;
-                    // registration supplies the next wake.
-                    tracing::debug!(
-                        target = "ironclaw::reborn::run_delivery",
-                        run_id = %event.run_id,
-                        "completed-run delivery awaits its route handler"
-                    );
+                    // No registered handler proved ownership. Expected while
+                    // channel graphs register during startup (registration
+                    // supplies the next wake) — but if the route's owning
+                    // channel extension is durably retired (removed, possibly
+                    // by this very run), no registration is ever coming:
+                    // downgrade the reply to the WebApp transcript instead of
+                    // leaving a permanently pending handoff.
+                    if !self.settle_retired_route_handoff(replay, &handoff).await? {
+                        tracing::debug!(
+                            target = "ironclaw::reborn::run_delivery",
+                            run_id = %event.run_id,
+                            "completed-run delivery awaits its route handler"
+                        );
+                    }
                 }
                 after = Some(handoff);
             }
@@ -542,6 +589,87 @@ impl RunDeliveryEventRouter {
                 return Ok(());
             }
         }
+    }
+
+    /// Settle an unowned completed-run handoff whose channel route is durably
+    /// retired: downgrade the sealed destination to the WebApp transcript
+    /// (typed [`RunFinalReplyDowngrade`] evidence) and complete the handoff.
+    /// Returns `false` — leaving the handoff pending — for every uncertain
+    /// case: no connected authority, unreadable run state, a non-inbound
+    /// origin (WebUi cross-channel retirement keeps its policy-side story),
+    /// or an authority error. The reply itself already lives in the durable
+    /// web transcript; this writes the projectable evidence and stops the
+    /// permanent re-scan.
+    async fn settle_retired_route_handoff(
+        &self,
+        replay: &DurableRunDeliveryReplay,
+        handoff: &RunFinalReplyHandoffRecord,
+    ) -> Result<bool, DurableRunDeliveryReplayError> {
+        let Some(authority) = replay.route_authority.get() else {
+            return Ok(false);
+        };
+        let state = match replay
+            .run_state
+            .get_run_state(GetRunStateRequest {
+                scope: handoff.scope.clone(),
+                run_id: handoff.run_id,
+            })
+            .await
+        {
+            Ok(state) => state,
+            // Transient read failure: keep the handoff pending; the next
+            // drain retries with authoritative state.
+            Err(_) => return Ok(false),
+        };
+        let Some(actor) = state.actor.clone() else {
+            return Ok(false);
+        };
+        let Some(context) = state.product_context.as_ref() else {
+            return Ok(false);
+        };
+        if context.origin != TurnOriginKind::Inbound {
+            return Ok(false);
+        }
+        let Some(adapter) = context.adapter.as_ref() else {
+            return Ok(false);
+        };
+        match authority.channel_route_is_retired(adapter.as_str()).await {
+            Ok(true) => {}
+            Ok(false) => return Ok(false),
+            Err(error) => {
+                tracing::debug!(
+                    target = "ironclaw::reborn::run_delivery",
+                    run_id = %handoff.run_id,
+                    %error,
+                    "retired-route authority unavailable; handoff stays pending"
+                );
+                return Ok(false);
+            }
+        }
+        replay
+            .outbound_state
+            .put_run_final_reply_target(RunFinalReplyTargetRecord {
+                run_id: state.run_id,
+                scope: state.scope.clone(),
+                actor,
+                destination: RunFinalReplyDestination::WebApp,
+                downgrade: Some(RunFinalReplyDowngrade {
+                    reason: RunFinalReplyDowngradeReason::RetiredChannelRoute,
+                    retired_adapter: adapter.as_str().to_string(),
+                }),
+            })
+            .await?;
+        replay
+            .outbound_state
+            .complete_run_final_reply_handoff(handoff)
+            .await?;
+        tracing::warn!(
+            target = "ironclaw::reborn::run_delivery",
+            run_id = %handoff.run_id,
+            adapter = %adapter.as_str(),
+            "final reply downgraded to the web transcript: its channel route was removed mid-run"
+        );
+        Ok(true)
     }
 
     async fn load_handoff_event(

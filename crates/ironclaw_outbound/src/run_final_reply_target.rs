@@ -26,6 +26,25 @@ pub enum RunFinalReplyDestination {
     },
 }
 
+/// Why a sealed final-reply destination was replaced after the fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunFinalReplyDowngradeReason {
+    /// The destination's owning channel extension was removed after the run
+    /// sealed its route; the reply stays in the durable web transcript.
+    RetiredChannelRoute,
+}
+
+/// Typed, redacted downgrade evidence attached when a run's sealed external
+/// destination could no longer deliver and the host fell back to the WebApp
+/// transcript. Carries only the adapter/extension id — never conversation,
+/// credential, or vendor detail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunFinalReplyDowngrade {
+    pub reason: RunFinalReplyDowngradeReason,
+    pub retired_adapter: String,
+}
+
 /// Durable per-run final-reply routing decision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunFinalReplyTargetRecord {
@@ -33,6 +52,12 @@ pub struct RunFinalReplyTargetRecord {
     pub scope: TurnScope,
     pub actor: TurnActor,
     pub destination: RunFinalReplyDestination,
+    /// Present only when the host downgraded a sealed external destination
+    /// to the WebApp transcript (see [`RunFinalReplyDowngrade`]). Absent on
+    /// every normally-routed record; old persisted rows deserialize with
+    /// `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub downgrade: Option<RunFinalReplyDowngrade>,
 }
 
 /// Exact authority tuple required to read a per-run routing decision.
@@ -81,7 +106,54 @@ pub trait RouteCurrentRunFinalReply: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::OutboundDeliveryTargetId;
+    use super::{
+        OutboundDeliveryTargetId, RunFinalReplyDestination, RunFinalReplyDowngrade,
+        RunFinalReplyDowngradeReason, RunFinalReplyTargetRecord,
+    };
+
+    /// The `downgrade` field is additive: rows persisted before it existed
+    /// (no key on the wire) must keep deserializing, and a `None` record must
+    /// serialize without the key so old readers see an unchanged shape.
+    #[test]
+    fn target_record_downgrade_field_is_wire_compatible() {
+        let historical = serde_json::json!({
+            "run_id": "0b8a2f6e-8c1d-4a4f-9d55-1f2e3c4b5a69",
+            "scope": {
+                "tenant_id": "tenant-wire",
+                "agent_id": null,
+                "project_id": null,
+                "thread_id": "thread-wire",
+                "thread_owner": {"mode": "explicit_user", "owner_user_id": "user-wire"}
+            },
+            "actor": {"user_id": "user-wire"},
+            "destination": {"kind": "web_app"}
+        });
+        let record: RunFinalReplyTargetRecord =
+            serde_json::from_value(historical).expect("pre-downgrade rows keep deserializing");
+        assert_eq!(record.downgrade, None);
+        let encoded = serde_json::to_value(&record).expect("serialize record");
+        assert!(
+            encoded.get("downgrade").is_none(),
+            "absent downgrade must not appear on the wire: {encoded}"
+        );
+
+        let downgraded = RunFinalReplyTargetRecord {
+            downgrade: Some(RunFinalReplyDowngrade {
+                reason: RunFinalReplyDowngradeReason::RetiredChannelRoute,
+                retired_adapter: "telegram".to_string(),
+            }),
+            destination: RunFinalReplyDestination::WebApp,
+            ..record
+        };
+        let encoded = serde_json::to_value(&downgraded).expect("serialize downgraded record");
+        assert_eq!(
+            encoded["downgrade"]["reason"], "retired_channel_route",
+            "the reason is a snake_case wire enum: {encoded}"
+        );
+        let round_tripped: RunFinalReplyTargetRecord =
+            serde_json::from_value(encoded).expect("downgraded record round-trips");
+        assert_eq!(round_tripped, downgraded);
+    }
 
     #[test]
     fn target_id_rejects_invisible_formatting_characters() {

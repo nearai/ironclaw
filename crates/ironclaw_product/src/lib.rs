@@ -255,10 +255,10 @@ pub use policy::{
 };
 pub use run_delivery::{
     ApprovalPromptContextSource, BlockedAuthPromptSource, CurrentDeliveryTarget,
-    CurrentDeliveryTargetResolver, DeliveredChannelMessage, RunDeliveryError,
-    RunDeliveryEventHandler, RunDeliveryEventRouter, RunDeliveryObserver, RunDeliveryServices,
-    TriggeredRunDeliveryChannel, TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
-    TriggeredRunDeliveryRouter, TriggeredRunExternalDeliveryTarget,
+    CurrentDeliveryTargetResolver, DeliveredChannelMessage, RetiredChannelRouteAuthority,
+    RunDeliveryError, RunDeliveryEventHandler, RunDeliveryEventRouter, RunDeliveryObserver,
+    RunDeliveryServices, TriggeredRunDeliveryChannel, TriggeredRunDeliveryDriver,
+    TriggeredRunDeliveryRequest, TriggeredRunDeliveryRouter, TriggeredRunExternalDeliveryTarget,
 };
 pub use trigger_final_reply_target::{RunFinalReplyRoutingService, TriggerFinalReplyTargetService};
 // Adapter, projection, and event DTOs are re-exported from
