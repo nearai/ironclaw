@@ -24,7 +24,7 @@ use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ironclaw_filesystem::{
     CompositeRootFilesystem, InMemoryBackend, LibSqlRootFilesystem, ScopedFilesystem,
@@ -2060,37 +2060,179 @@ pub(crate) async fn build_storage_composite(
     Ok((Arc::new(composite), reopen))
 }
 
-const POSTGRES_TEST_LOCK_FILENAME: &str = "ironclaw-integration-postgres-testcontainer.lock";
+const POSTGRES_TEST_LOCK_DIRECTORY: &str = "ironclaw-integration-test-locks";
+const POSTGRES_TEST_LOCK_FILENAME: &str = "postgres-testcontainer.lock";
+const POSTGRES_TEST_LOCK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const POSTGRES_TEST_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn postgres_test_lock_path() -> PathBuf {
-    std::env::temp_dir().join(POSTGRES_TEST_LOCK_FILENAME)
+    std::env::temp_dir()
+        .join(POSTGRES_TEST_LOCK_DIRECTORY)
+        .join(POSTGRES_TEST_LOCK_FILENAME)
+}
+
+fn prepare_postgres_test_lock_directory(path: &Path) -> HarnessResult<()> {
+    let directory = path.parent().ok_or_else(|| {
+        format!(
+            "PostgreSQL integration-test lock has no parent: {}",
+            path.display()
+        )
+    })?;
+    #[cfg(unix)]
+    let create_result = {
+        use std::os::unix::fs::DirBuilderExt;
+
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700).create(directory)
+    };
+    #[cfg(not(unix))]
+    let create_result = std::fs::create_dir_all(directory);
+    create_result.map_err(|error| {
+        format!(
+            "failed to create PostgreSQL integration-test lock directory {}: {error}",
+            directory.display()
+        )
+    })?;
+
+    let metadata = std::fs::symlink_metadata(directory).map_err(|error| {
+        format!(
+            "failed to inspect PostgreSQL integration-test lock directory {}: {error}",
+            directory.display()
+        )
+    })?;
+    if !metadata.file_type().is_dir() {
+        return Err(format!(
+            "PostgreSQL integration-test lock directory is not a real directory: {}",
+            directory.display()
+        )
+        .into());
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).map_err(
+            |error| {
+                format!(
+                    "failed to restrict PostgreSQL integration-test lock directory {}: {error}",
+                    directory.display()
+                )
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_postgres_test_lock_file(path: &Path, file: &File) -> HarnessResult<()> {
+    let path_metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        format!(
+            "failed to inspect PostgreSQL integration-test lock {}: {error}",
+            path.display()
+        )
+    })?;
+    let file_metadata = file.metadata().map_err(|error| {
+        format!(
+            "failed to inspect opened PostgreSQL integration-test lock {}: {error}",
+            path.display()
+        )
+    })?;
+    if !path_metadata.file_type().is_file() || !file_metadata.is_file() {
+        return Err(format!(
+            "PostgreSQL integration-test lock is not a regular file: {}",
+            path.display()
+        )
+        .into());
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        if path_metadata.dev() != file_metadata.dev() || path_metadata.ino() != file_metadata.ino()
+        {
+            return Err(format!(
+                "PostgreSQL integration-test lock changed while it was opened: {}",
+                path.display()
+            )
+            .into());
+        }
+    }
+    Ok(())
 }
 
 fn open_postgres_test_lock(path: &Path) -> HarnessResult<File> {
-    OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
+    prepare_postgres_test_lock_directory(path)?;
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options
         .open(path)
-        .map_err(|error| {
+        .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
             format!(
                 "failed to open PostgreSQL integration-test lock {}: {error}",
                 path.display()
             )
             .into()
-        })
+        })?;
+    validate_postgres_test_lock_file(path, &file)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| {
+                format!(
+                    "failed to restrict PostgreSQL integration-test lock {}: {error}",
+                    path.display()
+                )
+            })?;
+    }
+    Ok(file)
 }
 
 fn lock_postgres_test_file(file: File) -> HarnessResult<File> {
-    fs4::FileExt::lock(&file)
-        .map_err(|error| format!("failed to acquire PostgreSQL integration-test lock: {error}"))?;
-    Ok(file)
+    lock_postgres_test_file_with_timeout(file, POSTGRES_TEST_LOCK_TIMEOUT)
+}
+
+fn lock_postgres_test_file_with_timeout(file: File, timeout: Duration) -> HarnessResult<File> {
+    let started_at = Instant::now();
+    loop {
+        match fs4::FileExt::try_lock(&file) {
+            Ok(()) => return Ok(file),
+            Err(fs4::TryLockError::Error(error)) => {
+                return Err(
+                    format!("failed to acquire PostgreSQL integration-test lock: {error}").into(),
+                );
+            }
+            Err(fs4::TryLockError::WouldBlock) => {
+                let elapsed = started_at.elapsed();
+                if elapsed >= timeout {
+                    return Err(format!(
+                        "timed out after {:.1}s waiting for PostgreSQL integration-test lock",
+                        timeout.as_secs_f64()
+                    )
+                    .into());
+                }
+                std::thread::sleep(
+                    POSTGRES_TEST_LOCK_POLL_INTERVAL.min(timeout.saturating_sub(elapsed)),
+                );
+            }
+        }
+    }
 }
 
 /// Acquire the host-wide PostgreSQL testcontainer lock without blocking a
 /// Tokio worker. The file lock is visible to every Cargo test process on the
-/// runner; non-PostgreSQL storage modes bypass it.
+/// runner; non-PostgreSQL storage modes bypass it. The persistent lock file is
+/// intentional: the kernel releases the advisory lock when the process exits,
+/// while retaining the inode prevents unlink/recreate races between processes.
 async fn acquire_storage_test_lock_at(
     mode: StorageMode,
     path: PathBuf,
@@ -2358,6 +2500,52 @@ mod tests {
             .recv_timeout(Duration::from_secs(2))
             .expect("second PostgreSQL acquisition proceeds after the first guard drops");
         drop(second.join().expect("second lock thread joins"));
+    }
+
+    #[test]
+    fn postgres_storage_lock_times_out_instead_of_blocking_forever() {
+        let tempdir = tempfile::tempdir().expect("temporary lock directory");
+        let lock_path = tempdir.path().join("postgres.lock");
+        let first = open_postgres_test_lock(&lock_path).expect("open first lock file");
+        fs4::FileExt::lock(&first).expect("acquire first lock");
+        let second = open_postgres_test_lock(&lock_path).expect("open second lock file");
+
+        let started_at = Instant::now();
+        let error = lock_postgres_test_file_with_timeout(second, Duration::from_millis(50))
+            .expect_err("contended lock must time out");
+        assert!(
+            error.to_string().contains("timed out"),
+            "unexpected timeout error: {error}"
+        );
+        assert!(
+            started_at.elapsed() < Duration::from_secs(1),
+            "short lock timeout should return promptly"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn postgres_storage_lock_rejects_symlink_paths() {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().expect("temporary lock directory");
+        let target = tempdir.path().join("target");
+        std::fs::write(&target, "unchanged").expect("write symlink target");
+        let lock_path = tempdir.path().join("postgres.lock");
+        symlink(&target, &lock_path).expect("create lock symlink");
+
+        let error = open_postgres_test_lock(&lock_path).expect_err("symlink lock must be rejected");
+        let message = error.to_string().to_ascii_lowercase();
+        assert!(
+            message.contains("too many levels")
+                || message.contains("symbolic link")
+                || message.contains("not a regular file"),
+            "unexpected symlink error: {error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target).expect("read symlink target"),
+            "unchanged"
+        );
     }
 }
 

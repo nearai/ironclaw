@@ -4,7 +4,9 @@ use ironclaw_reborn_composition::{
 };
 
 use crate::context::RebornCliContext;
-use crate::dto::{ComponentStatus, DriversSnapshot, FilePresence, ServiceStateDto, StatusDto};
+use crate::dto::{
+    ComponentStatus, DriversSnapshot, FilePresence, ServiceStateDto, StatusDto, StatusHomeFields,
+};
 use crate::render::{self, OutputMode, Renderable, terminal_safe_text};
 use std::io::Write;
 
@@ -54,12 +56,10 @@ fn build_status_dto_with_service_state(
     let (login_link, login_note) =
         resolve_login_link_and_note(home, &config_path_for_webui_lookup)?;
     let (login_link, login_note) = apply_service_suppression(service, login_link, login_note);
-    let ironclaw_home = home.path().to_path_buf();
 
     Ok(StatusDto {
         version: env!("CARGO_PKG_VERSION").to_string(),
-        ironclaw_home: ironclaw_home.clone(),
-        reborn_home: ironclaw_home,
+        home: StatusHomeFields::new(home.path().to_path_buf()),
         home_source: home.source_label(),
         profile: profile.as_str().to_string(),
         config_file: FilePresence {
@@ -192,11 +192,7 @@ impl Renderable for StatusDto {
         writeln!(w, "IronClaw status")?;
         writeln!(w)?;
         kv(w, "version", &self.version)?;
-        kv(
-            w,
-            "ironclaw_home",
-            &self.ironclaw_home.display().to_string(),
-        )?;
+        kv(w, "ironclaw_home", &self.home.path().display().to_string())?;
         kv(w, "home_source", self.home_source)?;
         kv(w, "profile", &self.profile)?;
         kv(

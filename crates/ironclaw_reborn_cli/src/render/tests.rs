@@ -4,7 +4,7 @@ use super::Renderable;
 use crate::dto::{
     CheckCategory, CheckOutcome, ComponentStatus, ConfigEntry, ConfigGetDto, ConfigListDto,
     ConfigValue, DoctorCheck, DoctorDto, DoctorSummary, DriversSnapshot, FilePresence,
-    ServiceStateDto, StatusDto,
+    ServiceStateDto, StatusDto, StatusHomeFields,
 };
 
 fn render_to_string(dto: &impl Renderable) -> String {
@@ -16,8 +16,7 @@ fn render_to_string(dto: &impl Renderable) -> String {
 fn sample_status() -> StatusDto {
     StatusDto {
         version: "0.1.0".to_string(),
-        ironclaw_home: PathBuf::from("/home/user/.ironclaw/reborn"),
-        reborn_home: PathBuf::from("/home/user/.ironclaw/reborn"),
+        home: StatusHomeFields::new(PathBuf::from("/home/user/.ironclaw/reborn")),
         home_source: "default",
         profile: "local-dev".to_string(),
         config_file: FilePresence {
@@ -48,7 +47,7 @@ fn sample_doctor() -> DoctorDto {
     DoctorDto {
         checks: vec![
             DoctorCheck {
-                name: "ironclaw_home".to_string(),
+                name: "reborn_home".to_string(),
                 category: CheckCategory::Core,
                 outcome: CheckOutcome::Pass,
                 detail: "/home/user/.ironclaw/reborn".to_string(),
@@ -208,7 +207,7 @@ fn doctor_json_round_trips() {
     let dto = sample_doctor();
     let json = serde_json::to_string_pretty(&dto).expect("serialize");
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
-    assert_eq!(parsed["checks"][0]["name"], "ironclaw_home");
+    assert_eq!(parsed["checks"][0]["name"], "reborn_home");
     assert_eq!(parsed["checks"][0]["outcome"], "pass");
     assert_eq!(parsed["checks"][1]["outcome"], "fail");
     assert_eq!(parsed["checks"][3]["outcome"], "skip");
@@ -221,6 +220,14 @@ fn doctor_json_round_trips() {
 #[test]
 fn doctor_render_text_contains_all_three_outcome_icons() {
     let text = render_to_string(&sample_doctor());
+    assert!(
+        text.contains("ironclaw_home"),
+        "human-readable output should map the legacy check ID: {text}"
+    );
+    assert!(
+        !text.contains("reborn_home"),
+        "the legacy check ID should remain JSON-only: {text}"
+    );
     assert!(text.contains('\u{2714}'), "missing pass icon ✔");
     assert!(text.contains('\u{2718}'), "missing fail icon ✘");
     assert!(
