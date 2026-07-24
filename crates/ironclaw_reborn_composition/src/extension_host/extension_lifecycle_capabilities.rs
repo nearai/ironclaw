@@ -297,8 +297,11 @@ fn channel_connection_display_preview(
 /// Install responses carry the full requirement through the display-preview
 /// side channel, so the model-visible payload drops it entirely. Search
 /// responses must retain the manifest-declared strategy and instructions so
-/// the model does not invent a provider-specific connection flow; only the
-/// input label and failure copy are cleared.
+/// the model does not invent a provider-specific connection flow. Those fields
+/// are semantic model guidance, while the placeholder, submit label, and error
+/// message are browser-form chrome rendered separately by WebUI; clearing only
+/// that chrome avoids presenting UI actions or duplicate failure copy as model
+/// instructions.
 fn without_model_visible_connection_chrome(
     mut response: LifecycleProductResponse,
 ) -> LifecycleProductResponse {

@@ -187,6 +187,13 @@ function plain(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+test("useChatEvents: rejects an invalid translator at the injection boundary", () => {
+  assert.throws(
+    () => createUseChatEventsHarness({ t: null }),
+    /useChatEvents requires a translation function/,
+  );
+});
+
 test("useChatEvents: projection activity preserves reasoning/tool chronology", () => {
   const harness = createUseChatEventsHarness();
 

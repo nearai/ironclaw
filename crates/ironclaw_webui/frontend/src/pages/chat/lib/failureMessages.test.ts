@@ -104,6 +104,13 @@ test("failureMessageForRequestError suppresses credential-bearing messages", () 
     }, t),
     "The request failed before it could be sent.",
   );
+  assert.equal(
+    failureMessageForRequestError({
+      message:
+        "Provider API key was rotated abcdef1234567890abcdef1234567890.",
+    }, t),
+    "The request failed before it could be sent.",
+  );
 });
 
 test("failureMessageForRequestError has a stable fallback", () => {
@@ -132,6 +139,56 @@ test("failureMessageForRequestError localizes client-derived API errors", () => 
         message: "Bad Gateway",
         body: "",
         statusText: "Bad Gateway",
+      },
+      t,
+    ),
+    "The request failed before it could be sent.",
+  );
+  assert.equal(
+    failureMessageForRequestError(
+      {
+        name: "ApiError",
+        message: "Gateway unavailable",
+        body: "",
+        statusText: "Bad Gateway",
+      },
+      t,
+    ),
+    "The request failed before it could be sent.",
+  );
+});
+
+test("failureMessageForRequestError safely handles malformed and oversized API errors", () => {
+  assert.equal(
+    failureMessageForRequestError(
+      {
+        name: "ApiError",
+        message: "Request failed",
+        body: `{"error":"${"x".repeat(10_000)}`,
+        statusText: "Bad Request",
+      },
+      t,
+    ),
+    "The request failed before it could be sent.",
+  );
+  assert.equal(
+    failureMessageForRequestError(
+      {
+        name: "ApiError",
+        message: "Service Unavailable",
+        body: "x".repeat(10_000),
+        statusText: "Service Unavailable",
+      },
+      t,
+    ),
+    "Service Unavailable",
+  );
+  assert.equal(
+    failureMessageForRequestError(
+      {
+        name: "ApiError",
+        message: "Malformed payload",
+        payload: ["unexpected", { validation_code: "invalid_value" }],
       },
       t,
     ),

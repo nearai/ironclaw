@@ -53,6 +53,15 @@ const AMBIGUOUS_RUN_ID = Symbol("ambiguous-run-id");
 //
 // The typed branches are still handled for forwards-compat if the
 // runtime starts emitting them.
+/**
+ * Builds the WebChat event handler.
+ *
+ * `t` is a required translator injected by `useChat` from `useT()`. Validate it
+ * here so a missing provider fails at hook construction instead of only when a
+ * later failure event attempts to render localized copy.
+ *
+ * @throws {TypeError} When `t` is not a translation function.
+ */
 export function useChatEvents({
   threadId,
   setMessages,
@@ -68,6 +77,9 @@ export function useChatEvents({
   onRunSettled,
   t,
 }) {
+  if (typeof t !== "function") {
+    throw new TypeError("useChatEvents requires a translation function");
+  }
   // Track which runIds we've already settled so that SSE replays
   // (reconnect with `last-event-id`, repeated snapshots) don't trigger
   // duplicate timeline refetches. A run settles on ANY terminal status,

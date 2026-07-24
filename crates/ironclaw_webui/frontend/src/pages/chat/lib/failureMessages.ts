@@ -88,8 +88,11 @@ type StreamFailureMessageInput = {
 const SENSITIVE_ERROR_MESSAGE_PATTERNS = [
   /\b(?:authorization|bearer|api[_ -]?key|access[_ -]?token|refresh[_ -]?token|secret|password)\b\s*[:=]\s*\S+/i,
   /\b(?:sk-[A-Za-z0-9_-]{8,}|sk-proj-[A-Za-z0-9_-]{8,}|ghp_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|xox[abprs]-[A-Za-z0-9-]{8,}|AKIA[0-9A-Z]{8,})\b/,
-  /\bapi[_ -]?key\b.{0,80}\b[A-Za-z0-9_-]{24,}\b/i,
 ];
+const API_KEY_LABEL_PATTERN = /\bapi[_ -]?key\b/gi;
+const LONG_CREDENTIAL_TOKEN_PREFIX_PATTERN = /\b[A-Za-z0-9_-]{24}/;
+const MAX_API_KEY_TOKEN_GAP = 80;
+const MIN_LONG_CREDENTIAL_TOKEN_LENGTH = 24;
 
 const PRODUCT_SURFACE_ERROR_KINDS = new Set([
   "validation",
@@ -120,9 +123,22 @@ const PRODUCT_SURFACE_VALIDATION_CODES = new Set([
 const SAFE_FIELD_IDENTIFIER_PATTERN = /^[a-z][a-z0-9_.-]{0,63}$/;
 
 function messageContainsSensitiveCredential(message: string): boolean {
-  return SENSITIVE_ERROR_MESSAGE_PATTERNS.some((pattern) =>
-    pattern.test(message),
-  );
+  if (
+    SENSITIVE_ERROR_MESSAGE_PATTERNS.some((pattern) => pattern.test(message))
+  ) {
+    return true;
+  }
+  for (const match of message.matchAll(API_KEY_LABEL_PATTERN)) {
+    const labelEnd = (match.index ?? 0) + match[0].length;
+    const boundedCandidate = message.slice(
+      labelEnd,
+      labelEnd + MAX_API_KEY_TOKEN_GAP + MIN_LONG_CREDENTIAL_TOKEN_LENGTH,
+    );
+    if (LONG_CREDENTIAL_TOKEN_PREFIX_PATTERN.test(boundedCandidate)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function allowlistedWireToken(
