@@ -23,6 +23,7 @@ layer = "app"
 test-support = [
     "ironclaw_extension_host/test-support",
     "dep:ironclaw_first_party_extensions",
+    "ironclaw_auth/test-support",
     "ironclaw_host_runtime/test-support",
     "ironclaw_outbound/test-support",
     "ironclaw_product/test-support",

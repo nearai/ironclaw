@@ -14,8 +14,8 @@ per-item line numbers and symbol names below are **main's**, retained for
 provenance — they are NOT live pointers on this branch. The structural map:
 
 1. **The shared OAuth engine moved.** On main the exchange lives in
-   `crates/ironclaw_reborn_composition/src/product_auth/oauth/oauth_provider_client.rs`
-   (`HostOAuthProviderSpec`, `scopes_for_exchange`, `ExchangeScopePolicy`). On the
+   `crates/ironclaw_auth/src/engine/`
+   (`AuthEngine`, `scopes_for_exchange`, `MissingScopeBehavior`). On the
    rollup it is the recipe-driven `AuthEngine` in **`crates/ironclaw_auth/src/engine/`**
    (`exchange.rs` + `mod.rs`), executing `ironclaw_host_api::OAuth2CodeRecipe` data.
    Scope extraction is `extract_token_response` and the exchange-scope policy enum is

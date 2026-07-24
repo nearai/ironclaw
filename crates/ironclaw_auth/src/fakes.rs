@@ -112,6 +112,16 @@ impl InMemoryAuthProductServices {
         self.lock_state().quarantines.insert(account_id, reason);
     }
 
+    #[cfg(test)]
+    pub(crate) async fn create_account_at(
+        &self,
+        request: NewCredentialAccount,
+        now: Timestamp,
+    ) -> Result<CredentialAccount, AuthProductError> {
+        let mut state = self.lock_state();
+        create_account_in_state_at(&mut state, request, now)
+    }
+
     pub fn flow_records_snapshot(&self) -> Vec<AuthFlowRecord> {
         let mut flows = self
             .lock_state()
@@ -1261,8 +1271,16 @@ fn create_account_in_state(
     state: &mut AuthState,
     request: NewCredentialAccount,
 ) -> Result<CredentialAccount, AuthProductError> {
-    validate_new_credential_account(&request)?;
     let now = Utc::now();
+    create_account_in_state_at(state, request, now)
+}
+
+fn create_account_in_state_at(
+    state: &mut AuthState,
+    request: NewCredentialAccount,
+    now: Timestamp,
+) -> Result<CredentialAccount, AuthProductError> {
+    validate_new_credential_account(&request)?;
     let account = CredentialAccount {
         id: CredentialAccountId::new(),
         scope: request.scope,

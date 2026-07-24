@@ -15,10 +15,8 @@ use ironclaw_auth::{
     OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OpaqueStateHash,
     PkceVerifierHash, PkceVerifierSecret, ProviderScope,
 };
-use ironclaw_reborn_composition::{
-    RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
-    test_support::OAuthProductAuthTestBundle,
-};
+use ironclaw_auth::{RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest};
+use ironclaw_reborn_composition::test_support::OAuthProductAuthTestBundle;
 use secrecy::SecretString;
 
 /// Build a 64-character hex string from a repeated byte value.

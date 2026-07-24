@@ -171,10 +171,8 @@ mod tests {
     use secrecy::SecretString;
 
     use super::*;
-    use crate::{
-        RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest, RebornRuntimeInput,
-        build_reborn_runtime,
-    };
+    use crate::{RebornRuntimeInput, build_reborn_runtime};
+    use ironclaw_auth::{RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest};
 
     #[tokio::test]
     async fn extension_lifecycle_command_activates_credentialed_extension_with_product_auth() {

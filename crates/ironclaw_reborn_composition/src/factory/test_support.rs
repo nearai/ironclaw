@@ -286,6 +286,7 @@ impl RebornRuntimeStores {
                 turn_coordinator,
                 Some(turn_state as Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>),
             );
+            let continuation = product_auth_continuation_dispatcher(continuation);
             service
                 .finish_pending_for_user_with_for_test(user_id, tenant_id, continuation)
                 .await

@@ -322,7 +322,7 @@ impl ironclaw_auth::EngineClientCredentialsSource for TestStaticClientCredential
 struct TestNoopContinuationDispatcher;
 
 #[async_trait]
-impl crate::product_auth::api::auth::RebornAuthContinuationDispatcher
+impl ironclaw_auth::product_auth::api::auth::RebornAuthContinuationDispatcher
     for TestNoopContinuationDispatcher
 {
     async fn dispatch_auth_continuation(
@@ -347,7 +347,7 @@ impl crate::product_auth::api::auth::RebornAuthContinuationDispatcher
 /// lets the test assert how many token-exchange calls were made.
 pub struct OAuthProductAuthTestBundle {
     /// Fully-wired product-auth services (real stores, scripted token egress).
-    pub services: Arc<crate::RebornProductAuthServices>,
+    pub services: Arc<ironclaw_auth::RebornProductAuthServices>,
     /// Scripted egress — inspect after `handle_oauth_callback` to verify
     /// the token-exchange HTTP call happened.
     pub egress: Arc<ScriptedOAuthTokenEgress>,
@@ -364,7 +364,7 @@ pub struct OAuthProductAuthTestBundle {
 struct OAuthProductAuthInfra {
     secret_store: Arc<dyn ironclaw_secrets::SecretStorePort>,
     durable: Arc<
-        crate::product_auth::durable::FilesystemAuthProductServices<
+        ironclaw_auth::product_auth::durable::FilesystemAuthProductServices<
             ironclaw_filesystem::InMemoryBackend,
         >,
     >,
@@ -397,7 +397,7 @@ fn build_oauth_product_auth_infra() -> OAuthProductAuthInfra {
         Arc::new(SecretStore::ephemeral());
     // Real durable product-auth services over the in-memory scoped filesystem.
     let durable = Arc::new(
-        crate::product_auth::durable::FilesystemAuthProductServices::new(
+        ironclaw_auth::product_auth::durable::FilesystemAuthProductServices::new(
             Arc::clone(&scoped_fs),
             Arc::clone(&secret_store),
         ),
@@ -446,7 +446,7 @@ pub fn build_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle {
         Arc::clone(&secret_store),
     );
 
-    let services = Arc::new(crate::RebornProductAuthServices::new(
+    let services = Arc::new(ironclaw_auth::RebornProductAuthServices::new(
         durable.clone() as Arc<dyn ironclaw_auth::AuthFlowManager>,
         durable.clone() as Arc<dyn ironclaw_auth::AuthInteractionService>,
         durable.clone() as Arc<dyn ironclaw_auth::CredentialSetupService>,
@@ -496,7 +496,7 @@ pub async fn build_oauth_product_auth_for_test_on_libsql(
     let secret_store: Arc<dyn ironclaw_secrets::SecretStorePort> =
         Arc::new(SecretStore::ephemeral());
     let durable = Arc::new(
-        crate::product_auth::durable::FilesystemAuthProductServices::new(
+        ironclaw_auth::product_auth::durable::FilesystemAuthProductServices::new(
             Arc::clone(&scoped_fs),
             Arc::clone(&secret_store),
         ),
@@ -511,7 +511,7 @@ pub async fn build_oauth_product_auth_for_test_on_libsql(
         Arc::clone(&egress),
         Arc::clone(&secret_store),
     );
-    let services = Arc::new(crate::RebornProductAuthServices::new(
+    let services = Arc::new(ironclaw_auth::RebornProductAuthServices::new(
         durable.clone() as Arc<dyn ironclaw_auth::AuthFlowManager>,
         durable.clone() as Arc<dyn ironclaw_auth::AuthInteractionService>,
         durable.clone() as Arc<dyn ironclaw_auth::CredentialSetupService>,
@@ -561,7 +561,7 @@ where
     let secret_store: Arc<dyn ironclaw_secrets::SecretStorePort> =
         Arc::new(SecretStore::ephemeral());
     let durable = Arc::new(
-        crate::product_auth::durable::FilesystemAuthProductServices::new(
+        ironclaw_auth::product_auth::durable::FilesystemAuthProductServices::new(
             Arc::clone(&scoped_fs),
             Arc::clone(&secret_store),
         ),
@@ -576,7 +576,7 @@ where
         Arc::clone(&egress),
         Arc::clone(&secret_store),
     );
-    let services = Arc::new(crate::RebornProductAuthServices::new(
+    let services = Arc::new(ironclaw_auth::RebornProductAuthServices::new(
         durable.clone() as Arc<dyn ironclaw_auth::AuthFlowManager>,
         durable.clone() as Arc<dyn ironclaw_auth::AuthInteractionService>,
         durable.clone() as Arc<dyn ironclaw_auth::CredentialSetupService>,
@@ -724,7 +724,7 @@ pub fn build_google_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle 
     // refresh_credential_account routes through the real refresh path instead
     // of returning BackendUnavailable.
     let services = Arc::new(
-        crate::RebornProductAuthServices::new(
+        ironclaw_auth::RebornProductAuthServices::new(
             durable.clone() as Arc<dyn ironclaw_auth::AuthFlowManager>,
             durable.clone() as Arc<dyn ironclaw_auth::AuthInteractionService>,
             durable.clone() as Arc<dyn ironclaw_auth::CredentialSetupService>,
@@ -812,7 +812,7 @@ pub fn build_oauth_product_auth_with_identity_for_test(
         Arc::clone(&egress),
         Arc::clone(&secret_store),
     );
-    let services = Arc::new(crate::RebornProductAuthServices::new(
+    let services = Arc::new(ironclaw_auth::RebornProductAuthServices::new(
         durable.clone() as Arc<dyn ironclaw_auth::AuthFlowManager>,
         durable.clone() as Arc<dyn ironclaw_auth::AuthInteractionService>,
         durable.clone() as Arc<dyn ironclaw_auth::CredentialSetupService>,
@@ -835,12 +835,12 @@ pub fn build_oauth_product_auth_with_identity_for_test(
 /// integration tests can prove a channel extension's OAuth connect writes
 /// an identity binding through the generic hook.
 pub async fn handle_oauth_callback_with_channel_identity_binding_for_test(
-    services: &crate::RebornProductAuthServices,
-    request: crate::RebornOAuthCallbackRequest,
+    services: &ironclaw_auth::RebornProductAuthServices,
+    request: ironclaw_auth::RebornOAuthCallbackRequest,
     binding: &crate::ChannelIdentityBindingConfig,
-) -> Result<crate::RebornOAuthCallbackResponse, crate::RebornOAuthCallbackError> {
+) -> Result<ironclaw_auth::RebornOAuthCallbackResponse, ironclaw_auth::RebornOAuthCallbackError> {
     let provider = match &request.outcome {
-        crate::RebornOAuthCallbackOutcome::Authorized { provider_request } => {
+        ironclaw_auth::RebornOAuthCallbackOutcome::Authorized { provider_request } => {
             provider_request.provider.as_str().to_string()
         }
         _ => String::new(),

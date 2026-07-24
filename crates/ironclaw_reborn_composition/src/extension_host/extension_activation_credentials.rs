@@ -8,7 +8,7 @@ use ironclaw_product::ProductWorkflowError;
 pub(crate) use ironclaw_extension_host::activation_transaction::ExtensionActivationCredentialReadiness;
 
 use crate::extension_host::extension_credential_requirements::package_runtime_credential_auth_requirements;
-use crate::product_auth::credentials::runtime_credentials::{
+use ironclaw_auth::product_auth::credentials::runtime_credentials::{
     RuntimeCredentialAccountSelectionService, missing_runtime_credential_auth_requirements,
     runtime_credential_accounts_and_missing_requirements,
 };

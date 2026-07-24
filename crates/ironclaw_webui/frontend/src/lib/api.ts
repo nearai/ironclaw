@@ -4,7 +4,7 @@
 // Every function in this module targets a `/api/webchat/v2/*` route
 // defined by issue #3815, a v2-owned `/auth/*` route mounted by
 // `ironclaw_webui::webui_v2_auth_router`, or a
-// Reborn product-auth route mounted by host composition. The module
+// Reborn product-auth route mounted by the host WebUI gateway. The module
 // deliberately contains no `/api/chat`, `/api/engine`, or
 // `/api/profile` paths — the hard non-goal of issue #3886 still
 // stands for v1 gateway routes that lack a v2 counterpart.

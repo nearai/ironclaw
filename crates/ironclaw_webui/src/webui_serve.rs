@@ -51,9 +51,8 @@ use crate::webui_v2::{
     webui_v2_router_with_options,
 };
 use ironclaw_reborn_composition::{
-    ChannelIdentityBindingConfig, ProductAuthRouteState, ProtectedRouteMount, PublicRouteDrains,
-    PublicRouteMount, RebornWebuiBundle, channel_identity_binding_hook_factory,
-    product_auth_route_mount,
+    ChannelIdentityBindingConfig, ProtectedRouteMount, PublicRouteDrains, PublicRouteMount,
+    RebornWebuiBundle, channel_identity_binding_hook_factory,
 };
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::{AllowHeaders, CorsLayer};
@@ -66,6 +65,7 @@ use crate::webui_operator_auth::{
 };
 use crate::webui_rate_limit::{build_rate_limit_state, enforce_rate_limit};
 use crate::webui_ws_origin::{build_websocket_origin_state, enforce_websocket_origin};
+use crate::{ProductAuthRouteState, product_auth_route_mount};
 use ironclaw_host_api::ProductSurfaceCaller;
 use serde::Serialize;
 

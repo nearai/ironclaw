@@ -56,9 +56,9 @@
 ### Task 3: Terminalize malformed OAuth callbacks and separate read from recovery
 
 **Files:**
-- Modify: `crates/ironclaw_reborn_composition/src/product_auth/serve/oauth.rs`
-- Modify: `crates/ironclaw_reborn_composition/src/product_auth/serve/mod.rs`
-- Modify: `crates/ironclaw_reborn_composition/src/product_auth/api/auth.rs`
+- Modify: `crates/ironclaw_webui/src/product_auth/oauth.rs`
+- Modify: `crates/ironclaw_webui/src/product_auth/mod.rs`
+- Modify: `crates/ironclaw_auth/src/product_auth/api/auth.rs`
 - Modify: product-workflow/auth route descriptors if the command surface changes
 - Test: route tests beside the above modules
 - Test: `crates/ironclaw_reborn_composition/tests/auth_callbacks.rs`
@@ -74,11 +74,11 @@
 
 **Files:**
 - Modify: `crates/ironclaw_reborn_composition/src/lifecycle_auth_continuation.rs`
-- Modify: `crates/ironclaw_reborn_composition/src/product_auth/api/auth.rs`
+- Modify: `crates/ironclaw_auth/src/product_auth/api/auth.rs`
 - Modify: `crates/ironclaw_reborn_composition/src/factory.rs`
 - Modify: extension credential-readiness contracts in their owning module
 - Test: `crates/ironclaw_reborn_composition/src/factory/auth_tests.rs`
-- Test: `crates/ironclaw_reborn_composition/src/product_auth/durable/tests.rs`
+- Test: `crates/ironclaw_auth/src/product_auth/durable/tests.rs`
 - Test: `tests/integration/` production-factory OAuth lifecycle scenario
 
 - [ ] Add a failing production-wrapper test proving successful lifecycle activation delegates to blocked-auth resume fanout and resumes a waiting run.
@@ -94,7 +94,7 @@
 **Files:**
 - Modify: `crates/ironclaw_reborn_composition/src/slack/slack_personal_oauth.rs`
 - Modify: Slack connection lifecycle/store owner selected from live code
-- Modify: `crates/ironclaw_reborn_composition/src/product_auth/serve/mod.rs`
+- Modify: `crates/ironclaw_webui/src/product_auth/mod.rs`
 - Modify: narrow installed-extension/lifecycle operation port and factory wiring
 - Test: Slack lifecycle tests and production-factory tests
 

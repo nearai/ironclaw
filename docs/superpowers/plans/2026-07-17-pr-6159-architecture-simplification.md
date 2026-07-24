@@ -181,8 +181,8 @@ git commit -m "test(reborn): pin PR 6159 simplification boundaries"
 - Create: `crates/ironclaw_product/src/auth_prompt.rs`
 - Create: `crates/ironclaw_product/src/approval_prompt.rs`
 - Modify: `crates/ironclaw_product/src/lib.rs`
-- Modify: `crates/ironclaw_reborn_composition/src/product_auth/api/auth_prompt.rs`
-- Modify: `crates/ironclaw_reborn_composition/src/product_auth/api/mod.rs`
+- Modify: `crates/ironclaw_product/src/auth_prompt.rs`
+- Modify: `crates/ironclaw_auth/src/product_auth/api/mod.rs`
 - Modify: `crates/ironclaw_reborn_composition/src/projection/turn_events.rs`
 - Modify: `crates/ironclaw_reborn_composition/src/lib.rs`
 - Modify: composition projection and product-auth tests importing these types.

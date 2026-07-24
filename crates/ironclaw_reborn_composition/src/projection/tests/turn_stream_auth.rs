@@ -584,11 +584,11 @@ async fn product_event_stream_surfaces_auth_challenge_lookup_failure() {
 
 #[tokio::test]
 async fn product_event_stream_creates_vendor_oauth_prompt_for_runtime_credential_gate() {
-    use crate::product_auth::api::auth::{
+    use async_trait::async_trait;
+    use ironclaw_auth::product_auth::api::auth::{
         RebornAuthContinuationDispatcher, RebornProductAuthServices,
     };
-    use crate::product_auth::oauth::oauth_gate::OAuthGateFlowDriver;
-    use async_trait::async_trait;
+    use ironclaw_auth::product_auth::oauth::oauth_gate::OAuthGateFlowDriver;
     use ironclaw_auth::{AuthContinuationEvent, InMemoryAuthProductServices};
     use ironclaw_secrets::SecretStore;
 
@@ -736,7 +736,10 @@ async fn product_event_stream_creates_vendor_oauth_prompt_for_runtime_credential
             },
         }),
     )
-    .with_auth_challenges(product_auth);
+    .with_auth_challenges(
+        crate::product_auth_challenge_provider(&product_auth)
+            .expect("product auth challenge provider"),
+    );
 
     let events = services
         .product_event_stream()

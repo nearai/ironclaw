@@ -1,9 +1,10 @@
 # Reborn Product Auth Contract
 
-- **Status:** contract and composition seam
+- **Status:** contract and production auth service
 - **Issue:** #3289 / #3810 / #3811 / #3812 / #3881 / #3882 / #3883 / #3884
 - **Crate:** `crates/ironclaw_auth`
-- **Composition:** `ironclaw_reborn_composition::RebornProductAuthServices`
+- **Service facade:** `ironclaw_auth::RebornProductAuthServices`
+- **HTTP routes:** `ironclaw_webui::product_auth_route_mount`
 
 ---
 
@@ -15,15 +16,17 @@ providers, extensions, MCP servers, WASM tools/channels, and future identity
 login flows.
 
 This slice is contract-first. `ironclaw_auth` defines Reborn-native vocabulary,
-traits, validation helpers, and fake services. `ironclaw_reborn_composition`
-owns the production filesystem-backed adapter and factory wiring. #3811 adds a
-Reborn composition seam, #3812 adds callback completion handling, #3881 mounts
-the first Reborn-native OAuth start/callback HTTP routes through
-`ironclaw_reborn_composition`, #3882 adds the composition-facing manual-token
-secure-submit entrypoint, #3883 adds recovery/selection facade coverage, and
-#3884 adds refresh/cleanup lifecycle contracts. It does not migrate production
-extension setup routes, CLI/setup flows, a production refresh scheduler/HTTP
-provider implementation, or runtime credential injection.
+traits, validation helpers, fake services, the production filesystem-backed
+product-auth service, provider-account selection/refresh, continuations, and
+cleanup. `ironclaw_webui` owns the host HTTP route serving surface.
+`ironclaw_reborn_composition` wires `AuthEngine`, stores, secrets, network, and
+product/runtime adapters into those crates; it must not grow a parallel
+product-auth service tree. #3811 adds the Reborn service seam, #3812 adds
+callback completion handling, #3881 mounts the first Reborn-native OAuth
+start/callback HTTP routes, #3882 adds the manual-token secure-submit
+entrypoint, #3883 adds recovery/selection facade coverage, and #3884 adds
+refresh/cleanup lifecycle contracts. It does not migrate production extension
+setup routes, CLI/setup flows, or runtime credential injection.
 
 Behavior may remain compatible with legacy UX. Code paths must not mingle V1
 components with Reborn components: V1 route handlers, pending maps, extension
@@ -86,7 +89,7 @@ Concretely:
   `CredentialAccount::is_authorized_for_requester` and the runtime visibility
   policy, never by the thread/mission a credential was authorized in.
 
-`RebornProductAuthServices` is the single composition bundle for the product
+`RebornProductAuthServices` is the single auth-owned bundle for the product
 auth ports above. WebUI/setup/extension surfaces should call this bundle once
 routes are migrated instead of reconstructing auth-flow stores, credential
 stores, provider clients, or cleanup services locally.
@@ -119,9 +122,11 @@ or dispatch runtime work directly.
 The first WebUI-mounted OAuth start route accepts only a provider authorization
 endpoint shape, not a precomposed browser-owned provider URL. Host composition
 must create the flow first, then return a sanitized authorization URL carrying
-flow/callback metadata; raw state and PKCE verifier material stay hashed or
-process-local and must not be serialized. Callback query parsing is bounded and
-malformed fields fail closed before provider exchange.
+flow/callback metadata. Durable flow records and transport DTOs must serialize
+only hashes or handles for raw state and PKCE verifier material; the encrypted
+host `SecretStore` copy of the raw verifier is intentionally durable for
+restart-safe callback completion. Callback query parsing is bounded and malformed
+fields fail closed before provider exchange.
 Provider-specific routes may own additional provider URL construction when they
 need host-only client metadata; the Google setup route builds the Google
 authorization URL from configured Reborn product-auth client metadata and keeps
@@ -153,8 +158,9 @@ Legacy web/CLI/channel auth UX may remain behavior-compatible during
 migration, but Reborn paths should enter through `ProductWorkflow` or the
 WebUI-facing `RebornServicesApi` facade. They must not call V1 pending maps,
 V1 OAuth routes, extension-manager authority, or route-local credential state.
-Dedicated HTTP route mounting for manual-token and OAuth callback transports
-remains a host-composition concern around `RebornProductAuthServices`.
+Dedicated HTTP route serving for manual-token and OAuth callback transports
+belongs in `ironclaw_webui`; composition supplies the configured
+`RebornProductAuthServices` and host dependencies.
 
 ---
 
@@ -175,8 +181,8 @@ V1 pending maps.
 ## Durable Production Slice (#4175)
 
 Production product-auth records use the `ironclaw_auth` contract types and are
-stored by the `ironclaw_reborn_composition` filesystem adapter under the normal
-Reborn scoped filesystem substrate, rooted at the caller's
+stored by `ironclaw_auth::FilesystemAuthProductServices` under the normal
+Reborn scoped filesystem substrate wired by composition, rooted at the caller's
 `/secrets/product-auth/{surface}` tree. The production factory constructs
 `FilesystemAuthProductServices` over the same libSQL/PostgreSQL-backed
 `ScopedFilesystem` and `SecretStore` used by the rest of Reborn; callers no
@@ -221,11 +227,12 @@ older v1/v2 tool paths only until a Reborn settings-config resolver explicitly
 adopts and documents them. Production startup rejects malformed OAuth config at
 construction time through the typed `OAuthClientConfig` validators.
 
-The HA-safe PKCE decision for this slice is documented sticky callback routing:
-the mounted WebUI OAuth route keeps raw PKCE verifiers in process-local bounded
-state while durable flow records store only hashes. Single-instance or sticky
-callback deployments are supported. Multi-replica/restart-surviving deployments
-must add a host-owned encrypted verifier store before claiming HA safety.
+The HA-safe PKCE decision for this slice is durable verifier storage:
+`RebornProductAuthServices::start_setup_oauth_flow` writes the raw verifier to
+`SecretStore` before creating the OAuth flow, while durable flow records store
+only hashes. Deployments therefore rely on a host-owned encrypted secret store
+for restart-surviving callback completion; raw PKCE material must never be
+serialized into the flow record.
 
 ---
 
@@ -256,14 +263,16 @@ Rules:
   from that requirement; the global provider recipe catalog is only a protocol
   and scope ceiling and cannot authorize a requirement for another extension.
 - Durable records may store state/verifier/code hashes, ids, handles, and
-  redacted metadata only.
-- Raw OAuth state, authorization code, PKCE verifier, access token, refresh
-  token, and provider response bodies must not be serialized or projected.
-- The first mounted WebUI OAuth route keeps the raw PKCE verifier in a bounded,
-  expiring process-local cache keyed by `AuthFlowId`, while the durable flow
-  record stores only the verifier hash. This is a single-instance first-slice
-  constraint: multi-replica or restart-surviving deployments must introduce a
-  host-owned encrypted verifier store or equivalent sticky callback mechanism
+  redacted metadata only; they must not serialize the raw verifier.
+- Raw OAuth state, authorization code, access token, refresh token, and provider
+  response bodies must not be serialized or projected. The raw PKCE verifier is
+  durable only in the host-owned encrypted `SecretStore` copy used by callback
+  completion.
+- `RebornProductAuthServices::start_setup_oauth_flow` stores the raw PKCE
+  verifier in `SecretStore` before creating the OAuth flow, while the durable
+  flow record stores only the verifier hash. Multi-replica or restart-surviving
+  deployments must use a host-owned encrypted secret store that is reachable
+  by the callback handler
   before treating the route as HA-safe.
 - Public callbacks must validate and claim the scoped flow/state/provider/PKCE
   hash before exchanging raw code/verifier through non-serializable one-shot
@@ -508,9 +517,9 @@ pretending cleanup succeeded.
 
 ## Product Facing HTTP Surfaces (#4201)
 
-The Reborn composition mounts host-owned HTTP routes that enter
+The WebUI crate owns and mounts host-owned HTTP routes that enter
 `RebornProductAuthServices` (see
-`crates/ironclaw_reborn_composition/src/product_auth/serve/mod.rs`). All mutation
+`crates/ironclaw_webui/src/product_auth/mod.rs`). All mutation
 routes share the same `LocalGateway` + `BearerToken` + per-caller body and
 rate-limit posture as the original `oauth/start` route and derive
 `AuthProductScope` from the authenticated caller, never from caller-supplied
@@ -583,8 +592,8 @@ Rules:
 
 | Product behavior | V1 evidence path | Reborn owner | First-slice status |
 | --- | --- | --- | --- |
-| Extension/provider OAuth start | `src/extensions/manager.rs`, `src/auth/mod.rs` | `AuthFlowManager`, `CredentialSetupService`, `AuthProviderClient` | Reborn-native route mounted in composition; production provider wiring deferred |
-| Hosted OAuth callback | `src/channels/web/features/oauth/mod.rs` | `RebornProductAuthServices::handle_oauth_callback`, `ProductAuthTurnGateResumeDispatcher` for turn-gate resume continuations | Reborn-native route mounted in composition; production provider wiring deferred |
+| Extension/provider OAuth start | `src/extensions/manager.rs`, `src/auth/mod.rs` | `AuthFlowManager`, `CredentialSetupService`, `AuthProviderClient` | Reborn-native route mounted by `ironclaw_webui`; composition supplies provider/service wiring |
+| Hosted OAuth callback | `src/channels/web/features/oauth/mod.rs` | `RebornProductAuthServices::handle_oauth_callback`, `ProductAuthTurnGateResumeDispatcher` for turn-gate resume continuations | Reborn-native route mounted by `ironclaw_webui`; composition supplies provider/service wiring |
 | Local OAuth callback | `src/extensions/manager.rs`, `src/auth/oauth.rs` | `AuthFlowManager`, `AuthProviderClient` | Inventory only |
 | Manual token entry from chat | `src/agent/agent_loop.rs`, `src/agent/thread_ops.rs` | `AuthInteractionService` secure submit via `RebornProductAuthServices::{request_manual_token_setup,submit_manual_token}` | Reborn facade ready; route migration deferred |
 | Engine/gate auth credential submit | `src/bridge/router.rs` | `AuthInteractionService`, `CredentialSetupService`, typed continuation | Contracted; migration deferred |
@@ -689,4 +698,4 @@ covers:
 - `challenge_for_gate` returns an `AuthChallengeView` for a seeded OAuth flow.
 - `challenge_for_gate` returns `None` for mismatched owner/scope/run/gate refs
   or terminal flows.
-- `as_auth_challenge_provider` returns `None` when no flow record source.
+- `product_auth_challenge_provider` returns `None` when no flow record source.
