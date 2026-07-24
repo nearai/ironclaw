@@ -347,13 +347,31 @@ const FOCUSABLE_SELECTOR = [
   "[tabindex]:not([tabindex^='-'])",
 ].join(",");
 
+function isVisible(element) {
+  if (typeof element.checkVisibility === "function") {
+    return element.checkVisibility({
+      checkOpacity: true,
+      checkVisibilityCSS: true,
+    });
+  }
+
+  const style = window.getComputedStyle(element);
+  return (
+    element.getClientRects().length > 0 &&
+    style.display !== "none" &&
+    style.visibility !== "hidden" &&
+    style.opacity !== "0"
+  );
+}
+
 function focusableElements(container) {
   if (!container) return [];
   return Array.from(container.querySelectorAll(FOCUSABLE_SELECTOR)).filter(
     (element) =>
       element.tabIndex >= 0 &&
       !element.hidden &&
-      element.getAttribute("aria-hidden") !== "true",
+      element.getAttribute("aria-hidden") !== "true" &&
+      isVisible(element),
   );
 }
 

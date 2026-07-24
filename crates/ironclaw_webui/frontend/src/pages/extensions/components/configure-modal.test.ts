@@ -619,12 +619,13 @@ test("ModalShell moves, traps, and restores keyboard focus", () => {
   const cleanups = [];
   const document = { activeElement: null };
 
-  function focusable(name) {
+  function focusable(name, visible = true) {
     return {
       name,
       hidden: false,
       isConnected: true,
       tabIndex: 0,
+      checkVisibility: () => visible,
       getAttribute: () => null,
       focus() {
         document.activeElement = this;
@@ -634,6 +635,7 @@ test("ModalShell moves, traps, and restores keyboard focus", () => {
 
   const opener = focusable("opener");
   const incidentalFocus = focusable("incidental");
+  const visuallyHiddenButton = focusable("visually-hidden", false);
   const closeButton = focusable("close");
   const saveButton = focusable("save");
   const dialog = {
@@ -642,7 +644,7 @@ test("ModalShell moves, traps, and restores keyboard focus", () => {
     focus() {
       document.activeElement = this;
     },
-    querySelectorAll: () => [closeButton, saveButton],
+    querySelectorAll: () => [visuallyHiddenButton, closeButton, saveButton],
   };
   document.activeElement = incidentalFocus;
 
@@ -669,7 +671,7 @@ test("ModalShell moves, traps, and restores keyboard focus", () => {
   assert.equal(
     document.activeElement,
     closeButton,
-    "the first focusable control receives focus when the modal opens",
+    "the first visible focusable control receives focus when the modal opens",
   );
 
   const handleKey = listeners.get("keydown");
