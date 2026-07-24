@@ -14,7 +14,7 @@ use crate::{
 };
 
 #[async_trait]
-pub trait OutboundStateStore: Send + Sync {
+pub trait OutboundStateStorePort: Send + Sync {
     async fn put_run_delivery_cleanup(
         &self,
         record: RunDeliveryCleanupRecord,

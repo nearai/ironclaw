@@ -1,7 +1,7 @@
 //! Shared test double for turn-state storage.
 //!
 //! [`in_memory_turn_state_store`] is the single, workspace-wide replacement for
-//! the former public in-memory turn-state store: a [`FilesystemTurnStateRowStore`]
+//! the former public in-memory turn-state store: a [`TurnStateRowStore`]
 //! over a volatile [`InMemoryBackend`], at the store's single write-behind
 //! durability mode (#6263 Step 5b — there is no longer a durability-mode
 //! choice). Gate-park, terminal, and new-run transitions are still
@@ -18,23 +18,23 @@ use std::sync::Arc;
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
 
-use crate::FilesystemTurnStateRowStore;
+use crate::TurnStateRowStore;
 
 /// Build the volatile, process-local turn-state store double.
 ///
 /// A fresh [`InMemoryBackend`] per call, so distinct stores are isolated. To
 /// exercise reopen / rehydration, build a shared backend with
 /// [`in_memory_turns_filesystem`] and open two stores over it.
-pub fn in_memory_turn_state_store() -> FilesystemTurnStateRowStore<InMemoryBackend> {
+pub fn in_memory_turn_state_store() -> TurnStateRowStore<InMemoryBackend> {
     // The lenient (default) mode — the same shape production composition wires
-    // via `FilesystemTurnStateRowStore::new`.
-    FilesystemTurnStateRowStore::new(in_memory_turns_filesystem())
+    // via `TurnStateRowStore::new`.
+    TurnStateRowStore::new(in_memory_turns_filesystem())
 }
 
 /// A fresh scoped `/turns` filesystem over a volatile [`InMemoryBackend`].
 ///
 /// Reuse the returned handle to open more than one
-/// [`FilesystemTurnStateRowStore`] over the *same durable bytes* — the
+/// [`TurnStateRowStore`] over the *same durable bytes* — the
 /// canonical way to cover restart / rehydration now that the row store
 /// rehydrates from durable rows rather than a handed-in snapshot.
 pub fn in_memory_turns_filesystem() -> Arc<ScopedFilesystem<InMemoryBackend>> {

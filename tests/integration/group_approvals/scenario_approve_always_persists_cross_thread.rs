@@ -2,7 +2,7 @@
 //! DIFFERENT thread of the same group.
 //!
 //! Thread A flips the per-`(tenant, user)` auto-approve toggle ON via the real
-//! CAS-persisted `AutoApproveSettingStore`. Thread B, a distinct
+//! CAS-persisted `AutoApproveSettingStorePort`. Thread B, a distinct
 //! conversation/thread, then runs the SAME gated capability and completes
 //! WITHOUT blocking because it reads thread A's persisted setting.
 //!

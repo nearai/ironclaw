@@ -259,13 +259,13 @@ mod openai_compat_mount_tests {
     use ironclaw_filesystem::{InMemoryBackend, RootFilesystem};
     use ironclaw_reborn_composition::ProtectedRouteMount;
     use ironclaw_reborn_openai_compat::{
-        FilesystemOpenAiCompatRefStore, OpenAiChatCompletionProjection,
-        OpenAiChatCompletionProjectionReader, OpenAiChatCompletionProjectionRequest,
-        OpenAiChatCompletionsWorkflow, OpenAiCompatRouterState, OpenAiResponseId,
-        OpenAiResponseObject, OpenAiResponseOutputItem, OpenAiResponseOutputItemStatus,
-        OpenAiResponseProjection, OpenAiResponseReadRequest, OpenAiResponseStatus,
-        OpenAiResponseWaitRequest, OpenAiResponsesMessageRole, OpenAiResponsesProjectionReader,
-        OpenAiResponsesWorkflow, openai_compat_router_with_state, openai_compat_routes,
+        OpenAiChatCompletionProjection, OpenAiChatCompletionProjectionReader,
+        OpenAiChatCompletionProjectionRequest, OpenAiChatCompletionsWorkflow, OpenAiCompatRefStore,
+        OpenAiCompatRouterState, OpenAiResponseId, OpenAiResponseObject, OpenAiResponseOutputItem,
+        OpenAiResponseOutputItemStatus, OpenAiResponseProjection, OpenAiResponseReadRequest,
+        OpenAiResponseStatus, OpenAiResponseWaitRequest, OpenAiResponsesMessageRole,
+        OpenAiResponsesProjectionReader, OpenAiResponsesWorkflow, openai_compat_router_with_state,
+        openai_compat_routes,
     };
     use ironclaw_turns::runner::{ClaimRunRequest, CompleteRunRequest, TurnRunTransitionPort};
     use ironclaw_turns::test_support::in_memory_turn_state_store;
@@ -279,9 +279,9 @@ mod openai_compat_mount_tests {
     const PROJECT: &str = "project-alpha";
     const THREAD: &str = "thread-openai-chat";
 
-    fn in_memory_openai_compat_ref_store() -> Arc<FilesystemOpenAiCompatRefStore> {
+    fn in_memory_openai_compat_ref_store() -> Arc<OpenAiCompatRefStore> {
         let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
-        Arc::new(FilesystemOpenAiCompatRefStore::new(filesystem))
+        Arc::new(OpenAiCompatRefStore::new(filesystem))
     }
 
     #[tokio::test]

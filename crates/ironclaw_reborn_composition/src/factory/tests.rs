@@ -1,12 +1,12 @@
 // arch-exempt: large_file, pre-existing >1500-line factory test module; this PR only adds the mandatory `owner` field to an outbound-target entry fixture for the registry caller-scoping hardening, plan #6389
 use super::*;
-use ironclaw_approvals::{AutoApproveSettingInput, AutoApproveSettingStore};
+use ironclaw_approvals::{AutoApproveSettingInput, AutoApproveSettingStorePort};
 use ironclaw_auth::{
     AuthProductScope, AuthSurface, CredentialAccountLabel, CredentialAccountStatus,
     CredentialOwnership, GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
     NewCredentialAccount, ProviderScope,
 };
-use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStore, GrantAuthorizer};
+use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStorePort, GrantAuthorizer};
 use ironclaw_filesystem::FilesystemError;
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_filesystem::RootFilesystem;
@@ -71,7 +71,7 @@ async fn production_store_bundle_new_validates_runtime_storage_before_store_asse
 #[tokio::test]
 async fn production_store_bundle_with_secret_credentials_validates_runtime_storage_first() {
     let credential_filesystem = empty_composite_filesystem();
-    let secret_credentials = FilesystemSecretCredentialStores::from_master_key(
+    let secret_credentials = SecretCredentialStores::from_master_key(
         crate::wrap_scoped(Arc::clone(&credential_filesystem)),
         test_secret_master_key(),
     )
@@ -107,7 +107,7 @@ async fn production_turn_state_store_uses_row_layout() {
     ));
 
     // `production_turn_state_store` returns the concrete
-    // `FilesystemTurnStateRowStore` by type, so "production uses the row
+    // `TurnStateRowStore` by type, so "production uses the row
     // layout" is now a compile-time guarantee. This exercises the factory
     // end-to-end and confirms the constructed store answers reads.
     let store =
@@ -191,7 +191,7 @@ fn build_runtime_substrate_uses_filesystem_resource_governor() {
 
 #[test]
 fn extension_installation_state_path_is_single_runtime_default() {
-    let path = FilesystemExtensionInstallationStore::default_state_path().expect("state path");
+    let path = ExtensionInstallationStore::default_state_path().expect("state path");
 
     assert_eq!(path.as_str(), "/system/extensions/.installations");
 }
@@ -706,7 +706,7 @@ async fn local_dev_default_product_auth_preserves_manual_token_across_rebuilds()
     let access_secret = account.access_secret.expect("manual token access secret");
     assert!(
         access_secret.as_str().starts_with("product-auth-manual-"),
-        "local-dev default product-auth must create durable SecretStore-backed handles"
+        "local-dev default product-auth must create durable SecretStorePort-backed handles"
     );
 
     let rebuilt = build_runtime_substrate(crate::deployment::local_dev_build_input(
@@ -2801,7 +2801,7 @@ fn skill_md(name: &str, description: &str, prompt: &str) -> String {
 }
 
 /// Verify that the durable `local_dev_outbound_store` bundle (libsql or postgres)
-/// shares a single `FilesystemOutboundStateStore` allocation across all four
+/// shares a single `OutboundStateStore` allocation across all four
 /// trait-object roles.
 ///
 /// The assertion reads the four trait-object pointers from the built

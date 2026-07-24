@@ -5,7 +5,7 @@ use crate::validation::validate_delivery_scope_candidate;
 use crate::{
     CommunicationDeliveryResolution, CommunicationPreferenceRepository, DeliveryFailureKind,
     OutboundDeliveryAttempt, OutboundDeliveryDecision, OutboundDeliveryId, OutboundDeliveryStatus,
-    OutboundError, OutboundPushCandidate, OutboundPushKind, OutboundStateStore,
+    OutboundError, OutboundPushCandidate, OutboundPushKind, OutboundStateStorePort,
     PrepareCommunicationDeliveryRequest, PrepareOutboundDeliveryRequest,
     ProjectionSubscriptionRecord, ProjectionSubscriptionRequest, ReplyTargetBindingClaim,
     ReplyTargetValidationRequest, ThreadProjectionAccessClaim, ThreadProjectionAccessGrant,
@@ -39,14 +39,14 @@ pub trait ReplyTargetBindingValidator: Send + Sync {
 }
 
 pub struct OutboundPolicyService<'a> {
-    store: &'a dyn OutboundStateStore,
+    store: &'a dyn OutboundStateStorePort,
     projection_access_policy: &'a dyn ThreadProjectionAccessPolicy,
     reply_target_validator: &'a dyn ReplyTargetBindingValidator,
 }
 
 impl<'a> OutboundPolicyService<'a> {
     pub fn new(
-        store: &'a dyn OutboundStateStore,
+        store: &'a dyn OutboundStateStorePort,
         projection_access_policy: &'a dyn ThreadProjectionAccessPolicy,
         reply_target_validator: &'a dyn ReplyTargetBindingValidator,
     ) -> Self {

@@ -4,7 +4,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_network::is_rfc3986_unreserved_segment;
 use ironclaw_safety::redaction_values_for_secret;
-use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStoreError};
+use ironclaw_secrets::{SecretMaterial, SecretStoreError, SecretStorePort};
 use secrecy::ExposeSecret;
 use std::sync::LazyLock;
 
@@ -90,7 +90,7 @@ impl<'a> CredentialSourceStrategy<'a> {
         injection: &RuntimeCredentialInjection,
     ) -> Result<Option<SecretMaterial>, RuntimeHttpEgressError>
     where
-        S: SecretStore,
+        S: SecretStorePort,
     {
         match self {
             Self::SecretStoreLease => lease_secret_for_injection(secrets, request, injection),
@@ -116,7 +116,7 @@ pub(super) fn apply_credential_injections<S>(
     request: &mut RuntimeHttpEgressRequest,
 ) -> Result<Vec<String>, RuntimeHttpEgressError>
 where
-    S: SecretStore,
+    S: SecretStorePort,
 {
     let mut redaction_values = Vec::new();
     let mut credential_materials = Vec::new();
@@ -206,7 +206,7 @@ fn credential_value_for_injection<'cache, S>(
     injection: &RuntimeCredentialInjection,
 ) -> Result<Option<&'cache SecretMaterial>, RuntimeHttpEgressError>
 where
-    S: SecretStore,
+    S: SecretStorePort,
 {
     let strategy = CredentialSourceStrategy::for_injection(injection);
     let key = strategy.cache_key(injection);
@@ -275,7 +275,7 @@ fn lease_secret_for_injection<S>(
     injection: &RuntimeCredentialInjection,
 ) -> Result<Option<SecretMaterial>, RuntimeHttpEgressError>
 where
-    S: SecretStore,
+    S: SecretStorePort,
 {
     match block_on_secret_store(async {
         let metadata = secrets.metadata(&request.scope, &injection.handle).await?;
@@ -571,7 +571,7 @@ mod tests {
         Timestamp, UserId,
     };
     use ironclaw_secrets::{
-        FilesystemSecretStore, SecretLease, SecretLeaseId, SecretMetadata, SecretStoreError,
+        SecretLease, SecretLeaseId, SecretMetadata, SecretStore, SecretStoreError,
     };
     use std::sync::Arc;
 
@@ -679,7 +679,7 @@ mod tests {
         }
     }
 
-    /// Real `FilesystemSecretStore` over a [`FaultInjecting`] backend armed to
+    /// Real `SecretStore` over a [`FaultInjecting`] backend armed to
     /// fail the lease write. Replaces the whole-trait `FailingLeaseSecretStore`
     /// fake for the one error the real store genuinely surfaces from a backend
     /// fault: `lease_once` reads the seeded secret, then its `write_lease`
@@ -691,7 +691,7 @@ mod tests {
         let scope = sample_scope();
         let handle = SecretHandle::new("api-token").unwrap();
         let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
-        let store = FilesystemSecretStore::ephemeral_over(backend.clone());
+        let store = SecretStore::ephemeral_over(backend.clone());
         // Seed the secret so metadata()/lease read succeed; the fault fires on
         // the lease write, not the reads.
         block_on_test(store.put(
@@ -727,7 +727,7 @@ mod tests {
         let scope = sample_scope();
         let handle = SecretHandle::new("absent-token").unwrap();
         let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
-        let store = FilesystemSecretStore::ephemeral_over(backend);
+        let store = SecretStore::ephemeral_over(backend);
 
         let request = sample_request(scope);
         let error = lease_secret_for_injection(&store, &request, &sample_injection(handle))
@@ -768,13 +768,13 @@ mod tests {
     }
 
     struct TokioBackedSecretStore {
-        inner: FilesystemSecretStore<InMemoryBackend>,
+        inner: SecretStore<InMemoryBackend>,
     }
 
     impl TokioBackedSecretStore {
         fn new() -> Self {
             Self {
-                inner: FilesystemSecretStore::ephemeral(),
+                inner: SecretStore::ephemeral(),
             }
         }
 
@@ -784,7 +784,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl SecretStore for TokioBackedSecretStore {
+    impl SecretStorePort for TokioBackedSecretStore {
         async fn put(
             &self,
             scope: ResourceScope,
@@ -891,7 +891,7 @@ mod path_placeholder_tests {
         RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeHttpEgressRequest, RuntimeKind,
         TenantId, UserId,
     };
-    use ironclaw_secrets::FilesystemSecretStore;
+    use ironclaw_secrets::SecretStore;
 
     fn request_with_url(url: &str) -> RuntimeHttpEgressRequest {
         RuntimeHttpEgressRequest {
@@ -930,7 +930,7 @@ mod path_placeholder_tests {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
-        let store = FilesystemSecretStore::ephemeral();
+        let store = SecretStore::ephemeral();
         let mut request = request_with_url(url);
         let handle = SecretHandle::new("path-credential").unwrap();
         runtime
@@ -963,7 +963,7 @@ mod path_placeholder_tests {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
-        let store = FilesystemSecretStore::ephemeral();
+        let store = SecretStore::ephemeral();
         let mut request = request_with_url("https://vendor.example/api/setWebhook");
         request.body = body.to_vec();
         let handle = SecretHandle::new("body-credential").unwrap();

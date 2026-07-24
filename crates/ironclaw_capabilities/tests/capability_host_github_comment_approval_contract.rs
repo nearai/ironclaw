@@ -149,10 +149,10 @@ async fn capability_host_rejects_mutated_github_comment_issue_replay_before_disp
 struct GitHubCommentApprovalFixture {
     registry: ironclaw_extensions::ExtensionRegistry,
     dispatcher: TestDispatcher,
-    run_state: ironclaw_run_state::FilesystemRunStateStore<ironclaw_filesystem::InMemoryBackend>,
+    run_state: ironclaw_run_state::RunStateStore<ironclaw_filesystem::InMemoryBackend>,
     approval_requests:
-        ironclaw_run_state::FilesystemApprovalRequestStore<ironclaw_filesystem::InMemoryBackend>,
-    leases: FilesystemCapabilityLeaseStore<InMemoryBackend>,
+        ironclaw_run_state::ApprovalRequestStore<ironclaw_filesystem::InMemoryBackend>,
+    leases: CapabilityLeaseStore<InMemoryBackend>,
     context: ExecutionContext,
     scope: ResourceScope,
     invocation_id: InvocationId,

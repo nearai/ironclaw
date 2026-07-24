@@ -85,7 +85,7 @@ impl RebornRuntimeStores {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn outbound_state_for_test(&self) -> &Arc<dyn OutboundStateStore> {
+    pub(crate) fn outbound_state_for_test(&self) -> &Arc<dyn OutboundStateStorePort> {
         &self.outbound_state
     }
 
@@ -179,7 +179,7 @@ impl RebornRuntimeStores {
     }
 
     /// The shared scoped secret store backing this composition.
-    pub(crate) fn secret_store(&self) -> Arc<dyn SecretStore> {
+    pub(crate) fn secret_store(&self) -> Arc<dyn SecretStorePort> {
         Arc::clone(&self.secret_store)
     }
     /// The composed generic channel ingress (router + per-extension
@@ -243,7 +243,7 @@ impl RebornRuntimeStores {
         actor: (&str, &str, Option<&str>, &str),
         turn_world: (
             Arc<dyn ironclaw_turns::TurnCoordinator>,
-            Arc<ironclaw_turns::FilesystemTurnStateRowStore<F>>,
+            Arc<ironclaw_turns::TurnStateRowStore<F>>,
             ironclaw_host_api::TenantId,
         ),
     ) -> Result<Option<ironclaw_host_api::UserId>, String>
@@ -355,7 +355,7 @@ impl RebornRuntimeStores {
     /// Test-support access to the shared scoped secret store backing the
     /// composed runtime.
     #[cfg(feature = "test-support")]
-    pub(crate) fn secret_store_for_test(&self) -> Arc<dyn SecretStore> {
+    pub(crate) fn secret_store_for_test(&self) -> Arc<dyn SecretStorePort> {
         Arc::clone(&self.secret_store)
     }
 
@@ -383,21 +383,20 @@ impl RebornRuntimeStores {
 
     #[cfg(feature = "test-support")]
     pub(crate) fn local_dev_approval_test_parts(&self) -> Option<RebornApprovalTestParts> {
-        let approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStore> =
+        let approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStorePort> =
             self.approval_requests.clone();
-        let capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStore> =
+        let capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStorePort> =
             self.capability_leases.clone();
         // Build over the same shared composite root production `capability_wiring`
         // uses, so these test-support stores persist across the group's
         // threads/turns and round-trip identically to production.
         let capability_store_filesystem =
             crate::wrap_scoped(Arc::clone(&self.extension_filesystem));
-        let gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore> =
-            Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
-                Arc::clone(&capability_store_filesystem),
-            ));
-        let replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore> = Arc::new(
-            ironclaw_capabilities::FilesystemReplayPayloadStore::new(capability_store_filesystem),
+        let gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort> = Arc::new(
+            ironclaw_run_state::GateRecordStore::new(Arc::clone(&capability_store_filesystem)),
+        );
+        let replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort> = Arc::new(
+            ironclaw_capabilities::ReplayPayloadStore::new(capability_store_filesystem),
         );
         Some(RebornApprovalTestParts {
             approval_requests,
@@ -410,8 +409,8 @@ impl RebornRuntimeStores {
     #[cfg(feature = "test-support")]
     pub(crate) fn local_dev_auto_approve_settings_for_test(
         &self,
-    ) -> Option<Arc<dyn ironclaw_approvals::AutoApproveSettingStore>> {
-        let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
+    ) -> Option<Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort>> {
+        let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort> =
             self.auto_approve_settings.clone();
         Some(auto_approve_settings)
     }
@@ -426,7 +425,7 @@ impl RebornRuntimeStores {
     #[cfg(feature = "test-support")]
     pub(crate) fn extension_installation_store_for_test(
         &self,
-    ) -> Option<Arc<dyn ExtensionInstallationStore>> {
+    ) -> Option<Arc<dyn ExtensionInstallationStorePort>> {
         Some(self.extension_management.installation_store_for_test())
     }
 
@@ -544,8 +543,8 @@ impl RebornRuntimeStores {
     #[cfg(feature = "test-support")]
     pub(crate) fn local_dev_tool_permission_overrides_for_test(
         &self,
-    ) -> Option<Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore>> {
-        let overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
+    ) -> Option<Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>> {
+        let overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort> =
             self.tool_permission_overrides.clone();
         Some(overrides)
     }
@@ -557,8 +556,8 @@ impl RebornRuntimeStores {
     #[cfg(feature = "test-support")]
     pub(crate) fn local_dev_persistent_approval_policies_for_test(
         &self,
-    ) -> Option<Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore>> {
-        let policies: Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore> =
+    ) -> Option<Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStorePort>> {
+        let policies: Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStorePort> =
             self.persistent_approval_policies.clone();
         Some(policies)
     }
@@ -649,7 +648,7 @@ impl RebornRuntimeStores {
     pub(crate) fn outbound_delivery_stores_for_test(
         &self,
     ) -> Option<(
-        Arc<dyn ironclaw_outbound::OutboundStateStore>,
+        Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
         Arc<dyn ironclaw_outbound::DeliveredGateRouteStore>,
         Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository>,
     )> {
@@ -781,16 +780,16 @@ pub struct AttachmentTestSupport {
 #[cfg(feature = "test-support")]
 #[derive(Clone)]
 pub struct RebornApprovalTestParts {
-    pub approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
-    pub capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStore>,
+    pub approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>,
+    pub capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStorePort>,
     /// Durable model-visible gate-record store, shared across the group's threads
     /// so a gate raised on one thread can be read back on another.
-    pub gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore>,
+    pub gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort>,
     /// Durable host-private replay-payload store (§5.3 Stage 2a-i), shared across
     /// the group's threads/turns so a gate/auth resume reconstitutes the input the
     /// original raise persisted. Backed by the same composite root as production
     /// `capability_wiring`, so the harness store round-trips identically.
-    pub replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
+    pub replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort>,
 }
 
 /// Thin void wrapper over [`build_default_local_dev_database_roots`] for
@@ -812,7 +811,7 @@ pub(crate) async fn mount_default_local_dev_database_roots(
 /// Test-only (T5 restart-survival seam): open a FRESH local-dev root
 /// filesystem at an existing `storage_root`, for reconstructing the generic
 /// channel-identity store the way production boot does
-/// (`build_runtime_substrate` → `FilesystemChannelIdentityStore::new` over the
+/// (`build_runtime_substrate` → `ChannelIdentityStore::new` over the
 /// composed root). `libsql`-only: the `LocalDefault` non-libsql
 /// arm mounts a fresh `InMemoryBackend`, which could only ever report
 /// absence. Tests only; zero bytes in production.
@@ -832,11 +831,11 @@ pub(crate) async fn open_local_dev_root_filesystem_for_test(
 }
 
 /// Test-only (E-DURABLE seam): open a FRESH, independent
-/// [`ExtensionInstallationStore`] at an existing local-dev `storage_root`,
+/// [`ExtensionInstallationStorePort`] at an existing local-dev `storage_root`,
 /// paralleling how `assert_reply_persists_after_reopen` opens a fresh libsql
 /// handle rather than reusing the live one. Reuses the production
 /// [`build_local_runtime_root_filesystem`] mounts and
-/// [`FilesystemExtensionInstallationStore::default_state_path`] so the reopen
+/// [`ExtensionInstallationStore::default_state_path`] so the reopen
 /// reads the exact durable `/system/extensions/.installations` state the
 /// running harness wrote while extension package files still live on disk
 /// (mirrors the production install-store load in [`build_runtime_substrate`],
@@ -846,7 +845,7 @@ pub(crate) async fn open_local_dev_root_filesystem_for_test(
 #[cfg(feature = "test-support")]
 pub(crate) async fn open_local_dev_extension_installation_store_for_test(
     storage_root: &Path,
-) -> Result<Arc<dyn ExtensionInstallationStore>, RebornBuildError> {
+) -> Result<Arc<dyn ExtensionInstallationStorePort>, RebornBuildError> {
     let workspace_root = storage_root.join("workspace");
     let bundle = build_local_runtime_root_filesystem(
         storage_root,
@@ -856,12 +855,11 @@ pub(crate) async fn open_local_dev_extension_installation_store_for_test(
     )
     .await?;
     let filesystem: Arc<dyn RootFilesystem> = bundle.filesystem;
-    let state_path =
-        FilesystemExtensionInstallationStore::default_state_path().map_err(|error| {
-            RebornBuildError::InvalidConfig {
-                reason: format!("extension installation state path invalid: {error}"),
-            }
-        })?;
+    let state_path = ExtensionInstallationStore::default_state_path().map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("extension installation state path invalid: {error}"),
+        }
+    })?;
     let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
         RebornBuildError::InvalidConfig {
             reason: format!("extension host port catalog could not be loaded: {error}"),
@@ -872,21 +870,17 @@ pub(crate) async fn open_local_dev_extension_installation_store_for_test(
             reason: format!("extension host API contracts could not be loaded: {error}"),
         }
     })?;
-    let store = FilesystemExtensionInstallationStore::load_at(
-        filesystem,
-        state_path,
-        host_ports,
-        host_api_contracts,
-    )
-    .await
-    .map_err(|error| RebornBuildError::InvalidConfig {
-        reason: format!("extension installation state could not be reopened: {error}"),
-    })?;
+    let store =
+        ExtensionInstallationStore::load_at(filesystem, state_path, host_ports, host_api_contracts)
+            .await
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("extension installation state could not be reopened: {error}"),
+            })?;
     Ok(Arc::new(store))
 }
 
 /// Test-only (C-DURABLE seam): open a FRESH, independent
-/// [`ironclaw_run_state::ApprovalRequestStore`] at an existing local-dev
+/// [`ironclaw_run_state::ApprovalRequestStorePort`] at an existing local-dev
 /// `storage_root`, paralleling [`open_local_dev_extension_installation_store_for_test`]
 /// (same on-disk root; a sibling capability store). Reuses
 /// [`mount_default_local_dev_database_roots`] + the production [`crate::wrap_scoped`]
@@ -896,11 +890,11 @@ pub(crate) async fn open_local_dev_extension_installation_store_for_test(
 #[cfg(feature = "test-support")]
 pub(crate) async fn open_local_dev_approval_request_store_for_test(
     storage_root: &Path,
-) -> Result<Arc<dyn ironclaw_run_state::ApprovalRequestStore>, RebornBuildError> {
+) -> Result<Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>, RebornBuildError> {
     let mut composite = CompositeRootFilesystem::new();
     mount_default_local_dev_database_roots(storage_root, &mut composite).await?;
     let scoped = crate::wrap_scoped(Arc::new(composite));
-    Ok(Arc::new(FilesystemApprovalRequestStore::new(scoped)))
+    Ok(Arc::new(ApprovalRequestStore::new(scoped)))
 }
 
 /// W6-COLD-SPOTS: fresh `CommunicationPreferenceRepository` reopen, mirrors
@@ -919,9 +913,9 @@ pub(crate) async fn open_local_dev_outbound_preferences_store_for_test(
 }
 
 /// Test-only (W5-WEBUI-API-1 seam): open FRESH, independent
-/// [`ironclaw_approvals::ToolPermissionOverrideStore`] /
-/// [`ironclaw_approvals::AutoApproveSettingStore`] /
-/// [`ironclaw_approvals::PersistentApprovalPolicyStore`] handles at an
+/// [`ironclaw_approvals::ToolPermissionOverrideStorePort`] /
+/// [`ironclaw_approvals::AutoApproveSettingStorePort`] /
+/// [`ironclaw_approvals::PersistentApprovalPolicyStorePort`] handles at an
 /// existing local-dev `storage_root`, paralleling
 /// [`open_local_dev_approval_request_store_for_test`] (same on-disk root;
 /// sibling capability stores). Reuses [`mount_default_local_dev_database_roots`]
@@ -935,23 +929,24 @@ pub(crate) async fn open_local_dev_approval_settings_stores_for_test(
     storage_root: &Path,
 ) -> Result<
     (
-        Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore>,
-        Arc<dyn ironclaw_approvals::AutoApproveSettingStore>,
-        Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore>,
+        Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>,
+        Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort>,
+        Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStorePort>,
     ),
     RebornBuildError,
 > {
     let mut composite = CompositeRootFilesystem::new();
     mount_default_local_dev_database_roots(storage_root, &mut composite).await?;
     let scoped = crate::wrap_scoped(Arc::new(composite));
-    let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
+    let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort> =
         Arc::new(ComposedToolPermissionOverrideStore::new(Arc::clone(
             &scoped,
         )));
-    let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
+    let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort> =
         Arc::new(ComposedAutoApproveSettingStore::new(Arc::clone(&scoped)));
-    let persistent_approval_policies: Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore> =
-        Arc::new(FilesystemPersistentApprovalPolicyStore::new(scoped));
+    let persistent_approval_policies: Arc<
+        dyn ironclaw_approvals::PersistentApprovalPolicyStorePort,
+    > = Arc::new(PersistentApprovalPolicyStore::new(scoped));
     Ok((
         tool_permission_overrides,
         auto_approve_settings,

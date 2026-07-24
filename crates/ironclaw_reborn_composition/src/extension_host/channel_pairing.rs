@@ -18,7 +18,7 @@ use ironclaw_auth::{AuthContinuationEvent, AuthContinuationRef, AuthFlowId};
 use ironclaw_conversations::{
     AdapterKind, ConversationActorPairingService, ExpectedExternalActorOwner,
 };
-use ironclaw_extensions::ExtensionInstallationStore;
+use ironclaw_extensions::ExtensionInstallationStorePort;
 #[cfg(test)]
 use ironclaw_filesystem::RootFilesystem;
 #[cfg(test)]
@@ -31,7 +31,7 @@ use ironclaw_product::{
     ChannelPairingIdentityStore, ChannelPairingInstallationSource, ChannelPairingTemplateValues,
 };
 
-use crate::extension_host::channel_dm_targets::FilesystemChannelDmTargetStore;
+use crate::extension_host::channel_dm_targets::ChannelDmTargetStore;
 #[cfg(test)]
 use crate::product_auth::api::auth::RebornAuthContinuationDispatcher;
 use crate::provider_identity::{
@@ -44,13 +44,13 @@ use crate::provider_identity::{
 /// setup work performed after install and before readiness, so the active-host
 /// snapshot is intentionally too narrow for this adapter.
 pub(crate) struct StoredPairingInstallationSource {
-    store: Arc<dyn ExtensionInstallationStore>,
+    store: Arc<dyn ExtensionInstallationStorePort>,
     extension_id: ExtensionId,
 }
 
 impl StoredPairingInstallationSource {
     pub(crate) fn new(
-        store: Arc<dyn ExtensionInstallationStore>,
+        store: Arc<dyn ExtensionInstallationStorePort>,
         extension_id: ExtensionId,
     ) -> Self {
         Self {
@@ -209,11 +209,11 @@ impl ChannelPairingIdentityStore for ComposedChannelPairingIdentityStore {
 /// Mechanical adapter from the existing canonical channel DM-target store to
 /// the provider-neutral product pairing port.
 pub(crate) struct ComposedChannelPairingDirectTargetStore {
-    inner: Arc<FilesystemChannelDmTargetStore>,
+    inner: Arc<ChannelDmTargetStore>,
 }
 
 impl ComposedChannelPairingDirectTargetStore {
-    pub(crate) fn new(inner: Arc<FilesystemChannelDmTargetStore>) -> Self {
+    pub(crate) fn new(inner: Arc<ChannelDmTargetStore>) -> Self {
         Self { inner }
     }
 }

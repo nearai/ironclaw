@@ -542,7 +542,7 @@ fn vendor_test_engine(
             recipes: Arc::new(ironclaw_auth::StaticAuthRecipeResolver::new(vec![recipe])),
             client_credentials: Arc::new(StaticVendorClientCredentials),
             egress: Arc::new(PanicVendorEgress),
-            secret_store: Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral()),
+            secret_store: Arc::new(ironclaw_secrets::SecretStore::ephemeral()),
             callback_base: ironclaw_auth::EngineCallbackBase::new(
                 "http://127.0.0.1:3000/api/reborn/product-auth/oauth",
             )

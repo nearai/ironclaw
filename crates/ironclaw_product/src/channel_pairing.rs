@@ -356,16 +356,16 @@ fn template_handles(template: &str) -> Vec<String> {
 /// under `/tenant-shared/channel-pairing/{extension}.json`. In-memory test
 /// composition rides the same store over `InMemoryBackend`
 /// (arch-simplification §4.3: in-memory is a backend, not a store).
-pub struct FilesystemChannelPairingStore {
+pub struct ChannelPairingStore {
     filesystem: Arc<ScopedFilesystem<dyn RootFilesystem>>,
     scope: ResourceScope,
     extension_id: ExtensionId,
 }
 
-impl std::fmt::Debug for FilesystemChannelPairingStore {
+impl std::fmt::Debug for ChannelPairingStore {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("FilesystemChannelPairingStore")
+            .debug_struct("ChannelPairingStore")
             .field("extension_id", &self.extension_id)
             .finish_non_exhaustive()
     }
@@ -380,7 +380,7 @@ fn pairing_mount_view(scope: &ResourceScope) -> Result<MountView, HostApiError> 
     )])
 }
 
-impl FilesystemChannelPairingStore {
+impl ChannelPairingStore {
     pub fn new(
         filesystem: Arc<dyn RootFilesystem>,
         tenant_id: TenantId,
@@ -487,7 +487,7 @@ pub struct ChannelPairingService {
     connection_requirement: ChannelConnectionRequirement,
     deep_link_template: Option<String>,
     inbound_code_prefixes: Vec<String>,
-    store: Arc<FilesystemChannelPairingStore>,
+    store: Arc<ChannelPairingStore>,
     installation: Arc<dyn ChannelPairingInstallationSource>,
     template_values: Arc<dyn ChannelPairingTemplateValues>,
     identity: Arc<dyn ChannelPairingIdentityStore>,
@@ -514,7 +514,7 @@ impl std::fmt::Debug for ChannelPairingService {
 /// Manifest data stays in the canonical [`ExtensionAccountSetupDescriptor`]
 /// instead of being mirrored into another constructor DTO.
 pub struct ChannelPairingServiceDependencies {
-    pub store: Arc<FilesystemChannelPairingStore>,
+    pub store: Arc<ChannelPairingStore>,
     pub installation: Arc<dyn ChannelPairingInstallationSource>,
     pub template_values: Arc<dyn ChannelPairingTemplateValues>,
     pub identity: Arc<dyn ChannelPairingIdentityStore>,

@@ -15,7 +15,7 @@ use ironclaw_extension_host::activation_transaction::{
 };
 use ironclaw_extensions::{
     CapabilityVisibility, ExtensionError, ExtensionInstallation, ExtensionInstallationError,
-    ExtensionInstallationId, ExtensionInstallationPersistedParts, ExtensionInstallationStore,
+    ExtensionInstallationId, ExtensionInstallationPersistedParts, ExtensionInstallationStorePort,
     ExtensionLifecycleService, ExtensionManifestRecord, ExtensionManifestRef, ExtensionPackage,
     InstallationOwner, ManifestHash, ManifestSource, canonicalize_installation_rows,
 };
@@ -120,7 +120,7 @@ const RETIRED_SLACK_USER_EXTENSION_ID: &str = "slack_user";
 pub(crate) struct ExtensionManagementPort {
     filesystem: Arc<dyn RootFilesystem>,
     catalog: Arc<RwLock<AvailableExtensionCatalog>>,
-    installation_store: Arc<dyn ExtensionInstallationStore>,
+    installation_store: Arc<dyn ExtensionInstallationStorePort>,
     lifecycle_service: Arc<Mutex<ExtensionLifecycleService>>,
     active_extensions: ActiveExtensionPublisher,
     operation_lock: Arc<Mutex<()>>,
@@ -231,7 +231,7 @@ impl ActiveExtensionCapability {
 pub(crate) async fn restore_extension_lifecycle_state(
     catalog: &AvailableExtensionCatalog,
     filesystem: &Arc<dyn RootFilesystem>,
-    installation_store: &Arc<dyn ExtensionInstallationStore>,
+    installation_store: &Arc<dyn ExtensionInstallationStorePort>,
     lifecycle_service: &Arc<Mutex<ExtensionLifecycleService>>,
     active_extensions: &ActiveExtensionPublisher,
     tenant_operator_user_id: &UserId,
@@ -301,7 +301,7 @@ pub(crate) async fn restore_extension_lifecycle_state(
 }
 
 async fn canonicalize_persisted_installation_rows(
-    installation_store: &Arc<dyn ExtensionInstallationStore>,
+    installation_store: &Arc<dyn ExtensionInstallationStorePort>,
     tenant_operator_user_id: &UserId,
 ) -> Result<Vec<ExtensionInstallation>, ProductWorkflowError> {
     let persisted = installation_store
@@ -354,7 +354,7 @@ async fn canonicalize_persisted_installation_rows(
 }
 
 async fn remove_retired_internal_installation(
-    installation_store: &Arc<dyn ExtensionInstallationStore>,
+    installation_store: &Arc<dyn ExtensionInstallationStorePort>,
     installation: &ExtensionInstallation,
 ) -> Result<bool, ProductWorkflowError> {
     if installation.extension_id().as_str() != RETIRED_SLACK_USER_EXTENSION_ID {
@@ -384,7 +384,7 @@ impl ExtensionManagementPort {
     pub(crate) fn new(
         filesystem: Arc<dyn RootFilesystem>,
         catalog: AvailableExtensionCatalog,
-        installation_store: Arc<dyn ExtensionInstallationStore>,
+        installation_store: Arc<dyn ExtensionInstallationStorePort>,
         lifecycle_service: Arc<Mutex<ExtensionLifecycleService>>,
         active_extensions: ActiveExtensionPublisher,
         credential_cleanup: Option<Arc<dyn ExtensionCredentialCleanup>>,
@@ -453,7 +453,7 @@ impl ExtensionManagementPort {
 
     /// The durable installation store handle (the generic host hydrates its
     /// working set from it at boot).
-    pub(crate) fn installation_store_handle(&self) -> Arc<dyn ExtensionInstallationStore> {
+    pub(crate) fn installation_store_handle(&self) -> Arc<dyn ExtensionInstallationStorePort> {
         Arc::clone(&self.installation_store)
     }
 
@@ -731,7 +731,7 @@ impl ExtensionManagementPort {
     /// in when constructing `ExtensionManagementPort`. For tests
     /// only — zero bytes shipped in production builds.
     #[cfg(feature = "test-support")]
-    pub(crate) fn installation_store_for_test(&self) -> Arc<dyn ExtensionInstallationStore> {
+    pub(crate) fn installation_store_for_test(&self) -> Arc<dyn ExtensionInstallationStorePort> {
         Arc::clone(&self.installation_store)
     }
 
@@ -2836,7 +2836,7 @@ fn prepare_manifest_migration(
 }
 
 async fn migrate_host_bundled_manifest_hash(
-    installation_store: &Arc<dyn ExtensionInstallationStore>,
+    installation_store: &Arc<dyn ExtensionInstallationStorePort>,
     available: &AvailableExtensionPackage,
     installation: &ExtensionInstallation,
     hash_error: ProductWorkflowError,
@@ -3266,9 +3266,8 @@ mod tests {
     };
     use async_trait::async_trait;
     use ironclaw_extensions::{
-        ExtensionLifecycleEvent, ExtensionLifecycleEventSink, ExtensionLifecycleService,
-        ExtensionManifest, ExtensionRegistry, FilesystemExtensionInstallationStore,
-        SharedExtensionRegistry,
+        ExtensionInstallationStore, ExtensionLifecycleEvent, ExtensionLifecycleEventSink,
+        ExtensionLifecycleService, ExtensionManifest, ExtensionRegistry, SharedExtensionRegistry,
     };
     use ironclaw_filesystem::{
         DiskFilesystem, Fault, FaultInjecting, FilesystemOperation, InMemoryBackend,
@@ -3290,11 +3289,11 @@ mod tests {
 
     mod private_install_tests;
 
-    fn filesystem_installation_store() -> FilesystemExtensionInstallationStore {
+    fn filesystem_installation_store() -> ExtensionInstallationStore {
         let host_ports =
             ironclaw_host_runtime::default_host_port_catalog().expect("default host port catalog");
         let contracts = product_extension_host_api_contract_registry().expect("host API contracts");
-        futures::executor::block_on(FilesystemExtensionInstallationStore::load_at(
+        futures::executor::block_on(ExtensionInstallationStore::load_at(
             Arc::new(InMemoryBackend::new()),
             VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
             host_ports,
@@ -3334,7 +3333,7 @@ mod tests {
             )
             .await
             .expect("persist legacy installation");
-        let store: Arc<dyn ExtensionInstallationStore> = store;
+        let store: Arc<dyn ExtensionInstallationStorePort> = store;
         let operator = UserId::new("operator").expect("operator user id");
 
         let restored = canonicalize_persisted_installation_rows(&store, &operator)
@@ -3762,7 +3761,7 @@ mod tests {
     #[derive(Clone)]
     struct RemovalCleanupProbe {
         package_dir: std::path::PathBuf,
-        installation_store: Arc<FilesystemExtensionInstallationStore>,
+        installation_store: Arc<ExtensionInstallationStore>,
         extension_id: ExtensionId,
         installation_id: ExtensionInstallationId,
     }
@@ -3794,7 +3793,7 @@ mod tests {
         fn set_probe(
             &self,
             storage_root: &std::path::Path,
-            installation_store: Arc<FilesystemExtensionInstallationStore>,
+            installation_store: Arc<ExtensionInstallationStore>,
             extension_id: &str,
         ) {
             *self.probe.lock().expect("cleanup probe lock") = Some(RemovalCleanupProbe {
@@ -4206,7 +4205,7 @@ supports_threads = true
         std::path::PathBuf,
         crate::extension_host::lifecycle::LifecycleFacade,
         Arc<SharedExtensionRegistry>,
-        Arc<FilesystemExtensionInstallationStore>,
+        Arc<ExtensionInstallationStore>,
     ) {
         extension_lifecycle_fixture_with_all_cleanup(
             AvailableExtensionCatalog::from_packages(vec![fixture_connectable_channel_package()]),
@@ -6348,7 +6347,7 @@ supports_threads = true
             Arc::clone(&restored_active_registry),
             Arc::clone(&restored_trust_policy),
         );
-        let installation_store: Arc<dyn ExtensionInstallationStore> = installation_store;
+        let installation_store: Arc<dyn ExtensionInstallationStorePort> = installation_store;
 
         restore_extension_lifecycle_state(
             &restored_catalog,
@@ -6452,7 +6451,7 @@ output_schema_ref = "schemas/search.output.json"
             Arc::clone(&restored_active_registry),
             Arc::clone(&restored_trust_policy),
         );
-        let installation_store_trait: Arc<dyn ExtensionInstallationStore> =
+        let installation_store_trait: Arc<dyn ExtensionInstallationStorePort> =
             installation_store.clone();
         let filesystem: Arc<dyn RootFilesystem> = Arc::new(DiskFilesystem::new());
 
@@ -6552,7 +6551,7 @@ output_schema_ref = "schemas/search.output.json"
             Arc::clone(&restored_active_registry),
             Arc::clone(&restored_trust_policy),
         );
-        let installation_store: Arc<dyn ExtensionInstallationStore> = installation_store;
+        let installation_store: Arc<dyn ExtensionInstallationStorePort> = installation_store;
 
         restore_extension_lifecycle_state(
             &restored_catalog,
@@ -6622,7 +6621,7 @@ output_schema_ref = "schemas/search.output.json"
             Arc::clone(&restored_active_registry),
             Arc::clone(&restored_trust_policy),
         );
-        let installation_store: Arc<dyn ExtensionInstallationStore> = installation_store;
+        let installation_store: Arc<dyn ExtensionInstallationStorePort> = installation_store;
 
         restore_extension_lifecycle_state(
             &AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
@@ -6677,7 +6676,7 @@ output_schema_ref = "schemas/search.output.json"
             Arc::clone(&restored_active_registry),
             Arc::clone(&restored_trust_policy),
         );
-        let installation_store: Arc<dyn ExtensionInstallationStore> = installation_store;
+        let installation_store: Arc<dyn ExtensionInstallationStorePort> = installation_store;
 
         restore_extension_lifecycle_state(
             &changed_catalog,
@@ -6755,7 +6754,7 @@ output_schema_ref = "schemas/search.output.json"
             Arc::clone(&restored_active_registry),
             Arc::clone(&restored_trust_policy),
         );
-        let installation_store: Arc<dyn ExtensionInstallationStore> = installation_store;
+        let installation_store: Arc<dyn ExtensionInstallationStorePort> = installation_store;
         let filesystem: Arc<dyn RootFilesystem> = Arc::new(DiskFilesystem::new());
 
         let error = restore_extension_lifecycle_state(
@@ -7781,7 +7780,7 @@ output_schema_ref = "schemas/search.output.json"
         std::path::PathBuf,
         crate::extension_host::lifecycle::LifecycleFacade,
         Arc<SharedExtensionRegistry>,
-        Arc<FilesystemExtensionInstallationStore>,
+        Arc<ExtensionInstallationStore>,
     ) {
         extension_lifecycle_fixture_with_catalog_and_service(
             AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
@@ -7796,7 +7795,7 @@ output_schema_ref = "schemas/search.output.json"
         std::path::PathBuf,
         crate::extension_host::lifecycle::LifecycleFacade,
         Arc<SharedExtensionRegistry>,
-        Arc<FilesystemExtensionInstallationStore>,
+        Arc<ExtensionInstallationStore>,
     ) {
         extension_lifecycle_fixture_with_catalog_and_service(
             AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
@@ -7809,7 +7808,7 @@ output_schema_ref = "schemas/search.output.json"
         std::path::PathBuf,
         crate::extension_host::lifecycle::LifecycleFacade,
         Arc<SharedExtensionRegistry>,
-        Arc<FilesystemExtensionInstallationStore>,
+        Arc<ExtensionInstallationStore>,
     ) {
         extension_lifecycle_fixture_with_catalog_and_service(
             AvailableExtensionCatalog::from_first_party_assets()
@@ -8516,7 +8515,7 @@ output_schema_ref = "schemas/search.output.json"
         std::path::PathBuf,
         Arc<ExtensionManagementPort>,
         Arc<SharedExtensionRegistry>,
-        Arc<FilesystemExtensionInstallationStore>,
+        Arc<ExtensionInstallationStore>,
     ) {
         let (dir, storage_root, extension_management, active_registry, installation_store, _) =
             extension_management_port_fixture_with_catalog_service_and_trust(
@@ -8541,7 +8540,7 @@ output_schema_ref = "schemas/search.output.json"
         std::path::PathBuf,
         Arc<ExtensionManagementPort>,
         Arc<SharedExtensionRegistry>,
-        Arc<FilesystemExtensionInstallationStore>,
+        Arc<ExtensionInstallationStore>,
     ) {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
@@ -8724,7 +8723,7 @@ output_schema_ref = "schemas/search.output.json"
 
     async fn assert_removal_target_preserved(
         storage_root: &std::path::Path,
-        installation_store: &FilesystemExtensionInstallationStore,
+        installation_store: &ExtensionInstallationStore,
         extension_id: &str,
     ) {
         assert!(
@@ -8761,7 +8760,7 @@ output_schema_ref = "schemas/search.output.json"
         std::path::PathBuf,
         Arc<ExtensionManagementPort>,
         Arc<SharedExtensionRegistry>,
-        Arc<FilesystemExtensionInstallationStore>,
+        Arc<ExtensionInstallationStore>,
         Arc<HostTrustPolicy>,
     ) {
         let trust_policy = test_extension_trust_policy();
@@ -8790,7 +8789,7 @@ output_schema_ref = "schemas/search.output.json"
         std::path::PathBuf,
         Arc<ExtensionManagementPort>,
         Arc<SharedExtensionRegistry>,
-        Arc<FilesystemExtensionInstallationStore>,
+        Arc<ExtensionInstallationStore>,
     ) {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
@@ -8849,7 +8848,7 @@ output_schema_ref = "schemas/search.output.json"
         std::path::PathBuf,
         Arc<ExtensionManagementPort>,
         Arc<SharedExtensionRegistry>,
-        Arc<FilesystemExtensionInstallationStore>,
+        Arc<ExtensionInstallationStore>,
     ) {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
@@ -8949,7 +8948,7 @@ output_schema_ref = "schemas/search.output.json"
         std::path::PathBuf,
         crate::extension_host::lifecycle::LifecycleFacade,
         Arc<SharedExtensionRegistry>,
-        Arc<FilesystemExtensionInstallationStore>,
+        Arc<ExtensionInstallationStore>,
     ) {
         extension_lifecycle_fixture_with_catalog_service_and_cleanup(
             catalog,
@@ -8967,7 +8966,7 @@ output_schema_ref = "schemas/search.output.json"
         std::path::PathBuf,
         crate::extension_host::lifecycle::LifecycleFacade,
         Arc<SharedExtensionRegistry>,
-        Arc<FilesystemExtensionInstallationStore>,
+        Arc<ExtensionInstallationStore>,
     ) {
         extension_lifecycle_fixture_with_all_cleanup(
             catalog,
@@ -8989,7 +8988,7 @@ output_schema_ref = "schemas/search.output.json"
         std::path::PathBuf,
         crate::extension_host::lifecycle::LifecycleFacade,
         Arc<SharedExtensionRegistry>,
-        Arc<FilesystemExtensionInstallationStore>,
+        Arc<ExtensionInstallationStore>,
     ) {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
@@ -9128,7 +9127,7 @@ output_schema_ref = "schemas/search.output.json"
         let active_registry = Arc::new(SharedExtensionRegistry::new(initial_active_registry));
         let trust_policy = test_extension_trust_policy();
         let failing_store = Arc::new(failing_store);
-        let installation_store: Arc<dyn ExtensionInstallationStore> = failing_store.clone();
+        let installation_store: Arc<dyn ExtensionInstallationStorePort> = failing_store.clone();
         let port = ExtensionManagementPort::new(
             root_filesystem,
             AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
@@ -9147,7 +9146,7 @@ output_schema_ref = "schemas/search.output.json"
         tempfile::TempDir,
         ExtensionManagementPort,
         Arc<SharedExtensionRegistry>,
-        Arc<FilesystemExtensionInstallationStore>,
+        Arc<ExtensionInstallationStore>,
         Arc<HostTrustPolicy>,
     ) {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -9173,7 +9172,7 @@ output_schema_ref = "schemas/search.output.json"
         let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
         let trust_policy = test_extension_trust_policy();
         let installation_store = Arc::new(filesystem_installation_store());
-        let extension_installation_store: Arc<dyn ExtensionInstallationStore> =
+        let extension_installation_store: Arc<dyn ExtensionInstallationStorePort> =
             installation_store.clone();
         let port = ExtensionManagementPort::new(
             root_filesystem,
@@ -9210,7 +9209,7 @@ output_schema_ref = "schemas/search.output.json"
     }
 
     struct DeleteInstallationFailingStore {
-        inner: FilesystemExtensionInstallationStore,
+        inner: ExtensionInstallationStore,
         fail_manifest_delete: bool,
         fail_get_installation: bool,
         mismatched_get_installation: bool,
@@ -9255,7 +9254,7 @@ output_schema_ref = "schemas/search.output.json"
     }
 
     #[async_trait]
-    impl ExtensionInstallationStore for DeleteInstallationFailingStore {
+    impl ExtensionInstallationStorePort for DeleteInstallationFailingStore {
         async fn list_manifests(
             &self,
         ) -> Result<Vec<ExtensionManifestRecord>, ExtensionInstallationError> {
@@ -9371,7 +9370,7 @@ output_schema_ref = "schemas/search.output.json"
         active_registry: &SharedExtensionRegistry,
         installation_store: &S,
     ) where
-        S: ExtensionInstallationStore + ?Sized,
+        S: ExtensionInstallationStorePort + ?Sized,
     {
         let extension_id = ExtensionId::new("fixture").expect("valid extension id");
         let installation_id = ExtensionInstallationId::new("fixture").expect("valid installation");

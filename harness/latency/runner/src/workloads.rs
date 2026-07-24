@@ -173,8 +173,8 @@ fn timestamp(seconds: i64) -> Result<DateTime<Utc>, Box<dyn std::error::Error + 
 }
 
 pub(super) async fn control_plane_snapshot(
-    approval_requests: Arc<dyn ApprovalRequestStore>,
-    secret_store: Arc<dyn SecretStore>,
+    approval_requests: Arc<dyn ApprovalRequestStorePort>,
+    secret_store: Arc<dyn SecretStorePort>,
     resource_governor: Arc<dyn ResourceGovernor>,
     backend: BackendName,
     postgres_pool_size: Option<usize>,

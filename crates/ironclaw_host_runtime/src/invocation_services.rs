@@ -25,7 +25,7 @@ use ironclaw_host_api::{
         DeploymentMode, FilesystemBackendKind, NetworkMode, ProcessBackendKind, SecretMode,
     },
 };
-use ironclaw_secrets::SecretStore;
+use ironclaw_secrets::SecretStorePort;
 use thiserror::Error;
 
 use crate::{
@@ -53,7 +53,7 @@ pub struct InvocationServices {
     /// network egress.
     pub runtime_secret_material_stager: Option<RuntimeSecretMaterialStager>,
     pub process: Arc<dyn RuntimeProcessPort>,
-    pub secret_store: Option<Arc<dyn SecretStore>>,
+    pub secret_store: Option<Arc<dyn SecretStorePort>>,
     pub audit_sink: Option<Arc<dyn AuditSink>>,
     pub unsafe_raw_diagnostics_allowed: bool,
     /// Operator-configured post-edit check appended to successful
@@ -184,7 +184,7 @@ pub struct ConfiguredInvocationServicesResolver {
     runtime_secret_material_stager: Option<RuntimeSecretMaterialStager>,
     process: Arc<dyn RuntimeProcessPort>,
     tenant_sandbox_process: Option<Arc<dyn RuntimeProcessPort>>,
-    secret_store: Option<Arc<dyn SecretStore>>,
+    secret_store: Option<Arc<dyn SecretStorePort>>,
     audit_sink: Option<Arc<dyn AuditSink>>,
     post_edit_check: Option<PostEditCheckConfig>,
 }
@@ -194,7 +194,7 @@ impl ConfiguredInvocationServicesResolver {
         filesystem: Arc<dyn RootFilesystem>,
         runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
         process: Arc<dyn RuntimeProcessPort>,
-        secret_store: Option<Arc<dyn SecretStore>>,
+        secret_store: Option<Arc<dyn SecretStorePort>>,
     ) -> Self {
         Self {
             filesystem,

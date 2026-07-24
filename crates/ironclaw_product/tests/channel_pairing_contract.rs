@@ -20,7 +20,7 @@ use ironclaw_product::{
     ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ChannelPairingDirectTargetStore,
     ChannelPairingIdentityBindOutcome, ChannelPairingIdentityStore,
     ChannelPairingInstallationSource, ChannelPairingService, ChannelPairingServiceDependencies,
-    ChannelPairingTemplateValues, ExtensionAccountSetupDescriptor, FilesystemChannelPairingStore,
+    ChannelPairingStore, ChannelPairingTemplateValues, ExtensionAccountSetupDescriptor,
     ProductActorUserResolutionRequest, ProductActorUserResolver, ProductAuthContinuationDispatcher,
     RebornChannelConnectStrategy,
 };
@@ -436,7 +436,7 @@ fn build_service_with_continuation(
         None,
         descriptor,
         ChannelPairingServiceDependencies {
-            store: Arc::new(FilesystemChannelPairingStore::new(
+            store: Arc::new(ChannelPairingStore::new(
                 filesystem,
                 tenant_id,
                 UserId::new("operator").expect("operator id"),

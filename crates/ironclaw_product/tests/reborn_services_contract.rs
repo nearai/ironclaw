@@ -16,10 +16,10 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Utc;
 use ironclaw_approvals::{
     AutoApproveSettingInput, AutoApproveSettingKey, AutoApproveSettingRecord,
-    AutoApproveSettingStore, CapabilityPermissionStoreError, PersistentApprovalAction,
+    AutoApproveSettingStorePort, CapabilityPermissionStoreError, PersistentApprovalAction,
     PersistentApprovalPolicy, PersistentApprovalPolicyError, PersistentApprovalPolicyInput,
-    PersistentApprovalPolicyKey, PersistentApprovalPolicyStore, ToolPermissionOverride,
-    ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStore,
+    PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort, ToolPermissionOverride,
+    ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStorePort,
 };
 use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{
@@ -10463,7 +10463,7 @@ impl RebornOperatorToolCatalog for StaticOperatorToolCatalogForTest {
 struct FailingAllowPersistentApprovalPolicyStore;
 
 #[async_trait]
-impl PersistentApprovalPolicyStore for FailingAllowPersistentApprovalPolicyStore {
+impl PersistentApprovalPolicyStorePort for FailingAllowPersistentApprovalPolicyStore {
     async fn allow(
         &self,
         _input: PersistentApprovalPolicyInput,
@@ -10508,7 +10508,7 @@ impl RecordingAutoApproveSettingStore {
 }
 
 #[async_trait]
-impl AutoApproveSettingStore for RecordingAutoApproveSettingStore {
+impl AutoApproveSettingStorePort for RecordingAutoApproveSettingStore {
     async fn set(
         &self,
         input: AutoApproveSettingInput,
@@ -10537,9 +10537,9 @@ type OperatorConfigServices = RebornServices<OperatorConfigAutoApproveInvoker>;
 
 #[derive(Clone)]
 struct OperatorConfigAutoApproveInvoker {
-    auto_approve: Arc<dyn AutoApproveSettingStore>,
-    overrides: Arc<dyn ToolPermissionOverrideStore>,
-    persistent_policies: Arc<dyn PersistentApprovalPolicyStore>,
+    auto_approve: Arc<dyn AutoApproveSettingStorePort>,
+    overrides: Arc<dyn ToolPermissionOverrideStorePort>,
+    persistent_policies: Arc<dyn PersistentApprovalPolicyStorePort>,
     tools: Arc<Vec<RebornOperatorToolInfo>>,
 }
 
@@ -10738,22 +10738,18 @@ fn services_with_operator_approval_config() -> OperatorConfigServices {
 
 fn services_with_operator_approval_config_parts() -> (
     OperatorConfigServices,
-    Arc<
-        ironclaw_approvals::FilesystemPersistentApprovalPolicyStore<
-            ironclaw_filesystem::InMemoryBackend,
-        >,
-    >,
+    Arc<ironclaw_approvals::PersistentApprovalPolicyStore<ironclaw_filesystem::InMemoryBackend>>,
 ) {
     let persistent_policies = Arc::new(
         ironclaw_approvals::test_support::in_memory_backed_persistent_approval_policy_store(),
     );
-    let policy_store: Arc<dyn PersistentApprovalPolicyStore> = persistent_policies.clone();
+    let policy_store: Arc<dyn PersistentApprovalPolicyStorePort> = persistent_policies.clone();
     let services = services_with_operator_approval_config_policy_store(policy_store);
     (services, persistent_policies)
 }
 
 fn services_with_operator_approval_config_policy_store(
-    persistent_policies: Arc<dyn PersistentApprovalPolicyStore>,
+    persistent_policies: Arc<dyn PersistentApprovalPolicyStorePort>,
 ) -> OperatorConfigServices {
     services_with_operator_approval_config_stores(
         Arc::new(ironclaw_approvals::test_support::in_memory_backed_auto_approve_setting_store()),
@@ -10762,10 +10758,10 @@ fn services_with_operator_approval_config_policy_store(
 }
 
 fn services_with_operator_approval_config_stores(
-    auto_approve: Arc<dyn AutoApproveSettingStore>,
-    persistent_policies: Arc<dyn PersistentApprovalPolicyStore>,
+    auto_approve: Arc<dyn AutoApproveSettingStorePort>,
+    persistent_policies: Arc<dyn PersistentApprovalPolicyStorePort>,
 ) -> OperatorConfigServices {
-    let overrides: Arc<dyn ToolPermissionOverrideStore> = Arc::new(
+    let overrides: Arc<dyn ToolPermissionOverrideStorePort> = Arc::new(
         ironclaw_approvals::test_support::in_memory_backed_capability_permission_override_store(),
     );
     let tools = Arc::new(operator_config_test_tools());

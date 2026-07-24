@@ -21,7 +21,7 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode};
 use chrono::Utc;
-use ironclaw_extensions::{ExtensionInstallation, ExtensionInstallationStore, InstallationOwner};
+use ironclaw_extensions::{ExtensionInstallation, InstallationOwner};
 use ironclaw_host_api::ProductSurfaceCaller;
 use ironclaw_host_api::{AgentId, TenantId, UserId};
 use ironclaw_reborn_composition::test_support::BudgetTestGateway;

@@ -29,7 +29,8 @@ use crate::{
 use async_trait::async_trait;
 use ironclaw_host_api::UserId;
 use ironclaw_outbound::{
-    CommunicationPreferenceRepository, DeliveredGateRouteStore, OutboundError, OutboundStateStore,
+    CommunicationPreferenceRepository, DeliveredGateRouteStore, OutboundError,
+    OutboundStateStorePort,
 };
 use ironclaw_turns::{GateRef, TurnCoordinator, TurnRunId, TurnScope};
 
@@ -101,7 +102,7 @@ pub struct RunDeliveryServices {
     pub binding_service: Arc<dyn ConversationBindingService>,
     pub thread_service: Arc<dyn ironclaw_threads::SessionThreadService>,
     pub turn_coordinator: Arc<dyn TurnCoordinator>,
-    pub outbound_store: Arc<dyn OutboundStateStore>,
+    pub outbound_store: Arc<dyn OutboundStateStorePort>,
     pub route_store: Arc<dyn DeliveredGateRouteStore>,
     pub communication_preferences: Arc<dyn CommunicationPreferenceRepository>,
     /// The coordinator every send goes through (OUT-1: none bypasses).

@@ -838,7 +838,7 @@ where
         }
         validate_bound_update_authority(&account, binding)?;
         // Capture previous secret handles before overwriting so we can delete
-        // orphaned material from SecretStore after a successful write. New
+        // orphaned material from SecretStorePort after a successful write. New
         // tokens are written first; a write failure leaves the old handles
         // still referenced by the on-disk record.
         let previous_access_secret = account.access_secret.clone();
@@ -847,7 +847,7 @@ where
         self.write_account(&account, CasExpectation::Version(version))
             .await?;
         // Best-effort purge of replaced handles. Failures are non-fatal:
-        // orphans in SecretStore are recoverable; errors must not propagate to
+        // orphans in SecretStorePort are recoverable; errors must not propagate to
         // the caller.
         if let Some(h) = &previous_access_secret
             && previous_access_secret.as_ref() != account.access_secret.as_ref()

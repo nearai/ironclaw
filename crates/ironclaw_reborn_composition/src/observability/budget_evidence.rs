@@ -5,13 +5,13 @@ use ironclaw_runner::loop_exit_applier::ResourceGateEvidenceStore;
 use ironclaw_turns::{LoopGateRef, TurnError, TurnScope};
 
 pub(crate) fn budget_gate_evidence(
-    budget_gate_store: Arc<dyn ironclaw_resources::BudgetGateStore>,
+    budget_gate_store: Arc<dyn ironclaw_resources::BudgetGateStorePort>,
 ) -> Arc<dyn ResourceGateEvidenceStore> {
     Arc::new(BudgetGateEvidence { budget_gate_store })
 }
 
 struct BudgetGateEvidence {
-    budget_gate_store: Arc<dyn ironclaw_resources::BudgetGateStore>,
+    budget_gate_store: Arc<dyn ironclaw_resources::BudgetGateStorePort>,
 }
 
 #[async_trait]

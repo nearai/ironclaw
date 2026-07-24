@@ -152,7 +152,7 @@ Step 6 is an either/or branch (assistant reply path OR capability path), not bot
 
 **Subagent today:** `spawn_subagent` runs inside CapabilityStage. Blocking mode emits `CapabilityOutcome::AwaitDependentRun` (`host.rs:1414`); the parent blocks at `AwaitDependentRunGateStage` (`executor/gates.rs:131`). Background mode is wired in the observer (`completion_observer.rs:180–183` has a Background branch) but the spawn port rejects the request at ingress. The Background branch calls `write_terminal_result` (which internally calls `update_parent_result_reference`) and pushes to `background_deliveries` — it skips `resume_parent`.
 
-**Durability reality check (load-bearing):** `write_terminal_result` → `update_capability_result` writes to a `Mutex<HashMap>` in both production (`product_live_adapters.rs:281`) and local-dev (`local_dev.rs:524`). It is **RAM only — not durable.** `BoundedSubagentGateResolutionStore` (`gate_resolution.rs:38`) is likewise `Mutex`+`HashMap`, lost on restart; subagent goals now use `FilesystemSubagentGoalStore`. **Any async-poll background path requires a durable result/gate backend first — this is a hard prerequisite, not a follow-up.**
+**Durability reality check (load-bearing):** `write_terminal_result` → `update_capability_result` writes to a `Mutex<HashMap>` in both production (`product_live_adapters.rs:281`) and local-dev (`local_dev.rs:524`). It is **RAM only — not durable.** `BoundedSubagentGateResolutionStore` (`gate_resolution.rs:38`) is likewise `Mutex`+`HashMap`, lost on restart; subagent goals now use `SubagentGoalStore`. **Any async-poll background path requires a durable result/gate backend first — this is a hard prerequisite, not a follow-up.**
 
 ## Proposed solution
 
@@ -229,7 +229,7 @@ Browser-side: render runs grouped by `tree_root_run_id`, indented by `subagent_d
 
 These block Responsibility 2 and reliable background mode. They are **not** optional follow-ons:
 
-- `BoundedSubagentGateResolutionStore` moves to a durable backend and subagent goals remain on `FilesystemSubagentGoalStore`. Restart between child terminal and parent observer dispatch no longer strands either blocking or background parents.
+- `BoundedSubagentGateResolutionStore` moves to a durable backend and subagent goals remain on `SubagentGoalStore`. Restart between child terminal and parent observer dispatch no longer strands either blocking or background parents.
 - The capability result store (`update_capability_result`, today a `Mutex<HashMap>`) gains a durable backend so Responsibility 2's `drain_settled` can read results written after a restart.
 - `RestartReconciler` replays missed background settlement events on boot.
 - Idempotency ledger keyed on `(run_id, child_run_id, terminal_kind)` so post-cleanup replay is a no-op.

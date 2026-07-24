@@ -434,9 +434,9 @@ pub use installations::{
     ExtensionCredentialBinding, ExtensionCredentialHandle, ExtensionHealthMessage,
     ExtensionHealthSnapshot, ExtensionHealthStatus, ExtensionInstallation,
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationPersistedParts,
-    ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestRef,
-    ExtensionRemovalChannelId, ExtensionRemovalCleanupAdapterId, ExtensionRemovalCleanupBinding,
-    ExtensionRemovalCleanupRequirement, FilesystemExtensionInstallationStore, InstallationOwner,
+    ExtensionInstallationStore, ExtensionInstallationStorePort, ExtensionManifestRecord,
+    ExtensionManifestRef, ExtensionRemovalChannelId, ExtensionRemovalCleanupAdapterId,
+    ExtensionRemovalCleanupBinding, ExtensionRemovalCleanupRequirement, InstallationOwner,
     ManifestHash,
 };
 pub use lifecycle::{

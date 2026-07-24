@@ -25,7 +25,7 @@ use std::sync::{Arc, RwLock, Weak};
 use async_trait::async_trait;
 use ironclaw_extension_host::SnapshotWatch;
 use ironclaw_extension_host::active::ActiveExtension;
-use ironclaw_extensions::ExtensionInstallationStore;
+use ironclaw_extensions::ExtensionInstallationStorePort;
 use ironclaw_host_api::{AgentId, ExtensionId, ProjectId, ResourceScope, TenantId, UserId};
 use ironclaw_outbound::{OutboundDeliveryTargetProvider, OutboundError, RunFinalReplyDestination};
 use ironclaw_product::{
@@ -41,8 +41,8 @@ use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnScope};
 
 use crate::extension_host::admin_configuration::ComposedExtensionAdminConfigurationResolver;
 use crate::extension_host::channel_dm_targets::{
-    ChannelDmTargetRecord, DM_TARGET_CONVERSATION_ID_KEY, DM_TARGET_SPACE_ID_KEY,
-    FilesystemChannelDmTargetStore,
+    ChannelDmTargetRecord, ChannelDmTargetStore, DM_TARGET_CONVERSATION_ID_KEY,
+    DM_TARGET_SPACE_ID_KEY,
 };
 use crate::extension_host::channel_host::GenericChannelHostAssembly;
 use crate::extension_host::channel_subject_routes::{
@@ -260,8 +260,8 @@ pub(crate) struct GenericChannelOutboundTargetDeps {
     /// Durable caller-membership authority. The active snapshot and
     /// administrator configuration are tenant-global and therefore cannot
     /// authorize a requesting user's personal target access.
-    pub(crate) installation_store: Arc<dyn ExtensionInstallationStore>,
-    pub(crate) dm_targets: Arc<FilesystemChannelDmTargetStore>,
+    pub(crate) installation_store: Arc<dyn ExtensionInstallationStorePort>,
+    pub(crate) dm_targets: Arc<ChannelDmTargetStore>,
     pub(crate) identity: ChannelOutboundTargetIdentity,
 }
 

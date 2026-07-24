@@ -89,8 +89,8 @@ fn binder_services(
 ) -> HostRuntimeServices<
     DiskFilesystem,
     InMemoryResourceGovernor,
-    ironclaw_processes::FilesystemProcessStore<ironclaw_filesystem::InMemoryBackend>,
-    ironclaw_processes::FilesystemProcessResultStore<ironclaw_filesystem::InMemoryBackend>,
+    ironclaw_processes::ProcessStore<ironclaw_filesystem::InMemoryBackend>,
+    ironclaw_processes::ProcessResultStore<ironclaw_filesystem::InMemoryBackend>,
 > {
     HostRuntimeServices::new(
         Arc::new(ExtensionRegistry::new()),

@@ -108,7 +108,7 @@ fn trace_host_factory_latency_error<E: ?Sized>(
 }
 
 use ironclaw_turns::{
-    CheckpointStateStore, LoopCheckpointStateRef, LoopCheckpointStore, RunProfileId,
+    CheckpointStateStorePort, LoopCheckpointStateRef, LoopCheckpointStore, RunProfileId,
     TurnCheckpointId, TurnError, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
     TurnStateStore, TurnStatus,
     run_profile::{
@@ -989,7 +989,7 @@ where
     thread_scope: ThreadScope,
     model_gateway: Arc<G>,
     model_route_resolver: Option<Arc<dyn ModelRouteResolver>>,
-    checkpoint_state_store: Arc<dyn CheckpointStateStore>,
+    checkpoint_state_store: Arc<dyn CheckpointStateStorePort>,
     loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     model_accountant: Arc<dyn LoopModelBudgetAccountant>,
@@ -1084,7 +1084,7 @@ where
         thread_service: Arc<S>,
         thread_scope: ThreadScope,
         model_gateway: Arc<G>,
-        checkpoint_state_store: Arc<dyn CheckpointStateStore>,
+        checkpoint_state_store: Arc<dyn CheckpointStateStorePort>,
         turn_state_store: Arc<dyn TurnStateStore>,
         loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
@@ -2785,11 +2785,11 @@ mod tests {
 
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-    use ironclaw_loop_host::FilesystemCheckpointStateStore;
+    use ironclaw_loop_host::CheckpointStateStore;
     use ironclaw_turns::test_support::in_memory_turn_state_store;
     use ironclaw_turns::{
-        FilesystemTurnStateRowStore, InMemoryRunProfileResolver, PutLoopCheckpointRequest,
-        RunProfileResolver, TurnActor, TurnCheckpointId, TurnId, TurnRunId, TurnScope,
+        InMemoryRunProfileResolver, PutLoopCheckpointRequest, RunProfileResolver, TurnActor,
+        TurnCheckpointId, TurnId, TurnRunId, TurnScope, TurnStateRowStore,
         run_profile::{
             AgentLoopHostErrorKind, CheckpointSchemaId, InMemoryLoopHostMilestoneSink,
             LoadCheckpointPayloadRequest, LoopCheckpointKind, LoopCheckpointRequest,
@@ -2867,8 +2867,8 @@ mod tests {
         context: LoopRunContext,
     ) -> (
         HostManagedLoopCheckpointPort,
-        Arc<FilesystemCheckpointStateStore<InMemoryBackend>>,
-        Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
+        Arc<CheckpointStateStore<InMemoryBackend>>,
+        Arc<TurnStateRowStore<InMemoryBackend>>,
     ) {
         let state_store = in_memory_checkpoint_state_store();
         let checkpoint_store = Arc::new(in_memory_turn_state_store());

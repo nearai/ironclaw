@@ -1,5 +1,5 @@
 //! Durable rehydration, row-collection reads, legacy-blob migration, and the
-//! durable-read query paths for [`FilesystemTurnStateRowStore`]. Moved verbatim
+//! durable-read query paths for [`TurnStateRowStore`]. Moved verbatim
 //! from the module root during the #6263 decomposition; behavior is unchanged.
 
 use std::sync::Arc;
@@ -11,7 +11,7 @@ use ironclaw_filesystem::{
 use ironclaw_host_api::{ResourceScope, ScopedPath, UserId};
 use serde::de::DeserializeOwned;
 
-use crate::filesystem_store::{io as legacy_blob_io, projection};
+use crate::turn_state_row_store::{io as legacy_blob_io, projection};
 use crate::{
     EventCursor, GetLoopCheckpointRequest, GetRunStateRequest, LoopCheckpointRecord,
     MAX_TURN_EVENT_PROJECTION_LIMIT, TurnError, TurnEventPage, TurnLifecycleEvent,
@@ -20,7 +20,7 @@ use crate::{
 };
 
 use super::{
-    FilesystemTurnStateRowStore, RowCollection,
+    RowCollection, TurnStateRowStore,
     delta::{
         RowSnapshotState, RowStoreMeta, active_lock_record_key, event_record_key, keyed_records,
         row_store_hot_cache_snapshot, snapshot_delta,
@@ -35,7 +35,7 @@ use super::{
 
 const ROW_COLLECTION_READ_CONCURRENCY: usize = 32;
 
-impl<F> FilesystemTurnStateRowStore<F>
+impl<F> TurnStateRowStore<F>
 where
     F: RootFilesystem,
 {

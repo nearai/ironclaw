@@ -18,7 +18,7 @@ pub(super) enum ConfigDestination {
     /// A literal value written into `config.toml`.
     ConfigToml,
     /// A secret value written into the encrypted secret store.
-    SecretStore,
+    SecretStorePort,
     /// The WebChat v2 bearer token file (`<reborn_home>/webui-token`) —
     /// rotate-only, no arbitrary value accepted.
     TokenFile,
@@ -70,7 +70,7 @@ impl ConfigKey {
 
     pub(super) fn destination(&self) -> ConfigDestination {
         match self {
-            Self::LlmApiKey { .. } | Self::GoogleClientSecret => ConfigDestination::SecretStore,
+            Self::LlmApiKey { .. } | Self::GoogleClientSecret => ConfigDestination::SecretStorePort,
             Self::GoogleClientId | Self::GoogleRedirectUri | Self::SlackEnabled => {
                 ConfigDestination::ConfigToml
             }
@@ -81,7 +81,7 @@ impl ConfigKey {
     /// `true` when input should be prompted for with terminal echo
     /// suppressed rather than taken as a plain CLI argument default.
     pub(super) fn is_secret_prompted(&self) -> bool {
-        matches!(self.destination(), ConfigDestination::SecretStore)
+        matches!(self.destination(), ConfigDestination::SecretStorePort)
     }
 }
 
@@ -247,11 +247,11 @@ mod tests {
                 provider_id: "openai".to_string()
             }
             .destination(),
-            ConfigDestination::SecretStore
+            ConfigDestination::SecretStorePort
         );
         assert_eq!(
             ConfigKey::GoogleClientSecret.destination(),
-            ConfigDestination::SecretStore
+            ConfigDestination::SecretStorePort
         );
         assert_eq!(
             ConfigKey::GoogleClientId.destination(),

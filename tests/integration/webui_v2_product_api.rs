@@ -23,8 +23,7 @@ use chrono::{DateTime, Utc};
 use ironclaw_events::InMemoryDurableEventLog;
 use ironclaw_extensions::{
     CapabilityProviderHostApiContract, ExtensionInstallation, ExtensionInstallationId,
-    ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestRef,
-    HostApiContractRegistry, InstallationOwner,
+    ExtensionManifestRecord, ExtensionManifestRef, HostApiContractRegistry, InstallationOwner,
 };
 use ironclaw_filesystem::{CompositeRootFilesystem, LibSqlRootFilesystem};
 use ironclaw_host_api::{

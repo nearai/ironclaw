@@ -32,12 +32,12 @@ use axum::http::{Request, StatusCode};
 use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
 use ironclaw_extension_host::{
-    AdminConfigurationIdempotencyKey, AdminConfigurationService, AdminConfigurationSubmittedValue,
-    FilesystemAdminConfigurationStore,
+    AdminConfigurationIdempotencyKey, AdminConfigurationService, AdminConfigurationStore,
+    AdminConfigurationSubmittedValue,
 };
 use ironclaw_extensions::{
     ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStore,
-    ExtensionManifestRecord, ExtensionManifestRef, FilesystemExtensionInstallationStore,
+    ExtensionInstallationStorePort, ExtensionManifestRecord, ExtensionManifestRef,
     InstallationOwner, ManifestSource,
 };
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
@@ -48,7 +48,7 @@ use ironclaw_host_api::{
 use ironclaw_outbound::test_support::in_memory_backed_outbound_state_store;
 use ironclaw_outbound::{
     CommunicationPreferenceRecord, CommunicationPreferenceRepository, DeliveredGateRouteStore,
-    DeliveryDefaultScope, OutboundStateStore, WriteCommunicationPreferenceRequest,
+    DeliveryDefaultScope, OutboundStateStorePort, WriteCommunicationPreferenceRequest,
 };
 use ironclaw_product::{
     AdapterInstallationId, AuthRequirement, AuthResolutionPayload, AuthResolutionResult,
@@ -68,7 +68,7 @@ use ironclaw_product::{
     ResolveAuthInteractionResponse, ResolveBindingRequest, ResolvedBinding, RunDeliveryEventRouter,
     RunDeliveryServices, TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
 };
-use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore};
+use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStorePort};
 use ironclaw_slack_extension::{
     SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID, SlackPreferenceTargetCodec,
 };
@@ -240,12 +240,11 @@ struct Harness {
     admin_configuration_resolver: Arc<ComposedExtensionAdminConfigurationResolver>,
     /// Durable caller-membership authority used by the production outbound
     /// target provider. The active host snapshot remains deployment-global.
-    installation_store: Arc<FilesystemExtensionInstallationStore>,
+    installation_store: Arc<ExtensionInstallationStore>,
     /// The harness's outbound state store — the SAME allocation the
     /// assembly's delivery deps read communication preferences from, so
     /// tests can seed the creator's personal preference.
-    outbound:
-        Arc<ironclaw_outbound::FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    outbound: Arc<ironclaw_outbound::OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     /// Keeps the harness extension host (and its published snapshot) alive.
     _host: Arc<ExtensionHost>,
     /// Keeps the assembly (and its reconcile loop + registrations) alive.
@@ -462,7 +461,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let outbound =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
-    let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
+    let outbound_store: Arc<dyn OutboundStateStorePort> = outbound.clone();
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound.clone();
     let egress = RecordingEgress::default();
 
@@ -472,7 +471,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         host.snapshot_watch(),
         Arc::new(ironclaw_extension_host::DeploymentChannelRegistry::default()),
         Arc::new(
-            crate::extension_host::reply_contexts::FilesystemReplyContextStore::new(
+            crate::extension_host::reply_contexts::ReplyContextStore::new(
                 Arc::new(InMemoryBackend::new()),
                 TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
                 UserId::new(USER).expect("user"),       // safety: static test user id is valid.
@@ -601,7 +600,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
 
 async fn channel_test_installation_store(
     include_telegram: bool,
-) -> Arc<FilesystemExtensionInstallationStore> {
+) -> Arc<ExtensionInstallationStore> {
     let store = Arc::new(crate::extension_host::filesystem_installation_store_for_test().await);
     let members = InstallationOwner::users(BTreeSet::from([
         UserId::new(USER).expect("Alice user"),
@@ -668,10 +667,10 @@ async fn configured_admin_configuration_resolver()
         invocation_id: InvocationId::new(),
     };
     let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
-    let secrets: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let secrets: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let admin = Arc::new(
         AdminConfigurationService::new(
-            FilesystemAdminConfigurationStore::new(Arc::new(ScopedFilesystem::new(
+            AdminConfigurationStore::new(Arc::new(ScopedFilesystem::new(
                 filesystem,
                 crate::invocation_mount_view,
             ))),
@@ -1209,7 +1208,7 @@ struct TriggeredDeliveryFixture {
 }
 
 async fn triggered_delivery_fixture(
-    outbound_store: Arc<dyn OutboundStateStore>,
+    outbound_store: Arc<dyn OutboundStateStorePort>,
 ) -> TriggeredDeliveryFixture {
     let host = channel_test_extension_host(false).await;
     let driver_egress = RecordingEgress::default();
@@ -1385,7 +1384,7 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
     );
     let coordinator: Arc<dyn TurnCoordinator> = Arc::new(ScriptedTriggerCoordinator::new(template));
 
-    let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
+    let outbound_store: Arc<dyn OutboundStateStorePort> = outbound.clone();
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
     let fixture = triggered_delivery_fixture(Arc::clone(&outbound_store)).await;
     let driver_egress = fixture.driver_egress.clone();
@@ -1624,7 +1623,7 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
     let auth_provider = Arc::new(FakeAuthChallengeProvider::default());
     let auth_challenges: Arc<dyn AuthChallengeProvider> = auth_provider.clone();
 
-    let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
+    let outbound_store: Arc<dyn OutboundStateStorePort> = outbound.clone();
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
     let route_store: Arc<dyn DeliveredGateRouteStore> =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
@@ -1751,7 +1750,7 @@ async fn triggered_auth_prompt_oauth_target_not_dm_suppresses_setup_link_and_can
     let auth_provider = Arc::new(FakeAuthChallengeProvider::default());
     let auth_challenges: Arc<dyn AuthChallengeProvider> = auth_provider.clone();
 
-    let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
+    let outbound_store: Arc<dyn OutboundStateStorePort> = outbound.clone();
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
     let route_store: Arc<dyn DeliveredGateRouteStore> =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
@@ -4199,9 +4198,7 @@ async fn slack_approval_then_auth_resume_completes_without_second_approval() {
 
 // ─── Generic outbound-delivery targets + generic triggered hook (P6 c-rest) ─
 
-use crate::extension_host::channel_dm_targets::{
-    FilesystemChannelDmTargetStore, dm_target_payload,
-};
+use crate::extension_host::channel_dm_targets::{ChannelDmTargetStore, dm_target_payload};
 use crate::extension_host::channel_outbound_targets::{
     ChannelOutboundTargetIdentity, GenericChannelOutboundTargetDeps,
     GenericChannelOutboundTargetProvider,
@@ -4217,8 +4214,8 @@ const RETIRED_INSTALLATION: &str = "retired-setup-install";
 /// A shared channel routed to the operator through `slack_subject_routes`.
 const ROUTED_CHANNEL: &str = "C777";
 
-fn generic_dm_target_store() -> Arc<FilesystemChannelDmTargetStore> {
-    Arc::new(FilesystemChannelDmTargetStore::new(
+fn generic_dm_target_store() -> Arc<ChannelDmTargetStore> {
+    Arc::new(ChannelDmTargetStore::new(
         Arc::new(InMemoryBackend::new()),
         TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
         UserId::new(USER).expect("user"),       // safety: static test user id is valid.
@@ -4227,14 +4224,14 @@ fn generic_dm_target_store() -> Arc<FilesystemChannelDmTargetStore> {
 
 fn generic_outbound_target_provider(
     harness: &Harness,
-    dm_targets: Arc<FilesystemChannelDmTargetStore>,
+    dm_targets: Arc<ChannelDmTargetStore>,
 ) -> GenericChannelOutboundTargetProvider {
     GenericChannelOutboundTargetProvider::new(GenericChannelOutboundTargetDeps {
         watch: harness.assembly.snapshot_watch(),
         assembly: Arc::clone(&harness.assembly),
         admin_configuration_resolver: Arc::clone(&harness.admin_configuration_resolver),
         installation_store: Arc::clone(&harness.installation_store)
-            as Arc<dyn ExtensionInstallationStore>,
+            as Arc<dyn ExtensionInstallationStorePort>,
         dm_targets,
         identity: ChannelOutboundTargetIdentity {
             tenant_id: TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.

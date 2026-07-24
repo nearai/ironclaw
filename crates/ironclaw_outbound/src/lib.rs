@@ -10,8 +10,8 @@ mod delivered_gate_routes;
 mod delivery_resolution;
 mod delivery_targets;
 mod error;
-mod filesystem_store;
 mod ids;
+mod outbound_state_store;
 mod resolution_engine;
 mod run_delivery_cleanup;
 mod run_final_reply_handoff;
@@ -50,11 +50,11 @@ pub use delivery_targets::{
     OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary,
 };
 pub use error::OutboundError;
-pub use filesystem_store::FilesystemOutboundStateStore;
 pub use ids::{
     OutboundDeliveryId, ProjectionSubscriptionId, ProjectionUpdateRef, TriggerFireSlot,
     TriggerOriginRef,
 };
+pub use outbound_state_store::OutboundStateStore;
 pub use run_delivery_cleanup::{
     MAX_RUN_DELIVERY_CLEANUP_RECORDS, RunDeliveryCleanupRecord, RunDeliveryCleanupRequest,
 };
@@ -67,7 +67,7 @@ pub use run_final_reply_target::{
 pub use service::{
     OutboundPolicyService, ReplyTargetBindingValidator, ThreadProjectionAccessPolicy,
 };
-pub use store::OutboundStateStore;
+pub use store::OutboundStateStorePort;
 pub use triggered_run_delivery::{
     TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryRecord, TriggeredRunDeliveryStore,
 };

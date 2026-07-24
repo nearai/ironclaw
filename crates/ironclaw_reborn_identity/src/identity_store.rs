@@ -56,7 +56,7 @@ use record::{
 };
 
 /// Canonical identity store backed by a host scoped filesystem.
-pub struct FilesystemRebornIdentityStore<F>
+pub struct RebornIdentityStore<F>
 where
     F: RootFilesystem + 'static,
 {
@@ -68,7 +68,7 @@ where
     locks: Arc<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>>,
 }
 
-impl<F> FilesystemRebornIdentityStore<F>
+impl<F> RebornIdentityStore<F>
 where
     F: RootFilesystem + 'static,
 {
@@ -256,7 +256,7 @@ where
 }
 
 #[async_trait]
-impl<F> RebornIdentityResolver for FilesystemRebornIdentityStore<F>
+impl<F> RebornIdentityResolver for RebornIdentityStore<F>
 where
     F: RootFilesystem + 'static,
 {

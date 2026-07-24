@@ -382,7 +382,7 @@ On a harness built from a `live_approvals` group:
 
 `HostRuntimeCapabilityHarness` (in `harness/mod.rs`, gated on `#[cfg(feature = "test-support")]`) exposes:
 
-- `extension_installation_store_for_test()` — returns the `Option<Arc<dyn ExtensionInstallationStore>>` wired into the local-dev extension management port; mirrors the production installation store for test read-back assertions. Returns `None` when the local runtime has no extension management wired.
+- `extension_installation_store_for_test()` — returns the `Option<Arc<dyn ExtensionInstallationStorePort>>` wired into the local-dev extension management port; mirrors the production installation store for test read-back assertions. Returns `None` when the local runtime has no extension management wired.
 
 `ironclaw_reborn_composition::test_support` exposes:
 

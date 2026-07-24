@@ -20,8 +20,7 @@ use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
 
 use crate::{
-    FilesystemAutoApproveSettingStore, FilesystemCapabilityPermissionOverrideStore,
-    FilesystemPersistentApprovalPolicyStore,
+    AutoApproveSettingStore, CapabilityPermissionOverrideStore, PersistentApprovalPolicyStore,
 };
 
 /// A fresh, volatile `ScopedFilesystem<InMemoryBackend>` mounted at `/approvals`
@@ -40,21 +39,20 @@ pub fn in_memory_backed_approvals_filesystem() -> Arc<ScopedFilesystem<InMemoryB
 }
 
 /// The production auto-approve store over a fresh in-memory backend.
-pub fn in_memory_backed_auto_approve_setting_store()
--> FilesystemAutoApproveSettingStore<InMemoryBackend> {
-    FilesystemAutoApproveSettingStore::new(in_memory_backed_approvals_filesystem())
+pub fn in_memory_backed_auto_approve_setting_store() -> AutoApproveSettingStore<InMemoryBackend> {
+    AutoApproveSettingStore::new(in_memory_backed_approvals_filesystem())
 }
 
 /// The production persistent-approval-policy store over a fresh in-memory
 /// backend.
 pub fn in_memory_backed_persistent_approval_policy_store()
--> FilesystemPersistentApprovalPolicyStore<InMemoryBackend> {
-    FilesystemPersistentApprovalPolicyStore::new(in_memory_backed_approvals_filesystem())
+-> PersistentApprovalPolicyStore<InMemoryBackend> {
+    PersistentApprovalPolicyStore::new(in_memory_backed_approvals_filesystem())
 }
 
 /// The production capability-permission-override store over a fresh in-memory
 /// backend.
 pub fn in_memory_backed_capability_permission_override_store()
--> FilesystemCapabilityPermissionOverrideStore<InMemoryBackend> {
-    FilesystemCapabilityPermissionOverrideStore::new(in_memory_backed_approvals_filesystem())
+-> CapabilityPermissionOverrideStore<InMemoryBackend> {
+    CapabilityPermissionOverrideStore::new(in_memory_backed_approvals_filesystem())
 }

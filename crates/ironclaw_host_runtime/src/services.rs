@@ -11,8 +11,8 @@ mod process_executor;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_approvals::{ApprovalResolver, PersistentApprovalPolicyStore};
-use ironclaw_authorization::{CapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer};
+use ironclaw_approvals::{ApprovalResolver, PersistentApprovalPolicyStorePort};
+use ironclaw_authorization::{CapabilityLeaseStorePort, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_capabilities::CapabilityObligationHandler;
 use ironclaw_dispatcher::{RuntimeAdapterResult, RuntimeDispatcher, ToolResolver};
 use ironclaw_events::{
@@ -36,8 +36,8 @@ use ironclaw_host_api::{
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutor, McpInvocation};
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::{
-    BackgroundFailureStage, ProcessExecutor, ProcessManager, ProcessResultStore, ProcessServices,
-    ProcessStore,
+    BackgroundFailureStage, ProcessExecutor, ProcessManager, ProcessResultStorePort,
+    ProcessServices, ProcessStorePort,
 };
 use ironclaw_reborn_event_store::{
     CoalescingEventSink, EventBatchConfig, RebornEventStoreConfig, RebornEventStoreError,
@@ -45,18 +45,18 @@ use ironclaw_reborn_event_store::{
 };
 use ironclaw_resources::{FilesystemResourceGovernor, InMemoryResourceGovernor, ResourceGovernor};
 use ironclaw_run_state::{
-    ApprovalRequestStore, FilesystemApprovalRequestStore, FilesystemRunStateStore,
-    RunStateApprovalStore, RunStateStore,
+    ApprovalRequestStore, ApprovalRequestStorePort, RunStateApprovalStorePort, RunStateStore,
+    RunStateStorePort,
 };
 use ironclaw_scripts::{ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};
 use ironclaw_secrets::{
-    CredentialAccountStore, CredentialSessionStore, FilesystemSecretStore,
-    InMemoryCredentialBroker, SecretStore, SecretStoreError,
+    CredentialAccountStore, CredentialSessionStore, InMemoryCredentialBroker, SecretStore,
+    SecretStoreError, SecretStorePort,
 };
 use ironclaw_trust::{HostTrustPolicy, TrustPolicy};
 use ironclaw_turns::{
-    DefaultTurnCoordinator, FilesystemTurnStateRowStore, NoopTurnRunWakeNotifier,
-    RunProfileResolver, TurnRunWakeNotifier, TurnStateStore, runner::TurnRunTransitionPort,
+    DefaultTurnCoordinator, NoopTurnRunWakeNotifier, RunProfileResolver, TurnRunWakeNotifier,
+    TurnStateRowStore, TurnStateStore, runner::TurnRunTransitionPort,
 };
 use ironclaw_wasm::{
     DenyWasmHostHttp, EmptyWasmRuntimeCredentials, PreparedWitTool, WasmError,
@@ -124,8 +124,8 @@ pub struct HostRuntimeServices<F, G, S, R>
 where
     F: RootFilesystem + 'static,
     G: ResourceGovernor + 'static,
-    S: ProcessStore + 'static,
-    R: ProcessResultStore + 'static,
+    S: ProcessStorePort + 'static,
+    R: ProcessResultStorePort + 'static,
 {
     registry: Arc<SharedExtensionRegistry>,
     trust_policy: Arc<dyn TrustPolicy>,
@@ -135,17 +135,17 @@ where
     authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer>,
     process_services: ProcessServices<S, R>,
     surface_version: CapabilitySurfaceVersion,
-    run_state: Option<Arc<dyn RunStateStore>>,
-    approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
-    run_state_approval_store: Option<Arc<dyn RunStateApprovalStore>>,
-    capability_leases: Option<Arc<dyn CapabilityLeaseStore>>,
+    run_state: Option<Arc<dyn RunStateStorePort>>,
+    approval_requests: Option<Arc<dyn ApprovalRequestStorePort>>,
+    run_state_approval_store: Option<Arc<dyn RunStateApprovalStorePort>>,
+    capability_leases: Option<Arc<dyn CapabilityLeaseStorePort>>,
     // arch-exempt: optional_arc, service builders support minimal/test host runtime
     // graphs while production Reborn wiring installs this store, plan #4539
-    persistent_approval_policies: Option<Arc<dyn PersistentApprovalPolicyStore>>,
+    persistent_approval_policies: Option<Arc<dyn PersistentApprovalPolicyStorePort>>,
     event_sink: Option<Arc<dyn EventSink>>,
     audit_sink: Option<Arc<dyn AuditSink>>,
     security_audit_sink: Option<Arc<dyn SecurityAuditSink>>,
-    secret_store: Option<Arc<dyn SecretStore>>,
+    secret_store: Option<Arc<dyn SecretStorePort>>,
     credential_account_store: Arc<dyn CredentialAccountStore>,
     credential_session_store: Arc<dyn CredentialSessionStore>,
     runtime_credential_account_resolver: Option<Arc<dyn RuntimeCredentialAccountResolver>>,
@@ -187,7 +187,7 @@ where
 pub struct ProductAuthProviderRuntimePorts {
     runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
     obligation_handler: Arc<dyn CapabilityObligationHandler>,
-    secret_store: Arc<dyn SecretStore>,
+    secret_store: Arc<dyn SecretStorePort>,
     secret_injection_store: Arc<RuntimeSecretInjectionStore>,
     network_policy_store: Arc<NetworkObligationPolicyStore>,
     credential_account_resolver: Option<Arc<dyn RuntimeCredentialAccountResolver>>,
@@ -233,7 +233,7 @@ impl ProductAuthProviderRuntimePorts {
     fn new(
         runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
         obligation_handler: Arc<dyn CapabilityObligationHandler>,
-        secret_store: Arc<dyn SecretStore>,
+        secret_store: Arc<dyn SecretStorePort>,
         secret_injection_store: Arc<RuntimeSecretInjectionStore>,
         network_policy_store: Arc<NetworkObligationPolicyStore>,
         credential_account_resolver: Option<Arc<dyn RuntimeCredentialAccountResolver>>,
@@ -409,8 +409,8 @@ impl<F, G, S, R> HostRuntimeServices<F, G, S, R>
 where
     F: RootFilesystem + 'static,
     G: ResourceGovernor + 'static,
-    S: ProcessStore + 'static,
-    R: ProcessResultStore + 'static,
+    S: ProcessStorePort + 'static,
+    R: ProcessResultStorePort + 'static,
 {
     pub fn new(
         registry: Arc<ExtensionRegistry>,
@@ -695,7 +695,7 @@ where
     /// stores, cancellation registry, result store, and runtime health graph.
     fn build_host_runtime(&self) -> DefaultHostRuntime {
         let lifecycle_process_store = Arc::clone(&self.process_lifecycle_store);
-        let process_store: Arc<dyn ProcessStore> = lifecycle_process_store.clone();
+        let process_store: Arc<dyn ProcessStorePort> = lifecycle_process_store.clone();
         let dispatcher: Arc<dyn CapabilityDispatcher> = Arc::new(self.runtime_dispatcher());
         let process_executor = Arc::new(HostProcessExecutor::new(
             Arc::new(RuntimeDispatchProcessExecutor::new(
@@ -738,7 +738,7 @@ where
                 });
             }),
         );
-        let process_result_store: Arc<dyn ProcessResultStore> =
+        let process_result_store: Arc<dyn ProcessResultStorePort> =
             self.process_services.result_store();
         let runtime_health = self.runtime_health.clone().unwrap_or_else(|| {
             Arc::new(RegisteredRuntimeHealth::new(
@@ -818,7 +818,8 @@ where
     /// configured, which keeps approval resolution fail-closed at composition.
     pub fn approval_resolver(
         &self,
-    ) -> Option<ApprovalResolver<'_, dyn ApprovalRequestStore, dyn CapabilityLeaseStore>> {
+    ) -> Option<ApprovalResolver<'_, dyn ApprovalRequestStorePort, dyn CapabilityLeaseStorePort>>
+    {
         let approval_requests = self.approval_requests.as_deref()?;
         let capability_leases = self.capability_leases.as_deref()?;
         let mut resolver = ApprovalResolver::new(approval_requests, capability_leases);

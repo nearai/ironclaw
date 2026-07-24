@@ -25,7 +25,7 @@ use crate::{
     OpenAiCompatBindInternalRefs, OpenAiCompatHttpError, OpenAiCompatIdempotencyKey,
     OpenAiCompatInternalRefs, OpenAiCompatProjectionStreamer, OpenAiCompatPublicId,
     OpenAiCompatRecordAcceptedAck, OpenAiCompatRefReservation, OpenAiCompatRefReservationOutcome,
-    OpenAiCompatRefStore, OpenAiCompatRequestFingerprint, OpenAiCompatResourceMapping,
+    OpenAiCompatRefStorePort, OpenAiCompatRequestFingerprint, OpenAiCompatResourceMapping,
     OpenAiCompatRouteSurface, OpenAiUsage,
 };
 use async_trait::async_trait;
@@ -122,7 +122,7 @@ impl OpenAiCompatAuthenticatedCaller {
 #[derive(Clone)]
 pub struct OpenAiChatCompletionsWorkflow {
     product_surface: Arc<dyn ProductSurface>,
-    ref_store: Arc<dyn OpenAiCompatRefStore>,
+    ref_store: Arc<dyn OpenAiCompatRefStorePort>,
     projection_reader: Arc<dyn OpenAiChatCompletionProjectionReader>,
     /// Wired by host composition when OpenAI-compatible streaming is enabled.
     /// When `None`, `stream: true` requests fail closed.
@@ -135,7 +135,7 @@ pub struct OpenAiChatCompletionsWorkflow {
 impl OpenAiChatCompletionsWorkflow {
     pub fn new(
         product_surface: Arc<dyn ProductSurface>,
-        ref_store: Arc<dyn OpenAiCompatRefStore>,
+        ref_store: Arc<dyn OpenAiCompatRefStorePort>,
         projection_reader: Arc<dyn OpenAiChatCompletionProjectionReader>,
     ) -> Self {
         Self {

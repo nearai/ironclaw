@@ -48,7 +48,7 @@ pub enum StoreError {
 }
 
 /// The derived execution view of installation records: rehydrated at boot
-/// from the durable `ExtensionInstallationStore` and kept current by the
+/// from the durable `ExtensionInstallationStorePort` and kept current by the
 /// generic host's lifecycle writes (lifecycle.md: an in-memory registry is a
 /// derived execution view, never the source of truth — there is no durable
 /// twin of this port to keep in lock-step). Contract tests use it standalone.

@@ -1,4 +1,4 @@
-//! Contract tests for [`FilesystemConversationStateStore`] and
+//! Contract tests for [`ConversationStateStore`] and
 //! [`RebornFilesystemConversationServices`].
 //!
 //! Most surface coverage already lives in `inbound_contract.rs`, which

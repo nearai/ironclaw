@@ -31,7 +31,7 @@ pub type MountViewResolver =
 /// resolving the caller's [`ScopedPath`] to a [`VirtualPath`] before the
 /// underlying [`RootFilesystem`] is touched.
 ///
-/// Higher-level stores (SecretStore, ProcessStore, …) accept a
+/// Higher-level stores (SecretStorePort, ProcessStorePort, …) accept a
 /// `Arc<ScopedFilesystem<F>>` and call the unified `put`/`get`/`query`/etc.
 /// ops on it, plumbing the request scope through every call. The
 /// [`ScopedFilesystem`] is the *single* per-process FS handle; tenant

@@ -2623,7 +2623,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_events",
                 "ironclaw_extensions",
                 // `ironclaw_filesystem` is permitted: the durable
-                // FilesystemOpenAiCompatRefStore lives behind the
+                // OpenAiCompatRefStore lives behind the
                 // `storage`/`libsql`/`postgres` features and persists opaque refs
                 // through the universal RootFilesystem port.
                 "ironclaw_gateway",
@@ -2879,7 +2879,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_dispatcher",
                 "ironclaw_events",
                 "ironclaw_extensions",
-                // ironclaw_filesystem is permitted: FilesystemResourceGovernorStore
+                // ironclaw_filesystem is permitted: ResourceGovernorStore
                 // routes the resource-governor snapshot through ScopedFilesystem
                 // under the universal-fs-dispatch rework (plan
                 // 2026-05-14-universal-fs-dispatch).
@@ -3085,7 +3085,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_conversations",
                 "ironclaw_dispatcher",
                 "ironclaw_extensions",
-                // ironclaw_filesystem is permitted: FilesystemOutboundStateStore
+                // ironclaw_filesystem is permitted: OutboundStateStore
                 // routes outbound persistence through ScopedFilesystem under
                 // the universal-fs-dispatch rework (plan
                 // 2026-05-14-universal-fs-dispatch).
@@ -3180,8 +3180,8 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_dispatcher",
                 "ironclaw_events",
                 "ironclaw_extensions",
-                // ironclaw_filesystem is permitted: FilesystemSecretStore /
-                // FilesystemCredentialBroker route secret + credential
+                // ironclaw_filesystem is permitted: SecretStore /
+                // CredentialBroker route secret + credential
                 // persistence through ScopedFilesystem under the
                 // universal-fs-dispatch rework (plan
                 // 2026-05-14-universal-fs-dispatch).
@@ -3325,7 +3325,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_capabilities",
                 "ironclaw_dispatcher",
                 "ironclaw_extensions",
-                // ironclaw_filesystem is permitted: FilesystemTurnStateRowStore
+                // ironclaw_filesystem is permitted: TurnStateRowStore
                 // routes turn-coordination persistence through ScopedFilesystem
                 // under the universal-fs-dispatch rework (plan
                 // 2026-05-14-universal-fs-dispatch).

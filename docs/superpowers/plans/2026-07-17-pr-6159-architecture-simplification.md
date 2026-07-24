@@ -215,7 +215,7 @@ pub struct ApprovalPromptLookup {
 }
 
 pub async fn approval_prompt_lookup(
-    approval_requests: Option<&dyn ApprovalRequestStore>,
+    approval_requests: Option<&dyn ApprovalRequestStorePort>,
     gate_ref: &GateRef,
     owner_user_id: &UserId,
     turn_scope: &TurnScope,
@@ -606,7 +606,7 @@ pub struct TelegramHostConfig { /* same five identity/public-origin fields */ }
 pub struct TelegramHostInput {
     pub config: TelegramHostConfig,
     pub state: Arc<FilesystemTelegramHostState>,
-    pub secret_store: Arc<dyn SecretStore>,
+    pub secret_store: Arc<dyn SecretStorePort>,
     pub host_egress: HostRuntimeHttpEgressPort,
     pub continuation: Arc<dyn RebornAuthContinuationDispatcher>,
     pub conversation_bindings: Arc<dyn ironclaw_conversations::ConversationBindingService>,

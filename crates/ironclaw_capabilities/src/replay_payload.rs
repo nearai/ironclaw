@@ -30,7 +30,7 @@
 //! ([`CapabilityInputRef`], [`AuthResumeApprovalIdentity`]) rather than
 //! re-typing them, per `type-placement.md`.
 //!
-//! The durable store mirrors `ironclaw_run_state`'s `FilesystemGateRecordStore`:
+//! The durable store mirrors `ironclaw_run_state`'s `GateRecordStore`:
 //! a [`ScopedFilesystem`] over any [`RootFilesystem`], the shared lock-free
 //! [`cas_update`] lane (fail-closed on non-CAS backends), a `RecordKind` tag so
 //! byte-only backends are rejected, and a private [`StoredReplayPayload`] wrapper
@@ -106,17 +106,17 @@ impl From<FilesystemError> for ReplayPayloadStoreError {
 ///
 /// This is a dependency-inversion port (`type-placement.md` §"Traits" reason 2 /
 /// 4): defined in this kernel crate, implemented by
-/// [`FilesystemReplayPayloadStore`] and wired at composition — the same single-
-/// production-impl shape as `ironclaw_run_state`'s `GateRecordStore` it mirrors.
+/// [`ReplayPayloadStore`] and wired at composition — the same single-
+/// production-impl shape as `ironclaw_run_state`'s `GateRecordStorePort` it mirrors.
 ///
 /// Resource-owner scoped; wrong-scope lookups look unknown (`Ok(None)`). It
 /// intentionally exposes no removal method: the replay payload is consumed once
-/// on resume, and — like the sibling `GateRecordStore` — there is no scope-safe
+/// on resume, and — like the sibling `GateRecordStorePort` — there is no scope-safe
 /// soft-delete to mirror. Hard deletion of a retained record needs an explicit
 /// product/retention contract (`database.md` "Data safety"); a later retention
 /// slice can add it.
 #[async_trait]
-pub trait ReplayPayloadStore: Send + Sync {
+pub trait ReplayPayloadStorePort: Send + Sync {
     /// Persists the replay payload for `invocation_id` in the exact
     /// resource-owner scope.
     ///
@@ -147,7 +147,7 @@ const REPLAY_PAYLOAD_RECORD_KIND: &str = "replay_payload_record";
 
 /// Durable wrapper carrying the resource-owner scope alongside the
 /// [`ReplayPayload`]. `ReplayPayload` has no scope field; persisting the scope
-/// beside it lets [`FilesystemReplayPayloadStore::load`] apply the same
+/// beside it lets [`ReplayPayloadStore::load`] apply the same
 /// `same_scope_owner` defense-in-depth check the sibling gate-record store does,
 /// so a wrong-scope read looks unknown. The scope is storage metadata only —
 /// `load` returns the bare [`ReplayPayload`].
@@ -160,7 +160,7 @@ struct StoredReplayPayload {
 /// Filesystem-backed replay-payload store under the `/replay-payloads` mount
 /// alias.
 ///
-/// Mirrors `ironclaw_run_state`'s `FilesystemGateRecordStore`: construct with a
+/// Mirrors `ironclaw_run_state`'s `GateRecordStore`: construct with a
 /// [`ScopedFilesystem`] over any [`RootFilesystem`]. The [`ScopedFilesystem`]
 /// resolves the `/replay-payloads` alias to a tenant/user-scoped
 /// [`VirtualPath`](ironclaw_host_api::VirtualPath) per its
@@ -168,14 +168,14 @@ struct StoredReplayPayload {
 /// any backend dispatch — so tenant isolation is structural. Within-tenant axes
 /// (agent/project/mission/thread) remain in the alias-relative path because they
 /// are not covered by the per-tenant `MountAlias`.
-pub struct FilesystemReplayPayloadStore<F>
+pub struct ReplayPayloadStore<F>
 where
     F: RootFilesystem,
 {
     filesystem: Arc<ScopedFilesystem<F>>,
 }
 
-impl<F> FilesystemReplayPayloadStore<F>
+impl<F> ReplayPayloadStore<F>
 where
     F: RootFilesystem,
 {
@@ -194,7 +194,7 @@ where
 }
 
 #[async_trait]
-impl<F> ReplayPayloadStore for FilesystemReplayPayloadStore<F>
+impl<F> ReplayPayloadStorePort for ReplayPayloadStore<F>
 where
     F: RootFilesystem,
 {

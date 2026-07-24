@@ -15,7 +15,7 @@ use ironclaw_product::{
     ChannelPairingRegistry, PairingAuthChallengeView,
 };
 use ironclaw_product::{ApprovalPromptContextView, AuthPromptView, ProductAdapterError};
-use ironclaw_run_state::ApprovalRequestStore;
+use ironclaw_run_state::ApprovalRequestStorePort;
 use ironclaw_turns::{GateRef, TurnScope};
 
 use ironclaw_product::auth_prompt_view_for_blocked_auth;
@@ -111,11 +111,11 @@ impl AuthChallengeProvider for RecipeAuthChallengeProvider {
 /// Approval-gate context over the shared projection read model — the same
 /// source the WebUI gate projection renders from.
 pub(crate) struct ProjectionApprovalPromptContextSource {
-    approval_requests: Arc<dyn ApprovalRequestStore>,
+    approval_requests: Arc<dyn ApprovalRequestStorePort>,
 }
 
 impl ProjectionApprovalPromptContextSource {
-    pub(crate) fn new(approval_requests: Arc<dyn ApprovalRequestStore>) -> Self {
+    pub(crate) fn new(approval_requests: Arc<dyn ApprovalRequestStorePort>) -> Self {
         Self { approval_requests }
     }
 }

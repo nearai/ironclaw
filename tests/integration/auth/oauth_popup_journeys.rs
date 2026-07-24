@@ -54,7 +54,7 @@ async fn oauth_connect_binds_channel_identity_through_the_generic_hook() {
     };
     use ironclaw_extensions::{
         ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStore,
-        ExtensionManifestRecord, ExtensionManifestRef, FilesystemExtensionInstallationStore,
+        ExtensionInstallationStorePort, ExtensionManifestRecord, ExtensionManifestRef,
         ManifestSource,
     };
     use ironclaw_filesystem::InMemoryBackend;
@@ -195,7 +195,7 @@ app_id = "/app_id"
 "#
     );
     let installation_store = Arc::new(
-        FilesystemExtensionInstallationStore::load_at(
+        ExtensionInstallationStore::load_at(
             Arc::new(InMemoryBackend::new()),
             VirtualPath::new("/system/extensions/.installations/oauth-popup")
                 .expect("valid installation root"),
@@ -234,7 +234,7 @@ app_id = "/app_id"
     let scope = test_scope();
     let binding_config = ChannelIdentityBindingConfig::for_test_with_admin_configuration(
         scope.resource.tenant_id.clone(),
-        Arc::clone(&installation_store) as Arc<dyn ExtensionInstallationStore>,
+        Arc::clone(&installation_store) as Arc<dyn ExtensionInstallationStorePort>,
         identity_store.clone(),
         identity_store.clone(),
         vec![
