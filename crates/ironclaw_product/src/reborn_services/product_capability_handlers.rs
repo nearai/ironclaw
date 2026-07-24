@@ -119,11 +119,18 @@ impl ProductCommandHandler {
                 let _: EmptyProductCommandInput = product_command_input(input)?;
                 command_output(services.trace_account_login_link(caller).await?)
             }
-            Self::TraceHoldAuthorize => command_output(
-                services
-                    .authorize_trace_hold(caller, product_command_input(input)?)
-                    .await?,
-            ),
+            Self::TraceHoldAuthorize => {
+                // The wire input is the command descriptor's request struct;
+                // deserializing it as the bare submission string rejected
+                // every well-formed request with a 400 (playwright live-serve
+                // regression).
+                let request: RebornTraceHoldAuthorizeProductRequest = product_command_input(input)?;
+                command_output(
+                    services
+                        .authorize_trace_hold(caller, request.submission_id)
+                        .await?,
+                )
+            }
             Self::OperatorConfigSetKey => {
                 let request: RebornOperatorConfigSetProductRequest = product_command_input(input)?;
                 command_output(

@@ -15456,3 +15456,30 @@ async fn admin_last_admin_protection_survives_concurrent_demotion() {
         "the tenant must never be stranded without an admin"
     );
 }
+
+/// Playwright live-serve regression: `trace.hold_authorize` arrives on the
+/// wire as the command descriptor's request struct (`{"submission_id": ...}` —
+/// exactly what the webui handler serializes), but the command arm decoded it
+/// as a bare string and 400-rejected every well-formed authorize. Drives the
+/// real ProductSurface command door with that wire shape; an absent hold is
+/// the normal `{ authorized: false }` success, never an input error.
+#[tokio::test]
+async fn trace_hold_authorize_command_accepts_the_descriptor_wire_request() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+    let response = ironclaw_host_api::ProductSurface::invoke(
+        &services,
+        caller_for_user("trace-hold-authorize-wire-user"),
+        ironclaw_host_api::ProductSurfaceInvokeRequest {
+            operation_id: CapabilityId::new(ironclaw_product::TRACE_HOLD_AUTHORIZE_COMMAND.id)
+                .expect("command id"),
+            input: json!({ "submission_id": uuid::Uuid::new_v4().to_string() }),
+            activity_id: ActivityId::new(),
+        },
+    )
+    .await
+    .expect("hold authorize command decodes its wire request");
+    assert_eq!(response.output, json!({ "authorized": false }));
+}

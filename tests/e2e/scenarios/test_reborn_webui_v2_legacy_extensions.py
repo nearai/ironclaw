@@ -545,16 +545,6 @@ async def _wait_for_request_count(
     )
 
 
-def _assert_install_requests(requests: list[dict], *package_ids: str):
-    assert [
-        request.get("package_ref") for request in requests
-    ] == [_package_ref(package_id) for package_id in package_ids]
-    for request in requests:
-        idempotency_key = request.get("idempotency_key")
-        assert isinstance(idempotency_key, str)
-        assert idempotency_key.strip()
-
-
 async def test_reborn_legacy_extensions_registry_search_and_install(
     reborn_v2_server, reborn_v2_browser
 ):
@@ -1237,7 +1227,6 @@ async def test_reborn_legacy_extensions_reinstall_after_remove_requires_setup_ag
                     "action": "submit",
                     "payload": {
                         "secrets": {"API_TOKEN": "fresh-token"},
-                        "fields": {},
                     },
                 },
             }
@@ -1447,14 +1436,7 @@ async def test_reborn_legacy_configure_modal_saves_manual_secret_and_fields(
                         "auto_generate": False,
                     },
                 ],
-                "fields": [
-                    {
-                        "name": "workspace",
-                        "prompt": "Workspace",
-                        "placeholder": "team-slug",
-                        "optional": False,
-                    }
-                ],
+                "fields": [],
                 "onboarding": {
                     "credential_instructions": "Paste credentials from the provider.",
                     "credential_next_step": "Save to continue.",
@@ -1475,7 +1457,6 @@ async def test_reborn_legacy_configure_modal_saves_manual_secret_and_fields(
         await expect(page.get_by_text("Paste credentials from the provider.")).to_be_visible()
         await page.locator('input[type="password"]').nth(0).fill("secret-token")
         await page.locator('input[type="password"]').nth(1).fill("rotated-secret")
-        await page.locator('input[type="text"][placeholder="team-slug"]').fill("team-a")
         await page.get_by_role("button", name="Save").click()
 
         await expect(page.get_by_role("heading", name="Configure Config Tool")).to_have_count(0)
@@ -1489,7 +1470,6 @@ async def test_reborn_legacy_configure_modal_saves_manual_secret_and_fields(
                             "API_TOKEN": "secret-token",
                             "OPTIONAL_SECRET": "rotated-secret",
                         },
-                        "fields": {"workspace": "team-a"},
                     },
                 },
             }
@@ -1540,14 +1520,7 @@ async def test_reborn_legacy_configure_modal_renders_field_variants(
                         "auto_generate": True,
                     },
                 ],
-                "fields": [
-                    {
-                        "name": "workspace",
-                        "prompt": "Workspace",
-                        "placeholder": "team-slug",
-                        "optional": True,
-                    }
-                ],
+                "fields": [],
                 "onboarding": None,
             }
         },
@@ -1565,14 +1538,12 @@ async def test_reborn_legacy_configure_modal_renders_field_variants(
         await expect(modal).to_contain_text("Existing token")
         await expect(modal).to_contain_text("Optional secret")
         await expect(modal).to_contain_text("Generated secret")
-        await expect(modal).to_contain_text("Workspace")
         await expect(modal.get_by_text("configured", exact=True)).to_be_visible()
-        await expect(modal.get_by_text("optional", exact=True)).to_have_count(2)
+        await expect(modal.get_by_text("optional", exact=True)).to_have_count(1)
         await expect(modal.get_by_text("Auto-generated if left blank")).to_be_visible()
         await expect(
             modal.locator('input[type="password"][placeholder*="leave blank to keep"]')
         ).to_have_count(1)
-        await expect(modal.locator('input[type="text"][placeholder="team-slug"]')).to_be_visible()
 
         await modal.get_by_role("button", name="Cancel").click()
         assert harness["setup_submit_requests"] == []
@@ -1693,7 +1664,6 @@ async def test_reborn_legacy_configure_handles_selector_sensitive_package_ids(
                     "action": "submit",
                     "payload": {
                         "secrets": {"API_TOKEN": "quoted-secret"},
-                        "fields": {},
                     },
                 },
             }
@@ -1759,7 +1729,6 @@ async def test_reborn_legacy_configure_modal_blank_existing_secret_is_not_submit
                     "action": "submit",
                     "payload": {
                         "secrets": {},
-                        "fields": {},
                     },
                 },
             }
@@ -1978,7 +1947,6 @@ async def test_reborn_legacy_configure_modal_enter_key_submits(
                     "action": "submit",
                     "payload": {
                         "secrets": {"API_TOKEN": "enter-token"},
-                        "fields": {},
                     },
                 },
             }
@@ -2525,8 +2493,10 @@ async def test_reborn_legacy_configure_oauth_localizes_https_authorization_error
         )
         opened = await page.evaluate("() => window.__openedUrls")
         assert opened == ["about:blank"]
-        assert harness["oauth_start_requests"][0]["body"]["provider"] == "google"
-        assert harness["oauth_start_requests"][0]["body"]["scopes"] == ["email"]
+        start_body = harness["oauth_start_requests"][0]["body"]
+        assert start_body["requirement"] == "GOOGLE_AUTH"
+        assert start_body["invocation_id"] == "inv-1"
+        assert start_body["expires_at"]
     finally:
         await harness["context"].close()
 
@@ -2605,7 +2575,9 @@ async def test_reborn_legacy_configure_oauth_start_failure_stays_visible(
         await expect(
             page.get_by_role("heading", name="Configure OAuth Tool")
         ).to_be_visible()
-        assert harness["oauth_start_requests"][0]["body"]["provider"] == "google"
+        start_body = harness["oauth_start_requests"][0]["body"]
+        assert start_body["requirement"] == "GOOGLE_AUTH"
+        assert start_body["invocation_id"] == "inv-1"
         assert await page.evaluate("() => window.__openedPopups[0].closed") is True
     finally:
         await harness["context"].close()

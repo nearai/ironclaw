@@ -11,11 +11,6 @@
     "whatsapp",
     "meta"
   ],
-  "source": {
-    "dir": "channels-src/whatsapp",
-    "capabilities": "whatsapp.capabilities.json",
-    "crate_name": "whatsapp-channel"
-  },
   "artifacts": {
     "wasm32-wasip2": {
       "url": "https://github.com/nearai/ironclaw/releases/download/ironclaw-v0.25.0/channel-whatsapp-0.2.2-wasm32-wasip2.tar.gz",

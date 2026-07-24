@@ -397,8 +397,8 @@ jobs:
       # telegram_round_trip / routine_visibility_from_telegram /
       # manual_trigger_from_telegram scenarios call
       # `/api/extensions/install` for the bundled telegram WASM
-      # channel, which only succeeds when channels-src/telegram has a
-      # built telegram.wasm artifact. Other live-canary lanes that
+      # channel, which requires the CI-built telegram.wasm artifact.
+      # Other live-canary lanes that
       # exercise WASM extensions follow the same pattern.
       # `--channels` skips the WASM tools build (~5 tools that
       # workflow-canary doesn't exercise) to keep the lane under

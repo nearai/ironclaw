@@ -1021,7 +1021,12 @@ async def _apply_extension_setup_api_after_start(
                 admin_url,
                 headers=headers,
                 json={
-                    "values": fields,
+                    # The operator surface takes a sequence of {handle, value}
+                    # entries, not a map (Vec<ExtensionAdminConfigurationValue>).
+                    "values": [
+                        {"handle": handle, "value": value}
+                        for handle, value in fields.items()
+                    ],
                     "expected_revision": revision,
                     "idempotency_key": f"live-qa-{uuid.uuid4()}",
                 },

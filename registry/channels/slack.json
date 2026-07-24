@@ -11,11 +11,6 @@
     "workspace",
     "slack"
   ],
-  "source": {
-    "dir": "channels-src/slack",
-    "capabilities": "slack.capabilities.json",
-    "crate_name": "slack-channel"
-  },
   "artifacts": {
     "wasm32-wasip2": {
       "url": "https://github.com/nearai/ironclaw/releases/download/ironclaw-v0.27.0/channel-slack-0.3.2-wasm32-wasip2.tar.gz",
