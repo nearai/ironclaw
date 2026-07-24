@@ -53,7 +53,16 @@ def _cargo_test_config(manifest_path: Path) -> tuple[dict[str, dict], bool]:
     with manifest_path.open("rb") as manifest_file:
         manifest = tomllib.load(manifest_file)
     targets = {target["name"]: target for target in manifest.get("test", [])}
-    autotests_enabled = manifest.get("package", {}).get("autotests", True)
+    package = manifest.get("package", {})
+    if "autotests" in package:
+        autotests_enabled = package["autotests"]
+    else:
+        edition = package.get("edition", "2015")
+        has_manual_target = any(
+            manifest.get(target_kind)
+            for target_kind in ("lib", "bin", "test", "bench", "example")
+        )
+        autotests_enabled = edition != "2015" or not has_manual_target
     return targets, autotests_enabled
 
 
@@ -524,6 +533,34 @@ def test_cargo_evidence_rejects_disabled_implicit_discovery(tmp_path: Path):
         '[package]\nname = "synthetic"\nversion = "0.1.0"\nautotests = false\n',
         encoding="utf-8",
     )
+    source_path = tmp_path / "tests/journey.rs"
+    source_path.touch()
+    evidence = CargoEvidence(
+        source="tests/journey.rs",
+        test="required_journey",
+        target="journey",
+    )
+    with pytest.raises(AssertionError, match="automatic test discovery"):
+        _assert_cargo_target(
+            "synthetic",
+            evidence,
+            source_path,
+            root=tmp_path,
+        )
+
+
+def test_cargo_evidence_rejects_legacy_manual_target_implicit_discovery(
+    tmp_path: Path,
+):
+    """Edition 2015 disables default discovery when a target is configured."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "Cargo.toml").write_text(
+        '[package]\nname = "synthetic"\nversion = "0.1.0"\n'
+        '[[bin]]\nname = "tool"\npath = "src/main.rs"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "src/main.rs").touch()
     source_path = tmp_path / "tests/journey.rs"
     source_path.touch()
     evidence = CargoEvidence(
