@@ -1,6 +1,6 @@
 use ironclaw_reborn_config::RebornBootConfig;
 
-/// Per-invocation context shared by Reborn CLI commands.
+/// Per-invocation context shared by IronClaw CLI commands.
 #[derive(Debug, Clone)]
 pub(crate) struct RebornCliContext {
     boot_config: RebornBootConfig,

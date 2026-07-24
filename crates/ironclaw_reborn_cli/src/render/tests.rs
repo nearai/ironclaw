@@ -4,7 +4,7 @@ use super::Renderable;
 use crate::dto::{
     CheckCategory, CheckOutcome, ComponentStatus, ConfigEntry, ConfigGetDto, ConfigListDto,
     ConfigValue, DoctorCheck, DoctorDto, DoctorSummary, DriversSnapshot, FilePresence,
-    ServiceStateDto, StatusDto,
+    ServiceStateDto, StatusDto, StatusHomeFields,
 };
 
 fn render_to_string(dto: &impl Renderable) -> String {
@@ -16,7 +16,7 @@ fn render_to_string(dto: &impl Renderable) -> String {
 fn sample_status() -> StatusDto {
     StatusDto {
         version: "0.1.0".to_string(),
-        reborn_home: PathBuf::from("/home/user/.ironclaw/reborn"),
+        home: StatusHomeFields::new(PathBuf::from("/home/user/.ironclaw/reborn")),
         home_source: "default",
         profile: "local-dev".to_string(),
         config_file: FilePresence {
@@ -105,6 +105,8 @@ fn status_json_round_trips() {
     let json = serde_json::to_string_pretty(&dto).expect("serialize");
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
     assert_eq!(parsed["version"], "0.1.0");
+    assert_eq!(parsed["ironclaw_home"], "/home/user/.ironclaw/reborn");
+    assert_eq!(parsed["reborn_home"], parsed["ironclaw_home"]);
     assert_eq!(parsed["profile"], "local-dev");
     assert_eq!(parsed["config_file"]["present"], true);
     assert_eq!(parsed["providers_file"]["present"], false);
@@ -133,10 +135,10 @@ fn status_json_round_trips() {
 #[test]
 fn status_render_text_contains_all_fields() {
     let text = render_to_string(&sample_status());
-    assert!(text.contains("IronClaw Reborn status"));
+    assert!(text.contains("IronClaw status"));
     assert!(text.contains("version:"));
     assert!(text.contains("0.1.0"));
-    assert!(text.contains("reborn_home:"));
+    assert!(text.contains("ironclaw_home:"));
     assert!(text.contains("/home/user/.ironclaw/reborn"));
     assert!(text.contains("home_source:"));
     assert!(text.contains("profile:"));
@@ -218,6 +220,14 @@ fn doctor_json_round_trips() {
 #[test]
 fn doctor_render_text_contains_all_three_outcome_icons() {
     let text = render_to_string(&sample_doctor());
+    assert!(
+        text.contains("ironclaw_home"),
+        "human-readable output should map the legacy check ID: {text}"
+    );
+    assert!(
+        !text.contains("reborn_home"),
+        "the legacy check ID should remain JSON-only: {text}"
+    );
     assert!(text.contains('\u{2714}'), "missing pass icon ✔");
     assert!(text.contains('\u{2718}'), "missing fail icon ✘");
     assert!(
@@ -241,7 +251,7 @@ fn config_list_json_round_trips() {
 #[test]
 fn config_list_render_text_covers_entries() {
     let text = render_to_string(&sample_config_list());
-    assert!(text.contains("IronClaw Reborn config"));
+    assert!(text.contains("IronClaw config"));
     assert!(text.contains("config.toml"));
     assert!(text.contains("boot.profile"));
     assert!(text.contains("local-dev"));

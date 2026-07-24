@@ -10,7 +10,7 @@ pub(crate) struct ChannelsCommand {
 
 #[derive(Debug, Subcommand)]
 enum ChannelsSubcommand {
-    /// List configured Reborn channels.
+    /// List configured IronClaw channels.
     List(ChannelsListCommand),
 }
 

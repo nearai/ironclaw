@@ -63,13 +63,13 @@ fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
     Ok(vec![
         lifecycle_manifest(
             EXTENSION_SEARCH_CAPABILITY_ID,
-            "Search the local Reborn extension catalog by extension, product, provider, or service name, including extensions not installed yet or whose setup is incomplete. For connect, enable, install, pair, authenticate, or integrate requests, use this for discovery only, then continue with builtin.extension_install for the matching extension instead of inventing setup instructions. Installation publishes tools internally when manifest-declared personal setup is ready. For routine, trigger, or notification delivery, prefer configured outbound delivery targets before installing an external channel.",
+            "Search the local IronClaw extension catalog by extension, product, provider, or service name, including extensions not installed yet or whose setup is incomplete. For connect, enable, install, pair, authenticate, or integrate requests, use this for discovery only, then continue with builtin.extension_install for the matching extension instead of inventing setup instructions. Installation publishes tools internally when manifest-declared personal setup is ready. For routine, trigger, or notification delivery, prefer configured outbound delivery targets before installing an external channel.",
             vec![EffectKind::ReadFilesystem],
             PermissionMode::Allow,
         )?,
         lifecycle_manifest(
             EXTENSION_INSTALL_CAPABILITY_ID,
-            "Install a searched Reborn extension and complete every internal lifecycle checkpoint that is currently possible. The result is either active or blocked on the extension manifest's personal auth/pairing setup; there is no separate user activation step. If setup is required, follow the returned typed auth or connection guidance and continue the original request after setup completes.",
+            "Install a searched IronClaw extension and complete every internal lifecycle checkpoint that is currently possible. The result is either active or blocked on the extension manifest's personal auth/pairing setup; there is no separate user activation step. If setup is required, follow the returned typed auth or connection guidance and continue the original request after setup completes.",
             vec![
                 EffectKind::ReadFilesystem,
                 EffectKind::WriteFilesystem,
@@ -79,7 +79,7 @@ fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
         )?,
         lifecycle_manifest(
             EXTENSION_REMOVE_CAPABILITY_ID,
-            "Remove an installed Reborn extension from durable local-dev lifecycle state. Use this when the user asks to uninstall, remove, disable, disconnect, unpair, unlink, or revoke access for an extension, integration, app, account, external channel, or the current external chat. Pass the extension's registry id as extension_id; removal also performs extension-owned cleanup such as authentication, identity, and channel bindings when supported.",
+            "Remove an installed IronClaw extension from durable local-dev lifecycle state. Use this when the user asks to uninstall, remove, disable, disconnect, unpair, unlink, or revoke access for an extension, integration, app, account, external channel, or the current external chat. Pass the extension's registry id as extension_id; removal also performs extension-owned cleanup such as authentication, identity, and channel bindings when supported.",
             vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
             PermissionMode::Ask,
         )?,

@@ -9,7 +9,7 @@ pub(crate) struct ProfileCommand {
 
 #[derive(Debug, Subcommand)]
 enum ProfileSubcommand {
-    /// List supported Reborn boot profiles.
+    /// List supported IronClaw boot profiles.
     List(ProfileListCommand),
 }
 
@@ -47,7 +47,7 @@ impl ProfileListCommand {
                 })
             );
         } else {
-            println!("IronClaw Reborn profiles");
+            println!("IronClaw profiles");
             for profile in profiles {
                 if *profile == RebornProfile::default() {
                     println!("- {} (default)", profile);

@@ -12,10 +12,10 @@ pub(crate) struct ConfigCommand {
 
 #[derive(Debug, Subcommand)]
 enum ConfigSubcommand {
-    /// Show resolved Reborn configuration paths without creating state.
+    /// Show resolved IronClaw configuration paths without creating state.
     Path(ConfigPathCommand),
     /// Write a commented stub `config.toml` and `providers.json` into
-    /// the Reborn home directory. Refuses to clobber unless --force.
+    /// the IronClaw home directory. Refuses to clobber unless --force.
     Init(init::ConfigInitCommand),
     /// List all configuration keys and their values.
     List(ConfigListCommand),
@@ -67,8 +67,8 @@ impl ConfigPathCommand {
             }
         };
 
-        println!("IronClaw Reborn config path");
-        println!("reborn_home: {}", report.home_path().display());
+        println!("IronClaw config path");
+        println!("ironclaw_home: {}", report.home_path().display());
         println!("home_source: {}", report.home_source_label());
         println!("profile: {}", report.profile());
         println!(

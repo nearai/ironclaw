@@ -158,10 +158,10 @@ impl TrafficPolicy {
     pub(crate) fn live_traffic_refusal(self, profile: RebornCompositionProfile) -> Option<String> {
         match self {
             Self::Disabled => Some(format!(
-                "profile={profile} must not start live Reborn runtime traffic"
+                "profile={profile} must not start live IronClaw runtime traffic"
             )),
             Self::ValidateOnly => Some(format!(
-                "profile={profile} validates production-shaped wiring but must not start live Reborn runtime traffic"
+                "profile={profile} validates production-shaped wiring but must not start live IronClaw runtime traffic"
             )),
             Self::Serve { .. } => None,
         }
@@ -571,7 +571,7 @@ impl DeploymentConfig {
 
 #[derive(Debug, Error)]
 pub enum RebornRuntimeProfileError {
-    #[error("profile={profile} is not a local Reborn runtime profile")]
+    #[error("profile={profile} is not a local IronClaw runtime profile")]
     UnsupportedProfile { profile: RebornCompositionProfile },
     #[error("failed to resolve local runtime policy: {0}")]
     Policy(#[from] ResolveError),

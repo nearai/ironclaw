@@ -599,7 +599,7 @@ fn oauth_callback_completion_html(response: &RebornOAuthCallbackResponse) -> Res
         ),
         _ => (
             "Authorization failed",
-            "Authorization did not complete. Please return to Reborn and retry authorization.",
+            "Authorization did not complete. Please return to IronClaw and retry authorization.",
         ),
     };
 
@@ -635,15 +635,15 @@ fn oauth_callback_failure_html(
             "Authorization failed. No permissions were selected, or authorization was denied. Please retry authorization and select the requested permissions."
         }
         AuthErrorCode::MalformedCallback => {
-            "Authorization failed. Please retry authorization from Reborn."
+            "Authorization failed. Please retry authorization from IronClaw."
         }
         AuthErrorCode::ProviderIdentityAlreadyConnected => {
-            "This account is already connected to another Reborn user. Disconnect it from that other account, then try again."
+            "This account is already connected to another IronClaw user. Disconnect it from that other account, then try again."
         }
         AuthErrorCode::LifecycleActivationFailed => {
             "Authorization completed, but the extension could not finish setup. Return to IronClaw to review the extension's setup requirements."
         }
-        _ => "Authorization failed. Please return to Reborn and retry authorization.",
+        _ => "Authorization failed. Please return to IronClaw and retry authorization.",
     };
     let script = oauth_callback_signal_script(&json!({
         "type": OAUTH_CALLBACK_SIGNAL_MESSAGE_TYPE,

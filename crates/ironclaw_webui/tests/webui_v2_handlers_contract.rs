@@ -392,7 +392,7 @@ fn operator_config_key_diagnostic(key: String) -> RebornOperatorConfigDiagnostic
     } else if normalized.starts_with("deprecated.") || normalized.starts_with("legacy.") {
         (
             "operator_config_deprecated",
-            "This operator config key is deprecated and is not applied by the Reborn runtime.",
+            "This operator config key is deprecated and is not applied by the IronClaw runtime.",
             "Move the setting to the current config key before relying on operator-managed startup.",
         )
     } else if normalized.starts_with("bootstrap.") {
@@ -413,7 +413,7 @@ fn operator_config_key_diagnostic(key: String) -> RebornOperatorConfigDiagnostic
     } else {
         (
             "operator_config_unknown_key",
-            "This operator config key is not recognized by the current Reborn runtime.",
+            "This operator config key is not recognized by the current IronClaw runtime.",
             "Remove the key or rename it to a documented operator config key.",
         )
     };

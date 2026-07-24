@@ -477,7 +477,7 @@ async fn connect_docker() -> Result<Docker, RuntimeProcessError> {
         }
     }
     Err(RuntimeProcessError::ExecutionFailed(
-        "could not connect to Docker daemon for Reborn sandbox".to_string(),
+        "could not connect to Docker daemon for IronClaw sandbox".to_string(),
     ))
 }
 

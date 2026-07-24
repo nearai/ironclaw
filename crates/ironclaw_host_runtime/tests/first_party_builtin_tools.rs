@@ -451,7 +451,7 @@ async fn builtin_memory_search_surface_declares_internal_scope_boundary() {
         memory_search
             .descriptor
             .description
-            .contains("only Reborn internal persistent memory"),
+            .contains("only IronClaw internal persistent memory"),
         "memory_search description should declare the internal-memory boundary: {}",
         memory_search.descriptor.description
     );
@@ -470,7 +470,7 @@ async fn builtin_memory_search_surface_declares_internal_scope_boundary() {
         .and_then(Value::as_str)
         .expect("memory_search schema should describe its search scope");
     assert!(
-        schema_description.contains("only Reborn internal persistent memory"),
+        schema_description.contains("only IronClaw internal persistent memory"),
         "memory_search schema description should declare scope: {schema_description}"
     );
     assert!(
@@ -486,7 +486,7 @@ async fn builtin_memory_search_surface_declares_internal_scope_boundary() {
         .and_then(Value::as_str)
         .expect("memory_search query should have a description");
     assert!(
-        query_description.contains("Reborn internal persistent memory"),
+        query_description.contains("IronClaw internal persistent memory"),
         "memory_search query description should declare internal memory: {query_description}"
     );
 }

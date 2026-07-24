@@ -34,6 +34,7 @@ fn build_doctor_dto(context: &RebornCliContext) -> DoctorDto {
     let report = RebornDoctorReport::from_config(context.boot_config().clone());
 
     checks.push(DoctorCheck {
+        // Stable machine-readable ID used by `doctor --json` consumers.
         name: "reborn_home".to_string(),
         category: CheckCategory::Core,
         outcome: if report.home_path().is_dir() {
@@ -164,7 +165,7 @@ fn driver_check(name: &str, status: &RebornRuntimeComponentStatus) -> DoctorChec
 
 impl Renderable for DoctorDto {
     fn render_text_to(&self, w: &mut impl Write) -> std::io::Result<()> {
-        writeln!(w, "IronClaw Reborn doctor")?;
+        writeln!(w, "IronClaw doctor")?;
         writeln!(w)?;
         let mut current_category: Option<CheckCategory> = None;
         for check in &self.checks {
@@ -184,7 +185,7 @@ impl Renderable for DoctorDto {
             writeln!(
                 w,
                 "  {icon} {:<28} {}",
-                terminal_safe_text(&check.name),
+                terminal_safe_text(doctor_check_display_name(&check.name)),
                 terminal_safe_text(&check.detail)
             )?;
         }
@@ -195,6 +196,13 @@ impl Renderable for DoctorDto {
             self.summary.pass, self.summary.fail, self.summary.skip,
         )?;
         Ok(())
+    }
+}
+
+fn doctor_check_display_name(name: &str) -> &str {
+    match name {
+        "reborn_home" => "ironclaw_home",
+        other => other,
     }
 }
 

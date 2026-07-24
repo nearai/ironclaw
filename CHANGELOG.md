@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Product identity:** present the shipping CLI, WebUI, health responses, and
+  built-in capability descriptions as IronClaw without the former “Reborn”
+  qualifier.
+
 ### Fixed
 
 - **Model recovery:** preserve typed, sanitized context-overflow,

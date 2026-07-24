@@ -8,7 +8,7 @@ use crate::context::RebornCliContext;
 use crate::file_write::{FileWriteAction, write_atomic};
 
 /// Write a commented stub `config.toml` and `providers.json` into the
-/// Reborn home directory so an operator has something editable.
+/// IronClaw home directory so an operator has something editable.
 ///
 /// Mirrors v1's `ironclaw config init` ergonomics: refuses to clobber
 /// existing files unless `--force` is given. Both files are written
@@ -93,8 +93,9 @@ pub(crate) fn write_default_config_files(
     existing_policy: ExistingConfigPolicy,
 ) -> anyhow::Result<ConfigFilesWriteOutcome> {
     let home_path = home.path();
-    fs::create_dir_all(home_path)
-        .map_err(|error| anyhow::anyhow!("create reborn home {}: {error}", home_path.display()))?;
+    fs::create_dir_all(home_path).map_err(|error| {
+        anyhow::anyhow!("create IronClaw home {}: {error}", home_path.display())
+    })?;
 
     let config_path = home.config_file_path();
     let providers_path = home.providers_file_path();
@@ -152,7 +153,7 @@ fn preflight_targets<const N: usize>(targets: [(&Path, &'static str); N]) -> any
 /// Build the commented stub TOML with the current API version baked in.
 fn config_stub() -> String {
     format!(
-        r#"# IronClaw Reborn boot configuration.
+        r#"# IronClaw boot configuration.
 #
 # Layout:
 #   - This file (config.toml) carries the SELECTION layer:

@@ -4,7 +4,9 @@ use ironclaw_reborn_composition::{
 };
 
 use crate::context::RebornCliContext;
-use crate::dto::{ComponentStatus, DriversSnapshot, FilePresence, ServiceStateDto, StatusDto};
+use crate::dto::{
+    ComponentStatus, DriversSnapshot, FilePresence, ServiceStateDto, StatusDto, StatusHomeFields,
+};
 use crate::render::{self, OutputMode, Renderable, terminal_safe_text};
 use std::io::Write;
 
@@ -57,7 +59,7 @@ fn build_status_dto_with_service_state(
 
     Ok(StatusDto {
         version: env!("CARGO_PKG_VERSION").to_string(),
-        reborn_home: home.path().to_path_buf(),
+        home: StatusHomeFields::new(home.path().to_path_buf()),
         home_source: home.source_label(),
         profile: profile.as_str().to_string(),
         config_file: FilePresence {
@@ -187,10 +189,10 @@ pub(super) fn convert_component_status(status: &RebornRuntimeComponentStatus) ->
 
 impl Renderable for StatusDto {
     fn render_text_to(&self, w: &mut impl Write) -> std::io::Result<()> {
-        writeln!(w, "IronClaw Reborn status")?;
+        writeln!(w, "IronClaw status")?;
         writeln!(w)?;
         kv(w, "version", &self.version)?;
-        kv(w, "reborn_home", &self.reborn_home.display().to_string())?;
+        kv(w, "ironclaw_home", &self.home.path().display().to_string())?;
         kv(w, "home_source", self.home_source)?;
         kv(w, "profile", &self.profile)?;
         kv(

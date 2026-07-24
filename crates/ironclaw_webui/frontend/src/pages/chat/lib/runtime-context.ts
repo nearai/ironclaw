@@ -1,8 +1,8 @@
 export function buildRuntimeContext({ gatewayStatus, activeThread }) {
   const turnCount = activeThread?.turn_count || 0;
   const connections = gatewayStatus?.total_connections;
-  // Reborn has one engine; the v1/v2 split is gone.
-  const engineLabel = "Reborn";
+  // IronClaw has one engine; the v1/v2 split is gone.
+  const engineLabel = "IronClaw";
 
   return {
     mode: "Auto-review",

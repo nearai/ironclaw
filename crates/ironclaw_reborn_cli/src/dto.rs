@@ -1,13 +1,15 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::ser::SerializeStruct;
+use serde::{Serialize, Serializer};
 
 // ─── Status ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct StatusDto {
     pub version: String,
-    pub reborn_home: PathBuf,
+    #[serde(flatten)]
+    pub home: StatusHomeFields,
     pub home_source: &'static str,
     pub profile: String,
     pub config_file: FilePresence,
@@ -15,7 +17,7 @@ pub(crate) struct StatusDto {
     pub model_slots: Vec<String>,
     pub drivers: DriversSnapshot,
     /// CLI-token `/login?token=` bootstrap link, present only when a valid
-    /// `webui-token` file exists under `reborn_home`.
+    /// `webui-token` file exists under the IronClaw home.
     ///
     /// `skip_serializing`: carries a live bearer token in the query string;
     /// `status --json` is diagnostic data pasted into issues/logs and must
@@ -38,6 +40,38 @@ pub(crate) struct StatusDto {
     /// when it is fully configured (no degradation to surface).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub google_oauth_degraded: Option<String>,
+}
+
+/// One canonical home path serialized under both the current and compatibility
+/// JSON keys. Keeping only one stored path makes it impossible for the two
+/// machine-readable fields to diverge.
+#[derive(Debug, Clone)]
+pub(crate) struct StatusHomeFields {
+    path: PathBuf,
+}
+
+impl StatusHomeFields {
+    pub(crate) fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Serialize for StatusHomeFields {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut fields = serializer.serialize_struct("StatusHomeFields", 2)?;
+        fields.serialize_field("ironclaw_home", &self.path)?;
+        // Deprecated compatibility key. Retained throughout the 0.x release
+        // line; removal requires a documented breaking release.
+        fields.serialize_field("reborn_home", &self.path)?;
+        fields.end()
+    }
 }
 
 /// Live OS-service lifecycle state. Mirrors `commands::service::ServiceState`,

@@ -205,7 +205,7 @@ pub(crate) async fn capture_turn_trace(
         Ok(Some(policy)) => policy,
         Ok(None) => return,
         Err(error) => {
-            tracing::debug!(%error, %scope_ref, "Reborn trace capture could not resolve policy");
+            tracing::debug!(%error, %scope_ref, "IronClaw trace capture could not resolve policy");
             return;
         }
     };
@@ -237,14 +237,14 @@ pub(crate) async fn capture_turn_trace(
         Ok(TraceClientAutonomousCaptureOutcome::Submit(envelope)) => {
             let trace_scope = TraceClientScope::user(scope.clone());
             if let Err(error) = TraceClientHost.queue_envelope_for_scope(&trace_scope, &envelope) {
-                tracing::debug!(%error, %scope_ref, "Reborn trace capture failed to queue envelope");
+                tracing::debug!(%error, %scope_ref, "IronClaw trace capture failed to queue envelope");
                 return;
             }
             if let Err(error) = TraceClientHost
                 .flush_scope_queue(&trace_scope, CAPTURE_FLUSH_LIMIT)
                 .await
             {
-                tracing::debug!(%error, %scope_ref, "Reborn trace queue flush failed; worker retries");
+                tracing::debug!(%error, %scope_ref, "IronClaw trace queue flush failed; worker retries");
             }
         }
         Ok(TraceClientAutonomousCaptureOutcome::Held {
@@ -262,7 +262,7 @@ pub(crate) async fn capture_turn_trace(
                     %submission_id,
                     %reason,
                     %scope_ref,
-                    "Reborn trace capture held by policy gate (dropped)"
+                    "IronClaw trace capture held by policy gate (dropped)"
                 );
                 return;
             }
@@ -272,19 +272,19 @@ pub(crate) async fn capture_turn_trace(
             if let Err(error) =
                 TraceClientHost.queue_held_envelope_for_scope(&trace_scope, &envelope, &reason)
             {
-                tracing::debug!(%error, %scope_ref, "Reborn trace capture failed to retain held envelope");
+                tracing::debug!(%error, %scope_ref, "IronClaw trace capture failed to retain held envelope");
                 return;
             }
             tracing::debug!(
                 %submission_id,
                 %reason,
                 %scope_ref,
-                "Reborn trace capture held for manual review (retained)"
+                "IronClaw trace capture held for manual review (retained)"
             );
         }
         Ok(TraceClientAutonomousCaptureOutcome::Skipped) => {}
         Err(error) => {
-            tracing::debug!(%error, %scope_ref, "Reborn trace capture failed to build envelope");
+            tracing::debug!(%error, %scope_ref, "IronClaw trace capture failed to build envelope");
         }
     }
 }
@@ -295,7 +295,7 @@ async fn load_capture_messages(
     scope_ref: &str,
 ) -> Option<Vec<ConversationMessage>> {
     let Some(agent_id) = event.scope.agent_id.clone() else {
-        tracing::debug!(%scope_ref, "Reborn trace capture skipped: turn scope has no agent id");
+        tracing::debug!(%scope_ref, "IronClaw trace capture skipped: turn scope has no agent id");
         return None;
     };
     let owner_user_id = event
@@ -315,7 +315,7 @@ async fn load_capture_messages(
     match history.thread_history_messages(request).await {
         Ok(records) => Some(conversation_messages_from_records(&records)),
         Err(error) => {
-            tracing::debug!(%error, %scope_ref, "Reborn trace capture could not load thread history");
+            tracing::debug!(%error, %scope_ref, "IronClaw trace capture could not load thread history");
             None
         }
     }
@@ -449,7 +449,7 @@ impl TraceQueueFlushWorkerHandle {
     pub(crate) async fn shutdown(self) {
         self.cancel.cancel();
         if let Err(error) = self.handle.await {
-            tracing::debug!(%error, "Reborn trace queue flush worker did not shut down cleanly");
+            tracing::debug!(%error, "IronClaw trace queue flush worker did not shut down cleanly");
         }
     }
 }
@@ -487,7 +487,7 @@ pub(crate) fn spawn_trace_queue_flush_worker(
                 .flush_queue_worker_tick(scopes.clone(), TRACE_QUEUE_WORKER_FLUSH_LIMIT)
                 .await
             {
-                tracing::debug!(%error, "Reborn trace queue worker tick failed");
+                tracing::debug!(%error, "IronClaw trace queue worker tick failed");
             }
             // Prune drained scopes so the observed set stays bounded by actual
             // pending backlog, not by every caller ever seen on this runtime. A

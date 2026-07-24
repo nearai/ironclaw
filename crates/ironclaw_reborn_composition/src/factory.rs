@@ -703,7 +703,7 @@ pub(crate) async fn build_runtime_substrate(
     tracing::debug!(
         profile = %input.profile(),
         owner_id = %input.owner_id(),
-        "building Reborn composition facades"
+        "building IronClaw composition facades"
     );
     // Substrate selection is deployment *data* (§4.4/§5.6), not a profile
     // match: the config says which substrate to assemble and this dispatches
@@ -2575,7 +2575,7 @@ async fn build_production_shaped(
     match storage {
         RebornStorageInput::Disabled => Err(RebornBuildError::InvalidConfig {
             reason: format!(
-                "profile={} requires durable database-backed Reborn storage",
+                "profile={} requires durable database-backed IronClaw storage",
                 profile
             ),
         }),

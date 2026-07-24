@@ -15,7 +15,7 @@ pub(crate) struct SkillsCommand {
 
 #[derive(Debug, Subcommand)]
 enum SkillsSubcommand {
-    /// List configured Reborn skills.
+    /// List configured IronClaw skills.
     List(SkillsListCommand),
 }
 
@@ -52,6 +52,7 @@ impl SkillsListCommand {
                 output["details"] = serde_json::json!({
                     "profile": config.profile.to_string(),
                     "reborn_home": context.boot_config().home().path(),
+                    "ironclaw_home": context.boot_config().home().path(),
                     "local_dev_root": config.local_dev_root,
                     "owner_id": config.owner_id,
                 });
@@ -60,7 +61,7 @@ impl SkillsListCommand {
             return Ok(());
         }
 
-        println!("IronClaw Reborn skills");
+        println!("IronClaw skills");
         println!("configured: {}", skills.len());
         println!("source: reborn-local-dev");
 
@@ -68,6 +69,10 @@ impl SkillsListCommand {
             println!("profile: {}", config.profile);
             println!(
                 "reborn_home: {}",
+                context.boot_config().home().path().display()
+            );
+            println!(
+                "ironclaw_home: {}",
                 context.boot_config().home().path().display()
             );
             println!("local_dev_root: {}", config.local_dev_root.display());
@@ -148,6 +153,7 @@ fn skills_json(skills: &[RebornSkillSummary]) -> serde_json::Value {
         "configured": skills.len(),
         "skills": skills.iter().map(reborn_skill_summary_json).collect::<Vec<_>>(),
         "source": "reborn-local-dev",
+        "product": "ironclaw",
     })
 }
 

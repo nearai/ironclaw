@@ -23,39 +23,39 @@ pub(crate) mod webui_auth;
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
-    /// Inspect configured Reborn channels.
+    /// Inspect configured IronClaw channels.
     Channels(channels::ChannelsCommand),
     /// Generate shell completion scripts.
     Completion(completion::CompletionCommand),
-    /// Inspect Reborn configuration paths without creating state.
+    /// Inspect IronClaw configuration paths without creating state.
     Config(config::ConfigCommand),
-    /// Check Reborn binary configuration without creating state.
+    /// Check IronClaw configuration without creating state.
     Doctor(doctor::DoctorCommand),
-    /// Manage local Reborn extension lifecycle.
+    /// Manage the local IronClaw extension lifecycle.
     Extension(extension::ExtensionCommand),
-    /// Inspect configured Reborn hooks.
+    /// Inspect configured IronClaw hooks.
     Hooks(hooks::HooksCommand),
-    /// Inspect Reborn logs.
+    /// Inspect IronClaw logs.
     Logs(logs::LogsCommand),
-    /// Inspect Reborn model slots and route status.
+    /// Inspect IronClaw model slots and route status.
     Models(models::ModelsCommand),
-    /// Initialize the standalone Reborn home and first-run setup marker.
+    /// Initialize the IronClaw home and first-run setup marker.
     Onboard(onboard::OnboardCommand),
-    /// Inspect supported Reborn boot profiles.
+    /// Inspect supported IronClaw boot profiles.
     Profile(profile::ProfileCommand),
-    /// Start the composed Reborn CLI REPL.
+    /// Start the composed IronClaw CLI REPL.
     Repl(repl::ReplCommand),
-    /// Initialize the minimal Reborn runtime shell and exit.
+    /// Initialize the minimal IronClaw runtime shell and exit.
     Run(run::RunCommand),
-    /// Start the Reborn WebUI service.
+    /// Start the IronClaw WebUI service.
     Serve(serve::ServeCommand),
-    /// Install/start/stop/status/uninstall the standalone Reborn binary
+    /// Install/start/stop/status/uninstall the IronClaw service.
     /// as an OS-native service (launchd on macOS, systemd on Linux). The
     /// installed unit runs `serve`.
     Service(service::ServiceCommand),
-    /// Inspect configured Reborn skills.
+    /// Inspect configured IronClaw skills.
     Skills(skills::SkillsCommand),
-    /// Show Reborn runtime status snapshot.
+    /// Show the IronClaw runtime status snapshot.
     Status(status::StatusCommand),
     /// Manage trace contributions to TraceCommons.
     Traces(Box<traces::TracesCommand>),

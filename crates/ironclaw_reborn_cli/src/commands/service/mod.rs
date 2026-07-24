@@ -1,4 +1,4 @@
-//! `ironclaw service` — install/manage the standalone Reborn
+//! `ironclaw service` — install/manage the IronClaw
 //! binary as an OS-native service.
 //!
 //! - **macOS**: launchd user agent at
@@ -8,7 +8,7 @@
 //!
 //! The installed service runs `<current_exe> serve`, restarting
 //! automatically on failure. Mirrors v1's `src/service.rs` shape with
-//! Reborn's label, paths, and env-passthrough contract; no v1 code is
+//! IronClaw's label, paths, and env-passthrough contract; no v1 code is
 //! shared or reused.
 //!
 //! Platform dispatch happens once, in [`ServicePlatform::detect`], called
@@ -20,7 +20,7 @@
 //! ## Canonical service identity, shared with the WebUI operator facade
 //!
 //! [`SERVICE_LABEL`] and [`SYSTEMD_UNIT`] name the **one** OS service
-//! identity for the standalone Reborn binary. Two surfaces install and
+//! identity for the IronClaw binary. Two surfaces install and
 //! manage it today: this CLI (`ironclaw service install`), and the
 //! WebUI operator facade (`OperatorServiceLifecycle` in
 //! `ironclaw_reborn_composition::observability::operator_service_lifecycle`,
@@ -895,7 +895,7 @@ mod tests {
                 "WorkingDirectory=\"{}\"",
                 expected_working_directory.display()
             )),
-            "unit file must anchor cwd at <reborn_home>/workspace, not the Reborn home itself \
+            "unit file must anchor cwd at <reborn_home>/workspace, not the IronClaw home itself \
              (the Reborn home is an ancestor of every default skill root, so cwd=reborn_home \
              still trips composition's overlap check — the crash-loop persisted after the first \
              attempt at this fix): {contents}"
@@ -968,7 +968,7 @@ mod tests {
                 "<string>{}</string>",
                 expected_working_directory.display()
             )) && contents.contains("<key>WorkingDirectory</key>"),
-            "plist must anchor cwd at <reborn_home>/workspace, not the Reborn home itself \
+            "plist must anchor cwd at <reborn_home>/workspace, not the IronClaw home itself \
              (the Reborn home is an ancestor of every default skill root, so cwd=reborn_home \
              still trips composition's overlap check — the crash-loop persisted after the first \
              attempt at this fix): {contents}"

@@ -231,8 +231,8 @@ async fn apply_run_trigger_fire_access_policy(
 
 fn print_runtime_banner(config: &RebornBootConfig) {
     eprintln!("ironclaw: runtime started");
-    eprintln!("  profile     : {}", config.profile());
-    eprintln!("  reborn_home : {}", config.home().path().display());
+    eprintln!("  profile       : {}", config.profile());
+    eprintln!("  ironclaw_home : {}", config.home().path().display());
     eprintln!();
 }
 
@@ -247,7 +247,7 @@ async fn send_once(
         .await?;
     if !reply.is_successful_final_reply() {
         anyhow::bail!(
-            "reborn run did not produce an assistant reply\n{}",
+            "IronClaw run did not produce an assistant reply\n{}",
             no_assistant_text_message(&reply)
         );
     }
@@ -297,7 +297,7 @@ async fn run_repl_loop(
                             Ok(reply) if stdin_is_tty => print_reply(&reply),
                             Ok(reply) => {
                                 anyhow::bail!(
-                                    "reborn run did not produce an assistant reply\n{}",
+                                    "IronClaw run did not produce an assistant reply\n{}",
                                     no_assistant_text_message(&reply)
                                 );
                             }
@@ -336,7 +336,7 @@ fn is_help_command(text: &str) -> bool {
 }
 
 fn print_repl_help() {
-    eprintln!("Reborn REPL commands:");
+    eprintln!("IronClaw REPL commands:");
     eprintln!("  /help  Show this help");
     eprintln!("  /exit  Exit the REPL");
     eprintln!("  /quit  Exit the REPL");
@@ -572,7 +572,7 @@ pub(crate) fn build_runtime_input_with_options(
                     provider_id = %llm.provider_id(),
                     model = %llm.model(),
                     base_url = %llm.base_url().unwrap_or_default(),
-                    "resolved LLM selection for Reborn runtime"
+                    "resolved LLM selection for IronClaw runtime"
                 );
                 // Opt-in LLM trace recording (`IRONCLAW_RECORD_TRACE`). The
                 // serve/run turn provider is built via `wrap_swappable_gateway`,

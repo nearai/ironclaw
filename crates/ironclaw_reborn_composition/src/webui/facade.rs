@@ -581,12 +581,12 @@ fn status_response_from_readiness(readiness: &RebornReadiness) -> RebornOperator
         crate::RebornReadinessState::Disabled => (
             RebornOperatorStatusState::NotConfigured,
             RebornOperatorStatusSeverity::Warning,
-            Some("finish Reborn runtime setup before production use".to_string()),
+            Some("finish IronClaw runtime setup before production use".to_string()),
         ),
         crate::RebornReadinessState::DevOnly => (
             RebornOperatorStatusState::Degraded,
             RebornOperatorStatusSeverity::Warning,
-            Some("finish Reborn runtime setup before production use".to_string()),
+            Some("finish IronClaw runtime setup before production use".to_string()),
         ),
         crate::RebornReadinessState::HostedSingleTenantValidated => (
             RebornOperatorStatusState::Ready,
@@ -614,7 +614,7 @@ fn status_response_from_readiness(readiness: &RebornReadiness) -> RebornOperator
         runtime_status,
         runtime_severity,
         format!(
-            "Reborn profile {:?} is {:?}",
+            "IronClaw profile {:?} is {:?}",
             readiness.profile, readiness.state
         ),
         runtime_remediation,
@@ -716,7 +716,7 @@ fn bool_check(
             missing_summary
         }
         .to_string(),
-        (!ready).then(|| format!("wire the {id} subsystem in Reborn composition")),
+        (!ready).then(|| format!("wire the {id} subsystem in IronClaw composition")),
     )
 }
 
@@ -741,9 +741,9 @@ fn status_check_from_readiness_diagnostic(
         RebornReadinessDiagnosticStatus::Info => RebornOperatorStatusSeverity::Info,
     };
     let remediation = if diagnostic.blocks_production {
-        "wire the required Reborn production component before exposing live traffic"
+        "wire the required IronClaw production component before exposing live traffic"
     } else {
-        "review the Reborn readiness report for the component owner"
+        "review the IronClaw readiness report for the component owner"
     };
     status_check(
         &id,

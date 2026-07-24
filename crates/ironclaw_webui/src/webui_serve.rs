@@ -742,12 +742,15 @@ pub fn webui_v2_app_with_lifecycle(
 struct RebornHealthResponse {
     status: &'static str,
     channel: &'static str,
+    product: &'static str,
 }
 
 async fn reborn_health_handler() -> Json<RebornHealthResponse> {
     Json(RebornHealthResponse {
         status: "healthy",
+        // Public compatibility token consumed by existing platform probes.
         channel: "reborn",
+        product: "ironclaw",
     })
 }
 

@@ -352,7 +352,7 @@ fn enforce_runtime_cutover_gate(
         if readiness.state != required_readiness {
             return Err(RebornRuntimeError::InvalidArgument {
                 reason: format!(
-                    "profile={profile} cannot start Reborn runtime before readiness is validated; required_state={required_readiness:?}, state={:?}",
+                    "profile={profile} cannot start IronClaw runtime before readiness is validated; required_state={required_readiness:?}, state={:?}",
                     readiness.state
                 ),
             });
@@ -365,7 +365,7 @@ fn enforce_runtime_cutover_gate(
         {
             return Err(RebornRuntimeError::InvalidArgument {
                 reason: format!(
-                    "profile={profile} cannot start Reborn runtime while readiness diagnostic blocks production: component={:?}, reason={:?}",
+                    "profile={profile} cannot start IronClaw runtime while readiness diagnostic blocks production: component={:?}, reason={:?}",
                     diagnostic.component, diagnostic.reason
                 ),
             });

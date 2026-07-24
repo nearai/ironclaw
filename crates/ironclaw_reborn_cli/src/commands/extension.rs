@@ -21,11 +21,11 @@ pub(crate) struct ExtensionCommand {
 
 #[derive(Debug, Subcommand)]
 enum ExtensionSubcommand {
-    /// Search local Reborn extension packages.
+    /// Search local IronClaw extension packages.
     Search(ExtensionSearchCommand),
-    /// Install a local Reborn extension package.
+    /// Install a local IronClaw extension package.
     Install(ExtensionPackageCommand),
-    /// Remove an installed local Reborn extension package.
+    /// Remove an installed local IronClaw extension package.
     Remove(ExtensionPackageCommand),
 }
 
@@ -105,7 +105,7 @@ fn execute_lifecycle_command(
             crate::runtime::with_binary_host_extension_bindings(runtime_services.services_input)?;
         let runtime = build_reborn_runtime(RebornRuntimeInput::from_build_input(services_input))
             .await
-            .context("failed to assemble Reborn runtime for extension lifecycle command")?;
+            .context("failed to assemble IronClaw runtime for extension lifecycle command")?;
         let response = execute_reborn_extension_lifecycle_command(&runtime, command)
             .await
             .map_err(anyhow::Error::from)?;

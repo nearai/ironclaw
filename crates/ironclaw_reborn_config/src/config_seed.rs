@@ -13,27 +13,27 @@ use crate::{REBORN_CONFIG_API_VERSION, RebornConfigFile, RebornConfigFileError, 
 
 #[derive(Debug, Error)]
 pub enum RebornConfigSeedError {
-    #[error("create Reborn config parent `{}`: {source}", path.display())]
+    #[error("create IronClaw config parent `{}`: {source}", path.display())]
     CreateParent {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("create temporary Reborn config file near `{}`: {source}", path.display())]
+    #[error("create temporary IronClaw config file near `{}`: {source}", path.display())]
     CreateTemp {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("write temporary Reborn config file `{}`: {source}", path.display())]
+    #[error("write temporary IronClaw config file `{}`: {source}", path.display())]
     WriteTemp {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("validate seeded Reborn config `{}`: {source}", path.display())]
+    #[error("validate seeded IronClaw config `{}`: {source}", path.display())]
     Validate {
         path: PathBuf,
         source: Box<RebornConfigFileError>,
     },
-    #[error("persist seeded Reborn config `{}`: {source}", path.display())]
+    #[error("persist seeded IronClaw config `{}`: {source}", path.display())]
     Persist {
         path: PathBuf,
         source: std::io::Error,
@@ -105,7 +105,7 @@ pub fn seed_default_config_file_if_missing(
 fn first_run_config_toml() -> String {
     let profile = RebornProfile::default();
     format!(
-        r#"# IronClaw Reborn first-run configuration.
+        r#"# IronClaw first-run configuration.
 #
 # This sparse file is created automatically the first time an
 # `ironclaw` command starts the runtime. It records the stable,

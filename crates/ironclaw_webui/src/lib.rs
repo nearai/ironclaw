@@ -178,12 +178,15 @@ struct DeferredWebuiRouterState {
 struct DeferredWebuiHealthResponse {
     status: &'static str,
     channel: &'static str,
+    product: &'static str,
 }
 
 async fn deferred_webui_health_handler() -> Json<DeferredWebuiHealthResponse> {
     Json(DeferredWebuiHealthResponse {
         status: "healthy",
+        // Keep this payload aligned with the ready router's public contract.
         channel: "reborn",
+        product: "ironclaw",
     })
 }
 
@@ -194,7 +197,7 @@ async fn deferred_webui_handler(
     let Some(router) = state.router_rx.borrow().clone() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            "Reborn runtime is starting",
+            "IronClaw runtime is starting",
         )
             .into_response();
     };

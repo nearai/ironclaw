@@ -2,7 +2,7 @@
 //!
 //! Consumed by the `service` subcommand's plist/unit generators
 //! (`commands/service/`) so the installed service unit's `serve`
-//! invocation agrees with the installing process on Reborn home/profile.
+//! invocation agrees with the installing process on IronClaw home/profile.
 
 use std::path::PathBuf;
 
@@ -11,7 +11,7 @@ use ironclaw_reborn_config::{REBORN_HOME_ENV, REBORN_PROFILE_ENV, RebornBootConf
 
 /// A fully resolved way to launch `ironclaw serve` as a child
 /// process: the binary path, its arguments, and the environment pairs a
-/// caller must set so `serve` resolves the same Reborn home/profile as
+/// caller must set so `serve` resolves the same IronClaw home/profile as
 /// the invoking process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServeInvocation {
@@ -32,7 +32,7 @@ pub struct ServeInvocation {
 pub fn serve_invocation() -> Result<ServeInvocation> {
     let exe = std::env::current_exe().context("failed to resolve current executable")?;
     let boot_config = RebornBootConfig::resolve_from_env()
-        .context("failed to resolve Reborn home for the serve invocation")?;
+        .context("failed to resolve IronClaw home for the serve invocation")?;
 
     let mut env = vec![(
         REBORN_HOME_ENV.to_string(),
