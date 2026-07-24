@@ -43,6 +43,7 @@ use ironclaw_auth::{
     ProviderScope, SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest, Timestamp,
     TurnRunRef, binding_scope_owns_account,
 };
+use ironclaw_host_api::NetworkMethod;
 use ironclaw_host_api::ingress::{
     AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
     IngressAuthScheme, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor, ListenerClass,
@@ -53,7 +54,7 @@ use ironclaw_host_api::{
     ProductSurfaceError, ProductSurfaceQueryRequest, ProjectId, ResourceScope, TenantId, ThreadId,
     UserId,
 };
-use ironclaw_host_api::{NetworkMethod, SplitRouteMount};
+use ironclaw_host_ingress::SplitRouteMount;
 use ironclaw_product::{
     EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, LifecyclePackageKind, RebornExtensionCredentialSetup,
     RebornExtensionListResponse, RebornSetupExtensionResponse,

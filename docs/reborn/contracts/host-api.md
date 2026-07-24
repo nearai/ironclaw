@@ -28,6 +28,10 @@ It is not a runtime, policy engine, filesystem, budget ledger, or extension mana
 - host-owned HTTP ingress descriptors
 - audit/event envelopes
 
+Concrete listener behavior and framework-specific router carriers are outside
+this contract crate. `ironclaw_host_ingress` pairs Axum routers with these
+ingress descriptors at the host HTTP boundary.
+
 The first implementation PR should create this crate before implementing `ironclaw_filesystem`, `ironclaw_resources`, `ironclaw_extensions`, `ironclaw_wasm`, or `ironclaw_dispatcher`.
 
 ---

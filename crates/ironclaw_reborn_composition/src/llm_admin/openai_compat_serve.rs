@@ -60,7 +60,7 @@ use sha2::{Digest, Sha256};
 
 use crate::RebornBuildError;
 use crate::RebornRuntime;
-use ironclaw_host_api::ProtectedRouteMount;
+use ironclaw_host_ingress::ProtectedRouteMount;
 
 #[cfg(test)]
 mod tests;

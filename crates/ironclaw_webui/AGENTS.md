@@ -60,7 +60,8 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
 
 `ironclaw_product` (wire DTOs and product command/view descriptors),
 `ironclaw_host_api` (`ProductSurface`, caller/error vocabulary, identity
-newtypes, and route-mount vocabulary), and `ironclaw_reborn_openai_compat`. Plus infra crates: `axum`, `tokio`, `tower*`,
+newtypes, and ingress descriptors), `ironclaw_host_ingress` (Axum route-mount
+carriers), and `ironclaw_reborn_openai_compat`. Plus infra crates: `axum`, `tokio`, `tower*`,
 `tracing`, `thiserror`, `async-trait`, `secrecy`, `subtle`, `jsonwebtoken`, etc.
 
 Any other workspace-crate edge requires an `ironclaw_architecture` boundary-test

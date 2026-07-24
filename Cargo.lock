@@ -3743,7 +3743,6 @@ name = "ironclaw_host_api"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "axum 0.8.9",
  "chrono",
  "rust_decimal",
  "rust_decimal_macros",
@@ -3757,6 +3756,14 @@ dependencies = [
  "tracing",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "ironclaw_host_ingress"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.9",
+ "ironclaw_host_api",
 ]
 
 [[package]]
@@ -4149,6 +4156,7 @@ dependencies = [
  "ironclaw_first_party_extensions",
  "ironclaw_hooks",
  "ironclaw_host_api",
+ "ironclaw_host_ingress",
  "ironclaw_host_runtime",
  "ironclaw_llm",
  "ironclaw_loop_host",
@@ -4295,6 +4303,7 @@ dependencies = [
  "ironclaw_first_party_extensions",
  "ironclaw_hooks",
  "ironclaw_host_api",
+ "ironclaw_host_ingress",
  "ironclaw_host_runtime",
  "ironclaw_llm",
  "ironclaw_loop_host",
@@ -4795,6 +4804,7 @@ dependencies = [
  "http 1.4.2",
  "http-body-util",
  "ironclaw_host_api",
+ "ironclaw_host_ingress",
  "ironclaw_loop_host",
  "ironclaw_product",
  "ironclaw_reborn_openai_compat",

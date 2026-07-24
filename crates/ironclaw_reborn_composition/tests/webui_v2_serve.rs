@@ -23,7 +23,7 @@ use ironclaw_host_api::{
     ResultPreviewMeta, ResultProgress, ResultRef, SafeSummary, TenantId, TerminateHint, ThreadId,
     ToolVerdict, UserId,
 };
-use ironclaw_host_api::{ProtectedRouteMount, PublicRouteMount};
+use ironclaw_host_ingress::{ProtectedRouteMount, PublicRouteMount};
 use ironclaw_product::{
     EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, LifecyclePackageKind,
     LifecyclePackageRef, LifecyclePublicState, ProductCreateThreadRequest,

@@ -145,7 +145,7 @@ use crate::extension_host::extension_ingress::{
 };
 use crate::extension_host::run_delivery_ports::ProductAuthBlockedAuthPromptSource;
 use crate::{RebornUserIdentityLookup, RebornUserIdentityLookupError};
-use ironclaw_host_api::PublicRouteMount;
+use ironclaw_host_ingress::PublicRouteMount;
 use ironclaw_product::AuthChallengeProvider;
 use ironclaw_product::BlockedAuthPromptSource;
 

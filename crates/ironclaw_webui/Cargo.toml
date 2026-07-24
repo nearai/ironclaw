@@ -29,6 +29,7 @@ futures = "0.3"
 hex = "0.4.3"
 hmac = "0.13"
 ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_host_ingress = { path = "../ironclaw_host_ingress" }
 # Folded up from the former `ironclaw_webui_v2` crate: the v2 handlers consume
 # only the `ProductSurface` facade + ingress/error vocabulary.
 ironclaw_product = { path = "../ironclaw_product", features = ["host-auth-mint"] }

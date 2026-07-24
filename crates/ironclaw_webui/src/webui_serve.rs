@@ -41,9 +41,9 @@ use axum::{
     routing::get,
 };
 use ironclaw_host_api::ingress::IngressRouteDescriptor;
-use ironclaw_host_api::{
-    AgentId, ProductSurface, ProjectId, ProtectedRouteMount, PublicRouteDrains, PublicRouteMount,
-    SplitRouteMount, TenantId, UserId,
+use ironclaw_host_api::{AgentId, ProductSurface, ProjectId, TenantId, UserId};
+use ironclaw_host_ingress::{
+    ProtectedRouteMount, PublicRouteDrains, PublicRouteMount, SplitRouteMount,
 };
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::{AllowHeaders, CorsLayer};

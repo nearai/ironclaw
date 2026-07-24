@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use axum::Router;
 
-use crate::ingress::IngressRouteDescriptor;
+use ironclaw_host_api::IngressRouteDescriptor;
 
 /// Async drain hook for public route mounts that schedule work outside the
 /// request/response future.

@@ -647,7 +647,7 @@ mod serve_mount {
     };
 
     use super::*;
-    use ironclaw_host_api::{PublicRouteDrain, PublicRouteMount};
+    use ironclaw_host_ingress::{PublicRouteDrain, PublicRouteMount};
 
     /// The canonical generic ingress route pattern (axum path params).
     pub const EXTENSION_INGRESS_ROUTE_PATTERN: &str =

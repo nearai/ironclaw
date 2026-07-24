@@ -1601,7 +1601,7 @@ impl RebornRuntime {
     #[cfg(any(test, feature = "test-support"))]
     pub fn channel_pairing_route_mount_for_test(
         &self,
-    ) -> Option<ironclaw_host_api::ProtectedRouteMount> {
+    ) -> Option<ironclaw_host_ingress::ProtectedRouteMount> {
         self.channel_pairing.as_ref().map(|registry| {
             crate::extension_host::channel_pairing_serve::channel_pairing_route_mount(Arc::clone(
                 registry,
@@ -1803,7 +1803,7 @@ impl RebornRuntime {
     /// `ironclaw_webui::WebuiServeConfig::with_public_route_mount`. Built
     /// from the runtime's private session/reload/boot so those stay internal.
     /// `None` when no LLM seam or boot config was wired.
-    pub fn nearai_login_callback_mount(&self) -> Option<ironclaw_host_api::PublicRouteMount> {
+    pub fn nearai_login_callback_mount(&self) -> Option<ironclaw_host_ingress::PublicRouteMount> {
         let boot = self.boot.clone()?;
         let session = self.webui_llm_session()?;
         let reload = self.webui_llm_reload_trigger()?;
@@ -1993,7 +1993,9 @@ impl RebornRuntime {
     /// durable channel-identity storage.
     /// The bearer-authed generic pairing route mount (`WebGeneratedCode`
     /// channels), when the composed runtime built any pairing service.
-    pub fn channel_pairing_route_mount(&self) -> Option<ironclaw_host_api::ProtectedRouteMount> {
+    pub fn channel_pairing_route_mount(
+        &self,
+    ) -> Option<ironclaw_host_ingress::ProtectedRouteMount> {
         self.channel_pairing.as_ref().map(|registry| {
             crate::extension_host::channel_pairing_serve::channel_pairing_route_mount(
                 std::sync::Arc::clone(registry),

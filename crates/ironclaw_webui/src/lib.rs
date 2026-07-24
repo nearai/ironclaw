@@ -39,8 +39,12 @@ mod webui_serve;
 mod webui_ws_origin;
 
 // WebChat v2 gateway assembly + the host-auth vocabulary it carries.
-// Route-mount vocabulary lives in `ironclaw_host_api` so composition can build
-// mounts and this ingress crate can consume them without a reverse dependency.
+// Route-mount carriers live in `ironclaw_host_ingress`: composition can build
+// mounts and this ingress crate can consume them without a reverse dependency
+// on WebUI.
+pub use ironclaw_host_ingress::{
+    ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount, SplitRouteMount,
+};
 pub use webui_rate_limit::RateLimitConfigError;
 pub use webui_serve::{
     WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, WebuiServeConfigError,
@@ -52,8 +56,8 @@ pub use auth::EmailUserDirectory;
 pub use auth::{
     GitHubOAuthConfig, GitHubProvider, GoogleOAuthConfig, GoogleProvider, OAuthError,
     OAuthProvider, OAuthProviderName, OAuthProviderNameError, OAuthRouterConfig, OAuthUserProfile,
-    ProviderInitError, PublicRouteMount, UserDirectory, UserDirectoryError,
-    empty_webui_v2_auth_providers_mount, webui_v2_auth_router,
+    ProviderInitError, UserDirectory, UserDirectoryError, empty_webui_v2_auth_providers_mount,
+    webui_v2_auth_router,
 };
 // Host-owned CLI-token bootstrap login (`GET /login?token=`); shares the
 // OAuth surface's bearer/ticket-exchange contract (`POST
