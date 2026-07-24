@@ -219,7 +219,6 @@ fn installation_deserialize_rejects_duplicate_bindings() {
 {
   "installation_id": "acme-telegram-prod",
   "extension_id": "telegram-v2",
-  "activation_state": "installed",
   "manifest_ref": { "extension_id": "telegram-v2", "manifest_hash": "sha256:abc123" },
   "credential_bindings": [
     { "credential_handle": "telegram_bot_token", "secret_handle": "secret_a" },

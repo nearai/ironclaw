@@ -97,7 +97,7 @@ use ironclaw_product::{
     SUBMIT_TURN_COMMAND, SetActiveLlmRequest, SettingsToolPermissionState,
     THREAD_DELETE_CAPABILITY, THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_LOGIN_LINK_COMMAND,
     TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, TRACE_HOLD_AUTHORIZE_COMMAND,
-    UpsertLlmProviderRequest, product_attachment_capabilities,
+    UpsertLlmProviderRequest, product_attachment_capabilities, project_public_lifecycle_states,
 };
 use secrecy::ExposeSecret;
 use serde::de::DeserializeOwned;
@@ -105,9 +105,9 @@ use serde::{Deserialize, Serialize};
 
 use ironclaw_host_api::turn::IdempotencyKey;
 use ironclaw_host_api::{
-    ActivityId, Blocked, FailureKind, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
-    ProductSurfaceErrorCode, ProductSurfaceErrorKind, ProductSurfaceValidationCode, Resolution,
-    SecretHandle, ThreadId, UserId,
+    ActivityId, Blocked, FailureKind, InstallationState, ProductSurface, ProductSurfaceCaller,
+    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    ProductSurfaceValidationCode, Resolution, SecretHandle, ThreadId, UserId,
 };
 use uuid::Uuid;
 
@@ -2131,14 +2131,22 @@ pub async fn install_extension(
         Ok::<LifecyclePackageRef, std::convert::Infallible>(body.package_ref),
         "package_ref",
     )?;
-    let resolution = invoke_product_capability(
+    let client_action_id = parse_client_action_id(body.client_action_id)?;
+    let activity_id = extension_lifecycle_activity_id(
+        &caller,
+        EXTENSION_INSTALL_CAPABILITY,
+        &package_ref,
+        &client_action_id,
+    )?;
+    let resolution = invoke_product_capability_with_activity_id(
         state.services(),
-        caller,
+        caller.clone(),
         EXTENSION_INSTALL_CAPABILITY,
         serde_json::json!({ "extension_id": package_ref.id.as_str() }),
+        activity_id,
     )
     .await?;
-    extension_lifecycle_mutation_succeeded(resolution)?;
+    extension_install_succeeded(state.services(), caller, &package_ref, resolution).await?;
     let response = extension_action_completed("Extension installed.");
     Ok(Json(response))
 }
@@ -2241,6 +2249,102 @@ fn extension_lifecycle_mutation_succeeded(
     }
 }
 
+async fn extension_install_succeeded(
+    services: &std::sync::Arc<dyn ProductSurface>,
+    caller: ProductSurfaceCaller,
+    package_ref: &LifecyclePackageRef,
+    resolution: Resolution,
+) -> Result<(), ProductSurfaceError> {
+    match resolution {
+        Resolution::Done(outcome) => {
+            if outcome.verdict.is_success() {
+                return ensure_extension_inventory_readback(
+                    services,
+                    caller.clone(),
+                    package_ref,
+                    |extension| {
+                        matches!(
+                            extension.installation_state,
+                            InstallationState::Active
+                                | InstallationState::Installed
+                                | InstallationState::Configured
+                                | InstallationState::Disabled
+                                | InstallationState::Failed
+                        )
+                    },
+                )
+                .await;
+            } else if matches!(
+                outcome.verdict.error_kind(),
+                Some(FailureKind::Backend | FailureKind::Transient | FailureKind::Unavailable)
+            ) {
+                let readback = ensure_extension_inventory_readback(
+                    services,
+                    caller.clone(),
+                    package_ref,
+                    |extension| {
+                        extension.needs_setup
+                            || matches!(
+                                extension.installation_state,
+                                InstallationState::Installed
+                                    | InstallationState::Configured
+                                    | InstallationState::Failed
+                            )
+                    },
+                )
+                .await;
+                match readback {
+                    Ok(()) => Ok(()),
+                    Err(_) => extension_lifecycle_mutation_succeeded(Resolution::Done(outcome)),
+                }
+            } else {
+                extension_lifecycle_mutation_succeeded(Resolution::Done(outcome))
+            }
+        }
+        Resolution::Blocked(Blocked::Auth(_)) => {
+            ensure_extension_inventory_readback(services, caller, package_ref, |extension| {
+                extension.needs_setup
+                    || matches!(
+                        extension.installation_state,
+                        InstallationState::Installed
+                            | InstallationState::Configured
+                            | InstallationState::Failed
+                    )
+            })
+            .await
+        }
+        other => extension_lifecycle_mutation_succeeded(other),
+    }
+}
+
+async fn ensure_extension_inventory_readback(
+    services: &std::sync::Arc<dyn ProductSurface>,
+    caller: ProductSurfaceCaller,
+    package_ref: &LifecyclePackageRef,
+    accepts: impl Fn(&ironclaw_product::RebornExtensionInfo) -> bool,
+) -> Result<(), ProductSurfaceError> {
+    let page = query_product_page(
+        services,
+        caller,
+        RebornViewQuery {
+            view_id: EXTENSIONS_VIEW.id.to_string(),
+            params: serde_json::json!({}),
+            cursor: None,
+        },
+    )
+    .await?;
+    let inventory: RebornExtensionListResponse =
+        serde_json::from_value(page.payload).map_err(ProductSurfaceError::internal_from)?;
+    if inventory.extensions.iter().any(|extension| {
+        extension.package_ref.kind == package_ref.kind
+            && extension.package_ref.id.as_str() == package_ref.id.as_str()
+            && accepts(extension)
+    }) {
+        return Ok(());
+    }
+    Err(extension_lifecycle_unavailable(true))
+}
+
 fn extension_lifecycle_forbidden() -> ProductSurfaceError {
     ProductSurfaceError {
         code: ProductSurfaceErrorCode::Forbidden,
@@ -2281,7 +2385,7 @@ pub async fn get_extension_setup(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<ProductSurfaceCaller>,
     Path(ExtensionPackagePath { package_id }): Path<ExtensionPackagePath>,
-) -> Result<Json<RebornSetupExtensionResponse>, WebUiV2HttpError> {
+) -> Result<Json<serde_json::Value>, WebUiV2HttpError> {
     let package_ref = extension_package_ref_for_request(
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id),
         "package_id",
@@ -2296,9 +2400,9 @@ pub async fn get_extension_setup(
         },
     )
     .await?;
-    let response =
+    let response: RebornSetupExtensionResponse =
         serde_json::from_value(page.payload).map_err(ProductSurfaceError::internal_from)?;
-    Ok(Json(response))
+    Ok(Json(public_lifecycle_json(response)?))
 }
 
 /// `POST /api/webchat/v2/extensions/{package_id}/setup`
@@ -2316,7 +2420,7 @@ pub async fn setup_extension(
     Extension(caller): Extension<ProductSurfaceCaller>,
     Path(ExtensionPackagePath { package_id }): Path<ExtensionPackagePath>,
     Json(body): Json<ProductSetupExtensionRequest>,
-) -> Result<Json<RebornSetupExtensionResponse>, WebUiV2HttpError> {
+) -> Result<Json<serde_json::Value>, WebUiV2HttpError> {
     let package_ref = extension_package_ref_for_request(
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id),
         "package_id",
@@ -2348,9 +2452,15 @@ pub async fn setup_extension(
         },
     )
     .await?;
-    let response =
+    let response: RebornSetupExtensionResponse =
         serde_json::from_value(page.payload).map_err(ProductSurfaceError::internal_from)?;
-    Ok(Json(response))
+    Ok(Json(public_lifecycle_json(response)?))
+}
+
+fn public_lifecycle_json<T: Serialize>(value: T) -> Result<serde_json::Value, ProductSurfaceError> {
+    let mut value = serde_json::to_value(value).map_err(ProductSurfaceError::internal_from)?;
+    project_public_lifecycle_states(&mut value);
+    Ok(value)
 }
 
 fn require_operator_webui_config(

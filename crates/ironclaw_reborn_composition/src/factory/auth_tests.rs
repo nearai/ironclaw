@@ -726,7 +726,7 @@ async fn oauth_callback_with_lifecycle_activation_returns_ok_without_resume() {
         &TurnActor::new(UserId::new("alice").unwrap()),
     );
     let continuation = AuthContinuationRef::LifecycleActivation {
-        package_ref: LifecyclePackageRef::new("github-extension").unwrap(),
+        package_ref: LifecyclePackageRef::new("github").unwrap(),
     };
     let flow_id = create_flow(product_auth, auth_scope.clone(), continuation.clone()).await;
 

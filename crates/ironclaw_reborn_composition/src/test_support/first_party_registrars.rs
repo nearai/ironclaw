@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use ironclaw_auth::{
     CredentialAccount, CredentialAccountSelectionRequest, RuntimeCredentialAccountVisibilityPolicy,
 };
+use ironclaw_extension_host::{FirstPartyHandlerRegistrar, FirstPartyRegistrarContext};
 use ironclaw_first_party_extensions::{
     FIRST_PARTY_WEB_GET_CONTENT_CAPABILITY_ID, FIRST_PARTY_WEB_SEARCH_CAPABILITY_ID,
     FirstPartyWebDispatchError, FirstPartyWebDispatchRequest, FirstPartyWebExecutor,
@@ -35,8 +36,6 @@ use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult, ProductAuthProviderRuntimePorts,
 };
-
-use ironclaw_extension_host::{FirstPartyHandlerRegistrar, FirstPartyRegistrarContext};
 
 /// The full set of first-party handler registrars a local-dev/test build
 /// needs, mirroring `ironclaw_reborn_cli::first_party::bundled_first_party_registrars`.

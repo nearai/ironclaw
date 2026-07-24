@@ -27,8 +27,9 @@ use ironclaw_host_api::{
     ResourceScope, SecretHandle, TenantId, UserId,
 };
 use ironclaw_product::{
-    EXTENSIONS_VIEW, LifecyclePackageKind, LifecyclePackageRef, RebornExtensionInfo,
-    RebornExtensionListResponse, rejecting_product_surface_error,
+    EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, LifecyclePackageKind, LifecyclePackageRef,
+    RebornExtensionCredentialSetup, RebornExtensionInfo, RebornExtensionListResponse,
+    RebornExtensionSetupSecret, RebornSetupExtensionResponse, rejecting_product_surface_error,
 };
 use ironclaw_webui::{
     ProductAuthRouteState, WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig,
@@ -300,6 +301,46 @@ impl ironclaw_host_api::ProductSurface for UnusedServices {
                 ],
                 next_cursor: None,
             }),
+            id if id == EXTENSION_SETUP_VIEW.id => {
+                let package_id = request
+                    .input
+                    .get("package_id")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(ProductSurfaceError::internal)?;
+                let package_ref =
+                    LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id)
+                        .map_err(ProductSurfaceError::internal_from)?;
+                Ok(ironclaw_host_api::ProductSurfaceQueryPage {
+                    items: vec![
+                        serde_json::to_value(RebornSetupExtensionResponse {
+                            package_ref,
+                            phase: InstallationState::Installed,
+                            blockers: Vec::new(),
+                            payload: None,
+                            secrets: vec![RebornExtensionSetupSecret {
+                                name: "google_oauth".to_string(),
+                                provider: "google".to_string(),
+                                prompt: "Google account".to_string(),
+                                optional: false,
+                                provided: false,
+                                credential_ref: None,
+                                setup: RebornExtensionCredentialSetup::OAuth {
+                                    account_label: "work google".to_string(),
+                                    scopes: vec![
+                                        GOOGLE_GMAIL_READONLY_SCOPE.to_string(),
+                                        GOOGLE_CALENDAR_READONLY_SCOPE.to_string(),
+                                    ],
+                                    invocation_id: InvocationId::new().to_string(),
+                                },
+                            }],
+                            fields: Vec::new(),
+                            onboarding: None,
+                        })
+                        .expect("extension setup payload"),
+                    ],
+                    next_cursor: None,
+                })
+            }
             _ => Err(rejecting_product_surface_error()),
         }
     }
@@ -607,9 +648,7 @@ async fn get_oauth_flow_status(
 fn google_oauth_start_body(extra_fields: serde_json::Value) -> serde_json::Value {
     let expires_at = (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339();
     let mut body = json!({
-        "provider": "google",
-        "account_label": "work google",
-        "scopes": [GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE],
+        "requirement": "google_oauth",
         "expires_at": expires_at,
         "invocation_id": InvocationId::new().to_string(),
     });
@@ -646,14 +685,7 @@ async fn post_extension_oauth_start(
 }
 
 async fn start_google_oauth_flow(app: &axum::Router) -> (serde_json::Value, String) {
-    let start_response = post_google_oauth_start(
-        app,
-        google_oauth_start_body(json!({
-            "session_id": "web-session-google",
-            "thread_id": "thread-auth-google"
-        })),
-    )
-    .await;
+    let start_response = post_google_oauth_start(app, google_oauth_start_body(json!({}))).await;
     assert_eq!(start_response.status(), StatusCode::OK);
     let start_body = read_body_string(start_response).await;
     let start_json: serde_json::Value = serde_json::from_str(&start_body).expect("start json");
@@ -833,11 +865,11 @@ async fn product_auth_google_oauth_start_fails_closed_without_config() {
 async fn product_auth_google_oauth_start_rejects_disallowed_scopes() {
     let (app, _) = build_app_with_google_oauth();
 
-    // A scope outside the recipe ceiling is rejected before any flow exists
-    // (an empty list is valid: it means the full recipe ceiling).
+    // The browser supplies only a manifest requirement key; unknown
+    // requirements are rejected before any flow exists.
     let response = post_google_oauth_start(
         &app,
-        google_oauth_start_body(json!({ "scopes": [DISALLOWED_GOOGLE_SCOPE] })),
+        google_oauth_start_body(json!({ "requirement": "missing_google_oauth" })),
     )
     .await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -1380,7 +1412,7 @@ async fn product_auth_google_oauth_start_builds_provider_authorization_url() {
     assert!(!body.contains("google-pkce"));
     let json: serde_json::Value = serde_json::from_str(&body).expect("start json");
     assert_eq!(json["provider"], "google");
-    assert_eq!(json["continuation"]["type"], "setup_only");
+    assert_eq!(json["continuation"]["type"], "lifecycle_activation");
     let authorization_url = json["authorization_url"]
         .as_str()
         .expect("authorization url");
@@ -1426,10 +1458,8 @@ async fn extension_oauth_start_rejects_package_missing_from_installed_inventory(
         &app,
         "google-calendar",
         json!({
-            "provider": "google",
-            "account_label": "work google",
+            "requirement": "google_oauth",
             "invocation_id": InvocationId::new().to_string(),
-            "scopes": [GOOGLE_CALENDAR_READONLY_SCOPE],
             "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
         }),
     )
@@ -1493,10 +1523,8 @@ async fn extension_oauth_start_for_installed_package_attaches_update_binding() {
         &app,
         "google-calendar",
         json!({
-            "provider": "google",
-            "account_label": "work google",
+            "requirement": "google_oauth",
             "invocation_id": invocation_id.to_string(),
-            "scopes": [GOOGLE_CALENDAR_READONLY_SCOPE],
             "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
         }),
     )
@@ -1519,12 +1547,13 @@ async fn extension_oauth_start_for_installed_package_attaches_update_binding() {
             .map(|binding| binding.account_id),
         Some(account.id)
     );
-    // Auth = OURS (owner decision): extension-card OAuth start creates
-    // SetupOnly flows — the retired LifecycleActivation continuation lane was
-    // excised; activation is frontend-driven after the callback completes
-    // (configure-modal `handleOauthConfigured`), pinned by
-    // `oauth_callback_with_lifecycle_activation_returns_ok_without_resume`.
-    assert_eq!(flow.continuation, AuthContinuationRef::SetupOnly);
+    assert_eq!(
+        flow.continuation,
+        AuthContinuationRef::LifecycleActivation {
+            package_ref: ironclaw_auth::LifecyclePackageRef::new("google-calendar")
+                .expect("package ref")
+        }
+    );
 }
 
 #[tokio::test]

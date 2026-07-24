@@ -347,15 +347,29 @@ impl ProductAuthRouteState {
     }
 
     #[cfg(test)]
-    fn with_test_installed_extension_lookup(mut self) -> Self {
-        self.installed_extension_lookup = Some(Arc::new(InstalledExtensionLookup::Scripted {
-            extension_id: ExtensionId::new("vendorco-tools").expect("test extension id"), // safety: cfg(test)-only static fixture.
-            requirement_name: "vendorco_oauth".to_string(),
-            requirement: InstalledExtensionOAuthRequirement {
+    fn with_test_installed_extension_lookup(self) -> Self {
+        self.with_test_installed_extension_lookup_for(
+            ExtensionId::new("vendorco-tools").expect("test extension id"),
+            "vendorco_oauth",
+            InstalledExtensionOAuthRequirement {
                 provider: "vendorco".to_string(),
                 account_label: "vendorco-tools vendorco".to_string(),
                 scopes: vec!["items:read".to_string()],
             },
+        )
+    }
+
+    #[cfg(test)]
+    fn with_test_installed_extension_lookup_for(
+        mut self,
+        extension_id: ExtensionId,
+        requirement_name: impl Into<String>,
+        requirement: InstalledExtensionOAuthRequirement,
+    ) -> Self {
+        self.installed_extension_lookup = Some(Arc::new(InstalledExtensionLookup::Scripted {
+            extension_id,
+            requirement_name: requirement_name.into(),
+            requirement,
         }));
         self
     }

@@ -5509,7 +5509,10 @@ async fn local_dev_webui_bundle_exposes_outbound_preferences_service() {
     .expect("outbound target listing uses composed service");
     let targets: ironclaw_product::RebornOutboundDeliveryTargetListResponse =
         serde_json::from_value(targets_page.payload).expect("outbound targets payload");
-    assert!(targets.targets.is_empty());
+    assert!(
+        !targets.targets.is_empty(),
+        "local-dev runtime identity should expose at least one composed outbound target"
+    );
 
     runtime.shutdown().await.expect("runtime shutdown");
 }

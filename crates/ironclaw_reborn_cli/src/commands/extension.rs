@@ -1,5 +1,6 @@
 use anyhow::Context;
 use clap::{Args, Subcommand};
+use ironclaw_host_api::public_lifecycle_response_json;
 use ironclaw_reborn_composition::{
     LifecycleProductResponse, RebornExtensionLifecycleCommand, RebornRuntimeInput,
     build_reborn_runtime, execute_reborn_extension_lifecycle_command,
@@ -73,7 +74,10 @@ impl ExtensionCommand {
         };
         let response = execute_lifecycle_command(context, command, self.confirm_host_access)?;
         if json {
-            println!("{}", serde_json::to_string(&response)?);
+            println!(
+                "{}",
+                serde_json::to_string(&public_lifecycle_response_json(&response)?)?
+            );
         } else {
             print!(
                 "{}",

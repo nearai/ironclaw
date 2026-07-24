@@ -133,8 +133,14 @@ mod tests {
 
     fn engine_backed_route_state(
         shared: Arc<ironclaw_auth::InMemoryAuthProductServices>,
+        extension_id: &str,
+        requirement_scopes: Vec<String>,
         recipes: Vec<ResolvedVendorAuthRecipe>,
     ) -> ProductAuthRouteState {
+        let provider = recipes
+            .first()
+            .map(|recipe| recipe.vendor.clone())
+            .expect("test recipe");
         let product_auth = RebornProductAuthServices::from_shared(shared, Arc::new(NoopDispatcher))
             .with_auth_engine(test_engine(recipes));
         ProductAuthRouteState::new(
@@ -143,7 +149,15 @@ mod tests {
             None,
             None,
         )
-        .with_test_installed_extension_lookup()
+        .with_test_installed_extension_lookup_for(
+            ExtensionId::new(extension_id).expect("test extension id"),
+            "test_oauth",
+            InstalledExtensionOAuthRequirement {
+                provider,
+                account_label: format!("{extension_id} account"),
+                scopes: requirement_scopes,
+            },
+        )
     }
 
     #[tokio::test]
@@ -155,7 +169,12 @@ mod tests {
         // full-equality compared `invocation_id` and so never matched, forking a
         // new account on every reconnect. The bind is now owner-granularity.
         let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
-        let state = engine_backed_route_state(shared.clone(), vec![vendor_recipe("notion", &[])]);
+        let state = engine_backed_route_state(
+            shared.clone(),
+            "notion",
+            Vec::new(),
+            vec![vendor_recipe("notion", &[])],
+        );
         let app = product_auth_route_mount(state)
             .protected
             .layer(axum::Extension(test_caller()));
@@ -186,9 +205,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
-                            "provider": "notion",
-                            "account_label": "work notion",
-                            "scopes": [],
+                            "requirement": "test_oauth",
                             "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
                             "invocation_id": flow_invocation_id.to_string(),
                         })
@@ -230,7 +247,12 @@ mod tests {
         // agent/project stay hard-`==` in the owner match, so a cross-owner
         // account is invisible and the flow starts with no update binding.
         let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
-        let state = engine_backed_route_state(shared.clone(), vec![vendor_recipe("notion", &[])]);
+        let state = engine_backed_route_state(
+            shared.clone(),
+            "notion",
+            Vec::new(),
+            vec![vendor_recipe("notion", &[])],
+        );
         let app = product_auth_route_mount(state)
             .protected
             .layer(axum::Extension(test_caller()));
@@ -263,9 +285,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
-                            "provider": "notion",
-                            "account_label": "work notion",
-                            "scopes": [],
+                            "requirement": "test_oauth",
                             "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
                             "invocation_id": flow_invocation_id.to_string(),
                         })
@@ -307,6 +327,8 @@ mod tests {
         let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
         let state = engine_backed_route_state(
             shared.clone(),
+            "drive-ext",
+            vec!["files:read".to_string()],
             vec![vendor_recipe("driveco", &["files:read"])],
         );
         let app = product_auth_route_mount(state)
@@ -346,9 +368,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
-                            "provider": "driveco",
-                            "account_label": "drive account",
-                            "scopes": ["files:read"],
+                            "requirement": "test_oauth",
                             "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
                             "invocation_id": flow_invocation_id.to_string(),
                         })
@@ -390,13 +410,15 @@ mod tests {
         let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
         let state = engine_backed_route_state(
             shared.clone(),
+            "acme-messenger",
+            vec!["admin".to_string()],
             vec![vendor_recipe("acmevendor", &["msg:read", "msg:write"])],
         );
         let app = product_auth_route_mount(state)
             .protected
             .layer(axum::Extension(test_caller()));
 
-        let start = |scopes: serde_json::Value| {
+        let start = |app: axum::Router| {
             let app = app.clone();
             async move {
                 app.oneshot(
@@ -406,9 +428,7 @@ mod tests {
                         .header(header::CONTENT_TYPE, "application/json")
                         .body(Body::from(
                             json!({
-                                "provider": "acmevendor",
-                                "account_label": "acme account",
-                                "scopes": scopes,
+                                "requirement": "test_oauth",
                                 "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
                                 "invocation_id": InvocationId::new().to_string(),
                             })
@@ -422,11 +442,21 @@ mod tests {
         };
 
         // Widening beyond the ceiling is rejected before any flow exists.
-        let response = start(json!(["admin"])).await;
+        let response = start(app.clone()).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
         // Empty scopes default to the full recipe ceiling.
-        let response = start(json!([])).await;
+        let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
+        let state = engine_backed_route_state(
+            shared.clone(),
+            "acme-messenger",
+            Vec::new(),
+            vec![vendor_recipe("acmevendor", &["msg:read", "msg:write"])],
+        );
+        let app = product_auth_route_mount(state)
+            .protected
+            .layer(axum::Extension(test_caller()));
+        let response = start(app).await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX)
             .await

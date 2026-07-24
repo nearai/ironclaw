@@ -1713,10 +1713,10 @@ async fn webui_v2_google_docs_setup_projects_oauth_before_install() {
     assert_eq!(setup.status(), StatusCode::OK);
     let setup_body = read_json(setup).await;
     assert_eq!(setup_body["package_ref"]["id"], "google-docs");
-    // Setup lookup now installs the package shell before projecting credential
-    // requirements, so the public phase is installed even before OAuth is
-    // complete.
-    assert_eq!(setup_body["phase"], "installed");
+    // Setup lookup installs the package shell before projecting credential
+    // requirements; the HTTP surface exposes that internal installed
+    // checkpoint as the public setup-needed state until OAuth is complete.
+    assert_eq!(setup_body["phase"], "setup_needed");
 
     let secrets = setup_body["secrets"]
         .as_array()
@@ -1775,10 +1775,11 @@ async fn webui_v2_github_api_key_setup_projects_manual_token_secret() {
     assert_eq!(setup.status(), StatusCode::OK);
     let setup_body = read_json(setup).await;
     assert_eq!(setup_body["package_ref"]["id"], "github");
-    // Setup lookup now installs the package shell before projecting credential
-    // requirements, so the public phase is installed even before the manual
-    // token is provided.
-    assert_eq!(setup_body["phase"], "installed");
+    // Setup lookup installs the package shell before projecting credential
+    // requirements; the HTTP surface exposes that internal installed
+    // checkpoint as the public setup-needed state until the manual token is
+    // provided.
+    assert_eq!(setup_body["phase"], "setup_needed");
 
     let secrets = setup_body["secrets"]
         .as_array()

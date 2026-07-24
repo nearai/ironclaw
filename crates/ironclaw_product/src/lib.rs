@@ -220,7 +220,8 @@ pub use lifecycle::{
     LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleProductService, LifecycleProductSurfaceContext,
     LifecycleReadinessBlocker, LifecycleSearchExtensionSummary, LifecycleSkillSource,
-    LifecycleSkillSummary, UnsupportedLifecycleProductService,
+    LifecycleSkillSummary, UnsupportedLifecycleProductService, project_public_lifecycle_states,
+    public_lifecycle_response_json,
 };
 // Product hosts use this outbound orchestration seam to wire outbound policy
 // decisions to adapter rendering without reaching into module internals.

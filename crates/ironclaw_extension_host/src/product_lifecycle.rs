@@ -161,9 +161,10 @@ pub struct ExtensionLifecycleManager {
     /// applies (#5499 review finding #3).
     import_decode_semaphore: Arc<Semaphore>,
     /// The tenant operator identity (#5459 P1). In local-dev this is the base
-    /// owner user (`IRONCLAW_REBORN_WEBUI_USER_ID` semantics); installs by this
-    /// user derive [`InstallationOwner::Tenant`] (shared), installs by anyone
-    /// else make (or join) the member set [`InstallationOwner::Users`].
+    /// owner user (`IRONCLAW_REBORN_WEBUI_USER_ID` semantics). Lifecycle
+    /// installs by every caller, including this user, make or join the member
+    /// set [`InstallationOwner::Users`]. Tenant-wide deployment state belongs
+    /// to administrator configuration, not lifecycle ownership.
     /// Resolved ONCE here — when P0 role wiring lands, this becomes a
     /// role-derived resolver instead of an identity comparison; callers do
     /// not re-derive admin-ness.
@@ -1108,8 +1109,18 @@ impl ExtensionLifecycleManager {
         package_ref: LifecyclePackageRef,
         mode: ExtensionActivationMode,
     ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
-        let credential_gate = crate::PrecheckedExtensionActivationCredentialGate;
         let caller = self.tenant_operator_user_id.clone();
+        self.activate_with_prechecked_credentials_for_user_for_test(package_ref, mode, &caller)
+            .await
+    }
+
+    pub async fn activate_with_prechecked_credentials_for_user_for_test(
+        &self,
+        package_ref: LifecyclePackageRef,
+        mode: ExtensionActivationMode,
+        caller: &UserId,
+    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+        let credential_gate = crate::PrecheckedExtensionActivationCredentialGate;
         self.activate_inner(package_ref, mode, &credential_gate, &caller)
             .await
     }

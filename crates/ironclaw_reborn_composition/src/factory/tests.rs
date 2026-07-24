@@ -1093,7 +1093,11 @@ async fn local_dev_gsuite_installs_activates_and_dispatches_through_host_runtime
         .await
         .expect("install Gmail");
     extension_management
-        .activate_with_prechecked_credentials_for_test(gmail_ref, ExtensionActivationMode::Static)
+        .activate_with_prechecked_credentials_for_user_for_test(
+            gmail_ref,
+            ExtensionActivationMode::Static,
+            &caller,
+        )
         .await
         .expect("activate Gmail");
     extension_management
@@ -1101,9 +1105,10 @@ async fn local_dev_gsuite_installs_activates_and_dispatches_through_host_runtime
         .await
         .expect("install Google Calendar");
     extension_management
-        .activate_with_prechecked_credentials_for_test(
+        .activate_with_prechecked_credentials_for_user_for_test(
             calendar_ref,
             ExtensionActivationMode::Static,
+            &caller,
         )
         .await
         .expect("activate Google Calendar");
@@ -1233,7 +1238,7 @@ async fn local_dev_notion_mcp_installs_activates_and_reaches_auth_gate() {
         .await
         .expect("install Notion MCP");
     extension_management
-        .activate_with_prechecked_credentials_for_test(
+        .activate_with_prechecked_credentials_for_user_for_test(
             notion_ref,
             ExtensionActivationMode::HostedMcpDiscovery {
                 scope: ResourceScope::local_default(caller.clone(), InvocationId::new())
@@ -1242,6 +1247,7 @@ async fn local_dev_notion_mcp_installs_activates_and_reaches_auth_gate() {
                     HostedMcpDiscoveryEgress::with_tool_name("notion-search").read_only(),
                 ),
             },
+            &caller,
         )
         .await
         .expect("activate Notion MCP with scripted discovery");
@@ -1292,9 +1298,10 @@ async fn local_dev_web_access_installs_activates_and_dispatches_through_host_run
         .await
         .expect("install Web Access");
     extension_management
-        .activate_with_prechecked_credentials_for_test(
+        .activate_with_prechecked_credentials_for_user_for_test(
             web_access_ref,
             ExtensionActivationMode::Static,
+            &caller,
         )
         .await
         .expect("activate Web Access");
@@ -3135,10 +3142,14 @@ async fn completed_lifecycle_activation_continuation_installs_the_extension() {
 #[tokio::test]
 async fn channel_pairing_completions_run_the_lifecycle_wrapped_continuation_dispatcher() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
-        "local-dev-pairing-continuation-owner",
-        dir.path().join("local-dev"),
-    ))
+    let services = build_runtime_substrate(
+        crate::deployment::local_dev_build_input(
+            "local-dev-pairing-continuation-owner",
+            dir.path().join("local-dev"),
+        )
+        .with_bundled_first_party_for_test()
+        .with_account_setup_descriptors(vec![pairing_account_setup_descriptor("pairing-fixture")]),
+    )
     .await
     .expect("local-dev services build");
 
@@ -3148,7 +3159,7 @@ async fn channel_pairing_completions_run_the_lifecycle_wrapped_continuation_disp
         .expect("local-dev build composes the channel pairing registry");
     let mut pairing_services_checked = 0usize;
     let mut shared_dispatcher = None;
-    for extension_id in ["telegram", "slack"] {
+    for extension_id in ["pairing-fixture"] {
         let Some(pairing) = channel_pairing.get(extension_id) else {
             continue;
         };
@@ -3170,6 +3181,35 @@ async fn channel_pairing_completions_run_the_lifecycle_wrapped_continuation_disp
     );
 }
 
+fn pairing_account_setup_descriptor(
+    extension_id: &str,
+) -> ironclaw_product::ExtensionAccountSetupDescriptor {
+    ironclaw_product::ExtensionAccountSetupDescriptor {
+        extension_id: ExtensionId::new(extension_id).expect("extension id"),
+        auth_requirement: ironclaw_host_api::RuntimeCredentialAuthRequirement {
+            provider: VendorId::new(extension_id).expect("provider id"),
+            setup: RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
+            requester_extension: ExtensionId::new(extension_id).expect("requester extension id"),
+            provider_scopes: Vec::new(),
+        },
+        connection_requirement: ironclaw_product::ChannelConnectionRequirement {
+            channel: extension_id.to_string(),
+            display_name: "Pairing Fixture".to_string(),
+            strategy: ironclaw_product::RebornChannelConnectStrategy::WebGeneratedCode,
+            instructions: "Pair with the generated code.".to_string(),
+            input_placeholder: "Code".to_string(),
+            submit_label: "Pair".to_string(),
+            error_message: "Pairing failed.".to_string(),
+        },
+        connection_notices: ironclaw_product::ChannelConnectionNoticePolicy::generic(
+            "Pairing Fixture",
+        ),
+        activation_success_message: "Pairing fixture connected.".to_string(),
+        pairing_deep_link_template: None,
+        inbound_code_prefixes: Vec::new(),
+    }
+}
+
 /// Live-repro regression (demo-stack defect): removing an installed channel
 /// extension through the lifecycle port with an authenticated actor must
 /// actually delete the caller's durable membership — and must be POSSIBLE in
@@ -3178,10 +3218,13 @@ async fn channel_pairing_completions_run_the_lifecycle_wrapped_continuation_disp
 #[tokio::test]
 async fn telegram_remove_with_authenticated_actor_deletes_the_membership() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
-        "local-dev-telegram-remove-owner",
-        dir.path().join("local-dev"),
-    ))
+    let services = build_runtime_substrate(
+        crate::deployment::local_dev_build_input(
+            "local-dev-telegram-remove-owner",
+            dir.path().join("local-dev"),
+        )
+        .with_bundled_first_party_for_test(),
+    )
     .await
     .expect("local-dev services build");
     let runtime_surfaces = services.local_runtime_for_test().expect("local runtime");
@@ -3214,9 +3257,18 @@ async fn telegram_remove_with_authenticated_actor_deletes_the_membership() {
         .project(telegram_ref, &caller)
         .await
         .expect("project telegram after remove");
-    assert_eq!(
-        projection.phase,
-        InstallationState::Removed,
-        "removed telegram must project uninstalled for its former member",
+    let Some(ironclaw_product::LifecycleProductPayload::ExtensionList { extensions, .. }) =
+        projection.payload.as_ref()
+    else {
+        panic!(
+            "expected extension projection payload, got {:?}",
+            projection.payload
+        );
+    };
+    assert!(
+        extensions
+            .first()
+            .is_some_and(|extension| extension.install_scope.is_none()),
+        "removed telegram must have no visible membership for its former member: {extensions:?}",
     );
 }

@@ -51,6 +51,7 @@ fn descriptor_with_display_name(
         connection_notices,
         activation_success_message: "Account setup is ready.".to_string(),
         pairing_deep_link_template: None,
+        inbound_code_prefixes: Vec::new(),
     }
 }
 

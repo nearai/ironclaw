@@ -490,6 +490,56 @@ pub struct LifecycleProductResponse {
     pub payload: Option<LifecycleProductPayload>,
 }
 
+/// Project internal lifecycle checkpoints to the public extension lifecycle
+/// vocabulary used by CLI, WebUI setup responses, and model-visible lifecycle
+/// capability output.
+///
+/// Internally the host distinguishes `Installed`, `Configured`, `Disabled`,
+/// `Failed`, and `Removed` to drive recovery and diagnostics. Product surfaces
+/// expose only the user-actionable state machine: `uninstalled`,
+/// `setup_needed`, and `active`.
+pub fn public_lifecycle_response_json(
+    response: &LifecycleProductResponse,
+) -> Result<Value, serde_json::Error> {
+    let mut value = serde_json::to_value(response)?;
+    project_public_lifecycle_states(&mut value);
+    Ok(value)
+}
+
+pub fn project_public_lifecycle_states(value: &mut Value) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                project_public_lifecycle_states(value);
+            }
+        }
+        Value::Object(values) => {
+            for (key, value) in values {
+                if matches!(
+                    key.as_str(),
+                    "phase" | "installation_phase" | "installation_state"
+                ) && let Value::String(text) = value
+                    && let Some(projected) = public_lifecycle_state(text)
+                {
+                    *text = projected.to_string();
+                    continue;
+                }
+                project_public_lifecycle_states(value);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
+fn public_lifecycle_state(state: &str) -> Option<&'static str> {
+    match state {
+        "active" => Some("active"),
+        "removed" => Some("uninstalled"),
+        "installed" | "configured" | "disabled" | "failed" | "unsupported" => Some("setup_needed"),
+        _ => None,
+    }
+}
+
 impl LifecycleProductResponse {
     pub fn projection(
         package_ref: Option<LifecyclePackageRef>,

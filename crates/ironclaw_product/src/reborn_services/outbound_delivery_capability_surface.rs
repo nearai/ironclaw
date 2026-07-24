@@ -20,7 +20,7 @@ pub const OUTBOUND_DELIVERY_TARGETS_LIST_DESCRIPTION: &str = "List available out
 pub const OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID: &str = "builtin.outbound_delivery_target_set";
 pub const OUTBOUND_DELIVERY_TARGET_SET_PROVIDER_TOOL_NAME: &str =
     "builtin__outbound_delivery_target_set";
-pub const OUTBOUND_DELIVERY_TARGET_SET_DESCRIPTION: &str = "Set the current user's DEFAULT final-reply outbound delivery target, such as a direct message or channel exposed by an installed integration, to an id returned by builtin__outbound_delivery_targets_list. This default is shared by replies and by every trigger without its own delivery_target_id \u{2014} changing it re-routes all of them, so to route a single trigger's results pass delivery_target_id to builtin__trigger_create instead of changing this. Approval may be required before the preference is changed.";
+pub const OUTBOUND_DELIVERY_TARGET_SET_DESCRIPTION: &str = "Set the current user's DEFAULT final-reply outbound delivery target, such as a direct message or channel exposed by an installed integration, to an id returned by builtin__outbound_delivery_targets_list. This FALLBACK default is shared by replies and by every trigger without its own delivery_target_id \u{2014} changing it re-routes all of them, so to route a single trigger's results pass delivery_target_id to builtin__trigger_create instead of changing this. Approval may be required before the preference is changed.";
 
 pub fn outbound_delivery_synthetic_provider() -> Result<ExtensionId, HostApiError> {
     ExtensionId::new(OUTBOUND_DELIVERY_SYNTHETIC_PROVIDER_ID)

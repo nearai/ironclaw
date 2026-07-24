@@ -943,18 +943,17 @@ impl RebornHostBindings {
         self
     }
 
-    /// Test-support: inject the full first-party extension surface (catalog
+    /// Test-support: inject the neutral first-party extension surface (catalog
     /// bundles, capability-handler registrars, and the provider-account
-    /// visibility policy) exactly as the `ironclaw_reborn_cli` binary does in
-    /// production.
+    /// visibility policy).
     ///
     /// Composition names no concrete first-party extension in production
     /// (extension-runtime DEL-7); the binary supplies these on the build input.
     /// Composition's own unit tests need the same surface to install / activate /
     /// dispatch first-party extensions through the production seam, so this
-    /// mirrors the binary's assembly from the dev-dependency inventory. Gated
-    /// `test-support` because integration harnesses compile composition as a
-    /// dependency, not under composition's own `cfg(test)`.
+    /// mirrors the binary's neutral assembly from the dev-dependency inventory.
+    /// Concrete native factories and channel bindings are injected by the binary
+    /// or by test code that owns those concrete crates.
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_bundled_first_party_for_test(self) -> Self {
         self.with_first_party_bundles(

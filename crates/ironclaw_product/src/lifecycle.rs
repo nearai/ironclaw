@@ -22,7 +22,7 @@ pub use ironclaw_host_api::{
     LifecycleInstalledExtensionSummary, LifecyclePackageId, LifecyclePackageKind,
     LifecyclePackageRef, LifecycleProductAction, LifecycleProductPayload, LifecycleProductResponse,
     LifecycleReadinessBlocker, LifecycleSearchExtensionSummary, LifecycleSkillSource,
-    LifecycleSkillSummary,
+    LifecycleSkillSummary, project_public_lifecycle_states, public_lifecycle_response_json,
 };
 
 const LIFECYCLE_REF_MAX_BYTES: usize = 512;

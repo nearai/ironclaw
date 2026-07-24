@@ -64,7 +64,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .assert_tool_invoked("builtin.extension_search")
         .await?;
     pending_viewer
-        .assert_tool_result_contains(r#""installation_phase":"installed""#)
+        .assert_tool_result_contains(r#""installation_phase":"setup_needed""#)
         .await?;
 
     // ── Phase 3: personal setup completes out-of-band for this caller. ─────

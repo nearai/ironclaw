@@ -7,7 +7,7 @@ use ironclaw_extensions::{
     ManifestHash, ManifestSource, canonicalize_installation_rows,
 };
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::sha256_digest_token;
+use ironclaw_host_api::{UserId, sha256_digest_token};
 use ironclaw_product::{LifecyclePackageKind, LifecyclePackageRef, ProductSurfaceFailure};
 use tokio::sync::Mutex;
 
@@ -24,8 +24,11 @@ pub async fn restore_extension_lifecycle_state(
     installation_store: &Arc<dyn ExtensionInstallationStorePort>,
     lifecycle_service: &Arc<Mutex<ExtensionLifecycleService>>,
     active_extensions: &ActiveExtensionPublisher,
+    legacy_tenant_owner: &UserId,
 ) -> Result<(), ProductSurfaceFailure> {
-    for installation in canonicalize_persisted_installation_rows(installation_store).await? {
+    for installation in
+        canonicalize_persisted_installation_rows(installation_store, legacy_tenant_owner).await?
+    {
         if remove_retired_internal_installation(installation_store, &installation).await? {
             continue;
         }
@@ -73,13 +76,25 @@ pub async fn restore_extension_lifecycle_state(
 
 async fn canonicalize_persisted_installation_rows(
     installation_store: &Arc<dyn ExtensionInstallationStorePort>,
+    legacy_tenant_owner: &UserId,
 ) -> Result<Vec<ExtensionInstallation>, ProductSurfaceFailure> {
     let persisted = installation_store
         .list_installations()
         .await
         .map_err(map_extension_installation_error)?;
-    let canonical = canonicalize_installation_rows(persisted.clone())
-        .map_err(map_extension_installation_error)?;
+    let repaired = persisted
+        .iter()
+        .cloned()
+        .map(|installation| {
+            if installation.owner().is_tenant() {
+                installation.with_owner(InstallationOwner::user(legacy_tenant_owner.clone()))
+            } else {
+                installation
+            }
+        })
+        .collect::<Vec<_>>();
+    let canonical =
+        canonicalize_installation_rows(repaired).map_err(map_extension_installation_error)?;
     if persisted == canonical {
         return Ok(canonical);
     }

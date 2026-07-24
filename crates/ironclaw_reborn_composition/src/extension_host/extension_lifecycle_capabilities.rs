@@ -361,8 +361,9 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
         let connection_preview = channel_connection_display_preview(
             connection_preview_source.as_ref().unwrap_or(&response),
         );
-        let output = serde_json::to_value(without_model_visible_connection_chrome(response))
-            .map_err(|error| {
+        let response = without_model_visible_connection_chrome(response);
+        let output =
+            ironclaw_product::public_lifecycle_response_json(&response).map_err(|error| {
                 tracing::debug!(
                     target: "ironclaw::reborn::extension_lifecycle",
                     ?error,
@@ -976,8 +977,9 @@ mod tests {
             telegram["channel_connection"]["instructions"]
                 .as_str()
                 .is_some_and(
-                    |instructions| instructions.contains("Open Telegram's app or bot")
-                        && instructions.contains("pairing code")
+                    |instructions| instructions.contains("IronClaw pairing panel")
+                        && instructions.contains("/start")
+                        && instructions.contains("displayed code")
                 ),
             "generated-code connection guidance must remain model-visible: {telegram}"
         );
@@ -1398,7 +1400,7 @@ mod tests {
             .iter()
             .find(|extension| extension["package_ref"]["id"] == "github")
             .expect("github search result");
-        assert_eq!(installed_github["installation_phase"], "installed");
+        assert_eq!(installed_github["installation_phase"], "setup_needed");
         let installed_message = installed_search["message"]
             .as_str()
             .expect("installed inactive search should carry install guidance");

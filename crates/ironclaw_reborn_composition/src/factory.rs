@@ -143,6 +143,7 @@ use ironclaw_outbound::{
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_product::{
+    ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
     ExtensionAccountSetupRegistry, LifecycleProductSurfaceContext,
     OutboundPreferencesProductService, ProductAuthTurnGateResumeDispatcher, ProjectService,
 };
@@ -3168,6 +3169,53 @@ fn production_first_party_registry_with_trigger_create_hook(
     })
 }
 
+fn manifest_channel_account_setup_descriptors(
+    manifests: &[Arc<ironclaw_extensions::ResolvedExtensionManifest>],
+) -> Vec<ExtensionAccountSetupDescriptor> {
+    manifests
+        .iter()
+        .filter_map(|manifest| {
+            let channel = manifest.channel.as_ref()?;
+            let connection = channel.connection.as_ref()?;
+            if connection.strategy != ironclaw_host_api::ChannelConnectionStrategy::WebGeneratedCode
+            {
+                return None;
+            }
+            Some(ExtensionAccountSetupDescriptor {
+                extension_id: manifest.id.clone(),
+                auth_requirement: ironclaw_host_api::RuntimeCredentialAuthRequirement {
+                    provider: connection.provider.clone(),
+                    setup: ironclaw_host_api::RuntimeCredentialAccountSetup::Pairing,
+                    requester_extension: manifest.id.clone(),
+                    provider_scopes: Vec::new(),
+                },
+                connection_requirement: ChannelConnectionRequirement {
+                    channel: manifest.id.as_str().to_string(),
+                    display_name: manifest.name.clone(),
+                    strategy: ironclaw_product::RebornChannelConnectStrategy::WebGeneratedCode,
+                    instructions: connection.instructions.clone(),
+                    input_placeholder: connection.input_placeholder.clone(),
+                    submit_label: connection.submit_label.clone(),
+                    error_message: connection.error_message.clone(),
+                },
+                connection_notices: ChannelConnectionNoticePolicy {
+                    connect_required: connection.notices.connect_required.clone(),
+                    paired: connection.notices.paired.clone(),
+                    already_paired_same_user: connection.notices.already_paired_same_user.clone(),
+                    already_bound_to_other_user: connection
+                        .notices
+                        .already_bound_to_other_user
+                        .clone(),
+                    expired_or_unknown: connection.notices.expired_or_unknown.clone(),
+                },
+                activation_success_message: connection.connection_success_message.clone(),
+                pairing_deep_link_template: connection.deep_link_template.clone(),
+                inbound_code_prefixes: connection.inbound_code_prefixes.clone(),
+            })
+        })
+        .collect()
+}
+
 /// Build the production first-party trust policy from the binary-injected
 /// neutral bundle set (extension-runtime DEL-7). The provider entry comes from
 /// `builtin_capability_policy` (no first-party dependency); each package's host
@@ -4411,7 +4459,7 @@ async fn build_backend_production(
         turn_state_store_limits,
         memory_resolver,
         scheduler_wake_wiring,
-        account_setup_descriptors,
+        mut account_setup_descriptors,
         nearai_mcp_bootstrap_config,
         native_extension_factories,
         channel_extension_bindings,
@@ -4935,6 +4983,9 @@ async fn build_backend_production(
             .insert(extension_id);
     }
     let available_manifests = available_extensions.resolved_manifests();
+    account_setup_descriptors.extend(manifest_channel_account_setup_descriptors(
+        &available_manifests,
+    ));
     let deployment_bindings = available_manifests
         .iter()
         .filter(|manifest| {
@@ -5024,6 +5075,7 @@ async fn build_backend_production(
         &extension_installation_store,
         &extension_lifecycle_service,
         &active_extensions,
+        &owner_user_id,
     )
     .await
     .map_err(|error| RebornBuildError::InvalidConfig {
@@ -5164,6 +5216,9 @@ async fn build_backend_production(
         &mut first_party_registry,
         Arc::clone(&admin_configuration),
         channel_egress_scope.user_id.clone(),
+        Arc::clone(&extension_management)
+            as Arc<dyn ironclaw_extension_host::ChannelConfigReactivation>,
+        admin_configuration_consumers,
     )
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("admin configuration handler is invalid: {error}"),
@@ -5386,6 +5441,7 @@ async fn build_backend_production(
                     extension_id: descriptor.extension_id.clone(),
                     connection_notices: descriptor.connection_notices.clone(),
                     deep_link_template: descriptor.pairing_deep_link_template.clone(),
+                    inbound_code_prefixes: descriptor.inbound_code_prefixes.clone(),
                     store: pairing_store,
                     installation,
                     template_values,

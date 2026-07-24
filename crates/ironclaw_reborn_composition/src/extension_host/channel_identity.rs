@@ -93,6 +93,15 @@ impl ChannelIdentityBindingConfig {
             overrides: Vec::new(),
         }
     }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_channel_config_for_test(
+        mut self,
+        channel_config: Arc<ChannelConfigService>,
+    ) -> Self {
+        self.channel_config = Some(channel_config);
+        self
+    }
 }
 
 impl std::fmt::Debug for ChannelIdentityBindingConfig {

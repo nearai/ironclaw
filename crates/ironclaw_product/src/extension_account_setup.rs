@@ -79,6 +79,9 @@ pub struct ExtensionAccountSetupDescriptor {
     /// (e.g. `https://vendor.example/{bot_username}?start={code}`). `None`
     /// presents the minted code alone.
     pub pairing_deep_link_template: Option<String>,
+    /// Exact message prefixes the channel's pairing parser may strip before
+    /// validating a host-issued proof code.
+    pub inbound_code_prefixes: Vec<String>,
 }
 
 /// Sanitized lifecycle classification for an unavailable setup host or status

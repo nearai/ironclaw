@@ -463,7 +463,10 @@ impl InboundSink for GenericChannelInboundSink {
                     return Ok(InboundAdmissionAck::Accepted);
                 }
                 ChannelPairingInterception::Failed => {
-                    return Ok(InboundAdmissionAck::Accepted);
+                    return Err(InboundSinkError {
+                        retryable: true,
+                        reason: "channel pairing completion failed".to_string(),
+                    });
                 }
             }
         }

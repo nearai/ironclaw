@@ -73,7 +73,7 @@ impl ProductAuthContinuationDispatcher for LifecycleAuthContinuationDispatcher {
             self.lifecycle
                 .execute(
                     context,
-                    LifecycleProductAction::ExtensionActivate { package_ref },
+                    LifecycleProductAction::ExtensionInstall { package_ref },
                 )
                 .await
                 .map_err(|error| {

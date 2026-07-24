@@ -461,6 +461,7 @@ pub(crate) struct ChannelPairingService {
     extension_id: ExtensionId,
     connection_notices: ChannelConnectionNoticePolicy,
     deep_link_template: Option<String>,
+    inbound_code_prefixes: Vec<String>,
     store: Arc<FilesystemChannelPairingStore>,
     installation: Arc<dyn ChannelPairingInstallationSource>,
     template_values: Arc<dyn ChannelPairingTemplateValues>,
@@ -493,6 +494,7 @@ pub(crate) struct ChannelPairingServiceParts {
     pub(crate) extension_id: ExtensionId,
     pub(crate) connection_notices: ChannelConnectionNoticePolicy,
     pub(crate) deep_link_template: Option<String>,
+    pub(crate) inbound_code_prefixes: Vec<String>,
     pub(crate) store: Arc<FilesystemChannelPairingStore>,
     pub(crate) installation: Arc<dyn ChannelPairingInstallationSource>,
     pub(crate) template_values: Arc<dyn ChannelPairingTemplateValues>,
@@ -513,6 +515,7 @@ impl ChannelPairingService {
             extension_id: parts.extension_id,
             connection_notices: parts.connection_notices,
             deep_link_template: parts.deep_link_template,
+            inbound_code_prefixes: parts.inbound_code_prefixes,
             store: parts.store,
             installation: parts.installation,
             template_values: parts.template_values,
@@ -617,15 +620,6 @@ impl ChannelPairingService {
         let connected = match &installation_id {
             Some(installation_id) => {
                 let _ = installation_id;
-                let snapshot = self.store.read_snapshot().await?;
-                if let Some(pending) = snapshot.completions.iter().find(|completion| {
-                    &completion.installation_id == installation_id && &completion.user_id == caller
-                }) {
-                    // Outbox retry: a completion that failed after the claim
-                    // (or a restart between claim and completion) re-runs
-                    // here; the user never re-sends a consumed code.
-                    self.finish_pending_completion(pending.clone()).await?;
-                }
                 self.dm_targets
                     .load(self.extension_id.as_str(), caller)
                     .await
@@ -799,9 +793,6 @@ impl ChannelPairingService {
         &self,
         completion: PendingPairingCompletion,
     ) -> Result<(), ChannelPairingError> {
-        // Boxed: the continuation fan-out resumes parked runs through the
-        // turn coordinator — a deep async subtree relative to this caller.
-        Box::pin(self.dispatch_pairing_completion(&completion.user_id)).await?;
         self.dm_targets
             .upsert(
                 self.extension_id.as_str(),
@@ -814,6 +805,9 @@ impl ChannelPairingService {
             )
             .await
             .map_err(store_unavailable)?;
+        // Boxed: the continuation fan-out resumes parked runs through the
+        // turn coordinator — a deep async subtree relative to this caller.
+        Box::pin(self.dispatch_pairing_completion(&completion.user_id)).await?;
         self.store
             .update_snapshot(move |mut snapshot| {
                 snapshot.completions.retain(|existing| {
@@ -932,10 +926,9 @@ impl ChannelPairingService {
         RebornIdentityProviderId::new(self.extension_id.as_str()).map_err(store_unavailable)
     }
 
-    /// Emit the standard auth-continuation completion so the
-    /// `BlockedAuthResumeFanout` resumes every run parked on this extension's
-    /// provider for this user. `SetupOnly` deliberately: the resumed run
-    /// re-runs `extension_activate` and re-checks pairedness itself.
+    /// Emit the standard auth-continuation completion so the lifecycle wrapper
+    /// activates the paired extension before `BlockedAuthResumeFanout` resumes
+    /// every run parked on this extension's provider for this user.
     async fn dispatch_pairing_completion(
         &self,
         user_id: &UserId,
@@ -973,7 +966,12 @@ impl ChannelPairingService {
                 },
                 AuthSurface::Callback,
             ),
-            continuation: AuthContinuationRef::SetupOnly,
+            continuation: AuthContinuationRef::LifecycleActivation {
+                package_ref: ironclaw_auth::LifecyclePackageRef::new(self.extension_id.as_str())
+                    .map_err(|error| ChannelPairingError::ContinuationDispatch {
+                        reason: error.to_string(),
+                    })?,
+            },
             provider,
             credential_account_id: None,
             emitted_at: Utc::now(),
@@ -1014,23 +1012,6 @@ impl ChannelPairingService {
             .iter()
             .map(|_| ())
             .collect())
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn finish_pending_for_user_for_test(
-        &self,
-        user_id: &UserId,
-    ) -> Result<(), ChannelPairingError> {
-        self.dispatch_pairing_completion(user_id).await?;
-        let user_id = user_id.clone();
-        self.store
-            .update_snapshot(move |mut snapshot| {
-                snapshot
-                    .completions
-                    .retain(|completion| completion.user_id != user_id);
-                (snapshot, ())
-            })
-            .await
     }
 
     #[cfg(test)]
@@ -1084,11 +1065,17 @@ impl ChannelPairingRegistry {
 
 /// Extract a candidate pairing code from a direct-message text: either the
 /// vendor-conventional `/start <CODE>` deep-link payload or a bare code.
-fn candidate_code(text: &str) -> Option<&str> {
+fn candidate_code<'a>(text: &'a str, inbound_code_prefixes: &[String]) -> Option<&'a str> {
     let trimmed = text.trim();
-    let candidate = match trimmed.strip_prefix("/start") {
-        Some(rest) => rest.trim(),
-        None => trimmed,
+    let candidate = if let Some((_, rest)) = inbound_code_prefixes
+        .iter()
+        .find_map(|prefix| trimmed.strip_prefix(prefix).map(|rest| (prefix, rest)))
+    {
+        rest.trim()
+    } else if trimmed.starts_with('/') {
+        return None;
+    } else {
+        trimmed
     };
     (candidate.len() == PAIRING_CODE_LEN
         && candidate
@@ -1109,7 +1096,7 @@ impl crate::extension_host::extension_ingress::ChannelPairingInterceptor for Cha
         if message.trigger != ironclaw_product::ProductTriggerReason::DirectChat {
             return ChannelPairingInterception::NotHandled;
         }
-        let Some(code) = candidate_code(&message.text) else {
+        let Some(code) = candidate_code(&message.text, &self.inbound_code_prefixes) else {
             return ChannelPairingInterception::NotHandled;
         };
         let provider_user_id =

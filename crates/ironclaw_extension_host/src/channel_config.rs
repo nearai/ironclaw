@@ -672,6 +672,11 @@ impl ironclaw_product::ChannelConfigProductService for RebornChannelConfigProduc
         &self,
         extension_id: &ExtensionId,
     ) -> Result<Vec<ironclaw_product::RebornChannelConfigField>, ProductSurfaceError> {
+        if let Ok(manifest) = self.service.resolved_manifest(extension_id).await
+            && !manifest.admin_configuration.is_empty()
+        {
+            return Ok(Vec::new());
+        }
         match self.service.status(extension_id).await {
             Ok(statuses) => Ok(statuses
                 .into_iter()

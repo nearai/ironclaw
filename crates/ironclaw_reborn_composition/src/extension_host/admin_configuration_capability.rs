@@ -1,21 +1,22 @@
 //! Authorized first-party mutation for manifest-declared administrator configuration.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
 use ironclaw_extension_host::{
     AdminConfigurationGroupState, AdminConfigurationIdempotencyKey, AdminConfigurationServiceError,
-    AdminConfigurationSubmittedValue,
+    AdminConfigurationSubmittedValue, ChannelConfigReactivation,
 };
 use ironclaw_extensions::{
     AdminConfigurationGroupId, CapabilityManifest, CapabilityVisibility, ExtensionError,
     ExtensionPackage,
 };
 use ironclaw_host_api::{
-    CapabilityId, CapabilityProfileSchemaRef, EffectKind, HostApiError, OriginGateMatrix,
-    OriginGatePolicy, PermissionMode, ResourceEstimate, ResourceProfile, ResourceUsage,
-    RuntimeDispatchErrorKind, SecretHandle, UserId,
+    CapabilityId, CapabilityProfileSchemaRef, EffectKind, ExtensionId, HostApiError,
+    OriginGateMatrix, OriginGatePolicy, PermissionMode, ResourceEstimate, ResourceProfile,
+    ResourceUsage, RuntimeDispatchErrorKind, SecretHandle, UserId,
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
@@ -38,12 +39,16 @@ pub(crate) fn insert_handler(
     registry: &mut FirstPartyCapabilityRegistry,
     service: Arc<ComposedAdminConfigurationService>,
     operator_user_id: UserId,
+    reactivation: Arc<dyn ChannelConfigReactivation>,
+    consumers: BTreeMap<AdminConfigurationGroupId, BTreeSet<ExtensionId>>,
 ) -> Result<(), HostApiError> {
     registry.insert_handler(
         CapabilityId::new(ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID)?,
         Arc::new(AdminConfigurationReplaceHandler {
             service,
             operator_user_id,
+            reactivation,
+            consumers: Arc::new(consumers),
         }),
     );
     Ok(())
@@ -89,6 +94,8 @@ fn manifest() -> Result<CapabilityManifest, ExtensionError> {
 struct AdminConfigurationReplaceHandler {
     service: Arc<ComposedAdminConfigurationService>,
     operator_user_id: UserId,
+    reactivation: Arc<dyn ChannelConfigReactivation>,
+    consumers: Arc<BTreeMap<AdminConfigurationGroupId, BTreeSet<ExtensionId>>>,
 }
 
 #[derive(Deserialize)]
@@ -164,11 +171,40 @@ impl FirstPartyCapabilityHandler for AdminConfigurationReplaceHandler {
             )
             .await
             .map_err(|error| map_service_error(error, started))?;
+        self.reactivate_consumers(&group_id, started).await?;
         let output = render_state(state);
         Ok(FirstPartyCapabilityResult::new(
             output,
             resource_usage(started),
         ))
+    }
+}
+
+impl AdminConfigurationReplaceHandler {
+    async fn reactivate_consumers(
+        &self,
+        group_id: &AdminConfigurationGroupId,
+        started: Instant,
+    ) -> Result<(), FirstPartyCapabilityError> {
+        let Some(consumers) = self.consumers.get(group_id) else {
+            return Ok(());
+        };
+        for extension_id in consumers {
+            self.reactivation
+                .reactivate_if_active(extension_id)
+                .await
+                .map_err(|error| {
+                    tracing::warn!(
+                        %error,
+                        extension_id = %extension_id,
+                        group_id = %group_id,
+                        "admin-configuration replacement could not refresh active extension"
+                    );
+                    FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+                        .with_usage(resource_usage(started))
+                })?;
+        }
+        Ok(())
     }
 }
 

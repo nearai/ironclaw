@@ -1247,56 +1247,18 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
         .await
         .expect("telegram lifecycle thread builds");
 
-    // The production configure surface: secrets land in the scoped secret
-    // store (where channel egress resolves them), the webhook URL in the
-    // durable installation store.
-    let channel_config = services
-        .channel_config_service()
-        .expect("the composed runtime exposes the channel-config configure port");
-    let telegram_id = ironclaw_host_api::ExtensionId::new("telegram").expect("extension id");
-    channel_config
-        .save_values(
-            &telegram_id,
-            vec![
-                (
-                    "telegram_webhook_url".to_string(),
-                    "https://hooks.example.test/webhooks/extensions/telegram/updates".to_string(),
-                ),
-                (
-                    "telegram_bot_token".to_string(),
-                    TELEGRAM_BOT_TOKEN.to_string(),
-                ),
-                (
-                    "telegram_webhook_secret".to_string(),
-                    TELEGRAM_WEBHOOK_SECRET.to_string(),
-                ),
-                ("bot_username".to_string(), "itest_delivery_bot".to_string()),
-            ],
-        )
-        .await
-        .expect("telegram configures through the production port");
-    // §6.4 config completeness: every field reports provided, secrets as
-    // presence only.
-    let status = channel_config
-        .field_status(&telegram_id)
-        .await
-        .expect("field status");
-    assert_eq!(status.len(), 4, "{status:?}");
-    // `bot_username` is optional pairing presentation (autofilled by the
-    // setup-provisioning hook); the three transport fields are configured.
-    assert!(
-        status
-            .iter()
-            .filter(|field| field.name != "bot_username")
-            .all(|field| field.provided),
-        "all configured fields must report provided: {status:?}"
-    );
-    assert!(
-        status
-            .iter()
-            .any(|field| field.name == "telegram_bot_token" && field.secret),
-        "the bot token is a secret field: {status:?}"
-    );
+    configure_admin_group(
+        &group,
+        "extension.telegram",
+        0,
+        json!([
+            {"handle": "telegram_bot_token", "value": TELEGRAM_BOT_TOKEN},
+            {"handle": "telegram_webhook_secret", "value": TELEGRAM_WEBHOOK_SECRET},
+            {"handle": "telegram_webhook_url", "value": "https://hooks.example.test/webhooks/extensions/telegram/updates"},
+            {"handle": "bot_username", "value": "itest_delivery_bot"}
+        ]),
+    )
+    .await;
 
     let (activation_run_id, _activation_gate_ref) = lifecycle
         .submit_turn_until_auth_blocked("install telegram")
@@ -1721,31 +1683,18 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
         .await
         .expect("telegram lifecycle thread builds");
 
-    let channel_config = services
-        .channel_config_service()
-        .expect("the composed runtime exposes the channel-config configure port");
-    let telegram_id = ironclaw_host_api::ExtensionId::new("telegram").expect("extension id");
-    channel_config
-        .save_values(
-            &telegram_id,
-            vec![
-                (
-                    "telegram_webhook_url".to_string(),
-                    "https://hooks.example.test/webhooks/extensions/telegram/updates".to_string(),
-                ),
-                (
-                    "telegram_bot_token".to_string(),
-                    TELEGRAM_BOT_TOKEN.to_string(),
-                ),
-                (
-                    "telegram_webhook_secret".to_string(),
-                    TELEGRAM_WEBHOOK_SECRET.to_string(),
-                ),
-                ("bot_username".to_string(), "itest_pairing_bot".to_string()),
-            ],
-        )
-        .await
-        .expect("telegram configures through the production port");
+    configure_admin_group(
+        &group,
+        "extension.telegram",
+        0,
+        json!([
+            {"handle": "telegram_bot_token", "value": TELEGRAM_BOT_TOKEN},
+            {"handle": "telegram_webhook_secret", "value": TELEGRAM_WEBHOOK_SECRET},
+            {"handle": "telegram_webhook_url", "value": "https://hooks.example.test/webhooks/extensions/telegram/updates"},
+            {"handle": "bot_username", "value": "itest_pairing_bot"}
+        ]),
+    )
+    .await;
 
     let (install_run_id, _gate_ref) = lifecycle
         .submit_turn_until_auth_blocked("install telegram")

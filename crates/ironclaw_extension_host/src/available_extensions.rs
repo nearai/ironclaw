@@ -6,13 +6,15 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::{DirEntry, FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
-    CapabilityId, CapabilitySurfaceKind, ExtensionId, HostPortCatalog, VendorId, VirtualPath,
+    CapabilityId, CapabilitySurfaceKind, ChannelConnectionStrategy, ExtensionId, HostPortCatalog,
+    VendorId, VirtualPath,
 };
 use ironclaw_product::{
     ChannelConnectionRequirement, LifecycleChannelDirections,
     LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
     LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
     LifecycleExtensionSummary, LifecyclePackageKind, LifecyclePackageRef, ProductSurfaceFailure,
+    RebornChannelConnectStrategy,
 };
 use ironclaw_product::{ProductCapabilityFlag, ProductSurfaceKind};
 use std::sync::Arc;
@@ -177,6 +179,22 @@ fn channel_connection_for_package(
     if !directions.inbound {
         return None;
     }
+    if let Some(connection) = package
+        .resolved_manifest
+        .channel
+        .as_ref()
+        .and_then(|channel| channel.connection.as_ref())
+    {
+        return Some(ChannelConnectionRequirement {
+            channel: package_ref.id.as_str().to_string(),
+            display_name: package.package.manifest.name.clone(),
+            strategy: channel_connection_strategy(connection.strategy),
+            instructions: connection.instructions.clone(),
+            input_placeholder: connection.input_placeholder.clone(),
+            submit_label: connection.submit_label.clone(),
+            error_message: connection.error_message.clone(),
+        });
+    }
     let strategy = channel_connect_strategy(&package.package);
     // Catalog projection: descriptor-owned connect copy applies at
     // activation/status time; the pre-install listing renders the derived
@@ -187,6 +205,20 @@ fn channel_connection_for_package(
         strategy,
         None,
     ))
+}
+
+fn channel_connection_strategy(
+    strategy: ChannelConnectionStrategy,
+) -> RebornChannelConnectStrategy {
+    match strategy {
+        ChannelConnectionStrategy::AdminManagedChannels => {
+            RebornChannelConnectStrategy::AdminManagedChannels
+        }
+        ChannelConnectionStrategy::WebGeneratedCode => {
+            RebornChannelConnectStrategy::WebGeneratedCode
+        }
+        ChannelConnectionStrategy::OAuth => RebornChannelConnectStrategy::OAuth,
+    }
 }
 
 fn onboarding(package: &AvailableExtensionPackage) -> Option<LifecycleExtensionOnboarding> {

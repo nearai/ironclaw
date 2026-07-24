@@ -386,7 +386,13 @@ impl RebornLocalLifecycleService {
                     return unsupported_projection(Some(package_ref));
                 };
                 let caller = lifecycle_caller(&context)?;
-                extension_management.install(package_ref, &caller).await
+                self.execute_extension_install_with_activation(
+                    context,
+                    extension_management,
+                    package_ref,
+                    &caller,
+                )
+                .await
             }
             LifecycleProductAction::ExtensionActivate { package_ref } => {
                 let Some(extension_management) = &self.extension_management else {
@@ -529,6 +535,160 @@ impl RebornLocalLifecycleService {
             lifecycle_resource_scope(context)?,
             Arc::clone(credential_accounts),
         )))
+    }
+
+    async fn execute_extension_install_with_activation(
+        &self,
+        context: LifecycleProductContext,
+        extension_management: &RebornLocalExtensionManagementPort,
+        package_ref: LifecyclePackageRef,
+        caller: &UserId,
+    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+        let install_response = extension_management
+            .install(package_ref.clone(), caller)
+            .await?;
+        let activation_response = async {
+            let credential_gate = self
+                .extension_activation_credential_gate(
+                    &context,
+                    extension_management,
+                    &package_ref,
+                    caller,
+                )
+                .await?;
+            if extension_management
+                .package_requires_hosted_mcp_discovery(&package_ref)
+                .await?
+            {
+                let Some(runtime_http_egress) = self.runtime_http_egress.clone() else {
+                    return Err(ProductSurfaceFailure::InvalidBindingRequest {
+                        reason: format!(
+                            "extension {} requires hosted MCP schema discovery and cannot be activated through the static lifecycle service",
+                            package_ref.id
+                        ),
+                    });
+                };
+                let scope = lifecycle_resource_scope(&context)?;
+                let mode = ironclaw_extension_host::ExtensionActivationMode::HostedMcpDiscovery {
+                    scope,
+                    runtime_http_egress,
+                };
+                return match credential_gate {
+                    Some(credential_gate) => {
+                        extension_management
+                            .activate_with_credential_gate(
+                                package_ref,
+                                mode,
+                                credential_gate,
+                                caller,
+                            )
+                            .await
+                    }
+                    None => extension_management.activate(package_ref, mode, caller).await,
+                };
+            }
+            let mode = ironclaw_extension_host::ExtensionActivationMode::Static;
+            match credential_gate {
+                Some(credential_gate) => {
+                    extension_management
+                        .activate_with_credential_gate(package_ref, mode, credential_gate, caller)
+                        .await
+                }
+                None => extension_management.activate(package_ref, mode, caller).await,
+            }
+        }
+        .await;
+        match activation_response {
+            Ok(activation_response) if activation_response.phase == InstallationState::Active => {
+                Ok(install_response_with_activation(
+                    install_response,
+                    activation_response,
+                ))
+            }
+            Ok(activation_response)
+                if activation_response_has_credential_blocker(&activation_response) =>
+            {
+                Ok(install_response_with_activation(
+                    install_response,
+                    activation_response,
+                ))
+            }
+            Ok(_) => Ok(install_response),
+            Err(error) => install_activation_error(error, install_response),
+        }
+    }
+}
+
+fn install_response_with_activation(
+    mut install_response: LifecycleProductResponse,
+    activation_response: LifecycleProductResponse,
+) -> LifecycleProductResponse {
+    install_response.phase = activation_response.phase;
+    install_response.blockers = activation_response.blockers;
+    install_response.message = activation_response.message;
+
+    let activation_visible_capability_ids = match activation_response.payload {
+        Some(LifecycleProductPayload::ExtensionActivate {
+            visible_capability_ids,
+            ..
+        }) => Some(visible_capability_ids),
+        _ => None,
+    };
+    if let Some(LifecycleProductPayload::ExtensionInstall {
+        visible_capability_ids,
+        next_step,
+        ..
+    }) = install_response.payload.as_mut()
+    {
+        if let Some(activation_visible_capability_ids) = activation_visible_capability_ids {
+            *visible_capability_ids = activation_visible_capability_ids;
+        }
+        *next_step = if install_response.phase == InstallationState::Active {
+            "Activation completed; model-visible extension tools are ready.".to_string()
+        } else {
+            "Activation did not complete; inspect the lifecycle phase and blockers.".to_string()
+        };
+    }
+    install_response
+}
+
+fn activation_response_has_credential_blocker(response: &LifecycleProductResponse) -> bool {
+    matches!(
+        response.payload.as_ref(),
+        Some(LifecycleProductPayload::ExtensionActivate {
+            activated: false,
+            ..
+        })
+    )
+}
+
+fn install_activation_error(
+    error: ProductSurfaceFailure,
+    install_response: LifecycleProductResponse,
+) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+    match error {
+        ProductSurfaceFailure::ProviderInstanceNotConfigured { .. } => Err(error),
+        ProductSurfaceFailure::Transient { reason } => {
+            tracing::debug!(
+                target: "ironclaw::reborn::extension_lifecycle",
+                %reason,
+                "post-install activation reconciliation failed; returning installed lifecycle state"
+            );
+            Ok(install_response)
+        }
+        ProductSurfaceFailure::InvalidBindingRequest { reason }
+            if reason.starts_with("hosted MCP discovery failed:")
+                || reason
+                    == "generic extension host rejected the activation: hosted MCP discovery published no callable tools" =>
+        {
+            tracing::debug!(
+                target: "ironclaw::reborn::extension_lifecycle",
+                %reason,
+                "post-install hosted MCP discovery failed; returning installed lifecycle state"
+            );
+            Ok(install_response)
+        }
+        error => Err(error),
     }
 }
 

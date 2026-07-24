@@ -1,4 +1,4 @@
-use ironclaw_host_api::ProductSurfaceError;
+use ironclaw_host_api::{InstallationState, ProductSurfaceError};
 use ironclaw_product::{
     LifecycleExtensionSource, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction,
     LifecycleProductContext, LifecycleProductPayload, LifecycleProductResponse,
@@ -44,7 +44,62 @@ pub async fn execute_reborn_extension_lifecycle_command(
     );
     let context =
         LifecycleProductContext::Surface(runtime.extension_lifecycle_surface_context.clone());
-    Ok(service.execute(context, command.into_action()?).await?)
+    Ok(match command {
+        RebornExtensionLifecycleCommand::Install { id } => {
+            execute_install_with_activation(&service, context, extension_package_ref(id)?).await?
+        }
+        command => service.execute(context, command.into_action()?).await?,
+    })
+}
+
+async fn execute_install_with_activation(
+    service: &RebornLocalLifecycleService,
+    context: LifecycleProductContext,
+    package_ref: LifecyclePackageRef,
+) -> Result<LifecycleProductResponse, ProductSurfaceError> {
+    let mut install_response = service
+        .execute(
+            context.clone(),
+            LifecycleProductAction::ExtensionInstall {
+                package_ref: package_ref.clone(),
+            },
+        )
+        .await?;
+    let activation_response = service
+        .execute(
+            context,
+            LifecycleProductAction::ExtensionActivate { package_ref },
+        )
+        .await;
+    let Ok(activation_response) = activation_response else {
+        return Ok(install_response);
+    };
+    install_response.phase = activation_response.phase;
+    install_response.blockers = activation_response.blockers;
+    install_response.message = activation_response.message;
+    let activation_visible_capability_ids = match activation_response.payload {
+        Some(LifecycleProductPayload::ExtensionActivate {
+            visible_capability_ids,
+            ..
+        }) => Some(visible_capability_ids),
+        _ => None,
+    };
+    if let Some(LifecycleProductPayload::ExtensionInstall {
+        visible_capability_ids,
+        next_step,
+        ..
+    }) = install_response.payload.as_mut()
+    {
+        if let Some(activation_visible_capability_ids) = activation_visible_capability_ids {
+            *visible_capability_ids = activation_visible_capability_ids;
+        }
+        *next_step = if install_response.phase == InstallationState::Active {
+            "Activation completed; model-visible extension tools are ready.".to_string()
+        } else {
+            "Activation did not complete; inspect the lifecycle phase and blockers.".to_string()
+        };
+    }
+    Ok(install_response)
 }
 
 pub fn render_reborn_extension_lifecycle_response(

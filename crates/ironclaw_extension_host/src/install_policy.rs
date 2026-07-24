@@ -6,13 +6,11 @@
 //! a repeated install of the same id does) are reviewable and testable in
 //! one place instead of interleaved with the lifecycle I/O.
 //!
-//! Contract (`docs/plans/2026-07-01-private-tool-installs.md`): a tenant
-//! (operator) install makes a tool available to everyone; a member install
-//! makes it available to that member — and any number of members can
-//! independently install the same tool by joining the one installation
-//! row's member set. An operator install of a member-held id EVICTS every
-//! member's private installation by replacing the member set with `Tenant`
-//! in a single row write.
+//! Contract (`docs/plans/2026-07-01-private-tool-installs.md`): lifecycle
+//! installs are caller-owned. Any number of callers, including the configured
+//! operator, can independently install the same tool by joining the one
+//! installation row's member set. Tenant-wide deployment state is owned by
+//! administrator configuration, not by lifecycle membership.
 
 use std::collections::BTreeSet;
 
@@ -20,14 +18,10 @@ use ironclaw_extensions::{ExtensionInstallation, InstallationOwner};
 use ironclaw_host_api::UserId;
 use ironclaw_product::{LifecycleInstallScope, ProductSurfaceFailure};
 
-/// Derive who a NEW install belongs to (#5459 P1): the tenant operator
-/// installs for the whole tenant; anyone else installs for themselves.
-pub fn derive_owner(caller: &UserId, tenant_operator: &UserId) -> InstallationOwner {
-    if caller == tenant_operator {
-        InstallationOwner::Tenant
-    } else {
-        InstallationOwner::user(caller.clone())
-    }
+/// Derive who a NEW install belongs to (#6520): every lifecycle install,
+/// including one initiated by the operator, is private to the caller.
+pub fn derive_owner(caller: &UserId, _tenant_operator: &UserId) -> InstallationOwner {
+    InstallationOwner::user(caller.clone())
 }
 
 /// Fail-closed visibility check for lifecycle mutations on an existing
@@ -51,15 +45,16 @@ pub fn ensure_caller_may_operate(
     })
 }
 
-/// Membership rules for an extension id whose installation row already
-/// exists. A same-member reinstall is idempotent so the model-facing install
-/// action can reconcile setup-complete installs after the public Activate action
-/// was retired. Tenant-shared duplicates are still "already installed".
+/// Membership rules for an extension id whose installation row already exists.
+/// A same-member reinstall is idempotent so the model-facing install action can
+/// reconcile setup-complete installs after the public Activate action was
+/// retired. Tenant compatibility rows remain "already installed" until restore
+/// narrows them to explicit membership.
 pub fn decide_install_on_existing(
     extension_id: &ironclaw_host_api::ExtensionId,
     existing_owner: &InstallationOwner,
     caller: &UserId,
-    tenant_operator: &UserId,
+    _tenant_operator: &UserId,
 ) -> Result<InstallationOwner, ProductSurfaceFailure> {
     let already_installed = || ProductSurfaceFailure::InvalidBindingRequest {
         reason: format!("extension {} is already installed", extension_id.as_str()),
@@ -68,13 +63,7 @@ pub fn decide_install_on_existing(
         // A tenant-shared tool is already available to every caller.
         InstallationOwner::Tenant => Err(already_installed()),
         InstallationOwner::Users { user_ids } => {
-            if caller == tenant_operator {
-                // Operator install evicts every member's private
-                // installation; the tenant row takes the id and everyone
-                // (the evicted members included) reaches the tool through
-                // the shared install.
-                Ok(InstallationOwner::Tenant)
-            } else if user_ids.contains(caller) {
+            if user_ids.contains(caller) {
                 Ok(existing_owner.clone())
             } else {
                 // JOIN: the caller becomes a member alongside the others.
@@ -169,9 +158,10 @@ mod tests {
     }
 
     #[test]
-    fn derive_owner_maps_operator_to_tenant_and_members_to_singleton() {
+    fn derive_owner_maps_operator_and_members_to_singletons() {
         let operator = user("operator");
-        assert!(derive_owner(&operator, &operator).is_tenant());
+        assert!(derive_owner(&operator, &operator).visible_to(&operator));
+        assert!(!derive_owner(&operator, &operator).is_tenant());
         let alice = user("alice");
         assert!(derive_owner(&alice, &operator).visible_to(&alice));
         assert!(!derive_owner(&alice, &operator).is_tenant());
@@ -215,16 +205,18 @@ mod tests {
         };
         assert!(joined.visible_to(&user("alice")) && joined.visible_to(&user("bob")));
 
-        // Operator evicts the whole member set to Tenant.
-        let Ok(evicted) = decide_install_on_existing(
+        // Operator joins the member set like any other caller.
+        let Ok(joined_by_operator) = decide_install_on_existing(
             &extension_id,
             &members(&["alice", "bob"]),
             &operator,
             &operator,
         ) else {
-            panic!("operator install must evict to tenant");
+            panic!("operator install must join");
         };
-        assert!(evicted.is_tenant());
+        assert!(joined_by_operator.visible_to(&user("alice")));
+        assert!(joined_by_operator.visible_to(&user("bob")));
+        assert!(joined_by_operator.visible_to(&operator));
 
         // Tenant-wide duplicates are "already installed" — and never leak members.
         for (existing, caller) in [

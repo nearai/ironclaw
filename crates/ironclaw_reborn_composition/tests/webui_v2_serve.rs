@@ -2111,15 +2111,18 @@ async fn setup_extension_returns_lifecycle_projection_via_service() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_body_string(response).await;
     assert!(
-        body.contains("\"phase\":\"unsupported\""),
+        body.contains("\"phase\":\"setup_needed\""),
         "setup_extension must surface lifecycle phase, got: {body}",
     );
     assert!(
         !body.contains("\"status\""),
         "setup_extension must not surface legacy status aliases, got: {body}",
     );
-    assert!(
-        body.contains("\"package_ref\":{\"kind\":\"extension\",\"id\":\"telegram\"}"),
+    let value: serde_json::Value =
+        serde_json::from_str(&body).expect("setup extension response is JSON");
+    assert_eq!(
+        value["package_ref"],
+        serde_json::json!({"kind": "extension", "id": "telegram"}),
         "setup_extension must echo the path-bound package ref, got: {body}",
     );
 }

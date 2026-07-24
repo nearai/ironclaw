@@ -226,9 +226,9 @@ network = "default"
 
 [[grants]]
 capability = "builtin.extension_install"
-effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
+effects = ["dispatch_capability", "read_filesystem", "write_filesystem", "network"]
 mounts = "system_extensions_lifecycle"
-network = "default"
+network = "dev_wildcard"
 
 [[grants]]
 capability = "builtin.extension_remove"

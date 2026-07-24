@@ -808,9 +808,10 @@ mod tests {
                 .expect("install GSuite extension");
             if matches!(extension_state, GsuiteExtensionState::Activated) {
                 extension_management
-                    .activate_with_prechecked_credentials_for_test(
+                    .activate_with_prechecked_credentials_for_user_for_test(
                         package_ref,
                         ironclaw_extension_host::ExtensionActivationMode::Static,
+                        surface_user,
                     )
                     .await
                     .expect("activate GSuite extension");
@@ -5341,9 +5342,10 @@ mod tests {
                 .await
                 .expect("install github extension");
             extension_management
-                .activate_with_prechecked_credentials_for_test(
+                .activate_with_prechecked_credentials_for_user_for_test(
                     package_ref,
                     ironclaw_extension_host::ExtensionActivationMode::Static,
+                    &surface_user,
                 )
                 .await
                 .expect("activate github extension");
@@ -5444,9 +5446,10 @@ mod tests {
             .await
             .expect("install github extension");
         extension_management
-            .activate_with_prechecked_credentials_for_test(
+            .activate_with_prechecked_credentials_for_user_for_test(
                 package_ref,
                 ironclaw_extension_host::ExtensionActivationMode::Static,
+                &surface_user,
             )
             .await
             .expect("activate github extension");
@@ -5651,9 +5654,10 @@ mod tests {
             .await
             .expect("install github extension");
         extension_management
-            .activate_with_prechecked_credentials_for_test(
+            .activate_with_prechecked_credentials_for_user_for_test(
                 package_ref,
                 ironclaw_extension_host::ExtensionActivationMode::Static,
+                &surface_user,
             )
             .await
             .expect("activate github extension");

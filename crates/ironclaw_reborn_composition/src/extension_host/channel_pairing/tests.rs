@@ -306,7 +306,7 @@ fn fixture_with_prefixes(
     installation: Option<&str>,
     deep_link_template: Option<&str>,
     template_values: BTreeMap<String, String>,
-    _inbound_code_prefixes: &[&str],
+    inbound_code_prefixes: &[&str],
 ) -> Fixture {
     let backend: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
     let tenant = TenantId::new("tenant-alpha").expect("tenant");
@@ -335,6 +335,10 @@ fn fixture_with_prefixes(
         extension_id,
         connection_notices: ChannelConnectionNoticePolicy::generic("Vendor X"),
         deep_link_template: deep_link_template.map(str::to_string),
+        inbound_code_prefixes: inbound_code_prefixes
+            .iter()
+            .map(|prefix| (*prefix).to_string())
+            .collect(),
         store,
         installation: Arc::new(StaticInstallation(
             installation.map(|id| AdapterInstallationId::new(id).expect("installation id")),
@@ -562,9 +566,8 @@ async fn consume_binds_identity_records_dm_target_then_dispatches_continuation()
         .expect("dm target present");
     assert_eq!(target.external_actor_id, "u-1");
 
-    // Consume has committed one durable completion intent, but it does not
-    // dispatch lifecycle policy itself. The generic ingress caller owns the
-    // synchronous dispatch-before-ack boundary.
+    // Consume dispatches the lifecycle completion before acknowledging the
+    // provider and settles the durable outbox on acceptance.
     assert_eq!(
         fixture
             .service
@@ -572,15 +575,11 @@ async fn consume_binds_identity_records_dm_target_then_dispatches_continuation()
             .await
             .expect("pairing completion ids")
             .len(),
-        1
+        0
     );
-    assert!(
-        fixture
-            .dispatcher
-            .events
-            .lock()
-            .expect("events lock")
-            .is_empty()
+    assert_eq!(
+        fixture.dispatcher.events.lock().expect("events lock").len(),
+        1
     );
     let connected = tokio::time::timeout(
         std::time::Duration::from_millis(250),
@@ -590,15 +589,6 @@ async fn consume_binds_identity_records_dm_target_then_dispatches_continuation()
     .expect("connection status must not wait for lifecycle continuation")
     .expect("connection status");
     assert!(connected.connected);
-    assert!(
-        fixture
-            .dispatcher
-            .events
-            .lock()
-            .expect("events lock")
-            .is_empty(),
-        "status reads must not recursively dispatch lifecycle continuation"
-    );
     assert_eq!(
         fixture
             .service
@@ -606,14 +596,9 @@ async fn consume_binds_identity_records_dm_target_then_dispatches_continuation()
             .await
             .expect("pairing completion ids after status")
             .len(),
-        1,
-        "status reads must not settle the durable completion intent"
+        0,
+        "status reads must not create a new durable completion intent"
     );
-    fixture
-        .service
-        .finish_pending_for_user_for_test(&user("alice"))
-        .await
-        .expect("finish pairing completion");
 
     // Pairing is the final manifest-declared setup step, so its durable
     // completion requests lifecycle reconciliation itself. The browser never
@@ -1028,8 +1013,8 @@ async fn unpair_drops_bindings_target_codes_and_conversation_actor_pairings() {
     assert_eq!(unpairs[0].0, INSTALL);
     assert_eq!(unpairs[0].1, "u-1");
     assert!(
-        unpairs[0].2.is_some(),
-        "pairing completion carries its durable exact-owner epoch into cleanup"
+        unpairs[0].2.is_none(),
+        "generic pairing cleanup is guarded by durable user ownership, not an adapter epoch"
     );
 }
 
