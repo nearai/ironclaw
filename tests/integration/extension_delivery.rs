@@ -87,7 +87,10 @@ use ironclaw_reborn_composition::{
     VerifiedEvidenceMint, extension_ingress_route_mount,
 };
 use ironclaw_turns::{GetRunStateRequest, TurnCoordinator, TurnRunId, TurnScope, TurnStatus};
-use reborn_support::builder::{RebornIntegrationHarness, StorageMode};
+use reborn_support::builder::{
+    RebornIntegrationHarness, StorageMode, retry_postgres_testcontainer_start,
+    start_postgres_testcontainer,
+};
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
 use rstest::rstest;
@@ -1015,6 +1018,95 @@ async fn admin_configured_telegram_unconnected_dm_gets_connect_notice_without_in
         "the unconnected Telegram DM must not admit an agent turn"
     );
     assert_extension_has_no_user_installation(services, "telegram").await;
+}
+
+#[tokio::test]
+async fn postgres_testcontainer_start_caller_serializes_operations() {
+    let first_entered = Arc::new(tokio::sync::Notify::new());
+    let release_first = Arc::new(tokio::sync::Notify::new());
+    let first = tokio::spawn(start_postgres_testcontainer({
+        let first_entered = Arc::clone(&first_entered);
+        let release_first = Arc::clone(&release_first);
+        move || {
+            let first_entered = Arc::clone(&first_entered);
+            let release_first = Arc::clone(&release_first);
+            async move {
+                first_entered.notify_one();
+                release_first.notified().await;
+                Ok::<_, &'static str>(())
+            }
+        }
+    }));
+    first_entered.notified().await;
+
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            start_postgres_testcontainer(|| async { Ok::<_, &'static str>(()) }),
+        )
+        .await
+        .is_err(),
+        "a concurrent PostgreSQL testcontainer start must wait for the active start"
+    );
+
+    release_first.notify_one();
+    first
+        .await
+        .expect("first operation task succeeds")
+        .expect("first start succeeds");
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        start_postgres_testcontainer(|| async { Ok::<_, &'static str>(()) }),
+    )
+    .await
+    .expect("a subsequent operation must enter after the first releases the lock")
+    .expect("subsequent start succeeds");
+}
+
+#[tokio::test]
+async fn postgres_testcontainer_start_retries_only_known_transient_provisioning_errors() {
+    const TRUNCATED_PULL: &str =
+        "failed to pull the image 'postgres:16-alpine', error: bytes remaining on stream";
+    const MISSING_PORT: &str = "container 'fixture-id' does not expose port 5432/tcp";
+
+    for transient_error in [TRUNCATED_PULL, MISSING_PORT] {
+        let mut recovered_attempts = 0;
+        let recovered = retry_postgres_testcontainer_start(|| {
+            recovered_attempts += 1;
+            let attempt = recovered_attempts;
+            async move {
+                if attempt == 1 {
+                    Err(transient_error)
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await;
+        assert!(recovered.is_ok(), "the one bounded retry must recover");
+        assert_eq!(recovered_attempts, 2);
+    }
+
+    let mut repeated_attempts = 0;
+    let repeated = retry_postgres_testcontainer_start(|| {
+        repeated_attempts += 1;
+        async { Err::<(), _>(TRUNCATED_PULL) }
+    })
+    .await;
+    assert_eq!(repeated, Err(TRUNCATED_PULL));
+    assert_eq!(repeated_attempts, 2, "the retry must remain bounded");
+
+    let mut permanent_attempts = 0;
+    let permanent = retry_postgres_testcontainer_start(|| {
+        permanent_attempts += 1;
+        async { Err::<(), _>("failed to connect to the Docker daemon") }
+    })
+    .await;
+    assert_eq!(permanent, Err("failed to connect to the Docker daemon"));
+    assert_eq!(
+        permanent_attempts, 1,
+        "non-transient Docker errors must fail immediately"
+    );
 }
 
 /// The Slack outbound proof (OUT-1/2/5 + ING-11 read half): a signed DM

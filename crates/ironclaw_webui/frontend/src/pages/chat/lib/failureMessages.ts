@@ -5,10 +5,13 @@ import {
   RUN_FAILURE_ID_PREFIX,
 } from "./message-types";
 
-export const CONNECTION_LOST_RUN_FAILURE_MESSAGE =
-  "Connection to the server was lost. Please reconnect and try again.";
-const REQUEST_FAILURE_FALLBACK_MESSAGE =
-  "The request failed before it could be sent.";
+export const CONNECTION_LOST_RUN_FAILURE_KEY = "chat.failure.connectionLost";
+const REQUEST_FAILURE_FALLBACK_KEY = "chat.failure.request";
+
+type Translate = (
+  key: string,
+  params?: Record<string, string | number>,
+) => string;
 
 type RunFailureMessageInput = {
   status?: string | null;
@@ -52,7 +55,7 @@ export function failureMessageForRunStatus({
   failureSummary,
   connectionStatus,
   connectionInterrupted,
-}: RunFailureMessageInput = {}): string {
+}: RunFailureMessageInput, t: Translate): string {
   if (
     shouldPreferConnectionLostRunFailure({
       failureCategory,
@@ -61,17 +64,19 @@ export function failureMessageForRunStatus({
       connectionInterrupted,
     })
   ) {
-    return CONNECTION_LOST_RUN_FAILURE_MESSAGE;
+    return t(CONNECTION_LOST_RUN_FAILURE_KEY);
   }
   if (typeof failureSummary === "string" && failureSummary.trim()) {
     return failureSummary.trim();
   }
   if (typeof failureCategory === "string" && failureCategory.trim()) {
-    return `The run failed: ${failureCategory.trim().replaceAll("_", " ")}.`;
+    return t("chat.failure.runCategory", {
+      detail: failureCategory.trim().replaceAll("_", " "),
+    });
   }
   return status === "recovery_required"
-    ? "The run is awaiting recovery — backend reported `recovery_required`."
-    : "The run failed before producing a reply.";
+    ? t("chat.failure.recoveryRequired")
+    : t("chat.failure.run");
 }
 
 type StreamFailureMessageInput = {
@@ -83,33 +88,147 @@ type StreamFailureMessageInput = {
 const SENSITIVE_ERROR_MESSAGE_PATTERNS = [
   /\b(?:authorization|bearer|api[_ -]?key|access[_ -]?token|refresh[_ -]?token|secret|password)\b\s*[:=]\s*\S+/i,
   /\b(?:sk-[A-Za-z0-9_-]{8,}|sk-proj-[A-Za-z0-9_-]{8,}|ghp_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|xox[abprs]-[A-Za-z0-9-]{8,}|AKIA[0-9A-Z]{8,})\b/,
-  /\bapi[_ -]?key\b.{0,80}\b[A-Za-z0-9_-]{24,}\b/i,
 ];
+const API_KEY_LABEL_PATTERN = /\bapi[_ -]?key\b/gi;
+const LONG_CREDENTIAL_TOKEN_PREFIX_PATTERN = /\b[A-Za-z0-9_-]{24}/;
+const MAX_API_KEY_TOKEN_GAP = 80;
+const MIN_LONG_CREDENTIAL_TOKEN_LENGTH = 24;
+
+const PRODUCT_SURFACE_ERROR_KINDS = new Set([
+  "validation",
+  "duplicate",
+  "busy",
+  "participant_denied",
+  "blocked_approval",
+  "blocked_authentication",
+  "blocked_resource",
+  "replay_unavailable",
+  "timeline_unavailable",
+  "service_unavailable",
+  "not_found",
+  "conflict",
+  "internal",
+]);
+
+const PRODUCT_SURFACE_VALIDATION_CODES = new Set([
+  "missing_field",
+  "blank",
+  "too_long",
+  "invalid_id",
+  "invalid_control_character",
+  "invalid_value",
+  "unknown_key",
+]);
+
+const SAFE_FIELD_IDENTIFIER_PATTERN = /^[a-z][a-z0-9_.-]{0,63}$/;
 
 function messageContainsSensitiveCredential(message: string): boolean {
-  return SENSITIVE_ERROR_MESSAGE_PATTERNS.some((pattern) =>
-    pattern.test(message),
-  );
+  if (
+    SENSITIVE_ERROR_MESSAGE_PATTERNS.some((pattern) => pattern.test(message))
+  ) {
+    return true;
+  }
+  for (const match of message.matchAll(API_KEY_LABEL_PATTERN)) {
+    const labelEnd = (match.index ?? 0) + match[0].length;
+    const boundedCandidate = message.slice(
+      labelEnd,
+      labelEnd + MAX_API_KEY_TOKEN_GAP + MIN_LONG_CREDENTIAL_TOKEN_LENGTH,
+    );
+    if (LONG_CREDENTIAL_TOKEN_PREFIX_PATTERN.test(boundedCandidate)) {
+      return true;
+    }
+  }
+  return false;
 }
 
-export function failureMessageForRequestError(error: unknown): string {
+function allowlistedWireToken(
+  value: unknown,
+  allowed: ReadonlySet<string>,
+): string {
+  const token = normalizeText(value);
+  return allowed.has(token) ? token : "";
+}
+
+function boundedFieldIdentifier(value: unknown): string {
+  const field = normalizeText(value);
+  return SAFE_FIELD_IDENTIFIER_PATTERN.test(field) ? field : "";
+}
+
+function isClientGeneratedRequestMessage(
+  error: unknown,
+  message: string,
+): boolean {
+  if (!message) return true;
+  if (messageContainsSensitiveCredential(message)) return true;
+  if (typeof error !== "object" || error === null) return false;
+
+  const requestError = error as {
+    name?: unknown;
+    body?: unknown;
+    payload?: unknown;
+    statusText?: unknown;
+  };
+  if (requestError.name === "TypeError" || requestError.name === "AbortError") {
+    return true;
+  }
+  if (requestError.name !== "ApiError") return false;
+
+  if (requestError.payload && typeof requestError.payload === "object") {
+    return true;
+  }
+  const body = normalizeText(requestError.body);
+  if (body && !body.startsWith("{") && !body.startsWith("[")) {
+    return false;
+  }
+  const statusText = normalizeText(requestError.statusText);
+  return !body || message === statusText || message === "Request failed";
+}
+
+function structuredRequestErrorDetail(error: unknown): string {
+  if (typeof error !== "object" || error === null) return "";
+  const payload = (error as { payload?: unknown }).payload;
+  if (typeof payload !== "object" || payload === null) return "";
+
+  const errorPayload = payload as {
+    validation_code?: unknown;
+    kind?: unknown;
+    field?: unknown;
+  };
+  const code =
+    allowlistedWireToken(
+      errorPayload.validation_code,
+      PRODUCT_SURFACE_VALIDATION_CODES,
+    ) ||
+    allowlistedWireToken(errorPayload.kind, PRODUCT_SURFACE_ERROR_KINDS);
+  if (!code) return "";
+  const field = boundedFieldIdentifier(errorPayload.field);
+  return field ? `${code} (${field})` : code;
+}
+
+export function failureMessageForRequestError(
+  error: unknown,
+  t: Translate,
+): string {
   const message =
     typeof (error as { message?: unknown })?.message === "string"
       ? (error as { message: string }).message.trim()
       : "";
-  if (!message) return REQUEST_FAILURE_FALLBACK_MESSAGE;
-  return messageContainsSensitiveCredential(message)
-    ? REQUEST_FAILURE_FALLBACK_MESSAGE
-    : message;
+  if (!isClientGeneratedRequestMessage(error, message)) return message;
+  const detail = structuredRequestErrorDetail(error);
+  return detail
+    ? t("chat.failure.requestDetail", { detail })
+    : t(REQUEST_FAILURE_FALLBACK_KEY);
 }
 
 export function failureMessageForStreamError(
-  { error, kind, retryable }: StreamFailureMessageInput = {},
+  { kind, retryable }: StreamFailureMessageInput,
+  t: Translate,
 ): string {
-  const detail = humanizeFailureToken(kind || error || "stream_error");
+  const safeKind = allowlistedWireToken(kind, PRODUCT_SURFACE_ERROR_KINDS);
+  const detail = humanizeFailureToken(safeKind || "stream_error");
   return retryable
-    ? `The chat stream hit a retryable error: ${detail}.`
-    : `The chat stream failed: ${detail}.`;
+    ? t("chat.failure.streamRetryable", { detail })
+    : t("chat.failure.stream", { detail });
 }
 
 function humanizeFailureToken(token: unknown): string {
@@ -121,7 +240,10 @@ function humanizeFailureToken(token: unknown): string {
 
 export function rewriteConnectionLostRunFailures(
   messages: any,
-  { runId }: { runId?: string | null } = {},
+  {
+    runId,
+    t,
+  }: { runId?: string | null; t: Translate },
 ) {
   if (!Array.isArray(messages)) return messages;
   if (!runId) return messages;
@@ -136,7 +258,7 @@ export function rewriteConnectionLostRunFailures(
       failureCategory: message.failureCategory,
       failureSummary: message.failureSummary || message.content,
       connectionInterrupted: true,
-    });
+    }, t);
     if (content === message.content) return message;
     changed = true;
     return { ...message, content };
@@ -149,21 +271,27 @@ export function upsertConnectionLostRunFailure(
   {
     runId,
     timestamp,
-  }: { runId?: string | null; timestamp?: string | null } = {},
+    t,
+  }: {
+    runId?: string | null;
+    timestamp?: string | null;
+    t: Translate;
+  },
 ) {
   if (!Array.isArray(messages)) return messages;
   const messageId = `${RUN_FAILURE_ID_PREFIX}${runId || "connection-lost"}`;
+  const content = t(CONNECTION_LOST_RUN_FAILURE_KEY);
   const nextMessage = createErrorChatMessage({
     id: messageId,
-    content: CONNECTION_LOST_RUN_FAILURE_MESSAGE,
+    content,
     timestamp: timestamp || new Date().toISOString(),
     failureStatus: "failed",
     failureCategory: "connection_lost",
-    failureSummary: CONNECTION_LOST_RUN_FAILURE_MESSAGE,
+    failureSummary: content,
   });
   const existing = messages.findIndex((message) => message?.id === messageId);
   if (existing < 0) return [...messages, nextMessage];
-  if (messages[existing]?.content === CONNECTION_LOST_RUN_FAILURE_MESSAGE) {
+  if (messages[existing]?.content === content) {
     return messages;
   }
   const next = [...messages];

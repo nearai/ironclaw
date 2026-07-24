@@ -18,7 +18,8 @@ import {
   resetToolActivityState,
 } from "./tool-activity-state";
 import {
-  CONNECTION_LOST_RUN_FAILURE_MESSAGE,
+  CONNECTION_LOST_RUN_FAILURE_KEY,
+  failureMessageForRequestError,
   rewriteConnectionLostRunFailures,
   upsertConnectionLostRunFailure,
 } from "./failureMessages";
@@ -54,6 +55,21 @@ const STATE_SLOT = Object.freeze({
   busyGateNotice: 6,
   stateThreadId: 7,
 });
+
+const ENGLISH_FAILURE_COPY = {
+  "chat.failure.connectionLost":
+    "Connection to the server was lost. Please reconnect and try again.",
+  "chat.failure.request": "The request failed before it could be sent.",
+};
+
+function testTranslator(copy = ENGLISH_FAILURE_COPY) {
+  return (key, params = {}) =>
+    (copy[key] || key).replace(/\{(\w+)\}/g, (match, name) =>
+      Object.hasOwn(params, name) ? String(params[name]) : match,
+    );
+}
+
+const t = testTranslator();
 
 function stateUpdatesFor(updates, slot) {
   return updates.filter((update) => update.index === slot);
@@ -126,7 +142,7 @@ function runUseChatSource(context) {
   if (!context.startExtensionOauth) {
     context.startExtensionOauth = async () => ({ success: false });
   }
-  if (!context.useT) context.useT = () => (key) => key;
+  if (!context.useT) context.useT = () => t;
   if (!("touchThreadInCache" in context)) context.touchThreadInCache = () => {};
   if (!("upsertThreadInCache" in context)) context.upsertThreadInCache = () => {};
   vm.runInNewContext(useChatSourceForTest(), context);
@@ -267,7 +283,10 @@ test("useChat: disconnected SSE rewrites an active driver_unavailable error", ()
 
   assert.equal(chat.sseStatus, CONNECTION_STATUS.DISCONNECTED);
   assert.equal(renderedMessages.length, 1);
-  assert.equal(renderedMessages[0].content, CONNECTION_LOST_RUN_FAILURE_MESSAGE);
+  assert.equal(
+    renderedMessages[0].content,
+    t(CONNECTION_LOST_RUN_FAILURE_KEY),
+  );
   assert.equal(
     stateUpdatesFor(setCalls, STATE_SLOT.isProcessing).at(-1)?.value,
     false,
@@ -347,7 +366,10 @@ test("useChat: disconnected SSE surfaces connection error before run id is known
   assert.equal(renderedMessages.length, 2);
   assert.equal(renderedMessages[0].content, historicalFailure);
   assert.equal(renderedMessages[1].id, "err-connection-lost");
-  assert.equal(renderedMessages[1].content, CONNECTION_LOST_RUN_FAILURE_MESSAGE);
+  assert.equal(
+    renderedMessages[1].content,
+    t(CONNECTION_LOST_RUN_FAILURE_KEY),
+  );
   assert.equal(
     stateUpdatesFor(setCalls, STATE_SLOT.isProcessing).at(-1)?.value,
     false,
@@ -989,9 +1011,13 @@ test("useChat.send: pending approval blocks before sendMessage", async () => {
   assert.equal(sendCalls, 0);
 });
 
-test("useChat.send: request failure appends inline error in the active thread", async () => {
+test("useChat.send: request failures use safe copy in the selected language", async () => {
   const threadId = "thread-1";
   let renderedMessages = [];
+  let sendAttempt = 0;
+  const zh = testTranslator({
+    "chat.failure.request": "请求在发送前失败。",
+  });
 
   const context = {
     AbortController,
@@ -1008,8 +1034,7 @@ test("useChat.send: request failure appends inline error in the active thread", 
     createThreadRequest: async () => {
       throw new Error("thread should already exist");
     },
-    failureMessageForRequestError: (error) =>
-      `inline:${error?.message || "unknown"}`,
+    failureMessageForRequestError,
     globalThis: {},
     queryClient: {
       fetchQuery: async () => {
@@ -1022,7 +1047,16 @@ test("useChat.send: request failure appends inline error in the active thread", 
     timelineMessageIdFromAcceptedRef,
     resolveGateRequest: async () => {},
     sendMessage: async () => {
-      throw new Error("AI provider account is out of credits");
+      sendAttempt += 1;
+      if (sendAttempt === 1) throw new TypeError("Failed to fetch");
+      throw {
+        name: "ApiError",
+        message: "Provider secret leaked",
+        payload: {
+          error: "customer email alice@example.com and token super-secret",
+          field: "api_key=super-secret",
+        },
+      };
     },
     setInterval,
     setTimeout,
@@ -1041,25 +1075,34 @@ test("useChat.send: request failure appends inline error in the active thread", 
       },
     }),
     useSSE: () => ({ status: "idle" }),
+    useT: () => zh,
   };
 
   runUseChatSource(context);
 
   const chat = context.globalThis.__testExports.useChat(threadId);
-  await assert.rejects(chat.send("please answer"), /out of credits/);
+  await assert.rejects(chat.send("please answer"), /Failed to fetch/);
 
   assert.equal(renderedMessages.length, 2);
   assert.equal(renderedMessages[0].role, "user");
   assert.equal(renderedMessages[0].status, "error");
-  assert.equal(
-    renderedMessages[0].error,
-    "inline:AI provider account is out of credits",
-  );
+  assert.equal(renderedMessages[0].error, "请求在发送前失败。");
   assert.equal(renderedMessages[1].role, "error");
   assert.equal(renderedMessages[1].requestForMessageId, renderedMessages[0].id);
-  assert.equal(
-    renderedMessages[1].content,
-    "inline:AI provider account is out of credits",
+  assert.equal(renderedMessages[1].content, "请求在发送前失败。");
+
+  await assert.rejects(chat.send("do not leak provider details"));
+
+  assert.equal(renderedMessages.length, 4);
+  assert.equal(renderedMessages[2].role, "user");
+  assert.equal(renderedMessages[2].status, "error");
+  assert.equal(renderedMessages[2].error, "请求在发送前失败。");
+  assert.equal(renderedMessages[3].role, "error");
+  assert.equal(renderedMessages[3].requestForMessageId, renderedMessages[2].id);
+  assert.equal(renderedMessages[3].content, "请求在发送前失败。");
+  assert.doesNotMatch(
+    renderedMessages.map((message) => message.content || message.error).join(" "),
+    /alice@example\.com|super-secret|api_key/,
   );
 });
 

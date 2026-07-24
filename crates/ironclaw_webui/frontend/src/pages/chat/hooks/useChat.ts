@@ -47,6 +47,7 @@ import {
 } from "../lib/connection-status";
 import { toRenderAttachment, toWireAttachment } from "../lib/attachments";
 import { failureMessageForRequestError } from "../lib/failureMessages";
+import { useT } from "../../../lib/i18n";
 import { useHistory } from "./useHistory";
 import { useSSE } from "./useSSE";
 
@@ -119,6 +120,7 @@ function isPendingOAuthGate(gate) {
 //   a v1-style `requestId`.
 // - cancelRun is a first-class action and posts to the v2 cancel route.
 export function useChat(threadId) {
+  const t = useT();
   const threadIdRef = React.useRef(threadId);
   const pendingMessagesRef = React.useRef(new Map());
   const pendingSeqRef = React.useRef(1);
@@ -404,6 +406,7 @@ export function useChat(threadId) {
     noteConnectionInterruptedRunId,
     connectionContextForRunFailure,
     onStreamError: handleStreamError,
+    t,
     // Reborn's projection bridge does not yet emit `Text` items for
     // assistant replies, and never emits `capability_display_preview`
     // items in the projection state — the assistant reply and the rich
@@ -469,11 +472,11 @@ export function useChat(threadId) {
     }
     setMessages((prev) =>
       upsertConnectionLostRunFailure(
-        runId ? rewriteConnectionLostRunFailures(prev, { runId }) : prev,
-        { runId },
+        runId ? rewriteConnectionLostRunFailures(prev, { runId, t }) : prev,
+        { runId, t },
       ),
     );
-  }, [sseStatus, setMessages, setIsProcessing, setActiveRun, threadId]);
+  }, [sseStatus, setMessages, setIsProcessing, setActiveRun, threadId, t]);
 
   // Accepts the composer call shape `{ attachments, threadId }`. The
   // `attachments` are staged objects from `lib/attachments.ts`
@@ -559,6 +562,7 @@ export function useChat(threadId) {
           appendRequestFailureMessage(setMessages, {
             id: requestFailureIdForMessage(`create-${pendingSeqRef.current++}`),
             error: err,
+            t,
           });
           throw err;
         }
@@ -649,7 +653,10 @@ export function useChat(threadId) {
           if (connectionInterruptedUnknownRef.current) {
             noteConnectionInterruptedRunId(response.run_id);
             setMessages((prev) =>
-              rewriteConnectionLostRunFailures(prev, { runId: response.run_id }),
+              rewriteConnectionLostRunFailures(prev, {
+                runId: response.run_id,
+                t,
+              }),
             );
           }
           if (streamErrorClosedAdmission) {
@@ -771,7 +778,7 @@ export function useChat(threadId) {
         if (err.status === 429) {
           setCooldownUntil(Date.now() + retryAfterMs(err));
         }
-        const failureContent = failureMessageForRequestError(err);
+        const failureContent = failureMessageForRequestError(err, t);
         // Mark the optimistic user bubble as retryable and append a separate
         // assistant-side error bubble. Apply each updater to both stores because
         // the rendered current thread and seeded target thread are distinct caches.
@@ -829,6 +836,7 @@ export function useChat(threadId) {
       setPendingGate,
       setActiveRun,
       noteConnectionInterruptedRunId,
+      t,
     ],
   );
   sendRef.current = send;
@@ -1109,10 +1117,10 @@ function retryAfterMs(err) {
   return 2000;
 }
 
-function requestFailureMessageForError(messageId, error) {
+function requestFailureMessageForError(messageId, error, t) {
   return requestFailureMessageForContent(
     messageId,
-    failureMessageForRequestError(error),
+    failureMessageForRequestError(error, t),
   );
 }
 
@@ -1124,8 +1132,8 @@ function requestFailureMessageForContent(messageId, content) {
   });
 }
 
-function appendRequestFailureMessage(setMessages, { id, error }) {
-  const content = failureMessageForRequestError(error);
+function appendRequestFailureMessage(setMessages, { id, error, t }) {
+  const content = failureMessageForRequestError(error, t);
   setMessages((prev) => [
     ...prev,
     createErrorChatMessage({
