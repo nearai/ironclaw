@@ -37,30 +37,30 @@ cd "${repo_root}"
 # Plain string + while-read (no `mapfile`): macOS dev machines ship bash 3.2,
 # and the guardrail must be runnable where it is written, not only on CI.
 #
-# The awk buffers each [[test]] stanza's `name`/`path` and emits at the
-# stanza boundary (next table header or EOF) — Cargo treats TOML key order
-# as irrelevant, so `path` before `name` must select exactly like the
-# conventional order (pinned by harness case D6's reversed-order stanza).
+# The manifest is parsed with Python's stdlib `tomllib` (python3 is already a
+# hard dependency of this lane's sibling scripts, e.g.
+# scripts/ci/lib/reborn_coverage_lcov.py) so the selector accepts exactly what
+# Cargo accepts — key order, spacing, and trailing comments can never drop a
+# registration the way a line-regex parser could (pinned by harness case D6's
+# reversed-order and compact stanzas).
 names="$(
-  awk '
-    function flush_stanza() {
-      if (in_test && name != "" && path_matches) {
-        print name
-      }
-      in_test = 0
-      name = ""
-      path_matches = 0
-    }
-    /^\[\[test\]\]/ { flush_stanza(); in_test = 1; next }
-    /^\[/           { flush_stanza() }
-    in_test && /^name = "/ {
-      name = $0
-      sub(/^name = "/, "", name)
-      sub(/"$/, "", name)
-    }
-    in_test && /^path = "tests\/integration\// { path_matches = 1 }
-    END { flush_stanza() }
-  ' Cargo.toml | LC_ALL=C sort -u
+  python3 - <<'PY'
+import tomllib
+
+with open("Cargo.toml", "rb") as manifest:
+    data = tomllib.load(manifest)
+
+names = {
+    entry["name"]
+    for entry in data.get("test", [])
+    if isinstance(entry, dict)
+    and isinstance(entry.get("name"), str)
+    and isinstance(entry.get("path"), str)
+    and entry["path"].startswith("tests/integration/")
+}
+for name in sorted(names):
+    print(name)
+PY
 )"
 
 if [ -z "${names}" ]; then
