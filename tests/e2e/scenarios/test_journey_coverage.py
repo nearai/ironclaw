@@ -52,11 +52,7 @@ def _manifest_provider_journeys() -> set[str]:
 def _cargo_targets(manifest_path: Path) -> dict[str, dict]:
     with manifest_path.open("rb") as manifest_file:
         manifest = tomllib.load(manifest_file)
-    return {
-        target["name"]: target
-        for target in manifest.get("test", [])
-        if "path" in target
-    }
+    return {target["name"]: target for target in manifest.get("test", [])}
 
 
 def _disabling_pytest_marks(
@@ -103,7 +99,7 @@ def _pytest_mark_aliases(tree: ast.Module) -> dict[str, set[str]]:
             isinstance(statement, ast.Expr)
             and isinstance(statement.value, ast.Call)
             and isinstance(statement.value.func, ast.Attribute)
-            and statement.value.func.attr in {"append", "extend"}
+            and statement.value.func.attr in {"append", "extend", "insert"}
             and isinstance(statement.value.func.value, ast.Name)
         ):
             collection = aliases.setdefault(statement.value.func.value.id, set())
@@ -260,7 +256,8 @@ def _assert_cargo_target(
             f"{case_id}: Cargo target {evidence.target!r} requires features "
             f"{required_features} that journey evidence does not enable"
         )
-        expected_source = (manifest_path.parent / target["path"]).resolve()
+        target_path = target.get("path", f"tests/{evidence.target}.rs")
+        expected_source = (manifest_path.parent / target_path).resolve()
         assert expected_source == source_path.resolve(), (
             f"{case_id}: Cargo target {evidence.target!r} points to "
             f"{expected_source}, not {source_path}"
@@ -454,14 +451,22 @@ def test_cargo_evidence_rejects_a_misdirected_target(tmp_path: Path):
         )
 
 
-def test_cargo_evidence_rejects_a_feature_gated_target(tmp_path: Path):
+@pytest.mark.parametrize(
+    "path_entry",
+    ['path = "tests/journey.rs"\n', ""],
+    ids=["explicit-path", "implicit-path"],
+)
+def test_cargo_evidence_rejects_a_feature_gated_target(
+    tmp_path: Path,
+    path_entry: str,
+):
     """A target that CI cannot run cannot satisfy executable evidence."""
     (tmp_path / "tests").mkdir()
     manifest_path = tmp_path / "Cargo.toml"
     manifest_path.write_text(
         "[[test]]\n"
         'name = "journey"\n'
-        'path = "tests/journey.rs"\n'
+        f"{path_entry}"
         'required-features = ["test-support"]\n',
         encoding="utf-8",
     )
