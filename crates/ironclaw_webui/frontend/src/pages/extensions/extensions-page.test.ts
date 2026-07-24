@@ -65,6 +65,7 @@ function renderExtensionsPage(tab, extensionState = {}) {
     Navigate() {},
     React: {
       useCallback: (fn) => fn,
+      useRef: (initial) => ({ current: initial }),
       useState: (initial) => {
         const index = hookCursor;
         hookCursor += 1;

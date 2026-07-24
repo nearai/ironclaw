@@ -19,7 +19,7 @@ import {
 } from "../lib/extensions-schema";
 import { PairingWebCodePanel } from "../../../components/pairing-web-code-panel";
 
-export function ConfigureModal({ extension, onClose, onSaved }) {
+export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
   const t = useT();
   const extensionName = extension?.displayName || extension?.packageRef?.id || t("extensions.defaultName");
   const { secrets = [], onboarding, isLoading, error } =
@@ -100,6 +100,7 @@ export function ConfigureModal({ extension, onClose, onSaved }) {
     return (
       <ModalShell
         onClose={onClose}
+        returnFocusTo={returnFocusTo}
         title={t("extensions.configureName").replace("{name}", extensionName)}
       >
         <PairingWebCodePanel
@@ -114,7 +115,11 @@ export function ConfigureModal({ extension, onClose, onSaved }) {
 
   if (isLoading) {
     return (
-      <ModalShell onClose={onClose} title={t("extensions.configureName").replace("{name}", extensionName)}>
+      <ModalShell
+        onClose={onClose}
+        returnFocusTo={returnFocusTo}
+        title={t("extensions.configureName").replace("{name}", extensionName)}
+      >
         <div className="space-y-3">
           {[1, 2].map(
             (i) =>
@@ -130,7 +135,11 @@ export function ConfigureModal({ extension, onClose, onSaved }) {
 
   if (error) {
     return (
-      <ModalShell onClose={onClose} title={t("extensions.configureName").replace("{name}", extensionName)}>
+      <ModalShell
+        onClose={onClose}
+        returnFocusTo={returnFocusTo}
+        title={t("extensions.configureName").replace("{name}", extensionName)}
+      >
         <p className="text-sm text-red-200">
           {t("extensions.loadFailed")} {error.message}
         </p>
@@ -140,7 +149,11 @@ export function ConfigureModal({ extension, onClose, onSaved }) {
 
   if (secrets.length === 0) {
     return (
-      <ModalShell onClose={onClose} title={t("extensions.configureName").replace("{name}", extensionName)}>
+      <ModalShell
+        onClose={onClose}
+        returnFocusTo={returnFocusTo}
+        title={t("extensions.configureName").replace("{name}", extensionName)}
+      >
         <p className="text-sm text-iron-300">
           {t("extensions.noConfigRequired")}
         </p>
@@ -149,7 +162,11 @@ export function ConfigureModal({ extension, onClose, onSaved }) {
   }
 
   return (
-    <ModalShell onClose={onClose} title={t("extensions.configureName").replace("{name}", extensionName)}>
+    <ModalShell
+      onClose={onClose}
+      returnFocusTo={returnFocusTo}
+      title={t("extensions.configureName").replace("{name}", extensionName)}
+    >
       {onboarding?.credential_instructions &&
       (
         <p className="mb-4 text-sm leading-6 text-iron-300">
@@ -340,12 +357,12 @@ function focusableElements(container) {
   );
 }
 
-function ModalShell({ onClose, title, children }) {
+function ModalShell({ onClose, returnFocusTo, title, children }) {
   const t = useT();
   const titleId = React.useId();
   const dialogRef = React.useRef(null);
   React.useEffect(() => {
-    const previouslyFocused = document.activeElement;
+    const previouslyFocused = returnFocusTo || document.activeElement;
     const dialog = dialogRef.current;
     const initialFocus = focusableElements(dialog)[0] || dialog;
     initialFocus?.focus({ preventScroll: true });
@@ -386,7 +403,7 @@ function ModalShell({ onClose, title, children }) {
         previouslyFocused.focus({ preventScroll: true });
       }
     };
-  }, [onClose]);
+  }, [onClose, returnFocusTo]);
 
   return (
     <div

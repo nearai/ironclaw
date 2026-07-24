@@ -633,6 +633,7 @@ test("ModalShell moves, traps, and restores keyboard focus", () => {
   }
 
   const opener = focusable("opener");
+  const incidentalFocus = focusable("incidental");
   const closeButton = focusable("close");
   const saveButton = focusable("save");
   const dialog = {
@@ -643,7 +644,7 @@ test("ModalShell moves, traps, and restores keyboard focus", () => {
     },
     querySelectorAll: () => [closeButton, saveButton],
   };
-  document.activeElement = opener;
+  document.activeElement = incidentalFocus;
 
   context.document = document;
   context.window.addEventListener = (type, handler) => listeners.set(type, handler);
@@ -660,6 +661,7 @@ test("ModalShell moves, traps, and restores keyboard focus", () => {
     onClose: () => {
       closeCalls += 1;
     },
+    returnFocusTo: opener,
     title: "Configure Slack",
     children: null,
   });

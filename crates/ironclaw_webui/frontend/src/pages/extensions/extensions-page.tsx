@@ -50,6 +50,7 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
   const { tab = "registry" } = useParams();
   const [configuring, setConfiguring] = React.useState(null);
   const [extensionToRemove, setExtensionToRemove] = React.useState(null);
+  const configureTriggerRef = React.useRef(null);
 
   const {
     status,
@@ -75,7 +76,10 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
     invalidate,
   } = useExtensions();
 
-  const handleConfigure = React.useCallback((extension) => setConfiguring(extension), []);
+  const handleConfigure = React.useCallback((extension, returnFocusTo) => {
+    configureTriggerRef.current = returnFocusTo || document.activeElement;
+    setConfiguring(extension);
+  }, []);
   const handleInstall = React.useCallback(
     (payload) => install({ ...payload, onNeedsSetup: handleConfigure }),
     [handleConfigure, install]
@@ -200,6 +204,7 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
           extension={configuring}
           onClose={handleCloseModal}
           onSaved={handleSaved}
+          returnFocusTo={configureTriggerRef.current}
         />
       )}
       <ConfirmDialog

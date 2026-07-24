@@ -45,6 +45,7 @@ function OverflowMenu({ actions, isBusy }) {
   const t = useT();
   const [open, setOpen] = React.useState(false);
   const ref = React.useRef(null);
+  const triggerRef = React.useRef(null);
 
   React.useEffect(() => {
     if (!open) return undefined;
@@ -58,6 +59,7 @@ function OverflowMenu({ actions, isBusy }) {
   return (
     <div ref={ref} className="relative shrink-0">
       <button
+        ref={triggerRef}
         type="button"
         aria-label={t("extensions.moreActions")}
         aria-haspopup="true"
@@ -81,9 +83,9 @@ function OverflowMenu({ actions, isBusy }) {
                 type="button"
                 role="menuitem"
                 disabled={isBusy}
-                onClick={() => {
+                onClick={(event) => {
                   setOpen(false);
-                  action.run();
+                  action.run(triggerRef.current || event.currentTarget);
                 }}
                 className={[
                   "flex w-full items-center gap-2.5 rounded-[7px] px-2.5 py-1.5 text-left text-[13px] disabled:cursor-not-allowed disabled:opacity-50",
@@ -166,7 +168,7 @@ export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
     primaryActions.push({
       id: "configure",
       label: configureLabel,
-      run: () => onConfigure(configurePayload),
+      run: (returnFocusTo) => onConfigure(configurePayload, returnFocusTo),
     });
   }
   if (
@@ -179,7 +181,7 @@ export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
       id: "reconfigure",
       label: configureLabel,
       icon: "settings",
-      run: () => onConfigure(configurePayload),
+      run: (returnFocusTo) => onConfigure(configurePayload, returnFocusTo),
     });
   }
   if (canManage) {
@@ -267,7 +269,12 @@ export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
         <span className="flex-1"></span>
         {primary &&
         (
-          <Button variant="secondary" size="sm" onClick={primary.run} disabled={isBusy}>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={(event) => primary.run(event.currentTarget)}
+            disabled={isBusy}
+          >
             {primary.label}
           </Button>
         )}
