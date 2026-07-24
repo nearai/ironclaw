@@ -16,6 +16,7 @@ This repo exposes Reborn structure primarily through implementation crates, crat
 | Standalone Reborn Slack setup | `docs/reborn/setup-slack-for-reborn-binary.md` |
 | Porting v1 channels to Reborn surfaces/ProductAdapters | `docs/reborn/how-to-port-channel-to-reborn.md` |
 | Proposed subagent spawn design | `docs/reborn/subagent-spawn/README.md` |
+| Storage landscape and target relational model | `docs/reborn/storage/README.md` |
 | Host API vocabulary | `crates/ironclaw_host_api/` |
 | Host API local rules | `crates/ironclaw_host_api/CLAUDE.md` |
 | Host/runtime composition and shared runtime HTTP egress | `crates/ironclaw_host_runtime/` |
