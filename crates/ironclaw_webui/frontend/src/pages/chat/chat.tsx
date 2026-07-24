@@ -1,6 +1,7 @@
 // @ts-nocheck
 import React from "react";
 import { useT } from "../../lib/i18n";
+import { toast } from "../../lib/toast";
 import {
   THREAD_STATE,
   clearThreadState,
@@ -225,8 +226,14 @@ export function Chat({
   );
 
   const handleCancelRun = React.useCallback(
-    () => cancelRun("user_requested"),
-    [cancelRun]
+    async () => {
+      try {
+        await cancelRun("user_requested");
+      } catch (_) {
+        toast(t("chat.cancelFailed"), { tone: "error" });
+      }
+    },
+    [cancelRun, t]
   );
 
   /* Mirror the active thread's lifecycle into the per-thread state store

@@ -80,6 +80,7 @@ function renderChat({
   activeThreadId = "thread-1",
   runEffects = false,
   threadStateUpdates = [],
+  toastCalls = [],
   globalAutoApproveEnabled = false,
   showChatLogsShortcut = true,
 }) {
@@ -125,6 +126,7 @@ function renderChat({
     channelConnectionFromGate,
     setThreadState: (threadId, state) =>
       threadStateUpdates.push({ threadId, state }),
+    toast: (message, options) => toastCalls.push({ message, options }),
     setTimeout: () => 1,
     clearTimeout: () => {},
     window: {
@@ -178,6 +180,46 @@ test("Chat cancel button routes through active thread run cancellation", async (
   assert.equal(props.canCancel, true);
   await props.onCancel();
   assert.deepEqual(cancelReasons, ["user_requested"]);
+});
+
+test("Chat shows a localized error toast when run cancellation fails", async () => {
+  const toastCalls = [];
+  const { tree, components } = renderChat({
+    toastCalls,
+    hookState: {
+      messages: [{ id: "message-1" }],
+      isProcessing: true,
+      pendingGate: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: { runId: "run-1", threadId: "thread-1", status: "running" },
+      send: async () => ({}),
+      cancelRun: async () => {
+        throw new Error("cancel failed");
+      },
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+
+  const chatInput = findComponent(tree, components.ChatInput);
+  const props = componentProps(chatInput, components.ChatInput);
+  await props.onCancel();
+
+  assert.deepEqual(JSON.parse(JSON.stringify(toastCalls)), [
+    {
+      message: "chat.cancelFailed",
+      options: { tone: "error" },
+    },
+  ]);
 });
 
 test("Chat leaves the composer editable while a run is processing", () => {

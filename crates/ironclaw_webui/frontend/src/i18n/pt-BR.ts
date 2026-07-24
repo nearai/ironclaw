@@ -1208,6 +1208,7 @@ registerPack("pt-BR", {
   "common.pinned": "Fixado",
   "common.deleteChat": "Excluir bate-papo",
   "chat.deleteFailed": "Não foi possível excluir esta conversa.",
+  "chat.cancelFailed": "Não foi possível interromper esta execução. Ela ainda pode estar em andamento. Tente novamente.",
   "chat.deleteBusy": "Não é possível excluir uma conversa enquanto ela está em execução. Pare-a primeiro e tente novamente.",
   "command.placeholder": "Digite um comando ou pesquise...",
   "routine.searchPlaceholder": "Pesquise o nome da rotina, gatilho ou ação",

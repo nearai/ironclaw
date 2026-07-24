@@ -1874,7 +1874,7 @@ test("useChat.send: repeated sends under the same pending gate stay blocked loca
   assert.equal(sendCalls, 0);
 });
 
-test("useChat.cancelRun clears local state before cancel request resolves", async () => {
+test("useChat.cancelRun keeps local state until the cancel request succeeds", async () => {
   const threadId = "thread-1";
   const stateUpdates = [];
   let cancelRequest = null;
@@ -1944,14 +1944,82 @@ test("useChat.cancelRun clears local state before cancel request resolves", asyn
   assert.equal(cancelRequest.threadId, threadId);
   assert.equal(cancelRequest.runId, "run-1");
   assert.equal(cancelRequest.reason, "user_requested");
+  assert.deepEqual(stateUpdates, []);
+
+  resolveCancelRequest({});
+  await cancelPromise;
+
   assert.deepEqual(stateUpdates.slice(0, 3), [
     { index: 4, value: null },
     { index: 3, value: false },
     { index: 2, value: null },
   ]);
+});
 
-  resolveCancelRequest({});
-  await cancelPromise;
+test("useChat.cancelRun preserves local state when the cancel request fails", async () => {
+  const threadId = "thread-1";
+  const stateUpdates = [];
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub({
+      initialByIndex: new Map([
+        [2, { runId: "run-1", threadId, status: "running" }],
+        [3, true],
+        [4, { runId: "run-1", gateRef: "gate-1" }],
+      ]),
+      setCalls: stateUpdates,
+    }),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {
+      throw new Error("cancel request failed");
+    },
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("createThread should not run");
+    },
+    globalThis: {},
+    queryClient: {
+      fetchQuery: async () => ({ channels: [] }),
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    resolveGateRequest: async () => {},
+    sendMessage: async () => {
+      throw new Error("sendMessage should not run");
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: [],
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      seedThreadMessages: () => {},
+      setMessages: () => {},
+    }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+  };
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  await assert.rejects(
+    chat.cancelRun("user_requested"),
+    /cancel request failed/,
+  );
+
+  assert.deepEqual(stateUpdates, []);
 });
 
 test("useChat clears transient run and gate state during thread switch render", () => {
@@ -2383,6 +2451,7 @@ test("useChat.cancelRun completion does not clear a newer run", async () => {
   const threadId = "thread-1";
   const stateUpdates = [];
   let resolveCancelRequest;
+  let updateActiveRun;
 
   const context = {
     AbortController,
@@ -2427,7 +2496,10 @@ test("useChat.cancelRun completion does not clear a newer run", async () => {
     setInterval,
     setTimeout,
     submitManualToken: async () => {},
-    useChatEvents: () => () => {},
+    useChatEvents: ({ setActiveRun }) => {
+      updateActiveRun = setActiveRun;
+      return () => {};
+    },
     useHistory: () => ({
       messages: [],
       hasMore: false,
@@ -2444,14 +2516,19 @@ test("useChat.cancelRun completion does not clear a newer run", async () => {
 
   const chat = context.globalThis.__testExports.useChat(threadId);
   const cancelPromise = chat.cancelRun("user_requested");
-  await chat.send("next request");
+  updateActiveRun({
+    runId: "run-2",
+    threadId,
+    status: "queued",
+    source: "projection",
+  });
 
   const newerRunUpdate = stateUpdates.find(
     (update) => update.index === 2 && update.value?.runId === "run-2",
   );
   assert.equal(newerRunUpdate?.value.threadId, threadId);
   assert.equal(newerRunUpdate?.value.status, "queued");
-  assert.equal(newerRunUpdate?.value.source, "local");
+  assert.equal(newerRunUpdate?.value.source, "projection");
 
   const updatesBeforeCancelResolution = stateUpdates.length;
   resolveCancelRequest({});

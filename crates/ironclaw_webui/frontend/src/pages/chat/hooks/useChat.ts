@@ -962,6 +962,18 @@ export function useChat(threadId) {
     async (reason) => {
       const runId = activeRun?.runId;
       if (!runId || !threadId) return;
+      await cancelRunRequest({ threadId, runId, reason });
+      // The cancellation acknowledgement is the authority for clearing local
+      // run state. A failed request may leave the backend run executing, so
+      // keep the stop control and processing state visible for a retry. The
+      // run/thread check also prevents a late acknowledgement from clearing a
+      // newer run or state restored after navigation.
+      if (
+        activeRunRef.current?.runId !== runId ||
+        threadIdRef.current !== threadId
+      ) {
+        return;
+      }
       setPendingGate(null);
       // Cancelling abandons any pairing panel for this thread: forget its waiter
       // and remember the dismissal so a later channel connect can't blast a
@@ -981,7 +993,6 @@ export function useChat(threadId) {
       }
       connectionInterruptedRunIdsRef.current.delete(runId);
       connectionInterruptedUnknownRef.current = false;
-      await cancelRunRequest({ threadId, runId, reason });
     },
     [activeRun, threadId, dismissOnboardingPairing],
   );
