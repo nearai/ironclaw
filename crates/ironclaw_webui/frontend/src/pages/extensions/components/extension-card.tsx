@@ -14,6 +14,11 @@ import {
   authAccountReasonLabelKey,
 } from "../lib/extensions-schema";
 import { extensionLifecycleState, primaryExtensionAction } from "../lib/extension-actions";
+import type {
+  ConfigureFocusHandler,
+  FocusTarget,
+  InstallFocusHandler,
+} from "../lib/focus-target";
 
 /* Card layout (Option B): self-contained bordered card. Capabilities collapse
    behind a count disclosure; secondary actions (Configure / Setup / Remove)
@@ -40,12 +45,28 @@ function translatedKnownLabel(t, prefix, value, knownLabels) {
   return knownLabels[value] ? t(`${prefix}.${value}`) : value;
 }
 
-/* Lightweight overflow menu. Real <button>s; closes on outside click. */
+/**
+ * @typedef {{
+ *   id: string;
+ *   label: string;
+ *   icon?: string;
+ *   danger?: boolean;
+ *   run: (returnFocusTo: FocusTarget) => void;
+ * }} FocusAction
+ */
+
+/**
+ * Lightweight overflow menu. Real <button>s; closes on outside click.
+ *
+ * @param {{ actions: FocusAction[]; isBusy: boolean }} props
+ */
 function OverflowMenu({ actions, isBusy }) {
   const t = useT();
   const [open, setOpen] = React.useState(false);
   const ref = React.useRef(null);
-  const triggerRef = React.useRef(null);
+  const triggerRef = React.useRef(
+    /** @type {HTMLButtonElement | null} */ (null),
+  );
 
   React.useEffect(() => {
     if (!open) return undefined;
@@ -114,6 +135,14 @@ function ChipGrid({ items }) {
   );
 }
 
+/**
+ * @param {{
+ *   ext: any;
+ *   onConfigure: ConfigureFocusHandler<any>;
+ *   onRemove: (extension: any) => void;
+ *   isBusy: boolean;
+ * }} props
+ */
 export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
   const t = useT();
   const state = extensionLifecycleState(ext);
@@ -160,7 +189,9 @@ export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
       ? t("extensions.reconfigure")
       : t("extensions.configure");
 
+  /** @type {FocusAction[]} */
   const primaryActions = [];
+  /** @type {FocusAction[]} */
   const overflowActions = [];
   const primaryAction = primaryExtensionAction(ext);
 
@@ -286,6 +317,14 @@ export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
   );
 }
 
+/**
+ * @param {{
+ *   entry: any;
+ *   onInstall?: InstallFocusHandler | null;
+ *   isBusy: boolean;
+ *   statusLabel?: string;
+ * }} props
+ */
 export function RegistryCard({ entry, onInstall = null, isBusy, statusLabel = undefined }) {
   const t = useT();
   const kindLabel = translatedKnownLabel(t, "extensions.runtime", entry.runtime, RUNTIME_LABELS);

@@ -8,6 +8,10 @@ import { ConfigureModal } from "./components/configure-modal";
 import { ToolsTab } from "./components/tools-tab";
 import { RegistryTab } from "./components/registry-tab";
 import { useExtensions } from "./hooks/useExtensions";
+import type { ConfigureFocusHandler } from "./lib/focus-target";
+import type { FocusTarget } from "./lib/focus-target";
+import type { FocusTargetResolver } from "./lib/focus-target";
+import type { InstallFocusHandler } from "./lib/focus-target";
 
 // The banner text/tone follows the *cause* of the failure, not which tab it is
 // shown on: a failed catalog (registry) request is always "Extension catalog
@@ -45,6 +49,11 @@ function CatalogErrorBanner({ isCatalogError = true, isRefetching, onRetry }) {
   );
 }
 
+/**
+ * @param {string | { id?: string } | null | undefined} packageRef
+ * @param {HTMLElement | null | undefined} installTrigger
+ * @returns {FocusTargetResolver}
+ */
 function installReturnFocusTarget(packageRef, installTrigger) {
   const extensionId =
     typeof packageRef === "string" ? packageRef : packageRef?.id;
@@ -57,9 +66,11 @@ function installReturnFocusTarget(packageRef, installTrigger) {
     ).find(
       (card) => card.getAttribute("data-extension-id") === extensionId,
     );
-    return installedCard?.querySelector(
-      "[data-extension-primary-action]",
-    ) || null;
+    return /** @type {HTMLElement | null} */ (
+      installedCard?.querySelector(
+        "[data-extension-primary-action]",
+      ) || null
+    );
   };
 }
 
@@ -68,7 +79,9 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
   const { tab = "registry" } = useParams();
   const [configuring, setConfiguring] = React.useState(null);
   const [extensionToRemove, setExtensionToRemove] = React.useState(null);
-  const configureTriggerRef = React.useRef(null);
+  const configureTriggerRef = React.useRef(
+    /** @type {FocusTarget | null} */ (null),
+  );
 
   const {
     status,
@@ -94,10 +107,13 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
     invalidate,
   } = useExtensions();
 
+  /** @type {ConfigureFocusHandler} */
   const handleConfigure = React.useCallback((extension, returnFocusTo) => {
-    configureTriggerRef.current = returnFocusTo || document.activeElement;
+    configureTriggerRef.current = returnFocusTo ||
+      /** @type {HTMLElement | null} */ (document.activeElement);
     setConfiguring(extension);
   }, []);
+  /** @type {InstallFocusHandler} */
   const handleInstall = React.useCallback(
     (payload, installTrigger) => {
       const returnFocusTo = installReturnFocusTarget(

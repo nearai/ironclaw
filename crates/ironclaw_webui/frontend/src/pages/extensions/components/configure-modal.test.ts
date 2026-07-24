@@ -9,6 +9,7 @@ import {
   hasChannelSurface,
   isWebGeneratedCodeConnection,
 } from "../lib/extensions-schema";
+import { resolveFocusTarget } from "../lib/focus-target";
 
 // Wire-shaped surface fixtures: a channel extension declares a channel
 // surface; a plain tool extension declares only a tool surface.
@@ -120,6 +121,7 @@ function renderModal({
     channelConnection,
     hasChannelSurface,
     isWebGeneratedCodeConnection,
+    resolveFocusTarget,
     window: {
       open: (url, target, features) => {
         if (blockPopup) {

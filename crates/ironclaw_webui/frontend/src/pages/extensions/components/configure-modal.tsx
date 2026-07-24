@@ -17,8 +17,18 @@ import {
   hasChannelSurface,
   isWebGeneratedCodeConnection,
 } from "../lib/extensions-schema";
+import { resolveFocusTarget } from "../lib/focus-target";
+import type { FocusTarget } from "../lib/focus-target";
 import { PairingWebCodePanel } from "../../../components/pairing-web-code-panel";
 
+/**
+ * @param {{
+ *   extension: any;
+ *   onClose: () => void;
+ *   onSaved?: (result?: unknown) => void;
+ *   returnFocusTo?: FocusTarget | null;
+ * }} props
+ */
 export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
   const t = useT();
   const extensionName = extension?.displayName || extension?.packageRef?.id || t("extensions.defaultName");
@@ -375,6 +385,14 @@ function focusableElements(container) {
   );
 }
 
+/**
+ * @param {{
+ *   onClose: () => void;
+ *   returnFocusTo?: FocusTarget | null;
+ *   title: string;
+ *   children: React.ReactNode;
+ * }} props
+ */
 function ModalShell({ onClose, returnFocusTo, title, children }) {
   const t = useT();
   const titleId = React.useId();
@@ -414,8 +432,7 @@ function ModalShell({ onClose, returnFocusTo, title, children }) {
     window.addEventListener("keydown", handleKey);
     return () => {
       window.removeEventListener("keydown", handleKey);
-      const previouslyFocused =
-        typeof returnTarget === "function" ? returnTarget() : returnTarget;
+      const previouslyFocused = resolveFocusTarget(returnTarget);
       if (
         previouslyFocused?.isConnected &&
         typeof previouslyFocused.focus === "function"
