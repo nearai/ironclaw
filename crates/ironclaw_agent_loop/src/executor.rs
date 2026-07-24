@@ -47,10 +47,7 @@ use gates::{AwaitDependentRunGateInput, AwaitDependentRunGateStage, GateInput, G
 #[cfg(test)]
 use input::consume_drainable_inputs;
 use input::{DrainInput, InputStage, InputStep, UserFacingInputDrainMode};
-use loop_exit::{
-    COMPLETION_NUDGE_LIMIT, ExitInput, ExitStage, completion_nudge_control_message,
-    reply_trailed_off,
-};
+use loop_exit::{ExitInput, ExitStage, completion_nudge_control_message, reply_trailed_off};
 use mapping::{
     batch_policy_kind, blocked_kind, capability_batch_counts, capability_error_class,
     capability_error_failure_category, capability_failure_kind, capability_host_error,
@@ -58,9 +55,9 @@ use mapping::{
     model_error_failure_summary, model_preference_to_host, sanitized_strategy_summary_or_fallback,
 };
 use model::{ModelInput, ModelStage, ModelStep};
-use pipeline::{DefaultExecutorPipeline, ExecutorStage, StageContext};
+use pipeline::{DefaultExecutorPipeline, ExecutorStage, StageContext, timed};
 use post_capability::PostCapabilityStage;
-use prompt::{PromptInput, PromptStage, PromptStep};
+use prompt::{ApprovalResumePromptOutput, PromptInput, PromptOutput, PromptStage, PromptStep};
 use reply_admission::{ReplyAdmissionInput, ReplyAdmissionStage, ReplyAdmissionStep};
 use turn_stop::{StopInput, StopObservationInput, StopObservationStep, StopStage, StopStep};
 
@@ -76,7 +73,7 @@ use ironclaw_turns::{
 use crate::{
     family::LoopFamily,
     state::{CheckpointKind, LoopExecutionState},
-    strategies::{StopKind, TurnSummary},
+    strategies::TurnSummary,
 };
 
 const MAX_CAPABILITY_RETRIES: usize = 8;
@@ -243,6 +240,16 @@ impl PendingInputAck {
             .map_err(|_| AgentLoopExecutorError::HostUnavailable {
                 stage: HostStage::Input,
             })
+    }
+
+    /// Latency-instrumented sibling of [`Self::ack`].
+    async fn ack_timed(
+        &mut self,
+        operation: &'static str,
+        host: &(dyn AgentLoopDriverHost + Send + Sync),
+        iteration: u32,
+    ) -> Result<(), AgentLoopExecutorError> {
+        latency::stage!(operation, host.run_context(), iteration, self.ack(host))
     }
 }
 

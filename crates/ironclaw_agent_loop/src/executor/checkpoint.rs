@@ -19,7 +19,7 @@ use ironclaw_turns::run_profile::AgentLoopDriverHost;
 use super::{
     AgentLoopExecutorError, CancelCheck, CheckpointWrite, ExecutorStage, HostStage,
     PendingInputAck, StageContext, cancelled_exit_with_reason, cancelled_reason_from_signal,
-    checkpoint_kind_to_host, debug_host_unavailable,
+    checkpoint_kind_to_host, debug_host_unavailable, latency,
 };
 
 #[cfg(test)]
@@ -110,6 +110,21 @@ impl CheckpointStage {
         let _ = ctx.host.emit_loop_progress(event).await;
     }
 
+    /// Latency-instrumented sibling of [`Self::emit_progress`] for the one
+    /// canonical.rs call site (`IterationStarted`) that used to hand-roll its
+    /// own timing block.
+    pub(super) async fn emit_progress_timed(
+        &self,
+        operation: &'static str,
+        ctx: StageContext<'_>,
+        iteration: u32,
+        event: LoopProgressEvent,
+    ) {
+        let started_at = latency::started_at();
+        self.emit_progress(ctx, event).await;
+        latency::operation_ok(operation, ctx.host.run_context(), iteration, started_at);
+    }
+
     // Cancellation is checked cooperatively at N boundary points between external calls.
     // A macro refactor was considered but deferred; the explicit sites are self-documenting.
     pub(super) async fn cancel_if_requested(
@@ -150,6 +165,23 @@ impl CheckpointStage {
             }
             Err(error) => Err(error),
         }
+    }
+
+    /// Latency-instrumented sibling of [`Self::cancel_if_requested`] for its
+    /// one canonical.rs call site (the per-iteration `cancel_check`).
+    pub(super) async fn cancel_if_requested_timed(
+        &self,
+        operation: &'static str,
+        ctx: StageContext<'_>,
+        iteration: u32,
+        state: LoopExecutionState,
+    ) -> Result<CancelCheck, AgentLoopExecutorError> {
+        latency::stage!(
+            operation,
+            ctx.host.run_context(),
+            iteration,
+            self.cancel_if_requested(ctx, state)
+        )
     }
 
     pub(super) async fn cancel_if_requested_after_pending_input_ack(
