@@ -1,6 +1,7 @@
 // @ts-nocheck
 import React from "react";
 import { useT } from "../../lib/i18n";
+import { toast } from "../../lib/toast";
 import {
   THREAD_STATE,
   clearThreadState,
@@ -53,6 +54,20 @@ function hasVisibleStreamingAssistantText(messages, activeRunId) {
     message.content.length > 0 &&
     (!activeRunId || message.turnRunId === activeRunId)
   );
+}
+
+function cancellationFailureDiagnostic(error) {
+  const status =
+    error &&
+    typeof error === "object" &&
+    Number.isInteger(error.status) &&
+    error.status >= 400 &&
+    error.status <= 599
+      ? error.status
+      : null;
+  return status === null
+    ? { category: "request_error" }
+    : { category: "http_error", status };
 }
 
 export function Chat({
@@ -225,8 +240,18 @@ export function Chat({
   );
 
   const handleCancelRun = React.useCallback(
-    () => cancelRun("user_requested"),
-    [cancelRun]
+    async () => {
+      try {
+        await cancelRun("user_requested");
+      } catch (error) {
+        console.error(
+          "Failed to cancel active run",
+          cancellationFailureDiagnostic(error)
+        );
+        toast(t("chat.cancelFailed"), { tone: "error" });
+      }
+    },
+    [cancelRun, t]
   );
 
   /* Mirror the active thread's lifecycle into the per-thread state store

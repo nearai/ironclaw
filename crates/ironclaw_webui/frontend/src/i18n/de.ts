@@ -1208,6 +1208,7 @@ registerPack("de", {
   "common.pinned": "Angeheftet",
   "common.deleteChat": "Chat löschen",
   "chat.deleteFailed": "Diese Unterhaltung konnte nicht gelöscht werden.",
+  "chat.cancelFailed": "Dieser Lauf konnte nicht gestoppt werden. Er läuft möglicherweise noch. Versuchen Sie es erneut.",
   "chat.deleteBusy": "Eine laufende Unterhaltung kann nicht gelöscht werden. Stoppe sie zuerst und versuche es dann erneut.",
   "command.placeholder": "Geben Sie einen Befehl oder eine Suche ein ...",
   "routine.searchPlaceholder": "Routinename, Trigger oder Aktion suchen",

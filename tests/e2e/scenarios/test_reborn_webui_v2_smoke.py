@@ -370,7 +370,7 @@ async def test_reborn_v2_light_theme_semantic_colors_have_readable_contrast(
     await composer.press("Enter")
     user_message = reborn_v2_page.locator(SEL_V2["msg_user"]).last
     await expect(user_message).to_contain_text("editable composer slow response", timeout=15000)
-    cancel_button = reborn_v2_page.get_by_role("button", name="Cancel").first
+    cancel_button = reborn_v2_page.locator(SEL_V2["chat_cancel_run"]).first
     await expect(cancel_button).to_be_visible(timeout=10000)
     await _assert_readable(cancel_button, "light-theme danger button")
 
@@ -979,6 +979,50 @@ async def test_reborn_v2_composer_accepts_draft_while_run_is_processing(reborn_v
 
     await composer.press("Enter")
     await expect(reborn_v2_page.locator(SEL_V2["msg_user"])).to_have_count(1, timeout=1000)
+
+
+async def test_reborn_v2_failed_cancel_keeps_active_run_visible(reborn_v2_page):
+    """A failed cancel request preserves the active-run UI and shows a safe error."""
+    cancel_requests = 0
+
+    async def fail_cancel(route) -> None:
+        nonlocal cancel_requests
+        cancel_requests += 1
+        await route.fulfill(
+            status=503,
+            content_type="application/json",
+            body=json.dumps({"error": "internal cancellation detail"}),
+        )
+
+    await reborn_v2_page.route(
+        "**/api/webchat/v2/threads/*/runs/*/cancel",
+        fail_cancel,
+    )
+
+    composer = reborn_v2_page.locator(SEL_V2["chat_composer"])
+    await composer.fill("editable composer slow response")
+    await composer.press("Enter")
+
+    await expect(reborn_v2_page.locator(SEL_V2["msg_user"]).first).to_contain_text(
+        "editable composer slow response",
+        timeout=15000,
+    )
+    cancel_button = reborn_v2_page.locator(SEL_V2["chat_cancel_run"]).first
+    await expect(cancel_button).to_be_visible(timeout=10000)
+    await cancel_button.click()
+
+    await expect(cancel_button).to_be_visible(timeout=10000)
+    await expect(cancel_button).to_be_enabled(timeout=10000)
+    await expect(composer).to_have_attribute("data-send-disabled", "true")
+    error_toast = reborn_v2_page.locator(SEL_V2["toast"]).filter(
+        has_text="Couldn't stop this run"
+    )
+    await expect(error_toast).to_have_text(
+        "Couldn't stop this run. It may still be running. Try again.",
+        timeout=10000,
+    )
+    await expect(error_toast).not_to_contain_text("internal cancellation detail")
+    assert cancel_requests == 1
 
 
 async def test_reborn_v2_disconnected_run_shows_status_and_stops_typing(

@@ -538,6 +538,7 @@ export function ChatInput({
                   type="button"
                   variant="danger"
                   size="icon-sm"
+                  data-testid="chat-cancel-run"
                   onClick={handleCancel}
                   disabled={isCancelling}
                   aria-label={t("common.cancel")}

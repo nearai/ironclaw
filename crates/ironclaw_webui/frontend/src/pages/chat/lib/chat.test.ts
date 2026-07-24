@@ -80,6 +80,8 @@ function renderChat({
   activeThreadId = "thread-1",
   runEffects = false,
   threadStateUpdates = [],
+  toastCalls = [],
+  consoleErrors = [],
   globalAutoApproveEnabled = false,
   showChatLogsShortcut = true,
 }) {
@@ -119,12 +121,16 @@ function renderChat({
     buildScopedLogsPath: ({ threadId }) => `/logs?thread_id=${threadId}`,
     clearThreadState: (threadId) =>
       threadStateUpdates.push({ threadId, state: null }),
+    console: {
+      error: (...args) => consoleErrors.push(args),
+    },
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     channelConnectionDisplayName,
     channelConnectionFromGate,
     setThreadState: (threadId, state) =>
       threadStateUpdates.push({ threadId, state }),
+    toast: (message, options) => toastCalls.push({ message, options }),
     setTimeout: () => 1,
     clearTimeout: () => {},
     window: {
@@ -178,6 +184,115 @@ test("Chat cancel button routes through active thread run cancellation", async (
   assert.equal(props.canCancel, true);
   await props.onCancel();
   assert.deepEqual(cancelReasons, ["user_requested"]);
+});
+
+test("Chat shows a localized error toast when run cancellation fails", async () => {
+  const toastCalls = [];
+  const consoleErrors = [];
+  const cancellationError = Object.assign(
+    new Error("sensitive cancellation detail"),
+    {
+      status: 503,
+      body: '{"error":"sensitive cancellation detail"}',
+      payload: { error: "sensitive cancellation detail" },
+    }
+  );
+  const { tree, components } = renderChat({
+    toastCalls,
+    consoleErrors,
+    hookState: {
+      messages: [{ id: "message-1" }],
+      isProcessing: true,
+      pendingGate: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: { runId: "run-1", threadId: "thread-1", status: "running" },
+      send: async () => ({}),
+      cancelRun: async () => {
+        throw cancellationError;
+      },
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+
+  const chatInput = findComponent(tree, components.ChatInput);
+  const props = componentProps(chatInput, components.ChatInput);
+  await props.onCancel();
+
+  assert.deepEqual(JSON.parse(JSON.stringify(toastCalls)), [
+    {
+      message: "chat.cancelFailed",
+      options: { tone: "error" },
+    },
+  ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(consoleErrors)), [
+    [
+      "Failed to cancel active run",
+      { category: "http_error", status: 503 },
+    ],
+  ]);
+  assert.doesNotMatch(
+    JSON.stringify(consoleErrors),
+    /sensitive cancellation detail/
+  );
+});
+
+test("Chat redacts malformed cancellation errors in request diagnostics", async () => {
+  const consoleErrors = [];
+  const cancellationError = Object.assign(
+    new Error("sensitive malformed cancellation detail"),
+    {
+      status: "503",
+      body: '{"error":"sensitive malformed cancellation detail"}',
+      payload: { error: "sensitive malformed cancellation detail" },
+    }
+  );
+  const { tree, components } = renderChat({
+    consoleErrors,
+    hookState: {
+      messages: [{ id: "message-1" }],
+      isProcessing: true,
+      pendingGate: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: { runId: "run-1", threadId: "thread-1", status: "running" },
+      send: async () => ({}),
+      cancelRun: async () => {
+        throw cancellationError;
+      },
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+
+  const chatInput = findComponent(tree, components.ChatInput);
+  const props = componentProps(chatInput, components.ChatInput);
+  await props.onCancel();
+
+  assert.deepEqual(JSON.parse(JSON.stringify(consoleErrors)), [
+    ["Failed to cancel active run", { category: "request_error" }],
+  ]);
+  assert.doesNotMatch(
+    JSON.stringify(consoleErrors),
+    /sensitive malformed cancellation detail/
+  );
 });
 
 test("Chat leaves the composer editable while a run is processing", () => {

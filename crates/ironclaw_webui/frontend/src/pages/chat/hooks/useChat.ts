@@ -134,13 +134,14 @@ export function useChat(threadId) {
     activeRunRef.current = value;
     setActiveRunState(value);
   }, []);
-  // Mirror committed activeRun into the ref. The setActiveRun wrapper keeps
-  // the ref current for back-to-back synchronous reads inside event handlers;
-  // this effect additionally covers paths that set the state directly — the
-  // per-thread reset below uses the raw setter so render stays side-effect
-  // free (no ref mutation during render, which a concurrent render could
-  // discard without rolling back).
-  React.useEffect(() => {
+  // Mirror committed activeRun into the ref before asynchronous continuations
+  // can observe the commit. The setActiveRun wrapper keeps the ref current for
+  // back-to-back synchronous reads inside event handlers; this layout effect
+  // additionally covers paths that set the state directly — the per-thread
+  // reset below uses the raw setter so render stays side-effect free (no ref
+  // mutation during render, which a concurrent render could discard without
+  // rolling back).
+  React.useLayoutEffect(() => {
     activeRunRef.current = activeRun;
   }, [activeRun]);
   const getPendingMessages = React.useCallback(
@@ -260,7 +261,10 @@ export function useChat(threadId) {
     setActiveRunState(null);
   }
 
-  React.useEffect(() => {
+  // A cancellation acknowledgement can resume in a microtask immediately
+  // after this thread commits. Update the identity fence in the layout phase
+  // so it cannot still identify the previously committed thread.
+  React.useLayoutEffect(() => {
     threadIdRef.current = threadId;
   }, [threadId]);
   React.useEffect(
@@ -962,6 +966,18 @@ export function useChat(threadId) {
     async (reason) => {
       const runId = activeRun?.runId;
       if (!runId || !threadId) return;
+      await cancelRunRequest({ threadId, runId, reason });
+      // The cancellation acknowledgement is the authority for clearing local
+      // run state. A failed request may leave the backend run executing, so
+      // keep the stop control and processing state visible for a retry. The
+      // run/thread check also prevents a late acknowledgement from clearing a
+      // newer run or state restored after navigation.
+      if (
+        activeRunRef.current?.runId !== runId ||
+        threadIdRef.current !== threadId
+      ) {
+        return;
+      }
       setPendingGate(null);
       // Cancelling abandons any pairing panel for this thread: forget its waiter
       // and remember the dismissal so a later channel connect can't blast a
@@ -981,7 +997,6 @@ export function useChat(threadId) {
       }
       connectionInterruptedRunIdsRef.current.delete(runId);
       connectionInterruptedUnknownRef.current = false;
-      await cancelRunRequest({ threadId, runId, reason });
     },
     [activeRun, threadId, dismissOnboardingPairing],
   );
