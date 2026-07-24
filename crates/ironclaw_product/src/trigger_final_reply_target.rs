@@ -245,7 +245,6 @@ impl RouteCurrentRunFinalReply for RunFinalReplyRoutingService {
                 ),
                 actor: TurnActor::new(scope.user_id),
                 destination,
-                downgrade: None,
             })
             .await
             .map_err(map_route_outbound_error)
