@@ -98,6 +98,53 @@ pub(crate) fn context_length_error(status_code: u16, response_text: &str) -> Opt
     Some(LlmError::ContextLengthExceeded { used, limit })
 }
 
+/// Detect a provider "invalid / unknown model" rejection: an HTTP 400 whose body
+/// says the requested model name is not valid, e.g. cloud-api.near.ai returns
+/// `{"error":{"message":"Model 'auto' not found. It's not a valid model name or
+/// alias.","type":"invalid_request_error","param":"model"}}` when sent a model id
+/// it doesn't serve. Returns the offending model name (best-effort) when matched.
+///
+/// This is a PERMANENT client error — the identical request can never succeed —
+/// so callers map it to the non-retryable [`LlmError::ModelNotAvailable`] rather
+/// than the retryable `RequestFailed` path. Otherwise a single model-config
+/// mistake (e.g. `NEARAI_MODEL=auto` against a gateway with no `auto` alias)
+/// retry-loops at the provider AND loop layers into a multi-minute silent hang
+/// where the user's turn never produces a reply.
+pub(crate) fn invalid_model_error(status_code: u16, response_text: &str) -> Option<String> {
+    if status_code != 400 {
+        return None;
+    }
+    let lower = response_text.to_ascii_lowercase();
+    // Must be about the model, and say it is unusable. Guard against matching a
+    // context-length 400 (handled separately) by requiring model-name wording.
+    let mentions_model = lower.contains("model");
+    let is_invalid = lower.contains("not found")
+        || lower.contains("not a valid model")
+        || lower.contains("invalid model")
+        || lower.contains("unknown model")
+        || lower.contains("is not a valid model name or alias");
+    if !(mentions_model && is_invalid) {
+        return None;
+    }
+    Some(parse_invalid_model_name(response_text).unwrap_or_else(|| "unknown".to_string()))
+}
+
+/// Best-effort extraction of the model name from an invalid-model message such as
+/// `Model 'auto' not found` (single- or double-quoted). Preserves original case.
+fn parse_invalid_model_name(text: &str) -> Option<String> {
+    let idx = text.to_ascii_lowercase().find("model")?;
+    let after = &text[idx + "model".len()..];
+    let mut chars = after.char_indices().skip_while(|(_, c)| c.is_whitespace());
+    let (start, quote) = chars.next()?;
+    if quote != '\'' && quote != '"' {
+        return None;
+    }
+    let rest = &after[start + quote.len_utf8()..];
+    let end = rest.find(quote)?;
+    let name = rest[..end].trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
 pub(crate) fn is_context_length_error_message(lower: &str) -> bool {
     const CONTEXT_PATTERNS: &[&str] = &[
         "context_length_exceeded",
@@ -313,6 +360,40 @@ mod tests {
         assert!(!is_context_length_error_message(unrelated));
         assert_eq!(parse_context_token_counts(unrelated), (0, 0));
         assert!(context_length_error(400, unrelated).is_none());
+    }
+
+    #[test]
+    fn invalid_model_error_detects_cloud_api_model_not_found() {
+        // The exact shape cloud-api.near.ai returns for an unknown model id
+        // (e.g. when NEARAI_MODEL=auto reaches a gateway with no `auto` alias).
+        let body = r#"{"error":{"message":"Model 'auto' not found. It's not a valid model name or alias.","type":"invalid_request_error","param":"model","code":null}}"#;
+        assert_eq!(invalid_model_error(400, body).as_deref(), Some("auto"));
+        // Preserves original case of the model name.
+        let cased = r#"{"error":{"message":"Model 'DeepSeek-V9' not found","type":"invalid_request_error"}}"#;
+        assert_eq!(
+            invalid_model_error(400, cased).as_deref(),
+            Some("DeepSeek-V9")
+        );
+        // Falls back to a placeholder when no quoted name is present.
+        let no_name = r#"{"error":{"message":"unknown model requested"}}"#;
+        assert_eq!(
+            invalid_model_error(400, no_name).as_deref(),
+            Some("unknown")
+        );
+    }
+
+    #[test]
+    fn invalid_model_error_ignores_non_400_and_unrelated_400s() {
+        let body = r#"{"error":{"message":"Model 'auto' not found"}}"#;
+        // Only HTTP 400 qualifies.
+        assert!(invalid_model_error(404, body).is_none());
+        assert!(invalid_model_error(500, body).is_none());
+        // A 400 that is not about an invalid model is left to other branches.
+        let other = r#"{"error":{"message":"missing required field 'messages'"}}"#;
+        assert!(invalid_model_error(400, other).is_none());
+        // A context-length 400 must not be misread as an invalid-model error.
+        let ctx = r#"{"error":{"message":"This model's maximum context length is 128000 tokens"}}"#;
+        assert!(invalid_model_error(400, ctx).is_none());
     }
 
     // ------------------------------------------------------------------
