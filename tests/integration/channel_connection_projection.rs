@@ -1,9 +1,9 @@
-//! RED journey: a channel's descriptor-declared connection contract must be
-//! the one the model sees through `builtin.extension_search`.
+//! Caller-level regression: channel connection render guidance must not leak
+//! into the model-visible `builtin.extension_search` result.
 //!
-//! This is intentionally a caller-level test. Both the catalog projection and
-//! the account-setup registry are compiled from the resolved manifest; checking
-//! either in isolation would not catch drift in the model-visible projection.
+//! The descriptor still identifies the package as a channel so the model can
+//! reason about its surface, while WebUI-only setup copy stays on the display
+//! preview path.
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
@@ -17,7 +17,7 @@ use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
 
 #[tokio::test]
-async fn extension_search_projects_descriptor_declared_web_generated_code_guidance() {
+async fn extension_search_omits_ui_only_connection_copy_from_model_output() {
     let group = RebornIntegrationGroup::extension_delivery()
         .await
         .expect("extension-delivery group builds with the Telegram manifest");
@@ -49,26 +49,14 @@ async fn extension_search_projects_descriptor_declared_web_generated_code_guidan
         .iter()
         .find(|entry| entry["package_ref"]["id"] == "telegram")
         .unwrap_or_else(|| panic!("Telegram catalog result in {output}"));
-    let connection = &telegram["channel_connection"];
-    assert_eq!(
-        connection["strategy"], "web_generated_code",
-        "extension_search must preserve the descriptor's WebGeneratedCode strategy: {connection}"
+    assert!(
+        telegram["surface_kinds"]
+            .as_array()
+            .is_some_and(|kinds| kinds.iter().any(|kind| kind == "channel")),
+        "model-visible search must still identify Telegram as a channel: {telegram}"
     );
     assert!(
-        connection["instructions"]
-            .as_str()
-            .is_some_and(|instructions| instructions.contains("IronClaw pairing panel")),
-        "manifest-authored connection guidance must survive catalog projection: {connection}"
-    );
-
-    let rendered = connection.to_string().to_ascii_lowercase();
-    assert!(
-        !rendered.contains("/pair"),
-        "the generic connection contract must never invent an unsupported /pair command: {connection}"
-    );
-    assert!(
-        !rendered.contains("get the pairing code from")
-            && !rendered.contains("get the pairing code"),
-        "WebGeneratedCode means IronClaw mints the code/deep link; the bot does not issue it: {connection}"
+        telegram.get("channel_connection").is_none(),
+        "model-visible search must omit UI-only connection guidance: {telegram}"
     );
 }

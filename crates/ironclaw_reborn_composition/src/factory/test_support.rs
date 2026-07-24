@@ -19,7 +19,10 @@ pub struct ChannelHostAssemblyTestWiring {
     pub run_delivery_settings: ironclaw_product::RunDeliverySettings,
 }
 
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "test-support helper methods are consumed selectively by downstream integration harnesses"
+)]
 impl RebornRuntimeStores {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn local_runtime_for_test(&self) -> Option<&Self> {
@@ -359,14 +362,6 @@ impl RebornRuntimeStores {
             auth_flow_cancel: None,
             run_delivery_settings: wiring.run_delivery_settings,
         })
-    }
-
-    /// The deployment-first channel delivery resolver behind the coordinator.
-    #[allow(dead_code)]
-    pub(crate) fn channel_delivery_resolver(
-        &self,
-    ) -> Option<Arc<dyn ironclaw_product::ChannelDeliveryResolver>> {
-        self.channel_delivery_resolver.clone()
     }
 
     /// Test-support access to the shared scoped secret store backing the

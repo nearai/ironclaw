@@ -32,7 +32,7 @@ use ironclaw_product::{
 };
 use ironclaw_reborn_composition::{
     RebornCompositionProfile, RebornHostBindings, RebornRuntimeIdentity, RebornRuntimeInput,
-    RebornRuntimeProcessBinding, build_reborn_runtime, build_webui_services,
+    RebornRuntimeProcessBinding, build_reborn_runtime,
 };
 
 #[path = "support/first_party.rs"]
@@ -111,7 +111,9 @@ async fn production_runtime_webui_serves_automations_without_local_runtime() {
         .await
         .expect("production runtime builds");
 
-    let bundle = build_webui_services(&runtime, None).expect("webui bundle builds");
+    let bundle = runtime
+        .product_surface(None)
+        .expect("product surface builds");
     let caller = ProductSurfaceCaller::new(
         TenantId::new("runtime-automation-prod-tenant").unwrap(),
         UserId::new("runtime-automation-prod-owner").unwrap(),
@@ -123,7 +125,7 @@ async fn production_runtime_webui_serves_automations_without_local_runtime() {
     // (no 503) so the request reaches the repository rather than returning
     // ServiceUnavailable.
     let result = ironclaw_host_api::ProductSurface::query(
-        bundle.product_surface.as_ref(),
+        bundle.as_ref(),
         caller,
         ironclaw_host_api::ProductSurfaceQueryRequest {
             view_id: AUTOMATIONS_VIEW.id.to_string(),

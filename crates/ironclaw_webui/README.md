@@ -21,7 +21,7 @@ across it:
 | Composed piece | Was | Now lives in |
 |---|---|---|
 | **WebChat v2 route surface + SPA** | crate `ironclaw_webui_v2` | `src/webui_v2/` (public module) + `frontend/` |
-| **Gateway assembly + middleware** | `ironclaw_reborn_composition::webui::webui_serve` + middleware | `src/webui_serve.rs` + `src/webui_*.rs` |
+| **Gateway assembly + middleware** | host-supplied `ProductSurface` + WebUI middleware | `src/webui_serve.rs` + `src/webui_*.rs` |
 | **Serve loop + host auth** | crate `ironclaw_reborn_webui_ingress` (this crate's original scope) | `src/lib.rs`, `src/auth/`, `src/session.rs`, `src/oidc.rs`, `src/signed_session_login.rs` |
 
 ### 1. WebChat v2 route surface + SPA (`src/webui_v2/`)
@@ -29,7 +29,7 @@ across it:
 The native WebChat v2 HTTP routes on top of
 `ironclaw_host_api::ProductSurface`. Handlers are thin: they read the
 `ProductSurfaceCaller` + `WebUiV2Capabilities` injected as axum extensions,
-dispatch to the service, and render redacted responses through `WebUiV2HttpError`.
+dispatch to the facade, and render redacted responses through `WebUiV2HttpError`.
 
 - `webui_v2_router(state)` / `webui_v2_router_with_options(state, opts)` — build
   the `axum::Router` from a `WebUiV2State`.
@@ -46,13 +46,13 @@ dispatch to the service, and render redacted responses through `WebUiV2HttpError
   one `SseCapacity` budget keyed by `(tenant, user)`; both render
   `ProductOutboundEnvelope`s into the redacted `WebChatV2EventFrame` schema and
   resume via `Last-Event-ID`. Slots are RAII and bounded by a max stream
-  lifetime so a stuck client or service cannot pin a slot.
+  lifetime so a stuck client or facade cannot pin a slot.
 - **SPA bundle:** the Vite/TypeScript frontend under `frontend/` is compiled by
   `build.rs` into Cargo's `OUT_DIR` and served from `src/webui_v2/static_assets/`.
 
 ### 2. Gateway assembly + middleware (`src/webui_serve.rs`, `src/webui_*.rs`)
 
-`webui_v2_app(bundle, config)` takes composition's `RebornWebuiBundle` plus a
+`webui_v2_app(product_surface, config)` takes a host-supplied `ProductSurface` plus a
 host-owned `WebuiServeConfig` and returns a `WebuiV2App` — the fully composed
 `axum::Router` with the canonical middleware stack layered in a fixed order:
 
@@ -84,10 +84,9 @@ attach under their feature flag.
 
 ## Layering & boundaries
 
-- Reaches the rest of Reborn **only** through composition's service
-  (`RebornWebuiBundle`, product-auth mount builders, the
-  `PublicRouteMount`/`ProtectedRouteMount` vocabulary) and
-  `ironclaw_host_api::ProductSurface`.
+- Reaches the rest of Reborn **only** through
+  `ironclaw_host_api::ProductSurface` and the neutral
+  `PublicRouteMount`/`ProtectedRouteMount` vocabulary supplied by the host.
 - **No** direct dependency on `ironclaw_product` or any lower substrate
   crate; **no** v1 `src/` import; **no** v1 secrets / settings / DB. Host auth
   stays host-owned here (Path A of `docs/reborn/how-to-port-channel-to-reborn.md`).

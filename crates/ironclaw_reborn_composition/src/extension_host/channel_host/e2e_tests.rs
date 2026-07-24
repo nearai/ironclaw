@@ -95,10 +95,10 @@ use crate::extension_host::extension_ingress::{
     build_extension_ingress, extension_ingress_route_mount,
 };
 use crate::extension_host::run_delivery_ports::ProductAuthBlockedAuthPromptSource;
-use crate::webui::route_mounts::PublicRouteMount;
 use crate::{RebornUserIdentityLookup, RebornUserIdentityLookupError};
 use ironclaw_extension_host::{ChannelConfigReactivation, ChannelConfigService};
 use ironclaw_extension_host::{IngressReplyContextSource, SnapshotChannelDeliveryResolver};
+use ironclaw_host_ingress::PublicRouteMount;
 use ironclaw_product::AuthChallengeProvider;
 use ironclaw_product::BlockedAuthPromptSource;
 

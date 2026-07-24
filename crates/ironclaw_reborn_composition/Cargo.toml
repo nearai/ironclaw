@@ -48,6 +48,7 @@ ironclaw_extensions = { path = "../ironclaw_extensions" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_hooks = { path = "../ironclaw_hooks" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_host_ingress = { path = "../ironclaw_host_ingress" }
 ironclaw_extension_host = { path = "../ironclaw_extension_host" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
 ironclaw_llm = { path = "../ironclaw_llm", default-features = false, features = ["registry-provider-factory"] }

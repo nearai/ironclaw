@@ -15,8 +15,9 @@ use ironclaw_host_runtime::{
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
 use ironclaw_product::{
-    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
-    ProductSurfaceFailure,
+    ChannelConnectionRequirement, LifecyclePackageKind, LifecyclePackageRef,
+    LifecycleProductPayload, LifecycleProductResponse, ProductSurfaceFailure,
+    RebornChannelConnectStrategy,
 };
 use serde::Deserialize;
 
@@ -307,20 +308,42 @@ fn channel_connection_display_preview(
     })
 }
 
-/// The structured connect requirement carries render chrome for the in-chat
-/// connection panel and rides the display-preview side channel only. Strip it
-/// from the model-visible tool output so the model sees just activation prose.
+/// Structured channel connection requirements carry render chrome for WebUI.
+/// For model-visible catalog search, retain only generated-code channel setup
+/// contracts the model needs to explain the next step. OAuth channels are
+/// started by host UI/actions, and static failure copy is not live state.
 fn without_model_visible_connection_chrome(
     mut response: LifecycleProductResponse,
 ) -> LifecycleProductResponse {
-    if let Some(LifecycleProductPayload::ExtensionActivate {
-        connection_required,
-        ..
-    }) = response.payload.as_mut()
-    {
-        *connection_required = None;
+    match response.payload.as_mut() {
+        Some(LifecycleProductPayload::ExtensionActivate {
+            connection_required,
+            ..
+        }) => *connection_required = None,
+        Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) => {
+            for extension in extensions {
+                extension.summary.channel_connection = extension
+                    .summary
+                    .channel_connection
+                    .take()
+                    .and_then(model_visible_channel_connection);
+            }
+        }
+        _ => {}
     }
     response
+}
+
+fn model_visible_channel_connection(
+    connection: ChannelConnectionRequirement,
+) -> Option<ChannelConnectionRequirement> {
+    if connection.strategy != RebornChannelConnectStrategy::WebGeneratedCode {
+        return None;
+    }
+    Some(ChannelConnectionRequirement {
+        error_message: String::new(),
+        ..connection
+    })
 }
 
 fn display_channel_name(channel: &str) -> String {
@@ -696,10 +719,77 @@ mod tests {
             "extension_activate description should teach the model to raise auth through activation and route channel pairing through UI: {}",
             activate.description
         );
-
         assert!(
             activate.effects.contains(&EffectKind::Network),
             "hosted MCP activation needs runtime HTTP egress for discovery"
+        );
+    }
+
+    #[tokio::test]
+    async fn model_visible_extension_search_projects_generated_code_without_ui_failure_copy() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
+            "extension-search-model-output-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+
+        let search = invoke_json(
+            &services,
+            EXTENSION_SEARCH_CAPABILITY_ID,
+            serde_json::json!({"query": "slack"}),
+        )
+        .await
+        .expect("Slack search succeeds");
+        let slack = search["payload"]["extensions"]
+            .as_array()
+            .expect("extensions array")
+            .iter()
+            .find(|extension| extension["package_ref"]["id"] == "slack")
+            .expect("Slack search result");
+
+        assert!(
+            slack["surface_kinds"]
+                .as_array()
+                .is_some_and(|kinds| kinds.iter().any(|kind| kind == "channel")),
+            "model-visible search must still identify Slack as a channel: {slack}"
+        );
+        assert!(
+            slack.get("channel_connection").is_none(),
+            "model-visible search must not expose UI-only connection failure copy: {slack}"
+        );
+        assert!(
+            !serde_json::to_string(&search)
+                .expect("search response serializes")
+                .contains("Slack OAuth connection failed"),
+            "static OAuth failure copy must not be presented as live model-visible state"
+        );
+
+        let search = invoke_json(
+            &services,
+            EXTENSION_SEARCH_CAPABILITY_ID,
+            serde_json::json!({"query": "telegram"}),
+        )
+        .await
+        .expect("Telegram search succeeds");
+        let telegram = search["payload"]["extensions"]
+            .as_array()
+            .expect("extensions array")
+            .iter()
+            .find(|extension| extension["package_ref"]["id"] == "telegram")
+            .expect("Telegram search result");
+        let connection = &telegram["channel_connection"];
+        assert_eq!(connection["strategy"], "web_generated_code");
+        assert!(
+            connection["instructions"]
+                .as_str()
+                .is_some_and(|instructions| instructions.contains("IronClaw pairing panel")),
+            "generated-code connection guidance must remain model-visible: {connection}"
+        );
+        assert_eq!(
+            connection["error_message"], "",
+            "static pairing failure copy is UI-only, not live model state: {connection}"
         );
     }
 

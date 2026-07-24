@@ -25,11 +25,11 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Utc;
 use http_body_util::BodyExt;
 use ironclaw_host_api::{
-    ActivityId, AgentId, Blocked, CapabilityId, ExtensionId, GateRef, GateWaypoint, InvocationId,
-    Outcome, OutcomeRefs, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
-    ProductSurfaceErrorCode, ProductSurfaceErrorKind, ProductSurfaceValidationCode, ProjectId,
-    Resolution, ResultPreviewMeta, ResultProgress, ResultRef, RuntimeKind, SafeSummary, TenantId,
-    TerminateHint, ThreadId, ToolVerdict, UserId,
+    ActivityId, AgentId, Blocked, CapabilityId, ExtensionId, GateRef, GateWaypoint,
+    InstallationState, InvocationId, Outcome, OutcomeRefs, ProductSurface, ProductSurfaceCaller,
+    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    ProductSurfaceValidationCode, ProjectId, Resolution, ResultPreviewMeta, ResultProgress,
+    ResultRef, RuntimeKind, SafeSummary, TenantId, TerminateHint, ThreadId, ToolVerdict, UserId,
 };
 use ironclaw_product::{
     ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_PUT_SECRET_CAPABILITY_ID, ADMIN_USER_SECRETS_VIEW,
@@ -41,15 +41,15 @@ use ironclaw_product::{
     EXTENSIONS_VIEW, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_STAT_VIEW, FsMount, GLOBAL_AUTO_APPROVE_VIEW,
     LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID,
     LLM_PROVIDER_UPSERT_CAPABILITY_ID, LOGS_VIEW, LifecyclePackageKind, LifecyclePackageRef,
-    LifecyclePublicState, LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
-    LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
-    OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
-    OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
-    OPERATOR_SETUP_RUN_CAPABILITY_ID, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,
-    OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
-    OUTBOUND_PREFERENCES_VIEW, PROJECT_DELETE_CAPABILITY_ID, PROJECT_FS_LIST_VIEW,
-    PROJECT_FS_STAT_VIEW, PROJECT_MEMBER_ADD_CAPABILITY_ID, PROJECT_MEMBER_REMOVE_CAPABILITY_ID,
+    LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
+    LlmProviderView, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
+    NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
+    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID, OPERATOR_CONFIG_VALIDATE_VIEW,
+    OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_RUN_CAPABILITY_ID,
+    OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
+    OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OUTBOUND_PREFERENCES_VIEW,
+    PROJECT_DELETE_CAPABILITY_ID, PROJECT_FS_LIST_VIEW, PROJECT_FS_STAT_VIEW,
+    PROJECT_MEMBER_ADD_CAPABILITY_ID, PROJECT_MEMBER_REMOVE_CAPABILITY_ID,
     PROJECT_MEMBER_UPDATE_CAPABILITY_ID, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY_ID,
     PROJECT_VIEW, PROJECTS_VIEW, ProductCancelRunRequest, ProductCreateThreadRequest,
     ProductListAutomationsRequest, ProductListThreadsRequest, ProductResolveGateRequest,
@@ -1784,10 +1784,11 @@ fn operator_config_entry(key: String, value: Value) -> RebornOperatorConfigEntry
 fn extension_setup_response(package_ref: LifecyclePackageRef) -> RebornSetupExtensionResponse {
     RebornSetupExtensionResponse {
         package_ref,
-        phase: LifecyclePublicState::SetupNeeded,
+        phase: InstallationState::Installed,
         blockers: Vec::new(),
         payload: None,
         secrets: Vec::new(),
+        fields: Vec::new(),
         onboarding: None,
     }
 }
@@ -1799,14 +1800,19 @@ fn extension_info(id: &str, active: bool) -> RebornExtensionInfo {
         display_name: id.to_string(),
         runtime: "first_party".to_string(),
         description: format!("{id} extension"),
+        authenticated: active,
+        active,
         tools: Vec::new(),
+        needs_setup: !active,
+        has_auth: false,
         installation_state: if active {
-            LifecyclePublicState::Active
+            InstallationState::Active
         } else {
-            LifecyclePublicState::SetupNeeded
+            InstallationState::Installed
         },
         activation_error: None,
         version: Some("1.0.0".to_string()),
+        onboarding_state: None,
         onboarding: None,
         auth_accounts: Vec::new(),
         surfaces: Vec::new(),

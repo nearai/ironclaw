@@ -11,7 +11,8 @@
 //! Tool names recorded at this seam are the model-facing names the Reborn
 //! gateway advertises, which equal capability ids (`builtin.trigger_create`)
 //! for every first-party tool except `builtin.skill_activate` (advertised as
-//! `builtin__skill_activate`); the QA phrases do not exercise that tool.
+//! `builtin__skill_activate`). Recorded QA phrases may exercise that tool before
+//! continuing with the selected skill's workflow.
 
 #![allow(dead_code)] // Shared by the QA recorder/replay test binaries only.
 

@@ -416,7 +416,7 @@ async fn preresolve_vendor_turn_scope(
 
 struct VendorIngress {
     parts: ExtensionIngressParts,
-    mount: ironclaw_reborn_composition::PublicRouteMount,
+    mount: ironclaw_host_ingress::PublicRouteMount,
 }
 
 impl VendorIngress {

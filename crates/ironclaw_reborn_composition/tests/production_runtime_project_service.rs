@@ -3,7 +3,7 @@
 //! tenant/user scoped.
 //!
 //! Regression for the bucket-2 production-parity gap (#5013 / audit #6389).
-//! Production profiles have `local_runtime: None`; `build_webui_services` only
+//! Production profiles have `local_runtime: None`; `runtime.product_surface` only
 //! called `with_project_service` for the local substrate, so on production the
 //! WebUI project surface fell through to the `ProductSurface` default, which
 //! returns `service_unavailable` for `create_project` / `list_projects`. The
@@ -37,7 +37,7 @@ use ironclaw_product::{
 };
 use ironclaw_reborn_composition::{
     RebornCompositionProfile, RebornHostBindings, RebornRuntimeIdentity, RebornRuntimeInput,
-    RebornRuntimeProcessBinding, build_reborn_runtime, build_webui_services,
+    RebornRuntimeProcessBinding, build_reborn_runtime,
 };
 
 #[path = "support/first_party.rs"]
@@ -126,7 +126,9 @@ async fn production_runtime_wires_project_service_and_scopes_by_tenant() {
     let runtime = build_reborn_runtime(input)
         .await
         .expect("production runtime builds");
-    let bundle = build_webui_services(&runtime, None).expect("webui bundle builds");
+    let bundle = runtime
+        .product_surface(None)
+        .expect("product surface builds");
 
     let owner = ProductSurfaceCaller::new(
         TenantId::new(RUNTIME_TENANT).unwrap(),
@@ -139,8 +141,7 @@ async fn production_runtime_wires_project_service_and_scopes_by_tenant() {
     // the `ProductSurface` default and this returned
     // `service_unavailable`. A successful create proves `with_project_service`
     // was wired from the production store graph.
-    let owner_surface =
-        ironclaw_host_api::BoundProductSurface::new(bundle.product_surface.clone(), owner.clone());
+    let owner_surface = ironclaw_host_api::BoundProductSurface::new(bundle.clone(), owner.clone());
     let created = PROJECT_CREATE_COMMAND
         .invoke_on(
             &owner_surface,
@@ -175,8 +176,7 @@ async fn production_runtime_wires_project_service_and_scopes_by_tenant() {
         Some(AgentId::new(RUNTIME_AGENT).unwrap()),
         None,
     );
-    let other_surface =
-        ironclaw_host_api::BoundProductSurface::new(bundle.product_surface.clone(), other_tenant);
+    let other_surface = ironclaw_host_api::BoundProductSurface::new(bundle.clone(), other_tenant);
     let other_listed = PROJECTS_VIEW
         .query_on(
             &other_surface,

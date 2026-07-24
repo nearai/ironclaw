@@ -26,7 +26,6 @@ use ironclaw_host_api::{
     ThreadId, UserId,
 };
 use ironclaw_product::RebornCreateThreadResponse;
-use ironclaw_reborn_composition::{RebornReadiness, RebornWebuiBundle};
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use ironclaw_webui::{
     EnvBearerAuthenticator, OAuthProvider, OAuthProviderName, OAuthUserProfile,
@@ -200,11 +199,6 @@ fn build_app(profiles: Vec<OAuthUserProfile>) -> (axum::Router, Arc<RecordingSer
     .expect("login wiring");
 
     let services = Arc::new(RecordingServices::default());
-    let bundle = RebornWebuiBundle {
-        product_surface: services.clone(),
-        product_auth: None,
-        readiness: RebornReadiness::disabled(),
-    };
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         wiring.authenticator,
@@ -213,7 +207,7 @@ fn build_app(profiles: Vec<OAuthUserProfile>) -> (axum::Router, Arc<RecordingSer
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
     .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
     .with_public_route_mount(wiring.mount);
-    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+    let app = webui_v2_app(services.clone(), config).expect("webui v2 app");
     (app, services)
 }
 

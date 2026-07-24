@@ -556,7 +556,6 @@ use crate::runtime_input::{
     TriggerFireAccessChecker, TriggerFireAccessDecision, TriggerFireAccessError,
     TriggerPollerSettings,
 };
-use crate::webui::service::build_webui_services;
 use crate::{RebornCompositionProfile, RebornReadiness, RebornReadinessState, RebornRuntimeError};
 use ironclaw_extension_host::ExtensionActivationMode;
 use ironclaw_reborn_config::{RebornBootConfig, RebornHome, RebornProfile};
@@ -4990,7 +4989,7 @@ async fn local_dev_runtime_webui_bundle_reuses_thread_and_turn_services() {
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
     let runtime_turn_coordinator = runtime.product_turn_coordinator();
-    let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+    let bundle = runtime.product_surface(None).expect("product surface");
     let caller = ProductSurfaceCaller::new(
         TenantId::new("runtime-webui-tenant").unwrap(),
         UserId::new("runtime-webui-owner").unwrap(),
@@ -4998,7 +4997,7 @@ async fn local_dev_runtime_webui_bundle_reuses_thread_and_turn_services() {
         None,
     );
     let created = invoke_product_command(
-        bundle.product_surface.as_ref(),
+        bundle.as_ref(),
         caller.clone(),
         CREATE_THREAD_COMMAND,
         ProductCreateThreadRequest {
@@ -5010,7 +5009,7 @@ async fn local_dev_runtime_webui_bundle_reuses_thread_and_turn_services() {
     .await
     .expect("create webui thread");
     let submitted = invoke_product_command(
-        bundle.product_surface.as_ref(),
+        bundle.as_ref(),
         caller.clone(),
         SUBMIT_TURN_COMMAND,
         ProductSubmitTurnRequest {
@@ -5029,7 +5028,7 @@ async fn local_dev_runtime_webui_bundle_reuses_thread_and_turn_services() {
     let stream = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             let stream = stream_product_events(
-                bundle.product_surface.as_ref(),
+                bundle.as_ref(),
                 caller.clone(),
                 RebornStreamEventsRequest {
                     thread_id: created.thread.thread_id.to_string(),
@@ -5062,7 +5061,7 @@ async fn local_dev_runtime_webui_bundle_reuses_thread_and_turn_services() {
     .await
     .expect("completed webui projection should appear");
 
-    let _api = bundle.product_surface.clone();
+    let _api = bundle.clone();
     assert!(Arc::ptr_eq(
         &runtime_turn_coordinator,
         &runtime.product_turn_coordinator()
@@ -5075,17 +5074,16 @@ async fn local_dev_runtime_webui_bundle_reuses_thread_and_turn_services() {
                 | ProductOutboundPayload::ProjectionSnapshot { .. }
                 | ProductOutboundPayload::ProjectionUpdate { .. }
         )),
-        "webui bundle should expose only projection stream events"
+        "product surface should expose only projection stream events"
     );
-    assert_eq!(bundle.readiness, runtime.readiness().clone());
-    assert_eq!(bundle.readiness.state, RebornReadinessState::DevOnly);
+    assert_eq!(runtime.readiness().state, RebornReadinessState::DevOnly);
 
     runtime.shutdown().await.expect("runtime shutdown");
 }
 
 /// Caller-level regression for the production attachment-landing path:
 /// drives `RebornRuntime::webui_workspace_filesystem()` — the exact method
-/// `build_webui_services`/`build_openai_compat_route_mount` call — through
+/// `runtime.product_surface`/`build_openai_compat_route_mount` call — through
 /// a real `ProjectScopedAttachmentLander`, then reads the landed bytes back
 /// through the same `ProjectScopedAttachmentReader` production wires
 /// `attachment_read_port` with. The C-ATTACH integration tests exercise the
@@ -5345,7 +5343,7 @@ async fn local_dev_webui_bundle_uses_local_lifecycle_service_for_setup_extension
     .with_model_gateway_override(gateway);
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+    let bundle = runtime.product_surface(None).expect("product surface");
     let caller = ProductSurfaceCaller::new(
         TenantId::new("runtime-webui-lifecycle-tenant").unwrap(),
         UserId::new("runtime-webui-lifecycle-owner").unwrap(),
@@ -5353,9 +5351,7 @@ async fn local_dev_webui_bundle_uses_local_lifecycle_service_for_setup_extension
         None,
     );
 
-    let setup =
-        query_webui_extension_setup(bundle.product_surface.as_ref(), caller.clone(), "github")
-            .await;
+    let setup = query_webui_extension_setup(bundle.as_ref(), caller.clone(), "github").await;
 
     assert_eq!(setup.package_ref.id.as_str(), "github");
     assert_eq!(setup.phase, InstallationState::Installed);
@@ -5369,12 +5365,8 @@ async fn local_dev_webui_bundle_uses_local_lifecycle_service_for_setup_extension
         setup.secrets[0].setup,
         RebornExtensionCredentialSetup::ManualToken
     ));
-    let google_setup = query_webui_extension_setup(
-        bundle.product_surface.as_ref(),
-        caller.clone(),
-        "google-calendar",
-    )
-    .await;
+    let google_setup =
+        query_webui_extension_setup(bundle.as_ref(), caller.clone(), "google-calendar").await;
     assert_eq!(google_setup.secrets.len(), 1);
     let google_secret = &google_setup.secrets[0];
     assert_eq!(google_secret.provider, "google");
@@ -5406,7 +5398,7 @@ async fn local_dev_webui_bundle_uses_local_lifecycle_service_for_setup_extension
                     && extensions[0].summary.package_ref.id.as_str() == "github"
                     && extensions[0].summary.credential_requirements.len() == 1
         ),
-        "local webui bundle should use the local lifecycle service package projection"
+        "local product surface should use the local lifecycle service package projection"
     );
     assert!(
         !setup.blockers.iter().any(|blocker| matches!(
@@ -5414,7 +5406,7 @@ async fn local_dev_webui_bundle_uses_local_lifecycle_service_for_setup_extension
             LifecycleReadinessBlocker::Runtime { ref_id: Some(ref_id) }
                 if ref_id.as_str() == "reborn_lifecycle_service_unwired"
         )),
-        "local webui bundle must not fall back to the default unwired service"
+        "local product surface must not fall back to the default unwired service"
     );
 
     runtime.shutdown().await.expect("runtime shutdown");
@@ -5447,7 +5439,7 @@ async fn local_dev_webui_bundle_exposes_outbound_preferences_service() {
     .with_model_gateway_override(gateway);
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+    let bundle = runtime.product_surface(None).expect("product surface");
     let caller = ProductSurfaceCaller::new(
         TenantId::new("runtime-webui-outbound-tenant").unwrap(),
         UserId::new("runtime-webui-outbound-owner").unwrap(),
@@ -5456,7 +5448,7 @@ async fn local_dev_webui_bundle_exposes_outbound_preferences_service() {
     );
 
     let cleared = invoke_product_capability(
-        bundle.product_surface.as_ref(),
+        bundle.as_ref(),
         caller.clone(),
         ironclaw_product::OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
         serde_json::json!({}),
@@ -5465,7 +5457,7 @@ async fn local_dev_webui_bundle_exposes_outbound_preferences_service() {
     .expect("outbound preference clear uses composed service");
     assert!(matches!(cleared, Resolution::Done(_)));
     let cleared_page = query_product_surface_page(
-        bundle.product_surface.as_ref(),
+        bundle.as_ref(),
         caller.clone(),
         ironclaw_product::RebornViewQuery {
             view_id: ironclaw_product::OUTBOUND_PREFERENCES_VIEW.id.to_string(),
@@ -5480,7 +5472,7 @@ async fn local_dev_webui_bundle_exposes_outbound_preferences_service() {
     assert!(cleared_preferences.final_reply_target.is_none());
 
     let targets_page = query_product_surface_page(
-        bundle.product_surface.as_ref(),
+        bundle.as_ref(),
         caller,
         ironclaw_product::RebornViewQuery {
             view_id: ironclaw_product::OUTBOUND_DELIVERY_TARGETS_VIEW
@@ -5526,7 +5518,7 @@ async fn local_dev_webui_bundle_invokes_skill_install_with_scoped_mounts() {
     .with_model_gateway_override(gateway);
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+    let bundle = runtime.product_surface(None).expect("product surface");
     let caller = ProductSurfaceCaller::new(
         TenantId::new("runtime-webui-skill-tenant").unwrap(),
         UserId::new("runtime-webui-skill-owner").unwrap(),
@@ -5535,7 +5527,7 @@ async fn local_dev_webui_bundle_invokes_skill_install_with_scoped_mounts() {
     );
 
     let installed = invoke_product_capability(
-        bundle.product_surface.as_ref(),
+        bundle.as_ref(),
         caller.clone(),
         ironclaw_product::SKILL_INSTALL_CAPABILITY_ID,
         serde_json::json!({
@@ -5550,7 +5542,7 @@ async fn local_dev_webui_bundle_invokes_skill_install_with_scoped_mounts() {
         other => panic!("skill install did not succeed: {other:?}"),
     }
     let skills_page = query_product_surface_page(
-        bundle.product_surface.as_ref(),
+        bundle.as_ref(),
         caller,
         ironclaw_product::RebornViewQuery {
             view_id: ironclaw_product::SKILLS_VIEW.id.to_string(),
@@ -5606,7 +5598,7 @@ async fn webui_route_rejects_list_automations_without_agent_binding() {
     .with_model_gateway_override(gateway);
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+    let bundle = runtime.product_surface(None).expect("product surface");
     let caller_without_agent = ProductSurfaceCaller::new(
         TenantId::new("runtime-webui-no-agent-tenant").unwrap(),
         UserId::new("runtime-webui-no-agent-owner").unwrap(),
@@ -5614,7 +5606,7 @@ async fn webui_route_rejects_list_automations_without_agent_binding() {
         None,
     );
     let router = webui_v2_router(WebUiV2State::new(
-        bundle.product_surface,
+        bundle,
         DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
     ))
     .layer(axum::Extension(caller_without_agent));
@@ -5668,7 +5660,7 @@ async fn webui_operator_diagnostics_route_exposes_composed_readiness_evidence() 
     .with_model_gateway_override(gateway);
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+    let bundle = runtime.product_surface(None).expect("product surface");
     let caller = ProductSurfaceCaller::new(
         TenantId::new("runtime-webui-diagnostics-tenant").unwrap(),
         UserId::new("runtime-webui-diagnostics-owner").unwrap(),
@@ -5677,7 +5669,7 @@ async fn webui_operator_diagnostics_route_exposes_composed_readiness_evidence() 
     )
     .with_operator_config(true);
     let router = webui_v2_router(WebUiV2State::new(
-        bundle.product_surface,
+        bundle,
         DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
     ))
     .layer(axum::Extension(caller))
@@ -5728,7 +5720,7 @@ async fn webui_operator_diagnostics_route_exposes_composed_readiness_evidence() 
 }
 
 #[tokio::test]
-async fn build_webui_services_without_local_runtime_still_lists_automations_from_core_store() {
+async fn runtime_product_surface_without_local_runtime_still_lists_automations_from_core_store() {
     let root = tempfile::tempdir().expect("tempdir");
     let gateway = Arc::new(RecordingGateway {
         reply: "unused".to_string(),
@@ -5754,7 +5746,7 @@ async fn build_webui_services_without_local_runtime_still_lists_automations_from
     .with_model_gateway_override(gateway);
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+    let bundle = runtime.product_surface(None).expect("product surface");
     let caller = ProductSurfaceCaller::new(
         TenantId::new("runtime-webui-no-host-tenant").unwrap(),
         UserId::new("runtime-webui-no-host-owner").unwrap(),
@@ -5763,7 +5755,7 @@ async fn build_webui_services_without_local_runtime_still_lists_automations_from
     );
 
     let response = query_product_surface_page(
-        bundle.product_surface.as_ref(),
+        bundle.as_ref(),
         caller,
         ironclaw_product::RebornViewQuery {
             view_id: ironclaw_product::AUTOMATIONS_VIEW.id.to_string(),
@@ -5809,7 +5801,7 @@ async fn local_dev_webui_setup_extension_stores_and_rotates_runtime_credentials(
     .with_model_gateway_override(gateway);
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+    let bundle = runtime.product_surface(None).expect("product surface");
     let caller = ProductSurfaceCaller::new(
         TenantId::new("runtime-webui-credential-tenant").unwrap(),
         UserId::new("runtime-webui-credential-owner").unwrap(),
@@ -5817,7 +5809,7 @@ async fn local_dev_webui_setup_extension_stores_and_rotates_runtime_credentials(
         None,
     );
     let first = submit_webui_extension_setup(
-        bundle.product_surface.as_ref(),
+        bundle.as_ref(),
         caller.clone(),
         "github",
         ProductSetupExtensionRequest {
@@ -5840,7 +5832,7 @@ async fn local_dev_webui_setup_extension_stores_and_rotates_runtime_credentials(
         .expect("credential ref");
 
     let second = submit_webui_extension_setup(
-        bundle.product_surface.as_ref(),
+        bundle.as_ref(),
         caller,
         "github",
         ProductSetupExtensionRequest {
@@ -5893,7 +5885,7 @@ async fn local_dev_webui_bundle_routes_approval_gates_into_interaction_service()
     .with_model_gateway_override(gateway);
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+    let bundle = runtime.product_surface(None).expect("product surface");
     let caller = ProductSurfaceCaller::new(
         TenantId::new("runtime-webui-approval-tenant").unwrap(),
         UserId::new("runtime-webui-approval-owner").unwrap(),
@@ -5901,7 +5893,7 @@ async fn local_dev_webui_bundle_routes_approval_gates_into_interaction_service()
         None,
     );
     let created = invoke_product_command(
-        bundle.product_surface.as_ref(),
+        bundle.as_ref(),
         caller.clone(),
         CREATE_THREAD_COMMAND,
         ProductCreateThreadRequest {
@@ -5915,7 +5907,7 @@ async fn local_dev_webui_bundle_routes_approval_gates_into_interaction_service()
     let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate");
 
     let err = invoke_product_command::<_, ironclaw_product::RebornResolveGateResponse>(
-        bundle.product_surface.as_ref(),
+        bundle.as_ref(),
         caller,
         RESOLVE_GATE_COMMAND,
         ProductResolveGateRequest {
@@ -5964,7 +5956,7 @@ async fn local_dev_webui_bundle_routes_auth_gates_into_interaction_service() {
     .with_model_gateway_override(gateway);
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+    let bundle = runtime.product_surface(None).expect("product surface");
     let caller = ProductSurfaceCaller::new(
         TenantId::new("runtime-webui-auth-tenant").unwrap(),
         UserId::new("runtime-webui-auth-owner").unwrap(),
@@ -5972,7 +5964,7 @@ async fn local_dev_webui_bundle_routes_auth_gates_into_interaction_service() {
         None,
     );
     let created = invoke_product_command(
-        bundle.product_surface.as_ref(),
+        bundle.as_ref(),
         caller.clone(),
         CREATE_THREAD_COMMAND,
         ProductCreateThreadRequest {
@@ -5985,7 +5977,7 @@ async fn local_dev_webui_bundle_routes_auth_gates_into_interaction_service() {
     .expect("create thread");
 
     let err = invoke_product_command::<_, ironclaw_product::RebornResolveGateResponse>(
-        bundle.product_surface.as_ref(),
+        bundle.as_ref(),
         caller,
         RESOLVE_GATE_COMMAND,
         ProductResolveGateRequest {
@@ -6049,7 +6041,7 @@ async fn local_dev_webui_bundle_records_selectable_filesystem_skill_context() {
     .with_model_gateway_override(gateway);
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+    let bundle = runtime.product_surface(None).expect("product surface");
     let webui_user_id = UserId::new("runtime-webui-skill-user").unwrap();
     let caller = ProductSurfaceCaller::new(
         TenantId::new("runtime-webui-skill-tenant").unwrap(),
@@ -6058,7 +6050,7 @@ async fn local_dev_webui_bundle_records_selectable_filesystem_skill_context() {
         None,
     );
     let created = invoke_product_command(
-        bundle.product_surface.as_ref(),
+        bundle.as_ref(),
         caller.clone(),
         CREATE_THREAD_COMMAND,
         ProductCreateThreadRequest {
@@ -6070,7 +6062,7 @@ async fn local_dev_webui_bundle_records_selectable_filesystem_skill_context() {
     .await
     .expect("create thread");
     let submitted = invoke_product_command(
-        bundle.product_surface.as_ref(),
+        bundle.as_ref(),
         caller,
         SUBMIT_TURN_COMMAND,
         ProductSubmitTurnRequest {
@@ -6364,7 +6356,7 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
 /// Scenario:
 ///  A – submitted via `turn_coordinator.submit_turn`; worker is stopped so it stays
 ///      Queued and holds the active-lock.
-///  B – submitted via `bundle.product_surface.submit_turn` (WebUI path); thread is busy → stored
+///  B – submitted via `bundle.submit_turn` (WebUI path); thread is busy → stored
 ///      as `RejectedBusy`; response carries a non-empty `notice`.
 ///  Cancel A → B stays `RejectedBusy` (no auto-resubmission).
 ///  C – submitted after A is cancelled; thread is free → `Submitted`.
@@ -6399,7 +6391,7 @@ async fn rejected_busy_message_not_auto_resubmitted_after_run_cancellation() {
     // Stop the worker so run A stays Queued and holds the thread active-lock.
     stop_turn_runner_worker_for_manual_state_test(&runtime).await;
 
-    let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+    let bundle = runtime.product_surface(None).expect("product surface");
     let caller = ProductSurfaceCaller::new(
         TenantId::new("runtime-rejected-busy-tenant").unwrap(),
         UserId::new("runtime-rejected-busy-owner").unwrap(),
@@ -6409,7 +6401,7 @@ async fn rejected_busy_message_not_auto_resubmitted_after_run_cancellation() {
 
     // Create the thread via WebUI so the thread record exists.
     let created = invoke_product_command(
-        bundle.product_surface.as_ref(),
+        bundle.as_ref(),
         caller.clone(),
         CREATE_THREAD_COMMAND,
         ProductCreateThreadRequest {
@@ -6452,7 +6444,7 @@ async fn rejected_busy_message_not_auto_resubmitted_after_run_cancellation() {
 
     // Submit message B through the WebUI path — thread is busy, must get RejectedBusy.
     let response_b = invoke_product_command(
-        bundle.product_surface.as_ref(),
+        bundle.as_ref(),
         caller.clone(),
         SUBMIT_TURN_COMMAND,
         ProductSubmitTurnRequest {
@@ -6563,7 +6555,7 @@ async fn rejected_busy_message_not_auto_resubmitted_after_run_cancellation() {
 
     // Submit message C — thread is free again, must be Submitted.
     let response_c = invoke_product_command(
-        bundle.product_surface.as_ref(),
+        bundle.as_ref(),
         caller.clone(),
         SUBMIT_TURN_COMMAND,
         ProductSubmitTurnRequest {

@@ -6,13 +6,12 @@ use std::sync::Arc;
 use anyhow::{Context, anyhow};
 use clap::Args;
 use ironclaw_reborn_composition::build_openai_compat_route_mount;
-use ironclaw_reborn_composition::build_webui_services;
 use ironclaw_reborn_composition::host_api::{
     AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
 };
 use ironclaw_reborn_composition::{
     RebornHostBindings, RebornReadiness, RebornRuntimeIdentity, RebornRuntimeInput,
-    RebornWebuiBundle, TriggerFireAccessPolicy, build_reborn_runtime,
+    TriggerFireAccessPolicy, build_reborn_runtime,
 };
 use ironclaw_reborn_config::{IdentitySection, seed_default_config_file_if_missing};
 use ironclaw_webui::{
@@ -455,7 +454,7 @@ impl ServeCommand {
                 );
             }
 
-            let bundle: RebornWebuiBundle = build_webui_services(&runtime, None)?;
+            let product_surface = runtime.product_surface(None)?;
             let openai_compat_mount = build_openai_compat_route_mount(
                 &runtime,
                 tenant_id.clone(),
@@ -535,11 +534,12 @@ impl ServeCommand {
                 env_token_var,
                 env_user_id_var,
                 &allowed_origins_raw,
-                &bundle.readiness,
+                runtime.readiness(),
             );
 
-            let mut serve_config = WebuiServeConfig::new(tenant_id, authenticator, allowed_origins)
-                .with_default_agent_id(default_agent_id.clone());
+            let mut serve_config =
+                WebuiServeConfig::new(tenant_id.clone(), authenticator, allowed_origins)
+                    .with_default_agent_id(default_agent_id.clone());
             if let Some(project_id) = default_project_id.clone() {
                 serve_config = serve_config.with_default_project_id(project_id);
             }
@@ -561,6 +561,25 @@ impl ServeCommand {
             if let Some(host) = canonical_host {
                 serve_config = serve_config.with_canonical_host(host);
             }
+            {
+                let mut state = ironclaw_reborn_composition::ProductAuthRouteState::new(
+                    runtime.product_auth_services(),
+                    tenant_id.clone(),
+                    Some(default_agent_id.clone()),
+                    default_project_id.clone(),
+                )
+                .with_product_surface(product_surface.clone());
+                if let Some(channel_identity_binding) = runtime.channel_identity_binding_config() {
+                    state = state.with_provider_identity_hook(
+                        ironclaw_reborn_composition::channel_identity_binding_hook_factory(
+                            channel_identity_binding,
+                        ),
+                    );
+                }
+                serve_config = serve_config.with_split_route_mount(
+                    ironclaw_reborn_composition::product_auth_route_mount(state),
+                );
+            }
             // Generic extension channel ingress (extension-runtime P4): one
             // mount serves `/webhooks/extensions/{extension_id}/{route_suffix}`
             // for every active extension; the route table follows the active
@@ -570,13 +589,6 @@ impl ServeCommand {
                     ironclaw_reborn_composition::extension_ingress_route_mount(&ingress_parts)
                         .context("failed to compose the extension ingress route mount")?;
                 serve_config = serve_config.with_public_route_mount(ingress_mount);
-            }
-            // The generic post-OAuth channel identity binding: installed
-            // channel extensions bind through generic discovery over the
-            // durable installation store; bindings land in the generic
-            // channel-identity store.
-            if let Some(channel_identity_binding) = runtime.channel_identity_binding_config() {
-                serve_config = serve_config.with_channel_identity_binding(channel_identity_binding);
             }
             // Generic WebGeneratedCode pairing routes (mint/status/unpair per
             // extension), riding the shared protected-route seam.
@@ -594,7 +606,7 @@ impl ServeCommand {
             if let Some(cli_login_mount) = cli_login_mount {
                 serve_config = serve_config.with_public_route_mount(cli_login_mount);
             }
-            let webui_app = webui_v2_app_with_lifecycle(bundle, serve_config)
+            let webui_app = webui_v2_app_with_lifecycle(product_surface, serve_config)
                 .context("failed to compose v2 Router")?;
             let (router, public_route_drains) = webui_app.into_parts();
 

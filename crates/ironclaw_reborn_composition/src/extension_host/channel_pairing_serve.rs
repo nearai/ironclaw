@@ -17,6 +17,10 @@
 
 use std::sync::Arc;
 
+use crate::extension_host::channel_pairing::{
+    ChannelPairingError, ChannelPairingIssue, ChannelPairingRegistry, ChannelPairingService,
+    ChannelPairingStatus,
+};
 use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -30,11 +34,7 @@ use ironclaw_host_api::ingress::{
 use ironclaw_host_api::{NetworkMethod, ProductSurfaceCaller};
 use serde::Serialize;
 
-use crate::extension_host::channel_pairing::{
-    ChannelPairingError, ChannelPairingIssue, ChannelPairingRegistry, ChannelPairingService,
-    ChannelPairingStatus,
-};
-use crate::webui::route_mounts::ProtectedRouteMount;
+use ironclaw_host_ingress::ProtectedRouteMount;
 
 const MINT_PATH: &str = "/api/webchat/v2/extensions/{extension_id}/pairing/mint";
 const STATUS_PATH: &str = "/api/webchat/v2/extensions/{extension_id}/pairing/status";

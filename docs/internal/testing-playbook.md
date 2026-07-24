@@ -476,3 +476,21 @@ Keep missing credentials, credential refresh, and account-scope behavior at
 their existing auth/runtime seams when a provider proxy cannot create the
 condition faithfully. Fault state must be reset independently from provider
 state after every case.
+
+## Whole-path journey inventory
+
+Use `tests/e2e/journey_types.py` and `tests/e2e/journey_cases.py` to register
+representative compositions across ingress, execution, provider state, and
+delivery. A `JourneyCase` is evidence metadata, not a workflow DSL: execution
+logic, provider setup, and readback remain in their owning test modules.
+
+Each case names its trace when it has one, isolated provider worlds, ingress,
+execution lane, delivery target, observable assertions, and an exact Pytest or
+Cargo test declaration. `test_journey_coverage.py` verifies that the evidence
+still exists and is executable. It also derives inbound and outbound channel
+surfaces from shipped first-party manifests, so adding a production channel
+without representative journey evidence fails CI.
+
+Prefer one representative whole-path case per supported ingress and delivery
+mechanism. Do not multiply every provider operation by every ingress or move
+provider-specific assertions into the generic registry.

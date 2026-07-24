@@ -36,7 +36,6 @@ use axum::body::Body;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use chrono::Duration as ChronoDuration;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
-use ironclaw_reborn_composition::{RebornReadiness, RebornWebuiBundle};
 use ironclaw_webui::{
     EnvBearerAuthenticator, OidcAuthenticator, OidcAuthenticatorConfig, SessionAuthenticator,
     SignedTokenSessionStore, signed_session_store,
@@ -71,11 +70,6 @@ const ENV_USER: &str = "operator-user";
 /// handler.
 fn compose(authenticator: Arc<dyn WebuiAuthenticator>) -> (axum::Router, Arc<StubServices>) {
     let services = Arc::new(StubServices::default());
-    let bundle = RebornWebuiBundle {
-        product_surface: services.clone(),
-        product_auth: None,
-        readiness: RebornReadiness::disabled(),
-    };
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         authenticator,
@@ -83,7 +77,7 @@ fn compose(authenticator: Arc<dyn WebuiAuthenticator>) -> (axum::Router, Arc<Stu
     )
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
     .with_default_project_id(ProjectId::new(PROJECT).expect("project"));
-    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+    let app = webui_v2_app(services.clone(), config).expect("webui v2 app");
     (app, services)
 }
 
@@ -383,11 +377,6 @@ async fn session_minted_for_one_tenant_does_not_authenticate_another_deployment(
     let tenant_b_store = signed_store_for(&TenantId::new("tenant-b").expect("tenant"));
     let authenticator = Arc::new(SessionAuthenticator::new(tenant_b_store.clone()));
     let services = Arc::new(StubServices::default());
-    let bundle = RebornWebuiBundle {
-        product_surface: services.clone(),
-        product_auth: None,
-        readiness: RebornReadiness::disabled(),
-    };
     let config = WebuiServeConfig::new(
         TenantId::new("tenant-b").expect("tenant"),
         authenticator,
@@ -395,7 +384,7 @@ async fn session_minted_for_one_tenant_does_not_authenticate_another_deployment(
     )
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
     .with_default_project_id(ProjectId::new(PROJECT).expect("project"));
-    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+    let app = webui_v2_app(services.clone(), config).expect("webui v2 app");
 
     let response = app
         .oneshot(with_peer(

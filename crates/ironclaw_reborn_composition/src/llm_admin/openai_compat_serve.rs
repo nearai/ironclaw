@@ -25,11 +25,12 @@ use ironclaw_product::{
     ProductProjectionState, ProjectionCursor, ProjectionReadRequest, ProjectionStream,
     ProjectionSubscriptionRequest,
 };
+use ironclaw_reborn_openai_compat::OpenAiCompatRefStore;
 use ironclaw_reborn_openai_compat::{
     OpenAiChatCompletionProjection, OpenAiChatCompletionProjectionReader,
     OpenAiChatCompletionProjectionRequest, OpenAiChatCompletionsWorkflow,
     OpenAiChatProjectionStreamRequest, OpenAiCompatActorScope, OpenAiCompatErrorKind,
-    OpenAiCompatHttpError, OpenAiCompatProjectionStreamer, OpenAiCompatRefStore,
+    OpenAiCompatHttpError, OpenAiCompatProjectionStreamer, OpenAiCompatRefStorePort,
     OpenAiCompatResourceBinding, OpenAiCompatResourceMapping, OpenAiCompatRouterState,
     OpenAiResponseErrorObject, OpenAiResponseId, OpenAiResponseObject, OpenAiResponseOutputItem,
     OpenAiResponseOutputItemStatus, OpenAiResponseProjection,
@@ -59,7 +60,7 @@ use sha2::{Digest, Sha256};
 
 use crate::RebornBuildError;
 use crate::RebornRuntime;
-use crate::webui::route_mounts::ProtectedRouteMount;
+use ironclaw_host_ingress::ProtectedRouteMount;
 
 #[cfg(test)]
 mod tests;
@@ -76,13 +77,12 @@ pub async fn build_openai_compat_route_mount(
     _default_project_id: Option<ProjectId>,
 ) -> Result<ProtectedRouteMount, RebornBuildError> {
     let ref_filesystem: Arc<dyn RootFilesystem> = runtime.extension_filesystem.clone();
-    let ref_store: Arc<dyn ironclaw_reborn_openai_compat::OpenAiCompatRefStorePort> = Arc::new(
-        OpenAiCompatRefStore::with_root(ref_filesystem, openai_compat_ref_root(&tenant_id)?),
-    );
+    let ref_store: Arc<dyn OpenAiCompatRefStorePort> = Arc::new(OpenAiCompatRefStore::with_root(
+        ref_filesystem,
+        openai_compat_ref_root(&tenant_id)?,
+    ));
     let projection_stream = runtime.product_event_stream();
-    let product_surface =
-        crate::webui::service::build_webui_services(runtime, Some(projection_stream.clone()))?
-            .product_surface;
+    let product_surface = runtime.product_surface(Some(projection_stream.clone()))?;
     let chat_projection_reader = Arc::new(OpenAiChatCompletionThreadProjectionReader::new(
         product_surface.clone(),
     ));
@@ -128,7 +128,7 @@ pub async fn build_openai_compat_route_mount(
     // `GET /v1/models` lists the deployment's configured models from the same
     // LLM-config source the operator WebUI uses. Wired only when the root LLM
     // provider is compiled in; otherwise the route stays fail-closed (501).
-    let router_state = match crate::webui::service::build_llm_config_service(runtime) {
+    let router_state = match crate::product_surface::build_llm_config_service(runtime) {
         Some(llm_config) => {
             let catalog: Arc<dyn OpenAiCompatModelCatalog> =
                 Arc::new(LlmConfigModelCatalog::new(llm_config));

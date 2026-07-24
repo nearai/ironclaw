@@ -1,5 +1,5 @@
 //! W5-WEBUI-API-1: `webui_v2` router mounted over a REAL `RebornServices`
-//! service, hand-built from int-tier harness parts — not the
+//! facade, hand-built from int-tier harness parts — not the
 //! `MinimalWebuiServices` fake in `webui_v2_router_smoke.rs` (rejects 24/25
 //! methods). Hand-built because `webui.rs`'s builder needs a `&RebornRuntime`
 //! the harness never constructs.
@@ -36,8 +36,8 @@ use ironclaw_product::{
 };
 use ironclaw_reborn_composition::test_support::BudgetTestGateway;
 use ironclaw_reborn_composition::{
-    RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput, RebornWebuiBundle,
-    build_reborn_runtime, build_webui_services, local_dev_runtime_policy,
+    RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput, build_reborn_runtime,
+    local_dev_runtime_policy,
 };
 use ironclaw_turns::{ReplyTargetBindingRef, TurnEventProjectionSource, TurnStatus};
 use ironclaw_webui::webui_v2::{
@@ -247,7 +247,7 @@ async fn settings_tool_permission_post_then_cold_read() {
     // freshly-reopened tool-permission-override/auto-approve/persistent-policy
     // stores at the same on-disk `storage_root` (not the live `Arc`s above) —
     // this is what actually proves the POSTed state survives a store reopen,
-    // rather than a second service reading the same in-process handles.
+    // rather than a second facade reading the same in-process handles.
     let fresh_thread_service = h
         .thread_harness
         .service_instance()
@@ -281,13 +281,13 @@ async fn settings_tool_permission_post_then_cold_read() {
 }
 
 /// Production-composed WebUI import path: the local-dev composition owns the
-/// real lifecycle service and extension-management port, while this test uses
+/// real lifecycle facade and extension-management port, while this test uses
 /// only an inert model/network boundary because no turn or outbound request is
 /// needed. The default router mount proves the operator route is forbidden;
 /// the operator-capability mount then submits the same valid ZIP through the
 /// real route and checks both catalog and filesystem effects.
 #[tokio::test]
-async fn operator_can_import_extension_bundle_through_production_webui_service() {
+async fn operator_can_import_extension_bundle_through_production_webui_facade() {
     let root = tempdir().expect("runtime storage tempdir");
     let storage_root = root.path().join("local-dev");
     let tenant_id = TenantId::new("webui-import-tenant").expect("tenant id");
@@ -315,12 +315,14 @@ async fn operator_can_import_extension_bundle_through_production_webui_service()
     )
     .await
     .expect("production Reborn runtime builds");
-    let webui = build_webui_services(&runtime, None).expect("production WebUI service builds");
+    let webui = runtime
+        .product_surface(None)
+        .expect("production product surface builds");
     let caller = ProductSurfaceCaller::new(tenant_id, user_id, Some(agent_id), None);
     let bundle = importable_extension_zip("webui-uploaded");
 
     let (status, body) = post_raw(
-        mount_webui_v2_router(Arc::clone(&webui.product_surface), caller.clone()),
+        mount_webui_v2_router(Arc::clone(&webui), caller.clone()),
         "/api/webchat/v2/extensions/import",
         bundle.clone(),
     )
@@ -338,7 +340,7 @@ async fn operator_can_import_extension_bundle_through_production_webui_service()
     );
 
     let operator_router = webui_v2_router(WebUiV2State::new(
-        Arc::clone(&webui.product_surface),
+        Arc::clone(&webui),
         DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
     ))
     .layer(axum::Extension(caller.clone().with_operator_config(true)))
@@ -352,7 +354,7 @@ async fn operator_can_import_extension_bundle_through_production_webui_service()
 
     let (status, body) = get_json(
         mount_webui_v2_router(
-            Arc::clone(&webui.product_surface),
+            Arc::clone(&webui),
             ProductSurfaceCaller::new(
                 caller.tenant_id.clone(),
                 caller.user_id.clone(),
@@ -420,12 +422,14 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
     )
     .await
     .expect("production Reborn runtime builds");
-    let webui = build_webui_services(&runtime, None).expect("production WebUI service builds");
+    let webui = runtime
+        .product_surface(None)
+        .expect("production product surface builds");
     let operator_caller =
         ProductSurfaceCaller::new(tenant_id.clone(), operator_id, Some(agent_id.clone()), None);
 
     let operator_router = webui_v2_router(WebUiV2State::new(
-        Arc::clone(&webui.product_surface),
+        Arc::clone(&webui),
         DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
     ))
     .layer(axum::Extension(operator_caller.with_operator_config(true)))
@@ -452,7 +456,7 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
             "client_action_id": format!("legacy-canonicalize-install-{name}")
         });
         let (status, body) = post_json(
-            mount_webui_v2_router(Arc::clone(&webui.product_surface), caller),
+            mount_webui_v2_router(Arc::clone(&webui), caller),
             "/api/webchat/v2/extensions/install",
             install_request,
         )
@@ -530,8 +534,9 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
     )
     .await
     .expect("rebuilt production Reborn runtime builds");
-    let rebuilt_webui =
-        build_webui_services(&rebuilt_runtime, None).expect("rebuilt WebUI service builds");
+    let rebuilt_webui = rebuilt_runtime
+        .product_surface(None)
+        .expect("rebuilt product surface builds");
 
     let store = ironclaw_reborn_composition::test_support::open_local_dev_extension_installation_store_for_test(
         &storage_root,
@@ -563,7 +568,7 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
     let alice_caller =
         ProductSurfaceCaller::new(tenant_id.clone(), alice_id, Some(agent_id.clone()), None);
     let (status, body) = get_json(
-        mount_webui_v2_router(Arc::clone(&rebuilt_webui.product_surface), alice_caller),
+        mount_webui_v2_router(Arc::clone(&rebuilt_webui), alice_caller),
         "/api/webchat/v2/extensions",
     )
     .await;
@@ -580,7 +585,7 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
 
     let bob_caller = ProductSurfaceCaller::new(tenant_id, bob_id, Some(agent_id), None);
     let (status, body) = get_json(
-        mount_webui_v2_router(Arc::clone(&rebuilt_webui.product_surface), bob_caller),
+        mount_webui_v2_router(Arc::clone(&rebuilt_webui), bob_caller),
         "/api/webchat/v2/extensions",
     )
     .await;
@@ -645,7 +650,9 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
     )
     .await
     .expect("production Reborn runtime builds");
-    let webui = build_webui_services(&runtime, None).expect("production WebUI service builds");
+    let webui = runtime
+        .product_surface(None)
+        .expect("production product surface builds");
     let operator_caller = ProductSurfaceCaller::new(
         tenant_id.clone(),
         operator_id.clone(),
@@ -654,7 +661,7 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
     );
 
     let operator_router = webui_v2_router(WebUiV2State::new(
-        Arc::clone(&webui.product_surface),
+        Arc::clone(&webui),
         DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
     ))
     .layer(axum::Extension(operator_caller.with_operator_config(true)))
@@ -773,8 +780,9 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
     )
     .await
     .expect("rebuilt production Reborn runtime builds despite the orphan installation row");
-    let rebuilt_webui =
-        build_webui_services(&rebuilt_runtime, None).expect("rebuilt WebUI service builds");
+    let rebuilt_webui = rebuilt_runtime
+        .product_surface(None)
+        .expect("rebuilt product surface builds");
 
     // The orphan row is preserved untouched (never deleted or rewritten) so
     // it can restore once the migration tool later materializes its catalog
@@ -797,10 +805,10 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
     );
 
     // The catalog-present installation still restores and is reachable
-    // through the real WebUI service.
+    // through the real product surface.
     let operator_caller = ProductSurfaceCaller::new(tenant_id, operator_id, Some(agent_id), None);
     let (status, body) = get_json(
-        mount_webui_v2_router(Arc::clone(&rebuilt_webui.product_surface), operator_caller),
+        mount_webui_v2_router(Arc::clone(&rebuilt_webui), operator_caller),
         "/api/webchat/v2/extensions",
     )
     .await;
@@ -830,15 +838,11 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
         .expect("rebuilt runtime shuts down");
 }
 
-/// Pins PR #5499 private-install membership through the PRODUCTION webui
-/// service, mirroring the crate-tier invariants in
-/// `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle/tests/private_install_tests.rs`
-/// (`members_install_the_same_tool_independently` +
-/// `operator_install_evicts_member_installs_to_tenant_shared`), but driven
-/// through the real HTTP router instead of the service directly.
+/// Pins caller-owned installation membership through the production WebUI
+/// facade. Operator authorization grants access to deployment configuration;
+/// it does not turn that operator's personal install into tenant-wide state.
 #[tokio::test]
-async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_through_production_webui_service()
- {
+async fn users_and_operator_install_and_remove_independently_through_production_webui_facade() {
     let root = tempdir().expect("runtime storage tempdir");
     let storage_root = root.path().join("local-dev");
     let tenant_id = TenantId::new("webui-eviction-tenant").expect("tenant id");
@@ -868,7 +872,9 @@ async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_thro
     )
     .await
     .expect("production Reborn runtime builds");
-    let webui = build_webui_services(&runtime, None).expect("production WebUI service builds");
+    let webui = runtime
+        .product_surface(None)
+        .expect("production product surface builds");
 
     let extension_id = "member-eviction-fixture";
     let operator_caller = ProductSurfaceCaller::new(
@@ -878,7 +884,7 @@ async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_thro
         None,
     );
     let operator_router = webui_v2_router(WebUiV2State::new(
-        Arc::clone(&webui.product_surface),
+        Arc::clone(&webui),
         DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
     ))
     .layer(axum::Extension(
@@ -911,10 +917,7 @@ async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_thro
 
     // 1: alice installs -> private install created.
     let (status, body) = post_json(
-        mount_webui_v2_router(
-            Arc::clone(&webui.product_surface),
-            caller_for(alice_id.clone()),
-        ),
+        mount_webui_v2_router(Arc::clone(&webui), caller_for(alice_id.clone())),
         "/api/webchat/v2/extensions/install",
         install_request("webui-api2-membership-alice-install"),
     )
@@ -924,10 +927,7 @@ async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_thro
 
     // 2: bob installs the SAME id -> joins the membership, not a duplicate error.
     let (status, body) = post_json(
-        mount_webui_v2_router(
-            Arc::clone(&webui.product_surface),
-            caller_for(bob_id.clone()),
-        ),
+        mount_webui_v2_router(Arc::clone(&webui), caller_for(bob_id.clone())),
         "/api/webchat/v2/extensions/install",
         install_request("webui-api2-membership-bob-install"),
     )
@@ -938,7 +938,7 @@ async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_thro
     // 3: both members see a PRIVATE entry.
     for (name, user_id) in [("alice", alice_id.clone()), ("bob", bob_id.clone())] {
         let (status, body) = get_json(
-            mount_webui_v2_router(Arc::clone(&webui.product_surface), caller_for(user_id)),
+            mount_webui_v2_router(Arc::clone(&webui), caller_for(user_id)),
             "/api/webchat/v2/extensions",
         )
         .await;
@@ -956,10 +956,7 @@ async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_thro
 
     // 4: carol, never a member, does not see the entry at all (masked visibility).
     let (status, body) = get_json(
-        mount_webui_v2_router(
-            Arc::clone(&webui.product_surface),
-            caller_for(carol_id.clone()),
-        ),
+        mount_webui_v2_router(Arc::clone(&webui), caller_for(carol_id.clone())),
         "/api/webchat/v2/extensions",
     )
     .await;
@@ -974,15 +971,12 @@ async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_thro
     );
 
     // 5: carol attempting to remove the member-private id gets the masked
-    // "is not installed" denial (`ProductSurfaceFailure::InvalidBindingRequest`
+    // "is not installed" denial (`ProductWorkflowError::InvalidBindingRequest`
     // via `install_policy::ensure_caller_may_operate`, mapped to 400 by
     // `map_lifecycle_error` in `lifecycle_setup.rs`) rather than a 403/404 that
     // would let a non-member distinguish "not installed" from "not yours".
     let (status, body) = post_json(
-        mount_webui_v2_router(
-            Arc::clone(&webui.product_surface),
-            caller_for(carol_id.clone()),
-        ),
+        mount_webui_v2_router(Arc::clone(&webui), caller_for(carol_id.clone())),
         &format!("/api/webchat/v2/extensions/{extension_id}/remove"),
         serde_json::json!({
             "client_action_id": "webui-api2-membership-carol-remove-private"
@@ -1008,7 +1002,7 @@ async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_thro
     // 6: the operator installs for their own user. Administrative authority
     // does not evict Alice/Bob or install anything for Carol.
     let (status, body) = post_json(
-        mount_webui_v2_router(Arc::clone(&webui.product_surface), operator_caller.clone()),
+        mount_webui_v2_router(Arc::clone(&webui), operator_caller.clone()),
         "/api/webchat/v2/extensions/install",
         install_request("webui-api2-membership-operator-install"),
     )
@@ -1024,7 +1018,7 @@ async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_thro
         ("operator", operator_id.clone()),
     ] {
         let (status, body) = get_json(
-            mount_webui_v2_router(Arc::clone(&webui.product_surface), caller_for(user_id)),
+            mount_webui_v2_router(Arc::clone(&webui), caller_for(user_id)),
             "/api/webchat/v2/extensions",
         )
         .await;
@@ -1040,7 +1034,7 @@ async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_thro
         assert_eq!(entry["install_scope"], "private", "{name} scope: {body}");
     }
     let (status, body) = get_json(
-        mount_webui_v2_router(Arc::clone(&webui.product_surface), caller_for(carol_id)),
+        mount_webui_v2_router(Arc::clone(&webui), caller_for(carol_id)),
         "/api/webchat/v2/extensions",
     )
     .await;
@@ -1054,10 +1048,7 @@ async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_thro
     // 8: each caller removes only their own membership. Alice's removal does
     // not affect Bob or the operator.
     let (status, body) = post_json(
-        mount_webui_v2_router(
-            Arc::clone(&webui.product_surface),
-            caller_for(alice_id.clone()),
-        ),
+        mount_webui_v2_router(Arc::clone(&webui), caller_for(alice_id.clone())),
         &format!("/api/webchat/v2/extensions/{extension_id}/remove"),
         serde_json::json!({
             "client_action_id": "webui-api2-membership-alice-remove-shared"
@@ -1068,7 +1059,7 @@ async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_thro
 
     for (name, user_id) in [("bob", bob_id.clone()), ("operator", operator_id.clone())] {
         let (status, body) = get_json(
-            mount_webui_v2_router(Arc::clone(&webui.product_surface), caller_for(user_id)),
+            mount_webui_v2_router(Arc::clone(&webui), caller_for(user_id)),
             "/api/webchat/v2/extensions",
         )
         .await;
@@ -1081,7 +1072,7 @@ async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_thro
     }
 
     let (status, body) = post_json(
-        mount_webui_v2_router(Arc::clone(&webui.product_surface), operator_caller.clone()),
+        mount_webui_v2_router(Arc::clone(&webui), operator_caller.clone()),
         &format!("/api/webchat/v2/extensions/{extension_id}/remove"),
         serde_json::json!({
             "client_action_id": "webui-api2-membership-operator-remove"
@@ -1091,7 +1082,7 @@ async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_thro
     assert_eq!(status, StatusCode::OK, "operator remove response: {body}");
 
     let (status, body) = post_json(
-        mount_webui_v2_router(Arc::clone(&webui.product_surface), caller_for(bob_id)),
+        mount_webui_v2_router(Arc::clone(&webui), caller_for(bob_id)),
         &format!("/api/webchat/v2/extensions/{extension_id}/remove"),
         serde_json::json!({
             "client_action_id": "webui-api2-membership-bob-final-remove"
@@ -1138,10 +1129,12 @@ async fn operator_lists_uninstalled_manifest_admin_configuration_with_secrets_re
     )
     .await
     .expect("production Reborn runtime builds");
-    let webui = build_webui_services(&runtime, None).expect("production WebUI service builds");
+    let webui = runtime
+        .product_surface(None)
+        .expect("production product surface builds");
     let caller = ProductSurfaceCaller::new(tenant_id, user_id, Some(agent_id), None);
     let operator_router = webui_v2_router(WebUiV2State::new(
-        Arc::clone(&webui.product_surface),
+        Arc::clone(&webui),
         DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
     ))
     .layer(axum::Extension(caller.with_operator_config(true)))
@@ -1211,12 +1204,14 @@ async fn operator_saves_admin_configuration_and_reads_back_new_redacted_revision
     )
     .await
     .expect("production Reborn runtime builds");
-    let webui = build_webui_services(&runtime, None).expect("production WebUI service builds");
+    let webui = runtime
+        .product_surface(None)
+        .expect("production product surface builds");
     let caller = ProductSurfaceCaller::new(tenant_id, user_id, Some(agent_id), None)
         .with_operator_config(true);
     let operator_router = || {
         webui_v2_router(WebUiV2State::new(
-            Arc::clone(&webui.product_surface),
+            Arc::clone(&webui),
             DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
         ))
         .layer(axum::Extension(caller.clone()))
@@ -1599,7 +1594,7 @@ async fn extension_setup_hides_manifest_admin_configuration_while_pairing_consum
 struct AdminConfigurationFixture {
     _root: TempDir,
     runtime: RebornRuntime,
-    webui: RebornWebuiBundle,
+    webui: Arc<dyn ProductSurface>,
     caller: ProductSurfaceCaller,
 }
 
@@ -1633,7 +1628,9 @@ impl AdminConfigurationFixture {
         )
         .await
         .expect("production Reborn runtime builds");
-        let webui = build_webui_services(&runtime, None).expect("production WebUI service builds");
+        let webui = runtime
+            .product_surface(None)
+            .expect("production product surface builds");
         let caller = ProductSurfaceCaller::new(tenant_id, user_id, Some(agent_id), None);
         Self {
             _root: root,
@@ -1644,12 +1641,12 @@ impl AdminConfigurationFixture {
     }
 
     fn member_router(&self) -> Router {
-        mount_webui_v2_router(Arc::clone(&self.webui.product_surface), self.caller.clone())
+        mount_webui_v2_router(Arc::clone(&self.webui), self.caller.clone())
     }
 
     fn operator_router(&self) -> Router {
         webui_v2_router(WebUiV2State::new(
-            Arc::clone(&self.webui.product_surface),
+            Arc::clone(&self.webui),
             DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
         ))
         .layer(axum::Extension(
@@ -1899,7 +1896,7 @@ async fn sse_activity_stream_replay_and_reconnect() {
 
 /// W5-WEBUI-API-2: a browser refresh mid-gate must let the user rediscover
 /// and resolve a pending approval gate. Mounts the real `webui_v2` router
-/// over a hand-built `RebornServices` service wired with the harness's own
+/// over a hand-built `RebornServices` facade wired with the harness's own
 /// turn-state-converged `ApprovalInteractionService`
 /// (`local_dev_approval_interaction_service_with_turn_state_for_test`, the
 /// same seam `RebornIntegrationGroupBuilder::with_real_gate_dispatch_services`

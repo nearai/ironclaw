@@ -1,6 +1,6 @@
 //! Admin API token minting port.
 //!
-//! Kept in its own module so it can appear in the `build_webui_services`
+//! Kept in its own module so it can appear in the `runtime.product_surface`
 //! signature. The trait carries no WebUI/ingress types — just the canonical
 //! identifiers and a `SecretString` — so it is dependency-free.
 

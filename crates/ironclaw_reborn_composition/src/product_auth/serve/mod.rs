@@ -54,6 +54,7 @@ use ironclaw_host_api::{
     ProductSurfaceError, ProductSurfaceQueryRequest, ProjectId, ResourceScope, TenantId, ThreadId,
     UserId,
 };
+use ironclaw_host_ingress::SplitRouteMount;
 use ironclaw_product::{EXTENSIONS_VIEW, LifecyclePackageKind, RebornExtensionListResponse};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -471,6 +472,12 @@ pub struct ProductAuthRouteMount {
     pub protected: Router,
     pub public: Router,
     pub descriptors: Vec<IngressRouteDescriptor>,
+}
+
+impl From<ProductAuthRouteMount> for SplitRouteMount {
+    fn from(mount: ProductAuthRouteMount) -> Self {
+        SplitRouteMount::new(mount.protected, mount.public, mount.descriptors)
+    }
 }
 
 // Product-auth HTTP is a host-owned auth/secret-ingress boundary. Its

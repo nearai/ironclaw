@@ -38,6 +38,8 @@ mod observability;
 mod operator_tool_catalog;
 mod outbound;
 mod product_auth;
+mod product_capability;
+mod product_surface;
 mod production_runtime_policy;
 mod profile_approval_authorization;
 mod projection;
@@ -53,7 +55,6 @@ mod support;
 pub mod test_support;
 mod trigger_fire_access;
 mod turn_run_snapshot;
-mod webui;
 
 pub use admin_token::AdminApiTokenMinter;
 pub use automation::service::RebornAutomationProductService;
@@ -253,15 +254,6 @@ pub use runtime_input::{
     TurnRunnerSettings,
 };
 pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
-pub use webui::service::{RebornWebuiBundle, build_webui_services};
-// Host-supplied route-mount vocabulary shared with composition's own route
-// builders (nearai login, OpenAI-compat) and the host-owned gateway assembly
-// in `ironclaw_webui`. The `WebuiServeConfig` / `webui_v2_app`
-// / `WebuiAuthenticator` surface moved up into that ingress crate.
-pub use webui::route_mounts::{
-    ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount,
-};
-
 /// Re-exported identity vocabulary host binaries need to construct
 /// public runtime/WebUI types whose signatures mention a host-api identity.
 /// Kept narrow on purpose — the composition CLAUDE.md says "Expose

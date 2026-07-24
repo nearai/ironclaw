@@ -24,10 +24,10 @@ use ironclaw_triggers::TriggerRepository;
 
 use crate::extension_host::admin_configuration::AdminConfigurationViewProvider;
 use crate::operator_tool_catalog::ActiveRegistryOperatorToolCatalog;
-use crate::webui::product_capability::RuntimeProductCapabilityInvoker;
+use crate::product_capability::RuntimeProductCapabilityInvoker;
 use crate::{
-    RebornAutomationProductService, RebornBuildError, RebornProductAuthServices, RebornReadiness,
-    RebornReadinessDiagnostic, RebornReadinessDiagnosticStatus, RebornRuntime,
+    RebornAutomationProductService, RebornBuildError, RebornReadiness, RebornReadinessDiagnostic,
+    RebornReadinessDiagnosticStatus, RebornRuntime,
     extension_host::lifecycle::{
         RebornLocalLifecycleService, RebornLocalSkillManagementError,
         RebornLocalSkillManagementPort,
@@ -44,33 +44,6 @@ use crate::{
         ProjectScopedFilesystemReader,
     },
 };
-
-/// WebUI-facing Reborn service bundle for host composition.
-///
-/// This bundle deliberately exposes service-shaped product handles consumed
-/// by WebChat v2 and the optional product-auth OAuth routes. HTTP routing, auth
-/// middleware, static assets, and SSE transport live in the `ironclaw_webui`
-/// crate (which folded up the former `ironclaw_webui_v2` route surface); only
-/// the host-supplied route-mount vocabulary stays in the
-/// [`crate::webui::route_mounts`] module here. Lower runtime handles stay behind
-/// the existing Reborn runtime / composition services.
-#[derive(Clone)]
-pub struct RebornWebuiBundle {
-    pub product_surface: Arc<dyn ProductSurface>,
-    pub product_auth: Option<Arc<RebornProductAuthServices>>,
-    pub readiness: RebornReadiness,
-}
-
-impl std::fmt::Debug for RebornWebuiBundle {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("RebornWebuiBundle")
-            .field("product_surface", &"Arc<dyn ProductSurface>")
-            .field("product_auth", &self.product_auth.is_some())
-            .field("readiness", &self.readiness)
-            .finish()
-    }
-}
 
 /// A trigger repository paired with the turn-run snapshot source from the
 /// SAME runtime. Local-dev and production graphs both carry these two
@@ -90,34 +63,12 @@ pub(crate) fn automation_backing(runtime: &RebornRuntime) -> AutomationBacking {
     }
 }
 
-/// Compose the WebUI-facing product service from an already-built Reborn runtime.
-///
-/// This function does not create a second turn coordinator, thread service,
-/// host runtime or route server. It reuses the runtime's existing task-level
-/// composition and attaches the runtime-owned projection stream unless the
-/// caller supplies a custom stream.
-pub fn build_webui_services(
-    runtime: &RebornRuntime,
-    event_stream: Option<Arc<dyn ProjectionStream>>,
-) -> Result<RebornWebuiBundle, RebornBuildError> {
-    // The generic per-user channel-connection service (extension-runtime
-    // §6.3): channel extensions are discovered from the durable installation
-    // store; no per-vendor lane registers anything.
-    let channel_connection = runtime.generic_channel_connection_service();
-    build_webui_services_with_channel_connection(
-        runtime,
-        event_stream,
-        channel_connection,
-        Vec::new(),
-    )
-}
-
-pub(crate) fn build_webui_services_with_channel_connection(
+pub(crate) fn build_product_surface_with_channel_connection(
     runtime: &RebornRuntime,
     event_stream: Option<Arc<dyn ProjectionStream>>,
     channel_connection: Option<Arc<dyn ChannelConnectionService>>,
     mut outbound_delivery_target_providers: Vec<Arc<dyn OutboundDeliveryTargetProvider>>,
-) -> Result<RebornWebuiBundle, RebornBuildError> {
+) -> Result<Arc<dyn ProductSurface>, RebornBuildError> {
     if let Some(provider) = runtime.outbound_delivery_target_provider() {
         outbound_delivery_target_providers.push(provider);
     }
@@ -326,18 +277,14 @@ pub(crate) fn build_webui_services_with_channel_connection(
         api = api.with_active_model_reader(active_model_reader);
     }
 
-    Ok(RebornWebuiBundle {
-        product_surface: Arc::new(api),
-        product_auth: Some(Arc::clone(&runtime.product_auth)),
-        readiness: runtime.readiness.clone(),
-    })
+    Ok(Arc::new(api))
 }
 
 /// Compose the operator LLM-config settings service from the runtime's boot
 /// config, secret store, and optional reload/session/login-state handles.
 ///
 /// Returns `None` when the runtime was assembled without a boot config. Shared
-/// by `build_webui_services` (operator LLM routes) and the OpenAI-compatible
+/// by `RebornRuntime::product_surface` (operator LLM routes) and the OpenAI-compatible
 /// `/v1/models` catalog so both read the same configured-model source.
 pub(crate) fn build_llm_config_service(
     runtime: &RebornRuntime,

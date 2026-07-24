@@ -14,6 +14,7 @@
 //! the host-runtime lane binder without linking concrete extension crates.
 
 mod activation_credentials;
+pub mod activation_transaction;
 pub mod active;
 mod active_publication;
 mod admin_configuration_service;
@@ -35,6 +36,7 @@ pub mod extension_credential_requirements;
 pub mod first_party_package;
 pub mod generic_host;
 pub mod host_api_contracts;
+mod hosted_mcp_discovery_authority;
 pub mod ingress;
 pub mod install_policy;
 pub mod lifecycle;
