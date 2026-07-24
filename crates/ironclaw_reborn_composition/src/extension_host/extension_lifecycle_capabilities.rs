@@ -738,15 +738,13 @@ mod tests {
             .expect("local runtime substrate")
             .extension_management
             .clone();
-        let absent_remove = invoke_json(
-            &services,
-            EXTENSION_REMOVE_CAPABILITY_ID,
-            serde_json::json!({"extension_id": "web-access"}),
-        )
-        .await
-        .expect("already-absent remove succeeds");
-        assert_eq!(absent_remove["payload"]["removed"], false);
-
+        // No "already-absent remove" step here: `build_runtime_substrate`
+        // above auto-bootstraps `web-access` (see
+        // `web_access_bootstrap::bootstrap_web_access`), so it's already
+        // installed and active by construction time — a remove() here would
+        // be a REAL removal, not a no-op. The real remove-then-reinstall
+        // round trip below (using the actual tenant-operator identity, since
+        // the auto-bootstrapped install is Tenant-owned) covers that path.
         let search = invoke_json(
             &services,
             EXTENSION_SEARCH_CAPABILITY_ID,
@@ -757,31 +755,23 @@ mod tests {
         assert_eq!(search["payload"]["kind"], "extension_search");
         assert_eq!(search["payload"]["count"], 1);
 
-        let install = invoke_json(
-            &services,
-            EXTENSION_INSTALL_CAPABILITY_ID,
-            serde_json::json!({"extension_id": "web-access"}),
-        )
-        .await
-        .expect("install succeeds");
-        assert_eq!(install["payload"]["installed"], true);
-        assert_eq!(install["phase"], "active");
+        // `build_reborn_services` auto-bootstraps `web-access` (see
+        // `web_access_bootstrap::bootstrap_web_access`) precisely so a session
+        // never needs the model to drive install/activate itself — so it starts
+        // already installed and active, not `Discovered`. Assert that directly
+        // instead of driving install/activate here (an already-installed /
+        // already-active call would just fail); the remove-then-reinstall round
+        // trip below still exercises all four lifecycle capability handlers.
         assert!(
             storage_root
                 .join("system/extensions/web-access/manifest.toml")
-                .exists()
+                .exists(),
+            "web-access should already be installed at construction time"
         );
-
+        let already_active = active_extension_capability_ids(&extension_management).await;
+        assert!(already_active.iter().any(|id| id == "web-access.search"));
         assert!(
-            install["message"].as_str().is_some_and(|message| message
-                .contains("No additional authorization or configuration is needed")),
-            "install success should override stale same-turn search onboarding, got {install}"
-        );
-
-        let after_install = active_extension_capability_ids(&extension_management).await;
-        assert!(after_install.iter().any(|id| id == "web-access.search"));
-        assert!(
-            after_install
+            already_active
                 .iter()
                 .any(|id| id == "web-access.get_content")
         );
@@ -793,9 +783,18 @@ mod tests {
             "active Web Access capabilities require a registered first-party runtime"
         );
 
-        let remove = invoke_json(
+        // The auto-bootstrap installs `web-access` as a Tenant-owned
+        // installation under the real boot owner ("extension-tools-owner",
+        // ironclaw's tenant-operator identity in local-dev) — unlike the
+        // generic `invoke_json`/`execution_context` fixture user used above,
+        // which is an unrelated synthetic caller. Mutating a Tenant-owned
+        // installation (remove, and the reinstall below) requires the actual
+        // operator identity; use `execution_context_for_user` with the real
+        // owner for those calls instead of the generic fixture.
+        let remove = crate::approval_test_support::invoke_json_with_local_dev_approval(
             &services,
             EXTENSION_REMOVE_CAPABILITY_ID,
+            execution_context_for_user("extension-tools-owner", [EXTENSION_REMOVE_CAPABILITY_ID]),
             serde_json::json!({"extension_id": "web-access"}),
         )
         .await
@@ -805,6 +804,35 @@ mod tests {
         let after_remove = active_extension_capability_ids(&extension_management).await;
         assert!(!after_remove.iter().any(|id| id == "web-access.search"));
         assert!(!storage_root.join("system/extensions/web-access").exists());
+
+        // Reinstall through the model-facing capability handler (not the
+        // auto-bootstrap, which only runs once at construction) to cover the
+        // same round trip the pre-auto-bootstrap version of this test
+        // exercised. Install alone activates now — there is no separate
+        // model-facing activate capability (see the `builtin.extension_activate`
+        // absence assertion elsewhere in this file).
+        let install = crate::approval_test_support::invoke_json_with_local_dev_approval(
+            &services,
+            EXTENSION_INSTALL_CAPABILITY_ID,
+            execution_context_for_user("extension-tools-owner", [EXTENSION_INSTALL_CAPABILITY_ID]),
+            serde_json::json!({"extension_id": "web-access"}),
+        )
+        .await
+        .expect("reinstall succeeds");
+        assert_eq!(install["payload"]["installed"], true);
+        assert!(
+            storage_root
+                .join("system/extensions/web-access/manifest.toml")
+                .exists()
+        );
+
+        let after_reinstall = active_extension_capability_ids(&extension_management).await;
+        assert!(after_reinstall.iter().any(|id| id == "web-access.search"));
+        assert!(
+            after_reinstall
+                .iter()
+                .any(|id| id == "web-access.get_content")
+        );
     }
 
     #[tokio::test]

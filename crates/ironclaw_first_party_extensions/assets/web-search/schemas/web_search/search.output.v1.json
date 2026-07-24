@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Web Search (Brave) output",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "query": {
+      "type": "string"
+    },
+    "result_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "title": { "type": "string" },
+          "url": { "type": "string" },
+          "description": { "type": "string" },
+          "published": { "type": "string" },
+          "thumbnail": { "type": "string" },
+          "site_name": { "type": "string" }
+        },
+        "required": ["title", "url", "description"]
+      }
+    }
+  },
+  "required": ["query", "result_count", "results"]
+}

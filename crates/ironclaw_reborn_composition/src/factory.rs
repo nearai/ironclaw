@@ -844,10 +844,6 @@ fn production_config(
     config.require_credential_broker()
 }
 
-/// Build the safe single-tenant runtime surface used by local-dev and
-/// hosted-single-tenant. Hosted single-tenant supplies a durable Postgres
-/// backend through `RebornStorageInput::HostedSingleTenantPostgres`; local-dev
-/// keeps its historical local filesystem/libSQL default.
 fn local_dev_extension_lifecycle_surface_context(
     owner_user_id: UserId,
     local_runtime_identity: Option<&RuntimeOwnerIdentity>,
@@ -4273,6 +4269,33 @@ async fn build_backend_production(
     )
     .await?;
     nearai_mcp_bootstrap_outcome.log_completion();
+    // `web_search` (real, credentialed Brave Search API) and `web-access`
+    // (zero-config Exa MCP) share the same model-facing `web_search` display
+    // name (see `ironclaw_runner::tool_disclosure`), so only one may be
+    // active at a time. Prefer Brave whenever an operator has actually
+    // configured `BRAVE_API_KEY` — a real, quota'd backend beats Exa's
+    // rate-shared free tier — and fall back to Exa's always-available
+    // zero-config path otherwise. See `web_search_bootstrap`'s and
+    // `web_access_bootstrap`'s module docs for why either needs to exist at
+    // all: nothing in the base toolset otherwise points a session's model at
+    // the extension catalog, so it never discovers real web search on its own.
+    let web_search_bootstrap_outcome =
+        crate::extension_host::web_search_bootstrap::bootstrap_web_search_brave(
+            crate::extension_host::web_search_bootstrap::web_search_bootstrap_api_key_from_env(),
+            &extension_management,
+            Some(&admin_secret_provisioner),
+            &channel_egress_scope,
+        )
+        .await?;
+    web_search_bootstrap_outcome.log_completion();
+    if web_search_bootstrap_outcome.leaves_web_access_available() {
+        crate::extension_host::web_access_bootstrap::bootstrap_web_access(
+            &extension_management,
+            &channel_egress_scope,
+        )
+        .await?
+        .log_completion();
+    }
     // Read-side adapter for manifest-declared administrator configuration.
     // Production reads and writes both use the canonical Admin Configuration
     // service; installation membership carries no deployment-owned values.

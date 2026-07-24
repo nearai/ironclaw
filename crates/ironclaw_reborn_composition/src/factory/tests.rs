@@ -1280,7 +1280,7 @@ async fn local_dev_notion_mcp_installs_activates_and_reaches_auth_gate() {
 }
 
 #[tokio::test]
-async fn local_dev_web_access_installs_activates_and_dispatches_through_host_runtime() {
+async fn local_dev_web_access_is_auto_installed_activated_and_dispatches_through_host_runtime() {
     let dir = tempfile::tempdir().expect("tempdir");
     let services = build_runtime_substrate(
         crate::deployment::local_dev_build_input_with_profile(
@@ -1292,29 +1292,14 @@ async fn local_dev_web_access_installs_activates_and_dispatches_through_host_run
     )
     .await
     .expect("local-dev services build");
-    let runtime_surfaces = services.local_runtime_for_test().expect("local runtime");
-    let extension_management = &runtime_surfaces.extension_management;
-    let web_access_ref =
-        LifecyclePackageRef::new(LifecyclePackageKind::Extension, "web-access").expect("valid ref");
+    let local_runtime = services.local_runtime_for_test().expect("local runtime");
 
-    // #6520 removed the port-side operator accessor: install as the owner the
-    // runtime was constructed with.
-    let caller = UserId::new("local-dev-web-access-owner").expect("valid lifecycle caller");
-    extension_management
-        .install(web_access_ref.clone(), &caller)
-        .await
-        .expect("install Web Access");
-    extension_management
-        .activate_with_prechecked_credentials_for_test(
-            web_access_ref,
-            ExtensionActivationMode::Static,
-            &caller,
-        )
-        .await
-        .expect("activate Web Access");
-
+    // No explicit install/activate here: `build_reborn_services` auto-bootstraps
+    // `web-access` (see `web_access_bootstrap::bootstrap_web_access`) precisely so
+    // a session never needs the model — or a test — to drive the lifecycle
+    // handshake itself. This asserts that guarantee directly.
     let context = web_access_context("web-access.search");
-    enable_global_auto_approve_for_context(runtime_surfaces, &context).await;
+    enable_global_auto_approve_for_context(local_runtime, &context).await;
     let outcome = services
         .host_runtime
         .as_ref()
@@ -1340,6 +1325,134 @@ async fn local_dev_web_access_installs_activates_and_dispatches_through_host_run
     // does not burn the retry budget on a call that can never resolve). The
     // capability still fails closed — only the disposition changed.
     assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+}
+
+#[tokio::test]
+async fn local_dev_web_search_brave_is_auto_installed_and_activated_when_configured() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let owner = "local-dev-web-search-owner";
+    // Match `ExecutionContext::local_default`'s tenant/agent below (both
+    // resolve to `LOCAL_DEFAULT_TENANT_ID`/`LOCAL_DEFAULT_AGENT_ID` when no
+    // explicit identity is threaded through) -- this is exactly the
+    // scope-mismatch bug this test now guards against: the bootstrap
+    // must provision the secret under the SAME (tenant, user) a real
+    // capability invocation will look it up under, not whatever internal
+    // fallback identity composition happens to default to.
+    let runtime_identity = RuntimeOwnerIdentity {
+        tenant_id: ironclaw_host_api::TenantId::new(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
+            .expect("valid tenant id"),
+        agent_id: ironclaw_host_api::AgentId::new(ironclaw_host_api::LOCAL_DEFAULT_AGENT_ID)
+            .expect("valid agent id"),
+    };
+    let services = build_runtime_substrate(
+        crate::deployment::local_dev_build_input(owner, dir.path().join("local-dev"))
+            .with_local_runtime_identity(
+                runtime_identity.tenant_id.clone(),
+                runtime_identity.agent_id.clone(),
+            ),
+    )
+    .await
+    .expect("local-dev services build");
+    let local_runtime = services.local_runtime_for_test().expect("local runtime");
+    let extension_management = &local_runtime.extension_management;
+    let admin_secret_provisioner = &local_runtime.admin_secret_provisioner;
+    let owner_scope =
+        configured_runtime_owner_scope(UserId::new(owner).expect("valid owner"), &runtime_identity);
+
+    // Without a configured key, `build_runtime_substrate` above already ran
+    // `bootstrap_web_search_brave(None, ...)` -- assert it left `web_search`
+    // untouched (still just the neutral never-installed `Uninstalled` public
+    // state `project()` reports for an uninstalled package, matching the
+    // fallback-to-Exa behavior the mutual-exclusion logic in
+    // `build_backend_production` relies on) before exercising the configured
+    // path directly.
+    let web_search_ref =
+        LifecyclePackageRef::new(LifecyclePackageKind::Extension, "web_search").expect("valid ref");
+    let phase_before = extension_management
+        .project(web_search_ref.clone(), &owner_scope.user_id, None)
+        .await
+        .expect("project web_search before bootstrap")
+        .phase;
+    assert_eq!(phase_before, LifecyclePublicState::Uninstalled);
+
+    let outcome = crate::extension_host::web_search_bootstrap::bootstrap_web_search_brave(
+        Some(secrecy::SecretString::from("test-brave-key".to_string())),
+        extension_management,
+        Some(admin_secret_provisioner),
+        &owner_scope,
+    )
+    .await
+    .expect("brave bootstrap succeeds");
+    assert_eq!(
+        outcome,
+        crate::extension_host::web_search_bootstrap::WebSearchBootstrapOutcome::Activated
+    );
+    assert!(!outcome.leaves_web_access_available());
+
+    let phase_after = extension_management
+        .project(web_search_ref, &owner_scope.user_id, None)
+        .await
+        .expect("project web_search after bootstrap")
+        .phase;
+    assert_eq!(phase_after, LifecyclePublicState::Active);
+
+    // Must be provisioned under the TENANT-SHARED scope, not the
+    // bootstrap caller's own (tenant, user) -- `secret_owner_scope` (the
+    // dispatch-time credential pre-flight in ironclaw_host_runtime) only
+    // ever checks the real invocation caller's own scope, then falls back
+    // to `caller_scope.tenant_shared_managed_scope()`, never an arbitrary
+    // third scope. Provisioning anywhere else leaves the secret invisible
+    // to every real capability invocation regardless of who calls it --
+    // this regressed once already (dispatch-time pre-flight kept
+    // reporting the secret absent and surfacing AuthRequired, so Brave
+    // was never actually called end-to-end despite `web_search`
+    // reporting `Active`).
+    let shared_scope = owner_scope.tenant_shared_managed_scope();
+    let secrets = admin_secret_provisioner
+        .list(&shared_scope.tenant_id, &shared_scope.user_id)
+        .await
+        .expect("list secrets");
+    assert!(
+        secrets
+            .iter()
+            .any(|meta| meta.handle.as_str() == "brave_api_key"),
+        "expected brave_api_key to be seeded at the tenant-shared scope, got: {secrets:?}"
+    );
+
+    // End-to-end regression guard for the scope bug itself: invoke
+    // `web_search.search` as an ARBITRARY caller (not the bootstrap/tenant-
+    // operator identity) and assert the credential pre-flight does not
+    // gate it on `AuthRequired`. Before the tenant-shared-scope fix this
+    // always returned `AuthRequired` regardless of who called it, because
+    // the secret was provisioned under a scope no real invocation could
+    // ever read back. Whatever happens after the credential check (a real
+    // network call to Brave with a fake key, which can be slow to fail)
+    // is out of scope here -- bounded by a short timeout so a slow/hanging
+    // egress attempt can't turn this into a multi-minute test; a timeout
+    // still proves the credential gate itself was cleared.
+    let context = web_search_context("web_search.search");
+    enable_global_auto_approve_for_context(local_runtime, &context).await;
+    let invocation = services.host_runtime.as_ref().invoke_capability((
+        context,
+        CapabilityId::new("web_search.search").unwrap(),
+        ResourceEstimate::default(),
+        serde_json::json!({ "query": "ironclaw reborn" }),
+    ));
+    match tokio::time::timeout(std::time::Duration::from_secs(10), invocation).await {
+        Ok(result) => {
+            let outcome = result.expect("runtime invocation completes");
+            assert!(
+                !matches!(outcome, RuntimeCapabilityOutcome::AuthRequired(_)),
+                "expected the brave_api_key credential pre-flight to resolve \
+                 (regardless of what the actual HTTP call then does), got: {outcome:?}"
+            );
+        }
+        Err(_) => {
+            // Timed out past the credential gate (presumably stuck on the
+            // real network call with a fake key) -- the gate itself was
+            // cleared, which is all this test asserts.
+        }
+    }
 }
 
 fn nearai_bootstrap_input_with_base(
@@ -2682,6 +2795,45 @@ fn web_access_network_policy() -> NetworkPolicy {
         deny_private_ip_ranges: true,
         max_egress_bytes: None,
     }
+}
+
+fn web_search_context(capability_id: &str) -> ExecutionContext {
+    let extension_id = ExtensionId::new("caller").expect("valid extension id");
+    let mut context = ExecutionContext::local_default(
+        UserId::new("local-dev-test-user").expect("valid user id"),
+        extension_id.clone(),
+        RuntimeKind::FirstParty,
+        TrustClass::FirstParty,
+        CapabilitySet {
+            grants: vec![CapabilityGrant {
+                id: CapabilityGrantId::new(),
+                capability: CapabilityId::new(capability_id).expect("valid capability id"),
+                grantee: Principal::Extension(extension_id),
+                issued_by: Principal::HostRuntime,
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
+                    mounts: MountView::new(Vec::new()).expect("valid empty mount view"),
+                    network: NetworkPolicy {
+                        allowed_targets: vec![NetworkTargetPattern {
+                            scheme: Some(ironclaw_host_api::NetworkScheme::Https),
+                            host_pattern: "api.search.brave.com".to_string(),
+                            port: None,
+                        }],
+                        deny_private_ip_ranges: true,
+                        max_egress_bytes: None,
+                    },
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: None,
+                },
+            }],
+        },
+        MountView::new(Vec::new()).expect("valid empty mount view"),
+    )
+    .expect("valid execution context");
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn execution_context(capability_id: &str, mounts: MountView) -> ExecutionContext {

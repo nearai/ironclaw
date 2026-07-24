@@ -22,6 +22,7 @@ mod notion;
 mod slack;
 mod telegram;
 mod web_access;
+mod web_search;
 
 /// One inventory entry: a package's id paired with its bundle builder.
 type PackageEntry = (&'static str, fn() -> PackageBundle);
@@ -43,6 +44,7 @@ const PACKAGES: &[PackageEntry] = &[
     (slack::ID, slack::bundle),
     (telegram::ID, telegram::bundle),
     (web_access::ID, web_access::bundle),
+    (web_search::ID, web_search::bundle),
 ];
 
 /// Byte content of one asset shipped inside a package, addressed by its
