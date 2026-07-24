@@ -152,7 +152,12 @@ annotations and `.claude/rules/architecture.md` cite them; additions get
   credential account selection/refresh, continuations, cleanup, recipes, and
   fakes moved to `ironclaw_auth`; HTTP route serving moved to `ironclaw_webui`;
   `ironclaw_reborn_composition` now wires `AuthEngine`, stores, secrets,
-  network, runtime credential adapters, and product prompt adapters.
+  network, runtime credential adapters, and product prompt adapters. Source
+  anchors: `crates/ironclaw_auth/src/product_auth/api/auth.rs`
+  `RebornProductAuthServices`, `crates/ironclaw_auth/src/engine/mod.rs`
+  `AuthEngine`, `crates/ironclaw_webui/src/product_auth/mod.rs`
+  `product_auth_route_mount`, and `crates/ironclaw_reborn_composition/src/factory.rs`
+  `product_auth_ports` / `auth_execution_context` / `ProductAuthRuntimeCredentialResolver`.
 
 This note proposes a **fundamental** simplification of the Reborn host/runtime
 internals. The goal is to remove three recurring costs without weakening any
@@ -1593,7 +1598,12 @@ adapters (their deliver / auth side) or the kernel, not the assembler:
   fakes) plus `ironclaw_webui` route serving. Composition keeps only
   `AuthEngine`/store/secret/network wiring and generic runtime adapters supplied
   by owning crates; it must not own product-, channel-, or transport-specific
-  auth behavior.
+  auth behavior. Implementation anchors:
+  `crates/ironclaw_auth/src/product_auth/api/auth.rs` `RebornProductAuthServices`,
+  `crates/ironclaw_auth/src/engine/mod.rs` `AuthEngine`,
+  `crates/ironclaw_webui/src/product_auth/mod.rs` `product_auth_route_mount`,
+  and `crates/ironclaw_reborn_composition/src/factory.rs`
+  `product_auth_ports` / `ProductAuthRuntimeCredentialResolver`.
 - `composition/src/outbound/` (~1.8K) — delivery → the adapter's deliver path over the
   outbound port.
 - `composition/src/automation/` (~6.1K), `llm_admin/` (~8.5K) — these are *product
@@ -2551,7 +2561,11 @@ loop-facing capability result and every result mirror is deleted.
   product-auth contracts/flows/accounts/refresh/continuations/cleanup/recipes
   remain in `ironclaw_auth`, HTTP routes remain in `ironclaw_webui`, and
   composition keeps direct factory/runtime assembly code plus the retained
-  provider, runtime, and challenge adapters.
+  provider, runtime, and challenge adapters. Anchors:
+  `crates/ironclaw_auth/src/product_auth/api/auth.rs` `RebornProductAuthServices`,
+  `crates/ironclaw_webui/src/product_auth/mod.rs` `product_auth_route_mount`,
+  and `crates/ironclaw_reborn_composition/src/factory.rs`
+  `product_auth_ports` / `auth_execution_context` / `ProductAuthRuntimeCredentialResolver`.
 - **§5.2.10 causal routing / product-terminal path** — design added here and
   vocabulary aligned around terminals/channels, but no first-class duct/path
   event contract or conformance suite exists yet. Until that lands, claims in

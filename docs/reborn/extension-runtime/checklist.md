@@ -418,7 +418,7 @@ Rules — kept short on purpose:
   `google_manifests_declare_the_keepalive_idle_lifetime_identically`
   (`auth_engine_contract.rs`); vendor-blind candidate enumeration on both
   DB-gated builds (`list_refresh_candidates_covers_agent_and_project_scopes`,
-  composition `product_auth/durable/tests.rs`); recipe-field validation +
+  `crates/ironclaw_auth/src/product_auth/durable/tests.rs`); recipe-field validation +
   shared-vendor conflict coverage in `ironclaw_host_api` `recipe.rs` tests.
 - [x] AUTH-7 Identity extracts from the token response or the declared
   identity endpoint and is validated against the flow before storage. —

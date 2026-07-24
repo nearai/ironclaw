@@ -15,7 +15,7 @@ use super::*;
 /// `provider`/`requester_extension` exactly, and the request's runtime scope
 /// is within `owner_scope` (same surface/tenant/agent, and same project
 /// unless `owner_scope` is project-unscoped — see [`Self::scope_matches`]).
-pub struct HostManagedCredentialFallbackRule {
+pub(crate) struct HostManagedCredentialFallbackRule {
     provider: AuthProviderId,
     requester_extension: ExtensionId,
     owner_scope: AuthProductScope,
@@ -79,7 +79,7 @@ impl HostManagedCredentialFallbackRule {
 /// OAuth *binding* (`select_configured_account_for_binding`) is never
 /// eligible for host-managed fallback — it always delegates straight
 /// through, matching the un-decorated selector's behavior.
-pub struct HostManagedRuntimeCredentialAccountSelector {
+pub(crate) struct HostManagedRuntimeCredentialAccountSelector {
     inner: Arc<dyn RuntimeCredentialAccountSelectionService>,
     fallback: HostManagedCredentialFallbackRule,
 }
