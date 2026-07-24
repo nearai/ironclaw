@@ -88,7 +88,8 @@ use ironclaw_reborn_composition::{
 };
 use ironclaw_turns::{GetRunStateRequest, TurnCoordinator, TurnRunId, TurnScope, TurnStatus};
 use reborn_support::builder::{
-    RebornIntegrationHarness, StorageMode, serialize_postgres_testcontainer_start,
+    RebornIntegrationHarness, StorageMode, retry_postgres_testcontainer_start,
+    serialize_postgres_testcontainer_start,
 };
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
@@ -1055,6 +1056,52 @@ async fn postgres_testcontainer_start_operations_are_serialized() {
     )
     .await
     .expect("a subsequent operation must enter after the first releases the lock");
+}
+
+#[tokio::test]
+async fn postgres_testcontainer_start_retries_only_known_transient_provisioning_errors() {
+    const TRUNCATED_PULL: &str =
+        "failed to pull the image 'postgres:16-alpine', error: bytes remaining on stream";
+    const MISSING_PORT: &str = "container 'fixture-id' does not expose port 5432/tcp";
+
+    for transient_error in [TRUNCATED_PULL, MISSING_PORT] {
+        let mut recovered_attempts = 0;
+        let recovered = retry_postgres_testcontainer_start(|| {
+            recovered_attempts += 1;
+            let attempt = recovered_attempts;
+            async move {
+                if attempt == 1 {
+                    Err(transient_error)
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await;
+        assert!(recovered.is_ok(), "the one bounded retry must recover");
+        assert_eq!(recovered_attempts, 2);
+    }
+
+    let mut repeated_attempts = 0;
+    let repeated = retry_postgres_testcontainer_start(|| {
+        repeated_attempts += 1;
+        async { Err::<(), _>(TRUNCATED_PULL) }
+    })
+    .await;
+    assert_eq!(repeated, Err(TRUNCATED_PULL));
+    assert_eq!(repeated_attempts, 2, "the retry must remain bounded");
+
+    let mut permanent_attempts = 0;
+    let permanent = retry_postgres_testcontainer_start(|| {
+        permanent_attempts += 1;
+        async { Err::<(), _>("failed to connect to the Docker daemon") }
+    })
+    .await;
+    assert_eq!(permanent, Err("failed to connect to the Docker daemon"));
+    assert_eq!(
+        permanent_attempts, 1,
+        "non-transient Docker errors must fail immediately"
+    );
 }
 
 /// The Slack outbound proof (OUT-1/2/5 + ING-11 read half): a signed DM

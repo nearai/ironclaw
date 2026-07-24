@@ -2061,6 +2061,45 @@ pub(crate) async fn serialize_postgres_testcontainer_start<T>(
     operation.await
 }
 
+const POSTGRES_TESTCONTAINER_START_ATTEMPTS: usize = 2;
+
+fn is_retryable_postgres_testcontainer_provisioning_error(error: &str) -> bool {
+    (error.contains("failed to pull the image") && error.contains("bytes remaining on stream"))
+        || error.contains("does not expose port 5432/tcp")
+}
+
+/// Retry only the observed transient Docker image-stream and port-discovery
+/// failures. Other provisioning errors remain immediate failures so missing or
+/// misconfigured Docker cannot be hidden by the test harness.
+pub(crate) async fn retry_postgres_testcontainer_start<T, E, F, Fut>(
+    mut operation: F,
+) -> Result<T, E>
+where
+    E: std::fmt::Display,
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    let mut attempt = 1;
+    loop {
+        match operation().await {
+            Err(error)
+                if attempt < POSTGRES_TESTCONTAINER_START_ATTEMPTS
+                    && is_retryable_postgres_testcontainer_provisioning_error(
+                        &error.to_string(),
+                    ) =>
+            {
+                eprintln!(
+                    "retrying PostgreSQL testcontainer start after transient provisioning \
+                     failure: {error}"
+                );
+                attempt += 1;
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            result => return result,
+        }
+    }
+}
+
 /// Start a per-`build()` PostgreSQL testcontainer. A provisioning failure is
 /// a test failure (REL-3): in CI it panics with the docker context; locally
 /// the message names the fix.
@@ -2072,11 +2111,6 @@ pub(crate) async fn start_postgres_testcontainer() -> HarnessResult<(
 )> {
     use testcontainers_modules::testcontainers::{ImageExt, runners::AsyncRunner};
 
-    let image = testcontainers_modules::postgres::Postgres::default()
-        .with_db_name("ironclaw_test")
-        .with_user("postgres")
-        .with_password("postgres")
-        .with_tag("16-alpine");
     let unavailable = |error: String| -> String {
         if std::env::var("CI").is_ok() {
             panic!("StorageMode::Postgres requires Docker in CI and provisioning failed: {error}");
@@ -2087,21 +2121,25 @@ pub(crate) async fn start_postgres_testcontainer() -> HarnessResult<(
              skip is a failure per REL-3): {error}"
         )
     };
-    let container = serialize_postgres_testcontainer_start(image.start())
+    let (container, database_url) =
+        serialize_postgres_testcontainer_start(retry_postgres_testcontainer_start(|| async {
+            let container = testcontainers_modules::postgres::Postgres::default()
+                .with_db_name("ironclaw_test")
+                .with_user("postgres")
+                .with_password("postgres")
+                .with_tag("16-alpine")
+                .start()
+                .await?;
+            let host = container.get_host().await?;
+            let port = container.get_host_port_ipv4(5432).await?;
+            Ok::<_, testcontainers_modules::testcontainers::TestcontainersError>((
+                container,
+                format!("postgres://postgres:postgres@{host}:{port}/ironclaw_test"),
+            ))
+        }))
         .await
         .map_err(|error| unavailable(error.to_string()))?;
-    let host = container
-        .get_host()
-        .await
-        .map_err(|error| unavailable(error.to_string()))?;
-    let port = container
-        .get_host_port_ipv4(5432)
-        .await
-        .map_err(|error| unavailable(error.to_string()))?;
-    Ok((
-        container,
-        format!("postgres://postgres:postgres@{host}:{port}/ironclaw_test"),
-    ))
+    Ok((container, database_url))
 }
 
 pub(crate) fn postgres_pool(database_url: &str) -> HarnessResult<deadpool_postgres::Pool> {
