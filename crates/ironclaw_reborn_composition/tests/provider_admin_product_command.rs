@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
+use ironclaw_operator::{RebornProviderAdmin, RebornProviderAdminProductCommandService};
 use ironclaw_product::{
     AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
     ExternalEventId, InboundCommandPayload, ProductAdapterError, ProductAdapterId,
@@ -12,7 +13,6 @@ use ironclaw_product::{
     FakeInboundTurnService, ProductCommandAdmission, ProductCommandAdmissionService,
     ProductCommandContext, ProductWorkflowError,
 };
-use ironclaw_reborn_composition::{RebornProviderAdmin, RebornProviderAdminProductCommandService};
 use ironclaw_reborn_config::{RebornBootConfig, RebornHome, RebornProfile};
 
 fn sample_command_envelope(

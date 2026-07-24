@@ -8,7 +8,7 @@ use crate::webui::route_mounts::PublicRouteMount;
 
 pub(crate) fn nearai_login_callback_mount(
     session: Arc<ironclaw_llm::SessionManager>,
-    reload: Arc<dyn crate::LlmReloadTrigger>,
+    reload: Arc<dyn ironclaw_operator::LlmReloadTrigger>,
     boot: RebornBootConfig,
     states: Arc<NearAiLoginStateStore>,
 ) -> Result<PublicRouteMount, RebornBuildError> {

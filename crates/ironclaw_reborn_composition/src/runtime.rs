@@ -130,9 +130,9 @@ use crate::outbound::{
     OutboundDeliveryTargetProvider, RebornOutboundPreferencesFacade,
     outbound_delivery_synthetic_provider,
 };
-use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::root::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::turn_run_snapshot::TurnRunSnapshotSource;
+use ironclaw_product::projection::{RebornProjectionServices, build_reborn_projection_services};
 use ironclaw_secrets::SecretStorePort;
 
 #[cfg(any(test, feature = "test-support"))]
@@ -427,7 +427,7 @@ pub use skills::{
 
 use skills::skill_asset_error;
 
-use crate::runtime_input::ResolvedRebornLlm;
+use ironclaw_operator::ResolvedRebornLlm;
 
 /// Stable identifier for a Reborn CLI conversation. Wraps a `ThreadId`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1778,7 +1778,7 @@ impl RebornRuntime {
     /// issues states and the public callback consumes them.
     pub(crate) fn webui_nearai_login_states(
         &self,
-    ) -> Option<Arc<crate::llm_admin::llm_config_service::NearAiLoginStateStore>> {
+    ) -> Option<Arc<ironclaw_operator::llm_admin::llm_config_service::NearAiLoginStateStore>> {
         self.llm_reload
             .as_ref()
             .map(|parts| Arc::clone(&parts.nearai_login_states))
@@ -1814,17 +1814,17 @@ impl RebornRuntime {
     /// hot-swap adapter when an LLM provider was wired at boot; otherwise
     /// `None`, in which case config edits persist to disk and apply on the
     /// next restart.
-    pub(crate) fn webui_llm_reload_trigger(&self) -> Option<Arc<dyn crate::LlmReloadTrigger>> {
+    pub(crate) fn webui_llm_reload_trigger(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_operator::LlmReloadTrigger>> {
         let boot = self.boot.as_ref()?;
         let parts = self.llm_reload.as_ref()?;
-        Some(Arc::new(
-            crate::llm_admin::llm_reload::RebornLlmReloadAdapter::new(
-                boot.clone(),
-                Arc::clone(&parts.reload_handle),
-                Arc::clone(&parts.session),
-                crate::LlmKeyStore::new(self.secret_store()),
-            ),
-        ))
+        Some(Arc::new(ironclaw_operator::RebornLlmReloadAdapter::new(
+            boot.clone(),
+            Arc::clone(&parts.reload_handle),
+            Arc::clone(&parts.session),
+            ironclaw_operator::LlmKeyStore::new(self.secret_store()),
+        )))
     }
 
     /// Read-only reader exposing the live active/default model id so the WebUI
@@ -1836,11 +1836,9 @@ impl RebornRuntime {
         &self,
     ) -> Option<Arc<dyn ironclaw_product::ActiveModelReader>> {
         let parts = self.llm_reload.as_ref()?;
-        Some(Arc::new(
-            crate::llm_admin::active_model::ProviderActiveModelReader::new(
-                parts.reload_handle.primary_provider(),
-            ),
-        ))
+        Some(Arc::new(ironclaw_operator::ProviderActiveModelReader::new(
+            parts.reload_handle.primary_provider(),
+        )))
     }
 
     /// Diagnostic id for the no-profile run profile selected by this runtime.
@@ -4455,13 +4453,14 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
     // degrades like a boot with no LLM configured: placeholder stays wired,
     // operator retries through Settings -> Inference without a restart.
     if let (Some(boot_config), Some(reload_parts)) = (boot.as_ref(), llm_reload.as_ref()) {
-        let boot_reload_adapter = crate::llm_admin::llm_reload::RebornLlmReloadAdapter::new(
+        let boot_reload_adapter = ironclaw_operator::RebornLlmReloadAdapter::new(
             boot_config.clone(),
             Arc::clone(&reload_parts.reload_handle),
             Arc::clone(&reload_parts.session),
-            crate::LlmKeyStore::new(Arc::clone(&services.secret_store)),
+            ironclaw_operator::LlmKeyStore::new(Arc::clone(&services.secret_store)),
         );
-        if let Err(error) = crate::LlmReloadTrigger::reload(&boot_reload_adapter).await {
+        if let Err(error) = ironclaw_operator::LlmReloadTrigger::reload(&boot_reload_adapter).await
+        {
             tracing::warn!(
                 %error,
                 "boot-time LLM reload failed; the placeholder provider stays active until the \
@@ -4822,13 +4821,13 @@ async fn overlay_stored_llm_key_for_nearai_mcp_bootstrap(
         return Ok(None);
     };
 
-    let keys = crate::LlmKeyStore::new(Arc::clone(&services.secret_store));
+    let keys = ironclaw_operator::LlmKeyStore::new(Arc::clone(&services.secret_store));
     if let Some(stored) = keys
         .read(llm.provider_id())
         .await
         .map_err(|error| RebornRuntimeError::LlmProvider(error.to_string()))?
     {
-        crate::llm_admin::llm_catalog::apply_stored_api_key(llm.config_mut(), stored);
+        ironclaw_operator::apply_stored_api_key(llm.config_mut(), stored);
     }
 
     Ok(Some(llm))
@@ -4940,7 +4939,7 @@ impl CapabilitySurfaceProfileResolver for AllowAllCapabilitySurfaceResolver {
 /// `ResolvedRebornLlm::with_provider_factory` seam would be silently dropped on
 /// the cold-boot path.
 async fn build_production_model_gateway(
-    provider_factory: Option<crate::runtime_input::RebornProviderFactory>,
+    provider_factory: Option<ironclaw_operator::RebornProviderFactory>,
 ) -> Result<
     (
         Arc<dyn ironclaw_loop_host::HostManagedModelGateway>,
@@ -5008,7 +5007,7 @@ pub(crate) struct RebornLlmReloadParts {
     pub(crate) reload_handle: Arc<ironclaw_llm::LlmReloadHandle>,
     pub(crate) session: Arc<ironclaw_llm::SessionManager>,
     pub(crate) nearai_login_states:
-        Arc<crate::llm_admin::llm_config_service::NearAiLoginStateStore>,
+        Arc<ironclaw_operator::llm_admin::llm_config_service::NearAiLoginStateStore>,
 }
 
 /// Cold-boot gateway: no LLM configured yet. Wraps a placeholder provider (which
@@ -5021,7 +5020,7 @@ pub(crate) struct RebornLlmReloadParts {
 /// the boot-time reload that swaps in the real provider — the reload-stable
 /// contract documented on [`wrap_swappable_gateway`].
 async fn build_placeholder_llm_gateway(
-    provider_factory: Option<crate::runtime_input::RebornProviderFactory>,
+    provider_factory: Option<ironclaw_operator::RebornProviderFactory>,
 ) -> Result<LlmGatewayBundle, RebornRuntimeError> {
     let session =
         ironclaw_llm::create_session_manager(ironclaw_llm::SessionConfig::default()).await;
@@ -5043,7 +5042,7 @@ async fn build_placeholder_llm_gateway(
 fn wrap_swappable_gateway(
     raw: Arc<dyn ironclaw_llm::LlmProvider>,
     session: Arc<ironclaw_llm::SessionManager>,
-    provider_factory: Option<crate::runtime_input::RebornProviderFactory>,
+    provider_factory: Option<ironclaw_operator::RebornProviderFactory>,
 ) -> Result<LlmGatewayBundle, RebornRuntimeError> {
     use ironclaw_llm::{LlmProvider, LlmReloadHandle, SwappableLlmProvider};
     use ironclaw_runner::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
@@ -5070,7 +5069,7 @@ fn wrap_swappable_gateway(
             reload_handle,
             session,
             nearai_login_states: Arc::new(
-                crate::llm_admin::llm_config_service::NearAiLoginStateStore::new(),
+                ironclaw_operator::llm_admin::llm_config_service::NearAiLoginStateStore::new(),
             ),
         },
     })

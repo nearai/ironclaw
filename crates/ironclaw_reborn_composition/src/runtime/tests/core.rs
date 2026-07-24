@@ -1889,7 +1889,7 @@ async fn runtime_nearai_mcp_bootstraps_from_nearai_session_token() {
         response_cache_ttl_secs: 3600,
         response_cache_max_entries: 1000,
     };
-    let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config);
+    let llm = ironclaw_operator::ResolvedRebornLlm::from_llm_config(config);
 
     let input = RebornRuntimeInput::from_build_input(
         crate::deployment::local_dev_build_input(
@@ -1952,7 +1952,7 @@ async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
     )
     .await
     .expect("services build for stored key seed");
-    crate::LlmKeyStore::new(services.secret_store())
+    ironclaw_operator::LlmKeyStore::new(services.secret_store())
         .put(
             "nearai",
             ironclaw_secrets::SecretMaterial::from("sk-reborn-stored-nearai-mcp-key"),
@@ -1997,7 +1997,7 @@ async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
         response_cache_ttl_secs: 3600,
         response_cache_max_entries: 1000,
     };
-    let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config);
+    let llm = ironclaw_operator::ResolvedRebornLlm::from_llm_config(config);
 
     let input = RebornRuntimeInput::from_build_input(
         crate::deployment::local_dev_build_input("runtime-nearai-stored-mcp-owner", local_dev_root)
@@ -2097,7 +2097,7 @@ async fn runtime_nearai_mcp_prebuild_api_key_is_not_replaced_by_stored_key() {
     )
     .await
     .expect("services build for stored key seed");
-    crate::LlmKeyStore::new(services.secret_store())
+    ironclaw_operator::LlmKeyStore::new(services.secret_store())
         .put(
             "nearai",
             ironclaw_secrets::SecretMaterial::from("sk-post-build-stored-nearai-mcp-key"),
@@ -2142,7 +2142,7 @@ async fn runtime_nearai_mcp_prebuild_api_key_is_not_replaced_by_stored_key() {
         response_cache_ttl_secs: 3600,
         response_cache_max_entries: 1000,
     };
-    let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config);
+    let llm = ironclaw_operator::ResolvedRebornLlm::from_llm_config(config);
 
     let input = RebornRuntimeInput::from_build_input(
         crate::deployment::local_dev_build_input(owner, local_dev_root)
@@ -2396,7 +2396,7 @@ async fn provider_factory_survives_live_reload() {
     let session_dir = tempfile::tempdir().expect("session tempdir");
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let calls_for_factory = Arc::clone(&calls);
-    let factory: crate::runtime_input::RebornProviderFactory = Arc::new(move |inner| {
+    let factory: ironclaw_operator::RebornProviderFactory = Arc::new(move |inner| {
         Arc::new(CountingWrapperProvider {
             inner,
             calls: Arc::clone(&calls_for_factory),
@@ -2474,7 +2474,7 @@ async fn env_trace_recording_attaches_recorder_factory_only_when_enabled() {
     // Disabled: no factory attached; the resolved LLM is returned unchanged.
     {
         let _guard = RuntimeEnvGuard::with([("IRONCLAW_RECORD_TRACE", None)]).await;
-        let disabled = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config.clone())
+        let disabled = ironclaw_operator::ResolvedRebornLlm::from_llm_config(config.clone())
             .with_env_trace_recording();
         assert!(
             disabled.provider_factory().is_none(),
@@ -2485,7 +2485,7 @@ async fn env_trace_recording_attaches_recorder_factory_only_when_enabled() {
     // Enabled: the serve/run resolution path attaches the recording factory.
     {
         let _guard = RuntimeEnvGuard::set("IRONCLAW_RECORD_TRACE", "1").await;
-        let enabled = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config)
+        let enabled = ironclaw_operator::ResolvedRebornLlm::from_llm_config(config)
             .with_env_trace_recording();
         assert!(
             enabled.provider_factory().is_some(),
@@ -2518,13 +2518,13 @@ async fn provider_factory_runs_during_production_boot() {
     let factory_ran_for_closure = Arc::clone(&factory_ran);
     // Identity decorator that only records that it was constructed: the factory
     // runs once, at gateway construction, to wrap the swappable provider.
-    let factory: crate::runtime_input::RebornProviderFactory = Arc::new(move |inner| {
+    let factory: ironclaw_operator::RebornProviderFactory = Arc::new(move |inner| {
         factory_ran_for_closure.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         inner
     });
 
     let config = dead_endpoint_nearai_config(session_dir.path().join("session.json"));
-    let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config)
+    let llm = ironclaw_operator::ResolvedRebornLlm::from_llm_config(config)
         .with_provider_factory(factory);
 
     // No `boot` config is supplied, so the boot-time reload is skipped and the
@@ -2594,7 +2594,7 @@ async fn local_dev_runtime_startup_uses_stored_nearai_api_key_after_restart() {
     )
     .await
     .expect("services build for stored key seed");
-    crate::LlmKeyStore::new(services.secret_store())
+    ironclaw_operator::LlmKeyStore::new(services.secret_store())
         .put(
             "nearai",
             ironclaw_secrets::SecretMaterial::from("sk-reborn-stored-nearai-key"),

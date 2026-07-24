@@ -23,7 +23,7 @@
 //! identity for the standalone Reborn binary. Two surfaces install and
 //! manage it today: this CLI (`ironclaw service install`), and the
 //! WebUI operator facade (`OperatorServiceLifecycle` in
-//! `ironclaw_reborn_composition::observability::operator_service_lifecycle`,
+//! `ironclaw_operator::operator_service_lifecycle`,
 //! behind `POST /api/webchat/v2/operator/service`). Both target the same
 //! plist/unit path, so an install from either surface atomically replaces
 //! whatever the other last wrote there — see [`write_atomic`].
@@ -55,7 +55,7 @@ mod systemd;
 
 /// launchd label / systemd unit name for the canonical Reborn service
 /// identity. Shared, deliberately, with `OperatorServiceLifecycle` in
-/// `ironclaw_reborn_composition::observability::operator_service_lifecycle`
+/// `ironclaw_operator::operator_service_lifecycle`
 /// (the WebUI operator-service facade) — see the module doc above. An
 /// install from either surface atomically replaces the other's file at
 /// this same path; do not fork these constants to "avoid collisions"

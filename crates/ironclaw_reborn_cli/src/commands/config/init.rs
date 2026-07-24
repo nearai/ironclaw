@@ -361,14 +361,14 @@ mod tests {
         // A pre-existing LLM env var in the ambient test environment would make
         // an exact outcome assertion environment-dependent, so this only pins
         // the *shape*: env fallback reached, not a stub-seeded slot short-circuit.
-        let resolved = ironclaw_reborn_composition::resolve_reborn_runtime_llm(
+        let resolved = ironclaw_operator::resolve_reborn_runtime_llm(
             context.boot_config(),
             Some(&config_file),
         );
         assert!(
             !matches!(
                 &resolved,
-                Err(ironclaw_reborn_composition::RebornLlmCatalogError::MissingProviderId)
+                Err(ironclaw_operator::llm_admin::llm_catalog::RebornLlmCatalogError::MissingProviderId)
             ),
             "a de-seeded stub must reach env fallback, not MissingProviderId; got: {resolved:?}"
         );

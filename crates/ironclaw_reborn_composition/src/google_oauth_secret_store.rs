@@ -6,7 +6,7 @@
 //! `ironclaw_reborn_config::reject_inline_secret` enforces file-wide), so
 //! `config set google.client_secret` puts it in this store instead.
 //!
-//! Mirrors [`crate::LlmKeyStore`]'s shape but with a single fixed handle,
+//! Mirrors [`ironclaw_operator::LlmKeyStore`]'s shape but with a single fixed handle,
 //! since there is exactly one Google OAuth client per instance today.
 
 use std::sync::Arc;
@@ -61,7 +61,7 @@ impl GoogleOauthSecretStore {
 
     /// Read back the stored client secret, if any. Uses a one-shot lease +
     /// consume; the underlying secret persists, so this is repeatable
-    /// across reloads (mirrors [`crate::LlmKeyStore::read`]).
+    /// across reloads (mirrors [`ironclaw_operator::LlmKeyStore::read`]).
     pub async fn read(&self) -> Result<Option<SecretMaterial>, GoogleOauthSecretStoreError> {
         let scope = scope();
         let lease = match self.store.lease_once(&scope, &handle()?).await {

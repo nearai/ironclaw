@@ -126,7 +126,7 @@ fn check_providers_file(path: &std::path::Path) -> DoctorCheck {
             detail: format!("failed to read provider catalog: {error}"),
         },
         Ok(contents) => {
-            match ironclaw_reborn_composition::validate_reborn_provider_catalog_contents(&contents)
+            match ironclaw_operator::llm_admin::llm_catalog::validate_reborn_provider_catalog_contents(&contents)
             {
                 Ok(()) => DoctorCheck {
                     name: "providers_file".to_string(),

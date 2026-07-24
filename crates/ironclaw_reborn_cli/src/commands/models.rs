@@ -121,7 +121,7 @@ impl ModelsSetProviderCommand {
     }
 }
 
-fn print_provider_list(list: &ironclaw_reborn_composition::RebornProviderList, verbose: bool) {
+fn print_provider_list(list: &ironclaw_operator::RebornProviderList, verbose: bool) {
     println!("IronClaw Reborn LLM providers");
     println!("config_file: {}", list.config_file.display());
     println!("providers_file: {}", list.providers_file.display());
@@ -182,7 +182,7 @@ fn print_provider_list(list: &ironclaw_reborn_composition::RebornProviderList, v
     println!("* = active provider. v1_state: {}", list.v1_state);
 }
 
-fn print_provider_detail(list: &ironclaw_reborn_composition::RebornProviderList) {
+fn print_provider_detail(list: &ironclaw_operator::RebornProviderList) {
     let Some(provider) = list.providers.first() else {
         return;
     };
@@ -219,7 +219,7 @@ fn print_provider_detail(list: &ironclaw_reborn_composition::RebornProviderList)
     println!("v1_state: {}", list.v1_state);
 }
 
-fn print_status(status: &ironclaw_reborn_composition::RebornProviderStatus) {
+fn print_status(status: &ironclaw_operator::RebornProviderStatus) {
     println!("IronClaw Reborn model status");
     println!("config_file: {}", status.config_file.display());
     println!("providers_file: {}", status.providers_file.display());
@@ -261,7 +261,7 @@ enum WriteOutcomeKind {
 
 fn print_write_outcome(
     kind: WriteOutcomeKind,
-    outcome: &ironclaw_reborn_composition::RebornProviderWriteOutcome,
+    outcome: &ironclaw_operator::RebornProviderWriteOutcome,
 ) {
     match kind {
         WriteOutcomeKind::Model => {

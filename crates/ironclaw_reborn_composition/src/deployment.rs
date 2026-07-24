@@ -263,7 +263,7 @@ pub struct DeploymentConfig {
     pub(crate) oauth_provider_configs: Vec<crate::input::OAuthProviderBackendConfig>,
     pub(crate) oauth_dcr_callback: Option<crate::input::OAuthDcrCallbackConfig>,
     pub(crate) nearai_mcp_bootstrap_config:
-        Option<crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
+        Option<ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
     pub(crate) account_setup_descriptors: Vec<ironclaw_product::ExtensionAccountSetupDescriptor>,
     pub(crate) first_party_bundles:
         Vec<crate::extension_host::first_party::FirstPartyPackageBundle>,

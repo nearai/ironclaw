@@ -290,7 +290,7 @@ pub(crate) fn build_webui_services_with_channel_connection(
     api = api.with_operator_status_service(Arc::new(ReadinessOperatorStatusService::new(
         runtime.readiness.clone(),
     )));
-    api = api.with_operator_logs_service(crate::operator_log_buffer());
+    api = api.with_operator_logs_service(ironclaw_operator::operator_log_buffer());
     {
         let webui_boot_config = runtime.webui_boot_config();
         api = api.with_operator_service_lifecycle_service(Arc::new(
@@ -333,8 +333,8 @@ pub(crate) fn build_llm_config_service(
     runtime: &RebornRuntime,
 ) -> Option<Arc<dyn ironclaw_product::LlmConfigService>> {
     let boot = runtime.webui_boot_config()?;
-    let keys = crate::LlmKeyStore::new(runtime.secret_store());
-    let mut llm_config = crate::RebornLlmConfigService::new(boot.clone(), keys);
+    let keys = ironclaw_operator::LlmKeyStore::new(runtime.secret_store());
+    let mut llm_config = ironclaw_operator::RebornLlmConfigService::new(boot.clone(), keys);
     if let Some(reload) = runtime.webui_llm_reload_trigger() {
         llm_config = llm_config.with_reload_trigger(reload);
     }

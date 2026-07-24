@@ -1182,11 +1182,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "nearaimcp",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/lib.rs",
-        "nearai_mcp",
-    ),
-    ("crates/ironclaw_reborn_composition/src/lib.rs", "nearaimcp"),
-    (
         "crates/ironclaw_reborn_composition/src/llm_admin/mod.rs",
         "nearai_mcp",
     ),

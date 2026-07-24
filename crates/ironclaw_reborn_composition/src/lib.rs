@@ -40,7 +40,6 @@ mod outbound;
 mod product_auth;
 mod production_runtime_policy;
 mod profile_approval_authorization;
-mod projection;
 mod provider_identity;
 mod readiness;
 mod root;
@@ -167,16 +166,6 @@ pub use ironclaw_skills::{
 };
 pub use ironclaw_triggers::TriggerId;
 pub use ironclaw_turns::TurnStatus;
-pub use llm_admin::llm_catalog::{
-    ProviderCatalogValidationError, RebornLlmCatalogError, resolve_against_registry,
-    resolve_llm_selection_against_catalog, resolve_llm_selection_allow_missing_key,
-    resolve_reborn_runtime_llm, validate_reborn_provider_catalog_contents,
-};
-pub use llm_admin::llm_config_service::{LlmReloadTrigger, RebornLlmConfigService};
-pub use llm_admin::llm_key_store::{LlmKeyStore, LlmKeyStoreError};
-pub use llm_admin::nearai_mcp::{
-    NearAiMcpBootstrapConfig, NearAiMcpBootstrapConfigError, nearai_mcp_bootstrap_config_from_env,
-};
 pub use llm_admin::openai_compat_serve::build_openai_compat_route_mount;
 // Re-exported for the host-owned `ironclaw_webui::webui_v2_app`
 // (hoisted up from this crate): its bearer-auth middleware mints tenant-scoped
@@ -192,14 +181,6 @@ pub use deployment::{
 #[cfg(any(test, feature = "test-support"))]
 pub use deployment::{local_dev_build_input, local_dev_build_input_with_profile};
 pub use ironclaw_product::mark_bearer_token_verified_for_tenant;
-pub use llm_admin::provider_admin::{
-    DetectedEnvLlm, EXAMPLE_OVERLAY_PROVIDER_ID, ProviderMenuEntry, ProviderProbeOutcome,
-    RebornModelRoutesState, RebornProviderAdmin, RebornProviderAdminError, RebornProviderInfo,
-    RebornProviderList, RebornProviderMetadata, RebornProviderSelection, RebornProviderStatus,
-    RebornProviderWriteOutcome, RebornV1State,
-};
-pub use llm_admin::provider_admin_product_command::RebornProviderAdminProductCommandService;
-pub use llm_admin::provider_repo::{ProviderRepo, ProviderRepoError};
 pub use observability::budget::build_default_budget_accountant;
 pub use observability::budget_events::{BudgetEventObserver, TracingBudgetEventObserver};
 pub use observability::hooks::{
@@ -208,9 +189,6 @@ pub use observability::hooks::{
     MAX_TOTAL_HOOKS_PER_TENANT, ThirdPartyDiscoveryInput, build_hook_dispatcher_builder_factory,
     build_hook_dispatcher_builder_factory_for_tenant, build_hook_projection_registry,
     tenant_extension_root,
-};
-pub use observability::operator_logs::{
-    OperatorLogLayer, capture_tracing_log, operator_log_buffer,
 };
 pub use observability::trajectory_observer::RebornTrajectoryObserver;
 // Composition's facade re-exports the continuation dispatcher for its own
