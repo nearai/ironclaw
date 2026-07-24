@@ -10,12 +10,14 @@ feature defaults, marketing — should be checkable against these. The
 sibling page, **Voice & copy**, is these principles cascaded into concrete
 UI-copy rules.
 
-<Callout title="Suggested starting points, not settled law">
-  These principles are written to be as correct and thorough as we can
-  make them today, so they're usable as-is for real product decisions.
-  They are still proposals: the brand jam can overrule any of them. If
-  one is wrong, change it here first — then propagate to Voice & copy
-  and the components.
+<Callout title="This repository is the source of truth">
+  Per the design review (Jul 21), this repo is the single source of truth
+  for design principles and living documentation. These pages are plain
+  markdown: edit them here, in a PR, like any other change. The
+  principles are written to be as correct and thorough as we can make
+  them today, so they're usable as-is for real product decisions, and
+  they are still open to revision. If one is wrong, change it here first,
+  then propagate to Voice & copy and the components.
 </Callout>
 
 ## 1. Wow — impress out of the gate
@@ -54,9 +56,10 @@ Trust runs on two clocks, and we design for both.
 
 IronClaw is proactive. It derives routines from the user's world —
 inbox, calendar, repos, chats — and sets them up without waiting to be
-asked. It does not nag for permission; the user's core principles
-(productivity, security, privacy) are baked into what it chooses to
-automate and how.
+asked. It does not nag for permission inside the trust the user has
+granted; the user's core principles (productivity, security, privacy)
+are baked into what it chooses to automate and how. Where that trust has
+not been granted yet, it suggests instead of acting.
 
 - **Act, then show your work.** The default posture is "I did this, and
   here's why" — not "may I?". Asking permission for routine work is a
@@ -69,13 +72,54 @@ automate and how.
   time and attention, and respect the security boundary by
   construction: credentials stay sealed in the vault, data goes only to
   allowlisted endpoints.
+- **Human in the loop, always.** The agent is a tool for user-driven
+  outcomes, not an autonomous actor with its own agenda. Autonomy is
+  something the user grants, watches through receipts, and can revoke in
+  one click. Inside the granted envelope the agent acts and shows its
+  work; outside it, the agent suggests the action and waits. Proactivity
+  and human-in-the-loop are not opposites here: the loop is the receipts,
+  the steering verbs, and the envelope, not a confirmation dialog in
+  front of every step.
 - **The boundary that remains.** Irreversible external actions — money
   leaving, sending as the user to someone new, sharing data with a new
   party — still get explicit consent. Autonomy applies inside the trust
   envelope the user has granted (see #2); the envelope grows, the
   consent moments shrink.
 
-## 4. Human, plain-spoken
+## 4. Channel-first — meet the user where they already are
+
+The differentiating posture from the design review: optimize for the
+channels where the user already works (chat, email, Slack, the terminal),
+not for pulling them into our surfaces. The dashboard is the record, not
+the destination.
+
+- **Just-in-time, not just-in-case.** Insights arrive in the moment and
+  place they're useful ("your 10:00 call moved, I shifted your prep
+  block"), instead of waiting on a dashboard visit. Value is predictive
+  and workflow-shaped, not a chart the user has to go read.
+- **The workspace is the receipt.** The app remains the place to review,
+  adjust, and audit what the agent did. It earns visits through the
+  activity feed and run detail, not through information held hostage.
+- **Every surface stands alone.** A message in Slack or email carries the
+  finding, the action taken, and the escape hatch by itself. No "open the
+  app to see more" as a default.
+
+## 5. Private and secure — enterprise-grade, by construction
+
+Privacy and security are named principles, not implementation details,
+because enterprise adoption depends on them being legible.
+
+- **Private by design.** The user's data is theirs. Credentials stay
+  sealed in the vault, work happens in encrypted enclaves, and outbound
+  traffic is limited to allowlisted endpoints. These are architectural
+  facts we can show, not policy promises we ask people to believe.
+- **Legible security.** The security posture is visible in the product:
+  what's connected, what's sealed, what left the system and where it
+  went. A security review should be able to answer itself from the UI.
+- **Data minimalism.** The agent reads what the routine needs and no
+  more. Scope is granted per tool, shown plainly, and revocable.
+
+## 6. Human, plain-spoken
 
 The tone is soft and human — closer to how Claude's product copy reads
 than to edgy tech branding. Confident without being loud; technical
@@ -88,7 +132,9 @@ alarm-speak, no jargon where a plain word exists.
 |---|---|---|
 | Wow | Real derived result in the first session | Lead with the specific finding, not the feature name |
 | Trust | Receipts: feed, logs, previews, undo | Narrate actions in past tense with the reason; state failures plainly |
-| Automate | Routines set up proactively, guardrails on | "I set this up — adjust or undo", never "approval required" for routine work |
+| Automate | Acts inside the granted envelope, suggests outside it | "I set this up — adjust or undo" inside; "I can set this up — want it?" outside |
+| Channel-first | Insights delivered in the user's channels, just in time | Each message self-contained: finding, action, escape hatch |
+| Private & secure | Vault, enclaves, allowlists, per-tool scopes shown in the UI | State the architectural fact plainly; never "trust us" |
 | Human | Calm defaults, no dark patterns | Sentence case, short verbs, the user's vocabulary |
 
 The concrete UI-copy rules that fall out of this table live in

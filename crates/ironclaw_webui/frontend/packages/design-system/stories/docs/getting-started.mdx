@@ -15,6 +15,18 @@ engineer — or an agent — can ship them safely. This Storybook is the
 living spec. For why the same property lets an agent assemble whole
 surfaces from these parts, read **Docs → Generative UI** next.
 
+Two working agreements from the design review (Jul 21) shape how this
+Storybook is organized:
+
+- **This repository is the single source of truth.** Design principles,
+  copy rules, and component documentation live here as markdown and
+  stories, edited collaboratively through PRs. Docs → Brand principles
+  and Voice & copy are the canonical text, not a copy of it.
+- **Compositions show the look and feel.** Components in isolation don't
+  answer "does the system hang together?". The Compositions section
+  assembles full surfaces, including the complete agent workspace, so
+  layout, spacing, and rhythm can be judged as a whole.
+
 ## How it's put together
 
 - **Radix underneath.** Dialog, Select, DropdownMenu, Tabs, Tooltip,

@@ -10,11 +10,12 @@ those beliefs cascaded into UI-copy rules — the words on buttons, cards,
 statuses, and empty states. Tone in one line: human and plain-spoken,
 closer to how Claude's product copy reads than to edgy tech branding.
 
-<Callout title="Suggested starting points, not settled law">
-  These rules are written to be as correct and thorough as we can make
-  them today — apply them as-is when writing product copy. They remain
-  proposals until the brand jam ratifies them; if one fights a real
-  surface, flag it rather than working around it.
+<Callout title="This repository is the source of truth">
+  Per the design review (Jul 21), these rules live here, in markdown, and
+  are edited collaboratively like any other change. They're written to be
+  as correct and thorough as we can make them today, so apply them as-is
+  when writing product copy. If one fights a real surface, change it here
+  rather than working around it.
 </Callout>
 
 ## UI copy principles
@@ -27,9 +28,11 @@ closer to how Claude's product copy reads than to edgy tech branding.
    helps — "I set up a morning digest — 34 newsletter threads were
    burying your real mail" — and always ships with the steering verbs:
    *Review*, *Adjust*, *Pause*, *Undo*. Don't ask permission for routine
-   work, and never hide that the agent acted. The exception: irreversible
-   external actions (money, first-time sends as the user, sharing data
-   with a new party) do ask first — see Brand principles §3.
+   work inside the trust the user has granted, and never hide that the
+   agent acted. Outside that envelope, copy shifts from receipt to
+   suggestion: "I can set this up — want it?". Irreversible external
+   actions (money, first-time sends as the user, sharing data with a new
+   party) always ask first — see Brand principles §3.
 3. **Calm status language.** `Success`, `Running`, `Warning`, `Failed`,
    `Paused`. No exclamation marks, no alarm-speak. A failed run is a fact,
    not an emergency.
@@ -48,6 +51,10 @@ closer to how Claude's product copy reads than to edgy tech branding.
    (activity feed, run summaries), use past tense + the reason + the
    escape hatch: "Archived 12 newsletters — they matched your triage
    rules. Undo". This is the Trust principle wearing words.
+9. **Every message stands alone.** Channel-first (Brand principles §4)
+   means copy delivered in Slack, email, or chat carries the finding, the
+   action, and the escape hatch by itself. "Open the app for details" is
+   a fallback, never the payload.
 
 ## Built-in component strings
 
@@ -62,6 +69,7 @@ default to English. Localized hosts bridge their translator via
 |---|---|---|
 | Primary CTA | verb + object | `Create automation` |
 | Agent receipt | past tense + reason + escape hatch | `Set up "Morning digest" — 34 newsletters matched. Adjust · Undo` |
+| Agent suggestion (outside envelope) | finding + offer, user decides | `3 repos publish releases you open manually. Want a release digest?` |
 | Confirmation title | question restating the object | `Delete this automation?` |
 | Confirmation body | the consequence, plainly | `"Morning digest" will stop running immediately. This cannot be undone.` |
 | Hint text | why it matters, one sentence | `Shown in the sidebar and page titles.` |
