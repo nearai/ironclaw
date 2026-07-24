@@ -320,15 +320,72 @@ function httpsUrl(value) {
   }
 }
 
+const FOCUSABLE_SELECTOR = [
+  "a[href]",
+  "button:not([disabled])",
+  "input:not([disabled]):not([type='hidden'])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "[contenteditable='true']",
+  "[tabindex]:not([tabindex^='-'])",
+].join(",");
+
+function focusableElements(container) {
+  if (!container) return [];
+  return Array.from(container.querySelectorAll(FOCUSABLE_SELECTOR)).filter(
+    (element) =>
+      element.tabIndex >= 0 &&
+      !element.hidden &&
+      element.getAttribute("aria-hidden") !== "true",
+  );
+}
+
 function ModalShell({ onClose, title, children }) {
   const t = useT();
   const titleId = React.useId();
+  const dialogRef = React.useRef(null);
   React.useEffect(() => {
+    const previouslyFocused = document.activeElement;
+    const dialog = dialogRef.current;
+    const initialFocus = focusableElements(dialog)[0] || dialog;
+    initialFocus?.focus({ preventScroll: true });
+
     const handleKey = (e) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") {
+        onClose();
+        return;
+      }
+      if (e.key !== "Tab") return;
+
+      const focusable = focusableElements(dialog);
+      if (focusable.length === 0) {
+        e.preventDefault();
+        dialog?.focus({ preventScroll: true });
+        return;
+      }
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const activeElement = document.activeElement;
+      const focusIsOutside = !dialog?.contains(activeElement);
+      if (e.shiftKey && (activeElement === first || focusIsOutside)) {
+        e.preventDefault();
+        last.focus({ preventScroll: true });
+      } else if (!e.shiftKey && (activeElement === last || focusIsOutside)) {
+        e.preventDefault();
+        first.focus({ preventScroll: true });
+      }
     };
     window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
+    return () => {
+      window.removeEventListener("keydown", handleKey);
+      if (
+        previouslyFocused?.isConnected &&
+        typeof previouslyFocused.focus === "function"
+      ) {
+        previouslyFocused.focus({ preventScroll: true });
+      }
+    };
   }, [onClose]);
 
   return (
@@ -339,9 +396,11 @@ function ModalShell({ onClose, title, children }) {
       }}
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
+        tabIndex={-1}
         className="v2-panel mx-4 w-full max-w-lg rounded-2xl p-6"
         onClick={(e) => e.stopPropagation()}
       >

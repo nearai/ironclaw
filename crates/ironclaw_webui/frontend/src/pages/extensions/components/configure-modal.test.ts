@@ -613,6 +613,101 @@ test("ConfigureModal renders a localized close label through ModalShell", () => 
   assert.match(JSON.stringify(shell), /Localized close/);
 });
 
+test("ModalShell moves, traps, and restores keyboard focus", () => {
+  const { context } = renderModal();
+  const listeners = new Map();
+  const cleanups = [];
+  const document = { activeElement: null };
+
+  function focusable(name) {
+    return {
+      name,
+      hidden: false,
+      isConnected: true,
+      tabIndex: 0,
+      getAttribute: () => null,
+      focus() {
+        document.activeElement = this;
+      },
+    };
+  }
+
+  const opener = focusable("opener");
+  const closeButton = focusable("close");
+  const saveButton = focusable("save");
+  const dialog = {
+    contains: (element) =>
+      element === closeButton || element === saveButton || element === dialog,
+    focus() {
+      document.activeElement = this;
+    },
+    querySelectorAll: () => [closeButton, saveButton],
+  };
+  document.activeElement = opener;
+
+  context.document = document;
+  context.window.addEventListener = (type, handler) => listeners.set(type, handler);
+  context.window.removeEventListener = (type, handler) => {
+    if (listeners.get(type) === handler) listeners.delete(type);
+  };
+  context.React.useRef = () => ({ current: dialog });
+  context.React.useEffect = (effect) => {
+    cleanups.push(effect());
+  };
+
+  let closeCalls = 0;
+  context.globalThis.__testExports.ModalShell({
+    onClose: () => {
+      closeCalls += 1;
+    },
+    title: "Configure Slack",
+    children: null,
+  });
+
+  assert.equal(
+    document.activeElement,
+    closeButton,
+    "the first focusable control receives focus when the modal opens",
+  );
+
+  const handleKey = listeners.get("keydown");
+  assert.equal(typeof handleKey, "function");
+
+  document.activeElement = saveButton;
+  let prevented = false;
+  handleKey({
+    key: "Tab",
+    shiftKey: false,
+    preventDefault: () => {
+      prevented = true;
+    },
+  });
+  assert.equal(prevented, true);
+  assert.equal(document.activeElement, closeButton, "Tab wraps to the first control");
+
+  prevented = false;
+  handleKey({
+    key: "Tab",
+    shiftKey: true,
+    preventDefault: () => {
+      prevented = true;
+    },
+  });
+  assert.equal(prevented, true);
+  assert.equal(document.activeElement, saveButton, "Shift+Tab wraps to the last control");
+
+  handleKey({ key: "Escape", shiftKey: false, preventDefault() {} });
+  assert.equal(closeCalls, 1, "Escape still closes the modal");
+
+  cleanups[0]();
+  assert.equal(
+    document.activeElement,
+    opener,
+    "closing the modal restores focus to the control that opened it",
+  );
+  assert.equal(listeners.has("keydown"), false);
+});
+
 test("ConfigureModal surfaces a blocked popup and does not start the OAuth flow", () => {
   const slackOauthSecret = {
     name: "slack_oauth",
