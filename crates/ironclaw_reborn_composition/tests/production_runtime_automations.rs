@@ -1,5 +1,5 @@
 //! Integration test that fully builds a production-shape `RebornRuntime` and
-//! asserts the automation facade is reachable (no 503 `ServiceUnavailable`)
+//! asserts the automation service is reachable (no 503 `ServiceUnavailable`)
 //! when the production profile is used.
 //!
 //! This test lives in its own integration-test binary so cargo executes it
@@ -62,7 +62,7 @@ impl SandboxCommandTransport for RecordingSandboxTransport {
 // ─── test ─────────────────────────────────────────────────────────────────────
 
 /// Regression guard: production profiles have `local_runtime: None` and
-/// `production_runtime: Some(...)`. The automation facade must be installed
+/// `production_runtime: Some(...)`. The automation service must be installed
 /// from the production store graph so that `/automations` returns results
 /// instead of a 503 ServiceUnavailable error.
 #[tokio::test]
@@ -119,7 +119,7 @@ async fn production_runtime_webui_serves_automations_without_local_runtime() {
         None,
     );
 
-    // An empty list is fine — the key invariant is that the facade is wired
+    // An empty list is fine — the key invariant is that the service is wired
     // (no 503) so the request reaches the repository rather than returning
     // ServiceUnavailable.
     let result = ironclaw_host_api::ProductSurface::query(
@@ -134,7 +134,7 @@ async fn production_runtime_webui_serves_automations_without_local_runtime() {
         },
     )
     .await
-    .expect("production automation facade must be reachable (not 503)");
+    .expect("production automation service must be reachable (not 503)");
     let result = ironclaw_product::RebornViewPage {
         payload: result
             .items

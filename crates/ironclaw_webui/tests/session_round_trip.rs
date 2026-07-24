@@ -15,7 +15,7 @@
 //!
 //! The chain it locks: OAuth callback → SignedTokenSessionStore::create_session
 //! → one-time `login_ticket` exchange → SessionAuthenticator → v2
-//! route handler → facade call. A regression that loses any link
+//! route handler → service call. A regression that loses any link
 //! (e.g. store mismatch, bearer exchange drift, missing user_id
 //! stamp) would break exactly the path users hit when they sign in
 //! with Google.
@@ -53,7 +53,7 @@ const TENANT: &str = "tenant-a";
 const AGENT: &str = "agent-default";
 const PROJECT: &str = "project-default";
 
-// ─── stub facade ──────────────────────────────────────────────────────
+// ─── stub service ──────────────────────────────────────────────────────
 
 /// `ProductSurface` stub — only `create_thread` returns Ok with a
 /// fake thread (the protected route this test exercises). Every
@@ -329,7 +329,7 @@ async fn session_minted_via_oauth_callback_authenticates_protected_v2_route() {
         "OAuth-issued bearer must authenticate on the v2 surface",
     );
     let callers = services.create_thread_callers.lock().expect("lock").clone();
-    assert_eq!(callers.len(), 1, "facade reached exactly once");
+    assert_eq!(callers.len(), 1, "service reached exactly once");
     assert_eq!(callers[0].tenant_id.as_str(), TENANT);
     assert_eq!(callers[0].user_id.as_str(), "alice@example.com");
     assert_eq!(
@@ -385,7 +385,7 @@ async fn session_minted_via_oauth_callback_authenticates_protected_v2_route() {
     assert_eq!(
         services.create_thread_callers.lock().expect("lock").len(),
         1,
-        "facade must not be reached after revoke",
+        "service must not be reached after revoke",
     );
 }
 

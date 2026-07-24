@@ -334,7 +334,7 @@ fn readiness_for_runtime_gate(
     RebornReadiness {
         profile,
         state,
-        facades: crate::RebornFacadeReadiness {
+        services: crate::RebornServiceReadiness {
             host_runtime: true,
             turn_coordinator: true,
             product_auth: true,
@@ -557,7 +557,7 @@ use crate::runtime_input::{
     TriggerFireAccessChecker, TriggerFireAccessDecision, TriggerFireAccessError,
     TriggerPollerSettings,
 };
-use crate::webui::facade::build_webui_services;
+use crate::webui::service::build_webui_services;
 use crate::{RebornCompositionProfile, RebornReadiness, RebornReadinessState, RebornRuntimeError};
 use ironclaw_reborn_config::{RebornBootConfig, RebornHome, RebornProfile};
 
@@ -4963,7 +4963,7 @@ async fn local_dev_runtime_maps_workspace_to_configured_root() {
 }
 
 #[tokio::test]
-async fn local_dev_runtime_webui_bundle_reuses_thread_and_turn_facades() {
+async fn local_dev_runtime_webui_bundle_reuses_thread_and_turn_services() {
     let root = tempfile::tempdir().expect("tempdir");
     let gateway = Arc::new(RecordingGateway {
         reply: "webui projection ok".to_string(),
@@ -5319,7 +5319,7 @@ async fn submit_webui_extension_setup(
 }
 
 #[tokio::test]
-async fn local_dev_webui_bundle_uses_local_lifecycle_facade_for_setup_extension() {
+async fn local_dev_webui_bundle_uses_local_lifecycle_service_for_setup_extension() {
     let root = tempfile::tempdir().expect("tempdir");
     let gateway = Arc::new(RecordingGateway {
         reply: "webui lifecycle ok".to_string(),
@@ -5406,22 +5406,22 @@ async fn local_dev_webui_bundle_uses_local_lifecycle_facade_for_setup_extension(
                     && extensions[0].summary.package_ref.id.as_str() == "github"
                     && extensions[0].summary.credential_requirements.len() == 1
         ),
-        "local webui bundle should use the local lifecycle facade package projection"
+        "local webui bundle should use the local lifecycle service package projection"
     );
     assert!(
         !setup.blockers.iter().any(|blocker| matches!(
             blocker,
             LifecycleReadinessBlocker::Runtime { ref_id: Some(ref_id) }
-                if ref_id.as_str() == "reborn_lifecycle_facade_unwired"
+                if ref_id.as_str() == "reborn_lifecycle_service_unwired"
         )),
-        "local webui bundle must not fall back to the default unwired facade"
+        "local webui bundle must not fall back to the default unwired service"
     );
 
     runtime.shutdown().await.expect("runtime shutdown");
 }
 
 #[tokio::test]
-async fn local_dev_webui_bundle_exposes_outbound_preferences_facade() {
+async fn local_dev_webui_bundle_exposes_outbound_preferences_service() {
     let root = tempfile::tempdir().expect("tempdir");
     let gateway = Arc::new(RecordingGateway {
         reply: "webui outbound ok".to_string(),
@@ -5462,7 +5462,7 @@ async fn local_dev_webui_bundle_exposes_outbound_preferences_facade() {
         serde_json::json!({}),
     )
     .await
-    .expect("outbound preference clear uses composed facade");
+    .expect("outbound preference clear uses composed service");
     assert!(matches!(cleared, Resolution::Done(_)));
     let cleared_page = query_product_surface_page(
         bundle.product_surface.as_ref(),
@@ -5491,7 +5491,7 @@ async fn local_dev_webui_bundle_exposes_outbound_preferences_facade() {
         },
     )
     .await
-    .expect("outbound target listing uses composed facade");
+    .expect("outbound target listing uses composed service");
     let targets: ironclaw_product::RebornOutboundDeliveryTargetListResponse =
         serde_json::from_value(targets_page.payload).expect("outbound targets payload");
     assert!(targets.targets.is_empty());
@@ -5773,7 +5773,7 @@ async fn build_webui_services_without_local_runtime_still_lists_automations_from
         },
     )
     .await
-    .expect("automation facade reads the core trigger repository");
+    .expect("automation service reads the core trigger repository");
 
     let automations: ironclaw_product::RebornListAutomationsResponse =
         serde_json::from_value(response.payload).expect("automations payload");
@@ -6152,25 +6152,25 @@ async fn local_dev_webui_bundle_records_selectable_filesystem_skill_context() {
 #[tokio::test]
 async fn multi_tool_call_response_survives_surface_change_mid_register() {
     use ironclaw_product::{
-        LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
+        LifecycleProductAction, LifecycleProductContext, LifecycleProductService,
         LifecycleProductSurfaceContext,
     };
     use std::sync::OnceLock;
 
     // Gateway state seeded after runtime build.
-    struct LifecycleFacadeHandle {
-        facade: crate::extension_host::lifecycle::RebornLocalLifecycleFacade,
+    struct LifecycleServiceHandle {
+        service: crate::extension_host::lifecycle::RebornLocalLifecycleService,
     }
 
-    impl std::fmt::Debug for LifecycleFacadeHandle {
+    impl std::fmt::Debug for LifecycleServiceHandle {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_struct("LifecycleFacadeHandle").finish()
+            f.debug_struct("LifecycleServiceHandle").finish()
         }
     }
 
     struct MultiToolCallGateway {
         calls: StdMutex<usize>,
-        facade_slot: Arc<OnceLock<LifecycleFacadeHandle>>,
+        service_slot: Arc<OnceLock<LifecycleServiceHandle>>,
     }
 
     #[async_trait]
@@ -6239,10 +6239,10 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
 
             // Activate the github extension — deterministic surface-content change.
             // Pre-fix: this rebuilds the inner port, wiping candidate1's snapshot.
-            let facade_handle = self
-                .facade_slot
+            let service_handle = self
+                .service_slot
                 .get()
-                .expect("lifecycle facade must be seeded before send_user_message");
+                .expect("lifecycle service must be seeded before send_user_message");
             let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
                 .expect("valid github ref");
             // #5459 P1: act as the runtime owner (the tenant operator) so
@@ -6254,8 +6254,8 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
                 agent_id: None,
                 project_id: None,
             });
-            facade_handle
-                .facade
+            service_handle
+                .service
                 .execute(
                     ctx.clone(),
                     LifecycleProductAction::ExtensionInstall {
@@ -6264,8 +6264,8 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
                 )
                 .await
                 .expect("install github extension");
-            facade_handle
-                .facade
+            service_handle
+                .service
                 .execute(
                     ctx,
                     LifecycleProductAction::ExtensionActivate { package_ref },
@@ -6294,10 +6294,10 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
 
     // ── Test body ──────────────────────────────────────────────────────────────
     let root = tempfile::tempdir().expect("tempdir");
-    let facade_slot: Arc<OnceLock<LifecycleFacadeHandle>> = Arc::new(OnceLock::new());
+    let service_slot: Arc<OnceLock<LifecycleServiceHandle>> = Arc::new(OnceLock::new());
     let gateway = Arc::new(MultiToolCallGateway {
         calls: StdMutex::new(0),
-        facade_slot: Arc::clone(&facade_slot),
+        service_slot: Arc::clone(&service_slot),
     });
     let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway;
 
@@ -6322,16 +6322,16 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
 
-    // Seed the lifecycle facade before the model gateway runs.
+    // Seed the lifecycle service before the model gateway runs.
     let extension_management = runtime.extension_management.clone();
-    let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(Arc::clone(
+    let service = crate::extension_host::lifecycle::RebornLocalLifecycleService::new(Arc::clone(
         &runtime.skill_management,
     ))
     .with_extension_management(extension_management)
     .with_runtime_credential_accounts(Arc::new(MultiToolConfiguredCredentials));
-    facade_slot
-        .set(LifecycleFacadeHandle { facade })
-        .expect("facade slot should be empty before seeding");
+    service_slot
+        .set(LifecycleServiceHandle { service })
+        .expect("service slot should be empty before seeding");
 
     let conversation = runtime.new_conversation().await.expect("conversation");
     runtime

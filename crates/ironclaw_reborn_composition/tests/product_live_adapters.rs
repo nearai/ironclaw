@@ -1269,7 +1269,7 @@ async fn adapter_bundle_wires_required_product_live_components() {
         .unwrap();
     assert!(
         !visible.version.as_str().is_empty(),
-        "host-runtime capability facade should supply a concrete surface version"
+        "host-runtime capability service should supply a concrete surface version"
     );
 }
 

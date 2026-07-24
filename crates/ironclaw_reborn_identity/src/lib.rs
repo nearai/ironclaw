@@ -115,7 +115,7 @@ pub enum RebornIdentityError {
     #[error("persisted user id is invalid: {0}")]
     InvalidUserId(String),
     /// An admin directory operation targeted a user id with no record. Distinct
-    /// from `Backend` so the product-workflow facade can map it to a 404.
+    /// from `Backend` so the product-workflow service can map it to a 404.
     #[error("no user record for id: {0}")]
     UserNotFound(String),
     /// `resolve_or_create` resolved an external identity to an existing user

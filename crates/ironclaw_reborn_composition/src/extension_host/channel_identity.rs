@@ -272,7 +272,7 @@ fn handle_declares_claim(handle: &str, claim: &str) -> bool {
 }
 
 /// The generic scope source for one extension over the durable installation
-/// store — also used by the generic connection facade so the connect-report
+/// store — also used by the generic connection service so the connect-report
 /// prefix and the bind prefix can never diverge.
 pub(crate) fn channel_config_connection_scope_source(
     installation_store: Arc<dyn ExtensionInstallationStore>,
@@ -288,7 +288,7 @@ pub(crate) fn channel_config_connection_scope_source(
 
 /// A generically-discovered channel extension: its id and the auth vendors
 /// its manifest declares. Shared by the identity hook and the connection
-/// facade.
+/// service.
 pub(crate) struct DiscoveredChannelExtension {
     pub(crate) extension_id: String,
     pub(crate) providers: Vec<String>,
@@ -297,7 +297,7 @@ pub(crate) struct DiscoveredChannelExtension {
 /// Installed extensions whose manifest declares a channel surface, excluding
 /// `overridden` extension ids (their lane owns identity binding). OAuth
 /// channels expose one or more auth vendors; proof-code paired channels expose
-/// none but must still be discoverable by the generic connection facade so
+/// none but must still be discoverable by the generic connection service so
 /// removal can revoke their pairing-owned state.
 pub(crate) async fn discover_channel_extensions(
     installation_store: &Arc<dyn ExtensionInstallationStore>,

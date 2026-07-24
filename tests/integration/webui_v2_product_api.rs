@@ -1,5 +1,5 @@
 //! W5-WEBUI-API-1: `webui_v2` router mounted over a REAL `RebornServices`
-//! facade, hand-built from int-tier harness parts — not the
+//! service, hand-built from int-tier harness parts — not the
 //! `MinimalWebuiServices` fake in `webui_v2_router_smoke.rs` (rejects 24/25
 //! methods). Hand-built because `webui.rs`'s builder needs a `&RebornRuntime`
 //! the harness never constructs.
@@ -250,7 +250,7 @@ async fn settings_tool_permission_post_then_cold_read() {
     // freshly-reopened tool-permission-override/auto-approve/persistent-policy
     // stores at the same on-disk `storage_root` (not the live `Arc`s above) —
     // this is what actually proves the POSTed state survives a store reopen,
-    // rather than a second facade reading the same in-process handles.
+    // rather than a second service reading the same in-process handles.
     let fresh_thread_service = h
         .thread_harness
         .service_instance()
@@ -284,13 +284,13 @@ async fn settings_tool_permission_post_then_cold_read() {
 }
 
 /// Production-composed WebUI import path: the local-dev composition owns the
-/// real lifecycle facade and extension-management port, while this test uses
+/// real lifecycle service and extension-management port, while this test uses
 /// only an inert model/network boundary because no turn or outbound request is
 /// needed. The default router mount proves the operator route is forbidden;
 /// the operator-capability mount then submits the same valid ZIP through the
 /// real route and checks both catalog and filesystem effects.
 #[tokio::test]
-async fn operator_can_import_extension_bundle_through_production_webui_facade() {
+async fn operator_can_import_extension_bundle_through_production_webui_service() {
     let root = tempdir().expect("runtime storage tempdir");
     let storage_root = root.path().join("local-dev");
     let tenant_id = TenantId::new("webui-import-tenant").expect("tenant id");
@@ -318,7 +318,7 @@ async fn operator_can_import_extension_bundle_through_production_webui_facade() 
     )
     .await
     .expect("production Reborn runtime builds");
-    let webui = build_webui_services(&runtime, None).expect("production WebUI facade builds");
+    let webui = build_webui_services(&runtime, None).expect("production WebUI service builds");
     let caller = ProductSurfaceCaller::new(tenant_id, user_id, Some(agent_id), None);
     let bundle = importable_extension_zip("webui-uploaded");
 
@@ -423,7 +423,7 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
     )
     .await
     .expect("production Reborn runtime builds");
-    let webui = build_webui_services(&runtime, None).expect("production WebUI facade builds");
+    let webui = build_webui_services(&runtime, None).expect("production WebUI service builds");
     let operator_caller =
         ProductSurfaceCaller::new(tenant_id.clone(), operator_id, Some(agent_id.clone()), None);
 
@@ -533,7 +533,7 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
     .await
     .expect("rebuilt production Reborn runtime builds");
     let rebuilt_webui =
-        build_webui_services(&rebuilt_runtime, None).expect("rebuilt WebUI facade builds");
+        build_webui_services(&rebuilt_runtime, None).expect("rebuilt WebUI service builds");
 
     let store = ironclaw_reborn_composition::test_support::open_local_dev_extension_installation_store_for_test(
         &storage_root,
@@ -647,7 +647,7 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
     )
     .await
     .expect("production Reborn runtime builds");
-    let webui = build_webui_services(&runtime, None).expect("production WebUI facade builds");
+    let webui = build_webui_services(&runtime, None).expect("production WebUI service builds");
     let operator_caller = ProductSurfaceCaller::new(
         tenant_id.clone(),
         operator_id.clone(),
@@ -777,7 +777,7 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
     .await
     .expect("rebuilt production Reborn runtime builds despite the orphan installation row");
     let rebuilt_webui =
-        build_webui_services(&rebuilt_runtime, None).expect("rebuilt WebUI facade builds");
+        build_webui_services(&rebuilt_runtime, None).expect("rebuilt WebUI service builds");
 
     // The orphan row is preserved untouched (never deleted or rewritten) so
     // it can restore once the migration tool later materializes its catalog
@@ -800,7 +800,7 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
     );
 
     // The catalog-present installation still restores and is reachable
-    // through the real WebUI facade.
+    // through the real WebUI service.
     let operator_caller = ProductSurfaceCaller::new(tenant_id, operator_id, Some(agent_id), None);
     let (status, body) = get_json(
         mount_webui_v2_router(Arc::clone(&rebuilt_webui.product_surface), operator_caller),
@@ -831,13 +831,13 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
 }
 
 /// Pins PR #5499 private-install membership through the PRODUCTION webui
-/// facade, mirroring the crate-tier invariants in
+/// service, mirroring the crate-tier invariants in
 /// `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle/tests/private_install_tests.rs`
 /// (`members_install_the_same_tool_independently` +
 /// `operator_install_evicts_member_installs_to_tenant_shared`), but driven
-/// through the real HTTP router instead of the facade directly.
+/// through the real HTTP router instead of the service directly.
 #[tokio::test]
-async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_through_production_webui_facade()
+async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_through_production_webui_service()
  {
     let root = tempdir().expect("runtime storage tempdir");
     let storage_root = root.path().join("local-dev");
@@ -868,7 +868,7 @@ async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_thro
     )
     .await
     .expect("production Reborn runtime builds");
-    let webui = build_webui_services(&runtime, None).expect("production WebUI facade builds");
+    let webui = build_webui_services(&runtime, None).expect("production WebUI service builds");
 
     let extension_id = "member-eviction-fixture";
     let operator_caller = ProductSurfaceCaller::new(
@@ -1104,7 +1104,7 @@ async fn operator_lists_uninstalled_manifest_admin_configuration_with_secrets_re
     )
     .await
     .expect("production Reborn runtime builds");
-    let webui = build_webui_services(&runtime, None).expect("production WebUI facade builds");
+    let webui = build_webui_services(&runtime, None).expect("production WebUI service builds");
     let caller = ProductSurfaceCaller::new(tenant_id, user_id, Some(agent_id), None);
     let operator_router = webui_v2_router(WebUiV2State::new(
         Arc::clone(&webui.product_surface),
@@ -1177,7 +1177,7 @@ async fn operator_saves_admin_configuration_and_reads_back_new_redacted_revision
     )
     .await
     .expect("production Reborn runtime builds");
-    let webui = build_webui_services(&runtime, None).expect("production WebUI facade builds");
+    let webui = build_webui_services(&runtime, None).expect("production WebUI service builds");
     let caller = ProductSurfaceCaller::new(tenant_id, user_id, Some(agent_id), None)
         .with_operator_config(true);
     let operator_router = || {
@@ -1541,7 +1541,7 @@ impl AdminConfigurationFixture {
         )
         .await
         .expect("production Reborn runtime builds");
-        let webui = build_webui_services(&runtime, None).expect("production WebUI facade builds");
+        let webui = build_webui_services(&runtime, None).expect("production WebUI service builds");
         let caller = ProductSurfaceCaller::new(tenant_id, user_id, Some(agent_id), None);
         Self {
             _root: root,
@@ -1832,7 +1832,7 @@ async fn sse_activity_stream_replay_and_reconnect() {
 
 /// W5-WEBUI-API-2: a browser refresh mid-gate must let the user rediscover
 /// and resolve a pending approval gate. Mounts the real `webui_v2` router
-/// over a hand-built `RebornServices` facade wired with the harness's own
+/// over a hand-built `RebornServices` service wired with the harness's own
 /// turn-state-converged `ApprovalInteractionService`
 /// (`local_dev_approval_interaction_service_with_turn_state_for_test`, the
 /// same seam `RebornIntegrationGroupBuilder::with_real_gate_dispatch_services`

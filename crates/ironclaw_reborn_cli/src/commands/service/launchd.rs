@@ -199,7 +199,7 @@ pub(super) fn install_with_runner(
     let was_loaded = service_loaded(&list);
     // Captured before the write: a pre-existing file at this path may
     // have been installed by this CLI's own prior run, or by the WebUI
-    // operator facade (`RebornLocalServiceLifecycle`) — both surfaces
+    // operator service (`RebornLocalServiceLifecycle`) — both surfaces
     // target the same label/path by design (see the module doc). Either
     // way the write below atomically replaces it.
     let replaced_existing = file.exists();
@@ -656,7 +656,7 @@ mod tests {
     fn install_reports_replaced_existing_when_plist_already_present() {
         // Covers the shared-identity collision case (design doc: "adopt
         // identity"): a plist at this path may have been written by a
-        // prior CLI install, or by the WebUI operator facade
+        // prior CLI install, or by the WebUI operator service
         // (`RebornLocalServiceLifecycle`) — both target the same label/
         // path. Either way, `install` must report the replacement so the
         // operator knows a currently-running service (if any) keeps the

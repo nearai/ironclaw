@@ -8,7 +8,7 @@
 //! signed session bearers, and asserts each bearer reaches the protected v2
 //! surface as its OWN `ProductSurfaceCaller.user_id` — never the other's
 //! and never the env operator. That per-user identity is exactly what the
-//! facade's owner-scoped thread isolation builds on, so a regression that
+//! service's owner-scoped thread isolation builds on, so a regression that
 //! collapsed both logins onto one user (or onto the operator) would fail
 //! here.
 
@@ -42,7 +42,7 @@ const TENANT: &str = "tenant-a";
 const AGENT: &str = "agent-default";
 const PROJECT: &str = "project-default";
 
-// ─── facade stub: records the caller per create_thread ───────────────────
+// ─── service stub: records the caller per create_thread ───────────────────
 
 #[derive(Default)]
 struct RecordingServices {
@@ -60,7 +60,7 @@ impl ProductSurface for RecordingServices {
             return Err(ProductSurfaceError::service_unavailable(false));
         }
         // Return a thread owned by the calling user, mirroring the real
-        // facade's `owner = caller.user_id` rule.
+        // service's `owner = caller.user_id` rule.
         let owner = caller.user_id.clone();
         self.create_thread_callers
             .lock()
@@ -393,16 +393,16 @@ async fn two_oauth_users_reach_protected_routes_as_distinct_callers() {
     assert_eq!(create_thread(&app, &bob_bearer).await, StatusCode::OK);
 
     let callers = services.create_thread_callers.lock().expect("lock").clone();
-    assert_eq!(callers.len(), 2, "facade reached once per user");
+    assert_eq!(callers.len(), 2, "service reached once per user");
     assert_eq!(
         callers[0].user_id.as_str(),
         "user-alice-sub",
-        "alice's bearer must reach the facade as alice"
+        "alice's bearer must reach the service as alice"
     );
     assert_eq!(
         callers[1].user_id.as_str(),
         "user-bob-sub",
-        "bob's bearer must reach the facade as bob — never collapsed onto one user or the operator"
+        "bob's bearer must reach the service as bob — never collapsed onto one user or the operator"
     );
     // Both callers carry the host-trusted tenant, never a browser value.
     assert!(callers.iter().all(|c| c.tenant_id.as_str() == TENANT));

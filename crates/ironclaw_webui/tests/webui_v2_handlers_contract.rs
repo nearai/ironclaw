@@ -4,7 +4,7 @@
 //! drive a real axum [`Router`] (built from [`webui_v2_router`]) against a
 //! stub [`ProductSurface`] so the regression target is the wire
 //! contract — body shape, path/query plumbing, error mapping — not just
-//! the facade method bodies that are already covered in
+//! the service method bodies that are already covered in
 //! `ironclaw_product`.
 
 // arch-exempt: large_file, WebUI ProductSurface route contracts stay in the caller-level handler suite until the WebUI route split lands, plan #5985
@@ -551,7 +551,7 @@ impl StubServices {
     }
 
     /// Triggered the first time `stream_events` is invoked. Lets the SSE
-    /// test wait on the actual facade call rather than guessing at a
+    /// test wait on the actual service call rather than guessing at a
     /// timeout — axum's SSE body is lazy, so the handler does not run
     /// until the client polls the body.
     fn stream_events_signal(&self) -> Arc<Notify> {
@@ -1935,7 +1935,7 @@ async fn read_json(response: axum::response::Response) -> Value {
 }
 
 #[tokio::test]
-async fn create_thread_dispatches_through_facade() {
+async fn create_thread_dispatches_through_service() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
 
@@ -1958,12 +1958,12 @@ async fn create_thread_dispatches_through_facade() {
     assert_eq!(
         services.create_thread_calls.lock().expect("lock").len(),
         1,
-        "facade called exactly once"
+        "service called exactly once"
     );
 }
 
 #[tokio::test]
-async fn delete_thread_path_dispatches_through_facade() {
+async fn delete_thread_path_dispatches_through_service() {
     let services = Arc::new(StubServices::default());
     services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let router = router_with(services.clone());
@@ -2237,7 +2237,7 @@ async fn get_run_artifact_threads_path_and_run_path_into_request() {
 // The attachment-bytes route carries three path segments and returns raw
 // bytes rather than JSON. Per "Test Through the Caller", drive the real router
 // so the Path<(_, _, _)> extractor, the byte response, and the headers are all
-// exercised — a facade-only test would miss the path plumbing and Content-Type.
+// exercised — a service-only test would miss the path plumbing and Content-Type.
 #[tokio::test]
 async fn get_attachment_serves_bytes_with_authoritative_content_type() {
     let services = Arc::new(StubServices::default());
@@ -2279,7 +2279,7 @@ async fn get_attachment_serves_bytes_with_authoritative_content_type() {
         .expect("body bytes");
     assert_eq!(body.as_ref(), &[1, 2, 3, 4]);
 
-    // The whole (thread, message, attachment) triple reaches the facade — the
+    // The whole (thread, message, attachment) triple reaches the service — the
     // attachment id alone is not unique across a thread.
     let calls = services.read_attachment_calls.lock().expect("lock").clone();
     assert_eq!(calls.len(), 1);
@@ -2310,12 +2310,12 @@ async fn get_attachment_missing_bytes_returns_404() {
 }
 
 // Regression for the timeline pagination wire plumbing. Per
-// `.claude/rules/testing.md` "Test Through the Caller", a facade-only
+// `.claude/rules/testing.md` "Test Through the Caller", a service-only
 // test on `get_timeline` is not enough — the Query<TimelineQuery>
-// extractor sits between the URL and the facade, and a future refactor
+// extractor sits between the URL and the service, and a future refactor
 // that drops or renames a query field would only fail here.
 #[tokio::test]
-async fn get_timeline_forwards_query_params_to_facade() {
+async fn get_timeline_forwards_query_params_to_service() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
 
@@ -2336,11 +2336,11 @@ async fn get_timeline_forwards_query_params_to_facade() {
     let calls = services.get_timeline_calls.lock().expect("lock").clone();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].thread_id, "thread-x");
-    assert_eq!(calls[0].limit, Some(42), "?limit= must reach the facade");
+    assert_eq!(calls[0].limit, Some(42), "?limit= must reach the service");
     assert_eq!(
         calls[0].cursor.as_deref(),
         Some("opaque-from-browser"),
-        "?cursor= must reach the facade"
+        "?cursor= must reach the service"
     );
     let queries = services.view_queries.lock().expect("lock").clone();
     assert_eq!(queries.len(), 1);
@@ -2537,7 +2537,7 @@ async fn create_thread_error_maps_to_http_status() {
 }
 
 #[tokio::test]
-async fn stream_events_emits_sse_content_type_and_drains_facade() {
+async fn stream_events_emits_sse_content_type_and_drains_service() {
     let services = Arc::new(StubServices::default());
     let signal = services.stream_events_signal();
     let router = router_with(services.clone());
@@ -2580,7 +2580,7 @@ async fn stream_events_emits_sse_content_type_and_drains_facade() {
     let calls = services.stream_events_calls.lock().expect("lock").len();
     assert!(
         calls >= 1,
-        "facade.stream_events must be called at least once after the first SSE frame is read"
+        "service.stream_events must be called at least once after the first SSE frame is read"
     );
 }
 
@@ -2588,7 +2588,7 @@ async fn stream_events_emits_sse_content_type_and_drains_facade() {
 async fn stream_events_last_event_id_header_takes_precedence_over_query() {
     // Two distinct, parseable cursors so the precedence is observable in
     // the captured RebornStreamEventsRequest — if a future refactor flips
-    // the `.or()` order, the facade will see cursor-B and this test fails.
+    // the `.or()` order, the service will see cursor-B and this test fails.
     let header_cursor =
         ironclaw_product::ProjectionCursor::new("cursor-from-header").expect("cursor");
     let query_cursor =
@@ -2625,7 +2625,7 @@ async fn stream_events_last_event_id_header_takes_precedence_over_query() {
         .expect("stream_events must be called within 2s after the body is polled");
 
     let calls = services.stream_events_calls.lock().expect("lock").clone();
-    assert_eq!(calls.len(), 1, "facade.stream_events called exactly once");
+    assert_eq!(calls.len(), 1, "service.stream_events called exactly once");
     assert_eq!(
         calls[0].after_cursor.as_ref(),
         Some(&header_cursor),
@@ -2634,7 +2634,7 @@ async fn stream_events_last_event_id_header_takes_precedence_over_query() {
 }
 
 #[tokio::test]
-async fn list_automations_forwards_query_limits_to_facade() {
+async fn list_automations_forwards_query_limits_to_service() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
 
@@ -2732,7 +2732,7 @@ async fn list_automations_omits_limits_and_forwards_none() {
 }
 
 #[tokio::test]
-async fn pause_and_resume_automation_dispatch_path_id_to_facade() {
+async fn pause_and_resume_automation_dispatch_path_id_to_service() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
 
@@ -2794,7 +2794,7 @@ async fn pause_and_resume_automation_dispatch_path_id_to_facade() {
 }
 
 #[tokio::test]
-async fn rename_automation_dispatches_path_id_and_body_to_facade() {
+async fn rename_automation_dispatches_path_id_and_body_to_service() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
 
@@ -2996,7 +2996,7 @@ async fn trace_account_traces_returns_caller_scoped_unenrolled_zero_state() {
     assert_eq!(body["traces"].as_array().expect("traces array").len(), 0);
 
     // The route is caller-scoped: the handler must forward the authenticated
-    // caller's user id to the facade (fails if it stops threading the caller).
+    // caller's user id to the service (fails if it stops threading the caller).
     assert_eq!(
         services
             .trace_account_traces_callers
@@ -3044,7 +3044,7 @@ async fn trace_account_login_link_returns_minted_url_to_caller_scope() {
     );
 
     // The route must forward the authenticated caller's tenant AND user id to
-    // the facade — the scope is trusted-caller-derived, never request input
+    // the service — the scope is trusted-caller-derived, never request input
     // (fails if the handler stops threading the caller).
     assert_eq!(
         services
@@ -3057,7 +3057,7 @@ async fn trace_account_login_link_returns_minted_url_to_caller_scope() {
 }
 
 #[tokio::test]
-async fn delete_automation_dispatches_path_id_to_facade() {
+async fn delete_automation_dispatches_path_id_to_service() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
     services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
@@ -3173,7 +3173,7 @@ async fn list_automations_rejects_invalid_limit_query_with_400() {
             .lock()
             .expect("lock")
             .is_empty(),
-        "invalid query input must be rejected before reaching the facade"
+        "invalid query input must be rejected before reaching the service"
     );
 }
 
@@ -3200,7 +3200,7 @@ async fn list_automations_rejects_invalid_run_limit_query_with_400() {
             .lock()
             .expect("lock")
             .is_empty(),
-        "invalid query input must be rejected before reaching the facade"
+        "invalid query input must be rejected before reaching the service"
     );
 }
 
@@ -3236,9 +3236,9 @@ async fn list_automations_error_maps_to_http_status() {
 }
 
 #[tokio::test]
-async fn list_automations_include_completed_true_forwarded_to_facade() {
+async fn list_automations_include_completed_true_forwarded_to_service() {
     // ?include_completed=true must be parsed and forwarded as `true` in the
-    // ProductListAutomationsRequest so the facade can widen its exclusion slice.
+    // ProductListAutomationsRequest so the service can widen its exclusion slice.
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
 
@@ -3262,7 +3262,7 @@ async fn list_automations_include_completed_true_forwarded_to_facade() {
     assert_eq!(calls.len(), 1);
     assert!(
         calls[0].include_completed,
-        "include_completed=true must be forwarded to the facade"
+        "include_completed=true must be forwarded to the service"
     );
 }
 
@@ -3298,7 +3298,7 @@ async fn list_automations_include_completed_absent_defaults_to_false() {
 }
 
 // Regression: malformed `?include_completed=garbage` must be rejected at the
-// Query extractor level (400 Bad Request) before the handler or facade run.
+// Query extractor level (400 Bad Request) before the handler or service run.
 // The field is a plain `bool`; `serde_urlencoded` does not silently default
 // unparseable values — it returns a deserialization error, which axum maps to
 // 400. There is no silent fallback to `false`.
@@ -3330,12 +3330,12 @@ async fn list_automations_malformed_include_completed_rejected_with_400() {
             .lock()
             .expect("lock")
             .is_empty(),
-        "malformed include_completed must be rejected before reaching the facade"
+        "malformed include_completed must be rejected before reaching the service"
     );
 }
 
 #[tokio::test]
-async fn get_outbound_preferences_dispatches_through_facade() {
+async fn get_outbound_preferences_dispatches_through_service() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
 
@@ -3698,10 +3698,10 @@ async fn get_session_reports_reborn_projects_feature_from_state_flag() {
 }
 
 // The approval card hint needs the effective global auto-approve setting. Keep
-// that as a narrow facade read surfaced through the session bootstrap feature,
+// that as a narrow service read surfaced through the session bootstrap feature,
 // not an operator config key lookup from the browser or route handler.
 #[tokio::test]
-async fn get_session_reports_global_auto_approve_feature_from_facade() {
+async fn get_session_reports_global_auto_approve_feature_from_service() {
     for enabled in [false, true] {
         let services = Arc::new(StubServices::default());
         *services.global_auto_approve_enabled.lock().expect("lock") = enabled;
@@ -3727,12 +3727,12 @@ async fn get_session_reports_global_auto_approve_feature_from_facade() {
         let body = read_json(response).await;
         assert_eq!(
             body["features"]["global_auto_approve"], enabled,
-            "features.global_auto_approve must mirror the facade flag (enabled={enabled})"
+            "features.global_auto_approve must mirror the service flag (enabled={enabled})"
         );
         assert_eq!(
             *services.global_auto_approve_calls.lock().expect("lock"),
             1,
-            "session handler should read the feature through the narrow facade"
+            "session handler should read the feature through the narrow service"
         );
         assert!(
             services
@@ -3794,7 +3794,7 @@ async fn get_session_refreshes_global_auto_approve_feature_between_requests() {
 }
 
 #[tokio::test]
-async fn get_session_defaults_global_auto_approve_false_when_facade_read_fails() {
+async fn get_session_defaults_global_auto_approve_false_when_service_read_fails() {
     let services = Arc::new(StubServices::default());
     *services
         .next_global_auto_approve_error
@@ -3825,7 +3825,7 @@ async fn get_session_defaults_global_auto_approve_false_when_facade_read_fails()
 }
 
 #[tokio::test]
-async fn get_session_defaults_global_auto_approve_false_when_facade_stalls() {
+async fn get_session_defaults_global_auto_approve_false_when_service_stalls() {
     let services = Arc::new(StubServices::default());
     *services.stall_global_auto_approve.lock().expect("lock") = true;
     let router = webui_v2_router(WebUiV2State::new(
@@ -4091,7 +4091,7 @@ async fn admin_user_secret_mutations_invoke_product_capabilities() {
 }
 
 #[tokio::test]
-async fn operator_routes_dispatch_to_facade_with_body_and_query_inputs() {
+async fn operator_routes_dispatch_to_service_with_body_and_query_inputs() {
     let services = Arc::new(StubServices::default());
     let router = router_with_capabilities(
         services.clone(),
@@ -5268,7 +5268,7 @@ async fn install_extension_rejects_non_extension_package_kind_with_400() {
 }
 
 /// #5499 review finding #4: the admin-only import route must reject a caller
-/// whose bearer token lacks `operator_webui_config` BEFORE the facade is
+/// whose bearer token lacks `operator_webui_config` BEFORE the service is
 /// reached. Lower-level lifecycle tests cannot catch this route dropping its
 /// `require_operator_webui_config` gate.
 #[tokio::test]
@@ -5293,7 +5293,7 @@ async fn import_extension_requires_operator_webui_config() {
     assert_eq!(body["error"], "forbidden");
     assert!(
         services.invoke_calls.lock().expect("lock").is_empty(),
-        "a non-operator caller must never reach the import facade"
+        "a non-operator caller must never reach the import service"
     );
 }
 
@@ -5489,7 +5489,7 @@ async fn get_extension_setup_queries_product_surface_view() {
 }
 
 // The path segment must become a lifecycle package ref at the
-// handler/facade boundary. A well-formed package id reaches the facade
+// handler/service boundary. A well-formed package id reaches the service
 // and round-trips into the response.
 #[tokio::test]
 async fn setup_extension_invokes_product_surface_capability() {
@@ -5516,7 +5516,7 @@ async fn setup_extension_invokes_product_surface_capability() {
     let body = read_json(response).await;
     assert_eq!(
         body["package_ref"]["id"], "telegram",
-        "facade must echo the package id from the path",
+        "service must echo the package id from the path",
     );
     assert_eq!(body["package_ref"]["kind"], "extension");
     assert_eq!(body["phase"], "unsupported");
@@ -5573,11 +5573,11 @@ async fn setup_extension_invokes_product_surface_capability() {
 }
 
 // Companion to the typed-internals fix: a malformed identifier in
-// the route path must be rejected at the handler/facade boundary
-// before the facade is called, with the same `invalid_request` wire
+// the route path must be rejected at the handler/service boundary
+// before the service is called, with the same `invalid_request` wire
 // shape any other inbound validation failure produces. Without
 // boundary validation, a path like `../etc` would silently flow
-// into the facade as a raw `String` and the typed-internals rule in
+// into the service as a raw `String` and the typed-internals rule in
 // `.claude/rules/types.md` would be broken in practice.
 #[tokio::test]
 async fn setup_extension_rejects_malformed_package_id_with_400() {
@@ -6196,7 +6196,7 @@ async fn stream_events_caps_concurrent_streams_per_caller() {
     drop(recovered);
 }
 
-// Regression for the "stalled facade drain" review point: SSE_MAX_LIFETIME
+// Regression for the "stalled service drain" review point: SSE_MAX_LIFETIME
 // must bound the await on `services.stream_events`, not just the top-of-loop
 // check. If a projection drain stalls (e.g. an upstream wedge), an unbounded
 // `.await` would keep the `SseSlot` held even after the configured lifetime
@@ -6206,7 +6206,7 @@ async fn stream_events_caps_concurrent_streams_per_caller() {
 // advances Tokio's virtual time past `SSE_MAX_LIFETIME`, and asserts the
 // stream actually terminates and the slot is reusable for a new connection.
 #[tokio::test(start_paused = true)]
-async fn stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime() {
+async fn stream_events_releases_slot_when_service_drain_stalls_past_max_lifetime() {
     // Cap of 1 so we can observe slot release directly: a second open
     // returns 429 while the first is held, and 200 once it's released.
     let services = Arc::new(ProgrammableProductSurface::default());
@@ -6271,7 +6271,7 @@ async fn stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime(
 /// Build a minimal `ProductOutboundEnvelope` with a caller-supplied
 /// projection cursor and reply text. The exact payload shape is not the
 /// contract under test (it lives in `ironclaw_product`); these
-/// tests only care that whatever the facade hands back becomes a
+/// tests only care that whatever the service hands back becomes a
 /// well-formed SSE event.
 fn make_projection_envelope(cursor: &str, text: &str) -> ProductOutboundEnvelope {
     make_outbound_envelope(
@@ -6680,7 +6680,7 @@ fn assert_no_adapter_metadata(json: &Value) {
     );
 }
 
-// Regression for the "SSE facade error event path is untested" review
+// Regression for the "SSE service error event path is untested" review
 // (Medium). When `ProductSurface::stream_events` returns Err, the
 // handler must emit one SSE `error` frame carrying only the redacted
 // `error` code + `retryable` flag (no `field`, no internal `detail`),
@@ -6688,7 +6688,7 @@ fn assert_no_adapter_metadata(json: &Value) {
 // SSE connection because the browser would replay it as a hard
 // reconnect failure.
 #[tokio::test]
-async fn stream_events_facade_error_emits_redacted_error_event_and_closes() {
+async fn stream_events_service_error_emits_redacted_error_event_and_closes() {
     let services = Arc::new(StubServices::default());
     services.enqueue_stream_events(Err(ProductSurfaceError {
         code: ProductSurfaceErrorCode::Forbidden,
@@ -6713,12 +6713,12 @@ async fn stream_events_facade_error_emits_redacted_error_event_and_closes() {
         .await
         .expect("oneshot");
 
-    // The handler must surface the facade error as an SSE event, not as a
+    // The handler must surface the service error as an SSE event, not as a
     // failed HTTP open. EventSource cannot recover from a non-OK status.
     assert_eq!(
         response.status(),
         StatusCode::OK,
-        "SSE open must succeed even when the facade drain errors; the error path is an in-stream event"
+        "SSE open must succeed even when the service drain errors; the error path is an in-stream event"
     );
 
     let mut body = response.into_body();
@@ -6769,7 +6769,7 @@ async fn stream_events_facade_error_emits_redacted_error_event_and_closes() {
     let closed = matches!(final_frame, Ok(None) | Err(_));
     assert!(
         closed,
-        "facade error must close the SSE stream, but body.frame() yielded another chunk"
+        "service error must close the SSE stream, but body.frame() yielded another chunk"
     );
 }
 
@@ -6802,7 +6802,7 @@ async fn missing_caller_extension_returns_500() {
         "missing caller extension must fail closed, not bypass auth"
     );
 
-    // Drain the body to make sure no facade method was hit before the
+    // Drain the body to make sure no service method was hit before the
     // extractor failed.
     let _ = response.into_body().collect().await.expect("drain body");
 }
@@ -6813,7 +6813,7 @@ async fn missing_caller_extension_returns_500() {
 // WS connection that pumps frames can catch breakage in the
 // per-envelope JSON serialization, cursor advancement on the
 // `after_cursor` field, or the redacted error frame the handler emits
-// on facade failure.
+// on service failure.
 #[tokio::test]
 async fn stream_events_ws_emits_projection_frames_and_redacted_error() {
     use futures::StreamExt;
@@ -6827,7 +6827,7 @@ async fn stream_events_ws_emits_projection_frames_and_redacted_error() {
         events: vec![envelope_a.clone(), envelope_b.clone()],
     }));
     // After draining the two real events, the next drain produces a
-    // facade error so the handler exercises the redacted-error-frame +
+    // service error so the handler exercises the redacted-error-frame +
     // close path before lifetime expiry.
     services.enqueue_stream_events(Err(ProductSurfaceError {
         code: ProductSurfaceErrorCode::Unavailable,
@@ -7000,7 +7000,7 @@ async fn stream_events_ws_resumes_from_last_event_id_before_query_cursor() {
 // Regression for the WS-idle-close review (Medium): the WS drain
 // loop must observe socket close immediately. Without this, an
 // idle peer (closed tab, dropped network) leaves the loop polling
-// the facade at the 1Hz cadence — its per-caller `SseSlot` stays
+// the service at the 1Hz cadence — its per-caller `SseSlot` stays
 // reserved until `SSE_MAX_LIFETIME` (5 min). With the recv-aware
 // select, a peer close releases the slot within one poll cycle.
 //

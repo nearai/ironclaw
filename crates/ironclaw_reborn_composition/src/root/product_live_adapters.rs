@@ -45,7 +45,7 @@ use crate::projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreview
 
 #[derive(Debug, Error)]
 pub enum ProductLivePlannedRuntimeAdapterError {
-    #[error("product-live planned runtime adapters require a host runtime facade")]
+    #[error("product-live planned runtime adapters require a host runtime service")]
     MissingHostRuntime,
     #[error("product-live model route is invalid: {0}")]
     ModelRoute(#[from] ModelRouteError),
@@ -742,7 +742,7 @@ pub struct ProductLivePlannedRuntimeAdapterConfig {
 /// Adapter bundle consumed by `build_product_live_planned_runtime`.
 #[derive(Clone)]
 pub struct ProductLivePlannedRuntimeAdapters {
-    /// Capability port factory backed by the host runtime facade.
+    /// Capability port factory backed by the host runtime service.
     pub capability_factory: Arc<dyn LoopCapabilityPortFactory>,
     /// Capability input resolver shared with synthetic host capabilities.
     pub capability_input_resolver: Arc<dyn LoopCapabilityInputResolver>,

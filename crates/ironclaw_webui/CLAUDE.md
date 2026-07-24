@@ -28,7 +28,7 @@ host-owned counterpart that binds the `TcpListener` and drives the serve loop.
 Path A of `docs/reborn/how-to-port-channel-to-reborn.md` rules apply: host auth
 stays host-owned in this crate, no `src/` (v1) imports, no v1 secrets / settings
 / DB, and no direct `ironclaw_product` edge (reach it through
-composition's facade). Enforced by `ironclaw_architecture`
+composition's service). Enforced by `ironclaw_architecture`
 (`tests/reborn_dependency_boundaries.rs`).
 
 ## Surface
@@ -39,7 +39,7 @@ composition's facade). Enforced by `ironclaw_architecture`
 |---|---|
 | `webui_v2_router(state)` / `webui_v2_router_with_options(state, opts)` | Build the WebChat v2 `axum::Router` from a `WebUiV2State`. |
 | `webui_v2_routes() -> Vec<IngressRouteDescriptor>` | The route descriptor table (id, method, pattern, auth, rate/body limit, streaming). Locked by `tests/webui_v2_descriptors_contract.rs`. |
-| `WebUiV2State` | Handler state: the `ProductSurface` facade + `SseCapacity` + route options. |
+| `WebUiV2State` | Handler state: the `ProductSurface` service + `SseCapacity` + route options. |
 | `WebUiV2HttpError` / `WebUiV2HttpErrorBody` | The only path handlers return HTTP errors through — keeps the redacted-error vocabulary intact. |
 | `webui_v2_app(bundle, config) -> WebuiV2App` | Compose composition's `RebornWebuiBundle` + a host `WebuiServeConfig` into the full middleware-wrapped `Router` (also `webui_v2_app_with_lifecycle`). |
 | `WebuiServeConfig` | Host-owned serve config (tenant, authenticator, default agent/project, public/protected mounts, Google OAuth). |
@@ -59,7 +59,7 @@ turning the `webui_v2_routes()` descriptors into tower layers.
 | `SignedTokenSessionStore` | HMAC-signed bearer mint/lookup with a bounded process-local logout denylist |
 | `SessionAuthenticator` | `WebuiAuthenticator` that resolves bearer tokens through `SignedTokenSessionStore` |
 | `OidcAuthenticator` | OIDC bearer-token verifier (JWKS + standard claims); accepted tokens map to non-operator WebUI capabilities |
-| `webui_v2_auth_router(config) -> PublicRouteMount` | OAuth login router + route descriptors. The descriptors travel with the router so composition can fold them into the descriptor-driven per-route rate-limit / body-limit middleware — same machinery the v2 facade and product-auth callback already use, no side door. |
+| `webui_v2_auth_router(config) -> PublicRouteMount` | OAuth login router + route descriptors. The descriptors travel with the router so composition can fold them into the descriptor-driven per-route rate-limit / body-limit middleware — same machinery the v2 service and product-auth callback already use, no side door. |
 | `PublicRouteMount` | `{ router, descriptors }` pair handed to `WebuiServeConfig::with_public_route_mount` |
 | `OAuthProvider` trait (in `auth/provider.rs`) | Extension point for per-provider URL / code-exchange logic. Deliberately lives in its own module so each provider does not depend on the others. `GoogleProvider` and `GitHubProvider` ship today. |
 | `GoogleProvider` (in `auth/google.rs`) | Google OIDC provider (scopes `openid email profile`, PKCE S256, optional `hd` hosted-domain restriction). Built from `GoogleOAuthConfig`. |
@@ -104,7 +104,7 @@ descriptor table in `src/webui_v2/descriptors.rs`; the count/shape is locked by
 `webui_v2_routes()` entry, or that test fails.
 
 `webui.v2.get_run_artifact` exports one exact caller-owned run as the versioned
-`ironclaw.run_artifact.v1` evidence schema. The facade authorizes the thread
+`ironclaw.run_artifact.v1` evidence schema. The service authorizes the thread
 from authenticated tenant/user scope before selecting records by `turn_run_id`,
 reconstructs provider tool-call metadata through the model-context read path,
 and applies deterministic trace redaction before serialization. Its logs are a
@@ -142,7 +142,7 @@ route (tenant/user-scoped tool-approval settings), not an operator route.
   proxy-reordered closes/opens during thread navigation from stranding the
   replacement stream behind the cap; distinct tabs still consume distinct
   slots.
-- A successful facade subscription emits an application-level `keep_alive`
+- A successful service subscription emits an application-level `keep_alive`
   frame immediately after admission. Browser connection state uses that frame
   as proof that the projection tail is ready instead of waiting for a model
   delta or the periodic transport keep-alive.
@@ -153,10 +153,10 @@ route (tenant/user-scoped tool-approval settings), not an operator route.
   across SPA navigation.
 - Every stream is closed after a max lifetime (5 min) and every `socket.send` /
   drain await is `timeout`-bounded, so a back-pressuring client or a stalled
-  facade cannot pin a slot past the budget. Slots are RAII (`SseSlot`), released
+  service cannot pin a slot past the budget. Slots are RAII (`SseSlot`), released
   on disconnect / expiry / error. Regressions locked by
   `stream_events_ws_shares_capacity_with_sse_streams` and
-  `stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime`.
+  `stream_events_releases_slot_when_service_drain_stalls_past_max_lifetime`.
 - `capability_activity` / `capability_display_preview` frames carry only
   bounded, secret-redacted input/output *summaries* (host paths rejected, URLs
   stripped, byte-bounded) — never raw args/results. Full output stays behind the

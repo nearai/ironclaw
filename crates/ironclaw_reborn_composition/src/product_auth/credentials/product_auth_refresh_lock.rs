@@ -98,7 +98,7 @@ pub(crate) use ironclaw_auth::LeaderOutcome;
 pub(crate) struct CredentialRefreshLeaderLock {
     /// Postgres pool for leader-lock acquisition. `None` on the libsql /
     /// local-dev path → always-leader (pass-through). MUST stay private;
-    /// never exposed through any public API or the composition facade.
+    /// never exposed through any public API or the composition service.
     pool: Option<deadpool_postgres::Pool>,
 }
 

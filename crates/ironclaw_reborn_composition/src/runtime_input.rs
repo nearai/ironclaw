@@ -269,7 +269,7 @@ impl ResolvedRebornLlm {
     /// provider from `config` and hands the
     /// factory the *swappable* wrapper over it, so `config` remains the single
     /// source of truth and the raw `ironclaw_llm::LlmProvider` substrate handle
-    /// is never accepted wholesale through the facade — the caller only supplies
+    /// is never accepted wholesale through the service — the caller only supplies
     /// a decorator over a provider the composition built.
     /// `build_placeholder_llm_gateway` applies the factory at cold boot and never
     /// re-exposes the provider; because it wraps the swappable, the decorator
@@ -473,7 +473,7 @@ impl TriggerPollerSettings {
 pub struct RebornRuntimeInput {
     pub services: Option<RebornHostBindings>,
     pub llm: Option<ResolvedRebornLlm>,
-    /// Operator boot config. When present, the WebUI facade composes the LLM-config settings service from it so the
+    /// Operator boot config. When present, the WebUI service composes the LLM-config settings service from it so the
     /// settings surface can read/write `providers.json` + `config.toml`.
     pub boot: Option<RebornBootConfig>,
     pub runner: TurnRunnerSettings,
@@ -687,7 +687,7 @@ impl RebornRuntimeInput {
         self
     }
 
-    /// Supply the operator boot config so the WebUI facade can compose the
+    /// Supply the operator boot config so the WebUI service can compose the
     /// LLM-config settings service.
     pub fn with_boot_config(mut self, boot: RebornBootConfig) -> Self {
         self.boot = Some(boot);

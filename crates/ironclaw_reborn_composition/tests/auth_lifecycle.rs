@@ -348,11 +348,11 @@ async fn assert_lifecycle_uninstall_denies_blocked_auth_gate(fail_flow_before_un
 }
 
 #[tokio::test]
-async fn refresh_credential_account_uses_product_auth_facade_and_redacts_response() {
+async fn refresh_credential_account_uses_product_auth_service_and_redacts_response() {
     let auth = Arc::new(InMemoryAuthProductServices::new());
     let owner = scope("alice");
-    let old_access = SecretHandle::new("github-facade-old-access").unwrap();
-    let old_refresh = SecretHandle::new("github-facade-old-refresh").unwrap();
+    let old_access = SecretHandle::new("github-service-old-access").unwrap();
+    let old_refresh = SecretHandle::new("github-service-old-refresh").unwrap();
     let account = auth
         .create_account(NewCredentialAccount {
             scope: owner.clone(),
@@ -395,13 +395,13 @@ async fn refresh_credential_account_uses_product_auth_facade_and_redacts_respons
     assert_ne!(stored.refresh_secret, Some(old_refresh));
 
     let serialized = serde_json::to_string(&report).unwrap();
-    assert!(!serialized.contains("github-facade-old-access"));
-    assert!(!serialized.contains("github-facade-old-refresh"));
+    assert!(!serialized.contains("github-service-old-access"));
+    assert!(!serialized.contains("github-service-old-refresh"));
     assert!(!serialized.contains("oauth-refreshed"));
 }
 
 #[tokio::test]
-async fn refresh_credential_account_maps_facade_errors_to_stable_codes() {
+async fn refresh_credential_account_maps_service_errors_to_stable_codes() {
     let auth = Arc::new(InMemoryAuthProductServices::new());
     let owner = scope("alice");
     let account = auth
@@ -517,7 +517,7 @@ async fn refresh_credential_account_with_provider_keeps_existing_refresh_handle_
 }
 
 #[tokio::test]
-async fn cleanup_credentials_for_lifecycle_uses_facade_and_quarantine_report() {
+async fn cleanup_credentials_for_lifecycle_uses_service_and_quarantine_report() {
     let auth = Arc::new(InMemoryAuthProductServices::new());
     let owner = scope("alice");
     let extension = ExtensionId::new("github").unwrap();
@@ -530,7 +530,7 @@ async fn cleanup_credentials_for_lifecycle_uses_facade_and_quarantine_report() {
             ownership: CredentialOwnership::ExtensionOwned,
             owner_extension: Some(extension.clone()),
             granted_extensions: Vec::new(),
-            access_secret: Some(SecretHandle::new("github-owned-facade").unwrap()),
+            access_secret: Some(SecretHandle::new("github-owned-service").unwrap()),
             refresh_secret: None,
             scopes: Vec::new(),
         })
@@ -545,7 +545,7 @@ async fn cleanup_credentials_for_lifecycle_uses_facade_and_quarantine_report() {
             ownership: CredentialOwnership::ExtensionOwned,
             owner_extension: Some(extension.clone()),
             granted_extensions: Vec::new(),
-            access_secret: Some(SecretHandle::new("github-quarantined-facade").unwrap()),
+            access_secret: Some(SecretHandle::new("github-quarantined-service").unwrap()),
             refresh_secret: None,
             scopes: Vec::new(),
         })
@@ -598,8 +598,8 @@ async fn cleanup_credentials_for_lifecycle_uses_facade_and_quarantine_report() {
     );
 
     let serialized = serde_json::to_string(&report).unwrap();
-    assert!(!serialized.contains("github-owned-facade"));
-    assert!(!serialized.contains("github-quarantined-facade"));
+    assert!(!serialized.contains("github-owned-service"));
+    assert!(!serialized.contains("github-quarantined-service"));
 }
 
 #[derive(Debug, Default)]

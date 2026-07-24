@@ -10,7 +10,7 @@
 //! `ProductSurface`), not composition's `webui_v2_app` wrapper — the
 //! wrapper needs the heavier `build_reborn_runtime` tier (named follow-on).
 //! Composition deliberately does not re-export the bare router/state
-//! (facade-only rule), so this suite carries the root DEV-dependency on
+//! (service-only rule), so this suite carries the root DEV-dependency on
 //! `ironclaw_webui` itself — production binaries are unaffected.
 //!
 //! `MinimalWebuiServices` duplicates the role of the contract suite's
@@ -164,6 +164,6 @@ async fn create_thread_round_trips_through_router() {
     assert_eq!(
         services.create_thread_calls.lock().expect("lock").len(),
         1,
-        "facade create_thread dispatched exactly once"
+        "service create_thread dispatched exactly once"
     );
 }

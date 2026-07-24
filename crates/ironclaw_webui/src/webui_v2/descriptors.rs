@@ -390,7 +390,7 @@ fn send_message_descriptor() -> IngressRouteDescriptor {
         mutation_policy(
             // Message bodies carry user text plus optional base64-encoded inline
             // attachments. 14 MiB matches the gateway-wide body budget and covers
-            // base64 of the 10 MiB decoded per-message attachment cap (the facade
+            // base64 of the 10 MiB decoded per-message attachment cap (the service
             // enforces the 5 MiB-per-file / 10 MiB-total decoded budgets).
             body_limit_kib(14 * 1024),
             mutation_rate_limit(),
@@ -815,7 +815,7 @@ fn get_attachment_descriptor() -> IngressRouteDescriptor {
             read_rate_limit(),
             AuditTraceClass::UserAction,
             // Reads workspace-backed attachment bytes through the product
-            // facade — more than a projection read, so the effect path is
+            // service — more than a projection read, so the effect path is
             // ProductSurface to keep the fail-closed ingress boundary honest.
             AllowedEffectPath::ProductSurface,
             StreamingMode::None,

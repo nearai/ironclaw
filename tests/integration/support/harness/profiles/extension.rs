@@ -603,7 +603,7 @@ impl ironclaw_host_api::ToolAdapter for AcmeFixtureToolAdapter {
 /// its assets copied into the storage root pre-build (the catalog discovers
 /// them), its native factory assembled into the composition input, its tool
 /// granted, and its provider trusted — the acme lifecycle then runs through
-/// the REAL facade (install → activate → dispatch-from-snapshot → remove).
+/// the REAL service (install → activate → dispatch-from-snapshot → remove).
 pub(crate) fn extension_runtime_acme_tools_profile() -> HarnessResult<ToolsProfile> {
     let mut profile = extension_lifecycle_tools_profile()?;
     profile

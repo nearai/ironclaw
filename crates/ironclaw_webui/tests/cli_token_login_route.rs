@@ -183,7 +183,7 @@ async fn missing_token_is_rejected() {
 // `serve.rs`'s `WebuiServeConfig`), fed the SAME `session_store` the login
 // mount mints through.
 // - deliberately NOT the full `webui_v2_app` composition
-//   `session_round_trip.rs` uses — that facade is scoped to the OAuth
+//   `session_round_trip.rs` uses — that service is scoped to the OAuth
 //   round-trip; duplicating it here is unneeded machinery.
 // - `SessionAuthenticator` IS the seam that decides "does this bearer
 //   authenticate" in production, so a route behind it suffices.

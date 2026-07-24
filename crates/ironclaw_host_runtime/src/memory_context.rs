@@ -1,6 +1,6 @@
 //! Production [`MemoryPromptContextService`] adapter backed by IronClaw memory.
 //!
-//! This adapter bridges the Reborn memory service facade into the agent loop
+//! This adapter bridges the Reborn memory service service into the agent loop
 //! context pipeline. It derives the host-resolved IronClaw memory invocation
 //! scope from the request's [`TurnScope`] and [`TurnActor`], then delegates
 //! retrieval to [`MemoryService`]. The loop-facing adapter still owns final
@@ -32,7 +32,7 @@ pub struct ProductionMemoryPromptContextService {
 
 impl ProductionMemoryPromptContextService {
     /// Create a new production adapter wrapping the configured memory service
-    /// facade. Native memory remains the default facade adapter in Phase 1.
+    /// service. Native memory remains the default service adapter in Phase 1.
     pub fn new(memory_service: Arc<dyn MemoryService>) -> Self {
         Self { memory_service }
     }

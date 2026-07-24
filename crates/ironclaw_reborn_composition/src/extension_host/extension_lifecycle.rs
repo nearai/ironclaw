@@ -25,7 +25,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_product::adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
 use ironclaw_product::{
-    ChannelConnectionFacade, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
+    ChannelConnectionRequirement, ChannelConnectionService, ExtensionAccountSetupDescriptor,
     ExtensionAccountSetupError, ExtensionAccountSetupRegistry, LifecycleBlockerRef,
     LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
     LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
@@ -43,7 +43,7 @@ use crate::extension_host::unzip_extension_bundle;
 /// depending on the whole product-auth bundle (and so tests can record the
 /// issued cleanup). Production forwards to the guardrail-sanctioned
 /// [`RebornProductAuthServices::cleanup_credentials_for_lifecycle`]. This is the
-/// single convergence point for both removal entrypoints (the WebUI facade and
+/// single convergence point for both removal entrypoints (the WebUI service and
 /// the `builtin.extension_remove` agent capability), so revocation cannot be
 /// bypassed through one door.
 #[async_trait]
@@ -128,7 +128,7 @@ pub(crate) struct RebornLocalExtensionManagementPort {
     generic_host: std::sync::OnceLock<Arc<ironclaw_extension_host::ExtensionHost>>,
     /// Late-bound weak reference to the effective channel-configuration
     /// resolver. Weak ownership avoids the cycle created by that resolver's
-    /// reactivation port pointing back to this lifecycle facade.
+    /// reactivation port pointing back to this lifecycle service.
     channel_config:
         std::sync::OnceLock<Weak<crate::extension_host::channel_config::ChannelConfigService>>,
     // Late-attached with `generic_host` (both need the fully wired host
@@ -154,7 +154,7 @@ pub(crate) struct RebornLocalExtensionManagementPort {
     /// not re-derive admin-ness.
     tenant_operator_user_id: UserId,
     removal_cleanup: Arc<ExtensionRemovalCleanupRegistry>,
-    /// Late-binding slot for the generic per-user channel-connection facade
+    /// Late-binding slot for the generic per-user channel-connection service
     /// (extension-runtime §6.4), shared with
     /// `RebornLocalRuntimeServices::channel_disconnect_slot`. Removing
     /// an extension whose manifest declares a channel surface disconnects the
@@ -171,7 +171,7 @@ pub(crate) struct RebornLocalExtensionManagementPort {
     /// composition in `build_reborn_runtime`, or the channel-connection test
     /// bundle). `new` defaults to a fresh unshared (never-filled) slot for
     /// focused tests.
-    channel_disconnect_slot: Arc<std::sync::OnceLock<Arc<dyn ChannelConnectionFacade>>>,
+    channel_disconnect_slot: Arc<std::sync::OnceLock<Arc<dyn ChannelConnectionService>>>,
     /// Product-owned account-setup metadata (activation message and
     /// connection-requirement overrides). Descriptors are declared during
     /// composition; the activation success path consults it and the pairing
@@ -481,7 +481,7 @@ impl RebornLocalExtensionManagementPort {
         let _ = self.channel_config.set(Arc::downgrade(channel_config));
     }
 
-    /// The attached generic host, when this facade has one — the snapshot
+    /// The attached generic host, when this service has one — the snapshot
     /// authority the channel host assembly reconciles against.
     pub(crate) fn generic_host(&self) -> Option<Arc<ironclaw_extension_host::ExtensionHost>> {
         self.generic_host.get().cloned()
@@ -697,13 +697,13 @@ impl RebornLocalExtensionManagementPort {
         self
     }
 
-    /// Share the composition's late-binding channel-connection facade slot
+    /// Share the composition's late-binding channel-connection service slot
     /// (see the field doc). Composition passes the SAME `Arc` stored on
     /// `RebornLocalRuntimeServices` so a fill by runtime composition (or the
     /// channel-connection test bundle) is visible to the removal path here.
     pub(crate) fn with_channel_disconnect_slot(
         mut self,
-        slot: Arc<std::sync::OnceLock<Arc<dyn ChannelConnectionFacade>>>,
+        slot: Arc<std::sync::OnceLock<Arc<dyn ChannelConnectionService>>>,
     ) -> Self {
         self.channel_disconnect_slot = slot;
         self
@@ -1616,7 +1616,7 @@ impl RebornLocalExtensionManagementPort {
     }
 
     /// Remove an installed extension. This is the single convergence point both
-    /// removal entrypoints call — the WebUI facade
+    /// removal entrypoints call — the WebUI service
     /// ([`LifecycleProductAction::ExtensionRemove`]) and the
     /// `builtin.extension_remove` agent capability — so the credential
     /// revocation below cannot be bypassed through one door.
@@ -1707,7 +1707,7 @@ impl RebornLocalExtensionManagementPort {
             // proof-code channels own pairing records, identity bindings, DM
             // targets, and conversation-actor bindings. Removal runs the real
             // per-caller disconnect below while the installation still exists.
-            // The generic facade discovers the same manifest-derived set.
+            // The generic service discovers the same manifest-derived set.
             let removes_connectable_channel = {
                 let resolved = removal_manifest.resolved();
                 resolved.channel.is_some()
@@ -1746,7 +1746,7 @@ impl RebornLocalExtensionManagementPort {
             // Per-caller channel disconnect (§6.4, issue #6091 shape): run the
             // REAL disconnect — revoke the caller's personal vendor credential
             // → vendor cleanup → delete the caller's identity bindings —
-            // through the same generic facade the extensions page reads, so
+            // through the same generic service the extensions page reads, so
             // connection state, durable bindings, lifecycle phase, and tool
             // dispatchability flip together on removal. Runs before teardown
             // so the installation-scoped binding prefix still resolves; a
@@ -1756,7 +1756,7 @@ impl RebornLocalExtensionManagementPort {
             {
                 // Fail closed on an empty slot: a channel surface may hold
                 // per-caller OAuth or pairing state, and a composition that
-                // gives this path no facade to disconnect it through must not
+                // gives this path no service to disconnect it through must not
                 // report the removal as successful.
                 // Surface the same typed retryable error a failing disconnect
                 // does; compositions that legitimately remove channel
@@ -1766,7 +1766,7 @@ impl RebornLocalExtensionManagementPort {
                     return Err(ProductSurfaceFailure::Transient {
                         reason: format!(
                             "channel connection cleanup is unavailable for extension {}: no \
-                             channel connection facade is composed; retry removal once the \
+                             channel connection service is composed; retry removal once the \
                              host wires channel connections",
                             extension_id.as_str()
                         ),
@@ -3386,7 +3386,7 @@ mod tests {
     use ironclaw_host_runtime::{SPAWN_SUBAGENT_CAPABILITY_ID, builtin_first_party_package};
     use ironclaw_product::{
         LifecycleExtensionRuntimeKind, LifecycleExtensionSource, LifecycleProductAction,
-        LifecycleProductContext, LifecycleProductFacade, LifecycleProductSurfaceContext,
+        LifecycleProductContext, LifecycleProductService, LifecycleProductSurfaceContext,
         LifecycleReadinessBlocker,
     };
     use ironclaw_trust::{HostTrustPolicy, InvalidationBus, TrustPolicy};
@@ -3583,11 +3583,11 @@ mod tests {
 
     #[tokio::test]
     async fn extension_lifecycle_installs_activates_and_removes_catalog_package() {
-        let (_dir, storage_root, facade, active_registry, _installation_store) =
+        let (_dir, storage_root, service, active_registry, _installation_store) =
             extension_lifecycle_fixture();
 
-        // safety: test-only lifecycle facade calls; no database transaction is involved.
-        let search = facade
+        // safety: test-only lifecycle service calls; no database transaction is involved.
+        let search = service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionSearch {
@@ -3610,7 +3610,7 @@ mod tests {
 
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
-        let install = facade
+        let install = service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionInstall {
@@ -3637,7 +3637,7 @@ mod tests {
                 .is_none()
         );
 
-        let activate = facade
+        let activate = service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionActivate {
@@ -3664,7 +3664,7 @@ mod tests {
                 .is_some()
         );
 
-        let remove = facade
+        let remove = service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionRemove { package_ref },
@@ -3748,7 +3748,7 @@ mod tests {
         // that feature is compiled in, so a `telegram`-named fixture would no
         // longer exercise the surface-generic external-channel path this test
         // pins.
-        let (_dir, _storage_root, facade, _active_registry, _installation_store) =
+        let (_dir, _storage_root, service, _active_registry, _installation_store) =
             extension_lifecycle_fixture_with_catalog_and_service(
                 AvailableExtensionCatalog::from_packages(vec![fixture_external_channel_package(
                     "signal", "Signal",
@@ -3757,7 +3757,7 @@ mod tests {
             );
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "signal").expect("valid ref");
-        facade
+        service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionInstall {
@@ -3767,7 +3767,7 @@ mod tests {
             .await
             .expect("install external channel");
 
-        let activate = facade
+        let activate = service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionActivate { package_ref },
@@ -3818,8 +3818,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generic_external_channel_remove_succeeds_without_cleanup_facade() {
-        let (_dir, storage_root, facade, _active_registry, installation_store) =
+    async fn generic_external_channel_remove_succeeds_without_cleanup_service() {
+        let (_dir, storage_root, service, _active_registry, installation_store) =
             extension_lifecycle_fixture_with_catalog_and_service(
                 AvailableExtensionCatalog::from_packages(vec![fixture_external_channel_package(
                     "telegram", "Telegram",
@@ -3828,7 +3828,7 @@ mod tests {
             );
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram")
             .expect("valid ref");
-        facade
+        service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionInstall {
@@ -3838,7 +3838,7 @@ mod tests {
             .await
             .expect("install external channel");
 
-        facade
+        service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionRemove {
@@ -4022,7 +4022,7 @@ mod tests {
 
     #[tokio::test]
     async fn non_final_member_remove_runs_actor_cleanup_and_keeps_other_member_installed() {
-        // safety: test-only facade calls are independent lifecycle requests, not database writes.
+        // safety: test-only service calls are independent lifecycle requests, not database writes.
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
         let github = fixture_github_package_with_cleanup(removal_cleanup_requirement(
@@ -4040,7 +4040,7 @@ mod tests {
                 .expect("unique cleanup adapter"),
         );
         let credential_cleanup = Arc::new(RecordingExtensionCredentialCleanup::default());
-        let (_dir, storage_root, facade, _active_registry, installation_store) =
+        let (_dir, storage_root, service, _active_registry, installation_store) =
             extension_lifecycle_fixture_with_all_cleanup(
                 AvailableExtensionCatalog::from_packages(vec![github]),
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
@@ -4051,7 +4051,7 @@ mod tests {
         external_cleanup.set_probe(&storage_root, installation_store.clone(), "github");
 
         for member in ["alice", "bob"] {
-            facade
+            service
                 .execute(
                     lifecycle_surface_context_for_user(member),
                     LifecycleProductAction::ExtensionInstall {
@@ -4062,7 +4062,7 @@ mod tests {
                 .expect("member installs github");
         }
 
-        facade
+        service
             .execute(
                 lifecycle_surface_context_for_user("alice"),
                 LifecycleProductAction::ExtensionRemove {
@@ -4304,15 +4304,15 @@ supports_threads = true
     }
 
     /// Recording double for the §6.4 per-caller disconnect the removal path
-    /// dispatches through the late-bound facade slot. `fail_next(n)` scripts
+    /// dispatches through the late-bound service slot. `fail_next(n)` scripts
     /// the next `n` disconnects to fail so retry convergence can be pinned.
     #[derive(Default)]
-    struct RecordingChannelConnectionFacade {
+    struct RecordingChannelConnectionService {
         disconnects: StdMutex<Vec<(ProductSurfaceCaller, String)>>,
         failures_remaining: AtomicUsize,
     }
 
-    impl RecordingChannelConnectionFacade {
+    impl RecordingChannelConnectionService {
         fn fail_next(&self, count: usize) {
             self.failures_remaining.store(count, Ordering::SeqCst);
         }
@@ -4323,7 +4323,7 @@ supports_threads = true
     }
 
     #[async_trait]
-    impl ChannelConnectionFacade for RecordingChannelConnectionFacade {
+    impl ChannelConnectionService for RecordingChannelConnectionService {
         async fn caller_channel_connections(
             &self,
             _caller: ProductSurfaceCaller,
@@ -4354,11 +4354,11 @@ supports_threads = true
     }
 
     fn connectable_channel_removal_fixture(
-        slot: Option<Arc<std::sync::OnceLock<Arc<dyn ChannelConnectionFacade>>>>,
+        slot: Option<Arc<std::sync::OnceLock<Arc<dyn ChannelConnectionService>>>>,
     ) -> (
         tempfile::TempDir,
         std::path::PathBuf,
-        crate::extension_host::lifecycle::RebornLocalLifecycleFacade,
+        crate::extension_host::lifecycle::RebornLocalLifecycleService,
         Arc<SharedExtensionRegistry>,
         Arc<FilesystemExtensionInstallationStore>,
     ) {
@@ -4372,7 +4372,7 @@ supports_threads = true
     }
 
     /// §6.4 / issue #6091: removing a channel+auth extension runs the REAL
-    /// per-caller disconnect through the late-bound facade slot, with the
+    /// per-caller disconnect through the late-bound service slot, with the
     /// authenticated caller's identity, before teardown — and an empty slot
     /// fails the removal closed (typed retryable error, installation kept)
     /// instead of skipping the disconnect.
@@ -4380,15 +4380,15 @@ supports_threads = true
     async fn extension_remove_of_connectable_channel_disconnects_the_caller() {
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "acmechat")
             .expect("valid ref");
-        let channel_connection = Arc::new(RecordingChannelConnectionFacade::default());
-        let slot: Arc<std::sync::OnceLock<Arc<dyn ChannelConnectionFacade>>> =
+        let channel_connection = Arc::new(RecordingChannelConnectionService::default());
+        let slot: Arc<std::sync::OnceLock<Arc<dyn ChannelConnectionService>>> =
             Arc::new(std::sync::OnceLock::new());
-        slot.set(channel_connection.clone() as Arc<dyn ChannelConnectionFacade>)
+        slot.set(channel_connection.clone() as Arc<dyn ChannelConnectionService>)
             .ok();
-        let (_dir, _storage_root, facade, _active_registry, installation_store) =
+        let (_dir, _storage_root, service, _active_registry, installation_store) =
             connectable_channel_removal_fixture(Some(Arc::clone(&slot)));
 
-        facade
+        service
             .execute(
                 lifecycle_surface_context_for_user("alice"),
                 LifecycleProductAction::ExtensionInstall {
@@ -4397,7 +4397,7 @@ supports_threads = true
             )
             .await
             .expect("alice installs acmechat");
-        facade
+        service
             .execute(
                 lifecycle_surface_context_for_user("alice"),
                 LifecycleProductAction::ExtensionRemove {
@@ -4428,12 +4428,12 @@ supports_threads = true
 
         // Empty slot: fail closed. A channel surface backed by an auth vendor
         // may hold per-caller identity bindings, and a composition that gives
-        // the removal path no facade to disconnect them through must not
+        // the removal path no service to disconnect them through must not
         // report the removal as successful — the typed retryable error keeps
         // the installation authoritative for a retry.
-        let (_dir2, _storage_root2, unwired_facade, _registry2, unwired_store) =
+        let (_dir2, _storage_root2, unwired_service, _registry2, unwired_store) =
             connectable_channel_removal_fixture(None);
-        unwired_facade
+        unwired_service
             .execute(
                 lifecycle_surface_context_for_user("alice"),
                 LifecycleProductAction::ExtensionInstall {
@@ -4441,14 +4441,14 @@ supports_threads = true
                 },
             )
             .await
-            .expect("alice installs acmechat without a facade slot");
-        let error = unwired_facade
+            .expect("alice installs acmechat without a service slot");
+        let error = unwired_service
             .execute(
                 lifecycle_surface_context_for_user("alice"),
                 LifecycleProductAction::ExtensionRemove { package_ref },
             )
             .await
-            .expect_err("removal without a composed channel-connection facade must fail closed");
+            .expect_err("removal without a composed channel-connection service must fail closed");
         assert_retryable_lifecycle_unavailable(&error);
         assert!(
             unwired_store
@@ -4470,12 +4470,12 @@ supports_threads = true
     async fn extension_remove_of_pairing_channel_disconnects_the_caller() {
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "pairchat")
             .expect("valid ref");
-        let channel_connection = Arc::new(RecordingChannelConnectionFacade::default());
-        let slot: Arc<std::sync::OnceLock<Arc<dyn ChannelConnectionFacade>>> =
+        let channel_connection = Arc::new(RecordingChannelConnectionService::default());
+        let slot: Arc<std::sync::OnceLock<Arc<dyn ChannelConnectionService>>> =
             Arc::new(std::sync::OnceLock::new());
-        slot.set(channel_connection.clone() as Arc<dyn ChannelConnectionFacade>)
+        slot.set(channel_connection.clone() as Arc<dyn ChannelConnectionService>)
             .ok();
-        let (_dir, _storage_root, facade, _active_registry, installation_store) =
+        let (_dir, _storage_root, service, _active_registry, installation_store) =
             extension_lifecycle_fixture_with_all_cleanup(
                 AvailableExtensionCatalog::from_packages(vec![fixture_pairing_channel_package()]),
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
@@ -4484,7 +4484,7 @@ supports_threads = true
                 Some(slot),
             );
 
-        facade
+        service
             .execute(
                 lifecycle_surface_context_for_user("alice"),
                 LifecycleProductAction::ExtensionInstall {
@@ -4493,7 +4493,7 @@ supports_threads = true
             )
             .await
             .expect("alice installs pairchat");
-        facade
+        service
             .execute(
                 lifecycle_surface_context_for_user("alice"),
                 LifecycleProductAction::ExtensionRemove { package_ref },
@@ -4524,16 +4524,16 @@ supports_threads = true
     async fn extension_remove_stays_retryable_when_channel_disconnect_fails() {
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "acmechat")
             .expect("valid ref");
-        let channel_connection = Arc::new(RecordingChannelConnectionFacade::default());
+        let channel_connection = Arc::new(RecordingChannelConnectionService::default());
         channel_connection.fail_next(1);
-        let slot: Arc<std::sync::OnceLock<Arc<dyn ChannelConnectionFacade>>> =
+        let slot: Arc<std::sync::OnceLock<Arc<dyn ChannelConnectionService>>> =
             Arc::new(std::sync::OnceLock::new());
-        slot.set(channel_connection.clone() as Arc<dyn ChannelConnectionFacade>)
+        slot.set(channel_connection.clone() as Arc<dyn ChannelConnectionService>)
             .ok();
-        let (_dir, _storage_root, facade, _active_registry, installation_store) =
+        let (_dir, _storage_root, service, _active_registry, installation_store) =
             connectable_channel_removal_fixture(Some(Arc::clone(&slot)));
 
-        facade
+        service
             .execute(
                 lifecycle_surface_context_for_user("alice"),
                 LifecycleProductAction::ExtensionInstall {
@@ -4542,7 +4542,7 @@ supports_threads = true
             )
             .await
             .expect("alice installs acmechat");
-        let error = facade
+        let error = service
             .execute(
                 lifecycle_surface_context_for_user("alice"),
                 LifecycleProductAction::ExtensionRemove {
@@ -4563,7 +4563,7 @@ supports_threads = true
             "the installation must survive the failed removal so the owner can retry"
         );
 
-        facade
+        service
             .execute(
                 lifecycle_surface_context_for_user("alice"),
                 LifecycleProductAction::ExtensionRemove { package_ref },
@@ -4999,7 +4999,7 @@ supports_threads = true
         // fixture rather than the real Slack bot: under model B `slack_bot` is
         // hidden from search, so a Slack-named fixture would be filtered out and
         // this generic guidance would go untested.
-        let (_dir, _storage_root, facade, _active_registry, _installation_store) =
+        let (_dir, _storage_root, service, _active_registry, _installation_store) =
             extension_lifecycle_fixture_with_catalog_and_service(
                 AvailableExtensionCatalog::from_packages(vec![fixture_external_channel_package(
                     "example_bot",
@@ -5009,7 +5009,7 @@ supports_threads = true
             );
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "example_bot")
             .expect("valid ref");
-        facade
+        service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionInstall {
@@ -5018,7 +5018,7 @@ supports_threads = true
             )
             .await
             .expect("install example channel");
-        facade
+        service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionActivate {
@@ -5028,7 +5028,7 @@ supports_threads = true
             .await
             .expect("activate example channel");
 
-        let search = facade
+        let search = service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionSearch {
@@ -5227,7 +5227,7 @@ supports_threads = true
         let error = port
             .remove(slack_ref, &removal_scope, Some(&removal_scope.user_id))
             .await
-            .expect_err("Slack removal without its cleanup facade must fail closed");
+            .expect_err("Slack removal without its cleanup service must fail closed");
         assert!(matches!(error, ProductSurfaceFailure::Transient { .. }));
 
         let installed_ids = installation_store
@@ -5530,12 +5530,12 @@ supports_threads = true
 
     #[tokio::test]
     async fn hosted_mcp_activation_without_discovered_or_static_tools_stays_installed() {
-        let (_dir, _storage_root, facade, active_registry, installation_store) =
+        let (_dir, _storage_root, service, active_registry, installation_store) =
             extension_lifecycle_fixture_with_catalog_and_service(
                 AvailableExtensionCatalog::from_first_party_assets().expect("first-party assets"),
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
             );
-        let facade = facade
+        let service = service
             .with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts))
             .with_runtime_http_egress(Arc::new(EmptyToolsHostedMcpEgress));
         let package_ref =
@@ -5543,7 +5543,7 @@ supports_threads = true
 
         // safety: sequential caller actions in a hermetic lifecycle test, not
         // database statements that must share an atomic transaction.
-        facade
+        service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionInstall {
@@ -5552,7 +5552,7 @@ supports_threads = true
             )
             .await
             .expect("install Notion MCP");
-        let error = facade
+        let error = service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionActivate {
@@ -6668,12 +6668,12 @@ output_schema_ref = "schemas/search.output.json"
 
     #[tokio::test]
     async fn extension_lifecycle_installs_activates_and_removes_github() {
-        let (_dir, storage_root, facade, active_registry, _installation_store) =
+        let (_dir, storage_root, service, active_registry, _installation_store) =
             github_extension_lifecycle_fixture();
-        let facade =
-            facade.with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
+        let service =
+            service.with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
 
-        let search = facade
+        let search = service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionSearch {
@@ -6713,7 +6713,7 @@ output_schema_ref = "schemas/search.output.json"
 
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
-        let install = facade
+        let install = service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionInstall {
@@ -6740,7 +6740,7 @@ output_schema_ref = "schemas/search.output.json"
                 .is_none()
         );
 
-        let installed_search = facade
+        let installed_search = service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionSearch {
@@ -6771,7 +6771,7 @@ output_schema_ref = "schemas/search.output.json"
             "configured inactive GitHub search results must not expose stale PAT setup onboarding"
         );
 
-        let activate = facade
+        let activate = service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionActivate {
@@ -6802,7 +6802,7 @@ output_schema_ref = "schemas/search.output.json"
                 .is_some()
         );
 
-        let active_search = facade
+        let active_search = service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionSearch {
@@ -6830,7 +6830,7 @@ output_schema_ref = "schemas/search.output.json"
             "active GitHub search results must not expose stale PAT setup onboarding"
         );
 
-        let remove = facade
+        let remove = service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionRemove { package_ref },
@@ -6858,15 +6858,15 @@ output_schema_ref = "schemas/search.output.json"
 
     #[tokio::test]
     async fn extension_lifecycle_search_reports_credential_backend_failure_as_transient() {
-        let (_dir, _storage_root, facade, _active_registry, _installation_store) =
+        let (_dir, _storage_root, service, _active_registry, _installation_store) =
             github_extension_lifecycle_fixture();
-        let facade = facade.with_runtime_credential_accounts(Arc::new(
+        let service = service.with_runtime_credential_accounts(Arc::new(
             BackendUnavailableRuntimeCredentialAccounts,
         ));
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
 
-        facade
+        service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionInstall {
@@ -6875,7 +6875,7 @@ output_schema_ref = "schemas/search.output.json"
             )
             .await
             .expect("install extension");
-        let error = facade
+        let error = service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionSearch {
@@ -6889,15 +6889,15 @@ output_schema_ref = "schemas/search.output.json"
     }
 
     #[tokio::test]
-    async fn lifecycle_facade_reports_typed_credential_blockers_without_activation() {
-        let (_dir, _storage_root, facade, active_registry, _installation_store) =
+    async fn lifecycle_service_reports_typed_credential_blockers_without_activation() {
+        let (_dir, _storage_root, service, active_registry, _installation_store) =
             github_extension_lifecycle_fixture();
-        let facade =
-            facade.with_runtime_credential_accounts(Arc::new(MissingRuntimeCredentialAccounts));
+        let service =
+            service.with_runtime_credential_accounts(Arc::new(MissingRuntimeCredentialAccounts));
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
 
-        facade
+        service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionInstall {
@@ -6906,7 +6906,7 @@ output_schema_ref = "schemas/search.output.json"
             )
             .await
             .expect("install extension");
-        let response = facade
+        let response = service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionActivate {
@@ -6942,7 +6942,7 @@ output_schema_ref = "schemas/search.output.json"
         // non-owner activating a private credentialed install must get the
         // masked "is not installed" denial, never an auth-required response
         // that leaks the extension's existence and credential requirements.
-        facade
+        service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionRemove {
@@ -6951,7 +6951,7 @@ output_schema_ref = "schemas/search.output.json"
             )
             .await
             .expect("operator removes the shared installation");
-        facade
+        service
             .execute(
                 lifecycle_surface_context_for_user("alice"),
                 LifecycleProductAction::ExtensionInstall {
@@ -6960,7 +6960,7 @@ output_schema_ref = "schemas/search.output.json"
             )
             .await
             .expect("alice installs the credentialed extension privately");
-        let error = facade
+        let error = service
             .execute(
                 lifecycle_surface_context_for_user("bob"),
                 LifecycleProductAction::ExtensionActivate { package_ref },
@@ -6974,13 +6974,13 @@ output_schema_ref = "schemas/search.output.json"
     }
 
     #[tokio::test]
-    async fn lifecycle_facade_blocks_non_operator_activation_of_shared_installation() {
-        let (_dir, _storage_root, facade, active_registry, _installation_store) =
+    async fn lifecycle_service_blocks_non_operator_activation_of_shared_installation() {
+        let (_dir, _storage_root, service, active_registry, _installation_store) =
             extension_lifecycle_fixture();
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
 
-        facade
+        service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionInstall {
@@ -6989,7 +6989,7 @@ output_schema_ref = "schemas/search.output.json"
             )
             .await
             .expect("operator installs the shared extension");
-        let error = facade
+        let error = service
             .execute(
                 lifecycle_surface_context_for_user("alice"),
                 LifecycleProductAction::ExtensionActivate { package_ref },
@@ -7008,18 +7008,18 @@ output_schema_ref = "schemas/search.output.json"
     }
 
     #[tokio::test]
-    async fn lifecycle_facade_rejects_static_activation_for_hosted_mcp_packages() {
-        let (_dir, _storage_root, facade, _active_registry, _installation_store) =
+    async fn lifecycle_service_rejects_static_activation_for_hosted_mcp_packages() {
+        let (_dir, _storage_root, service, _active_registry, _installation_store) =
             extension_lifecycle_fixture_with_catalog_and_service(
                 AvailableExtensionCatalog::from_first_party_assets().expect("first-party assets"),
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
             );
-        let facade =
-            facade.with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
+        let service =
+            service.with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("valid ref");
 
-        facade
+        service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionInstall {
@@ -7028,7 +7028,7 @@ output_schema_ref = "schemas/search.output.json"
             )
             .await
             .expect("install Notion MCP");
-        let error = facade
+        let error = service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionActivate { package_ref },
@@ -7040,19 +7040,19 @@ output_schema_ref = "schemas/search.output.json"
     }
 
     #[tokio::test]
-    async fn lifecycle_facade_activates_hosted_mcp_with_runtime_egress() {
-        let (_dir, _storage_root, facade, active_registry, _installation_store) =
+    async fn lifecycle_service_activates_hosted_mcp_with_runtime_egress() {
+        let (_dir, _storage_root, service, active_registry, _installation_store) =
             extension_lifecycle_fixture_with_catalog_and_service(
                 AvailableExtensionCatalog::from_first_party_assets().expect("first-party assets"),
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
             );
-        let facade = facade
+        let service = service
             .with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts))
             .with_runtime_http_egress(Arc::new(HostedMcpDiscoveryEgress::default()));
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("valid ref");
 
-        facade
+        service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionInstall {
@@ -7061,7 +7061,7 @@ output_schema_ref = "schemas/search.output.json"
             )
             .await
             .expect("install Notion MCP");
-        let activate = facade
+        let activate = service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionActivate { package_ref },
@@ -7080,12 +7080,12 @@ output_schema_ref = "schemas/search.output.json"
 
     #[tokio::test]
     async fn extension_lifecycle_installs_activates_and_removes_gsuite() {
-        let (_dir, storage_root, facade, active_registry, _installation_store) =
+        let (_dir, storage_root, service, active_registry, _installation_store) =
             github_extension_lifecycle_fixture();
-        let facade =
-            facade.with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
+        let service =
+            service.with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
 
-        let search = facade
+        let search = service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionSearch {
@@ -7142,7 +7142,7 @@ output_schema_ref = "schemas/search.output.json"
                 "google-calendar.find_free_slots",
             ]
         );
-        let search = facade
+        let search = service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionSearch {
@@ -7181,7 +7181,7 @@ output_schema_ref = "schemas/search.output.json"
         let gmail_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "gmail").expect("valid ref");
         for package_ref in [calendar_ref.clone(), gmail_ref.clone()] {
-            let install = facade
+            let install = service
                 .execute(
                     lifecycle_surface_context(),
                     LifecycleProductAction::ExtensionInstall {
@@ -7210,7 +7210,7 @@ output_schema_ref = "schemas/search.output.json"
         );
 
         for package_ref in [calendar_ref.clone(), gmail_ref.clone()] {
-            let activate = facade
+            let activate = service
                 .execute(
                     lifecycle_surface_context(),
                     LifecycleProductAction::ExtensionActivate { package_ref },
@@ -7236,7 +7236,7 @@ output_schema_ref = "schemas/search.output.json"
         );
 
         for package_ref in [calendar_ref, gmail_ref] {
-            let remove = facade
+            let remove = service
                 .execute(
                     lifecycle_surface_context(),
                     LifecycleProductAction::ExtensionRemove { package_ref },
@@ -7265,10 +7265,10 @@ output_schema_ref = "schemas/search.output.json"
 
     #[tokio::test]
     async fn extension_install_rejects_skill_package_ref() {
-        let (_dir, _storage_root, facade, _active_registry, _installation_store) =
+        let (_dir, _storage_root, service, _active_registry, _installation_store) =
             extension_lifecycle_fixture();
 
-        let error = facade
+        let error = service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionInstall {
@@ -7284,12 +7284,12 @@ output_schema_ref = "schemas/search.output.json"
 
     #[tokio::test]
     async fn extension_install_rejects_duplicate_without_overwriting_materialized_files() {
-        let (_dir, storage_root, facade, _active_registry, _installation_store) =
+        let (_dir, storage_root, service, _active_registry, _installation_store) =
             extension_lifecycle_fixture();
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
 
-        facade
+        service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionInstall {
@@ -7301,7 +7301,7 @@ output_schema_ref = "schemas/search.output.json"
         let wasm_path = storage_root.join("system/extensions/fixture/wasm/fixture.wasm");
         std::fs::write(&wasm_path, b"existing-live-module").expect("rewrite installed module");
 
-        let error = facade
+        let error = service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionInstall { package_ref },
@@ -7378,7 +7378,7 @@ output_schema_ref = "schemas/search.output.json"
 
     #[tokio::test]
     async fn extension_remove_rejects_uninstalled_ref_without_deleting_files() {
-        let (_dir, storage_root, facade, _active_registry, _installation_store) =
+        let (_dir, storage_root, service, _active_registry, _installation_store) =
             extension_lifecycle_fixture();
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "unmanaged-fixture")
@@ -7388,7 +7388,7 @@ output_schema_ref = "schemas/search.output.json"
             .expect("extension directory");
         std::fs::write(&manifest_path, b"unmanaged manifest").expect("write unmanaged file");
 
-        let error = facade
+        let error = service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionRemove { package_ref },
@@ -7455,12 +7455,12 @@ output_schema_ref = "schemas/search.output.json"
     async fn extension_remove_lifecycle_failure_preserves_state() {
         let lifecycle_service = ExtensionLifecycleService::new(ExtensionRegistry::new())
             .with_event_sink(Arc::new(FailingRemoveLifecycleSink));
-        let (_dir, storage_root, facade, active_registry, installation_store) =
+        let (_dir, storage_root, service, active_registry, installation_store) =
             extension_lifecycle_fixture_with_service(lifecycle_service);
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
 
-        facade
+        service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionInstall {
@@ -7469,7 +7469,7 @@ output_schema_ref = "schemas/search.output.json"
             )
             .await
             .expect("install extension");
-        facade
+        service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionActivate {
@@ -7479,7 +7479,7 @@ output_schema_ref = "schemas/search.output.json"
             .await
             .expect("activate extension");
 
-        let error = facade
+        let error = service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionRemove { package_ref },
@@ -7690,7 +7690,7 @@ output_schema_ref = "schemas/search.output.json"
 
     #[tokio::test]
     async fn extension_auth_and_configure_return_unsupported() {
-        let (_dir, _storage_root, facade, _active_registry, _installation_store) =
+        let (_dir, _storage_root, service, _active_registry, _installation_store) =
             extension_lifecycle_fixture();
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture").unwrap();
@@ -7704,7 +7704,7 @@ output_schema_ref = "schemas/search.output.json"
                 payload: None,
             },
         ] {
-            let response = facade
+            let response = service
                 .execute(lifecycle_surface_context(), action)
                 .await
                 .expect("unsupported response");
@@ -7717,9 +7717,9 @@ output_schema_ref = "schemas/search.output.json"
 
     #[tokio::test]
     async fn project_package_returns_available_extension_projection() {
-        let (_dir, _storage_root, facade, _active_registry, _installation_store) =
+        let (_dir, _storage_root, service, _active_registry, _installation_store) =
             extension_lifecycle_fixture();
-        let response = facade
+        let response = service
             .project_package(
                 lifecycle_surface_context(),
                 LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture").unwrap(),
@@ -7739,7 +7739,7 @@ output_schema_ref = "schemas/search.output.json"
     fn extension_lifecycle_fixture() -> (
         tempfile::TempDir,
         std::path::PathBuf,
-        crate::extension_host::lifecycle::RebornLocalLifecycleFacade,
+        crate::extension_host::lifecycle::RebornLocalLifecycleService,
         Arc<SharedExtensionRegistry>,
         Arc<FilesystemExtensionInstallationStore>,
     ) {
@@ -7754,7 +7754,7 @@ output_schema_ref = "schemas/search.output.json"
     ) -> (
         tempfile::TempDir,
         std::path::PathBuf,
-        crate::extension_host::lifecycle::RebornLocalLifecycleFacade,
+        crate::extension_host::lifecycle::RebornLocalLifecycleService,
         Arc<SharedExtensionRegistry>,
         Arc<FilesystemExtensionInstallationStore>,
     ) {
@@ -7767,7 +7767,7 @@ output_schema_ref = "schemas/search.output.json"
     fn github_extension_lifecycle_fixture() -> (
         tempfile::TempDir,
         std::path::PathBuf,
-        crate::extension_host::lifecycle::RebornLocalLifecycleFacade,
+        crate::extension_host::lifecycle::RebornLocalLifecycleService,
         Arc<SharedExtensionRegistry>,
         Arc<FilesystemExtensionInstallationStore>,
     ) {
@@ -7822,9 +7822,9 @@ output_schema_ref = "schemas/search.output.json"
     }
 
     #[tokio::test]
-    async fn ui_facade_extension_remove_retries_incomplete_credential_cleanup_until_converged() {
+    async fn ui_service_extension_remove_retries_incomplete_credential_cleanup_until_converged() {
         let cleanup = Arc::new(FailThenQuarantineExtensionCredentialCleanup::default());
-        let (_dir, storage_root, facade, _active_registry, _installation_store) =
+        let (_dir, storage_root, service, _active_registry, _installation_store) =
             extension_lifecycle_fixture_with_catalog_service_and_cleanup(
                 AvailableExtensionCatalog::from_first_party_assets()
                     .expect("first-party GitHub catalog"),
@@ -7834,7 +7834,7 @@ output_schema_ref = "schemas/search.output.json"
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
 
-        facade
+        service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionInstall {
@@ -7843,7 +7843,7 @@ output_schema_ref = "schemas/search.output.json"
             )
             .await
             .expect("install github");
-        let backend_error = facade
+        let backend_error = service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionRemove {
@@ -7858,7 +7858,7 @@ output_schema_ref = "schemas/search.output.json"
             "the owned installation remains authoritative until actor-scoped cleanup converges"
         );
 
-        let quarantined_error = facade
+        let quarantined_error = service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionRemove {
@@ -7869,7 +7869,7 @@ output_schema_ref = "schemas/search.output.json"
             .expect_err("quarantined cleanup must not report removal success");
         assert_retryable_lifecycle_unavailable(&quarantined_error);
 
-        let retry = facade
+        let retry = service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionRemove { package_ref },
@@ -7889,13 +7889,13 @@ output_schema_ref = "schemas/search.output.json"
     }
 
     #[tokio::test]
-    async fn ui_facade_extension_remove_revokes_exclusive_credential_at_convergence_point() {
-        // Convergence coverage: the WebUI facade removal door (`ExtensionRemove`)
+    async fn ui_service_extension_remove_revokes_exclusive_credential_at_convergence_point() {
+        // Convergence coverage: the WebUI service removal door (`ExtensionRemove`)
         // and the `builtin.extension_remove` agent capability both call
         // `RebornLocalExtensionManagementPort::remove`, so credential revocation
         // cannot be bypassed through the UI door — the door users actually use.
         let cleanup = Arc::new(RecordingExtensionCredentialCleanup::default());
-        let (_dir, _storage_root, facade, _active_registry, _installation_store) =
+        let (_dir, _storage_root, service, _active_registry, _installation_store) =
             extension_lifecycle_fixture_with_catalog_service_and_cleanup(
                 AvailableExtensionCatalog::from_first_party_assets()
                     .expect("first-party GitHub catalog"),
@@ -7905,7 +7905,7 @@ output_schema_ref = "schemas/search.output.json"
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
 
-        facade
+        service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionInstall {
@@ -7914,7 +7914,7 @@ output_schema_ref = "schemas/search.output.json"
             )
             .await
             .expect("install github");
-        let remove = facade
+        let remove = service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionRemove {
@@ -7922,9 +7922,9 @@ output_schema_ref = "schemas/search.output.json"
                 },
             )
             .await
-            .expect("remove github via the WebUI facade");
+            .expect("remove github via the WebUI service");
         assert_eq!(remove.phase, InstallationState::Removed);
-        let retry = facade
+        let retry = service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionRemove { package_ref },
@@ -8411,7 +8411,8 @@ output_schema_ref = "schemas/search.output.json"
     }
 
     #[tokio::test]
-    async fn ui_facade_extension_remove_preserves_credential_still_shared_with_another_extension() {
+    async fn ui_service_extension_remove_preserves_credential_still_shared_with_another_extension()
+    {
         // Fail-safe coverage for `revoke_exclusive_credentials`: `gmail` and
         // `google-calendar` both authorize against the shared `google` provider.
         // Removing `gmail` while `google-calendar` remains installed must NOT
@@ -8420,7 +8421,7 @@ output_schema_ref = "schemas/search.output.json"
         // This exercises the `providers_still_in_use` preservation branch the
         // single-extension revoke test above cannot reach.
         let cleanup = Arc::new(RecordingExtensionCredentialCleanup::default());
-        let (_dir, _storage_root, facade, _active_registry, _installation_store) =
+        let (_dir, _storage_root, service, _active_registry, _installation_store) =
             extension_lifecycle_fixture_with_catalog_service_and_cleanup(
                 AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
@@ -8432,7 +8433,7 @@ output_schema_ref = "schemas/search.output.json"
             .expect("valid ref");
 
         for package_ref in [gmail.clone(), calendar.clone()] {
-            facade
+            service
                 .execute(
                     lifecycle_surface_context(),
                     LifecycleProductAction::ExtensionInstall { package_ref },
@@ -8441,13 +8442,13 @@ output_schema_ref = "schemas/search.output.json"
                 .expect("install Google extension");
         }
 
-        let remove = facade
+        let remove = service
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionRemove { package_ref: gmail },
             )
             .await
-            .expect("remove gmail via the WebUI facade");
+            .expect("remove gmail via the WebUI service");
         assert_eq!(remove.phase, InstallationState::Removed);
 
         let requests = cleanup.requests.lock().expect("cleanup lock");
@@ -8913,7 +8914,7 @@ output_schema_ref = "schemas/search.output.json"
     ) -> (
         tempfile::TempDir,
         std::path::PathBuf,
-        crate::extension_host::lifecycle::RebornLocalLifecycleFacade,
+        crate::extension_host::lifecycle::RebornLocalLifecycleService,
         Arc<SharedExtensionRegistry>,
         Arc<FilesystemExtensionInstallationStore>,
     ) {
@@ -8931,7 +8932,7 @@ output_schema_ref = "schemas/search.output.json"
     ) -> (
         tempfile::TempDir,
         std::path::PathBuf,
-        crate::extension_host::lifecycle::RebornLocalLifecycleFacade,
+        crate::extension_host::lifecycle::RebornLocalLifecycleService,
         Arc<SharedExtensionRegistry>,
         Arc<FilesystemExtensionInstallationStore>,
     ) {
@@ -8949,11 +8950,13 @@ output_schema_ref = "schemas/search.output.json"
         lifecycle_service: ExtensionLifecycleService,
         credential_cleanup: Option<Arc<dyn ExtensionCredentialCleanup>>,
         removal_cleanup: Arc<ExtensionRemovalCleanupRegistry>,
-        channel_connection_slot: Option<Arc<std::sync::OnceLock<Arc<dyn ChannelConnectionFacade>>>>,
+        channel_connection_slot: Option<
+            Arc<std::sync::OnceLock<Arc<dyn ChannelConnectionService>>>,
+        >,
     ) -> (
         tempfile::TempDir,
         std::path::PathBuf,
-        crate::extension_host::lifecycle::RebornLocalLifecycleFacade,
+        crate::extension_host::lifecycle::RebornLocalLifecycleService,
         Arc<SharedExtensionRegistry>,
         Arc<FilesystemExtensionInstallationStore>,
     ) {
@@ -9008,13 +9011,13 @@ output_schema_ref = "schemas/search.output.json"
                 extension_management_port.with_channel_disconnect_slot(slot);
         }
         let extension_management = Arc::new(extension_management_port);
-        let facade =
-            crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(skill_management)
+        let service =
+            crate::extension_host::lifecycle::RebornLocalLifecycleService::new(skill_management)
                 .with_extension_management(extension_management);
         (
             dir,
             storage_root,
-            facade,
+            service,
             active_registry,
             installation_store,
         )

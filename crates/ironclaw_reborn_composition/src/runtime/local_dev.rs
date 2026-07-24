@@ -20,7 +20,7 @@ use ironclaw_loop_host::{
     LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
     loop_driver_execution_extension_id,
 };
-use ironclaw_product::{OutboundPreferencesProductFacade, ProjectService};
+use ironclaw_product::{OutboundPreferencesProductService, ProjectService};
 use ironclaw_runner::thread_scope::ThreadScopeResolver;
 
 use ironclaw_run_state::ApprovalRequestStore;
@@ -103,7 +103,7 @@ pub(super) fn capability_wiring(
     model_gateway: Arc<dyn HostManagedModelGateway>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     skill_activation_source: Option<Arc<ComposedSelectableSkillContextSource>>,
-    outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
+    outbound_preferences_service: Option<Arc<dyn OutboundPreferencesProductService>>,
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
 ) -> Option<CapabilityPortWiring> {
     let runtime = services.host_runtime.clone();
@@ -130,7 +130,7 @@ pub(super) fn capability_wiring(
     let extension_surface_source =
         ExtensionCapabilitySurfaceSource::new(Some(services.extension_management.clone()));
     // First-class project creation reuses the same access-controlled
-    // `ProjectService` facade the WebUI v2 surface wires (composition owns the
+    // `ProjectService` service the WebUI v2 surface wires (composition owns the
     // service, never the raw repository), so an agent-created project is a real
     // entity that appears in the Projects list.
     let project_service: Arc<dyn ProjectService> = Arc::clone(&services.project_service);
@@ -182,7 +182,7 @@ pub(super) fn capability_wiring(
             project_service,
             thread_service,
             trajectory_observer,
-            outbound_preferences_facade,
+            outbound_preferences_service,
             outbound_delivery_target_set_requires_approval,
             approval_settings,
             approval_requests,
@@ -216,7 +216,7 @@ struct RefreshingLoopCapabilityPortFactory {
     project_service: Arc<dyn ProjectService>,
     thread_service: Arc<dyn SessionThreadService>,
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
-    outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
+    outbound_preferences_service: Option<Arc<dyn OutboundPreferencesProductService>>,
     outbound_delivery_target_set_requires_approval: bool,
     approval_settings: Arc<dyn ApprovalSettingsProvider>,
     approval_requests: Arc<dyn ApprovalRequestStore>,
@@ -264,7 +264,7 @@ impl LoopCapabilityPortFactory for RefreshingLoopCapabilityPortFactory {
             // refreshing helper builds) and the result hook (on `StagedCapabilityIo`),
             // so the two callbacks correlate by `call_id` for one tool call.
             trajectory_observer: self.trajectory_observer.clone(),
-            outbound_preferences_facade: self.outbound_preferences_facade.clone(),
+            outbound_preferences_service: self.outbound_preferences_service.clone(),
             outbound_delivery_target_set_requires_approval: self
                 .outbound_delivery_target_set_requires_approval,
             approval_settings: Arc::clone(&self.approval_settings),

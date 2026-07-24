@@ -9,7 +9,7 @@ use ironclaw_host_runtime::HostRuntime;
 use ironclaw_loop_host::{
     HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
 };
-use ironclaw_product::{OutboundPreferencesProductFacade, ProjectService};
+use ironclaw_product::{OutboundPreferencesProductService, ProjectService};
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_threads::SessionThreadService;
 use ironclaw_trust::TrustDecision;
@@ -56,7 +56,7 @@ pub(crate) struct RefreshingCapabilityPortConfig {
     pub(super) project_service: Arc<dyn ProjectService>,
     pub(super) thread_service: Arc<dyn SessionThreadService>,
     pub(super) trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
-    pub(super) outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
+    pub(super) outbound_preferences_service: Option<Arc<dyn OutboundPreferencesProductService>>,
     pub(super) outbound_delivery_target_set_requires_approval: bool,
     pub(super) approval_settings: Arc<dyn ApprovalSettingsProvider>,
     pub(super) approval_requests: Arc<dyn ApprovalRequestStore>,
@@ -113,7 +113,7 @@ pub(crate) async fn create_refreshing_capability_port(
         project_service: config.project_service,
         thread_service: config.thread_service,
         trajectory_observer: config.trajectory_observer,
-        outbound_preferences_facade: config.outbound_preferences_facade,
+        outbound_preferences_service: config.outbound_preferences_service,
         outbound_delivery_target_set_requires_approval: config
             .outbound_delivery_target_set_requires_approval,
         approval_settings: config.approval_settings,
@@ -153,7 +153,7 @@ struct RefreshingCapabilityPort {
     project_service: Arc<dyn ProjectService>,
     thread_service: Arc<dyn SessionThreadService>,
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
-    outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
+    outbound_preferences_service: Option<Arc<dyn OutboundPreferencesProductService>>,
     outbound_delivery_target_set_requires_approval: bool,
     approval_settings: Arc<dyn ApprovalSettingsProvider>,
     approval_requests: Arc<dyn ApprovalRequestStore>,
@@ -315,9 +315,9 @@ impl RefreshingCapabilityPort {
             Arc::clone(&self.thread_service),
             self.fallback_user_id.clone(),
         )?);
-        if let Some(outbound_preferences_facade) = &self.outbound_preferences_facade {
+        if let Some(outbound_preferences_service) = &self.outbound_preferences_service {
             synthetic_capabilities.extend(outbound_delivery_capabilities(
-                Arc::clone(outbound_preferences_facade),
+                Arc::clone(outbound_preferences_service),
                 self.fallback_user_id.clone(),
                 Arc::clone(&self.approval_requests),
                 Arc::clone(&self.capability_leases),
@@ -487,7 +487,7 @@ pub(crate) async fn create_refreshing_capability_port_for_test(
         project_service,
         thread_service,
         trajectory_observer,
-        outbound_preferences_facade,
+        outbound_preferences_service,
         outbound_delivery_target_set_requires_approval,
         tool_permission_overrides,
         auto_approve_settings,
@@ -544,7 +544,7 @@ pub(crate) async fn create_refreshing_capability_port_for_test(
         project_service,
         thread_service,
         trajectory_observer,
-        outbound_preferences_facade,
+        outbound_preferences_service,
         outbound_delivery_target_set_requires_approval,
         approval_settings,
         approval_requests,

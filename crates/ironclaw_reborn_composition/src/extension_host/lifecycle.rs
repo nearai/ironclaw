@@ -9,8 +9,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_product::{
     LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction,
-    LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
-    LifecycleProductResponse, LifecycleReadinessBlocker, LifecycleSkillSource,
+    LifecycleProductContext, LifecycleProductPayload, LifecycleProductResponse,
+    LifecycleProductService, LifecycleReadinessBlocker, LifecycleSkillSource,
     LifecycleSkillSummary, ProductSurfaceFailure, lifecycle_product_surface_error,
 };
 use ironclaw_skills::{
@@ -223,7 +223,7 @@ fn invalid_skill_context(error: impl std::fmt::Display) -> RebornLocalSkillManag
 }
 
 #[derive(Clone)]
-pub(crate) struct RebornLocalLifecycleFacade {
+pub(crate) struct RebornLocalLifecycleService {
     skill_management: Arc<RebornLocalSkillManagementPort>,
     extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
     channel_config: Option<Arc<crate::extension_host::channel_config::ChannelConfigService>>,
@@ -231,7 +231,7 @@ pub(crate) struct RebornLocalLifecycleFacade {
     credential_accounts: Option<Arc<dyn RuntimeCredentialAccountSelectionService>>,
 }
 
-impl RebornLocalLifecycleFacade {
+impl RebornLocalLifecycleService {
     pub(crate) fn new(skill_management: Arc<RebornLocalSkillManagementPort>) -> Self {
         Self {
             skill_management,
@@ -405,7 +405,7 @@ impl RebornLocalLifecycleFacade {
                     let Some(runtime_http_egress) = self.runtime_http_egress.clone() else {
                         return Err(ProductSurfaceFailure::InvalidBindingRequest {
                             reason: format!(
-                                "extension {} requires hosted MCP schema discovery and cannot be activated through the static lifecycle facade",
+                                "extension {} requires hosted MCP schema discovery and cannot be activated through the static lifecycle service",
                                 package_ref.id
                             ),
                         });
@@ -531,7 +531,7 @@ impl RebornLocalLifecycleFacade {
 }
 
 #[async_trait]
-impl LifecycleProductFacade for RebornLocalLifecycleFacade {
+impl LifecycleProductService for RebornLocalLifecycleService {
     async fn execute(
         &self,
         context: LifecycleProductContext,
@@ -620,7 +620,7 @@ fn lifecycle_resource_scope(
             // a host-minted tenant claim is the corresponding tenant scope.
             // Claims without a tenant remain valid for local-dev commands,
             // which use the local default scope just like the local command
-            // facade.
+            // service.
             let caller = lifecycle_caller(context)?;
             let mut scope =
                 ResourceScope::local_default(caller, InvocationId::new()).map_err(|error| {
@@ -789,10 +789,10 @@ mod tests {
     use ironclaw_product::LifecycleProductSurfaceContext;
 
     #[tokio::test]
-    async fn skill_lifecycle_facade_installs_lists_and_removes_via_skill_management() {
-        let (_dir, storage_root, facade) = lifecycle_fixture();
+    async fn skill_lifecycle_service_installs_lists_and_removes_via_skill_management() {
+        let (_dir, storage_root, service) = lifecycle_fixture();
 
-        let install = facade
+        let install = service
             .execute_action(lifecycle_test_context(), LifecycleProductAction::SkillInstall {
                 name: None,
                 content:
@@ -815,7 +815,7 @@ mod tests {
                 .exists()
         );
 
-        let list = facade
+        let list = service
             .execute_action(
                 lifecycle_test_context(),
                 LifecycleProductAction::SkillSearch {
@@ -831,7 +831,7 @@ mod tests {
         assert_eq!(*count, 1);
 
         for index in 0..55 {
-            facade
+            service
                 .execute_action(lifecycle_test_context(), LifecycleProductAction::SkillInstall {
                     name: Some(
                         LifecyclePackageId::new(format!("bulk-skill-{index:02}"))
@@ -845,7 +845,7 @@ mod tests {
                 .expect("install bulk skill");
         }
 
-        let all_skills = facade
+        let all_skills = service
             .execute_action(
                 lifecycle_test_context(),
                 LifecycleProductAction::SkillSearch {
@@ -868,7 +868,7 @@ mod tests {
         assert!(*truncated);
         assert_eq!(skills.len(), 50);
 
-        let wrong_kind = facade
+        let wrong_kind = service
             .execute_action(
                 lifecycle_test_context(),
                 LifecycleProductAction::SkillRemove {
@@ -891,7 +891,7 @@ mod tests {
                 .exists()
         );
 
-        let remove = facade
+        let remove = service
             .execute_action(
                 lifecycle_test_context(),
                 LifecycleProductAction::SkillRemove {
@@ -1002,19 +1002,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn skill_lifecycle_facade_serializes_concurrent_install_and_remove() {
-        let (_dir, storage_root, facade) = lifecycle_fixture();
+    async fn skill_lifecycle_service_serializes_concurrent_install_and_remove() {
+        let (_dir, storage_root, service) = lifecycle_fixture();
 
-        let facade_a = facade.clone();
-        let facade_b = facade.clone();
-        let install_a = facade_a.execute_action(
+        let service_a = service.clone();
+        let service_b = service.clone();
+        let install_a = service_a.execute_action(
             lifecycle_test_context(),
             LifecycleProductAction::SkillInstall {
                 name: Some(LifecyclePackageId::new("concurrent-a").expect("valid skill id")),
                 content: skill_content("concurrent-a"),
             },
         );
-        let install_b = facade_b.execute_action(
+        let install_b = service_b.execute_action(
             lifecycle_test_context(),
             LifecycleProductAction::SkillInstall {
                 name: Some(LifecyclePackageId::new("concurrent-b").expect("valid skill id")),
@@ -1025,15 +1025,15 @@ mod tests {
         installed_a.expect("install concurrent-a");
         installed_b.expect("install concurrent-b");
 
-        let facade_a = facade.clone();
-        let remove_a = facade_a.execute_action(
+        let service_a = service.clone();
+        let remove_a = service_a.execute_action(
             lifecycle_test_context(),
             LifecycleProductAction::SkillRemove {
                 package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Skill, "concurrent-a")
                     .expect("valid skill ref"),
             },
         );
-        let remove_b = facade.execute_action(
+        let remove_b = service.execute_action(
             lifecycle_test_context(),
             LifecycleProductAction::SkillRemove {
                 package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Skill, "concurrent-b")
@@ -1049,10 +1049,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn skill_lifecycle_facade_maps_skill_management_errors() {
-        let (_dir, _storage_root, facade) = lifecycle_fixture();
+    async fn skill_lifecycle_service_maps_skill_management_errors() {
+        let (_dir, _storage_root, service) = lifecycle_fixture();
 
-        let invalid_install = facade
+        let invalid_install = service
             .execute_action(
                 lifecycle_test_context(),
                 LifecycleProductAction::SkillInstall {
@@ -1067,7 +1067,7 @@ mod tests {
             ProductSurfaceFailure::InvalidBindingRequest { .. }
         ));
 
-        let missing_remove = facade
+        let missing_remove = service
             .execute_action(
                 lifecycle_test_context(),
                 LifecycleProductAction::SkillRemove {
@@ -1089,7 +1089,7 @@ mod tests {
     fn lifecycle_fixture() -> (
         tempfile::TempDir,
         std::path::PathBuf,
-        RebornLocalLifecycleFacade,
+        RebornLocalLifecycleService,
     ) {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
@@ -1119,8 +1119,8 @@ mod tests {
             ])
             .expect("valid mount view"),
         ));
-        let facade = RebornLocalLifecycleFacade::new(skill_management);
-        (dir, storage_root, facade)
+        let service = RebornLocalLifecycleService::new(skill_management);
+        (dir, storage_root, service)
     }
 
     fn skill_content(name: &str) -> String {

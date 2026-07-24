@@ -1,7 +1,7 @@
 //! Neutral package lifecycle vocabulary.
 //!
 //! These are value types for extension/package lifecycle projections and
-//! commands. Product-facing facades may wrap or project them, but the values
+//! commands. Product-facing services may wrap or project them, but the values
 //! themselves are host API vocabulary so generic extension services can share
 //! them without depending on product workflow.
 

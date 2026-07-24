@@ -181,7 +181,7 @@ pub(crate) struct GroupSharedStorage {
     /// path may use `Recording`.
     pub(crate) capability: GroupCapability,
     /// C-SLACK-LIFECYCLE (issue #6105): the REAL generic channel-connection
-    /// facade + OAuth-callback-shaped connect handles, built over the
+    /// service + OAuth-callback-shaped connect handles, built over the
     /// capability harness's own `RebornServices` (same durable stores, same
     /// late-bound cleanup slot `extension_remove` dispatches to).
     /// `Some` only for `extension_lifecycle()` groups.

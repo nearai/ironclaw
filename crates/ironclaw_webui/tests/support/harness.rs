@@ -40,7 +40,7 @@ pub const AGENT: &str = "agent-default";
 pub const PROJECT: &str = "project-default";
 
 /// `ProductSurface` stub for the audit suite. `create_thread` and
-/// `stream_events` record their callers so a test can assert the facade
+/// `stream_events` record their callers so a test can assert the service
 /// was (or was not) reached and which `UserId` the bearer / `?token=`
 /// resolved to; `list_threads` returns an empty page defensively; every
 /// other method panics or rejects so an accidental call surfaces loudly

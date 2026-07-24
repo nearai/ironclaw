@@ -69,8 +69,8 @@ pub struct RefreshingCapabilityPortTestParts {
     /// activates them AND passes the resulting handle here.
     pub extension_management: Option<ExtensionManagementTestHandle>,
     pub trajectory_observer: Option<std::sync::Arc<dyn crate::RebornTrajectoryObserver>>,
-    pub outbound_preferences_facade:
-        Option<std::sync::Arc<dyn ironclaw_product::OutboundPreferencesProductFacade>>,
+    pub outbound_preferences_service:
+        Option<std::sync::Arc<dyn ironclaw_product::OutboundPreferencesProductService>>,
     pub outbound_delivery_target_set_requires_approval: bool,
     /// Per-tool approval-setting overrides; wrapped into the same
     /// `StoreApprovalSettingsProvider` production wires (`local_dev.rs:1002`).

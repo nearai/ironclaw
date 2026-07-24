@@ -1,4 +1,4 @@
-//! Run-failure classification facade.
+//! Run-failure classification service.
 //!
 //! This joins the runner-owned failure category, user-facing summary, retry
 //! disposition, and lane into one pure classifier. Producers still emit the

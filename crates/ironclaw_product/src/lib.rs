@@ -1,4 +1,4 @@
-//! Product-facing workflow facade for IronClaw Reborn.
+//! Product-facing workflow service for IronClaw Reborn.
 //!
 //! `ironclaw_product` sits between product adapters and host-layer
 //! Reborn services. It owns the product action orchestration so that adapters
@@ -101,11 +101,12 @@ pub use binding::{
 };
 pub use command_dispatch::{
     ProductCommandAdmission, ProductCommandAdmissionService, ProductCommandContext,
-    ProductCommandService, RejectingProductCommandAdmissionService, RejectingProductCommandService,
+    RejectingProductCommandAdmissionService,
 };
 pub use commands::{
-    LifecycleProductCommandService, ProductCommand, ProductCommandDescriptor, ProductModelCommand,
-    product_command_descriptors,
+    PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID, PRODUCT_MODEL_COMMAND_OPERATION_ID, ProductCommand,
+    ProductCommandDescriptor, ProductLifecycleCommandInput, ProductModelCommand,
+    ProductModelCommandInput, product_command_descriptors,
 };
 pub use conversation_binding::{
     ProductActorBindingPolicy, ProductActorUserResolutionRequest, ProductActorUserResolver,
@@ -212,10 +213,10 @@ pub use lifecycle::{
     LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstallScope,
     LifecycleInstalledExtensionSummary, LifecyclePackageId, LifecyclePackageKind,
-    LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
-    LifecycleProductPayload, LifecycleProductResponse, LifecycleProductSurfaceContext,
+    LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext, LifecycleProductPayload,
+    LifecycleProductResponse, LifecycleProductService, LifecycleProductSurfaceContext,
     LifecycleReadinessBlocker, LifecycleSearchExtensionSummary, LifecycleSkillSource,
-    LifecycleSkillSummary, UnsupportedLifecycleProductFacade,
+    LifecycleSkillSummary, UnsupportedLifecycleProductService,
 };
 // Product hosts use this outbound orchestration seam to wire outbound policy
 // decisions to adapter rendering without reaching into module internals.
@@ -238,7 +239,7 @@ pub use run_delivery::{
 };
 // Adapter, projection, and event DTOs are re-exported from
 // `ironclaw_host_api::product_adapter` above so product terminals consume a
-// single product facade.
+// single product service.
 pub use reborn_services::{
     ADMIN_CONFIGURATION_REPLACE_CAPABILITY, ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID,
     ADMIN_CONFIGURATION_VIEW, ADMIN_USER_CREATE_COMMAND, ADMIN_USER_DELETE_CAPABILITY,
@@ -257,8 +258,8 @@ pub use reborn_services::{
     AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE, AUTOMATIONS_VIEW, ActiveModelReader,
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
     AdminUserSecretMeta, AdminUserService, AdminUserStatus, AutomationListRequest,
-    AutomationProductFacade, CANCEL_RUN_COMMAND, CREATE_THREAD_COMMAND, ChannelAuthAccountState,
-    ChannelConfigFacade, ChannelConnectionFacade, ChannelInboundSurfaceAdmission,
+    AutomationProductService, CANCEL_RUN_COMMAND, CREATE_THREAD_COMMAND, ChannelAuthAccountState,
+    ChannelConfigProductService, ChannelConnectionService, ChannelInboundSurfaceAdmission,
     ChannelInboundSurfaceOutcome, ChannelInboundSurfaceRejectedAdmission,
     ChannelInboundSurfaceRequest, CodexLoginStart, EXTENSION_ACTIVATE_CAPABILITY,
     EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_IMPORT_CAPABILITY, EXTENSION_IMPORT_CAPABILITY_ID,
@@ -289,7 +290,7 @@ pub use reborn_services::{
     OUTBOUND_PREFERENCES_SET_CAPABILITY, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
     OUTBOUND_PREFERENCES_VIEW, OperatorLogsService, OperatorServiceLifecycleService,
     OperatorStatusService, OutboundDeliveryCapabilityInputError, OutboundDeliveryTargetSetInput,
-    OutboundDeliveryTargetsListInput, OutboundPreferencesProductFacade, PROJECT_CREATE_COMMAND,
+    OutboundDeliveryTargetsListInput, OutboundPreferencesProductService, PROJECT_CREATE_COMMAND,
     PROJECT_DELETE_CAPABILITY, PROJECT_DELETE_CAPABILITY_ID, PROJECT_FS_LIST_VIEW,
     PROJECT_FS_READ_COMMAND, PROJECT_FS_STAT_VIEW, PROJECT_MEMBER_ADD_CAPABILITY,
     PROJECT_MEMBER_ADD_CAPABILITY_ID, PROJECT_MEMBER_REMOVE_CAPABILITY,
@@ -344,8 +345,8 @@ pub use reborn_services::{
     RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetDisplayName,
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
     RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
-    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesFacade,
-    RebornOutboundPreferencesResponse, RebornProjectFsListRequest, RebornProjectFsListResponse,
+    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
+    RebornOutboundPreferencesService, RebornProjectFsListRequest, RebornProjectFsListResponse,
     RebornProjectFsReadRequest, RebornProjectFsStatRequest, RebornProjectFsStatResponse,
     RebornProjectInfo, RebornProjectMemberInfo, RebornProjectMemberStatus, RebornProjectResponse,
     RebornProjectRole, RebornProjectState, RebornRemoveMemberRequest,
@@ -366,13 +367,13 @@ pub use reborn_services::{
     SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY,
     SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY, SKILL_REMOVE_CAPABILITY_ID,
     SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY, SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW,
-    SUBMIT_TURN_COMMAND, SetActiveLlmRequest, SettingsToolPermissionState, SkillsProductFacade,
+    SUBMIT_TURN_COMMAND, SetActiveLlmRequest, SettingsToolPermissionState, SkillsProductService,
     StaticOperatorStatusService, THREAD_DELETE_CAPABILITY, THREAD_DELETE_CAPABILITY_ID,
     THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_LOGIN_LINK_COMMAND, TRACE_ACCOUNT_TRACES_VIEW,
     TRACE_CREDITS_VIEW, TRACE_HOLD_AUTHORIZE_COMMAND, TriggerRunThreadScope,
-    UnavailableRebornViewProvider, UnsupportedAutomationProductFacade,
+    UnavailableRebornViewProvider, UnsupportedAutomationProductService,
     UnsupportedOperatorLogsService, UnsupportedOperatorServiceLifecycleService,
-    UnsupportedOperatorStatusService, UnsupportedOutboundPreferencesProductFacade,
+    UnsupportedOperatorStatusService, UnsupportedOutboundPreferencesProductService,
     UpsertLlmProviderRequest, list_outbound_delivery_targets_for_model,
     normalize_operator_log_context_value, outbound_delivery_synthetic_provider,
     outbound_delivery_target_set_input_schema, outbound_delivery_target_set_operator_tool_info,

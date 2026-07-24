@@ -159,7 +159,7 @@ pub trait RebornUserDirectory: Send + Sync {
     ) -> Result<(), RebornIdentityError>;
 
     /// Count active admins/owners in `tenant_id`. Backs last-admin protection
-    /// in the product-workflow facade (never demote/suspend/delete the sole
+    /// in the product-workflow service (never demote/suspend/delete the sole
     /// active admin).
     async fn count_active_admins(&self, tenant_id: &TenantId)
     -> Result<usize, RebornIdentityError>;

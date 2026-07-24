@@ -6,8 +6,8 @@
 
 use crate::{
     AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ProductAdapterId,
-    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductRejection,
-    ProductRejectionKind, ProductTriggerReason, VerifiedAuthClaim,
+    ProductInboundEnvelope, ProductInboundPayload, ProductRejection, ProductRejectionKind,
+    ProductTriggerReason, VerifiedAuthClaim,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -91,32 +91,5 @@ impl ProductCommandAdmissionService for RejectingProductCommandAdmissionService 
                 format!("command routing unavailable: {}", command.name()),
             ),
         ))
-    }
-}
-
-#[async_trait]
-pub trait ProductCommandService: Send + Sync {
-    async fn execute(
-        &self,
-        context: ProductCommandContext,
-        command: ProductCommand,
-    ) -> Result<ProductInboundAck, ProductSurfaceError>;
-}
-
-/// Fail-closed command executor used until a host composition supplies concrete
-/// command implementations.
-pub struct RejectingProductCommandService;
-
-#[async_trait]
-impl ProductCommandService for RejectingProductCommandService {
-    async fn execute(
-        &self,
-        _context: ProductCommandContext,
-        command: ProductCommand,
-    ) -> Result<ProductInboundAck, ProductSurfaceError> {
-        Ok(ProductInboundAck::Rejected(ProductRejection::permanent(
-            ProductRejectionKind::PolicyDenied,
-            format!("command routing unavailable: {}", command.name()),
-        )))
     }
 }

@@ -1,4 +1,4 @@
-//! Public auth facade for `ironclaw_llm`.
+//! Public auth service for `ironclaw_llm`.
 //!
 //! External callers (the setup wizard, the `ironclaw login` subcommand, and
 //! the LLM config loader) interact with provider authentication through this
@@ -171,7 +171,7 @@ pub struct PersistedCredentials {
     pub source_path: Option<PathBuf>,
 }
 
-/// Errors surfaced by the auth facade. Provider-specific error chains are
+/// Errors surfaced by the auth service. Provider-specific error chains are
 /// flattened into a single string for the caller — internal types do not
 /// cross the boundary.
 #[derive(Debug, thiserror::Error)]

@@ -179,7 +179,7 @@ pub(super) enum AccountTracesError {
 /// Fetch the caller-scoped submitted traces from the Trace Commons server.
 ///
 /// Uses the crate-local hardened reqwest path (no host-egress sink) — the same
-/// network lane as the rest of the WebUI / facade surface. The `enrolled` flag
+/// network lane as the rest of the WebUI / service surface. The `enrolled` flag
 /// is set from `resolve_trace_credentials`; a user who is not enrolled gets the
 /// unenrolled zero-state (`enrolled: false`, empty list) rather than an error.
 /// Transport failures surface as a typed `Err` (the operation is named and the

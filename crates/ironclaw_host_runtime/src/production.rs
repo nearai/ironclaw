@@ -1,6 +1,6 @@
 //! Production composition of the [`HostRuntime`] contract.
 //!
-//! [`DefaultHostRuntime`] is the contract-level facade that upper turn/loop
+//! [`DefaultHostRuntime`] is the contract-level service that upper turn/loop
 //! services should depend on. Internally it composes
 //! [`ironclaw_capabilities::CapabilityHost`] with neutral kernel services —
 //! extension registry, capability dispatcher, trust-aware authorizer,
@@ -370,7 +370,7 @@ impl DefaultHostRuntime {
     ///
     /// Production code must use `HostRuntimeServices::build_host_runtime()` which
     /// wires the secret store automatically. This setter is `pub(crate)` to prevent
-    /// a second public seam for secret-store configuration on the production facade.
+    /// a second public seam for secret-store configuration on the production service.
     // arch-exempt: optional_arc, genuinely optional — minimal/test graphs that
     // never need pre-flight skip this; production wires it from HostRuntimeServices,
     // plan #4539 (Fix B)

@@ -1,10 +1,10 @@
-//! WebUI-facing Reborn service facade.
+//! WebUI-facing Reborn service service.
 //!
 //! This module is the stable high-level API beta WebUI route handlers use
 //! instead of reaching into turn coordination, thread stores, runtime lanes, DB
 //! stores, dispatchers, or capability hosts directly.
 
-// arch-exempt: large_file, holds the ProductSurface facade awaiting the JIT domain-port split, plan #5985
+// arch-exempt: large_file, holds the ProductSurface service awaiting the JIT domain-port split, plan #5985
 
 use std::{
     collections::{HashMap, HashSet},
@@ -55,14 +55,16 @@ use uuid::Uuid;
 
 use crate::{
     ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
-    AuthInteractionRejectionKind, AuthInteractionService, LifecycleProductFacade,
-    ListPendingApprovalsRequest, ProductCancelRunRequest, ProductCreateThreadRequest,
-    ProductGateResolution, ProductInboundCommand, ProductListAutomationsRequest,
-    ProductListThreadsRequest, ProductRenameAutomationRequest, ProductResolveGateRequest,
-    ProductRetryRunRequest, ProductSubmitTurnRequest, ProductSurfaceFailure,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
-    UnsupportedLifecycleProductFacade,
+    AuthInteractionRejectionKind, AuthInteractionService, LifecycleProductContext,
+    LifecycleProductService, LifecycleProductSurfaceContext, ListPendingApprovalsRequest,
+    PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID, PRODUCT_MODEL_COMMAND_OPERATION_ID,
+    ProductCancelRunRequest, ProductCreateThreadRequest, ProductGateResolution,
+    ProductInboundCommand, ProductLifecycleCommandInput, ProductListAutomationsRequest,
+    ProductListThreadsRequest, ProductModelCommand, ProductModelCommandInput,
+    ProductRenameAutomationRequest, ProductResolveGateRequest, ProductRetryRunRequest,
+    ProductSubmitTurnRequest, ProductSurfaceFailure, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
+    ResolveAuthInteractionResponse, UnsupportedLifecycleProductService,
     approval_interaction::RejectingApprovalInteractionService,
     auth_interaction::RejectingAuthInteractionService,
     binding_ref::{
@@ -165,7 +167,7 @@ pub use outbound_delivery_capability_surface::{
     parse_outbound_delivery_target_set_input, parse_outbound_delivery_targets_list_input,
     set_outbound_delivery_target_for_model,
 };
-pub use outbound_preferences::RebornOutboundPreferencesFacade;
+pub use outbound_preferences::RebornOutboundPreferencesService;
 pub use outbound_views::{OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_VIEW};
 pub use project_fs::{
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,
@@ -555,21 +557,21 @@ fn rejected_busy_notice(status: TurnStatus) -> String {
 }
 
 /// The caller's durable auth-account signal for one channel extension's vendor
-/// — the raw inputs the extensions-list facade feeds to
+/// — the raw inputs the extensions-list service feeds to
 /// [`ironclaw_auth::project_auth_account_state`] so an account renders its real
 /// §6.3 state (`expired` / `refresh-failed` / `authenticating`) plus a typed
 /// last error, instead of the connected/disconnected collapse the
-/// [`ChannelConnectionFacade::caller_channel_connections`] bool alone permits.
+/// [`ChannelConnectionService::caller_channel_connections`] bool alone permits.
 ///
-/// Both inputs are optional. A facade that only knows the caller holds a live
+/// Both inputs are optional. A service that only knows the caller holds a live
 /// grant leaves both `None` and the projection falls back to the connection
-/// bool (a live grant backfills to `connected`, MIG-1); a facade that reads the
+/// bool (a live grant backfills to `connected`, MIG-1); a service that reads the
 /// durable credential-account status supplies `account_status` (and, mid-flow,
 /// `active_flow_status`) so the wire surfaces the real state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ChannelAuthAccountState {
     /// The caller's durable credential-account status for the extension's
-    /// vendor, when the facade can read it.
+    /// vendor, when the service can read it.
     pub account_status: Option<CredentialAccountStatus>,
     /// A live (non-terminal) auth flow for the extension's vendor, when one is
     /// in progress — projects to `authenticating`.
@@ -582,7 +584,7 @@ pub struct ChannelAuthAccountState {
 /// Only channels that have a per-user connection concept appear in the map;
 /// absence means "no per-user connection concept for this channel".
 #[async_trait]
-pub trait ChannelConnectionFacade: Send + Sync {
+pub trait ChannelConnectionService: Send + Sync {
     async fn caller_channel_connections(
         &self,
         caller: ProductSurfaceCaller,
@@ -594,9 +596,9 @@ pub trait ChannelConnectionFacade: Send + Sync {
     /// project the shared §6.3 auth-account state (`expired` / `refresh-failed`)
     /// and its typed last error for each vendor account.
     ///
-    /// Default: empty. A facade that does not yet read durable credential-account
+    /// Default: empty. A service that does not yet read durable credential-account
     /// status reports none and the wire falls back to the connection bool; the
-    /// production channel-connection facade overrides this to project each
+    /// production channel-connection service overrides this to project each
     /// caller's account status.
     async fn caller_channel_account_states(
         &self,
@@ -616,10 +618,10 @@ pub trait ChannelConnectionFacade: Send + Sync {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct StaticChannelConnectionFacade;
+pub struct StaticChannelConnectionService;
 
 #[async_trait]
-impl ChannelConnectionFacade for StaticChannelConnectionFacade {
+impl ChannelConnectionService for StaticChannelConnectionService {
     async fn caller_channel_connections(
         &self,
         _caller: ProductSurfaceCaller,
@@ -633,10 +635,10 @@ pub use ironclaw_host_api::ChannelConfigField as RebornChannelConfigField;
 /// The generic channel-config configure port: per-extension operator config
 /// declared by the extension manifest's channel-config fields. Host
 /// composition implements it over the durable installation store and the
-/// scoped secret store; the setup facade routes submitted values through it
+/// scoped secret store; the setup service routes submitted values through it
 /// and derives config completeness from the field status.
 #[async_trait]
-pub trait ChannelConfigFacade: Send + Sync {
+pub trait ChannelConfigProductService: Send + Sync {
     /// Per-field presence for the extension's declared channel config.
     /// Empty when the extension declares none (or is not installed yet).
     async fn field_status(
@@ -753,7 +755,7 @@ impl OperatorServiceLifecycleService for UnsupportedOperatorServiceLifecycleServ
 }
 
 #[async_trait]
-pub trait SkillsProductFacade: Send + Sync {
+pub trait SkillsProductService: Send + Sync {
     async fn list_skills(
         &self,
         caller: ProductSurfaceCaller,
@@ -782,19 +784,19 @@ pub trait SkillsProductFacade: Send + Sync {
 }
 
 #[derive(Debug, Default)]
-pub struct UnsupportedSkillsProductFacade;
+pub struct UnsupportedSkillsProductService;
 
-impl UnsupportedSkillsProductFacade {
+impl UnsupportedSkillsProductService {
     pub fn new_static() -> Self {
         Self
     }
 }
 
 #[async_trait]
-impl SkillsProductFacade for UnsupportedSkillsProductFacade {}
+impl SkillsProductService for UnsupportedSkillsProductService {}
 
 #[async_trait]
-pub trait OutboundPreferencesProductFacade: Send + Sync {
+pub trait OutboundPreferencesProductService: Send + Sync {
     /// Return the authenticated caller's scoped outbound preferences.
     ///
     /// Real implementations must scope stored preferences by the caller's
@@ -809,9 +811,9 @@ pub trait OutboundPreferencesProductFacade: Send + Sync {
     /// Persist the caller's scoped outbound delivery preferences.
     ///
     /// Implementations must scope writes by the caller's tenant/user identity.
-    /// `RebornServices` installs `UnsupportedOutboundPreferencesProductFacade`
+    /// `RebornServices` installs `UnsupportedOutboundPreferencesProductService`
     /// by default, which keeps Phase 1 mutation attempts fail-closed with a
-    /// non-retryable service-unavailable response until a real facade is wired.
+    /// non-retryable service-unavailable response until a real service is wired.
     async fn set_outbound_preferences(
         &self,
         caller: ProductSurfaceCaller,
@@ -822,9 +824,9 @@ pub trait OutboundPreferencesProductFacade: Send + Sync {
     ///
     /// Implementations must scope target inventory by the caller's tenant/user
     /// identity. `RebornServices` installs
-    /// `UnsupportedOutboundPreferencesProductFacade` by default, which keeps
+    /// `UnsupportedOutboundPreferencesProductService` by default, which keeps
     /// Phase 1 target discovery fail-closed with a non-retryable
-    /// service-unavailable response until a real facade is wired.
+    /// service-unavailable response until a real service is wired.
     async fn list_outbound_delivery_targets(
         &self,
         caller: ProductSurfaceCaller,
@@ -832,16 +834,16 @@ pub trait OutboundPreferencesProductFacade: Send + Sync {
 }
 
 #[derive(Debug)]
-pub struct UnsupportedOutboundPreferencesProductFacade;
+pub struct UnsupportedOutboundPreferencesProductService;
 
-impl UnsupportedOutboundPreferencesProductFacade {
+impl UnsupportedOutboundPreferencesProductService {
     pub fn new_static() -> Self {
         Self
     }
 }
 
 #[async_trait]
-impl OutboundPreferencesProductFacade for UnsupportedOutboundPreferencesProductFacade {
+impl OutboundPreferencesProductService for UnsupportedOutboundPreferencesProductService {
     async fn get_outbound_preferences(
         &self,
         _caller: ProductSurfaceCaller,
@@ -928,14 +930,14 @@ pub struct AutomationListRequest {
     pub run_limit: usize,
     /// When `true`, include completed (fire-once) automations alongside the
     /// active ones. When `false` (the default), only active automations are
-    /// returned. Facades apply `limit` after this filter, so a full page of
+    /// returned. Services apply `limit` after this filter, so a full page of
     /// active automations is returned regardless of how many completed ones
     /// exist.
     pub include_completed: bool,
 }
 
 /// Stored scope of a trigger-fired thread, returned by
-/// `AutomationProductFacade::resolve_run_thread_scope`.
+/// `AutomationProductService::resolve_run_thread_scope`.
 ///
 /// Trigger threads are written by `record_trigger_prompt` with:
 ///  - `agent_id` = trigger record's `agent_id` (or default agent)
@@ -991,7 +993,7 @@ struct AutomationApprovalThreadCandidate {
 }
 
 #[async_trait]
-pub trait AutomationProductFacade: Send + Sync {
+pub trait AutomationProductService: Send + Sync {
     async fn list_automations(
         &self,
         caller: ProductAgentBoundCaller,
@@ -1034,9 +1036,9 @@ pub trait AutomationProductFacade: Send + Sync {
     /// Whether the background trigger poller (scheduler) is running.
     ///
     /// Surfaced to the browser so the panel can warn that listed automations
-    /// will not fire while scheduling is off. Defaults to `true` so a facade
+    /// will not fire while scheduling is off. Defaults to `true` so a service
     /// that does not know its scheduler state never produces a false "off"
-    /// notice; the production facade overrides this with the real value.
+    /// notice; the production service overrides this with the real value.
     fn scheduler_enabled(&self) -> bool {
         true
     }
@@ -1056,7 +1058,7 @@ pub trait AutomationProductFacade: Send + Sync {
     ///
     /// Implementors that do not support trigger-thread access must provide an
     /// explicit `Ok(None)` body with a short comment noting the unsupported
-    /// state. No default body is provided here so a future production facade
+    /// state. No default body is provided here so a future production service
     /// cannot silently forget to implement this method and degrade
     /// timeline/SSE/gate/cancel/run-state to 404.
     async fn resolve_run_thread_scope(
@@ -1067,16 +1069,16 @@ pub trait AutomationProductFacade: Send + Sync {
 }
 
 #[derive(Debug)]
-pub struct UnsupportedAutomationProductFacade;
+pub struct UnsupportedAutomationProductService;
 
-impl UnsupportedAutomationProductFacade {
+impl UnsupportedAutomationProductService {
     pub fn new_static() -> Self {
         Self
     }
 }
 
 #[async_trait]
-impl AutomationProductFacade for UnsupportedAutomationProductFacade {
+impl AutomationProductService for UnsupportedAutomationProductService {
     async fn list_automations(
         &self,
         _caller: ProductAgentBoundCaller,
@@ -1123,7 +1125,7 @@ impl AutomationProductFacade for UnsupportedAutomationProductFacade {
         _caller: ProductAgentBoundCaller,
         _thread_id: &ThreadId,
     ) -> Result<Option<TriggerRunThreadScope>, ProductSurfaceError> {
-        // Trigger-thread access is unsupported when no automation facade is wired.
+        // Trigger-thread access is unsupported when no automation service is wired.
         Ok(None)
     }
 }
@@ -1186,7 +1188,7 @@ fn operator_setup_validation_error(field: &str) -> ProductSurfaceError {
     ProductSurfaceError::validation(field, ProductSurfaceValidationCode::InvalidValue)
 }
 
-/// Stable WebUI-facing facade surface for beta Reborn routes.
+/// Stable WebUI-facing service surface for beta Reborn routes.
 fn operator_setup_diagnostic(
     key: &str,
     severity: RebornOperatorConfigDiagnosticSeverity,
@@ -1367,7 +1369,7 @@ fn operator_config_invalid_value(field: &'static str) -> ProductSurfaceError {
     ProductSurfaceError::validation(field, ProductSurfaceValidationCode::InvalidValue)
 }
 
-// `internal_from` logs the backend cause while keeping the facade payload
+// `internal_from` logs the backend cause while keeping the service payload
 // sanitized, so operator diagnostics survive without leaking over the wire.
 fn operator_config_store_error(error: impl std::fmt::Display) -> ProductSurfaceError {
     ProductSurfaceError::internal_from(error)
@@ -2239,7 +2241,7 @@ pub trait InboundAttachmentReader: Send + Sync {
 ///
 /// The concrete execution adapter lives in composition: this crate owns the
 /// product contract and remains independent of runtime implementation crates.
-/// The facade is generic over this boundary so the production capability hot
+/// The service is generic over this boundary so the production capability hot
 /// path does not add another `Arc<dyn ...>` seam solely for test substitution.
 #[async_trait]
 pub trait ProductCapabilityInvoker: Send + Sync {
@@ -2270,7 +2272,7 @@ impl ProductCapabilityInvoker for UnavailableProductCapabilityInvoker {
     }
 }
 
-/// Default facade implementation composed at the WebUI boundary.
+/// Default service implementation composed at the WebUI boundary.
 #[derive(Clone)]
 pub struct RebornServices<
     I = UnavailableProductCapabilityInvoker,
@@ -2286,12 +2288,12 @@ pub struct RebornServices<
     project_service: Option<Arc<dyn ProjectService>>,
     inbound_attachment_reader: Option<Arc<dyn InboundAttachmentReader>>,
     event_stream: Option<Arc<dyn ProjectionStream>>,
-    lifecycle_facade: Arc<dyn LifecycleProductFacade>,
-    automation_facade: Arc<dyn AutomationProductFacade>,
-    skills_facade: Arc<dyn SkillsProductFacade>,
-    channel_connection_facade: Arc<dyn ChannelConnectionFacade>,
-    channel_config_facade: Option<Arc<dyn ChannelConfigFacade>>,
-    outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade>,
+    lifecycle_service: Arc<dyn LifecycleProductService>,
+    automation_service: Arc<dyn AutomationProductService>,
+    skills_service: Arc<dyn SkillsProductService>,
+    channel_connection_service: Arc<dyn ChannelConnectionService>,
+    channel_config_service: Option<Arc<dyn ChannelConfigProductService>>,
+    outbound_preferences_service: Arc<dyn OutboundPreferencesProductService>,
     operator_status: Arc<dyn OperatorStatusService>,
     operator_logs: Arc<dyn OperatorLogsService>,
     operator_service_lifecycle: Arc<dyn OperatorServiceLifecycleService>,
@@ -2362,15 +2364,15 @@ where
             project_service: None,
             inbound_attachment_reader: None,
             event_stream: None,
-            lifecycle_facade: Arc::new(UnsupportedLifecycleProductFacade::new_static(
-                "reborn_lifecycle_facade_unwired",
+            lifecycle_service: Arc::new(UnsupportedLifecycleProductService::new_static(
+                "reborn_lifecycle_service_unwired",
             )),
-            automation_facade: Arc::new(UnsupportedAutomationProductFacade::new_static()),
-            skills_facade: Arc::new(UnsupportedSkillsProductFacade::new_static()),
-            channel_connection_facade: Arc::new(StaticChannelConnectionFacade),
-            channel_config_facade: None,
-            outbound_preferences_facade: Arc::new(
-                UnsupportedOutboundPreferencesProductFacade::new_static(),
+            automation_service: Arc::new(UnsupportedAutomationProductService::new_static()),
+            skills_service: Arc::new(UnsupportedSkillsProductService::new_static()),
+            channel_connection_service: Arc::new(StaticChannelConnectionService),
+            channel_config_service: None,
+            outbound_preferences_service: Arc::new(
+                UnsupportedOutboundPreferencesProductService::new_static(),
             ),
             operator_status: Arc::new(UnsupportedOperatorStatusService),
             operator_logs: Arc::new(UnsupportedOperatorLogsService),
@@ -2479,43 +2481,43 @@ where
         self
     }
 
-    pub fn with_lifecycle_product_facade(
+    pub fn with_lifecycle_product_service(
         mut self,
-        lifecycle_facade: Arc<dyn LifecycleProductFacade>,
+        lifecycle_service: Arc<dyn LifecycleProductService>,
     ) -> Self {
-        self.lifecycle_facade = lifecycle_facade;
+        self.lifecycle_service = lifecycle_service;
         self
     }
 
-    pub fn with_automation_product_facade(
+    pub fn with_automation_product_service(
         mut self,
-        automation_facade: Arc<dyn AutomationProductFacade>,
+        automation_service: Arc<dyn AutomationProductService>,
     ) -> Self {
-        self.automation_facade = automation_facade;
+        self.automation_service = automation_service;
         self
     }
 
-    pub fn with_skills_product_facade(
+    pub fn with_skills_product_service(
         mut self,
-        skills_facade: Arc<dyn SkillsProductFacade>,
+        skills_service: Arc<dyn SkillsProductService>,
     ) -> Self {
-        self.skills_facade = skills_facade;
+        self.skills_service = skills_service;
         self
     }
 
-    pub fn with_channel_connection_facade(
+    pub fn with_channel_connection_service(
         mut self,
-        channel_connection_facade: Arc<dyn ChannelConnectionFacade>,
+        channel_connection_service: Arc<dyn ChannelConnectionService>,
     ) -> Self {
-        self.channel_connection_facade = channel_connection_facade;
+        self.channel_connection_service = channel_connection_service;
         self
     }
 
-    pub fn with_outbound_preferences_facade(
+    pub fn with_outbound_preferences_product_service(
         mut self,
-        outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade>,
+        outbound_preferences_service: Arc<dyn OutboundPreferencesProductService>,
     ) -> Self {
-        self.outbound_preferences_facade = outbound_preferences_facade;
+        self.outbound_preferences_service = outbound_preferences_service;
         self
     }
 
@@ -2652,9 +2654,9 @@ where
         };
         let limit = clamp_automation_list_limit(request.limit);
         let run_limit = clamp_automation_run_limit(request.run_limit);
-        let scheduler_enabled = self.automation_facade.scheduler_enabled();
+        let scheduler_enabled = self.automation_service.scheduler_enabled();
         let automations = self
-            .automation_facade
+            .automation_service
             .list_automations(
                 caller,
                 AutomationListRequest {
@@ -2675,7 +2677,7 @@ where
         caller: ProductSurfaceCaller,
         request: ProductListThreadsRequest,
     ) -> Result<RebornListThreadsResponse, ProductSurfaceError> {
-        // Reuse the same scope-construction shape the other v2 facade
+        // Reuse the same scope-construction shape the other v2 service
         // methods use: fail-closed when the caller has no agent
         // binding, owner-scope to the caller's user_id so the listing
         // is per-caller.
@@ -2698,13 +2700,13 @@ where
     }
 
     /// Wire the generic channel-config configure port. Without it, the
-    /// setup facade renders no channel-config fields and rejects
+    /// setup service renders no channel-config fields and rejects
     /// channel-config submissions as unavailable.
-    pub fn with_channel_config_facade(
+    pub fn with_channel_config_product_service(
         mut self,
-        channel_config_facade: Arc<dyn ChannelConfigFacade>,
+        channel_config_service: Arc<dyn ChannelConfigProductService>,
     ) -> Self {
-        self.channel_config_facade = Some(channel_config_facade);
+        self.channel_config_service = Some(channel_config_service);
         self
     }
 
@@ -2757,7 +2759,7 @@ where
     }
 
     /// Wire the admin user-management port (user CRUD + per-user secret
-    /// provisioning). Without it, every admin facade method reports the service
+    /// provisioning). Without it, every admin service method reports the service
     /// unavailable via the fail-closed [`RejectingAdminUserService`] default.
     pub fn with_admin_user_service(mut self, admin_users: Arc<dyn AdminUserService>) -> Self {
         self.admin_users = admin_users;
@@ -2983,6 +2985,48 @@ where
         self.product_capability_invoker
             .invoke(caller, capability, input, activity_id)
             .await
+    }
+
+    async fn execute_product_model_command(
+        &self,
+        caller: ProductSurfaceCaller,
+        action: ProductModelCommand,
+    ) -> Result<serde_json::Value, ProductSurfaceError> {
+        match action {
+            ProductModelCommand::Status => {
+                let snapshot = self.build_llm_config_view(caller).await?;
+                serde_json::to_value(snapshot).map_err(ProductSurfaceError::internal_from)
+            }
+            ProductModelCommand::Set { model } => {
+                let snapshot = self.build_llm_config_view(caller.clone()).await?;
+                let provider_id = snapshot
+                    .active
+                    .map(|active| active.provider_id)
+                    .ok_or_else(llm_config::llm_config_unavailable)?;
+                self.invoke_llm_active_set(
+                    caller.clone(),
+                    serde_json::json!({
+                        "provider_id": provider_id,
+                        "model": model,
+                    }),
+                )
+                .await?;
+                let snapshot = self.build_llm_config_view(caller).await?;
+                serde_json::to_value(snapshot).map_err(ProductSurfaceError::internal_from)
+            }
+            ProductModelCommand::SetProvider { provider, model } => {
+                self.invoke_llm_active_set(
+                    caller.clone(),
+                    serde_json::json!({
+                        "provider_id": provider,
+                        "model": model,
+                    }),
+                )
+                .await?;
+                let snapshot = self.build_llm_config_view(caller).await?;
+                serde_json::to_value(snapshot).map_err(ProductSurfaceError::internal_from)
+            }
+        }
     }
 
     pub async fn list_admin_users(
@@ -3824,9 +3868,9 @@ where
             id if id == EXTENSIONS_VIEW.id => {
                 views::parse_empty_view_params(query.params)?;
                 let response = extensions::list_extensions(
-                    Arc::clone(&self.lifecycle_facade),
+                    Arc::clone(&self.lifecycle_service),
                     self.extension_credentials.clone(),
-                    Arc::clone(&self.channel_connection_facade),
+                    Arc::clone(&self.channel_connection_service),
                     caller,
                 )
                 .await?;
@@ -3835,15 +3879,15 @@ where
             id if id == EXTENSION_REGISTRY_VIEW.id => {
                 views::parse_empty_view_params(query.params)?;
                 let response =
-                    extensions::list_extension_registry(self.lifecycle_facade.as_ref(), caller)
+                    extensions::list_extension_registry(self.lifecycle_service.as_ref(), caller)
                         .await?;
                 views::view_page(response)
             }
             id if id == EXTENSION_SETUP_VIEW.id => {
                 let response = lifecycle_setup::setup_extension_view(
-                    self.lifecycle_facade.as_ref(),
+                    self.lifecycle_service.as_ref(),
                     self.extension_credentials.as_deref(),
-                    self.channel_config_facade.as_deref(),
+                    self.channel_config_service.as_deref(),
                     caller,
                     query.params,
                 )
@@ -3852,20 +3896,20 @@ where
             }
             id if id == SKILLS_VIEW.id => {
                 views::parse_empty_view_params(query.params)?;
-                let response = self.skills_facade.list_skills(caller).await?;
+                let response = self.skills_service.list_skills(caller).await?;
                 views::view_page(response)
             }
             id if id == SKILL_SEARCH_VIEW.id => {
                 let search_query = views::required_string_view_param(query.params, "query")?;
                 let response = self
-                    .skills_facade
+                    .skills_service
                     .search_skills(caller, search_query)
                     .await?;
                 views::view_page(response)
             }
             id if id == SKILL_CONTENT_VIEW.id => {
                 let name = views::required_string_view_param(query.params, "name")?;
-                let response = self.skills_facade.read_skill_content(caller, name).await?;
+                let response = self.skills_service.read_skill_content(caller, name).await?;
                 views::view_page(response)
             }
             id if id == OPERATOR_DIAGNOSTICS_VIEW.id => {
@@ -3892,7 +3936,7 @@ where
             .authorize_project_fs_access(caller, request.thread_id)
             .await?;
         // dispatch-exempt: read-only, already-authorized workspace listing through
-        // the facade's own port — not an in-turn mutating tool call, so it does
+        // the service's own port — not an in-turn mutating tool call, so it does
         // not route through ToolDispatcher.
         let entries = reader
             .list_dir(&thread_scope, &request.path)
@@ -3911,7 +3955,7 @@ where
             .authorize_project_fs_access(caller, request.thread_id)
             .await?;
         // dispatch-exempt: read-only, already-authorized workspace stat through
-        // the facade's own port — not an in-turn mutating tool call.
+        // the service's own port — not an in-turn mutating tool call.
         let stat = reader
             .stat(&thread_scope, &request.path)
             .await
@@ -3929,7 +3973,7 @@ where
             .authorize_project_fs_access(caller, request.thread_id)
             .await?;
         // dispatch-exempt: read-only, already-authorized workspace file download
-        // through the facade's own port — not an in-turn mutating tool call.
+        // through the service's own port — not an in-turn mutating tool call.
         reader
             .read_file(&thread_scope, &request.path)
             .await
@@ -3968,7 +4012,7 @@ where
             .authorize_browse_scope(caller, request.project_id)
             .await?;
         // dispatch-exempt: read-only, caller-scoped internal-filesystem listing
-        // through the facade's own port — not an in-turn mutating tool call.
+        // through the service's own port — not an in-turn mutating tool call.
         let entries = browser
             .list_dir(&scope, request.mount, &request.path)
             .await
@@ -4446,7 +4490,7 @@ where
                 false,
             ));
         };
-        self.automation_facade
+        self.automation_service
             .pause_automation(caller, automation_id)
             .await
     }
@@ -4463,7 +4507,7 @@ where
                 false,
             ));
         };
-        self.automation_facade
+        self.automation_service
             .resume_automation(caller, automation_id)
             .await
     }
@@ -4482,7 +4526,7 @@ where
             ));
         };
         let name = parse_automation_name(request)?;
-        self.automation_facade
+        self.automation_service
             .rename_automation(caller, automation_id, name)
             .await
     }
@@ -4499,7 +4543,7 @@ where
                 false,
             ));
         };
-        self.automation_facade
+        self.automation_service
             .delete_automation(caller, automation_id)
             .await
     }
@@ -4833,7 +4877,7 @@ where
             ));
         };
         let automations = self
-            .automation_facade
+            .automation_service
             .list_automations(
                 bound_caller.clone(),
                 AutomationListRequest {
@@ -4927,7 +4971,7 @@ where
         automation_title: Option<AutomationNotificationTitle>,
     ) -> Result<Option<SessionThreadRecord>, ProductSurfaceError> {
         let Some(trigger_scope) = self
-            .automation_facade
+            .automation_service
             .resolve_run_thread_scope(bound_caller.clone(), &thread_id)
             .await?
         else {
@@ -5372,7 +5416,7 @@ where
     /// the reconstructed scope — this is accepted breakage; recreating the
     /// trigger creates a fresh owner-bearing binding.
     ///
-    /// Delegates to `AutomationProductFacade::resolve_run_thread_scope` which
+    /// Delegates to `AutomationProductService::resolve_run_thread_scope` which
     /// is caller-scoped: authorization is embedded in the repository lookup.
     /// If the trigger exists for this caller and contains the run, the returned
     /// scope lets all downstream storage lookups (timeline, gate, cancel, SSE)
@@ -5398,7 +5442,7 @@ where
         };
         let thread_id = &scope.thread_id;
         let Some(trigger_scope) = self
-            .automation_facade
+            .automation_service
             .resolve_run_thread_scope(bound_caller.clone(), thread_id)
             .await?
         else {
@@ -5770,7 +5814,7 @@ where
         // This read only selects the WebUI route. The typed auth/approval
         // services intentionally re-read run-state through `blocked_gate_state`
         // before mutating auth/approval records or resuming/cancelling a run,
-        // so stale facade classification cannot authorize a side effect.
+        // so stale service classification cannot authorize a side effect.
         GateResolutionRoute::from_run_state(
             state.status,
             state.gate_ref.as_ref(),
@@ -5930,7 +5974,7 @@ fn caller_browse_scope(caller: &ProductSurfaceCaller) -> ResourceScope {
     }
 }
 
-/// Map a project-filesystem read error to the sanitized facade error taxonomy.
+/// Map a project-filesystem read error to the sanitized service error taxonomy.
 /// No host paths or backend strings cross this boundary — only coarse
 /// transport/status shape.
 fn map_project_fs_error(error: ProjectFsError) -> ProductSurfaceError {
@@ -6898,7 +6942,7 @@ mod tests {
                 serde_json::from_value::<SettingsToolPermissionState>(serialized).unwrap(),
                 state
             );
-            // Round-trips through the storage parser the facade applies on set.
+            // Round-trips through the storage parser the service applies on set.
             let update =
                 parse_tool_permission_state(&serde_json::json!({ "state": wire })).unwrap();
             match (update, resolved) {
@@ -6914,11 +6958,11 @@ mod tests {
         }
     }
 
-    /// Every `ProjectServiceError` variant projects to a sanitized facade error
+    /// Every `ProjectServiceError` variant projects to a sanitized service error
     /// with the expected coarse code/status, and `InvalidInput`'s field name is
     /// carried through (it is a controlled constant, never backend text).
     #[test]
-    fn project_service_error_maps_to_sanitized_facade_error() {
+    fn project_service_error_maps_to_sanitized_service_error() {
         let not_found = map_project_service_error(ProjectServiceError::NotFound);
         assert_eq!(not_found.code, ProductSurfaceErrorCode::NotFound);
         assert_eq!(not_found.status_code, 404);

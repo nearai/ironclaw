@@ -7,8 +7,8 @@
 //! duplicate capability/route conflicts (LIFE-14), and in-flight snapshot
 //! generation isolation (LIFE-15). The dormant multi-step removal machine and
 //! crash-resume restore were deleted with the honest-state-machine refactor;
-//! production removal is the facade path (`remove_record` + auth cleanup) and
-//! is covered through the composition facades.
+//! production removal is the service path (`remove_record` + auth cleanup) and
+//! is covered through the composition services.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

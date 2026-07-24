@@ -1,5 +1,5 @@
 //! Membership-model ownership tests (#5459 P1, 2026-07-08 pivot),
-//! driven through the lifecycle facade/port like every production caller.
+//! driven through the lifecycle service/port like every production caller.
 //! Split out of the parent test module, whose shared fixtures it reuses
 //! via `super::*`.
 //!
@@ -14,13 +14,13 @@
 use super::*;
 use ironclaw_product::LifecycleInstallScope;
 
-/// Membership install rules through the facade: members install
+/// Membership install rules through the service: members install
 /// independently (second member JOINS, not "unavailable"), each sees a
 /// private entry, non-members stay masked, and a duplicate install by
 /// the same member is rejected as already installed.
 #[tokio::test]
 async fn members_install_the_same_tool_independently() {
-    let (_dir, _root, facade, _registry, installation_store) = extension_lifecycle_fixture();
+    let (_dir, _root, service, _registry, installation_store) = extension_lifecycle_fixture();
     let fixture_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture").expect("fixture ref");
     let installation_id = ExtensionInstallationId::new("fixture").expect("fixture installation id");
@@ -29,7 +29,7 @@ async fn members_install_the_same_tool_independently() {
     let carol = UserId::new("carol").expect("user");
 
     let install = |user: &str| {
-        facade.execute(
+        service.execute(
             lifecycle_surface_context_for_user(user),
             LifecycleProductAction::ExtensionInstall {
                 package_ref: fixture_ref.clone(),
@@ -37,7 +37,7 @@ async fn members_install_the_same_tool_independently() {
         )
     };
     let list = |user: &str| {
-        facade.execute(
+        service.execute(
             lifecycle_surface_context_for_user(user),
             LifecycleProductAction::ExtensionList,
         )
@@ -108,7 +108,7 @@ async fn members_install_the_same_tool_independently() {
     // …while activate works for both members (the bundle publishes once;
     // the second activate is an idempotent re-publish).
     for member in ["alice", "bob"] {
-        let response = facade
+        let response = service
             .execute(
                 lifecycle_surface_context_for_user(member),
                 LifecycleProductAction::ExtensionActivate {
@@ -134,7 +134,7 @@ async fn members_install_the_same_tool_independently() {
                 package_ref: fixture_ref.clone(),
             },
         ] {
-            let error = facade
+            let error = service
                 .execute(context.clone(), action)
                 .await
                 .expect_err("a tool the caller does not hold must be inoperable");
@@ -156,7 +156,7 @@ async fn members_install_the_same_tool_independently() {
 /// is free for a fresh install.
 #[tokio::test]
 async fn member_remove_leaves_others_and_last_member_remove_tears_down() {
-    let (_dir, _root, facade, _registry, installation_store) = extension_lifecycle_fixture();
+    let (_dir, _root, service, _registry, installation_store) = extension_lifecycle_fixture();
     let fixture_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture").expect("fixture ref");
     let installation_id = ExtensionInstallationId::new("fixture").expect("fixture installation id");
@@ -165,7 +165,7 @@ async fn member_remove_leaves_others_and_last_member_remove_tears_down() {
     let bob = UserId::new("bob").expect("user");
 
     for member in ["alice", "bob"] {
-        facade
+        service
             .execute(
                 lifecycle_surface_context_for_user(member),
                 LifecycleProductAction::ExtensionInstall {
@@ -175,7 +175,7 @@ async fn member_remove_leaves_others_and_last_member_remove_tears_down() {
             .await
             .expect("member installs");
     }
-    facade
+    service
         .execute(
             lifecycle_surface_context_for_user("alice"),
             LifecycleProductAction::ExtensionActivate {
@@ -186,7 +186,7 @@ async fn member_remove_leaves_others_and_last_member_remove_tears_down() {
         .expect("alice activates");
 
     // alice removes → she leaves the set; bob keeps the (still enabled) tool.
-    let response = facade
+    let response = service
         .execute(
             lifecycle_surface_context_for_user("alice"),
             LifecycleProductAction::ExtensionRemove {
@@ -203,7 +203,7 @@ async fn member_remove_leaves_others_and_last_member_remove_tears_down() {
         .expect("row survives while another member holds the tool");
     assert!(!installation.owner().visible_to(&alice), "alice left");
     assert!(installation.owner().visible_to(&bob), "bob keeps it");
-    let alice_list = facade
+    let alice_list = service
         .execute(
             lifecycle_surface_context_for_user("alice"),
             LifecycleProductAction::ExtensionList,
@@ -214,7 +214,7 @@ async fn member_remove_leaves_others_and_last_member_remove_tears_down() {
     else {
         panic!("alice no longer sees the tool: {alice_list:?}");
     };
-    let bob_list = facade
+    let bob_list = service
         .execute(
             lifecycle_surface_context_for_user("bob"),
             LifecycleProductAction::ExtensionList,
@@ -227,7 +227,7 @@ async fn member_remove_leaves_others_and_last_member_remove_tears_down() {
     };
 
     // bob (last member) removes → full teardown: row and manifest gone…
-    facade
+    service
         .execute(
             lifecycle_surface_context_for_user("bob"),
             LifecycleProductAction::ExtensionRemove {
@@ -254,7 +254,7 @@ async fn member_remove_leaves_others_and_last_member_remove_tears_down() {
     );
 
     // …and the id is free again for a fresh install.
-    facade
+    service
         .execute(
             lifecycle_surface_context_for_user("carol"),
             LifecycleProductAction::ExtensionInstall {
@@ -271,13 +271,13 @@ async fn member_remove_leaves_others_and_last_member_remove_tears_down() {
 /// operator can remove it.
 #[tokio::test]
 async fn operator_install_evicts_member_installs_to_tenant_shared() {
-    let (_dir, _root, facade, _registry, installation_store) = extension_lifecycle_fixture();
+    let (_dir, _root, service, _registry, installation_store) = extension_lifecycle_fixture();
     let fixture_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture").expect("fixture ref");
     let installation_id = ExtensionInstallationId::new("fixture").expect("fixture installation id");
 
     for member in ["alice", "bob"] {
-        facade
+        service
             .execute(
                 lifecycle_surface_context_for_user(member),
                 LifecycleProductAction::ExtensionInstall {
@@ -287,7 +287,7 @@ async fn operator_install_evicts_member_installs_to_tenant_shared() {
             .await
             .expect("member installs");
     }
-    facade
+    service
         .execute(
             lifecycle_surface_context_for_user("alice"),
             LifecycleProductAction::ExtensionActivate {
@@ -298,7 +298,7 @@ async fn operator_install_evicts_member_installs_to_tenant_shared() {
         .expect("alice activates");
 
     // Operator installs → evicts both members' private installs to Tenant.
-    let response = facade
+    let response = service
         .execute(
             lifecycle_surface_context(),
             LifecycleProductAction::ExtensionInstall {
@@ -326,7 +326,7 @@ async fn operator_install_evicts_member_installs_to_tenant_shared() {
     // Everyone — evicted members and never-installed users alike — now
     // sees the SHARED entry.
     for user in ["alice", "bob", "carol"] {
-        let user_list = facade
+        let user_list = service
             .execute(
                 lifecycle_surface_context_for_user(user),
                 LifecycleProductAction::ExtensionList,
@@ -348,7 +348,7 @@ async fn operator_install_evicts_member_installs_to_tenant_shared() {
 
     // Operator re-install is a real duplicate; members cannot remove the
     // shared tool; the operator can.
-    let error = facade
+    let error = service
         .execute(
             lifecycle_surface_context(),
             LifecycleProductAction::ExtensionInstall {
@@ -362,7 +362,7 @@ async fn operator_install_evicts_member_installs_to_tenant_shared() {
         "unexpected: {error}"
     );
     for member in ["alice", "bob"] {
-        let error = facade
+        let error = service
             .execute(
                 lifecycle_surface_context_for_user(member),
                 LifecycleProductAction::ExtensionRemove {
@@ -376,7 +376,7 @@ async fn operator_install_evicts_member_installs_to_tenant_shared() {
             "unexpected: {error}"
         );
     }
-    facade
+    service
         .execute(
             lifecycle_surface_context(),
             LifecycleProductAction::ExtensionRemove {
@@ -391,11 +391,11 @@ async fn operator_install_evicts_member_installs_to_tenant_shared() {
 /// "already installed" error — the tool is already available to them.
 #[tokio::test]
 async fn member_install_of_a_shared_tool_reports_already_installed() {
-    let (_dir, _root, facade, _registry, _store) = extension_lifecycle_fixture();
+    let (_dir, _root, service, _registry, _store) = extension_lifecycle_fixture();
     let fixture_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture").expect("fixture ref");
 
-    facade
+    service
         .execute(
             lifecycle_surface_context(),
             LifecycleProductAction::ExtensionInstall {
@@ -404,7 +404,7 @@ async fn member_install_of_a_shared_tool_reports_already_installed() {
         )
         .await
         .expect("operator installs shared");
-    let error = facade
+    let error = service
         .execute(
             lifecycle_surface_context_for_user("alice"),
             LifecycleProductAction::ExtensionInstall {
@@ -419,14 +419,14 @@ async fn member_install_of_a_shared_tool_reports_already_installed() {
     );
 }
 
-/// #5525 review: `LifecycleProductCommandService` dispatches every
+/// #5525 review: `Lifecycleproduct-surface command operation` dispatches every
 /// `/extension_*` command as `LifecycleProductContext::Command`, so the
-/// facade must derive the caller from the verified command auth claim
+/// service must derive the caller from the verified command auth claim
 /// instead of rejecting non-surface contexts outright — and the
 /// membership masking must hold on the command path too.
 #[tokio::test]
 async fn extension_lifecycle_commands_derive_caller_from_command_auth_claim() {
-    let (_dir, _root, facade, _registry, installation_store) = extension_lifecycle_fixture();
+    let (_dir, _root, service, _registry, installation_store) = extension_lifecycle_fixture();
     let fixture_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture").expect("fixture ref");
     let installation_id = ExtensionInstallationId::new("fixture").expect("fixture installation id");
@@ -434,7 +434,7 @@ async fn extension_lifecycle_commands_derive_caller_from_command_auth_claim() {
     let bob = UserId::new("bob").expect("user");
 
     // alice installs through the command path → membership derives from the claim.
-    let response = facade
+    let response = service
         .execute(
             lifecycle_command_context_for_user("alice"),
             LifecycleProductAction::ExtensionInstall {
@@ -456,7 +456,7 @@ async fn extension_lifecycle_commands_derive_caller_from_command_auth_claim() {
     assert!(!installation.owner().visible_to(&bob));
 
     // alice's command list sees it; bob's command list stays masked.
-    let alice_list = facade
+    let alice_list = service
         .execute(
             lifecycle_command_context_for_user("alice"),
             LifecycleProductAction::ExtensionList,
@@ -467,7 +467,7 @@ async fn extension_lifecycle_commands_derive_caller_from_command_auth_claim() {
     else {
         panic!("alice must see her install via command: {alice_list:?}");
     };
-    let bob_list = facade
+    let bob_list = service
         .execute(
             lifecycle_command_context_for_user("bob"),
             LifecycleProductAction::ExtensionList,
@@ -480,7 +480,7 @@ async fn extension_lifecycle_commands_derive_caller_from_command_auth_claim() {
     };
 
     // Membership masking holds for command-path mutations by a non-member.
-    let error = facade
+    let error = service
         .execute(
             lifecycle_command_context_for_user("bob"),
             LifecycleProductAction::ExtensionActivate {
@@ -496,7 +496,7 @@ async fn extension_lifecycle_commands_derive_caller_from_command_auth_claim() {
 
     // bob JOINS through the command path, then alice activates and removes
     // hers; bob keeps the tool.
-    facade
+    service
         .execute(
             lifecycle_command_context_for_user("bob"),
             LifecycleProductAction::ExtensionInstall {
@@ -505,7 +505,7 @@ async fn extension_lifecycle_commands_derive_caller_from_command_auth_claim() {
         )
         .await
         .expect("bob joins via command");
-    facade
+    service
         .execute(
             lifecycle_command_context_for_user("alice"),
             LifecycleProductAction::ExtensionActivate {
@@ -514,7 +514,7 @@ async fn extension_lifecycle_commands_derive_caller_from_command_auth_claim() {
         )
         .await
         .expect("alice activates via command");
-    facade
+    service
         .execute(
             lifecycle_command_context_for_user("alice"),
             LifecycleProductAction::ExtensionRemove {
@@ -581,7 +581,7 @@ async fn active_capabilities_carry_installation_owner() {
 }
 
 /// Command-path context whose verified auth claim subject is `user` —
-/// mirrors `LifecycleProductCommandService` dispatching `/extension_*`
+/// mirrors `Lifecycleproduct-surface command operation` dispatching `/extension_*`
 /// commands as `LifecycleProductContext::Command`.
 fn lifecycle_command_context_for_user(user: &str) -> LifecycleProductContext {
     use ironclaw_product::{

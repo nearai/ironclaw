@@ -6,7 +6,7 @@
 //!
 //! Already locked elsewhere (cross-referenced, not duplicated here):
 //! CORS allow / reject-with-configured-origin, descriptor body-limit 413
-//! and rate-limit 429 on the v2 facade routes, and WebSocket
+//! and rate-limit 429 on the v2 service routes, and WebSocket
 //! same-origin 403 all live in
 //! `ironclaw_reborn_composition/tests/webui_v2_serve.rs`; OAuth CSRF
 //! state single-use, cross-provider replay, and redirect sanitization
@@ -17,7 +17,7 @@
 //!
 //! 1. The public SSO routes inherit the descriptor-driven **per-IP**
 //!    rate limit (`/auth/login/{provider}` → 429 after the 60/60s
-//!    budget) — a distinct scope from the facade's per-caller limiter —
+//!    budget) — a distinct scope from the service's per-caller limiter —
 //!    and that the `PerIp` scope keys each distinct peer IP to its own
 //!    independent budget (one IP's flood cannot deny another).
 //! 2. The SSO body caps: `POST /auth/session/exchange` and
@@ -162,7 +162,7 @@ fn login_request_from(addr: SocketAddr) -> Request<Body> {
 async fn sso_login_enforces_per_ip_rate_limit() {
     // The public SSO mount declares `RateLimitScope::PerIp` at 60 req /
     // 60s on `/auth/login/{provider}` (a different scope from the v2
-    // facade's per-caller limiter). A single IP must be cut off after
+    // service's per-caller limiter). A single IP must be cut off after
     // the budget so an unauthenticated login flood is bounded.
     //
     // Two implementation properties this test relies on, both held by

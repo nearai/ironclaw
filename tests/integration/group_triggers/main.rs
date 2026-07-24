@@ -53,7 +53,7 @@ async fn triggers_group_e2e() {
         scenario_trigger_persists_after_reopen::run(&g).await,
     );
     // W5-WEBUI-API-1: independent of `verbs_lifecycle` — mints its own
-    // trigger, then lists it back through the real WebUI automations facade
+    // trigger, then lists it back through the real WebUI automations service
     // over the group's shared trigger repository.
     report.record(
         "webui_automations_list",

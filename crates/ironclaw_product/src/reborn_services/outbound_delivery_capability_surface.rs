@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use super::{
-    OutboundPreferencesProductFacade, ProductSurfaceCaller, ProductSurfaceError,
+    OutboundPreferencesProductService, ProductSurfaceCaller, ProductSurfaceError,
     RebornOperatorToolInfo, RebornOutboundDeliveryTargetId,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
     RebornSetOutboundPreferencesRequest,
@@ -71,11 +71,11 @@ impl OutboundDeliveryCapabilityInputError {
 }
 
 pub async fn list_outbound_delivery_targets_for_model(
-    facade: &dyn OutboundPreferencesProductFacade,
+    service: &dyn OutboundPreferencesProductService,
     caller: ProductSurfaceCaller,
     input: OutboundDeliveryTargetsListInput,
 ) -> Result<RebornOutboundDeliveryTargetListResponse, ProductSurfaceError> {
-    let mut response = facade.list_outbound_delivery_targets(caller).await?;
+    let mut response = service.list_outbound_delivery_targets(caller).await?;
     if let Some(channel_filter) = input.channel {
         response.targets.retain(|option| {
             option
@@ -89,11 +89,11 @@ pub async fn list_outbound_delivery_targets_for_model(
 }
 
 pub async fn set_outbound_delivery_target_for_model(
-    facade: &dyn OutboundPreferencesProductFacade,
+    service: &dyn OutboundPreferencesProductService,
     caller: ProductSurfaceCaller,
     input: OutboundDeliveryTargetSetInput,
 ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
-    facade
+    service
         .set_outbound_preferences(
             caller,
             RebornSetOutboundPreferencesRequest {

@@ -1,6 +1,6 @@
 //! End-to-end coverage for the WebChat v2 admin user-management surface.
 //!
-//! Unlike the crate-tier facade tests (which drive `ProductSurface` against
+//! Unlike the crate-tier service tests (which drive `ProductSurface` against
 //! a fake port), this stands up a REAL local-dev `RebornRuntime` with the admin
 //! service wired (identity user-directory + admin secret provisioner + a signed
 //! session-store token minter), composes the full `webui_v2_app` with a real
@@ -10,7 +10,7 @@
 //! The flagship proof: an admin (operator bearer) creates a user, receives the
 //! one-time `api_token`, and that token then authenticates a follow-up request
 //! AS the new user — exercising the entire mint → return → validate chain
-//! (facade → composition adapter → identity store → minter → the session
+//! (service → composition adapter → identity store → minter → the session
 //! authenticator that validates the bearer). Nothing above the token crypto is
 //! stubbed.
 
@@ -653,7 +653,7 @@ async fn admin_session_bearer_cannot_reach_operator_routes() {
 }
 
 /// 4. Forged / tampered / expired tokens are rejected at the auth boundary with
-///    a 401 — they never reach the admin facade.
+///    a 401 — they never reach the admin service.
 #[tokio::test]
 async fn forged_and_expired_tokens_are_rejected() {
     let harness = build_admin_harness().await;
@@ -762,7 +762,7 @@ async fn forged_and_expired_tokens_are_rejected() {
 }
 
 /// 5. An oversized create-user body is rejected with 413 by the descriptor
-///    body-limit middleware BEFORE the facade runs. The `admin_create_user`
+///    body-limit middleware BEFORE the service runs. The `admin_create_user`
 ///    route declares a 16 KiB per-route cap.
 #[tokio::test]
 async fn oversized_create_body_is_rejected_with_413() {
@@ -840,7 +840,7 @@ async fn malformed_inputs_are_4xx_not_500() {
     let operator = AdminApiDriver::new(harness.router.clone(), OPERATOR_TOKEN);
 
     // A malformed `{user_id}` path segment (whitespace/control) → 400 from the
-    // handler's `parse_admin_user_id` before the facade is touched.
+    // handler's `parse_admin_user_id` before the service is touched.
     let (status, _) = operator
         .send(
             Method::GET,

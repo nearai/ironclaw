@@ -43,7 +43,7 @@ use ironclaw_host_api::ingress::IngressRouteDescriptor;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 // The WebChat v2 route surface + static router are the folded-in `webui_v2`
 // module; the mount vocabulary + product-auth serve items are re-exported from
-// the composition facade.
+// the composition service.
 use crate::webui_v2::{
     DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, StaticRouterConfig, StaticRouterConfigError,
     WebUiV2Capabilities, WebUiV2RouteOptions, WebUiV2State,
@@ -218,13 +218,13 @@ pub struct WebuiServeConfig {
     /// [`ProductSurfaceCaller`]. The browser body cannot influence
     /// this — it comes from host installation config / runtime
     /// identity. Required because the downstream `ProductSurface`
-    /// facade builds `ThreadScope` from `caller.agent_id` for every
+    /// service builds `ThreadScope` from `caller.agent_id` for every
     /// v2 mutation and read, and a `None` agent_id collapses to a
     /// `400 InvalidRequest` before the handler reaches the workflow.
     pub(crate) default_agent_id: Option<AgentId>,
     /// Trusted default project id stamped onto every
     /// [`ProductSurfaceCaller`]. Optional at the type level
-    /// because the v2 facade allows projectless scopes for some
+    /// because the v2 service allows projectless scopes for some
     /// flows; supply it when the host installation has a single
     /// canonical project.
     pub(crate) default_project_id: Option<ProjectId>,
@@ -235,7 +235,7 @@ pub struct WebuiServeConfig {
     /// webhooks such as a channel vendor's events API. Both the `Router` and the
     /// `Vec<IngressRouteDescriptor>` are required so the descriptor-driven
     /// per-route rate-limit and body-limit middlewares apply to these routes
-    /// just like they do to the v2 facade and the product-auth callback —
+    /// just like they do to the v2 service and the product-auth callback —
     /// no side door. Defaults to an empty list.
     pub(crate) public_mounts: Vec<PublicRouteMount>,
     /// Host-supplied protected route mounts merged into the composed app
@@ -300,7 +300,7 @@ impl WebuiServeConfig {
     /// descriptors. The router is merged into the composed app
     /// outside the bearer auth layer; the descriptors fold into
     /// the same per-route rate-limit / body-limit middlewares the
-    /// v2 facade and the product-auth callback already use, so
+    /// v2 service and the product-auth callback already use, so
     /// the public surface rides on the canonical policy stack —
     /// no descriptor-less side door. Multiple public mounts are
     /// allowed so OAuth/login routes and protocol webhooks can coexist
@@ -346,7 +346,7 @@ impl WebuiServeConfig {
     }
 
     /// Set the trusted host-installation default `AgentId`. Stamped
-    /// onto every authenticated caller; required for the v2 facade to
+    /// onto every authenticated caller; required for the v2 service to
     /// build `ThreadScope` on mutations and reads.
     pub fn with_default_agent_id(mut self, agent_id: AgentId) -> Self {
         self.default_agent_id = Some(agent_id);
@@ -792,7 +792,7 @@ async fn authenticate_request(
     }
 
     // Stamp the trusted agent/project from host installation config
-    // onto every authenticated caller. The downstream facade builds
+    // onto every authenticated caller. The downstream service builds
     // `ThreadScope` from `caller.agent_id` and 400s if it's missing,
     // so a binary that fails to thread agent_id through here would
     // authenticate users only to reject every v2 mutation/read. The

@@ -2,6 +2,8 @@ use super::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ProductCommandHandler {
+    ProductLifecycleCommand,
+    ProductModelCommand,
     CreateThread,
     SubmitTurn,
     CancelRun,
@@ -31,6 +33,8 @@ pub(super) enum ProductCommandHandler {
 impl ProductCommandHandler {
     pub(super) fn parse(capability: &CapabilityId) -> Option<Self> {
         match capability.as_str() {
+            PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID => Some(Self::ProductLifecycleCommand),
+            PRODUCT_MODEL_COMMAND_OPERATION_ID => Some(Self::ProductModelCommand),
             CREATE_THREAD_COMMAND_ID => Some(Self::CreateThread),
             SUBMIT_TURN_COMMAND_ID => Some(Self::SubmitTurn),
             CANCEL_RUN_COMMAND_ID => Some(Self::CancelRun),
@@ -70,6 +74,38 @@ impl ProductCommandHandler {
         V: RebornViewProvider + Clone + 'static,
     {
         match self {
+            Self::ProductLifecycleCommand => {
+                let request: ProductLifecycleCommandInput = product_command_input(input)?;
+                let command_name = request.action.command_name().to_string();
+                let response = services
+                    .lifecycle_service
+                    .execute(
+                        LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
+                            tenant_id: caller.tenant_id,
+                            user_id: caller.user_id,
+                            agent_id: caller.agent_id,
+                            project_id: caller.project_id,
+                        }),
+                        request.action,
+                    )
+                    .await?;
+                let mut output = command_output(response)?;
+                if let serde_json::Value::Object(map) = &mut output {
+                    map.insert(
+                        "command".to_string(),
+                        serde_json::Value::String(command_name),
+                    );
+                }
+                Ok(output)
+            }
+            Self::ProductModelCommand => {
+                let request: ProductModelCommandInput = product_command_input(input)?;
+                command_output(
+                    services
+                        .execute_product_model_command(caller, request.action)
+                        .await?,
+                )
+            }
             Self::CreateThread => command_output(
                 services
                     .create_thread(caller, product_command_input(input)?)
@@ -327,7 +363,7 @@ impl ProductCapabilityHandler {
             Self::LlmActiveSet => services.invoke_llm_active_set(caller, input).await,
             Self::ExtensionImport => {
                 extensions::import_extension_capability(
-                    services.lifecycle_facade.as_ref(),
+                    services.lifecycle_service.as_ref(),
                     caller,
                     input,
                 )
@@ -335,9 +371,9 @@ impl ProductCapabilityHandler {
             }
             Self::ExtensionSetupSubmit => {
                 lifecycle_setup::submit_extension_setup_capability(
-                    services.lifecycle_facade.as_ref(),
+                    services.lifecycle_service.as_ref(),
                     services.extension_credentials.as_deref(),
-                    services.channel_config_facade.as_deref(),
+                    services.channel_config_service.as_deref(),
                     caller,
                     input,
                 )

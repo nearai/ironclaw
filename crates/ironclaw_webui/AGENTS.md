@@ -43,10 +43,10 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
 ## Do not move in here
 
 - **Product/API business logic.** Handlers consume only `ProductSurface`;
-  the facade, projections, and domain services stay behind that seam in
+  the service, projections, and domain services stay behind that seam in
   `ironclaw_product` / `ironclaw_reborn_composition`.
 - **A direct `ironclaw_product` dependency**, or any lower substrate /
-  runtime / DB crate. Reach that surface through composition's public facade
+  runtime / DB crate. Reach that surface through composition's public service
   (e.g. `mark_bearer_token_verified_for_tenant` is re-exported from composition,
   not imported from adapters). The architecture boundary test forbids the direct
   edge.

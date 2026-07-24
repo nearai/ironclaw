@@ -127,7 +127,7 @@ mod learning {
     ];
 
     /// Injection scanner applied to distilled skill content before install,
-    /// mirroring the WebUI facade's `validate_skill_content_safety`.
+    /// mirroring the WebUI service's `validate_skill_content_safety`.
     static SKILL_LEARNING_SAFETY: LazyLock<Sanitizer> = LazyLock::new(Sanitizer::new);
 
     /// Scoped skill write seam. Composition implements it over the real

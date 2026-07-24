@@ -1,5 +1,5 @@
 //! W5-WEBUI-API-2: rename through the real WebUI automations route, then
-//! list through the same facade to prove the trigger repository mutation is
+//! list through the same service to prove the trigger repository mutation is
 //! scoped and persisted.
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
@@ -46,17 +46,17 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let trigger_repository = capability_harness
         .trigger_repository_for_test()
         .ok_or("triggers group harness missing a captured trigger repository")?;
-    let facade =
-        ironclaw_reborn_composition::test_support::local_dev_automation_product_facade_for_test(
+    let service =
+        ironclaw_reborn_composition::test_support::local_dev_automation_product_service_for_test(
             trigger_repository,
             Arc::clone(&g.shared.turn_store),
         );
 
     let services = RebornServices::new(h.thread_harness.service.clone(), h.coordinator.clone())
-        .with_automation_product_facade(facade);
+        .with_automation_product_service(service);
     // The production capability port resolves the execution user from the
     // run's binding owner, so the trigger creator is the binding subject —
-    // the default caller already matches it for the scoped automation facade.
+    // the default caller already matches it for the scoped automation service.
     // (The pre-port harness dispatched under a fixed constructor user and
     // needed a caller override here.)
     let caller = webui_caller_for(&h.binding);

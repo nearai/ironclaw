@@ -5,7 +5,7 @@
 //! custom-provider overlay writer ([`ProviderRepo`]), the operator-scoped key
 //! store ([`LlmKeyStore`]), and the live provider-reload seam
 //! ([`LlmReloadTrigger`]). Everything the webui2 Inference tab needs lands here;
-//! the product facade stays a thin, sanitized pass-through.
+//! the product service stays a thin, sanitized pass-through.
 //!
 //! Persistence is operator-wide and split across three surfaces, mirroring how
 //! reborn already resolves an LLM at boot:

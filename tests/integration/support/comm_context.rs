@@ -6,7 +6,7 @@
 //! `assert_model_request_contains`).
 //!
 //! DISTINCT from the outbound delivery **sink** (E-OUTBOUND): this is prompt
-//! **context**, not a delivery recorder. The production facade→context
+//! **context**, not a delivery recorder. The production service→context
 //! mapping is already unit-tested in
 //! `crates/ironclaw_reborn_composition/src/root/communication_context.rs`; this
 //! double covers only the int-tier wiring gap.

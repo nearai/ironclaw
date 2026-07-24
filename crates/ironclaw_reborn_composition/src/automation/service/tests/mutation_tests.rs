@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use ironclaw_host_api::UserId;
-use ironclaw_product::{AutomationName, AutomationProductFacade, RebornAutomationState};
+use ironclaw_product::{AutomationName, AutomationProductService, RebornAutomationState};
 use ironclaw_triggers::{InMemoryTriggerRepository, TriggerId, TriggerRepository, TriggerState};
 
-use super::{caller, facade_over, make_record, now};
+use super::{caller, make_record, now, service_over};
 
 fn automation_name(value: &str) -> AutomationName {
     AutomationName::new(value).expect("valid automation name")
@@ -25,9 +25,9 @@ async fn pause_and_resume_update_scoped_trigger_state() {
     .await
     .expect("upsert trigger");
 
-    let facade = facade_over(repo.clone());
+    let service = service_over(repo.clone());
 
-    let paused = facade
+    let paused = service
         .pause_automation(c.clone(), trigger_id.to_string())
         .await
         .expect("pause automation");
@@ -44,7 +44,7 @@ async fn pause_and_resume_update_scoped_trigger_state() {
         "paused automation must not be eligible to fire"
     );
 
-    let resumed = facade
+    let resumed = service
         .resume_automation(c, trigger_id.to_string())
         .await
         .expect("resume automation");
@@ -80,8 +80,8 @@ async fn pause_automation_returns_not_updated_for_wrong_scope() {
     .await
     .expect("upsert trigger");
 
-    let facade = facade_over(repo);
-    let response = facade
+    let service = service_over(repo);
+    let response = service
         .pause_automation(c, trigger_id.to_string())
         .await
         .expect("pause wrong-scope automation");
@@ -105,8 +105,8 @@ async fn rename_automation_updates_scoped_trigger_name() {
     .await
     .expect("upsert trigger");
 
-    let facade = facade_over(repo.clone());
-    let response = facade
+    let service = service_over(repo.clone());
+    let response = service
         .rename_automation(
             c.clone(),
             trigger_id.to_string(),
@@ -147,8 +147,8 @@ async fn rename_automation_returns_not_updated_for_wrong_scope() {
     .await
     .expect("upsert trigger");
 
-    let facade = facade_over(repo.clone());
-    let response = facade
+    let service = service_over(repo.clone());
+    let response = service
         .rename_automation(c, trigger_id.to_string(), automation_name("Wrong scope"))
         .await
         .expect("rename wrong-scope automation");
@@ -180,8 +180,8 @@ async fn delete_automation_removes_scoped_trigger() {
     .await
     .expect("upsert trigger");
 
-    let facade = facade_over(repo.clone());
-    let response = facade
+    let service = service_over(repo.clone());
+    let response = service
         .delete_automation(c.clone(), trigger_id.to_string())
         .await
         .expect("delete automation");
@@ -220,8 +220,8 @@ async fn delete_automation_returns_not_updated_for_wrong_scope() {
     .await
     .expect("upsert trigger");
 
-    let facade = facade_over(repo.clone());
-    let response = facade
+    let service = service_over(repo.clone());
+    let response = service
         .delete_automation(c, trigger_id.to_string())
         .await
         .expect("delete wrong-scope automation");
@@ -259,8 +259,8 @@ async fn resume_automation_does_not_reopen_completed_trigger() {
     .await
     .expect("upsert completed trigger");
 
-    let facade = facade_over(repo);
-    let response = facade
+    let service = service_over(repo);
+    let response = service
         .resume_automation(c, trigger_id.to_string())
         .await
         .expect("resume completed automation");
@@ -271,9 +271,9 @@ async fn resume_automation_does_not_reopen_completed_trigger() {
 
 #[tokio::test]
 async fn pause_automation_rejects_invalid_automation_id_as_bad_request() {
-    let facade = facade_over(Arc::new(InMemoryTriggerRepository::default()));
+    let service = service_over(Arc::new(InMemoryTriggerRepository::default()));
 
-    let error = facade
+    let error = service
         .pause_automation(caller(), "not a trigger id".to_string())
         .await
         .expect_err("invalid automation id should be rejected");
@@ -283,9 +283,9 @@ async fn pause_automation_rejects_invalid_automation_id_as_bad_request() {
 
 #[tokio::test]
 async fn rename_automation_rejects_invalid_automation_id_as_bad_request() {
-    let facade = facade_over(Arc::new(InMemoryTriggerRepository::default()));
+    let service = service_over(Arc::new(InMemoryTriggerRepository::default()));
 
-    let error = facade
+    let error = service
         .rename_automation(
             caller(),
             "not a trigger id".to_string(),
@@ -299,9 +299,9 @@ async fn rename_automation_rejects_invalid_automation_id_as_bad_request() {
 
 #[tokio::test]
 async fn delete_automation_rejects_invalid_automation_id_as_bad_request() {
-    let facade = facade_over(Arc::new(InMemoryTriggerRepository::default()));
+    let service = service_over(Arc::new(InMemoryTriggerRepository::default()));
 
-    let error = facade
+    let error = service
         .delete_automation(caller(), "not a trigger id".to_string())
         .await
         .expect_err("invalid automation id should be rejected");

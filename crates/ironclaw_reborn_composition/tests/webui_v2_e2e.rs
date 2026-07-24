@@ -1241,7 +1241,7 @@ fn webui_extension_setup_scope(extension_id: &str) -> AuthProductScope {
 // ─── tests ────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn webui_v2_http_list_automations_uses_composed_runtime_facade() {
+async fn webui_v2_http_list_automations_uses_composed_runtime_service() {
     let harness = build_harness().await;
 
     let response = harness
@@ -1962,7 +1962,7 @@ async fn untrusted_request_body_cannot_inject_system_scope() {
 // ─── operator LLM-config smoke (issue #4673) ──────────────────────────
 //
 // Stands up the same real local-dev runtime as the chat e2e, but with a boot
-// config (so the WebUI facade composes the operator LLM-config service) and an
+// config (so the WebUI service composes the operator LLM-config service) and an
 // operator-scoped authenticator (so the `/api/webchat/v2/llm/providers` routes
 // mount). Saving the built-in NEAR AI provider stores its API key under the
 // system scope; the regression was that the system-scoped secret serialized but

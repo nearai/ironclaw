@@ -503,7 +503,7 @@ async fn lifecycle_cleanup_drops_canceled_flows_durable_pkce_verifier() {
     );
 }
 
-// ── cancel_blocked_auth_flow facade tests ─────────────────────────────────
+// ── cancel_blocked_auth_flow service tests ─────────────────────────────────
 
 /// Build a minimal `RebornProductAuthServices` for `cancel_blocked_auth_flow`
 /// tests.  The `flow_manager` is backed by `InMemoryAuthProductServices` so
@@ -929,7 +929,7 @@ async fn cancel_blocked_auth_flow_is_noop_without_flow_record_source() {
 ///
 /// `AuthGateRef` delegates to `validate_public_text`, which rejects empty
 /// strings ("must not be empty"). An empty `gate_ref` is therefore the
-/// simplest value that always fails at the facade boundary — regardless of
+/// simplest value that always fails at the service boundary — regardless of
 /// whether any flow or source is present.
 #[tokio::test]
 async fn cancel_blocked_auth_flow_rejects_invalid_gate_ref() {

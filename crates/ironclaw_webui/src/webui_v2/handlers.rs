@@ -12,7 +12,7 @@
 //!
 //! [`ProductSurface`]: ironclaw_host_api::ProductSurface
 
-// arch-exempt: large_file, ProductSurface facade-collapse routes stay in the existing WebUI handler table until the WebUI route split lands, plan #5985
+// arch-exempt: large_file, ProductSurface service-collapse routes stay in the existing WebUI handler table until the WebUI route split lands, plan #5985
 
 mod run_artifact;
 pub use run_artifact::get_run_artifact;
@@ -257,15 +257,15 @@ pub async fn delete_thread(
 
 // --- Admin user management ---------------------------------------------------
 //
-// Every handler delegates straight to the facade, which enforces admin
+// Every handler delegates straight to the service, which enforces admin
 // authorization (operator token or admin/owner role) and last-admin protection.
 // The `{user_id}` and `{handle}` path segments are parsed into their domain
 // types (`UserId` / `SecretHandle`) here so a malformed value is a sanitized
-// 400 before the facade runs — raw strings are a boundary format and never
+// 400 before the service runs — raw strings are a boundary format and never
 // travel deeper than this edge (see `.claude/rules/types.md`).
 
 /// Parse a `{user_id}` path segment into a `UserId`, mapping a malformed value
-/// to a sanitized `400 invalid_request` before the facade is touched.
+/// to a sanitized `400 invalid_request` before the service is touched.
 fn parse_admin_user_id(raw: String) -> Result<UserId, WebUiV2HttpError> {
     UserId::new(raw).map_err(|_| {
         WebUiV2HttpError::from(ProductSurfaceError::validation(
@@ -276,7 +276,7 @@ fn parse_admin_user_id(raw: String) -> Result<UserId, WebUiV2HttpError> {
 }
 
 /// Parse a `{handle}` path segment into a `SecretHandle`, mapping a malformed
-/// value to a sanitized `400 invalid_request` before the facade is touched.
+/// value to a sanitized `400 invalid_request` before the service is touched.
 /// Keeps a bad handle a client fault (400), never an internal 500 downstream.
 fn parse_admin_secret_handle(raw: String) -> Result<SecretHandle, WebUiV2HttpError> {
     SecretHandle::new(raw).map_err(|_| {
@@ -554,7 +554,7 @@ pub async fn send_message(
 /// `GET /api/webchat/v2/threads/{thread_id}/timeline`
 ///
 /// Optional query parameters:
-/// - `limit`: maximum number of messages per response. The facade
+/// - `limit`: maximum number of messages per response. The service
 ///   clamps to a hard ceiling so an unbounded value cannot widen the
 ///   response.
 /// - `cursor`: opaque cursor echoed from the previous response's
@@ -588,7 +588,7 @@ pub struct TimelineQuery {
 }
 
 /// Default workspace root listed when a `list_project_files` request omits
-/// `?path=`. The facade confines all paths to this alias regardless.
+/// `?path=`. The service confines all paths to this alias regardless.
 const PROJECT_FS_ROOT: &str = "/workspace";
 
 /// Query parameters for the project-filesystem read routes. `path` is a scoped
@@ -702,7 +702,7 @@ pub struct FsBrowseQuery {
     pub mount: FsMount,
     #[serde(default)]
     pub path: Option<String>,
-    /// Optional project to browse, authorized by the product-workflow facade.
+    /// Optional project to browse, authorized by the product-workflow service.
     #[serde(default)]
     pub project_id: Option<ironclaw_host_api::ProjectId>,
 }
@@ -792,7 +792,7 @@ fn require_fs_browse_path(path: Option<String>) -> Result<String, WebUiV2HttpErr
 }
 
 /// Reject a missing or blank `?path=` on the stat/download routes with a
-/// field-scoped 400, rather than forwarding an empty string to the facade where
+/// field-scoped 400, rather than forwarding an empty string to the service where
 /// it surfaces as a murkier downstream invalid-path error.
 /// Resolve the directory-listing path. An absent, empty, or whitespace-only
 /// `?path=` means "list the workspace root" — mirrors `require_project_fs_path`'s
@@ -1069,7 +1069,7 @@ fn sanitized_download_filename(filename: Option<&str>) -> String {
 /// Serves one landed attachment's raw bytes so the browser can render an image
 /// thumbnail (or download a file) for a persisted message. The `(thread_id,
 /// message_id, attachment_id)` triple addresses the attachment; the caller's
-/// authority comes from the authenticated session, and the facade derives the
+/// authority comes from the authenticated session, and the service derives the
 /// scope and resolves the storage path server-side. The response sets the
 /// authoritative `Content-Type` from the stored ref plus `nosniff` and a short
 /// private cache so the browser can reuse the bytes without re-fetching.
@@ -1107,7 +1107,7 @@ pub async fn get_attachment(
     Ok((StatusCode::OK, headers, attachment.bytes).into_response())
 }
 
-/// SSE polling cadence for `stream_events`. The facade only exposes a
+/// SSE polling cadence for `stream_events`. The service only exposes a
 /// drain-style read; once the backlog is flushed the handler waits this
 /// long before checking for newly arrived events.
 const SSE_POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -1154,7 +1154,7 @@ fn sse_poll_interval_for_idle_polls(idle_polls: u32) -> Duration {
 /// `Last-Event-ID`, which bounds drift and recycles slots even under
 /// long-running tab leaks.
 ///
-/// When the facade supports subscriptions, the handler forwards that live
+/// When the service supports subscriptions, the handler forwards that live
 /// stream directly. Older compositions fall back to drain/poll semantics,
 /// documented on [`ProductSurface::stream_events`].
 ///
@@ -1315,7 +1315,7 @@ fn build_sse_stream(
         // The slot guard moves into the generator and stays alive for
         // the lifetime of this stream. It drops automatically when the
         // generator is dropped (client disconnect, max-lifetime expiry,
-        // or facade error), releasing the per-caller concurrency slot.
+        // or service error), releasing the per-caller concurrency slot.
         let mut slot_guard = slot;
         let started_at = tokio::time::Instant::now();
         let mut after_cursor = initial_cursor.and_then(parse_cursor_token);
@@ -1347,12 +1347,12 @@ fn build_sse_stream(
             };
             match drain {
                 Err(_elapsed) => {
-                    // The facade drain was still pending when SSE_MAX_LIFETIME
+                    // The service drain was still pending when SSE_MAX_LIFETIME
                     // ran out. Returning here drops the generator (and the
                     // SseSlot it owns), so the per-caller concurrency budget
                     // recovers even under a stuck projection stream — without
                     // this bound, an unbounded `.await` on a non-resolving
-                    // facade would pin the slot indefinitely.
+                    // service would pin the slot indefinitely.
                     tracing::debug!(
                         target = "ironclaw_webui_v2::sse",
                         "stream_events drain pending past SSE_MAX_LIFETIME; closing stream"
@@ -1377,7 +1377,7 @@ fn build_sse_stream(
                         }
                     }
                     if had_events {
-                        // The production projection facade waits on its live
+                        // The production projection service waits on its live
                         // subscription when no new item is replayable. Re-enter
                         // it immediately after delivering a batch so assistant
                         // text deltas are not delayed by the idle poll cadence.
@@ -1404,7 +1404,7 @@ fn build_sse_stream(
                     tracing::debug!(
                         target = "ironclaw_webui_v2::sse",
                         error = ?error,
-                        "facade rejected SSE drain; closing stream",
+                        "service rejected SSE drain; closing stream",
                     );
                     yield Ok(sse_error_event(error));
                     return;
@@ -1538,7 +1538,7 @@ pub struct ListThreadsQuery {
 ///
 /// Lists the caller-scoped schedule automations visible to the browser. The
 /// optional `?limit=N` and `?run_limit=N` queries are capped by the product
-/// workflow facade; the response is a single bounded page and does not include
+/// workflow service; the response is a single bounded page and does not include
 /// a cursor. By default only active automations are returned; pass
 /// `?include_completed=true` to also include soft-completed (fire-once)
 /// automations. See [`ListAutomationsQuery`] for the full per-parameter parse
@@ -1651,7 +1651,7 @@ pub struct ListAutomationsQuery {
 /// `GET /api/webchat/v2/traces/credit`
 ///
 /// Read-only Trace Commons credit summary scoped strictly to the
-/// authenticated caller — the facade derives the trace scope from the
+/// authenticated caller — the service derives the trace scope from the
 /// caller's user id; no scope input is accepted from the request. The
 /// response is the contributor-local view as of the last credit sync;
 /// the authoritative ledger is server-side. A caller with no local
@@ -2381,8 +2381,8 @@ pub async fn get_extension_setup(
 /// onboarding controllers.
 ///
 /// The path segment is lifted into a lifecycle package ref at the
-/// handler/facade boundary; a malformed identifier returns `400
-/// invalid_argument` before the facade is called.
+/// handler/service boundary; a malformed identifier returns `400
+/// invalid_argument` before the service is called.
 pub async fn setup_extension(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<ProductSurfaceCaller>,
@@ -3316,7 +3316,7 @@ pub async fn query_logs(
     Query(query): Query<RebornOperatorLogsQuery>,
 ) -> Result<Json<RebornLogQueryResponse>, WebUiV2HttpError> {
     // The public and operator HTTP query strings intentionally share fields;
-    // convert at the handler boundary so the facade can enforce public scope.
+    // convert at the handler boundary so the service can enforce public scope.
     let mut request = RebornLogQueryRequest {
         limit: query.limit,
         cursor: query.cursor,
@@ -3632,7 +3632,7 @@ fn extension_package_ref_for_request(
 ///
 /// WebSocket transport variant of [`stream_events`]. The handler
 /// accepts the WS upgrade, drains the same `ProductSurface::
-/// stream_events` facade as the SSE handler, and writes each event as
+/// stream_events` service as the SSE handler, and writes each event as
 /// a JSON text frame. Same lifetime + per-caller concurrency caps as
 /// SSE.
 ///
@@ -3706,7 +3706,7 @@ async fn ws_drain_loop(
                 ws_send_with_timeout(&mut socket, None, std::time::Duration::from_millis(0)).await;
             return;
         }
-        let facade_call = surface.stream_events(ironclaw_host_api::ProductSurfaceStreamRequest {
+        let service_call = surface.stream_events(ironclaw_host_api::ProductSurfaceStreamRequest {
             stream_id: Some(thread_id.clone()),
             after_cursor: after_cursor
                 .as_ref()
@@ -3718,7 +3718,7 @@ async fn ws_drain_loop(
                 let _ = socket.close().await;
                 return;
             }
-            // Peer close / socket error wins over the facade poll —
+            // Peer close / socket error wins over the service poll —
             // if the browser already dropped the connection we want
             // to free the slot immediately, not wait for stream_events
             // to return.
@@ -3732,7 +3732,7 @@ async fn ws_drain_loop(
                     Some(Ok(_)) => continue,
                 }
             }
-            facade = tokio::time::timeout(remaining, facade_call) => facade,
+            service = tokio::time::timeout(remaining, service_call) => service,
         };
         match outcome {
             Err(_elapsed) => {
@@ -3799,7 +3799,7 @@ async fn ws_drain_loop(
                 }
                 if had_events {
                     // Match SSE semantics: do not sleep after a delivered
-                    // batch, because the production facade waits on the live
+                    // batch, because the production service waits on the live
                     // projection subscription for the next item.
                     idle_polls = 0;
                     continue;
@@ -3812,7 +3812,7 @@ async fn ws_drain_loop(
                     return;
                 }
                 // Race the poll-interval sleep against socket close
-                // for the same reason as the facade call above: if
+                // for the same reason as the service call above: if
                 // the peer drops during the idle window, free the
                 // slot immediately.
                 tokio::select! {
@@ -3833,7 +3833,7 @@ async fn ws_drain_loop(
                 tracing::debug!(
                     target = "ironclaw_webui_v2::ws",
                     error = ?error,
-                    "facade rejected WS drain; closing stream",
+                    "service rejected WS drain; closing stream",
                 );
                 let payload = SseErrorPayload {
                     error: error.code,
@@ -3970,7 +3970,7 @@ mod tests {
     #[test]
     fn project_fs_list_path_defaults_root_for_missing_or_blank() {
         // Absent, empty, and whitespace-only all mean "list the workspace root"
-        // rather than forwarding a bogus path the facade would reject.
+        // rather than forwarding a bogus path the service would reject.
         assert_eq!(project_fs_list_path(None), PROJECT_FS_ROOT);
         assert_eq!(project_fs_list_path(Some(String::new())), PROJECT_FS_ROOT);
         assert_eq!(

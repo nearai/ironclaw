@@ -194,7 +194,7 @@ impl ServeCommand {
         )?);
 
         // Resolve trusted host-installation default agent/project from
-        // `[identity]`. The v2 facade builds `ThreadScope` from
+        // `[identity]`. The v2 service builds `ThreadScope` from
         // `caller.agent_id` on every mutation and read, so an absent
         // default_agent here means every authenticated request would
         // still 400. Mirror the same fallback rule the `run` command
@@ -203,12 +203,12 @@ impl ServeCommand {
 
         // Pin the runtime owner to the authenticated WebUI user so the
         // turn-runner loop host reads thread context from the same
-        // `owners/<user>` subtree the v2 facade wrote to. Without this the
+        // `owners/<user>` subtree the v2 service wrote to. Without this the
         // runtime owner stays at `[identity].default_owner` (a different
         // identity source) and every turn fails with `UnknownThread`.
         let runtime_owner = resolve_webui_runtime_owner(identity_section, &user_id_raw)?;
         let mut runtime_input = runtime_input.with_owner_id(runtime_owner);
-        // Carry the boot config so the WebUI facade can compose the operator
+        // Carry the boot config so the WebUI service can compose the operator
         // LLM-config settings service over `providers.json` / `config.toml`.
         {
             runtime_input = runtime_input.with_boot_config(boot_config.clone());
@@ -937,7 +937,7 @@ fn resolve_webui_user_id_raw(
 /// Resolve the owner the Reborn runtime must run under for the WebChat v2
 /// serve path.
 ///
-/// The v2 facade writes and reads threads under a `ThreadScope` whose
+/// The v2 service writes and reads threads under a `ThreadScope` whose
 /// `owner_user_id` is the authenticated WebUI user, while the turn-runner
 /// loop host reads thread context under the runtime's composition owner. If
 /// those two identities diverge, `ThreadScope::to_resource_scope` resolves a
@@ -1330,7 +1330,7 @@ mod tests {
     fn webui_runtime_owner_defaults_to_authenticated_user() {
         // With no `[identity].default_owner`, the runtime owner must be the
         // authenticated WebUI user so the turn-runner loop host reads thread
-        // context from the same `owners/<user>` subtree the v2 facade wrote.
+        // context from the same `owners/<user>` subtree the v2 service wrote.
         assert_eq!(
             resolve_webui_runtime_owner(None, "local-user").unwrap(),
             "local-user"
@@ -1350,7 +1350,7 @@ mod tests {
     #[test]
     fn webui_runtime_owner_rejects_divergent_config_owner() {
         // A configured owner that differs from the authenticated WebUI user is
-        // the bug class that silently made every thread invisible: the facade
+        // the bug class that silently made every thread invisible: the service
         // writes under `owners/local-user` while the loop host reads under
         // `owners/reborn-cli`. Fail loud at startup instead.
         let identity = IdentitySection::default().set_default_owner("reborn-cli");

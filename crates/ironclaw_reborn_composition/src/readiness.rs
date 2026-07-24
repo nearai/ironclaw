@@ -19,7 +19,7 @@ pub enum RebornReadinessState {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornFacadeReadiness {
+pub struct RebornServiceReadiness {
     pub host_runtime: bool,
     pub turn_coordinator: bool,
     pub product_auth: bool,
@@ -382,7 +382,7 @@ impl From<ProductionWiringIssueKind> for RebornReadinessDiagnosticReason {
 pub struct RebornReadiness {
     pub profile: RebornCompositionProfile,
     pub state: RebornReadinessState,
-    pub facades: RebornFacadeReadiness,
+    pub services: RebornServiceReadiness,
     #[serde(default)]
     pub workers: RebornWorkerReadiness,
     #[serde(default)]
@@ -406,7 +406,7 @@ impl RebornReadiness {
         Self {
             profile: config.profile(),
             state: contract.state,
-            facades: RebornFacadeReadiness {
+            services: RebornServiceReadiness {
                 host_runtime: false,
                 turn_coordinator: false,
                 product_auth: false,
@@ -451,7 +451,7 @@ mod tests {
             r#"{
                 "profile": "local-dev",
                 "state": "dev-only",
-                "facades": {
+                "services": {
                     "host_runtime": true,
                     "turn_coordinator": true,
                     "product_auth": false

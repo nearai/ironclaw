@@ -1,13 +1,13 @@
 use ironclaw_host_api::ProductSurfaceError;
 use ironclaw_product::{
     LifecycleExtensionSource, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction,
-    LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
-    LifecycleProductResponse, LifecycleSearchExtensionSummary, ProductSurfaceFailure,
+    LifecycleProductContext, LifecycleProductPayload, LifecycleProductResponse,
+    LifecycleProductService, LifecycleSearchExtensionSummary, ProductSurfaceFailure,
 };
 use std::sync::Arc;
 use thiserror::Error;
 
-use crate::extension_host::lifecycle::RebornLocalLifecycleFacade;
+use crate::extension_host::lifecycle::RebornLocalLifecycleService;
 use crate::runtime::RebornRuntime;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,19 +32,19 @@ pub async fn execute_reborn_extension_lifecycle_command(
     runtime: &RebornRuntime,
     command: RebornExtensionLifecycleCommand,
 ) -> Result<LifecycleProductResponse, RebornExtensionLifecycleCommandError> {
-    let mut facade = RebornLocalLifecycleFacade::new(Arc::clone(&runtime.skill_management));
-    facade = facade.with_extension_management(runtime.extension_management.clone());
+    let mut service = RebornLocalLifecycleService::new(Arc::clone(&runtime.skill_management));
+    service = service.with_extension_management(runtime.extension_management.clone());
     if let Some(runtime_http_egress) = &runtime.runtime_http_egress {
-        facade = facade.with_runtime_http_egress(runtime_http_egress.clone());
+        service = service.with_runtime_http_egress(runtime_http_egress.clone());
     }
-    facade = facade.with_runtime_credential_accounts(
+    service = service.with_runtime_credential_accounts(
         runtime
             .product_auth
             .runtime_credential_account_selection_service(),
     );
     let context =
         LifecycleProductContext::Surface(runtime.extension_lifecycle_surface_context.clone());
-    Ok(facade.execute(context, command.into_action()?).await?)
+    Ok(service.execute(context, command.into_action()?).await?)
 }
 
 pub fn render_reborn_extension_lifecycle_response(

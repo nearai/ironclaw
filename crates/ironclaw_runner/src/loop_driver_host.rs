@@ -1141,7 +1141,7 @@ where
     /// surface multi-user — each caller's thread reads and writes land
     /// in their own `owners/<user>` subtree (via
     /// [`ThreadScope::to_resource_scope`]), matching the owner the
-    /// product facade already creates threads under
+    /// product service already creates threads under
     /// (`reborn_services::create_thread` scopes to `caller.user_id`).
     ///
     /// The re-scoping applies only when the factory is owner-scoped (it

@@ -13,7 +13,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_product::{
     ApprovalInteractionActionView, ApprovalInteractionScope, ApprovalInteractionService,
-    AutomationListRequest, AutomationProductFacade, ListPendingApprovalsRequest,
+    AutomationListRequest, AutomationProductService, ListPendingApprovalsRequest,
     ListPendingApprovalsResponse, PendingApprovalInteractionView, ProductAgentBoundCaller,
     ProductListThreadsRequest, ProductSurfaceFailure, RebornAutomationHoldReason,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
@@ -35,17 +35,17 @@ use ironclaw_triggers::{
 use ironclaw_turns::test_support::in_memory_turn_state_store;
 use ironclaw_turns::{DefaultTurnCoordinator, TurnRunId};
 
-use super::RebornAutomationProductFacade;
+use super::RebornAutomationProductService;
 
 // -------------------------------------------------------------------------
 // Helpers
 // -------------------------------------------------------------------------
 
-/// Facade over `repo` with no run-state source (`Missing` lookup): hold
+/// Service over `repo` with no run-state source (`Missing` lookup): hold
 /// derivation stays inert so pre-#5886 expectations hold. Hold-specific tests
-/// construct the facade with a scripted lookup instead.
-fn facade_over(repo: Arc<dyn TriggerRepository>) -> RebornAutomationProductFacade {
-    RebornAutomationProductFacade::new(repo, missing_lookup())
+/// construct the service with a scripted lookup instead.
+fn service_over(repo: Arc<dyn TriggerRepository>) -> RebornAutomationProductService {
+    RebornAutomationProductService::new(repo, missing_lookup())
 }
 
 fn missing_lookup() -> Arc<dyn ironclaw_triggers::TriggerActiveRunLookup> {
@@ -254,11 +254,11 @@ impl ApprovalInteractionService for ActorFallbackApprovalInteractionService {
 // Failing repository for error-path tests
 // -------------------------------------------------------------------------
 
-/// Single configurable mock covering every error/hang path the facade
+/// Single configurable mock covering every error/hang path the service
 /// exercises. `scoped` scripts `list_scoped_triggers`; `batch` scripts
 /// `list_trigger_run_history_batch`; `thread_lookup` scripts
 /// `find_trigger_run_by_thread_id`. All other trait methods are never
-/// called by the facade and return a backend error.
+/// called by the service and return a backend error.
 #[allow(dead_code)]
 enum ScriptedOutcome {
     Records(Vec<TriggerRecord>),
@@ -478,7 +478,7 @@ enum ScriptedActiveRunOutcome {
     /// Proves a request was never issued — used for records with no active
     /// fire, which `active_holds_for_records` must skip entirely (#5886).
     Panic,
-    /// Sleeps past the facade's deadline before resolving, for proving the
+    /// Sleeps past the service's deadline before resolving, for proving the
     /// required run-history fetch is unaffected by a stalled optional hold
     /// lookup (#5886 ordering fix).
     Sleep(std::time::Duration),
@@ -515,7 +515,7 @@ impl TriggerActiveRunLookup for ScriptedActiveRunLookup {
 // -------------------------------------------------------------------------
 
 #[tokio::test]
-async fn automation_facade_forwards_caller_scope_to_repository() {
+async fn automation_service_forwards_caller_scope_to_repository() {
     let repo = Arc::new(InMemoryTriggerRepository::default());
     let c = caller();
 
@@ -547,8 +547,8 @@ async fn automation_facade_forwards_caller_scope_to_repository() {
         .await
         .expect("upsert non-matching");
 
-    let facade = facade_over(repo);
-    let result = facade
+    let service = service_over(repo);
+    let result = service
         .list_automations(c, automation_list_request(25, 0))
         .await
         .expect("list automations");
@@ -568,7 +568,7 @@ async fn automation_facade_forwards_caller_scope_to_repository() {
 }
 
 #[tokio::test]
-async fn automation_facade_maps_active_trigger_states() {
+async fn automation_service_maps_active_trigger_states() {
     let repo = Arc::new(InMemoryTriggerRepository::default());
     let c = caller();
 
@@ -591,8 +591,8 @@ async fn automation_facade_maps_active_trigger_states() {
         let record = make_record(id, &c, *trigger_state, "Test trigger", "0 9 * * *");
         repo.upsert_trigger(record).await.expect("upsert");
 
-        let facade = facade_over(repo.clone());
-        let result = facade
+        let service = service_over(repo.clone());
+        let result = service
             .list_automations(c.clone(), automation_list_request(100, 0))
             .await
             .expect("list automations");
@@ -611,7 +611,7 @@ async fn automation_facade_maps_active_trigger_states() {
 }
 
 #[tokio::test]
-async fn automation_facade_excludes_completed_triggers_from_active_list() {
+async fn automation_service_excludes_completed_triggers_from_active_list() {
     // A Completed trigger is a fired one-shot that has soft-completed. It must
     // not appear in the active automations panel so users only see automations
     // that are still running or can be resumed.
@@ -641,8 +641,8 @@ async fn automation_facade_excludes_completed_triggers_from_active_list() {
     .await
     .expect("upsert completed");
 
-    let facade = facade_over(repo);
-    let result = facade
+    let service = service_over(repo);
+    let result = service
         .list_automations(c, automation_list_request(100, 0))
         .await
         .expect("list automations");
@@ -660,7 +660,7 @@ async fn automation_facade_excludes_completed_triggers_from_active_list() {
 }
 
 #[tokio::test]
-async fn automation_facade_maps_run_history_and_skips_batch_when_run_limit_zero() {
+async fn automation_service_maps_run_history_and_skips_batch_when_run_limit_zero() {
     let repo = Arc::new(InMemoryTriggerRepository::default());
     let c = caller();
     let id = TriggerId::new();
@@ -669,8 +669,8 @@ async fn automation_facade_maps_run_history_and_skips_batch_when_run_limit_zero(
     repo.upsert_trigger(record).await.expect("upsert");
 
     // run_limit=0 -> empty recent_runs even if runs exist
-    let facade = facade_over(repo.clone());
-    let result_zero = facade
+    let service = service_over(repo.clone());
+    let result_zero = service
         .list_automations(c.clone(), automation_list_request(10, 0))
         .await
         .expect("list automations run_limit=0");
@@ -685,13 +685,13 @@ async fn automation_facade_maps_run_history_and_skips_batch_when_run_limit_zero(
     // populates runs only through lifecycle methods (claim_due_fire etc.),
     // we assert the call succeeds and returns the record (run count may be 0
     // because we have no fired history yet).
-    let result_with_runs = facade
+    let result_with_runs = service
         .list_automations(c.clone(), automation_list_request(10, 5))
         .await
         .expect("list automations run_limit=5");
 
     assert_eq!(result_with_runs.len(), 1);
-    // No fires were submitted, so runs is empty — but the facade must still
+    // No fires were submitted, so runs is empty — but the service must still
     // return the automation record (not filter it out on empty runs).
     assert_eq!(result_with_runs[0].automation_id, id.to_string());
 
@@ -743,7 +743,7 @@ async fn notification_thread_list_discovers_pending_approval_from_real_run_histo
         thread_service,
         Arc::new(DefaultTurnCoordinator::new(turn_state)),
     )
-    .with_automation_product_facade(Arc::new(facade_over(repo)))
+    .with_automation_product_service(Arc::new(service_over(repo)))
     .with_approval_interactions(Arc::new(ActorFallbackApprovalInteractionService {
         pending_thread_id: thread_id.clone(),
         tenant_id: c.tenant_id.clone(),
@@ -783,7 +783,7 @@ async fn notification_thread_list_discovers_pending_approval_from_real_run_histo
 }
 
 #[tokio::test]
-async fn automation_facade_maps_trigger_run_status_and_last_status() {
+async fn automation_service_maps_trigger_run_status_and_last_status() {
     let repo = Arc::new(InMemoryTriggerRepository::default());
     let c = caller();
     let id = TriggerId::new();
@@ -792,8 +792,8 @@ async fn automation_facade_maps_trigger_run_status_and_last_status() {
     record.last_status = Some(ironclaw_triggers::TriggerRunStatus::Ok);
     repo.upsert_trigger(record).await.expect("upsert");
 
-    let facade = facade_over(repo);
-    let result = facade
+    let service = service_over(repo);
+    let result = service
         .list_automations(c, automation_list_request(10, 0))
         .await
         .expect("list automations");
@@ -812,16 +812,16 @@ async fn automation_facade_maps_trigger_run_status_and_last_status() {
 // to keep this file under the project's 800-900 line file-size target.
 
 #[tokio::test]
-async fn automation_facade_maps_backend_error_to_unavailable() {
+async fn automation_service_maps_backend_error_to_unavailable() {
     let repo = Arc::new(ScriptedRepository {
         scoped: ScriptedOutcome::FailBackend,
         batch: ScriptedOutcome::FailBackend,
         thread_lookup: None,
         limits: None,
     });
-    let facade = facade_over(repo);
+    let service = service_over(repo);
 
-    let error = facade
+    let error = service
         .list_automations(caller(), automation_list_request(10, 5))
         .await
         .expect_err("backend error should propagate as 503");
@@ -840,8 +840,8 @@ async fn automation_facade_maps_backend_error_to_unavailable() {
 }
 
 #[tokio::test]
-async fn automation_facade_times_out_stalled_repository() {
-    let facade = RebornAutomationProductFacade::with_backend_timeout(
+async fn automation_service_times_out_stalled_repository() {
+    let service = RebornAutomationProductService::with_backend_timeout(
         Arc::new(ScriptedRepository {
             scoped: ScriptedOutcome::Hang,
             batch: ScriptedOutcome::Hang,
@@ -854,10 +854,10 @@ async fn automation_facade_times_out_stalled_repository() {
 
     let error = tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        facade.list_automations(caller(), automation_list_request(10, 5)),
+        service.list_automations(caller(), automation_list_request(10, 5)),
     )
     .await
-    .expect("facade timeout should complete promptly")
+    .expect("service timeout should complete promptly")
     .expect_err("stalled repository should time out");
 
     assert_eq!(error.code, ProductSurfaceErrorCode::Unavailable);
@@ -867,7 +867,7 @@ async fn automation_facade_times_out_stalled_repository() {
 }
 
 #[tokio::test]
-async fn automation_facade_maps_backend_error_on_run_history_batch_to_unavailable() {
+async fn automation_service_maps_backend_error_on_run_history_batch_to_unavailable() {
     let c = caller();
     let record = make_record(
         TriggerId::new(),
@@ -876,14 +876,14 @@ async fn automation_facade_maps_backend_error_on_run_history_batch_to_unavailabl
         "Daily task",
         "0 9 * * *",
     );
-    let facade = facade_over(Arc::new(ScriptedRepository {
+    let service = service_over(Arc::new(ScriptedRepository {
         scoped: ScriptedOutcome::Records(vec![record]),
         batch: ScriptedOutcome::FailBackend,
         thread_lookup: None,
         limits: None,
     }));
 
-    let error = facade
+    let error = service
         .list_automations(c, automation_list_request(10, 5))
         .await
         .expect_err("batch backend error should propagate as 503");
@@ -901,7 +901,7 @@ async fn automation_facade_maps_backend_error_on_run_history_batch_to_unavailabl
 }
 
 #[tokio::test]
-async fn automation_facade_times_out_stalled_run_history_batch() {
+async fn automation_service_times_out_stalled_run_history_batch() {
     let c = caller();
     let record = make_record(
         TriggerId::new(),
@@ -910,7 +910,7 @@ async fn automation_facade_times_out_stalled_run_history_batch() {
         "Daily task",
         "0 9 * * *",
     );
-    let facade = RebornAutomationProductFacade::with_backend_timeout(
+    let service = RebornAutomationProductService::with_backend_timeout(
         Arc::new(ScriptedRepository {
             scoped: ScriptedOutcome::Records(vec![record]),
             batch: ScriptedOutcome::Hang,
@@ -923,10 +923,10 @@ async fn automation_facade_times_out_stalled_run_history_batch() {
 
     let error = tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        facade.list_automations(c, automation_list_request(10, 5)),
+        service.list_automations(c, automation_list_request(10, 5)),
     )
     .await
-    .expect("facade timeout should complete promptly")
+    .expect("service timeout should complete promptly")
     .expect_err("stalled batch call should time out");
 
     assert_eq!(error.code, ProductSurfaceErrorCode::Unavailable);
@@ -936,15 +936,15 @@ async fn automation_facade_times_out_stalled_run_history_batch() {
 }
 
 #[tokio::test]
-async fn automation_facade_maps_not_found_trigger_error_to_404() {
-    let facade = facade_over(Arc::new(ScriptedRepository {
+async fn automation_service_maps_not_found_trigger_error_to_404() {
+    let service = service_over(Arc::new(ScriptedRepository {
         scoped: ScriptedOutcome::NotFound,
         batch: ScriptedOutcome::NotFound,
         thread_lookup: None,
         limits: None,
     }));
 
-    let error = facade
+    let error = service
         .list_automations(caller(), automation_list_request(10, 5))
         .await
         .expect_err("not-found error should propagate as 404");
@@ -1015,7 +1015,7 @@ async fn automation_source_from_record_includes_non_utc_timezone() {
 /// already-filtered rows.  Using InMemoryTriggerRepository (which now also
 /// applies the exclusion before truncation) exercises the same invariant.
 #[tokio::test]
-async fn automation_facade_excludes_completed_even_when_filling_limit() {
+async fn automation_service_excludes_completed_even_when_filling_limit() {
     let repo = Arc::new(InMemoryTriggerRepository::default());
     let c = caller();
 
@@ -1044,8 +1044,8 @@ async fn automation_facade_excludes_completed_even_when_filling_limit() {
     .expect("upsert scheduled");
 
     // limit=1 — if Completed consumed the slot, Scheduled would be invisible.
-    let facade = facade_over(repo);
-    let result = facade
+    let service = service_over(repo);
+    let result = service
         .list_automations(c, automation_list_request(1, 0))
         .await
         .expect("list automations");
@@ -1070,7 +1070,7 @@ async fn automation_facade_excludes_completed_even_when_filling_limit() {
 /// alongside active ones. The Completed entry must have `next_run_at = None`
 /// (its stored slot is a stale past date and must not render as a future run).
 #[tokio::test]
-async fn automation_facade_include_completed_returns_completed_automations() {
+async fn automation_service_include_completed_returns_completed_automations() {
     let repo = Arc::new(InMemoryTriggerRepository::default());
     let c = caller();
 
@@ -1097,8 +1097,8 @@ async fn automation_facade_include_completed_returns_completed_automations() {
     .await
     .expect("upsert completed");
 
-    let facade = facade_over(repo);
-    let result = facade
+    let service = service_over(repo);
+    let result = service
         .list_automations(c, automation_list_request_with_completed(100, 0))
         .await
         .expect("list automations include_completed=true");
@@ -1137,7 +1137,7 @@ async fn automation_facade_include_completed_returns_completed_automations() {
 /// Completed automations are excluded at the SQL layer so pagination LIMIT
 /// applies only to active rows.
 #[tokio::test]
-async fn automation_facade_default_excludes_completed_automations() {
+async fn automation_service_default_excludes_completed_automations() {
     let repo = Arc::new(InMemoryTriggerRepository::default());
     let c = caller();
 
@@ -1164,8 +1164,8 @@ async fn automation_facade_default_excludes_completed_automations() {
     .await
     .expect("upsert completed");
 
-    let facade = facade_over(repo);
-    let result = facade
+    let service = service_over(repo);
+    let result = service
         .list_automations(c, automation_list_request(100, 0))
         .await
         .expect("list automations include_completed=false (default)");
@@ -1191,7 +1191,7 @@ async fn automation_facade_default_excludes_completed_automations() {
 // -------------------------------------------------------------------------
 
 #[tokio::test]
-async fn automation_facade_active_hold_nonterminal_reports_in_progress() {
+async fn automation_service_active_hold_nonterminal_reports_in_progress() {
     let repo = Arc::new(InMemoryTriggerRepository::default());
     let c = caller();
     let id = TriggerId::new();
@@ -1201,8 +1201,8 @@ async fn automation_facade_active_hold_nonterminal_reports_in_progress() {
     let lookup = Arc::new(ScriptedActiveRunLookup {
         outcome: ScriptedActiveRunOutcome::State(TriggerActiveRunState::Nonterminal),
     });
-    let facade = RebornAutomationProductFacade::new(repo, lookup);
-    let result = facade
+    let service = RebornAutomationProductService::new(repo, lookup);
+    let result = service
         .list_automations(c, automation_list_request(10, 0))
         .await
         .expect("list automations");
@@ -1223,7 +1223,7 @@ async fn automation_facade_active_hold_nonterminal_reports_in_progress() {
 }
 
 #[tokio::test]
-async fn automation_facade_active_hold_blocked_auth_reports_auth() {
+async fn automation_service_active_hold_blocked_auth_reports_auth() {
     let repo = Arc::new(InMemoryTriggerRepository::default());
     let c = caller();
     let id = TriggerId::new();
@@ -1235,8 +1235,8 @@ async fn automation_facade_active_hold_blocked_auth_reports_auth() {
             kind: BlockedActiveRunKind::Auth,
         }),
     });
-    let facade = RebornAutomationProductFacade::new(repo, lookup);
-    let result = facade
+    let service = RebornAutomationProductService::new(repo, lookup);
+    let result = service
         .list_automations(c, automation_list_request(10, 0))
         .await
         .expect("list automations");
@@ -1253,7 +1253,7 @@ async fn automation_facade_active_hold_blocked_auth_reports_auth() {
 }
 
 #[tokio::test]
-async fn automation_facade_active_hold_missing_state_omits_hold() {
+async fn automation_service_active_hold_missing_state_omits_hold() {
     let repo = Arc::new(InMemoryTriggerRepository::default());
     let c = caller();
     let id = TriggerId::new();
@@ -1263,8 +1263,8 @@ async fn automation_facade_active_hold_missing_state_omits_hold() {
     let lookup = Arc::new(ScriptedActiveRunLookup {
         outcome: ScriptedActiveRunOutcome::State(TriggerActiveRunState::Missing),
     });
-    let facade = RebornAutomationProductFacade::new(repo, lookup);
-    let result = facade
+    let service = RebornAutomationProductService::new(repo, lookup);
+    let result = service
         .list_automations(c, automation_list_request(10, 0))
         .await
         .expect("list automations");
@@ -1280,7 +1280,7 @@ async fn automation_facade_active_hold_missing_state_omits_hold() {
 }
 
 #[tokio::test]
-async fn automation_facade_active_hold_terminal_state_omits_hold() {
+async fn automation_service_active_hold_terminal_state_omits_hold() {
     // A terminal run whose fire cleanup hasn't landed yet must not display as
     // held — the run finished, it just hasn't been unlocked (#5886).
     let repo = Arc::new(InMemoryTriggerRepository::default());
@@ -1294,8 +1294,8 @@ async fn automation_facade_active_hold_terminal_state_omits_hold() {
             status: TriggerRunHistoryStatus::Ok,
         }),
     });
-    let facade = RebornAutomationProductFacade::new(repo, lookup);
-    let result = facade
+    let service = RebornAutomationProductService::new(repo, lookup);
+    let result = service
         .list_automations(c, automation_list_request(10, 0))
         .await
         .expect("list automations");
@@ -1311,7 +1311,7 @@ async fn automation_facade_active_hold_terminal_state_omits_hold() {
 }
 
 #[tokio::test]
-async fn automation_facade_active_hold_lookup_failure_is_silent_ok() {
+async fn automation_service_active_hold_lookup_failure_is_silent_ok() {
     // silent-ok: lookup failure must degrade to "no hold", not fail the list
     // (#5886 — display-only projection).
     let repo = Arc::new(InMemoryTriggerRepository::default());
@@ -1323,8 +1323,8 @@ async fn automation_facade_active_hold_lookup_failure_is_silent_ok() {
     let lookup = Arc::new(ScriptedActiveRunLookup {
         outcome: ScriptedActiveRunOutcome::FailBackend,
     });
-    let facade = RebornAutomationProductFacade::new(repo, lookup);
-    let result = facade
+    let service = RebornAutomationProductService::new(repo, lookup);
+    let result = service
         .list_automations(c, automation_list_request(10, 0))
         .await
         .expect("list_automations must still succeed when the lookup errors");
@@ -1340,7 +1340,7 @@ async fn automation_facade_active_hold_lookup_failure_is_silent_ok() {
 }
 
 #[tokio::test]
-async fn automation_facade_stalled_hold_lookup_does_not_starve_run_history() {
+async fn automation_service_stalled_hold_lookup_does_not_starve_run_history() {
     // The required run-history fetch now runs before the optional hold lookup
     // (#5886 ordering fix), so a hold lookup that stalls past the shared
     // deadline must degrade to "no hold" without failing the whole list or
@@ -1352,7 +1352,7 @@ async fn automation_facade_stalled_hold_lookup_does_not_starve_run_history() {
     let mut runs_by_trigger = HashMap::new();
     runs_by_trigger.insert(id, vec![run]);
 
-    let facade = RebornAutomationProductFacade::with_backend_timeout(
+    let service = RebornAutomationProductService::with_backend_timeout(
         Arc::new(ScriptedRepository {
             scoped: ScriptedOutcome::Records(vec![record]),
             batch: ScriptedOutcome::Runs(runs_by_trigger),
@@ -1367,10 +1367,10 @@ async fn automation_facade_stalled_hold_lookup_does_not_starve_run_history() {
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        facade.list_automations(c, automation_list_request(10, 5)),
+        service.list_automations(c, automation_list_request(10, 5)),
     )
     .await
-    .expect("facade must not hang waiting on the stalled hold lookup")
+    .expect("service must not hang waiting on the stalled hold lookup")
     .expect("required run history must survive a stalled optional hold lookup");
 
     let found = result
@@ -1389,7 +1389,7 @@ async fn automation_facade_stalled_hold_lookup_does_not_starve_run_history() {
 }
 
 #[tokio::test]
-async fn automation_facade_active_hold_propagates_elapsed_occurrences_capped() {
+async fn automation_service_active_hold_propagates_elapsed_occurrences_capped() {
     let repo = Arc::new(InMemoryTriggerRepository::default());
     let c = caller();
     let id = TriggerId::new();
@@ -1402,8 +1402,8 @@ async fn automation_facade_active_hold_propagates_elapsed_occurrences_capped() {
     let lookup = Arc::new(ScriptedActiveRunLookup {
         outcome: ScriptedActiveRunOutcome::State(TriggerActiveRunState::Nonterminal),
     });
-    let facade = RebornAutomationProductFacade::new(repo, lookup);
-    let result = facade
+    let service = RebornAutomationProductService::new(repo, lookup);
+    let result = service
         .list_automations(c, automation_list_request(10, 0))
         .await
         .expect("list automations");
@@ -1420,7 +1420,7 @@ async fn automation_facade_active_hold_propagates_elapsed_occurrences_capped() {
 }
 
 #[tokio::test]
-async fn automation_facade_non_active_record_never_calls_the_lookup() {
+async fn automation_service_non_active_record_never_calls_the_lookup() {
     // `active_holds_for_records` must skip requests for records with no
     // active fire — the panic-lookup proves the batch never even calls it
     // (#5886).
@@ -1433,8 +1433,8 @@ async fn automation_facade_non_active_record_never_calls_the_lookup() {
     let lookup = Arc::new(ScriptedActiveRunLookup {
         outcome: ScriptedActiveRunOutcome::Panic,
     });
-    let facade = RebornAutomationProductFacade::new(repo, lookup);
-    let result = facade
+    let service = RebornAutomationProductService::new(repo, lookup);
+    let result = service
         .list_automations(c, automation_list_request(10, 0))
         .await
         .expect("list automations");
@@ -1450,7 +1450,7 @@ async fn automation_facade_non_active_record_never_calls_the_lookup() {
 }
 
 #[tokio::test]
-async fn automation_facade_claimed_but_unaccepted_record_reports_other_without_lookup() {
+async fn automation_service_claimed_but_unaccepted_record_reports_other_without_lookup() {
     // A record with `active_fire_slot` set but `active_run_ref` still `None`
     // is mid claim-to-accept (worker::due_fire::process_claimed_fire). There
     // is no run_id to look up yet, so the hold must resolve to `Other`
@@ -1466,8 +1466,8 @@ async fn automation_facade_claimed_but_unaccepted_record_reports_other_without_l
     let lookup = Arc::new(ScriptedActiveRunLookup {
         outcome: ScriptedActiveRunOutcome::Panic,
     });
-    let facade = RebornAutomationProductFacade::new(repo, lookup);
-    let result = facade
+    let service = RebornAutomationProductService::new(repo, lookup);
+    let result = service
         .list_automations(c, automation_list_request(10, 0))
         .await
         .expect("list automations");

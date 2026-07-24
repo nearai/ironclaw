@@ -10,7 +10,7 @@
 //! This module lives OUTSIDE `src/runtime/` because the CLI runtime tree is
 //! banned from `use ironclaw_host_runtime::` (a dependency-boundary test); the
 //! host-runtime / host-api / auth types these builders touch are reached through
-//! `ironclaw_reborn_composition` facade re-exports.
+//! `ironclaw_reborn_composition` service re-exports.
 
 use std::sync::Arc;
 

@@ -48,7 +48,7 @@ handles Chat Completions create and optional projection-backed SSE streaming:
 
 - `POST /v1/chat/completions` parses the OpenAI-compatible DTO, reserves an
   opaque `chatcmpl-*` ref with actor-scoped idempotency, and submits the user
-  message through the channel-neutral `ProductSurface` facade.
+  message through the channel-neutral `ProductSurface` service.
 - The route builds a canonical projection read request from the authenticated
   caller and ProductSurface thread response, then waits through a
   composition-supplied `OpenAiChatCompletionProjectionReader`. Timeout returns

@@ -5,14 +5,14 @@
 //! §5.2's target: product consumers share the neutral
 //! `ironclaw_host_api::ProductSurface` vocabulary (`invoke`, `query`, and
 //! `stream_events`). Feature work adds a **capability descriptor** and/or a
-//! **view descriptor**, never a product-local facade method.
+//! **view descriptor**, never a product-local service method.
 //!
 //! This test freezes that shared host API method set and asserts the
-//! old product-local facade trait stays retired. The
+//! old product-local service trait stays retired. The
 //! ratchet fails on any subsequent change:
 //!
 //! - a **new** host `ProductSurface` method fails — the feature belongs in a
-//!   capability/view descriptor, not a new facade method;
+//!   capability/view descriptor, not a new service method;
 //! - a **removed** host method fails — callers share this exact three-word
 //!   vocabulary unless §5.2 is intentionally revised;
 //! - a **duplicate** method name in the block fails (defensive; a trait cannot
@@ -52,7 +52,7 @@ const EXPECTED_HOST_PRODUCT_SURFACE_METHODS: &[&str] = &["invoke", "query", "str
 
 /// Extract the method names declared **directly** in `trait <trait_name>`'s block
 /// — i.e. at trait-declaration depth, so a `fn` nested inside a default-method
-/// body is not a facade method. Operates on comment-/string-stripped source and
+/// body is not a service method. Operates on comment-/string-stripped source and
 /// walks brace depth so multi-line signatures and default bodies are handled
 /// uniformly. Returns names in source order (duplicates preserved).
 fn extract_trait_methods(source: &str, trait_name: &str) -> Vec<String> {
@@ -175,7 +175,7 @@ fn host_product_surface_method_set_is_frozen() {
         added.is_empty(),
         "New `{PRODUCT_SURFACE_TRAIT}` methods are banned (arch-simplification §5.2/§5.2.5/§10): \
          a new product operation is a matrix-declared capability descriptor or a view descriptor, \
-         never a facade method. Offending new methods: {added:?}."
+         never a service method. Offending new methods: {added:?}."
     );
 
     let removed: Vec<&str> = expected.difference(&found_set).copied().collect();
@@ -203,7 +203,7 @@ fn product_local_product_surface_traits_stay_retired() {
     assert!(
         !stripped.contains(&retired_needle),
         "`{RETIRED_PROTO_FACADE_TRAIT}` was retired into `{PRODUCT_SURFACE_TRAIT}`; do not \
-         reintroduce the proto-facade split."
+         reintroduce the proto-service split."
     );
 }
 
@@ -214,7 +214,7 @@ fn product_local_product_surface_traits_stay_retired() {
 fn extract_trait_methods_self_test() {
     let sample = r##"
         // fn commented_out_before -> ignored
-        pub trait SampleFacade: Send + Sync {
+        pub trait SampleService: Send + Sync {
             async fn create_thread(
                 &self,
                 caller: Caller,
@@ -235,12 +235,12 @@ fn extract_trait_methods_self_test() {
 
         // Anything after the trait block must be ignored:
         fn free_fn_after() {}
-        impl SampleFacade for Thing {
+        impl SampleService for Thing {
             async fn create_thread(&self, _c: Caller) -> Result<Resp, Err> { fn inner() {} unimplemented!() }
         }
     "##;
 
-    let methods = extract_trait_methods(sample, "SampleFacade");
+    let methods = extract_trait_methods(sample, "SampleService");
     assert_eq!(
         methods,
         vec![

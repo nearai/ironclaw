@@ -515,7 +515,7 @@ async fn readiness_operator_status_keeps_info_diagnostics_ready() {
     let service = ReadinessOperatorStatusService::new(RebornReadiness {
         profile: crate::RebornCompositionProfile::Production,
         state: crate::RebornReadinessState::ProductionValidated,
-        facades: crate::RebornFacadeReadiness {
+        services: crate::RebornServiceReadiness {
             host_runtime: true,
             turn_coordinator: true,
             product_auth: true,
@@ -549,7 +549,7 @@ async fn readiness_operator_status_keeps_info_diagnostics_ready() {
 }
 
 #[tokio::test]
-async fn skills_product_facade_surfaces_shared_auto_activate_learned_flag() {
+async fn skills_product_service_surfaces_shared_auto_activate_learned_flag() {
     let dir = tempfile::tempdir().expect("tempdir");
     let storage_root = dir.path().join("local-dev");
     std::fs::create_dir_all(&storage_root).expect("storage root");
@@ -571,10 +571,10 @@ async fn skills_product_facade_surfaces_shared_auto_activate_learned_flag() {
     // selector holds the same `Arc`, so a toggle here must be observable on
     // that handle (that is the whole point of the live master switch).
     let flag = Arc::new(AtomicBool::new(true));
-    let facade = LocalSkillsProductFacade::new(skill_management, Some(Arc::clone(&flag)));
+    let service = LocalSkillsProductService::new(skill_management, Some(Arc::clone(&flag)));
     let owner = caller("runtime-owner");
 
-    let listed = facade.list_skills(owner.clone()).await.expect("list");
+    let listed = service.list_skills(owner.clone()).await.expect("list");
     assert!(
         listed.auto_activate_learned,
         "default master switch must report on"
@@ -585,7 +585,7 @@ async fn skills_product_facade_surfaces_shared_auto_activate_learned_flag() {
         !flag.load(Ordering::Relaxed),
         "test setup must flip the shared selector flag to false"
     );
-    let listed = facade.list_skills(owner.clone()).await.expect("list");
+    let listed = service.list_skills(owner.clone()).await.expect("list");
     assert!(
         !listed.auto_activate_learned,
         "list must report the master switch as off after disabling"
@@ -596,7 +596,7 @@ async fn skills_product_facade_surfaces_shared_auto_activate_learned_flag() {
         flag.load(Ordering::Relaxed),
         "test setup must flip the shared selector flag back to true"
     );
-    let listed = facade.list_skills(owner).await.expect("list");
+    let listed = service.list_skills(owner).await.expect("list");
     assert!(
         listed.auto_activate_learned,
         "list must report the master switch as on after re-enabling"
@@ -604,8 +604,8 @@ async fn skills_product_facade_surfaces_shared_auto_activate_learned_flag() {
 }
 
 #[tokio::test]
-async fn skills_product_facade_defaults_auto_activate_learned_when_no_selector_is_wired() {
-    // Production assembly mounts the read facade but wires no local-dev
+async fn skills_product_service_defaults_auto_activate_learned_when_no_selector_is_wired() {
+    // Production assembly mounts the read service but wires no local-dev
     // flag-reading selector. The list still renders with a sane default
     // rather than erroring; writes go through the first-party capability.
     let dir = tempfile::tempdir().expect("tempdir");
@@ -625,10 +625,10 @@ async fn skills_product_facade_defaults_auto_activate_learned_when_no_selector_i
         filesystem,
         Arc::new(scoped_skill_mounts),
     ));
-    let facade = LocalSkillsProductFacade::new(skill_management, None);
+    let service = LocalSkillsProductService::new(skill_management, None);
     let owner = caller("runtime-owner");
 
-    let listed = facade.list_skills(owner).await.expect("list");
+    let listed = service.list_skills(owner).await.expect("list");
     assert!(
         listed.auto_activate_learned,
         "list defaults to on when no selector flag is wired"
@@ -636,7 +636,7 @@ async fn skills_product_facade_defaults_auto_activate_learned_when_no_selector_i
 }
 
 #[tokio::test]
-async fn skills_product_facade_hides_owner_user_skills_from_other_callers() {
+async fn skills_product_service_hides_owner_user_skills_from_other_callers() {
     let dir = tempfile::tempdir().expect("tempdir");
     let storage_root = dir.path().join("local-dev");
     std::fs::create_dir_all(&storage_root).expect("storage root");
@@ -661,7 +661,7 @@ async fn skills_product_facade_hides_owner_user_skills_from_other_callers() {
         filesystem,
         Arc::new(scoped_skill_mounts),
     ));
-    let facade = LocalSkillsProductFacade::new(
+    let service = LocalSkillsProductService::new(
         Arc::clone(&skill_management),
         Some(Arc::new(AtomicBool::new(true))),
     );
@@ -678,20 +678,20 @@ async fn skills_product_facade_hides_owner_user_skills_from_other_callers() {
         .await
         .expect("owner installs skill");
 
-    let owner_skills = facade
+    let owner_skills = service
         .list_skills(owner)
         .await
         .expect("owner lists skills")
         .skills;
     assert!(owner_skills.iter().any(|skill| skill.name == "shared-name"));
-    let bob_skills = facade
+    let bob_skills = service
         .list_skills(bob.clone())
         .await
         .expect("bob lists skills")
         .skills;
     assert!(!bob_skills.iter().any(|skill| skill.name == "shared-name"));
     assert!(bob_skills.iter().any(|skill| skill.name == "system-helper"));
-    let other_tenant_skills = facade
+    let other_tenant_skills = service
         .list_skills(other_tenant_owner.clone())
         .await
         .expect("same user id in another tenant lists skills")
@@ -702,12 +702,12 @@ async fn skills_product_facade_hides_owner_user_skills_from_other_callers() {
             .any(|skill| skill.name == "shared-name")
     );
 
-    let bob_read = facade
+    let bob_read = service
         .read_skill_content(bob.clone(), "shared-name".to_string())
         .await
         .expect_err("bob must not read the owner skill root");
     assert_eq!(bob_read.status_code, 404);
-    let other_tenant_read = facade
+    let other_tenant_read = service
         .read_skill_content(other_tenant_owner.clone(), "shared-name".to_string())
         .await
         .expect_err("same user id in another tenant must not read the owner skill root");
@@ -721,12 +721,12 @@ async fn skills_product_facade_hides_owner_user_skills_from_other_callers() {
         )
         .await
         .expect("bob installs own skill");
-    let bob_content = facade
+    let bob_content = service
         .read_skill_content(bob.clone(), "bob-skill".to_string())
         .await
         .expect("bob reads own skill");
     assert!(bob_content.content.contains("bob skill"));
-    let owner_cannot_read_bob = facade
+    let owner_cannot_read_bob = service
         .read_skill_content(caller("runtime-owner"), "bob-skill".to_string())
         .await
         .expect_err("owner must not read bob skill root");

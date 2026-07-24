@@ -1,7 +1,7 @@
-//! Generic per-user channel connection facade (extension-runtime §6.4).
+//! Generic per-user channel connection service (extension-runtime §6.4).
 //!
-//! One vendor-blind [`ChannelConnectionFacade`] replaces the per-vendor
-//! facades: every installed extension whose manifest declares a channel
+//! One vendor-blind [`ChannelConnectionService`] replaces the per-vendor
+//! services: every installed extension whose manifest declares a channel
 //! surface is discovered. OAuth connection state is derived from the
 //! identity-binding store; proof-code connection state comes from the generic
 //! pairing registry. Disconnect runs the owner-specific cleanup before the
@@ -28,7 +28,7 @@ use ironclaw_extensions::ExtensionInstallationStore;
 use ironclaw_host_api::{
     ExtensionId, InvocationId, ProductSurfaceCaller, ProductSurfaceError, ResourceScope, TenantId,
 };
-use ironclaw_product::{ChannelAuthAccountState, ChannelConnectionFacade};
+use ironclaw_product::{ChannelAuthAccountState, ChannelConnectionService};
 
 use crate::extension_host::channel_identity::{
     ChannelConnectionScope, ChannelConnectionScopeSource, channel_config_connection_scope_source,
@@ -74,7 +74,7 @@ impl ChannelCredentialCleanup for crate::RebornProductAuthServices {
 /// connected/disconnected collapse the identity-binding bool alone permits.
 /// Production forwards to the product-auth
 /// [`crate::RebornProductAuthServices::credential_account_record_source`]; the
-/// facade leaves the live-flow (`authenticating`) axis to the auth-flow
+/// service leaves the live-flow (`authenticating`) axis to the auth-flow
 /// projection that owns thread-scoped setup flows.
 #[async_trait]
 pub(crate) trait ChannelAccountStatusReader: Send + Sync {
@@ -138,7 +138,7 @@ pub(crate) trait ChannelDisconnectCleanup: Send + Sync {
     ) -> Result<(), String>;
 }
 
-/// One channel lane's registration with the generic facade: the extension
+/// One channel lane's registration with the generic service: the extension
 /// id, the auth vendors whose bindings mean "connected", the lane's scope
 /// source, and its optional disconnect-side cleanup.
 #[derive(Clone)]
@@ -149,8 +149,8 @@ pub(crate) struct ChannelConnectionEntry {
     pub(crate) disconnect_cleanup: Option<Arc<dyn ChannelDisconnectCleanup>>,
 }
 
-/// The generic per-user channel connection facade.
-pub(crate) struct GenericChannelConnectionFacade {
+/// The generic per-user channel connection service.
+pub(crate) struct GenericChannelConnectionService {
     tenant_id: TenantId,
     /// Lane-registered entries; win over generic discovery for their ids.
     entries: Vec<ChannelConnectionEntry>,
@@ -178,8 +178,8 @@ pub(crate) struct GenericChannelConnectionFacade {
     channel_pairing: Option<Arc<crate::extension_host::channel_pairing::ChannelPairingRegistry>>,
 }
 
-impl GenericChannelConnectionFacade {
-    // arch-exempt: too_many_args, needs a ChannelConnectionFacadeDeps bundle for the distinct discovery/identity/cleanup/status ports, plan #5905
+impl GenericChannelConnectionService {
+    // arch-exempt: too_many_args, needs a ChannelConnectionServiceDeps bundle for the distinct discovery/identity/cleanup/status ports, plan #5905
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         tenant_id: TenantId,
@@ -351,7 +351,7 @@ impl ChannelDisconnectCleanup for ChannelDmTargetDisconnectCleanup {
 }
 
 #[async_trait]
-impl ChannelConnectionFacade for GenericChannelConnectionFacade {
+impl ChannelConnectionService for GenericChannelConnectionService {
     async fn caller_channel_connections(
         &self,
         caller: ProductSurfaceCaller,
@@ -399,7 +399,7 @@ impl ChannelConnectionFacade for GenericChannelConnectionFacade {
             // vendor account state (length ≤ 1 today). `active_flow_status`
             // stays `None`: the mid-flow `authenticating` signal is projected
             // from thread-scoped setup flows owned by the auth-flow read model,
-            // not this per-caller connection facade.
+            // not this per-caller connection service.
             let mut account_status = None;
             for provider in &entry.providers {
                 if let Some(status) = reader.account_status_for_caller(&caller, provider).await? {
@@ -552,13 +552,13 @@ mod tests {
         }
     }
 
-    fn facade(
+    fn service(
         scope: Option<ChannelConnectionScope>,
         identity_store: Arc<RecordingIdentityStore>,
         disconnect_cleanup: Option<Arc<dyn ChannelDisconnectCleanup>>,
         credential_cleanup: Option<Arc<dyn ChannelCredentialCleanup>>,
-    ) -> GenericChannelConnectionFacade {
-        GenericChannelConnectionFacade::new(
+    ) -> GenericChannelConnectionService {
+        GenericChannelConnectionService::new(
             tenant(),
             vec![ChannelConnectionEntry {
                 extension_id: EXTENSION.to_string(),
@@ -585,11 +585,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn facade_disconnects_identity_and_vendor_state_in_order() {
+    async fn service_disconnects_identity_and_vendor_state_in_order() {
         let identity_store = bound_identity_store("install-alpha");
         let vendor_cleanup = Arc::new(RecordingDisconnectCleanup::default());
         let credential_cleanup = Arc::new(RecordingCredentialCleanup::default());
-        let facade = facade(
+        let service = service(
             Some(scope("install-alpha")),
             identity_store.clone(),
             Some(vendor_cleanup.clone()),
@@ -598,14 +598,14 @@ mod tests {
         let caller = caller();
 
         assert_eq!(
-            facade
+            service
                 .caller_channel_connections(caller.clone())
                 .await
                 .expect("connection lookup"),
             HashMap::from([(EXTENSION.to_string(), true)])
         );
 
-        facade
+        service
             .disconnect_channel_for_caller(caller.clone(), EXTENSION)
             .await
             .expect("disconnect succeeds");
@@ -639,7 +639,7 @@ mod tests {
             )]
         );
         assert_eq!(
-            facade
+            service
                 .caller_channel_connections(caller.clone())
                 .await
                 .expect("connection lookup after disconnect"),
@@ -651,7 +651,7 @@ mod tests {
         // removal retries the disconnect for a caller who is already
         // disconnected. That repeat disconnect must stay an idempotent
         // no-op success, not an error that would wedge the removal retry.
-        facade
+        service
             .disconnect_channel_for_caller(caller.clone(), EXTENSION)
             .await
             .expect("repeat disconnect for a disconnected caller is an idempotent no-op");
@@ -663,9 +663,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn facade_keeps_identity_when_vendor_cleanup_fails() {
+    async fn service_keeps_identity_when_vendor_cleanup_fails() {
         let identity_store = bound_identity_store("install-alpha");
-        let facade = facade(
+        let service = service(
             Some(scope("install-alpha")),
             identity_store.clone(),
             Some(Arc::new(FailingDisconnectCleanup)),
@@ -674,14 +674,14 @@ mod tests {
         let caller = caller();
 
         assert!(
-            facade
+            service
                 .disconnect_channel_for_caller(caller.clone(), EXTENSION)
                 .await
                 .is_err(),
             "vendor cleanup failure must fail the disconnect"
         );
         assert_eq!(
-            facade
+            service
                 .caller_channel_connections(caller)
                 .await
                 .expect("connection lookup after failed disconnect"),
@@ -692,9 +692,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn facade_keeps_identity_when_credential_cleanup_fails() {
+    async fn service_keeps_identity_when_credential_cleanup_fails() {
         let identity_store = bound_identity_store("install-alpha");
-        let facade = facade(
+        let service = service(
             Some(scope("install-alpha")),
             identity_store.clone(),
             None,
@@ -703,14 +703,14 @@ mod tests {
         let caller = caller();
 
         assert!(
-            facade
+            service
                 .disconnect_channel_for_caller(caller.clone(), EXTENSION)
                 .await
                 .is_err(),
             "credential cleanup failure must fail the disconnect"
         );
         assert_eq!(
-            facade
+            service
                 .caller_channel_connections(caller)
                 .await
                 .expect("connection lookup after failed disconnect"),
@@ -721,14 +721,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn facade_requires_current_installation_scope_for_connected() {
+    async fn service_requires_current_installation_scope_for_connected() {
         // A binding under a different installation than the current scope
         // must not report connected.
         let identity_store = bound_identity_store("install-beta");
-        let facade = facade(Some(scope("install-alpha")), identity_store, None, None);
+        let service = service(Some(scope("install-alpha")), identity_store, None, None);
 
         assert_eq!(
-            facade
+            service
                 .caller_channel_connections(caller())
                 .await
                 .expect("connection lookup"),
@@ -737,7 +737,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn facade_disconnects_without_a_connection_scope() {
+    async fn service_disconnects_without_a_connection_scope() {
         // A fresh instance (or one whose setup was deleted) has no
         // connection scope. Uninstall/disconnect must still succeed and
         // clean the caller's own bindings without an installation prefix
@@ -746,7 +746,7 @@ mod tests {
         let identity_store = bound_identity_store("install-alpha");
         let vendor_cleanup = Arc::new(RecordingDisconnectCleanup::default());
         let credential_cleanup = Arc::new(RecordingCredentialCleanup::default());
-        let facade = facade(
+        let service = service(
             None,
             identity_store.clone(),
             Some(vendor_cleanup.clone()),
@@ -755,13 +755,13 @@ mod tests {
         let caller = caller();
 
         assert_eq!(
-            facade
+            service
                 .caller_channel_connections(caller.clone())
                 .await
                 .expect("connection lookup"),
             HashMap::from([(EXTENSION.to_string(), false)])
         );
-        facade
+        service
             .disconnect_channel_for_caller(caller.clone(), EXTENSION)
             .await
             .expect("disconnect succeeds without a connection scope");
@@ -779,10 +779,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn facade_ignores_foreign_tenants_and_unknown_channels() {
+    async fn service_ignores_foreign_tenants_and_unknown_channels() {
         let identity_store = bound_identity_store("install-alpha");
         let credential_cleanup = Arc::new(RecordingCredentialCleanup::default());
-        let facade = facade(
+        let service = service(
             Some(scope("install-alpha")),
             identity_store.clone(),
             None,
@@ -796,17 +796,17 @@ mod tests {
         );
 
         assert_eq!(
-            facade
+            service
                 .caller_channel_connections(foreign_caller.clone())
                 .await
                 .expect("connection lookup"),
             HashMap::from([(EXTENSION.to_string(), false)])
         );
-        facade
+        service
             .disconnect_channel_for_caller(foreign_caller, EXTENSION)
             .await
             .expect("foreign tenant disconnect is a no-op");
-        facade
+        service
             .disconnect_channel_for_caller(caller(), "unknown-channel")
             .await
             .expect("unknown channel disconnect is a no-op");
@@ -814,17 +814,17 @@ mod tests {
         assert_eq!(identity_store.deletes(), Vec::new());
     }
 
-    /// The generic facade projects the caller's durable credential-account
+    /// The generic service projects the caller's durable credential-account
     /// status per vendor through the injected reader, so the extensions wire
     /// can render `expired` instead of the connected/disconnected collapse.
     /// A foreign tenant gets no account states (fail-closed).
     #[tokio::test]
-    async fn facade_projects_caller_account_status_per_vendor() {
+    async fn service_projects_caller_account_status_per_vendor() {
         let identity_store = bound_identity_store("install-alpha");
         let reader = Arc::new(RecordingAccountStatusReader::new(Some(
             CredentialAccountStatus::RefreshFailed,
         )));
-        let facade = GenericChannelConnectionFacade::new(
+        let service = GenericChannelConnectionService::new(
             tenant(),
             vec![ChannelConnectionEntry {
                 extension_id: EXTENSION.to_string(),
@@ -841,7 +841,7 @@ mod tests {
             None,
         );
 
-        let states = facade
+        let states = service
             .caller_channel_account_states(caller())
             .await
             .expect("account states");
@@ -867,7 +867,7 @@ mod tests {
             None,
         );
         assert!(
-            facade
+            service
                 .caller_channel_account_states(foreign)
                 .await
                 .expect("account states")
@@ -1044,7 +1044,7 @@ team_id = "/team/id"
             .await
             .expect("seed DM target");
 
-        let facade = GenericChannelConnectionFacade::new(
+        let service = GenericChannelConnectionService::new(
             tenant(),
             Vec::new(),
             Some(installation_store as Arc<dyn ExtensionInstallationStore>),
@@ -1058,14 +1058,14 @@ team_id = "/team/id"
 
         // Discovered + bound: connected.
         assert_eq!(
-            facade
+            service
                 .caller_channel_connections(caller.clone())
                 .await
                 .expect("connection lookup"),
             HashMap::from([(EXTENSION.to_string(), true)])
         );
 
-        facade
+        service
             .disconnect_channel_for_caller(caller.clone(), EXTENSION)
             .await
             .expect("disconnect succeeds");
@@ -1089,7 +1089,7 @@ team_id = "/team/id"
         );
     }
 
-    /// Proof-code channels have no auth vendor, but the connection facade
+    /// Proof-code channels have no auth vendor, but the connection service
     /// still has to discover them so its pairing registry can own status and
     /// disconnect. This mirrors Telegram's manifest shape without naming a
     /// provider in production code.
@@ -1172,7 +1172,7 @@ injection = { type = "header", name = "authorization", prefix = "Bearer " }
             .expect("persist install");
 
         let identity_store = bound_identity_store("pairchat-install");
-        let facade = GenericChannelConnectionFacade::new(
+        let service = GenericChannelConnectionService::new(
             tenant(),
             Vec::new(),
             Some(installation_store as Arc<dyn ExtensionInstallationStore>),
@@ -1184,7 +1184,7 @@ injection = { type = "header", name = "authorization", prefix = "Bearer " }
             None,
         );
 
-        let entries = facade
+        let entries = service
             .connection_entries()
             .await
             .expect("discover channels");

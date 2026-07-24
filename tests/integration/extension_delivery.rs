@@ -98,7 +98,7 @@ const SLACK_BOT_TOKEN: &str = "xoxb-itest-bot-token";
 const SLACK_REPLY: &str = "Here is the coordinated Slack reply.";
 
 const TELEGRAM_ROUTE: &str = "/webhooks/extensions/telegram/updates";
-/// The PRODUCTION installation id: the lifecycle facade mints installation
+/// The PRODUCTION installation id: the lifecycle service mints installation
 /// ids equal to the extension id, and the assembly's dynamic secrets port
 /// reports that id as the verification candidate.
 const TELEGRAM_INSTALLATION: &str = "telegram";
@@ -1168,7 +1168,7 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
     // store (where channel egress resolves them), the webhook URL in the
     // durable installation store.
     let channel_config = services
-        .channel_config_facade()
+        .channel_config_service()
         .expect("the composed runtime exposes the channel-config configure port");
     let telegram_id = ironclaw_host_api::ExtensionId::new("telegram").expect("extension id");
     channel_config
@@ -1551,7 +1551,7 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
 /// verified inbound actors resolve through the generic identity bindings and
 /// an unbound DM fails closed into the connect nudge instead of inheriting
 /// the operator. A code minted web-side (production pairing service — the
-/// same instance the pairing routes and the connection facade hold) is
+/// same instance the pairing routes and the connection service hold) is
 /// consumed from the verified webhook (`/start <code>`), binding the sender:
 /// the durable pairing state flips to connected and the next plain DM admits
 /// a turn whose scope subject IS the paired user, with the reply coordinated
@@ -1620,7 +1620,7 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
         .expect("telegram install completes");
 
     let channel_config = services
-        .channel_config_facade()
+        .channel_config_service()
         .expect("the composed runtime exposes the channel-config configure port");
     let telegram_id = ironclaw_host_api::ExtensionId::new("telegram").expect("extension id");
     channel_config
@@ -1773,7 +1773,7 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
     );
 
     // 2. Web-side mint for the paired user (the production pairing service —
-    //    the exact instance the pairing routes and connection facade hold).
+    //    the exact instance the pairing routes and connection service hold).
     let code = services
         .pairing_mint_for_test("telegram", &paired_user)
         .await

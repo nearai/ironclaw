@@ -4,24 +4,28 @@
 //! command payloads so command parsing does not depend on v1 agent routing or on
 //! the product surface that produced the command.
 
-use std::sync::Arc;
-
-use crate::{
-    InboundCommandPayload, ProductCommandResultPayload, ProductInboundAck, ProductRejection,
-    ProductRejectionKind,
-};
-use async_trait::async_trait;
-use ironclaw_host_api::{HostApiError, ProductSurfaceError};
+use crate::{InboundCommandPayload, ProductRejection, ProductRejectionKind};
+use ironclaw_host_api::HostApiError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{
-    ProductCommandContext, ProductCommandService,
-    lifecycle::{
-        LifecycleCommandKind, LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef,
-        LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
-    },
+use crate::lifecycle::{
+    LifecycleCommandKind, LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef,
+    LifecycleProductAction,
 };
+
+pub const PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID: &str = "product.lifecycle.command";
+pub const PRODUCT_MODEL_COMMAND_OPERATION_ID: &str = "product.model.command";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProductLifecycleCommandInput {
+    pub action: LifecycleProductAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProductModelCommandInput {
+    pub action: ProductModelCommand,
+}
 
 /// Public command inventory metadata. Policy decisions based on actor,
 /// installation, trigger, or product surface belong to `ProductCommandAdmissionService`.
@@ -187,42 +191,6 @@ fn parse_model_option(args: &[&str]) -> Result<Option<String>, ProductRejection>
         ProductRejectionKind::InvalidRequest,
         "model set-provider accepts only `--model <model>` after provider",
     ))
-}
-
-pub struct LifecycleProductCommandService {
-    facade: Arc<dyn LifecycleProductFacade>,
-}
-
-impl LifecycleProductCommandService {
-    pub fn new(facade: Arc<dyn LifecycleProductFacade>) -> Self {
-        Self { facade }
-    }
-}
-
-#[async_trait]
-impl ProductCommandService for LifecycleProductCommandService {
-    async fn execute(
-        &self,
-        context: ProductCommandContext,
-        command: ProductCommand,
-    ) -> Result<ProductInboundAck, ProductSurfaceError> {
-        let ProductCommand::Lifecycle { action } = command else {
-            return Ok(ProductInboundAck::Rejected(ProductRejection::permanent(
-                ProductRejectionKind::PolicyDenied,
-                format!("command routing unavailable: {}", command.name()),
-            )));
-        };
-        let command_name = action.command_name().to_string();
-        let response = self
-            .facade
-            .execute(LifecycleProductContext::Command(Box::new(context)), action)
-            .await?;
-        let payload = serde_json::to_value(response).map_err(ProductSurfaceError::internal_from)?;
-        Ok(ProductInboundAck::CommandResult {
-            command: command_name,
-            payload: ProductCommandResultPayload::new(payload),
-        })
-    }
 }
 
 fn parse_lifecycle_command_payload(

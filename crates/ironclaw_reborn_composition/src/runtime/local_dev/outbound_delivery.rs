@@ -10,7 +10,7 @@ use ironclaw_host_api::{
     SafeSummary, UserId,
 };
 use ironclaw_loop_host::{CapabilityResultWrite, DurablePersistence};
-use ironclaw_product::{OutboundPreferencesProductFacade, RebornOutboundDeliveryTargetId};
+use ironclaw_product::{OutboundPreferencesProductService, RebornOutboundDeliveryTargetId};
 use ironclaw_run_state::{ApprovalRequestStore, ApprovalStatus, RunStateError};
 use ironclaw_turns::{
     LoopGateRef,
@@ -41,7 +41,7 @@ use crate::runtime::local_dev::synthetic_capability::{
 // arch-exempt: too_many_args, outbound handler carries the replay-payload store (§5.3 Stage 2a-i), plan #6175
 #[allow(clippy::too_many_arguments)]
 pub(super) fn outbound_delivery_capabilities(
-    facade: Arc<dyn OutboundPreferencesProductFacade>,
+    service: Arc<dyn OutboundPreferencesProductService>,
     fallback_user_id: UserId,
     approval_requests: Arc<dyn ApprovalRequestStore>,
     capability_leases: Arc<dyn CapabilityLeaseStore>,
@@ -60,7 +60,7 @@ pub(super) fn outbound_delivery_capabilities(
                 outbound_delivery_targets_list_input_schema(),
             )?,
             Arc::new(OutboundDeliveryTargetsListHandler {
-                facade: Arc::clone(&facade),
+                service: Arc::clone(&service),
                 fallback_user_id: fallback_user_id.clone(),
             }),
         ),
@@ -73,7 +73,7 @@ pub(super) fn outbound_delivery_capabilities(
                 outbound_delivery_target_set_input_schema(),
             )?,
             Arc::new(OutboundDeliveryTargetSetHandler {
-                facade,
+                service,
                 fallback_user_id,
                 approval_requests,
                 capability_leases,
@@ -87,7 +87,7 @@ pub(super) fn outbound_delivery_capabilities(
 }
 
 struct OutboundDeliveryTargetsListHandler {
-    facade: Arc<dyn OutboundPreferencesProductFacade>,
+    service: Arc<dyn OutboundPreferencesProductService>,
     fallback_user_id: UserId,
 }
 
@@ -110,7 +110,7 @@ impl SyntheticCapabilityHandler for OutboundDeliveryTargetsListHandler {
             parse_outbound_delivery_targets_list_input(&invocation.input).map_err(input_error)?;
         let caller = caller_for_run(&invocation, &self.fallback_user_id);
         let response =
-            match list_outbound_delivery_targets_for_model(self.facade.as_ref(), caller, input)
+            match list_outbound_delivery_targets_for_model(self.service.as_ref(), caller, input)
                 .await
             {
                 Ok(response) => response,
@@ -146,7 +146,7 @@ impl SyntheticCapabilityHandler for OutboundDeliveryTargetsListHandler {
 const APPROVAL_GATE_SUMMARY: &str = "changing the outbound delivery target requires approval";
 
 struct OutboundDeliveryTargetSetHandler {
-    facade: Arc<dyn OutboundPreferencesProductFacade>,
+    service: Arc<dyn OutboundPreferencesProductService>,
     fallback_user_id: UserId,
     approval_requests: Arc<dyn ApprovalRequestStore>,
     capability_leases: Arc<dyn CapabilityLeaseStore>,
@@ -260,7 +260,7 @@ impl SyntheticCapabilityHandler for OutboundDeliveryTargetSetHandler {
 
         let caller = caller_for_run(&invocation, &self.fallback_user_id);
         let response = match set_outbound_delivery_target_for_model(
-            self.facade.as_ref(),
+            self.service.as_ref(),
             caller,
             target_input,
         )

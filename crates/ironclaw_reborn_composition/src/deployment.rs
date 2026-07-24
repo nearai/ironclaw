@@ -87,7 +87,7 @@ impl RebornReadinessDiagnostic {
 /// deployment selects a substrate, it does not *have a mode that implies one*.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeSubstrate {
-    /// No runtime is assembled — the facades report disabled.
+    /// No runtime is assembled — the services report disabled.
     None,
     /// The production-shaped substrate (libSQL or PostgreSQL store graph).
     ProductionShaped,

@@ -1,6 +1,6 @@
-//! Contract tests for WebUI-facing RebornServices facade.
+//! Contract tests for WebUI-facing RebornServices service.
 
-// arch-exempt: large_file, contract suite tracks the ProductSurface facade one seam per test; splits with the domain-port decomposition, plan #5985
+// arch-exempt: large_file, contract suite tracks the ProductSurface service one seam per test; splits with the domain-port decomposition, plan #5985
 
 use std::{
     collections::{HashMap, HashSet},
@@ -48,9 +48,9 @@ use ironclaw_product::{
     AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE, AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, AUTOMATIONS_VIEW,
     ActiveModelReader, ApprovalInteractionActionView, ApprovalInteractionDecision,
     ApprovalInteractionScope, ApprovalInteractionService, AuthInteractionDecision,
-    AuthInteractionService, AutomationListRequest, AutomationName, AutomationProductFacade,
-    ChannelAuthAccountState, ChannelConfigFacade, ChannelConnectionFacade,
-    ChannelConnectionRequirement, CodexLoginStart, EXTENSION_IMPORT_CAPABILITY_ID,
+    AuthInteractionService, AutomationListRequest, AutomationName, AutomationProductService,
+    ChannelAuthAccountState, ChannelConfigProductService, ChannelConnectionRequirement,
+    ChannelConnectionService, CodexLoginStart, EXTENSION_IMPORT_CAPABILITY_ID,
     EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW,
     ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
     ExtensionCredentialSubmitRequest, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_STAT_VIEW,
@@ -61,7 +61,7 @@ use ironclaw_product::{
     LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
     LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext,
-    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
+    LifecycleProductPayload, LifecycleProductResponse, LifecycleProductService,
     LifecycleReadinessBlocker, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
     ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse, LlmActiveSelection,
     LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
@@ -73,7 +73,7 @@ use ironclaw_product::{
     OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
     OUTBOUND_PREFERENCES_SET_CAPABILITY, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
     OUTBOUND_PREFERENCES_VIEW, OperatorLogsService, OperatorServiceLifecycleService,
-    OperatorStatusService, OutboundPreferencesProductFacade, PROJECT_DELETE_CAPABILITY_ID,
+    OperatorStatusService, OutboundPreferencesProductService, PROJECT_DELETE_CAPABILITY_ID,
     PROJECT_FS_LIST_VIEW, PROJECT_FS_STAT_VIEW, PROJECT_MEMBER_ADD_CAPABILITY_ID,
     PROJECT_MEMBER_REMOVE_CAPABILITY_ID, PROJECT_MEMBER_UPDATE_CAPABILITY_ID, PROJECT_MEMBERS_VIEW,
     PROJECT_UPDATE_CAPABILITY_ID, PROJECT_VIEW, PROJECTS_VIEW, PendingApprovalInteractionView,
@@ -120,7 +120,7 @@ use ironclaw_product::{
     RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery, ResolveApprovalInteractionRequest,
     ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
     ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW, SKILL_SEARCH_VIEW, SKILLS_VIEW,
-    SetActiveLlmRequest, SkillsProductFacade, StaticOperatorStatusService,
+    SetActiveLlmRequest, SkillsProductService, StaticOperatorStatusService,
     THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW,
     TRACE_CREDITS_VIEW, TriggerRunThreadScope, UpsertLlmProviderRequest, approval_gate_ref,
     automation_trigger_thread_metadata_json,
@@ -233,7 +233,7 @@ fn fake_thread_history(owner: &ProductSurfaceCaller, thread_id: &str) -> ThreadH
             scope: scope.clone(),
             thread_id: thread_id.clone(),
             created_by_actor_id: owner.user_id.as_str().to_string(),
-            title: Some("M2 facade contract thread".to_string()),
+            title: Some("M2 service contract thread".to_string()),
             metadata_json: None,
             goal: None,
             created_at: None,
@@ -291,7 +291,7 @@ fn segment(name: &str, value: &str) -> String {
 }
 
 /// Establish thread ownership for `caller` under `thread_id` so subsequent
-/// thread-bound facade calls pass the ownership check.
+/// thread-bound service calls pass the ownership check.
 async fn setup_owned_thread(
     services: &RebornServices,
     owner: ProductSurfaceCaller,
@@ -908,14 +908,14 @@ impl AuthInteractionService for RecordingAuthInteractionService {
     }
 }
 
-struct RecordingLifecycleFacade {
+struct RecordingLifecycleService {
     package_refs: Mutex<Vec<LifecyclePackageRef>>,
     imported_bundles: Mutex<Vec<Vec<u8>>>,
     credential_requirements: Vec<LifecycleExtensionCredentialRequirement>,
     onboarding: Option<LifecycleExtensionOnboarding>,
 }
 
-impl RecordingLifecycleFacade {
+impl RecordingLifecycleService {
     fn new() -> Self {
         Self {
             package_refs: Mutex::new(Vec::new()),
@@ -991,7 +991,7 @@ impl RecordingLifecycleFacade {
 }
 
 #[async_trait]
-impl LifecycleProductFacade for RecordingLifecycleFacade {
+impl LifecycleProductService for RecordingLifecycleService {
     async fn execute(
         &self,
         _context: LifecycleProductContext,
@@ -1044,12 +1044,12 @@ impl LifecycleProductFacade for RecordingLifecycleFacade {
     }
 }
 
-struct ListingLifecycleFacade {
+struct ListingLifecycleService {
     extension: LifecycleInstalledExtensionSummary,
 }
 
 #[async_trait]
-impl LifecycleProductFacade for ListingLifecycleFacade {
+impl LifecycleProductService for ListingLifecycleService {
     async fn execute(
         &self,
         _context: LifecycleProductContext,
@@ -1101,12 +1101,12 @@ struct AutomationMutationCall {
 }
 
 #[derive(Default)]
-struct RecordingAutomationFacade {
+struct RecordingAutomationService {
     list_calls: Mutex<Vec<ListAutomationCall>>,
     mutation_calls: Mutex<Vec<AutomationMutationCall>>,
 }
 
-impl RecordingAutomationFacade {
+impl RecordingAutomationService {
     fn list_calls(&self) -> Vec<ListAutomationCall> {
         self.list_calls.lock().expect("lock").clone()
     }
@@ -1117,7 +1117,7 @@ impl RecordingAutomationFacade {
 }
 
 #[async_trait]
-impl AutomationProductFacade for RecordingAutomationFacade {
+impl AutomationProductService for RecordingAutomationService {
     async fn list_automations(
         &self,
         caller: ProductAgentBoundCaller,
@@ -1145,7 +1145,7 @@ impl AutomationProductFacade for RecordingAutomationFacade {
         _caller: ProductAgentBoundCaller,
         _thread_id: &ThreadId,
     ) -> Result<Option<TriggerRunThreadScope>, ProductSurfaceError> {
-        // Trigger-thread access is not wired in the recording facade.
+        // Trigger-thread access is not wired in the recording service.
         Ok(None)
     }
 
@@ -1243,7 +1243,7 @@ impl AutomationProductFacade for RecordingAutomationFacade {
 }
 
 #[derive(Clone)]
-struct StaticAutomationFacade {
+struct StaticAutomationService {
     output: Vec<RebornAutomationInfo>,
     scheduler_enabled: bool,
     list_calls: Arc<Mutex<Vec<ListAutomationCall>>>,
@@ -1254,7 +1254,7 @@ struct StaticAutomationFacade {
     resolve_calls: Arc<Mutex<Vec<ThreadId>>>,
 }
 
-impl StaticAutomationFacade {
+impl StaticAutomationService {
     fn new(output: Vec<RebornAutomationInfo>) -> Self {
         Self {
             output,
@@ -1289,7 +1289,7 @@ impl StaticAutomationFacade {
 }
 
 #[async_trait]
-impl AutomationProductFacade for StaticAutomationFacade {
+impl AutomationProductService for StaticAutomationService {
     fn scheduler_enabled(&self) -> bool {
         self.scheduler_enabled
     }
@@ -1324,16 +1324,16 @@ impl AutomationProductFacade for StaticAutomationFacade {
     }
 }
 
-/// An automation facade that initially exposes one trigger thread scope but can
+/// An automation service that initially exposes one trigger thread scope but can
 /// have that scope revoked via `revoke()`. Used to verify that the service
 /// revalidates authorization on every call rather than caching the result.
-struct RevocableAutomationFacade {
+struct RevocableAutomationService {
     thread_id: ThreadId,
     scope: TriggerRunThreadScope,
     revoked: Mutex<bool>,
 }
 
-impl RevocableAutomationFacade {
+impl RevocableAutomationService {
     fn new(thread_id: ThreadId, caller: &ProductSurfaceCaller) -> Self {
         let scope = TriggerRunThreadScope {
             agent_id: caller.agent_id.clone(),
@@ -1353,7 +1353,7 @@ impl RevocableAutomationFacade {
 }
 
 #[async_trait]
-impl AutomationProductFacade for RevocableAutomationFacade {
+impl AutomationProductService for RevocableAutomationService {
     async fn list_automations(
         &self,
         _caller: ProductAgentBoundCaller,
@@ -1378,14 +1378,14 @@ impl AutomationProductFacade for RevocableAutomationFacade {
     }
 }
 
-/// An automation facade whose `resolve_run_thread_scope` always returns a
+/// An automation service whose `resolve_run_thread_scope` always returns a
 /// backend error (503 Unavailable, retryable). Used to verify that the timeline
 /// call surfaces the backend error rather than masking it as a 404.
-struct ErroringAutomationFacade {
+struct ErroringAutomationService {
     error: ProductSurfaceError,
 }
 
-impl ErroringAutomationFacade {
+impl ErroringAutomationService {
     fn unavailable() -> Self {
         Self {
             error: ProductSurfaceError {
@@ -1401,7 +1401,7 @@ impl ErroringAutomationFacade {
 }
 
 #[async_trait]
-impl AutomationProductFacade for ErroringAutomationFacade {
+impl AutomationProductService for ErroringAutomationService {
     async fn list_automations(
         &self,
         _caller: ProductAgentBoundCaller,
@@ -1420,13 +1420,13 @@ impl AutomationProductFacade for ErroringAutomationFacade {
 }
 
 #[derive(Default)]
-struct RecordingOutboundPreferencesFacade {
+struct RecordingOutboundPreferencesService {
     get_calls: Mutex<Vec<ProductSurfaceCaller>>,
     set_calls: Mutex<usize>,
     list_calls: Mutex<Vec<ProductSurfaceCaller>>,
 }
 
-impl RecordingOutboundPreferencesFacade {
+impl RecordingOutboundPreferencesService {
     fn get_calls(&self) -> Vec<ProductSurfaceCaller> {
         self.get_calls.lock().expect("lock").clone()
     }
@@ -1471,7 +1471,7 @@ impl ProductCapabilityInvoker for RecordingOutboundPreferencesInvoker {
 }
 
 #[async_trait]
-impl OutboundPreferencesProductFacade for RecordingOutboundPreferencesFacade {
+impl OutboundPreferencesProductService for RecordingOutboundPreferencesService {
     async fn get_outbound_preferences(
         &self,
         caller: ProductSurfaceCaller,
@@ -2693,7 +2693,7 @@ async fn project_and_filesystem_reads_are_available_as_product_views() {
         .with_project_service(project_service.clone());
     create_thread_for(&services, caller(), "thread-product-surface").await;
 
-    // safety: these are ProductSurface facade query calls in a contract test;
+    // safety: these are ProductSurface service query calls in a contract test;
     // no database transaction is involved.
     let project_fs_list = services
         .query(
@@ -2958,7 +2958,7 @@ async fn session_timeline_and_thread_delete_are_available_as_product_surface() {
     );
     create_thread_for(&services, caller(), "thread-session-product-surface").await;
 
-    // safety: these are ProductSurface facade query calls in a contract test;
+    // safety: these are ProductSurface service query calls in a contract test;
     // no database transaction is involved.
     let global_auto_approve = services
         .query(
@@ -2973,7 +2973,7 @@ async fn session_timeline_and_thread_delete_are_available_as_product_surface() {
         serde_json::from_value(global_auto_approve.payload).expect("global auto approve payload");
     assert!(
         !global_auto_approve.enabled,
-        "the default facade reports global auto-approve disabled"
+        "the default service reports global auto-approve disabled"
     );
 
     let timeline = services
@@ -3192,7 +3192,7 @@ fn product_surface_descriptor_helpers_keep_view_and_capability_declarations_type
 }
 
 #[test]
-fn facade_error_taxonomy_serializes_all_stable_wire_names() {
+fn service_error_taxonomy_serializes_all_stable_wire_names() {
     let error = ProductSurfaceError {
         code: ProductSurfaceErrorCode::Conflict,
         kind: ProductSurfaceErrorKind::Busy,
@@ -3249,7 +3249,7 @@ fn facade_error_taxonomy_serializes_all_stable_wire_names() {
 }
 
 #[tokio::test]
-async fn submit_turn_uses_facade_and_thread_history_without_route_store_access() {
+async fn submit_turn_uses_service_and_thread_history_without_route_store_access() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let services = RebornServices::new(threads, coordinator.clone());
@@ -3466,7 +3466,7 @@ async fn submit_turn_returns_internal_when_skill_activation_recorder_fails() {
 }
 
 #[tokio::test]
-async fn m2_facade_timeline_contract_uses_fake_thread_port_with_authenticated_scope() {
+async fn m2_service_timeline_contract_uses_fake_thread_port_with_authenticated_scope() {
     let web_caller = caller();
     let expected_tenant_id = web_caller.tenant_id.clone();
     let expected_agent_id = web_caller.agent_id.clone().expect("test caller has agent");
@@ -3507,7 +3507,7 @@ async fn m2_facade_timeline_contract_uses_fake_thread_port_with_authenticated_sc
 }
 
 #[tokio::test]
-async fn m2_facade_stream_contract_uses_fake_projection_port_with_authenticated_scope() {
+async fn m2_service_stream_contract_uses_fake_projection_port_with_authenticated_scope() {
     let web_caller = caller();
     let event_stream = Arc::new(RecordingProjectionStream::default());
     let services = RebornServices::new(
@@ -3650,7 +3650,7 @@ async fn submit_turn_maps_capacity_exceeded_to_non_retryable_rate_limit() {
             .expect("request"),
         )
         .await
-        .expect_err("capacity error must map through facade");
+        .expect_err("capacity error must map through service");
 
     assert_eq!(err.code, ProductSurfaceErrorCode::RateLimited);
     assert_eq!(err.status_code, 429);
@@ -4370,7 +4370,7 @@ async fn turn_unauthorized_maps_to_forbidden() {
 }
 
 #[tokio::test]
-async fn turn_error_categories_map_to_facade_taxonomy() {
+async fn turn_error_categories_map_to_service_taxonomy() {
     let cases = [
         (
             "conflict",
@@ -4433,7 +4433,7 @@ async fn turn_error_categories_map_to_facade_taxonomy() {
                 .expect("request"),
             )
             .await
-            .expect_err("turn error maps to stable facade taxonomy");
+            .expect_err("turn error maps to stable service taxonomy");
 
         assert_eq!(err.code, expected_code, "{name}");
         assert_eq!(err.kind, expected_kind, "{name}");
@@ -4561,7 +4561,7 @@ async fn projection_egress_denied_maps_to_blocked_resource_taxonomy() {
 }
 
 #[tokio::test]
-async fn surface_rejection_kinds_map_to_facade_taxonomy() {
+async fn surface_rejection_kinds_map_to_service_taxonomy() {
     let cases = [
         (
             ProductSurfaceRejectionKind::ThreadBusy,
@@ -4631,7 +4631,7 @@ async fn surface_rejection_kinds_map_to_facade_taxonomy() {
                 },
             )
             .await
-            .expect_err("workflow rejection maps to stable facade taxonomy");
+            .expect_err("workflow rejection maps to stable service taxonomy");
 
         assert_eq!(err.code, expected_code);
         assert_eq!(err.kind, expected_kind);
@@ -4670,7 +4670,7 @@ async fn timeline_backend_failure_maps_to_timeline_unavailable_taxonomy() {
 }
 
 #[tokio::test]
-async fn cancel_run_uses_turn_facade_and_stable_response() {
+async fn cancel_run_uses_turn_service_and_stable_response() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
@@ -4699,7 +4699,7 @@ async fn cancel_run_uses_turn_facade_and_stable_response() {
 }
 
 #[tokio::test]
-async fn retry_run_uses_turn_facade_and_stable_response() {
+async fn retry_run_uses_turn_service_and_stable_response() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
@@ -4749,7 +4749,7 @@ async fn retry_run_uses_turn_facade_and_stable_response() {
 }
 
 #[tokio::test]
-async fn retry_run_rejects_invalid_run_id_without_turn_facade() {
+async fn retry_run_rejects_invalid_run_id_without_turn_service() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
@@ -5388,7 +5388,7 @@ impl AuthInteractionService for DeniedResumedAuthInteractionService {
 async fn hook_auth_gate_denial_maps_to_reborn_resumed() {
     // Verifies that a Deny decision (which produces `Resumed` from
     // `resume_denied_auth`) maps to `RebornResolveGateResponse::Resumed`
-    // through the facade.
+    // through the service.
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let auth_interactions = Arc::new(DeniedResumedAuthInteractionService);
     let services = RebornServices::new(
@@ -5821,13 +5821,13 @@ async fn approval_gate_resolution_with_persistent_flag_uses_approval_interaction
 }
 
 #[tokio::test]
-async fn setup_extension_projects_through_configured_lifecycle_facade() {
-    let lifecycle_facade = Arc::new(RecordingLifecycleFacade::new());
+async fn setup_extension_projects_through_configured_lifecycle_service() {
+    let lifecycle_service = Arc::new(RecordingLifecycleService::new());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_lifecycle_product_facade(lifecycle_facade.clone());
+    .with_lifecycle_product_service(lifecycle_service.clone());
 
     let response = query_extension_setup(&services, caller(), "github")
         .await
@@ -5845,7 +5845,7 @@ async fn setup_extension_projects_through_configured_lifecycle_facade() {
             if ref_id.as_str() == "extension_lifecycle_store_unwired"
     )));
     assert_eq!(
-        lifecycle_facade.package_refs(),
+        lifecycle_service.package_refs(),
         vec![
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
                 .expect("valid package ref")
@@ -5855,12 +5855,12 @@ async fn setup_extension_projects_through_configured_lifecycle_facade() {
 
 #[tokio::test]
 async fn extension_setup_is_available_as_product_view() {
-    let lifecycle_facade = Arc::new(RecordingLifecycleFacade::new());
+    let lifecycle_service = Arc::new(RecordingLifecycleService::new());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_lifecycle_product_facade(lifecycle_facade.clone());
+    .with_lifecycle_product_service(lifecycle_service.clone());
 
     let response = query_extension_setup(&services, caller(), "github")
         .await
@@ -5873,7 +5873,7 @@ async fn extension_setup_is_available_as_product_view() {
     );
     assert_eq!(response.phase, InstallationState::Unsupported);
     assert_eq!(
-        lifecycle_facade.package_refs(),
+        lifecycle_service.package_refs(),
         vec![
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
                 .expect("valid package ref")
@@ -5887,7 +5887,7 @@ async fn list_extensions_projects_onboarding_payload_through_reborn_services() {
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_lifecycle_product_facade(Arc::new(ListingLifecycleFacade {
+    .with_lifecycle_product_service(Arc::new(ListingLifecycleService {
         extension: LifecycleInstalledExtensionSummary {
             summary: extension_summary(
                 "github",
@@ -5921,13 +5921,13 @@ async fn list_extensions_projects_onboarding_payload_through_reborn_services() {
 }
 
 #[tokio::test]
-async fn list_automation_dispatches_through_product_facade() {
-    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+async fn list_automation_dispatches_through_product_service() {
+    let automation_service = Arc::new(RecordingAutomationService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade.clone());
+    .with_automation_product_service(automation_service.clone());
 
     let listed = query_automations(
         &services,
@@ -5963,7 +5963,7 @@ async fn list_automation_dispatches_through_product_facade() {
         Some("thread-listed")
     );
 
-    let list_calls = automation_facade.list_calls();
+    let list_calls = automation_service.list_calls();
     assert_eq!(list_calls.len(), 1);
     assert_eq!(list_calls[0].caller.user_id.as_str(), "user-alpha");
     assert_eq!(list_calls[0].caller.agent_id.as_str(), "agent-alpha");
@@ -6008,7 +6008,7 @@ async fn list_extensions_projects_channel_surface_with_directions_and_connection
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_lifecycle_product_facade(Arc::new(ListingLifecycleFacade {
+    .with_lifecycle_product_service(Arc::new(ListingLifecycleService {
         extension: LifecycleInstalledExtensionSummary {
             summary,
             phase: InstallationState::Active,
@@ -6050,15 +6050,15 @@ async fn list_extensions_projects_channel_surface_with_directions_and_connection
     assert_eq!(info.installation_state, InstallationState::Active);
 }
 
-/// A caller-scoped channel-connection facade that reports a fixed set of
+/// A caller-scoped channel-connection service that reports a fixed set of
 /// connected channels (mirrors the production port shape the composition crate
-/// wires; the default `StaticChannelConnectionFacade` reports none).
-struct ConnectedChannelConnectionFacade {
+/// wires; the default `StaticChannelConnectionService` reports none).
+struct ConnectedChannelConnectionService {
     connections: std::collections::HashMap<String, bool>,
 }
 
 #[async_trait]
-impl ChannelConnectionFacade for ConnectedChannelConnectionFacade {
+impl ChannelConnectionService for ConnectedChannelConnectionService {
     async fn caller_channel_connections(
         &self,
         _caller: ProductSurfaceCaller,
@@ -6110,14 +6110,14 @@ async fn list_extensions_golden_wire_multi_surface_extension_freezes_accounts_li
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_lifecycle_product_facade(Arc::new(ListingLifecycleFacade {
+    .with_lifecycle_product_service(Arc::new(ListingLifecycleService {
         extension: LifecycleInstalledExtensionSummary {
             summary,
             phase: InstallationState::Active,
             install_scope: None,
         },
     }))
-    .with_channel_connection_facade(Arc::new(ConnectedChannelConnectionFacade {
+    .with_channel_connection_service(Arc::new(ConnectedChannelConnectionService {
         connections: std::collections::HashMap::from([("acme".to_string(), true)]),
     }));
 
@@ -6191,17 +6191,17 @@ async fn list_extensions_golden_wire_multi_surface_extension_freezes_accounts_li
     );
 }
 
-/// A lifecycle facade that lists one installed extension in a caller-chosen
+/// A lifecycle service that lists one installed extension in a caller-chosen
 /// installation state and reports a redacted per-extension activation error —
 /// drives the terminal `Failed` installation-state (§6.1) and `activation_error`
 /// projection through the real descriptor-backed `EXTENSIONS_VIEW` seam.
-struct FailedStateLifecycleFacade {
+struct FailedStateLifecycleService {
     extension: LifecycleInstalledExtensionSummary,
     activation_errors: std::collections::HashMap<String, String>,
 }
 
 #[async_trait]
-impl LifecycleProductFacade for FailedStateLifecycleFacade {
+impl LifecycleProductService for FailedStateLifecycleService {
     async fn execute(
         &self,
         _context: LifecycleProductContext,
@@ -6236,17 +6236,17 @@ impl LifecycleProductFacade for FailedStateLifecycleFacade {
     }
 }
 
-/// A channel-connection facade that also reports the caller's durable
+/// A channel-connection service that also reports the caller's durable
 /// auth-account status per vendor, so the extensions wire projects real §6.3
 /// states (expired / refresh-failed) instead of the connected/disconnected
 /// collapse the connection bool alone permits.
-struct AccountStatusConnectionFacade {
+struct AccountStatusConnectionService {
     connections: std::collections::HashMap<String, bool>,
     account_states: std::collections::HashMap<String, ChannelAuthAccountState>,
 }
 
 #[async_trait]
-impl ChannelConnectionFacade for AccountStatusConnectionFacade {
+impl ChannelConnectionService for AccountStatusConnectionService {
     async fn caller_channel_connections(
         &self,
         _caller: ProductSurfaceCaller,
@@ -6267,7 +6267,7 @@ impl ChannelConnectionFacade for AccountStatusConnectionFacade {
 /// descriptor-backed `EXTENSIONS_VIEW` seam. Before the projection fix
 /// this shape was unrepresentable/collapsed: a `Failed` extension read as
 /// `Installed`, a live-grant account read as `connected` with no error, and
-/// `activation_error` was hard-coded `None`. The facade must now project all
+/// `activation_error` was hard-coded `None`. The service must now project all
 /// three distinctly.
 #[tokio::test]
 async fn list_extensions_surfaces_failed_state_expired_account_and_activation_error() {
@@ -6300,7 +6300,7 @@ async fn list_extensions_surfaces_failed_state_expired_account_and_activation_er
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_lifecycle_product_facade(Arc::new(FailedStateLifecycleFacade {
+    .with_lifecycle_product_service(Arc::new(FailedStateLifecycleService {
         extension: LifecycleInstalledExtensionSummary {
             summary,
             // An enabled extension whose activation failed for a non-auth
@@ -6314,7 +6314,7 @@ async fn list_extensions_surfaces_failed_state_expired_account_and_activation_er
             "activation failed: runtime credential rejected".to_string(),
         )]),
     }))
-    .with_channel_connection_facade(Arc::new(AccountStatusConnectionFacade {
+    .with_channel_connection_service(Arc::new(AccountStatusConnectionService {
         // The caller still holds a binding (connected), yet the durable
         // credential-account status says the grant's refresh failed. The real
         // status must win over the connected backfill.
@@ -6847,15 +6847,15 @@ async fn outbound_preferences_unwired_mutations_and_target_listing_fail_closed()
 }
 
 #[tokio::test]
-async fn outbound_preferences_facade_forwards_caller_and_request() {
-    let outbound_facade = Arc::new(RecordingOutboundPreferencesFacade::default());
+async fn outbound_preferences_service_forwards_caller_and_request() {
+    let outbound_service = Arc::new(RecordingOutboundPreferencesService::default());
     let invoker = RecordingOutboundPreferencesInvoker::default();
     let services = RebornServices::new_with_product_capability_invoker(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
         invoker.clone(),
     )
-    .with_outbound_preferences_facade(outbound_facade.clone());
+    .with_outbound_preferences_product_service(outbound_service.clone());
 
     let get_page = services
         .query(
@@ -6928,13 +6928,13 @@ async fn outbound_preferences_facade_forwards_caller_and_request() {
     );
     assert!(targets.targets[0].capabilities.final_replies);
 
-    let get_calls = outbound_facade.get_calls();
+    let get_calls = outbound_service.get_calls();
     assert_eq!(get_calls.len(), 2);
     assert_eq!(get_calls[0].tenant_id.as_str(), "tenant-alpha");
     assert_eq!(get_calls[0].user_id.as_str(), "user-alpha");
     assert_eq!(get_calls[1].user_id.as_str(), "user-bravo");
 
-    assert_eq!(outbound_facade.set_calls(), 0);
+    assert_eq!(outbound_service.set_calls(), 0);
     let invoke_calls = invoker.calls();
     assert_eq!(invoke_calls.len(), 1);
     assert_eq!(invoke_calls[0].0.user_id.as_str(), "user-bravo");
@@ -6949,19 +6949,19 @@ async fn outbound_preferences_facade_forwards_caller_and_request() {
         json!({ "final_reply_target_id": "slack-dm-beta" })
     );
 
-    let list_calls = outbound_facade.list_calls();
+    let list_calls = outbound_service.list_calls();
     assert_eq!(list_calls.len(), 1);
     assert_eq!(list_calls[0].user_id.as_str(), "user-charlie");
 }
 
 #[tokio::test]
 async fn outbound_preferences_reads_are_available_as_product_views() {
-    let outbound_facade = Arc::new(RecordingOutboundPreferencesFacade::default());
+    let outbound_service = Arc::new(RecordingOutboundPreferencesService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_outbound_preferences_facade(outbound_facade.clone());
+    .with_outbound_preferences_product_service(outbound_service.clone());
     let preferences_caller = caller_for_user("user-outbound-preferences");
     let targets_caller = caller_for_user("user-outbound-targets");
 
@@ -7000,8 +7000,8 @@ async fn outbound_preferences_reads_are_available_as_product_views() {
     let targets: RebornOutboundDeliveryTargetListResponse =
         serde_json::from_value(targets_page.payload).expect("outbound targets payload");
     assert_eq!(targets.targets.len(), 1);
-    assert_eq!(outbound_facade.get_calls(), vec![preferences_caller]);
-    assert_eq!(outbound_facade.list_calls(), vec![targets_caller]);
+    assert_eq!(outbound_service.get_calls(), vec![preferences_caller]);
+    assert_eq!(outbound_service.list_calls(), vec![targets_caller]);
 }
 
 #[tokio::test]
@@ -7061,14 +7061,14 @@ async fn trace_reads_are_available_as_product_views() {
 
 #[tokio::test]
 async fn set_outbound_preferences_can_clear_final_target() {
-    let outbound_facade = Arc::new(RecordingOutboundPreferencesFacade::default());
+    let outbound_service = Arc::new(RecordingOutboundPreferencesService::default());
     let invoker = RecordingOutboundPreferencesInvoker::default();
     let services = RebornServices::new_with_product_capability_invoker(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
         invoker.clone(),
     )
-    .with_outbound_preferences_facade(outbound_facade.clone());
+    .with_outbound_preferences_product_service(outbound_service.clone());
 
     services
         .invoke(
@@ -7080,7 +7080,7 @@ async fn set_outbound_preferences_can_clear_final_target() {
         .await
         .expect("clear outbound preferences");
 
-    assert_eq!(outbound_facade.set_calls(), 0);
+    assert_eq!(outbound_service.set_calls(), 0);
     let invoke_calls = invoker.calls();
     assert_eq!(invoke_calls.len(), 1);
     assert_eq!(
@@ -7091,7 +7091,7 @@ async fn set_outbound_preferences_can_clear_final_target() {
 }
 
 #[tokio::test]
-async fn set_outbound_preferences_rejects_malformed_target_id_before_facade() {
+async fn set_outbound_preferences_rejects_malformed_target_id_before_service() {
     for target_id in [
         "",
         " ",
@@ -7114,15 +7114,15 @@ async fn set_outbound_preferences_rejects_malformed_target_id_before_facade() {
 }
 
 #[tokio::test]
-async fn set_outbound_preferences_accepts_max_length_target_id_before_facade() {
-    let outbound_facade = Arc::new(RecordingOutboundPreferencesFacade::default());
+async fn set_outbound_preferences_accepts_max_length_target_id_before_service() {
+    let outbound_service = Arc::new(RecordingOutboundPreferencesService::default());
     let invoker = RecordingOutboundPreferencesInvoker::default();
     let services = RebornServices::new_with_product_capability_invoker(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
         invoker.clone(),
     )
-    .with_outbound_preferences_facade(outbound_facade.clone());
+    .with_outbound_preferences_product_service(outbound_service.clone());
 
     let max_length_target_id = "a".repeat(512);
     services
@@ -7135,7 +7135,7 @@ async fn set_outbound_preferences_accepts_max_length_target_id_before_facade() {
         .await
         .expect("max-length target id");
 
-    assert_eq!(outbound_facade.set_calls(), 0);
+    assert_eq!(outbound_service.set_calls(), 0);
     let invoke_calls = invoker.calls();
     assert_eq!(invoke_calls.len(), 1);
     assert_eq!(
@@ -7149,12 +7149,12 @@ async fn set_outbound_preferences_accepts_max_length_target_id_before_facade() {
 
 #[tokio::test]
 async fn list_automations_rejects_missing_agent_id() {
-    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let automation_service = Arc::new(RecordingAutomationService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade.clone());
+    .with_automation_product_service(automation_service.clone());
 
     let err = query_automations(
         &services,
@@ -7166,17 +7166,17 @@ async fn list_automations_rejects_missing_agent_id() {
 
     assert_eq!(err.code, ProductSurfaceErrorCode::InvalidRequest);
     assert_eq!(err.status_code, 400);
-    assert_eq!(automation_facade.list_calls().len(), 0);
+    assert_eq!(automation_service.list_calls().len(), 0);
 }
 
 #[tokio::test]
-async fn list_automations_clamps_oversize_limit_before_product_facade() {
-    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+async fn list_automations_clamps_oversize_limit_before_product_service() {
+    let automation_service = Arc::new(RecordingAutomationService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade.clone());
+    .with_automation_product_service(automation_service.clone());
 
     query_automations(
         &services,
@@ -7186,23 +7186,23 @@ async fn list_automations_clamps_oversize_limit_before_product_facade() {
     .await
     .expect("list automations");
 
-    let list_calls = automation_facade.list_calls();
+    let list_calls = automation_service.list_calls();
     assert_eq!(list_calls.len(), 1);
     assert_eq!(
         list_calls[0].limit, AUTOMATION_LIST_MAX_PAGE_SIZE as usize,
-        "automation list limit must be clamped to AUTOMATION_LIST_MAX_PAGE_SIZE ({}) before the product facade",
+        "automation list limit must be clamped to AUTOMATION_LIST_MAX_PAGE_SIZE ({}) before the product service",
         AUTOMATION_LIST_MAX_PAGE_SIZE
     );
 }
 
 #[tokio::test]
-async fn list_automations_clamps_zero_limit_before_product_facade() {
-    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+async fn list_automations_clamps_zero_limit_before_product_service() {
+    let automation_service = Arc::new(RecordingAutomationService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade.clone());
+    .with_automation_product_service(automation_service.clone());
 
     query_automations(
         &services,
@@ -7212,7 +7212,7 @@ async fn list_automations_clamps_zero_limit_before_product_facade() {
     .await
     .expect("list automations");
 
-    let list_calls = automation_facade.list_calls();
+    let list_calls = automation_service.list_calls();
     assert_eq!(list_calls.len(), 1);
     assert_eq!(
         list_calls[0].limit, 1,
@@ -7222,12 +7222,12 @@ async fn list_automations_clamps_zero_limit_before_product_facade() {
 
 #[tokio::test]
 async fn list_automations_uses_default_limit_when_omitted() {
-    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let automation_service = Arc::new(RecordingAutomationService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade.clone());
+    .with_automation_product_service(automation_service.clone());
 
     query_automations(
         &services,
@@ -7237,7 +7237,7 @@ async fn list_automations_uses_default_limit_when_omitted() {
     .await
     .expect("list automations");
 
-    let list_calls = automation_facade.list_calls();
+    let list_calls = automation_service.list_calls();
     assert_eq!(list_calls.len(), 1);
     assert_eq!(
         list_calls[0].limit, AUTOMATION_LIST_DEFAULT_PAGE_SIZE as usize,
@@ -7247,13 +7247,13 @@ async fn list_automations_uses_default_limit_when_omitted() {
 }
 
 #[tokio::test]
-async fn list_automations_clamps_oversize_run_limit_before_product_facade() {
-    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+async fn list_automations_clamps_oversize_run_limit_before_product_service() {
+    let automation_service = Arc::new(RecordingAutomationService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade.clone());
+    .with_automation_product_service(automation_service.clone());
 
     query_automations(
         &services,
@@ -7263,23 +7263,23 @@ async fn list_automations_clamps_oversize_run_limit_before_product_facade() {
     .await
     .expect("list automations");
 
-    let list_calls = automation_facade.list_calls();
+    let list_calls = automation_service.list_calls();
     assert_eq!(list_calls.len(), 1);
     assert_eq!(
         list_calls[0].run_limit, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE as usize,
-        "automation run history limit must be clamped to AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE ({}) before the product facade",
+        "automation run history limit must be clamped to AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE ({}) before the product service",
         AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE
     );
 }
 
 #[tokio::test]
-async fn list_automations_allows_zero_run_limit_before_product_facade() {
-    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+async fn list_automations_allows_zero_run_limit_before_product_service() {
+    let automation_service = Arc::new(RecordingAutomationService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade.clone());
+    .with_automation_product_service(automation_service.clone());
 
     query_automations(
         &services,
@@ -7289,7 +7289,7 @@ async fn list_automations_allows_zero_run_limit_before_product_facade() {
     .await
     .expect("list automations");
 
-    let list_calls = automation_facade.list_calls();
+    let list_calls = automation_service.list_calls();
     assert_eq!(list_calls.len(), 1);
     assert_eq!(
         list_calls[0].run_limit, 0,
@@ -7298,13 +7298,13 @@ async fn list_automations_allows_zero_run_limit_before_product_facade() {
 }
 
 #[tokio::test]
-async fn list_automations_forwards_include_completed_true_to_product_facade() {
-    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+async fn list_automations_forwards_include_completed_true_to_product_service() {
+    let automation_service = Arc::new(RecordingAutomationService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade.clone());
+    .with_automation_product_service(automation_service.clone());
 
     query_automations(
         &services,
@@ -7314,22 +7314,22 @@ async fn list_automations_forwards_include_completed_true_to_product_facade() {
     .await
     .expect("list automations");
 
-    let list_calls = automation_facade.list_calls();
+    let list_calls = automation_service.list_calls();
     assert_eq!(list_calls.len(), 1);
     assert!(
         list_calls[0].include_completed,
-        "include_completed=true must be forwarded to the product facade unchanged"
+        "include_completed=true must be forwarded to the product service unchanged"
     );
 }
 
 #[tokio::test]
-async fn list_automations_forwards_include_completed_false_to_product_facade() {
-    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+async fn list_automations_forwards_include_completed_false_to_product_service() {
+    let automation_service = Arc::new(RecordingAutomationService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade.clone());
+    .with_automation_product_service(automation_service.clone());
 
     query_automations(
         &services,
@@ -7339,22 +7339,22 @@ async fn list_automations_forwards_include_completed_false_to_product_facade() {
     .await
     .expect("list automations");
 
-    let list_calls = automation_facade.list_calls();
+    let list_calls = automation_service.list_calls();
     assert_eq!(list_calls.len(), 1);
     assert!(
         !list_calls[0].include_completed,
-        "include_completed=false must be forwarded to the product facade unchanged"
+        "include_completed=false must be forwarded to the product service unchanged"
     );
 }
 
 #[tokio::test]
 async fn pause_automation_rejects_missing_agent_id() {
-    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let automation_service = Arc::new(RecordingAutomationService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade.clone());
+    .with_automation_product_service(automation_service.clone());
 
     let err = invoke_json_product_capability(
         &services,
@@ -7369,17 +7369,17 @@ async fn pause_automation_rejects_missing_agent_id() {
 
     assert_eq!(err.code, ProductSurfaceErrorCode::InvalidRequest);
     assert_eq!(err.status_code, 400);
-    assert_eq!(automation_facade.mutation_calls().len(), 0);
+    assert_eq!(automation_service.mutation_calls().len(), 0);
 }
 
 #[tokio::test]
 async fn resume_automation_rejects_missing_agent_id() {
-    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let automation_service = Arc::new(RecordingAutomationService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade.clone());
+    .with_automation_product_service(automation_service.clone());
 
     let err = invoke_json_product_capability(
         &services,
@@ -7394,17 +7394,17 @@ async fn resume_automation_rejects_missing_agent_id() {
 
     assert_eq!(err.code, ProductSurfaceErrorCode::InvalidRequest);
     assert_eq!(err.status_code, 400);
-    assert_eq!(automation_facade.mutation_calls().len(), 0);
+    assert_eq!(automation_service.mutation_calls().len(), 0);
 }
 
 #[tokio::test]
 async fn rename_automation_rejects_missing_agent_id() {
-    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let automation_service = Arc::new(RecordingAutomationService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade.clone());
+    .with_automation_product_service(automation_service.clone());
 
     let err = invoke_json_product_capability(
         &services,
@@ -7420,17 +7420,17 @@ async fn rename_automation_rejects_missing_agent_id() {
 
     assert_eq!(err.code, ProductSurfaceErrorCode::InvalidRequest);
     assert_eq!(err.status_code, 400);
-    assert_eq!(automation_facade.mutation_calls().len(), 0);
+    assert_eq!(automation_service.mutation_calls().len(), 0);
 }
 
 #[tokio::test]
 async fn delete_automation_rejects_missing_agent_id() {
-    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let automation_service = Arc::new(RecordingAutomationService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade.clone());
+    .with_automation_product_service(automation_service.clone());
 
     let err = invoke_json_product_capability(
         &services,
@@ -7445,17 +7445,17 @@ async fn delete_automation_rejects_missing_agent_id() {
 
     assert_eq!(err.code, ProductSurfaceErrorCode::InvalidRequest);
     assert_eq!(err.status_code, 400);
-    assert_eq!(automation_facade.mutation_calls().len(), 0);
+    assert_eq!(automation_service.mutation_calls().len(), 0);
 }
 
 #[tokio::test]
-async fn automation_mutations_forward_caller_scope_to_product_facade() {
-    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+async fn automation_mutations_forward_caller_scope_to_product_service() {
+    let automation_service = Arc::new(RecordingAutomationService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade.clone());
+    .with_automation_product_service(automation_service.clone());
     let caller = caller();
     let expected_agent_id = caller.agent_id.clone().expect("agent id");
 
@@ -7520,7 +7520,7 @@ async fn automation_mutations_forward_caller_scope_to_product_facade() {
         Resolution::Done(outcome) if outcome.verdict.is_success()
     ));
 
-    let calls = automation_facade.mutation_calls();
+    let calls = automation_service.mutation_calls();
     assert_eq!(calls.len(), 4);
     assert_eq!(calls[0].action, AutomationMutationAction::Pause);
     assert_eq!(calls[0].automation_id, "trigger-alpha");
@@ -7555,12 +7555,12 @@ async fn automation_mutations_forward_caller_scope_to_product_facade() {
 
 #[tokio::test]
 async fn automation_mutations_are_available_as_product_capabilities() {
-    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let automation_service = Arc::new(RecordingAutomationService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade.clone());
+    .with_automation_product_service(automation_service.clone());
 
     for (capability_id, input) in [
         (
@@ -7608,7 +7608,7 @@ async fn automation_mutations_are_available_as_product_capabilities() {
         ));
     }
 
-    let calls = automation_facade.mutation_calls();
+    let calls = automation_service.mutation_calls();
     assert_eq!(calls.len(), 4);
     assert_eq!(calls[0].action, AutomationMutationAction::Pause);
     assert_eq!(calls[1].action, AutomationMutationAction::Resume);
@@ -7622,13 +7622,13 @@ async fn automation_mutations_are_available_as_product_capabilities() {
 }
 
 #[tokio::test]
-async fn rename_automation_validates_name_before_product_facade() {
-    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+async fn rename_automation_validates_name_before_product_service() {
+    let automation_service = Arc::new(RecordingAutomationService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade.clone());
+    .with_automation_product_service(automation_service.clone());
 
     for (request, expected_code) in [
         (
@@ -7658,7 +7658,7 @@ async fn rename_automation_validates_name_before_product_facade() {
             },
         )
         .await
-        .expect_err("invalid name should fail before facade");
+        .expect_err("invalid name should fail before service");
 
         assert_eq!(err.code, ProductSurfaceErrorCode::InvalidRequest);
         assert_eq!(err.status_code, 400);
@@ -7666,7 +7666,7 @@ async fn rename_automation_validates_name_before_product_facade() {
         assert_eq!(err.validation_code, Some(expected_code));
     }
 
-    assert_eq!(automation_facade.mutation_calls().len(), 0);
+    assert_eq!(automation_service.mutation_calls().len(), 0);
 }
 
 #[test]
@@ -8344,9 +8344,9 @@ async fn get_timeline_succeeds_for_own_automation_trigger_thread() {
         .await
         .expect("trigger thread stored");
 
-    // The automation facade recognises the thread and returns the trigger scope.
-    let automation_facade = Arc::new(
-        StaticAutomationFacade::new(vec![RebornAutomationInfo {
+    // The automation service recognises the thread and returns the trigger scope.
+    let automation_service = Arc::new(
+        StaticAutomationService::new(vec![RebornAutomationInfo {
             automation_id: "trigger-scheduled-alpha".to_string(),
             name: "Morning briefing".to_string(),
             source: RebornAutomationSource::Schedule {
@@ -8376,7 +8376,7 @@ async fn get_timeline_succeeds_for_own_automation_trigger_thread() {
     );
 
     let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
-        .with_automation_product_facade(automation_facade);
+        .with_automation_product_service(automation_service);
 
     let response = services
         .get_timeline(
@@ -8460,8 +8460,8 @@ async fn read_attachment_reads_trigger_thread_bytes_under_creator_scope() {
         .await
         .expect("message with attachment accepted");
 
-    let automation_facade = Arc::new(
-        StaticAutomationFacade::new(vec![RebornAutomationInfo {
+    let automation_service = Arc::new(
+        StaticAutomationService::new(vec![RebornAutomationInfo {
             automation_id: "trigger-bytes".to_string(),
             name: "Morning briefing".to_string(),
             source: RebornAutomationSource::Schedule {
@@ -8495,7 +8495,7 @@ async fn read_attachment_reads_trigger_thread_bytes_under_creator_scope() {
         reads: Mutex::new(Vec::new()),
     });
     let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
-        .with_automation_product_facade(automation_facade)
+        .with_automation_product_service(automation_service)
         .with_inbound_attachment_reader(reader.clone());
 
     let result = services
@@ -8547,12 +8547,12 @@ async fn get_timeline_rejects_other_users_automation_trigger_thread() {
         .await
         .expect("alice trigger thread stored");
 
-    // Bob's facade returns no automations and no resolve_scope — the fallback
+    // Bob's service returns no automations and no resolve_scope — the fallback
     // must deny him because resolve_run_thread_scope returns None.
-    let automation_facade = Arc::new(StaticAutomationFacade::new(Vec::new()));
+    let automation_service = Arc::new(StaticAutomationService::new(Vec::new()));
 
     let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
-        .with_automation_product_facade(automation_facade);
+        .with_automation_product_service(automation_service);
 
     let err = services
         .get_timeline(
@@ -8572,7 +8572,7 @@ async fn get_timeline_rejects_other_users_automation_trigger_thread() {
 #[tokio::test]
 async fn get_timeline_surfaces_trigger_scope_lookup_backend_error() {
     // The primary user-scoped lookup will miss (thread stored under trigger
-    // creator scope), then the automation fallback fires.  The facade returns
+    // creator scope), then the automation fallback fires.  The service returns
     // a 503 Unavailable error — the service must propagate that error rather
     // than converting it to 404.
     let caller = caller();
@@ -8595,11 +8595,11 @@ async fn get_timeline_surfaces_trigger_scope_lookup_backend_error() {
         .await
         .expect("trigger thread stored");
 
-    // The automation facade returns a 503 backend error from resolve_run_thread_scope.
-    let automation_facade = Arc::new(ErroringAutomationFacade::unavailable());
+    // The automation service returns a 503 backend error from resolve_run_thread_scope.
+    let automation_service = Arc::new(ErroringAutomationService::unavailable());
 
     let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
-        .with_automation_product_facade(automation_facade);
+        .with_automation_product_service(automation_service);
 
     let err = services
         .get_timeline(
@@ -8607,7 +8607,7 @@ async fn get_timeline_surfaces_trigger_scope_lookup_backend_error() {
             RebornTimelineRequest::new(trigger_thread_id.as_str().to_string()),
         )
         .await
-        .expect_err("backend error from facade must propagate, not become 404");
+        .expect_err("backend error from service must propagate, not become 404");
 
     assert_eq!(
         err.code,
@@ -8791,7 +8791,7 @@ impl SessionThreadService for FirstMissBackendErrorThreadService {
 // fallback fires) and `resolve_run_thread_scope` authorizes access, but the
 // second `list_thread_history` call for the trigger-owned scope returns a
 // backend error, the result must be Unavailable (503) — NOT the 404 NotFound
-// that would have been returned had the automation facade also denied access.
+// that would have been returned had the automation service also denied access.
 // A backend outage must never be surfaced as an authorization miss.
 #[tokio::test]
 async fn get_timeline_surfaces_backend_error_from_unscoped_trigger_history_reload() {
@@ -8803,17 +8803,17 @@ async fn get_timeline_surfaces_backend_error_from_unscoped_trigger_history_reloa
     // second call (trigger-owned scope reload) → Backend error.
     let thread_service = Arc::new(FirstMissBackendErrorThreadService::new());
 
-    // Automation facade authorizes: the facade resolves a scope for the
+    // Automation service authorizes: the service resolves a scope for the
     // thread, so the service proceeds to the trigger-owned reload.
-    let automation_facade = Arc::new(
-        StaticAutomationFacade::new(Vec::new()).with_resolve_scope_for_thread(
+    let automation_service = Arc::new(
+        StaticAutomationService::new(Vec::new()).with_resolve_scope_for_thread(
             trigger_thread_id.clone(),
             trigger_run_thread_scope_for(&caller),
         ),
     );
 
     let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
-        .with_automation_product_facade(automation_facade);
+        .with_automation_product_service(automation_service);
 
     let err = services
         .get_timeline(
@@ -8883,13 +8883,13 @@ async fn get_timeline_uses_caller_agent_when_trigger_scope_omits_agent_id() {
         creator_user_id: UserId::new(TRIGGER_CREATOR_USER_ID)
             .expect("valid trigger creator user id"),
     };
-    let automation_facade = Arc::new(
-        StaticAutomationFacade::new(vec![])
+    let automation_service = Arc::new(
+        StaticAutomationService::new(vec![])
             .with_resolve_scope_for_thread(trigger_thread_id.clone(), scope_with_no_agent),
     );
 
     let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
-        .with_automation_product_facade(automation_facade);
+        .with_automation_product_service(automation_service);
 
     let response = services
         .get_timeline(
@@ -8913,12 +8913,12 @@ async fn get_timeline_uses_caller_agent_when_trigger_scope_omits_agent_id() {
 // trigger-fired thread therefore returned 404, even when the caller owned the
 // automation that produced the thread.
 
-fn automation_facade_with_trigger_thread(
+fn automation_service_with_trigger_thread(
     trigger_thread_id: ThreadId,
     caller: &ProductSurfaceCaller,
-) -> Arc<StaticAutomationFacade> {
+) -> Arc<StaticAutomationService> {
     Arc::new(
-        StaticAutomationFacade::new(vec![RebornAutomationInfo {
+        StaticAutomationService::new(vec![RebornAutomationInfo {
             automation_id: "trigger-gate-automation".to_string(),
             name: "Gate test automation".to_string(),
             source: RebornAutomationSource::Schedule {
@@ -9020,7 +9020,7 @@ async fn resolve_gate_approval_succeeds_for_own_automation_trigger_thread() {
     coordinator.set_run_state_actor(Some(turn_actor_for_user(TRIGGER_CREATOR_USER_ID)));
 
     let services = RebornServices::new(thread_service, coordinator.clone())
-        .with_automation_product_facade(automation_facade_with_trigger_thread(
+        .with_automation_product_service(automation_service_with_trigger_thread(
             trigger_thread_id.clone(),
             &caller,
         ))
@@ -9092,8 +9092,8 @@ async fn cancel_run_succeeds_for_own_automation_trigger_thread() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
 
     let services =
-        RebornServices::new(thread_service, coordinator.clone()).with_automation_product_facade(
-            automation_facade_with_trigger_thread(trigger_thread_id.clone(), &caller),
+        RebornServices::new(thread_service, coordinator.clone()).with_automation_product_service(
+            automation_service_with_trigger_thread(trigger_thread_id.clone(), &caller),
         );
 
     let response = services
@@ -9144,8 +9144,8 @@ async fn get_run_state_succeeds_for_own_automation_trigger_thread() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
 
     let services =
-        RebornServices::new(thread_service, coordinator.clone()).with_automation_product_facade(
-            automation_facade_with_trigger_thread(trigger_thread_id.clone(), &caller),
+        RebornServices::new(thread_service, coordinator.clone()).with_automation_product_service(
+            automation_service_with_trigger_thread(trigger_thread_id.clone(), &caller),
         );
 
     let response = services
@@ -9184,12 +9184,12 @@ async fn resolve_gate_rejects_other_users_automation_trigger_thread() {
         setup_trigger_thread(&thread_service, &alice, "thread-trigger-gate-beta").await;
 
     // Bob has no automations — resolve_run_thread_scope returns None, fallback denies him.
-    let bob_automation_facade = Arc::new(StaticAutomationFacade::new(Vec::new()));
+    let bob_automation_service = Arc::new(StaticAutomationService::new(Vec::new()));
     let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
     let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
 
     let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
-        .with_automation_product_facade(bob_automation_facade)
+        .with_automation_product_service(bob_automation_service)
         .with_approval_interactions(approval_interactions.clone());
 
     let err = services
@@ -9240,7 +9240,7 @@ async fn stream_events_uses_trigger_creator_as_projection_identity() {
 
     let event_stream = Arc::new(RecordingProjectionStream::default());
     let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
-        .with_automation_product_facade(automation_facade_with_trigger_thread(
+        .with_automation_product_service(automation_service_with_trigger_thread(
             trigger_thread_id.clone(),
             &caller,
         ))
@@ -9281,7 +9281,7 @@ async fn stream_events_uses_trigger_creator_as_projection_identity() {
 }
 
 #[tokio::test]
-async fn stream_events_revalidates_facade_on_every_poll() {
+async fn stream_events_revalidates_service_on_every_poll() {
     // Every stream_events poll must call resolve_run_thread_scope — there is no
     // authorization cache. This ensures a caller that loses automation
     // visibility between polls cannot keep draining the trigger-owned stream.
@@ -9294,11 +9294,11 @@ async fn stream_events_revalidates_facade_on_every_poll() {
     )
     .await;
 
-    let automation_facade =
-        automation_facade_with_trigger_thread(trigger_thread_id.clone(), &caller);
+    let automation_service =
+        automation_service_with_trigger_thread(trigger_thread_id.clone(), &caller);
     let event_stream = Arc::new(RecordingProjectionStream::default());
     let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
-        .with_automation_product_facade(automation_facade.clone())
+        .with_automation_product_service(automation_service.clone())
         .with_event_stream(event_stream.clone());
 
     for _ in 0..3 {
@@ -9315,7 +9315,7 @@ async fn stream_events_revalidates_facade_on_every_poll() {
     }
 
     assert_eq!(
-        automation_facade.resolve_calls(),
+        automation_service.resolve_calls(),
         vec![
             trigger_thread_id.clone(),
             trigger_thread_id.clone(),
@@ -9343,14 +9343,14 @@ async fn stream_events_fails_when_visibility_revoked_between_polls() {
     )
     .await;
 
-    // A facade that starts with the scope available but can revoke it.
-    let revocable_facade = Arc::new(RevocableAutomationFacade::new(
+    // A service that starts with the scope available but can revoke it.
+    let revocable_service = Arc::new(RevocableAutomationService::new(
         trigger_thread_id.clone(),
         &caller,
     ));
     let event_stream = Arc::new(RecordingProjectionStream::default());
     let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
-        .with_automation_product_facade(revocable_facade.clone())
+        .with_automation_product_service(revocable_service.clone())
         .with_event_stream(event_stream.clone());
 
     // First poll succeeds — caller still has automation visibility.
@@ -9366,7 +9366,7 @@ async fn stream_events_fails_when_visibility_revoked_between_polls() {
         .expect("first poll must succeed while scope is visible");
 
     // Revoke visibility.
-    revocable_facade.revoke();
+    revocable_service.revoke();
 
     // Second poll must fail — visibility was revoked and there is no cached authz.
     let err = services
@@ -9397,11 +9397,11 @@ async fn get_timeline_rejects_thread_id_absent_from_callers_automations() {
     let thread_service = Arc::new(InMemorySessionThreadService::default());
     // No threads stored anywhere.
 
-    // Automation facade knows about a DIFFERENT thread, not the requested one.
+    // Automation service knows about a DIFFERENT thread, not the requested one.
     let unrelated_thread_id =
         ThreadId::new("thread-unrelated-xyz").expect("valid unrelated thread id");
-    let automation_facade = Arc::new(
-        StaticAutomationFacade::new(vec![RebornAutomationInfo {
+    let automation_service = Arc::new(
+        StaticAutomationService::new(vec![RebornAutomationInfo {
             automation_id: "trigger-other".to_string(),
             name: "Other automation".to_string(),
             source: RebornAutomationSource::Schedule {
@@ -9423,11 +9423,11 @@ async fn get_timeline_rejects_thread_id_absent_from_callers_automations() {
             is_active: true,
             created_at: None,
             active_hold: None,
-        }]), // resolve_scope is None — the facade does not recognise the requested thread.
+        }]), // resolve_scope is None — the service does not recognise the requested thread.
     );
 
     let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
-        .with_automation_product_facade(automation_facade);
+        .with_automation_product_service(automation_service);
 
     let err = services
         .get_timeline(
@@ -9447,7 +9447,7 @@ async fn list_automations_returns_empty_list() {
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(Arc::new(StaticAutomationFacade::new(Vec::new())));
+    .with_automation_product_service(Arc::new(StaticAutomationService::new(Vec::new())));
 
     let listed = query_automations(
         &services,
@@ -9458,7 +9458,7 @@ async fn list_automations_returns_empty_list() {
     .expect("list automations");
 
     assert!(listed.automations.is_empty());
-    // Default facade reports the scheduler as running.
+    // Default service reports the scheduler as running.
     assert!(listed.scheduler_enabled);
 }
 
@@ -9471,8 +9471,8 @@ async fn list_automations_surfaces_disabled_scheduler() {
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(Arc::new(
-        StaticAutomationFacade::new(Vec::new()).with_scheduler_enabled(false),
+    .with_automation_product_service(Arc::new(
+        StaticAutomationService::new(Vec::new()).with_scheduler_enabled(false),
     ));
 
     let listed = query_automations(
@@ -9487,7 +9487,7 @@ async fn list_automations_surfaces_disabled_scheduler() {
 }
 
 #[tokio::test]
-async fn automation_facade_unwired_fails_closed() {
+async fn automation_service_unwired_fails_closed() {
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
@@ -9499,7 +9499,7 @@ async fn automation_facade_unwired_fails_closed() {
         ProductListAutomationsRequest::default(),
     )
     .await
-    .expect_err("unwired automation facade");
+    .expect_err("unwired automation service");
 
     assert_eq!(error.code, ProductSurfaceErrorCode::Unavailable);
     assert_eq!(error.status_code, 503);
@@ -9512,8 +9512,8 @@ async fn setup_extension_returns_post_setup_onboarding_payload() {
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_lifecycle_product_facade(Arc::new(
-        RecordingLifecycleFacade::with_credential_requirements_and_onboarding(
+    .with_lifecycle_product_service(Arc::new(
+        RecordingLifecycleService::with_credential_requirements_and_onboarding(
             vec![manual_credential_requirement("github_runtime_token", true)],
             onboarding_fixture(),
         ),
@@ -9629,12 +9629,12 @@ type RecordedChannelConfigSave = (String, Vec<(String, String)>);
 /// Recording fake of the channel-config configure port: serves a fixed
 /// field-status projection and records every save.
 #[derive(Default)]
-struct RecordingChannelConfigFacade {
+struct RecordingChannelConfigProductService {
     fields: Vec<RebornChannelConfigField>,
     saves: Mutex<Vec<RecordedChannelConfigSave>>,
 }
 
-impl RecordingChannelConfigFacade {
+impl RecordingChannelConfigProductService {
     fn with_fields(fields: Vec<RebornChannelConfigField>) -> Self {
         Self {
             fields,
@@ -9648,7 +9648,7 @@ impl RecordingChannelConfigFacade {
 }
 
 #[async_trait]
-impl ChannelConfigFacade for RecordingChannelConfigFacade {
+impl ChannelConfigProductService for RecordingChannelConfigProductService {
     async fn field_status(
         &self,
         _extension_id: &ExtensionId,
@@ -9678,21 +9678,21 @@ fn channel_config_field(name: &str, label: &str, secret: bool) -> RebornChannelC
     }
 }
 
-/// The setup facade renders manifest-declared channel-config fields (the
+/// The setup service renders manifest-declared channel-config fields (the
 /// non-secret descriptors in `fields`, the secret ones in the existing
 /// `secrets` shape, presence only) and routes submitted values to the
 /// configure port while credential secrets keep the credential path.
 #[tokio::test]
 async fn setup_extension_projects_and_routes_channel_config_values() {
     let credentials = Arc::new(RecordingExtensionCredentialSetupService::default());
-    let channel_config = Arc::new(RecordingChannelConfigFacade::with_fields(vec![
+    let channel_config = Arc::new(RecordingChannelConfigProductService::with_fields(vec![
         channel_config_field("bot_token", "Bot token", true),
         channel_config_field("public_url", "Public webhook URL", false),
     ]));
     let services =
         setup_services_with_requirements(vec![manual_credential_requirement("api_token", false)])
             .with_extension_credentials(credentials.clone())
-            .with_channel_config_facade(channel_config.clone());
+            .with_channel_config_product_service(channel_config.clone());
 
     // View: fields from the non-secret descriptors, secret channel fields in
     // the secrets list (presence only, manual-token shape).
@@ -9765,12 +9765,12 @@ async fn setup_extension_projects_and_routes_channel_config_values() {
 #[tokio::test]
 async fn setup_extension_rejects_unknown_channel_config_field() {
     let credentials = Arc::new(RecordingExtensionCredentialSetupService::default());
-    let channel_config = Arc::new(RecordingChannelConfigFacade::with_fields(vec![
+    let channel_config = Arc::new(RecordingChannelConfigProductService::with_fields(vec![
         channel_config_field("public_url", "Public webhook URL", false),
     ]));
     let services = setup_services_with_requirements(Vec::new())
         .with_extension_credentials(credentials.clone())
-        .with_channel_config_facade(channel_config.clone());
+        .with_channel_config_product_service(channel_config.clone());
 
     let err = invoke_extension_setup_submit(
         &services,
@@ -9801,8 +9801,8 @@ fn setup_services_with_requirements(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_lifecycle_product_facade(Arc::new(
-        RecordingLifecycleFacade::with_credential_requirements(requirements),
+    .with_lifecycle_product_service(Arc::new(
+        RecordingLifecycleService::with_credential_requirements(requirements),
     ))
 }
 
@@ -10694,12 +10694,12 @@ async fn submit_extension_setup_and_query<S: ProductSurface + ?Sized>(
 
 #[tokio::test]
 async fn extension_import_is_available_as_product_capability() {
-    let lifecycle_facade = Arc::new(RecordingLifecycleFacade::new());
+    let lifecycle_service = Arc::new(RecordingLifecycleService::new());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_lifecycle_product_facade(lifecycle_facade.clone());
+    .with_lifecycle_product_service(lifecycle_service.clone());
     let bundle: Vec<u8> = b"PK\x03\x04\x00\xff\xfe binary zip bytes".to_vec();
 
     let resolution = services
@@ -10716,17 +10716,17 @@ async fn extension_import_is_available_as_product_capability() {
         resolution,
         Resolution::Done(outcome) if outcome.verdict.is_success()
     ));
-    assert_eq!(lifecycle_facade.imported_bundles(), vec![bundle]);
+    assert_eq!(lifecycle_service.imported_bundles(), vec![bundle]);
 }
 
 #[tokio::test]
 async fn skill_reads_are_available_as_product_views() {
-    let skills = Arc::new(RecordingSkillsFacade::default());
+    let skills = Arc::new(RecordingSkillsService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_skills_product_facade(skills.clone());
+    .with_skills_product_service(skills.clone());
 
     let list_page = services
         .query(
@@ -10802,12 +10802,12 @@ fn skill_info(name: &str) -> RebornSkillInfo {
 }
 
 #[derive(Default)]
-struct RecordingSkillsFacade {
+struct RecordingSkillsService {
     search_queries: Mutex<Vec<String>>,
 }
 
 #[async_trait]
-impl SkillsProductFacade for RecordingSkillsFacade {
+impl SkillsProductService for RecordingSkillsService {
     async fn list_skills(
         &self,
         _caller: ProductSurfaceCaller,
@@ -12886,7 +12886,7 @@ async fn get_timeline_pages_messages_with_cursor() {
     );
 }
 
-// Regression: `limit` must be clamped to the facade's hard ceiling so a
+// Regression: `limit` must be clamped to the service's hard ceiling so a
 // caller cannot widen the response by passing a huge value. Without the
 // clamp, the per-route rate limit would be the only thing bounding
 // per-request response size.
@@ -12951,8 +12951,8 @@ async fn get_timeline_rejects_malformed_cursor() {
 }
 
 #[test]
-fn facade_source_avoids_forbidden_runtime_dependencies() {
-    let source = std::fs::read_to_string("src/reborn_services.rs").expect("facade source");
+fn service_source_avoids_forbidden_runtime_dependencies() {
+    let source = std::fs::read_to_string("src/reborn_services.rs").expect("service source");
     for forbidden in [
         "CapabilityHost",
         "ironclaw_capabilities",
@@ -12966,7 +12966,7 @@ fn facade_source_avoids_forbidden_runtime_dependencies() {
     ] {
         assert!(
             !source.contains(forbidden),
-            "RebornServices facade must not expose route handlers to {forbidden}"
+            "RebornServices service must not expose route handlers to {forbidden}"
         );
     }
 
@@ -12974,10 +12974,10 @@ fn facade_source_avoids_forbidden_runtime_dependencies() {
 }
 
 // Regression for the missing-error-path-test review (Medium): the
-// new `list_threads` facade path must fail closed until a backend
+// new `list_threads` service path must fail closed until a backend
 // override for `list_threads_for_scope` is wired. The default
 // `SessionThreadService` impl returns `Backend(...)`, and the
-// facade is supposed to translate that into a retryable
+// service is supposed to translate that into a retryable
 // `service_unavailable` (HTTP 503) — never an empty thread list
 // that pretends the caller owns nothing. This test pins the wire
 // contract so a future regression that quietly returns Ok([]) on a
@@ -12987,7 +12987,7 @@ fn facade_source_avoids_forbidden_runtime_dependencies() {
 async fn list_threads_unimplemented_backend_returns_service_unavailable() {
     // `ScopeMismatchThreadStub` is reused here because it
     // intentionally does NOT override the trait's default
-    // `list_threads_for_scope` impl, so the facade sees the
+    // `list_threads_for_scope` impl, so the service sees the
     // unimplemented-enumeration error path. The in-memory backend
     // grew a real enumeration impl (local-dev needed working
     // sidebar listing), so it can no longer stand in for a backend
@@ -13107,7 +13107,7 @@ async fn list_threads_needs_approval_returns_only_automation_threads_with_pendin
         thread_service.clone(),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade_with_trigger_thread(
+    .with_automation_product_service(automation_service_with_trigger_thread(
         automation_pending_thread_id.clone(),
         &caller,
     ))
@@ -13162,7 +13162,7 @@ async fn list_threads_needs_approval_queries_pending_with_run_scope_shape() {
         thread_service.clone(),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade_with_trigger_thread(
+    .with_automation_product_service(automation_service_with_trigger_thread(
         automation_pending_thread_id.clone(),
         &caller,
     ))
@@ -13202,13 +13202,13 @@ async fn list_threads_needs_approval_uses_bounded_run_candidates() {
         agent_id: caller.agent_id.clone().expect("agent id"),
         project_id: caller.project_id.clone(),
     });
-    let automation_facade =
-        automation_facade_with_trigger_thread(automation_pending_thread_id.clone(), &caller);
+    let automation_service =
+        automation_service_with_trigger_thread(automation_pending_thread_id.clone(), &caller);
     let services = RebornServices::new(
         thread_service.clone(),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade.clone())
+    .with_automation_product_service(automation_service.clone())
     .with_approval_interactions(approval_service);
 
     let response = query_threads(
@@ -13220,13 +13220,13 @@ async fn list_threads_needs_approval_uses_bounded_run_candidates() {
     .expect("list approval threads");
 
     assert_eq!(response.threads.len(), 1);
-    let list_calls = automation_facade.list_calls();
+    let list_calls = automation_service.list_calls();
     assert_eq!(list_calls.len(), 1);
     assert_eq!(list_calls[0].limit, 20);
     assert_eq!(list_calls[0].run_limit, 20);
     assert!(list_calls[0].include_completed);
     assert_eq!(
-        automation_facade.resolve_calls(),
+        automation_service.resolve_calls(),
         vec![automation_pending_thread_id],
         "notification lookup should still resolve the thread id once to recover the true trigger creator scope",
     );
@@ -13251,7 +13251,7 @@ async fn list_threads_needs_approval_finds_legacy_ownerless_automation_thread() 
         thread_service.clone(),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade_with_trigger_thread(
+    .with_automation_product_service(automation_service_with_trigger_thread(
         automation_pending_thread_id.clone(),
         &caller,
     ))
@@ -13307,7 +13307,7 @@ async fn list_threads_needs_approval_uses_automation_name_when_thread_title_miss
         thread_service.clone(),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade_with_trigger_thread(
+    .with_automation_product_service(automation_service_with_trigger_thread(
         automation_pending_thread_id.clone(),
         &caller,
     ))
@@ -13342,8 +13342,8 @@ async fn list_threads_needs_approval_checks_candidate_automation_thread() {
         thread_service.clone(),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(Arc::new(
-        StaticAutomationFacade::new(Vec::new()).with_resolve_scope_for_thread(
+    .with_automation_product_service(Arc::new(
+        StaticAutomationService::new(Vec::new()).with_resolve_scope_for_thread(
             automation_pending_thread_id.clone(),
             trigger_run_thread_scope_for(&caller),
         ),
@@ -13428,7 +13428,7 @@ async fn list_threads_breaks_out_when_cursor_does_not_advance_for_automation_thr
     assert_eq!(
         list_requests.len(),
         2,
-        "facade should fetch the stalled page once and then break on the repeated cursor",
+        "service should fetch the stalled page once and then break on the repeated cursor",
     );
     assert_eq!(list_requests[0].cursor, None);
     assert_eq!(list_requests[1].cursor.as_deref(), Some("cursor-stalled"));
@@ -13483,13 +13483,13 @@ async fn list_threads_caps_filtered_pages_when_automation_threads_dominate() {
     assert_eq!(
         list_requests.len(),
         20,
-        "facade must enforce a hard cap on filtered backend pages",
+        "service must enforce a hard cap on filtered backend pages",
     );
     assert!(
         list_requests
             .iter()
             .all(|request| request.limit == Some(50)),
-        "facade should use a fixed candidate page size instead of shrinking toward one"
+        "service should use a fixed candidate page size instead of shrinking toward one"
     );
 }
 
@@ -13510,7 +13510,7 @@ async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
     // Threads list newest-activity first, so create them oldest → newest:
     // second visible, then first visible, then the automation thread last.
     // That yields a candidate order of [automation, first, second], so the
-    // facade has to skip the leading hidden automation thread while filling
+    // service has to skip the leading hidden automation thread while filling
     // the first page — the behavior under test. Waiting past each stamp
     // keeps the `created_at` order strict regardless of clock resolution.
     let second = thread_service
@@ -14011,7 +14011,7 @@ async fn legacy_deferred_busy_mark_failure_surfaces_error_not_false_terminal() {
 }
 
 /// Test lander that records what it was asked to land and returns a ref per
-/// attachment with a deterministic `storage_key`, so the facade test can assert
+/// attachment with a deterministic `storage_key`, so the service test can assert
 /// both that decode→land ran and that the returned refs reach the transcript.
 #[derive(Default)]
 struct RecordingLander {
@@ -14215,9 +14215,9 @@ async fn submit_turn_rejects_attachments_when_no_lander_is_wired() {
 }
 
 // ---------------------------------------------------------------------------
-// Admin user management: facade authorization + last-admin protection.
+// Admin user management: service authorization + last-admin protection.
 //
-// Drives the facade methods through a fake `AdminUserService` port so the
+// Drives the service methods through a fake `AdminUserService` port so the
 // load-bearing NEW logic — role-based authorization (read every request),
 // operator bypass, and last-admin protection — is tested through the caller.
 // The composition adapter over the real identity store is thin mapping;
@@ -14427,7 +14427,7 @@ async fn admin_users_are_available_as_product_views_and_capabilities() {
     ]));
     let target = UserId::new("user-beta").expect("user");
 
-    // safety: these are ProductSurface facade query calls in a contract test;
+    // safety: these are ProductSurface service query calls in a contract test;
     // no database transaction is involved.
     let users = services
         .query(
@@ -14661,7 +14661,7 @@ async fn admin_users_are_available_as_product_views_and_capabilities() {
     assert_eq!(deleted.code, ProductSurfaceErrorCode::NotFound);
 }
 
-/// Drive EVERY admin verb through the facade and assert each is a 403.
+/// Drive EVERY admin verb through the service and assert each is a 403.
 /// `authorize_admin` is a predicate that gates side effects, so it must be
 /// tested at every call site — not just `list` (.claude/rules/testing.md,
 /// "test through the caller"): a verb that forgot to call it would be an
@@ -14787,7 +14787,7 @@ async fn admin_member_caller_is_forbidden_on_every_verb() {
 
 #[tokio::test]
 async fn admin_unknown_caller_is_forbidden_on_every_verb() {
-    // The caller has no user record at all. Same 403 as a member — the facade
+    // The caller has no user record at all. Same 403 as a member — the service
     // must never leak (via a different status/code) whether the caller record
     // exists but is under-privileged vs. does not exist.
     let services = admin_services(FakeAdminUsers::default());
@@ -14899,7 +14899,7 @@ async fn admin_list_forwards_status_filter_to_the_port() {
 
 #[tokio::test]
 async fn admin_list_bounds_pages_and_threads_the_cursor() {
-    // The facade must clamp the page and derive a `next_cursor` from a full
+    // The service must clamp the page and derive a `next_cursor` from a full
     // page, then honor that cursor on the next call — so a large tenant is
     // paged, not returned (and scanned) in one unbounded response.
     let services = admin_services(FakeAdminUsers::with([

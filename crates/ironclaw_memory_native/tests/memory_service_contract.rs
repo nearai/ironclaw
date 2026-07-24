@@ -50,7 +50,7 @@ async fn native_provider_reads_writes_lists_and_searches_through_memory_service(
             },
         )
         .await
-        .expect("write through IronClaw memory facade");
+        .expect("write through IronClaw memory service");
     assert_eq!(write.path, "notes/alpha.md");
 
     let read = service
@@ -61,7 +61,7 @@ async fn native_provider_reads_writes_lists_and_searches_through_memory_service(
             },
         )
         .await
-        .expect("read through IronClaw memory facade");
+        .expect("read through IronClaw memory service");
     assert_eq!(read.content, "alpha native IronClaw memory marker");
 
     let tree = service
@@ -73,7 +73,7 @@ async fn native_provider_reads_writes_lists_and_searches_through_memory_service(
             },
         )
         .await
-        .expect("tree through IronClaw memory facade");
+        .expect("tree through IronClaw memory service");
     assert!(
         serde_json::to_string(&tree.entries)
             .expect("tree serializes")
@@ -89,7 +89,7 @@ async fn native_provider_reads_writes_lists_and_searches_through_memory_service(
             },
         )
         .await
-        .expect("search through IronClaw memory facade");
+        .expect("search through IronClaw memory service");
     assert_eq!(search.results.len(), 1);
     assert_eq!(search.results[0].path, "notes/alpha.md");
 }
@@ -126,7 +126,7 @@ async fn native_context_retrieve_filters_cross_scope_results_and_hashes_snippet_
             },
         )
         .await
-        .expect("context retrieval through IronClaw memory facade");
+        .expect("context retrieval through IronClaw memory service");
 
     assert_eq!(snippets.len(), 1);
     assert_eq!(
@@ -203,7 +203,7 @@ async fn native_context_retrieve_filters_out_of_scope_tenant_user_agent_and_proj
             },
         )
         .await
-        .expect("context retrieval through IronClaw memory facade");
+        .expect("context retrieval through IronClaw memory service");
 
     // Only the exactly-in-scope result survives the scope-isolation filter.
     assert_eq!(snippets.len(), 1);
@@ -257,7 +257,7 @@ async fn native_context_retrieve_filters_non_finite_scores_before_ordering() {
             },
         )
         .await
-        .expect("context retrieval through IronClaw memory facade");
+        .expect("context retrieval through IronClaw memory service");
 
     // Only the result with a finite score survives.
     assert_eq!(snippets.len(), 1);
@@ -290,14 +290,14 @@ async fn native_context_retrieve_drops_path_like_snippets() {
             },
         )
         .await
-        .expect("context retrieval through IronClaw memory facade");
+        .expect("context retrieval through IronClaw memory service");
 
     assert!(snippets.is_empty());
 }
 
 #[tokio::test]
 async fn native_context_retrieve_orders_score_desc_then_path_asc() {
-    // Ordering facade test, ported from the pre-lift
+    // Ordering service test, ported from the pre-lift
     // `deterministic_ordering_score_desc_then_path_asc`. It drives
     // `retrieve_context`, whose `results.sort_by(compare_memory_search_results)`
     // is solely responsible for the ordering. Two of the three in-scope results
@@ -341,7 +341,7 @@ async fn native_context_retrieve_orders_score_desc_then_path_asc() {
             },
         )
         .await
-        .expect("context retrieval through IronClaw memory facade");
+        .expect("context retrieval through IronClaw memory service");
 
     assert_eq!(snippets.len(), 3);
     // Highest score first.
@@ -362,7 +362,7 @@ async fn native_context_retrieve_orders_score_desc_then_path_asc() {
 
 #[tokio::test]
 async fn native_context_retrieve_caps_aggregate_safe_summary_bytes() {
-    // Aggregate-budget facade test, ported from the pre-lift
+    // Aggregate-budget service test, ported from the pre-lift
     // `aggregate_safe_summary_bytes_are_bounded`. It drives `retrieve_context`,
     // which calls `collect_context_snippets(.., MAX_TOTAL_SAFE_SUMMARY_BYTES)`.
     // Twenty in-scope results each carry a long snippet (~512 bytes after the
@@ -399,7 +399,7 @@ async fn native_context_retrieve_caps_aggregate_safe_summary_bytes() {
             },
         )
         .await
-        .expect("context retrieval through IronClaw memory facade");
+        .expect("context retrieval through IronClaw memory service");
 
     let total_bytes: usize = snippets
         .iter()

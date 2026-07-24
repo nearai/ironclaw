@@ -965,7 +965,7 @@ impl RebornProductAuthServices {
     /// when it auto-denies a non-OAuth auth challenge (issue #4952).
     ///
     /// Returns `None` under the same condition as
-    /// [`Self::as_auth_challenge_provider`] — both flow-backed facades gate on
+    /// [`Self::as_auth_challenge_provider`] — both flow-backed services gate on
     /// [`Self::has_flow_record_source`]. They stay separate accessors because they
     /// expose distinct capability ports (`AuthChallengeProvider` vs
     /// `BlockedAuthFlowCanceller`), but share the one wiring precondition.
@@ -977,7 +977,7 @@ impl RebornProductAuthServices {
             .then(|| Arc::clone(self) as Arc<dyn BlockedAuthFlowCanceller>)
     }
 
-    /// Shared precondition for the flow-backed facades: both
+    /// Shared precondition for the flow-backed services: both
     /// [`Self::as_auth_challenge_provider`] and
     /// [`Self::as_blocked_auth_flow_canceller`] are only available when an
     /// `AuthFlowRecordSource` projection is wired in. Defined once so the gate
@@ -1045,7 +1045,7 @@ impl RebornProductAuthServices {
 
     /// Apply ownership-aware credential cleanup for extension lifecycle events.
     ///
-    /// This facade keeps lifecycle callers on the Reborn product-auth boundary
+    /// This service keeps lifecycle callers on the Reborn product-auth boundary
     /// instead of depending on V1 extension-manager cleanup or route-local
     /// secret authority.
     pub async fn cleanup_credentials_for_lifecycle(
@@ -1866,7 +1866,7 @@ impl RuntimeCredentialAccountRefreshPort for RebornProductAuthServices {
 
 // The engine keepalive sweep refreshes through the same composed path as the
 // inline injection-time refresh: the per-account single-flight lock lives in
-// `ProviderBackedCredentialAccountService` below this facade.
+// `ProviderBackedCredentialAccountService` below this service.
 #[async_trait]
 impl ironclaw_auth::KeepaliveRefreshPort for RebornProductAuthServices {
     async fn refresh_account(

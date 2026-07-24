@@ -45,7 +45,7 @@ pub enum LifecycleProductContext {
 }
 
 #[async_trait]
-pub trait LifecycleProductFacade: Send + Sync {
+pub trait LifecycleProductService: Send + Sync {
     async fn execute(
         &self,
         context: LifecycleProductContext,
@@ -60,7 +60,7 @@ pub trait LifecycleProductFacade: Send + Sync {
 
     /// Import a standalone extension from an uploaded bundle (zip bytes) — the
     /// WebUI "Install Tool" path. Default is unavailable; only the local runtime
-    /// facade implements it.
+    /// service implements it.
     async fn import_extension_bundle(
         &self,
         _context: LifecycleProductContext,
@@ -75,14 +75,14 @@ pub trait LifecycleProductFacade: Send + Sync {
 
     /// Redacted activation error for each installed extension whose activation
     /// failed, keyed by extension id — sourced from the durable installation
-    /// record's typed `last_error`. The extensions-list facade threads this
+    /// record's typed `last_error`. The extensions-list service threads this
     /// into `RebornExtensionInfo::activation_error` so a failed extension shows
     /// *why* it failed instead of collapsing to a bare `installed`/`failed`
     /// state with no reason.
     ///
-    /// Default: none. A facade that does not surface durable installation
+    /// Default: none. A service that does not surface durable installation
     /// errors reports no reason and the wire's `activation_error` stays absent;
-    /// the production extension-host facade overrides this to read the
+    /// the production extension-host service overrides this to read the
     /// installation records' `last_error`.
     async fn installed_activation_errors(
         &self,
@@ -93,11 +93,11 @@ pub trait LifecycleProductFacade: Send + Sync {
 }
 
 #[derive(Debug, Clone)]
-pub struct UnsupportedLifecycleProductFacade {
+pub struct UnsupportedLifecycleProductService {
     runtime_ref: String,
 }
 
-impl UnsupportedLifecycleProductFacade {
+impl UnsupportedLifecycleProductService {
     pub fn new(runtime_ref: impl Into<String>) -> Result<Self, ProductSurfaceError> {
         Ok(Self {
             runtime_ref: validate_lifecycle_string(
@@ -138,7 +138,7 @@ impl UnsupportedLifecycleProductFacade {
 }
 
 #[async_trait]
-impl LifecycleProductFacade for UnsupportedLifecycleProductFacade {
+impl LifecycleProductService for UnsupportedLifecycleProductService {
     async fn execute(
         &self,
         _context: LifecycleProductContext,

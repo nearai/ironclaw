@@ -141,14 +141,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn profile_set_dispatches_closed_fields_through_memory_service_facade() {
+    async fn profile_set_dispatches_closed_fields_through_memory_service_service() {
         let memory_service = Arc::new(RecordingProfileMemoryService::default());
         let state = MemoryCapabilityState::with_memory_service_for_test(memory_service.clone());
         let request = profile_set_request(json!({"timezone": "Asia/Tokyo"}));
 
         let result = dispatch(&state, &request)
             .await
-            .expect("profile_set should write through IronClaw memory facade");
+            .expect("profile_set should write through IronClaw memory service");
 
         assert_eq!(result.output["status"], "ok");
         let seen = memory_service
@@ -179,6 +179,9 @@ mod tests {
             .seen
             .lock()
             .expect("recording profile service lock should not be poisoned");
-        assert!(seen.is_empty(), "rejected profile_set must not call facade");
+        assert!(
+            seen.is_empty(),
+            "rejected profile_set must not call service"
+        );
     }
 }

@@ -15,7 +15,7 @@
 
 - Product-facing Reborn workflow orchestration between product adapters and host-layer services.
 - Binding resolution, inbound message staging, turn submission, idempotency, busy/deferred handling, gate routing, and product-safe acknowledgements.
-- The WebUI-facing Reborn facade over thread, turn, and projection ports.
+- The WebUI-facing Reborn service over thread, turn, and projection ports.
 - Crate-local public API, tests, and fakes needed to prove that ownership.
 
 ## Do Not Move In Here

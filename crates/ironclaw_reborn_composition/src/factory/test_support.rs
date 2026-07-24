@@ -116,7 +116,7 @@ impl RebornRuntimeStores {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn channel_disconnect_slot_for_test(
         &self,
-    ) -> &Arc<std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionFacade>>> {
+    ) -> &Arc<std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionService>>> {
         &self.channel_disconnect_slot
     }
 
@@ -298,7 +298,7 @@ impl RebornRuntimeStores {
 
     /// The caller's pairing connection state through the composed generic
     /// pairing service — tests only. Mirrors the production `pairing/status`
-    /// route handler and the channel-connection facade read.
+    /// route handler and the channel-connection service read.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn pairing_connected_for_test(
         &self,
@@ -322,15 +322,15 @@ impl RebornRuntimeStores {
     }
 
     /// The generic `[channel.config]` configure port (extension-runtime
-    /// §6.4): the production surface the WebUI setup facade and the
+    /// §6.4): the production surface the WebUI setup service and the
     /// lifecycle configure action route operator channel config through.
     /// `None` without a local-dev runtime.
-    pub(crate) fn channel_config_facade(
+    pub(crate) fn channel_config_service(
         &self,
-    ) -> Option<Arc<dyn ironclaw_product::ChannelConfigFacade>> {
+    ) -> Option<Arc<dyn ironclaw_product::ChannelConfigProductService>> {
         let service = self.channel_config.clone();
         Some(Arc::new(
-            crate::extension_host::channel_config::RebornChannelConfigFacade::new(service),
+            crate::extension_host::channel_config::RebornChannelConfigProductService::new(service),
         ))
     }
 
@@ -655,7 +655,7 @@ impl RebornRuntimeStores {
 
     /// The delivery coordinator's outbound stores — the SAME instances the
     /// factory handed the coordinator (`outbound_state`), the gate-route
-    /// recorder (`delivered_gate_routes`), and the preference facade
+    /// recorder (`delivered_gate_routes`), and the preference service
     /// (`outbound_preferences`). Integration proofs build generic
     /// run-delivery components over these so observer and coordinator share
     /// one delivery ledger. `None` without a local-dev runtime.

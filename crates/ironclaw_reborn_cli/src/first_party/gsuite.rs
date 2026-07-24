@@ -5,8 +5,8 @@
 //! shared context; the concrete GSuite executor, credential stager, error
 //! mapping, and Google-account visibility policy live here in the assembling
 //! binary. Every host-api / host-runtime / auth type is reached through the
-//! `ironclaw_reborn_composition` facade re-exports so the CLI's exact-deps
-//! allow-list stays frozen to the facade set plus `ironclaw_first_party_extensions`.
+//! `ironclaw_reborn_composition` service re-exports so the CLI's exact-deps
+//! allow-list stays frozen to the service set plus `ironclaw_first_party_extensions`.
 
 use std::sync::Arc;
 

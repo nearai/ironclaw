@@ -56,7 +56,7 @@ mod turn_run_snapshot;
 mod webui;
 
 pub use admin_token::AdminApiTokenMinter;
-pub use automation::facade::RebornAutomationProductFacade;
+pub use automation::service::RebornAutomationProductService;
 pub use automation::trigger_poller::PostSubmitDeliveryHook;
 pub use error::RebornBuildError;
 pub use extension_host::channel_host::{ChannelHostIdentity, GenericChannelHostAssembly};
@@ -110,8 +110,8 @@ pub use input::{
 /// building the runtime input / OAuth client config. The
 /// `reborn_cli_binary_crate_stays_separate_from_v1_root` boundary test (in
 /// `ironclaw_architecture`) pins the CLI's workspace dependencies to exactly
-/// the composition-facade set, so adding `ironclaw_auth` there would fail that
-/// test — the type must travel through this facade instead.
+/// the composition-service set, so adding `ironclaw_auth` there would fail that
+/// test — the type must travel through this service instead.
 pub use ironclaw_auth::OAuthRedirectUri;
 #[cfg(any(test, feature = "test-support"))]
 pub use ironclaw_auth::{
@@ -123,7 +123,7 @@ pub use ironclaw_auth::{
 /// [`FirstPartyHandlerRegistrar`]s and the credential-account visibility policy
 /// without depending on `ironclaw_host_api` / `ironclaw_host_runtime` /
 /// `ironclaw_auth` directly (extension-runtime DEL-7). The CLI's exact-deps
-/// allow-list is frozen to the composition facade, so these types travel
+/// allow-list is frozen to the composition service, so these types travel
 /// through here.
 pub use ironclaw_auth::{CredentialAccount, CredentialAccountSelectionRequest};
 pub use ironclaw_host_api::{
@@ -154,7 +154,7 @@ pub use ironclaw_runner::failure_lane::{ALL_RUN_FAILURE_CATEGORIES, FailureLane,
 pub use ironclaw_runner::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
 pub use product_auth::credentials::runtime_credentials::RuntimeCredentialAccountVisibilityPolicy;
 // Re-exported for `ironclaw_reborn_cli` (`runtime/mod.rs` turn-failure display):
-// the CLI consumes composition as its facade and must not grow a direct
+// the CLI consumes composition as its service and must not grow a direct
 // `ironclaw_runner` edge for one summary helper. All other run-failure
 // classifier items moved to `ironclaw_runner::{failure_lane, failure_summary,
 // retry_disposition}` with consumers repointed (no path-preservation shims).
@@ -183,7 +183,7 @@ pub use llm_admin::openai_compat_serve::build_openai_compat_route_mount;
 // (hoisted up from this crate): its bearer-auth middleware mints tenant-scoped
 // verified-bearer evidence for protected OpenAI-compatible mounts. Ingress must
 // not depend on `ironclaw_product` directly (architecture boundary), so
-// it reaches this helper through composition's facade.
+// it reaches this helper through composition's service.
 pub use deployment::{
     RebornRuntimeProfileError, RebornRuntimeProfileOptions, hosted_single_tenant_runtime_policy,
     hosted_single_tenant_volume_runtime_policy, local_dev_runtime_policy,
@@ -199,7 +199,6 @@ pub use llm_admin::provider_admin::{
     RebornProviderList, RebornProviderMetadata, RebornProviderSelection, RebornProviderStatus,
     RebornProviderWriteOutcome, RebornV1State,
 };
-pub use llm_admin::provider_admin_product_command::RebornProviderAdminProductCommandService;
 pub use llm_admin::provider_repo::{ProviderRepo, ProviderRepoError};
 pub use observability::budget::build_default_budget_accountant;
 pub use observability::budget_events::{BudgetEventObserver, TracingBudgetEventObserver};
@@ -214,7 +213,7 @@ pub use observability::operator_logs::{
     OperatorLogLayer, capture_tracing_log, operator_log_buffer,
 };
 pub use observability::trajectory_observer::RebornTrajectoryObserver;
-// Composition's facade re-exports the continuation dispatcher for its own
+// Composition's service re-exports the continuation dispatcher for its own
 // downstream consumers (root test suites, the CLI) alongside the
 // product-auth service surface that produces it.
 pub use product_auth::api::auth::RebornAuthContinuationDispatcher;
@@ -239,9 +238,9 @@ pub use provider_identity::{
     RebornUserIdentityLookupError, installation_scoped_provider_user_id,
 };
 pub use readiness::{
-    RebornFacadeReadiness, RebornReadiness, RebornReadinessDiagnostic,
-    RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
-    RebornReadinessDiagnosticStatus, RebornReadinessState, RebornWorkerReadiness,
+    RebornReadiness, RebornReadinessDiagnostic, RebornReadinessDiagnosticComponent,
+    RebornReadinessDiagnosticReason, RebornReadinessDiagnosticStatus, RebornReadinessState,
+    RebornServiceReadiness, RebornWorkerReadiness,
 };
 pub use root::product_live_adapters::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
@@ -265,7 +264,7 @@ pub use runtime_input::{
     TurnRunnerSettings,
 };
 pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
-pub use webui::facade::{RebornWebuiBundle, build_webui_services};
+pub use webui::service::{RebornWebuiBundle, build_webui_services};
 // Host-supplied route-mount vocabulary shared with composition's own route
 // builders (nearai login, OpenAI-compat) and the host-owned gateway assembly
 // in `ironclaw_webui`. The `WebuiServeConfig` / `webui_v2_app`
@@ -277,8 +276,8 @@ pub use webui::route_mounts::{
 /// Re-exported identity vocabulary host binaries need to construct
 /// public runtime/WebUI types whose signatures mention a host-api identity.
 /// Kept narrow on purpose — the composition CLAUDE.md says "Expose
-/// facade-shaped handles only"; these host-api identity types are the
-/// host-identity facade.
+/// service-shaped handles only"; these host-api identity types are the
+/// host-identity service.
 pub mod host_api {
     pub use ironclaw_host_api::{
         AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
@@ -290,7 +289,7 @@ pub mod host_api {
 /// external channel/product actors — to a stable `UserId` before runtime
 /// state is touched. Only the resolver trait, request, surface, and error
 /// types are re-exported so host wiring (`ironclaw-reborn serve`, the CLI
-/// `UserDirectory` adapter) depends on the facade vocabulary, never on
+/// `UserDirectory` adapter) depends on the service vocabulary, never on
 /// `ironclaw_reborn_identity` directly. The concrete filesystem-backed store
 /// stays private to this composition layer (composition CLAUDE.md: "keep
 /// lower substrate handles private").

@@ -488,7 +488,7 @@ export function useChat(threadId) {
   // projection returns after the run.
   //
   // v2 send-message requires `thread_id` as a path parameter — the
-  // facade refuses to implicitly create a missing thread. When the
+  // service refuses to implicitly create a missing thread. When the
   // caller is on the landing screen (no active thread yet), we
   // eagerly POST `/threads` first and use the returned id. The
   // returned response carries `thread_id` so the chat.tsx navigation

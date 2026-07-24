@@ -5,7 +5,7 @@
 //!
 //! This is the one place identity, secrets, and token issuance meet — the
 //! composition root is the only crate allowed to depend on all three, so the
-//! product-workflow facade and the webui_v2 routes stay free of those deps
+//! product-workflow service and the webui_v2 routes stay free of those deps
 //! (the crate boundary the architecture tests enforce).
 
 use std::collections::BTreeMap;
@@ -138,7 +138,7 @@ impl AdminUserService for RebornAdminUserDirectory {
         display_name: Option<String>,
         metadata: Option<BTreeMap<String, String>>,
     ) -> Result<AdminUserRecord, AdminUserError> {
-        // The facade has already tenant-scoped the target via get_user before
+        // The service has already tenant-scoped the target via get_user before
         // calling this, so the directory's user-id-keyed mutation is safe.
         let user = self
             .directory

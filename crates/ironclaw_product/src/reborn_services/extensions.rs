@@ -12,9 +12,9 @@ use ironclaw_host_api::{
 };
 
 use crate::{
-    ChannelAuthAccountState, ChannelConnectionFacade, LifecycleExtensionSummary,
+    ChannelAuthAccountState, ChannelConnectionService, LifecycleExtensionSummary,
     LifecycleInstalledExtensionSummary, LifecycleProductAction, LifecycleProductContext,
-    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
+    LifecycleProductPayload, LifecycleProductResponse, LifecycleProductService,
     LifecycleProductSurfaceContext, ProductView, RebornAccountBindingSource, RebornAuthAccount,
     RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionOnboardingState,
     RebornExtensionRegistryEntry, RebornExtensionRegistryResponse, RebornExtensionSurface,
@@ -39,31 +39,31 @@ pub const EXTENSION_REGISTRY_VIEW: ProductView<serde_json::Value, RebornExtensio
     ProductView::unpaginated("extension_registry");
 
 pub(super) async fn list_extensions(
-    facade: Arc<dyn LifecycleProductFacade>,
+    service: Arc<dyn LifecycleProductService>,
     extension_credentials: Option<Arc<dyn ExtensionCredentialSetupService>>,
-    channel_connection_facade: Arc<dyn ChannelConnectionFacade>,
+    channel_connection_service: Arc<dyn ChannelConnectionService>,
     caller: ProductSurfaceCaller,
 ) -> Result<RebornExtensionListResponse, ProductSurfaceError> {
     let context = lifecycle_surface_context(caller.clone());
     let lifecycle = execute_lifecycle(
-        facade.as_ref(),
+        service.as_ref(),
         context.clone(),
         LifecycleProductAction::ExtensionList,
     )
     .await?;
     let installed = lifecycle_installed_extensions(&lifecycle);
-    let connections = channel_connection_facade
+    let connections = channel_connection_service
         .caller_channel_connections(caller.clone())
         .await?;
     // Per-caller auth-account status per channel vendor: lets each account
     // project its real §6.3 state (expired / refresh-failed) instead of the
     // connected/disconnected collapse the connection bool alone permits.
-    let account_states = channel_connection_facade
+    let account_states = channel_connection_service
         .caller_channel_account_states(caller.clone())
         .await?;
     // Redacted per-extension activation errors from the durable installation
     // records, projected onto `RebornExtensionInfo::activation_error`.
-    let activation_errors = facade.installed_activation_errors(context).await?;
+    let activation_errors = service.installed_activation_errors(context).await?;
     Ok(RebornExtensionListResponse {
         extensions: lifecycle_extension_infos(
             installed,
@@ -78,18 +78,18 @@ pub(super) async fn list_extensions(
 }
 
 pub(super) async fn list_extension_registry(
-    facade: &dyn LifecycleProductFacade,
+    service: &dyn LifecycleProductService,
     caller: ProductSurfaceCaller,
 ) -> Result<RebornExtensionRegistryResponse, ProductSurfaceError> {
     let context = lifecycle_surface_context(caller);
     let (installed_result, registry_result) = tokio::join!(
         execute_lifecycle(
-            facade,
+            service,
             context.clone(),
             LifecycleProductAction::ExtensionList
         ),
         execute_lifecycle(
-            facade,
+            service,
             context,
             LifecycleProductAction::ExtensionSearch {
                 query: String::new(),
@@ -118,7 +118,7 @@ pub(super) async fn list_extension_registry(
 }
 
 pub(super) async fn import_extension_capability(
-    facade: &dyn LifecycleProductFacade,
+    service: &dyn LifecycleProductService,
     caller: ProductSurfaceCaller,
     input: serde_json::Value,
 ) -> Result<(), ProductSurfaceError> {
@@ -140,16 +140,16 @@ pub(super) async fn import_extension_capability(
         validation_error("bundle_base64", ProductSurfaceValidationCode::InvalidValue)
     })?;
     let context = lifecycle_surface_context(caller);
-    facade.import_extension_bundle(context, bundle).await?;
+    service.import_extension_bundle(context, bundle).await?;
     Ok(())
 }
 
 async fn execute_lifecycle(
-    facade: &dyn LifecycleProductFacade,
+    service: &dyn LifecycleProductService,
     context: LifecycleProductContext,
     action: LifecycleProductAction,
 ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
-    facade.execute(context, action).await
+    service.execute(context, action).await
 }
 
 fn lifecycle_surface_context(caller: ProductSurfaceCaller) -> LifecycleProductContext {
@@ -291,7 +291,7 @@ fn extension_info(
     let account_state = account_states.get(summary.package_ref.id.as_str());
     // Redacted activation error for this extension (host installation record's
     // typed `last_error`), threaded onto the card slot the frontend already
-    // renders. `None` when the facade surfaces no failure for this extension.
+    // renders. `None` when the service surfaces no failure for this extension.
     let activation_error = activation_errors
         .get(summary.package_ref.id.as_str())
         .cloned();
@@ -410,7 +410,7 @@ fn channel_auth_vendor(summary: &LifecycleExtensionSummary) -> String {
 /// [`project_auth_account_state`] from the caller's durable auth-account signal
 /// (`account_state`): a real credential-account status surfaces `expired` /
 /// `refresh-failed` (with a typed `last_error`) and a live auth flow surfaces
-/// `authenticating`. When the facade carries no richer status the connection
+/// `authenticating`. When the service carries no richer status the connection
 /// bool is the MIG-1 backfill — a live grant reads as a `configured` account
 /// and projects `connected`.
 fn vendor_auth_accounts(
@@ -422,7 +422,7 @@ fn vendor_auth_accounts(
         return Vec::new();
     };
     let vendor = channel_auth_vendor(summary);
-    // Prefer the facade's durable credential-account status; fall back to the
+    // Prefer the service's durable credential-account status; fall back to the
     // connection bool (a live grant backfills to `configured` → `connected`).
     let account_status = account_state
         .and_then(|state| state.account_status)
@@ -458,9 +458,9 @@ mod tests {
     use ironclaw_host_api::{AgentId, CapabilitySurfaceKind, ProjectId, TenantId, UserId};
 
     use super::*;
-    use crate::reborn_services::StaticChannelConnectionFacade;
+    use crate::reborn_services::StaticChannelConnectionService;
     use crate::{
-        ChannelConnectionFacade, ExtensionCredentialStatusRequest,
+        ChannelConnectionService, ExtensionCredentialStatusRequest,
         ExtensionCredentialSubmitRequest, LifecycleExtensionCredentialRequirement,
         LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding,
         LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
@@ -488,7 +488,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl ChannelConnectionFacade for TestConnections {
+    impl ChannelConnectionService for TestConnections {
         async fn caller_channel_connections(
             &self,
             _caller: ProductSurfaceCaller,
@@ -497,17 +497,17 @@ mod tests {
         }
     }
 
-    fn no_channel_connections() -> Arc<dyn ChannelConnectionFacade> {
+    fn no_channel_connections() -> Arc<dyn ChannelConnectionService> {
         Arc::new(TestConnections::default())
     }
 
-    fn channel_connections(entries: &[(&str, bool)]) -> Arc<dyn ChannelConnectionFacade> {
+    fn channel_connections(entries: &[(&str, bool)]) -> Arc<dyn ChannelConnectionService> {
         Arc::new(TestConnections::with_connections(entries))
     }
 
     #[tokio::test]
-    async fn static_channel_connection_facade_fails_disconnect_closed() {
-        let error = StaticChannelConnectionFacade
+    async fn static_channel_connection_service_fails_disconnect_closed() {
+        let error = StaticChannelConnectionService
             .disconnect_channel_for_caller(caller(), "slack")
             .await
             .expect_err("unwired disconnect must not report success");
@@ -518,7 +518,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_marks_active_credentialed_extension_unauthenticated_without_caller_account() {
-        let facade = ListingFacade {
+        let service = ListingService {
             extension: LifecycleInstalledExtensionSummary {
                 summary: summary_with_onboarding(),
                 phase: InstallationState::Active,
@@ -530,7 +530,7 @@ mod tests {
 
         let credentials_service: Arc<dyn ExtensionCredentialSetupService> = credentials.clone();
         let response = list_extensions(
-            Arc::new(facade),
+            Arc::new(service),
             Some(credentials_service),
             no_channel_connections(),
             caller.clone(),
@@ -563,7 +563,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_preserves_lifecycle_state_when_credential_status_is_retryably_unavailable() {
-        let facade = ListingFacade {
+        let service = ListingService {
             extension: LifecycleInstalledExtensionSummary {
                 summary: summary_with_onboarding(),
                 phase: InstallationState::Active,
@@ -573,7 +573,7 @@ mod tests {
         let credentials = UnavailableCredentials;
 
         let response = list_extensions(
-            Arc::new(facade),
+            Arc::new(service),
             Some(Arc::new(credentials)),
             no_channel_connections(),
             caller(),
@@ -593,7 +593,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_marks_active_host_managed_credential_extension_ready_without_setup_prompt() {
-        let facade = ListingFacade {
+        let service = ListingService {
             extension: LifecycleInstalledExtensionSummary {
                 summary: summary_without_browser_setup_credentials(),
                 phase: InstallationState::Active,
@@ -604,7 +604,7 @@ mod tests {
         let credentials_service: Arc<dyn ExtensionCredentialSetupService> = credentials.clone();
 
         let response = list_extensions(
-            Arc::new(facade),
+            Arc::new(service),
             Some(credentials_service),
             no_channel_connections(),
             caller(),
@@ -627,7 +627,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_checks_extension_readiness_with_bounded_concurrency() {
-        let facade = MultiListingFacade {
+        let service = MultiListingService {
             extensions: (0..EXTENSION_READINESS_CONCURRENCY + 3)
                 .map(|index| LifecycleInstalledExtensionSummary {
                     summary: summary_with_onboarding_for(&format!("fixture-{index}")),
@@ -640,7 +640,7 @@ mod tests {
         let credentials_service: Arc<dyn ExtensionCredentialSetupService> = credentials.clone();
 
         let response = list_extensions(
-            Arc::new(facade),
+            Arc::new(service),
             Some(credentials_service),
             no_channel_connections(),
             caller(),
@@ -721,7 +721,7 @@ mod tests {
         summary.runtime_kind = LifecycleExtensionRuntimeKind::FirstParty;
         summary.surface_kinds = vec![CapabilitySurfaceKind::Channel];
         summary.credential_requirements = Vec::new();
-        let facade = ListingFacade {
+        let service = ListingService {
             extension: LifecycleInstalledExtensionSummary {
                 summary,
                 phase: InstallationState::Active,
@@ -729,7 +729,7 @@ mod tests {
             },
         };
 
-        let response = list_extensions(Arc::new(facade), None, no_channel_connections(), caller())
+        let response = list_extensions(Arc::new(service), None, no_channel_connections(), caller())
             .await
             .expect("list extensions");
         let extension = response.extensions.first().expect("one extension");
@@ -748,7 +748,7 @@ mod tests {
         unconnected_summary.surface_kinds = vec![CapabilitySurfaceKind::Channel];
         unconnected_summary.credential_requirements = Vec::new();
         let unconnected = list_extensions(
-            Arc::new(ListingFacade {
+            Arc::new(ListingService {
                 extension: LifecycleInstalledExtensionSummary {
                     summary: unconnected_summary,
                     phase: InstallationState::Active,
@@ -798,7 +798,7 @@ mod tests {
             summary.surface_kinds = vec![CapabilitySurfaceKind::Channel];
             summary
         };
-        let facade = RegistryListingFacade {
+        let service = RegistryListingService {
             installed: LifecycleInstalledExtensionSummary {
                 summary: installed_summary,
                 phase: InstallationState::Active,
@@ -811,7 +811,7 @@ mod tests {
             calls: Mutex::new(Vec::new()),
         };
 
-        let response = list_extension_registry(&facade, caller.clone())
+        let response = list_extension_registry(&service, caller.clone())
             .await
             .expect("registry response");
 
@@ -843,7 +843,7 @@ mod tests {
         );
         assert!(!uninstalled_entry.installed);
 
-        let calls = facade.calls.lock().expect("lock");
+        let calls = service.calls.lock().expect("lock");
         assert_eq!(calls.len(), 2);
         for (context, action) in calls.iter() {
             match action {
@@ -941,12 +941,12 @@ mod tests {
         }
     }
 
-    struct ListingFacade {
+    struct ListingService {
         extension: LifecycleInstalledExtensionSummary,
     }
 
     #[async_trait]
-    impl LifecycleProductFacade for ListingFacade {
+    impl LifecycleProductService for ListingService {
         async fn execute(
             &self,
             _context: LifecycleProductContext,
@@ -974,12 +974,12 @@ mod tests {
         }
     }
 
-    struct MultiListingFacade {
+    struct MultiListingService {
         extensions: Vec<LifecycleInstalledExtensionSummary>,
     }
 
     #[async_trait]
-    impl LifecycleProductFacade for MultiListingFacade {
+    impl LifecycleProductService for MultiListingService {
         async fn execute(
             &self,
             _context: LifecycleProductContext,
@@ -1007,14 +1007,14 @@ mod tests {
         }
     }
 
-    struct RegistryListingFacade {
+    struct RegistryListingService {
         installed: LifecycleInstalledExtensionSummary,
         registry: Vec<LifecycleSearchExtensionSummary>,
         calls: Mutex<Vec<(LifecycleProductContext, LifecycleProductAction)>>,
     }
 
     #[async_trait]
-    impl LifecycleProductFacade for RegistryListingFacade {
+    impl LifecycleProductService for RegistryListingService {
         async fn execute(
             &self,
             context: LifecycleProductContext,

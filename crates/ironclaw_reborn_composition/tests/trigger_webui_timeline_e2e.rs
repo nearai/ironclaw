@@ -18,7 +18,7 @@
 //!
 //! 2. **Automation-service-stack path**
 //!    (`timeline_opens_for_creator_via_automation_service_stack`):
-//!    Same setup, second independent trigger. Confirms the automation facade
+//!    Same setup, second independent trigger. Confirms the automation service
 //!    wiring is correct across multiple trigger fires.
 //!
 //!    The thread_id is discovered via `list_trigger_run_history` on the
@@ -187,7 +187,7 @@ async fn wait_for_trigger_fire(
 /// `mark_fire_accepted`).
 ///
 /// This polls `list_trigger_run_history` — the same repository method the WebUI
-/// Automations panel uses via `AutomationProductFacade::list_automations`. Once
+/// Automations panel uses via `AutomationProductService::list_automations`. Once
 /// the row's `thread_id` is a parseable UUID we know the panel's `chat_path`
 /// would open a real thread.
 ///
@@ -451,10 +451,10 @@ async fn timeline_opens_for_creator() {
     );
 }
 
-/// Exercises the composed automation product facade through the full HTTP→
+/// Exercises the composed automation product service through the full HTTP→
 /// product-workflow path using a second independent trigger.
 ///
-/// Confirms the automation facade wiring is correct across multiple trigger
+/// Confirms the automation service wiring is correct across multiple trigger
 /// fires. Uses `list_trigger_run_history` to discover the canonical UUID —
 /// the same data path the WebUI Automations panel uses.
 #[tokio::test]

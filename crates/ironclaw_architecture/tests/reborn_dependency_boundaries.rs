@@ -575,7 +575,7 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
             "ironclaw_slack_extension",
             "ironclaw_telegram_extension",
         ],
-        "ironclaw should enter Reborn through ironclaw_reborn_composition (assembled-runtime and provider-admin facade), ironclaw_reborn_config (boot-config contract), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), and ironclaw_webui (host-owned WebUI serve lifecycle) — plus ironclaw_extension_host (the NativeExtensionFactory contract) and concrete extension crates for the binary-assembled native factory registry (DEL-7: only the binary and tests may link concrete extension crates). Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
+        "ironclaw should enter Reborn through ironclaw_reborn_composition (assembled-runtime and provider-admin service), ironclaw_reborn_config (boot-config contract), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), and ironclaw_webui (host-owned WebUI serve lifecycle) — plus ironclaw_extension_host (the NativeExtensionFactory contract) and concrete extension crates for the binary-assembled native factory registry (DEL-7: only the binary and tests may link concrete extension crates). Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
     );
     assert_workspace_deps_exactly(
         &dependencies_all_kinds,
@@ -2522,7 +2522,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
-            // Product auth is a Reborn contract/facade vocabulary plus the
+            // Product auth is a Reborn contract/service vocabulary plus the
             // recipe-driven auth engine (extension-runtime workstream D). The
             // engine owns token secret storage, so the Reborn-native
             // `ironclaw_secrets` store is allowed; implementation code must
@@ -2578,9 +2578,9 @@ fn boundary_rules() -> Vec<BoundaryRule> {
         // invariant is now carried by the `ironclaw_webui`
         // rule's forbidden list.
         BoundaryRule {
-            // OpenAI-compatible route surface is a Reborn product/API facade.
+            // OpenAI-compatible route surface is a Reborn product/API service.
             // It may depend on host ingress vocabulary, product adapter
-            // contracts, and the ProductSurface facade, but it must not revive
+            // contracts, and the ProductSurface service, but it must not revive
             // v1 gateway/LLM proxy paths or reach into runtime/composition
             // services directly.
             crate_name: "ironclaw_reborn_openai_compat",
@@ -2752,7 +2752,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
         },
         BoundaryRule {
             // The standalone CLI reaches runtime and provider/admin UX through
-            // `ironclaw_reborn_composition` facades. Adding any of the
+            // `ironclaw_reborn_composition` services. Adding any of the
             // forbidden deps here re-opens "speculative public API" access to
             // internal Reborn types (turn coordinator, session thread service,
             // loop drivers, LLM registry/auth internals, etc.) and
@@ -2777,11 +2777,11 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // the axum serve loop for the composed v2 Router. Since the
             // `ironclaw_webui_v2` route surface was folded into this crate
             // (as its `webui_v2` module), it now legitimately consumes the
-            // `ironclaw_product` `ProductSurface` facade the v2
+            // `ironclaw_product` `ProductSurface` service the v2
             // handlers dispatch through. It still must not pull lower
             // substrate handles, product adapters, or v1 surface code into
             // the binary path. Reaches the rest of Reborn through
-            // ironclaw_reborn_composition's facade (Router + WebuiAuthenticator
+            // ironclaw_reborn_composition's service (Router + WebuiAuthenticator
             // trait + WebuiServeConfig + mount vocabulary + product-auth mount
             // builders).
             crate_name: "ironclaw_webui",

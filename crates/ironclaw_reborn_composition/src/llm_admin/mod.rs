@@ -7,5 +7,4 @@ pub(crate) mod nearai_login_serve;
 pub(crate) mod nearai_mcp;
 pub(crate) mod openai_compat_serve;
 pub(crate) mod provider_admin;
-pub(crate) mod provider_admin_product_command;
 pub(crate) mod provider_repo;

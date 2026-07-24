@@ -84,7 +84,7 @@ pub async fn build_openai_compat_route_mount(
         ));
     let projection_stream = runtime.product_event_stream();
     let product_surface =
-        crate::webui::facade::build_webui_services(runtime, Some(projection_stream.clone()))?
+        crate::webui::service::build_webui_services(runtime, Some(projection_stream.clone()))?
             .product_surface;
     let chat_projection_reader = Arc::new(OpenAiChatCompletionThreadProjectionReader::new(
         product_surface.clone(),
@@ -131,7 +131,7 @@ pub async fn build_openai_compat_route_mount(
     // `GET /v1/models` lists the deployment's configured models from the same
     // LLM-config source the operator WebUI uses. Wired only when the root LLM
     // provider is compiled in; otherwise the route stays fail-closed (501).
-    let router_state = match crate::webui::facade::build_llm_config_service(runtime) {
+    let router_state = match crate::webui::service::build_llm_config_service(runtime) {
         Some(llm_config) => {
             let catalog: Arc<dyn OpenAiCompatModelCatalog> =
                 Arc::new(LlmConfigModelCatalog::new(llm_config));

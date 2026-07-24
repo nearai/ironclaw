@@ -2,8 +2,8 @@ use std::{sync::Arc, time::Duration};
 
 use ironclaw_host_api::{CapabilitySurfaceKind, InstallationState, ProductSurfaceCaller};
 use ironclaw_product::{
-    LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
-    LifecycleProductPayload, LifecycleProductSurfaceContext, OutboundPreferencesProductFacade,
+    LifecycleProductAction, LifecycleProductContext, LifecycleProductPayload,
+    LifecycleProductService, LifecycleProductSurfaceContext, OutboundPreferencesProductService,
     RebornOutboundDeliveryTargetStatus,
 };
 use ironclaw_turns::{
@@ -24,25 +24,25 @@ use tokio::time::timeout;
 const COMMUNICATION_CONTEXT_FETCH_TIMEOUT: Duration = Duration::from_millis(500);
 
 pub(crate) struct RuntimeCommunicationContextProvider {
-    outbound_preferences: Arc<dyn OutboundPreferencesProductFacade>,
-    /// Optional lifecycle facade used to populate connected channels.
+    outbound_preferences: Arc<dyn OutboundPreferencesProductService>,
+    /// Optional lifecycle service used to populate connected channels.
     /// When None the slice always renders `Connected channels: unknown.`
-    lifecycle_facade: Option<Arc<dyn LifecycleProductFacade>>,
+    lifecycle_service: Option<Arc<dyn LifecycleProductService>>,
 }
 
 impl RuntimeCommunicationContextProvider {
-    pub(crate) fn new(outbound_preferences: Arc<dyn OutboundPreferencesProductFacade>) -> Self {
+    pub(crate) fn new(outbound_preferences: Arc<dyn OutboundPreferencesProductService>) -> Self {
         Self {
             outbound_preferences,
-            lifecycle_facade: None,
+            lifecycle_service: None,
         }
     }
 
-    pub(crate) fn with_lifecycle_facade(
+    pub(crate) fn with_lifecycle_service(
         mut self,
-        lifecycle_facade: Arc<dyn LifecycleProductFacade>,
+        lifecycle_service: Arc<dyn LifecycleProductService>,
     ) -> Self {
-        self.lifecycle_facade = Some(lifecycle_facade);
+        self.lifecycle_service = Some(lifecycle_service);
         self
     }
 }
@@ -53,16 +53,16 @@ impl CommunicationContextProvider for RuntimeCommunicationContextProvider {
         scope: TurnScope,
         actor: Option<TurnActor>,
     ) -> CommunicationContextFetch {
-        // Clone the facade handles into the spawned task so the backend lookups
+        // Clone the service handles into the spawned task so the backend lookups
         // run concurrently with loop-start work; the caller joins the result
         // later via `resolve`. Dropping the returned fetch before resolve aborts
         // the task via `CommunicationContextFetch`'s `Drop` impl, preventing
         // wasted backend work on the run-start hot path.
         let outbound_preferences = Arc::clone(&self.outbound_preferences);
-        let lifecycle_facade = self.lifecycle_facade.clone();
+        let lifecycle_service = self.lifecycle_service.clone();
         let actor_present = actor.is_some();
         let handle = tokio::spawn(async move {
-            fetch_communication_context(outbound_preferences, lifecycle_facade, scope, actor).await
+            fetch_communication_context(outbound_preferences, lifecycle_service, scope, actor).await
         });
         // Pass `actor_present` so that `resolve` can degrade a `JoinError`
         // (task panic) to `Some(Unknown)` rather than `None` when an actor is
@@ -71,13 +71,13 @@ impl CommunicationContextProvider for RuntimeCommunicationContextProvider {
     }
 }
 
-/// Resolve the advisory communication slice from backend facades under a single
+/// Resolve the advisory communication slice from backend services under a single
 /// shared timeout budget. The returned context's `delivery_tools_visible` is a
 /// placeholder (`false`); the real, surface-derived value is stamped by
 /// `CommunicationContextFetch::resolve`.
 async fn fetch_communication_context(
-    outbound_preferences: Arc<dyn OutboundPreferencesProductFacade>,
-    lifecycle_facade: Option<Arc<dyn LifecycleProductFacade>>,
+    outbound_preferences: Arc<dyn OutboundPreferencesProductService>,
+    lifecycle_service: Option<Arc<dyn LifecycleProductService>>,
     scope: TurnScope,
     actor: Option<TurnActor>,
 ) -> Option<CommunicationRuntimeContext> {
@@ -104,12 +104,12 @@ async fn fetch_communication_context(
     let preferences_fut = outbound_preferences.get_outbound_preferences(caller.clone());
 
     // Fetch the installed-extension list to classify channel surfaces. Skipped
-    // only when no lifecycle facade is wired (the slice then renders channels as
+    // only when no lifecycle service is wired (the slice then renders channels as
     // `unknown`). Runs concurrently with the preferences fetch under the shared
     // budget below.
     let lifecycle_fut = async {
-        match lifecycle_facade.as_deref() {
-            Some(facade) => {
+        match lifecycle_service.as_deref() {
+            Some(service) => {
                 let ctx = LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
                     tenant_id: caller.tenant_id.clone(),
                     user_id: caller.user_id.clone(),
@@ -117,7 +117,7 @@ async fn fetch_communication_context(
                     project_id: caller.project_id.clone(),
                 });
                 Some(
-                    facade
+                    service
                         .execute(ctx, LifecycleProductAction::ExtensionList)
                         .await,
                 )
@@ -173,7 +173,7 @@ async fn fetch_communication_context(
     };
 
     let connected_channels = match lifecycle_result {
-        // A present response means a lifecycle facade was wired and returned the
+        // A present response means a lifecycle service was wired and returned the
         // installed-extension list; classify each by its projected surface kind.
         Some(Ok(response)) => {
             let extensions = match response.payload {
@@ -201,7 +201,7 @@ async fn fetch_communication_context(
             );
             ConnectedChannelsState::Unknown
         }
-        // None means lifecycle facade was skipped or not wired — not an error.
+        // None means lifecycle service was skipped or not wired — not an error.
         None => ConnectedChannelsState::Unknown,
     };
 
@@ -238,8 +238,8 @@ mod tests {
     use ironclaw_product::{
         LifecycleExtensionRuntimeKind, LifecycleExtensionSource, LifecycleExtensionSummary,
         LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
-        LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
-        LifecycleProductPayload, LifecycleProductResponse, OutboundPreferencesProductFacade,
+        LifecycleProductAction, LifecycleProductContext, LifecycleProductPayload,
+        LifecycleProductResponse, LifecycleProductService, OutboundPreferencesProductService,
         RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
         RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
         RebornOutboundPreferencesResponse, RebornSetOutboundPreferencesRequest,
@@ -265,7 +265,7 @@ mod tests {
         TurnActor::new(UserId::new("user-test").unwrap())
     }
 
-    // --- OutboundPreferencesProductFacade fakes ---
+    // --- OutboundPreferencesProductService fakes ---
 
     fn test_service_error() -> ProductSurfaceError {
         ProductSurfaceError {
@@ -278,12 +278,12 @@ mod tests {
         }
     }
 
-    macro_rules! fake_preferences_facade {
+    macro_rules! fake_preferences_service {
         ($name:ident, $get:expr) => {
             struct $name;
 
             #[async_trait]
-            impl OutboundPreferencesProductFacade for $name {
+            impl OutboundPreferencesProductService for $name {
                 async fn get_outbound_preferences(
                     &self,
                     _caller: ProductSurfaceCaller,
@@ -312,13 +312,13 @@ mod tests {
         };
     }
 
-    fake_preferences_facade!(
-        NoneSetPreferencesFacade,
+    fake_preferences_service!(
+        NoneSetPreferencesService,
         Ok(RebornOutboundPreferencesResponse::default())
     );
 
-    fake_preferences_facade!(
-        UnavailablePreferencesFacade,
+    fake_preferences_service!(
+        UnavailablePreferencesService,
         Ok(RebornOutboundPreferencesResponse {
             final_reply_target: None,
             final_reply_target_status: RebornOutboundDeliveryTargetStatus::Unavailable,
@@ -326,8 +326,8 @@ mod tests {
         })
     );
 
-    fake_preferences_facade!(
-        TargetSetPreferencesFacade,
+    fake_preferences_service!(
+        TargetSetPreferencesService,
         Ok(RebornOutboundPreferencesResponse {
             final_reply_target: Some(
                 RebornOutboundDeliveryTargetSummary::new(
@@ -343,14 +343,14 @@ mod tests {
         })
     );
 
-    fake_preferences_facade!(ErrorPreferencesFacade, Err(test_service_error()));
+    fake_preferences_service!(ErrorPreferencesService, Err(test_service_error()));
 
-    // --- LifecycleProductFacade fakes ---
+    // --- LifecycleProductService fakes ---
 
-    struct EmptyLifecycleFacade;
+    struct EmptyLifecycleService;
 
     #[async_trait]
-    impl LifecycleProductFacade for EmptyLifecycleFacade {
+    impl LifecycleProductService for EmptyLifecycleService {
         async fn execute(
             &self,
             _context: LifecycleProductContext,
@@ -377,12 +377,12 @@ mod tests {
         }
     }
 
-    struct ChannelListLifecycleFacade {
+    struct ChannelListLifecycleService {
         extensions: Vec<LifecycleInstalledExtensionSummary>,
     }
 
     #[async_trait]
-    impl LifecycleProductFacade for ChannelListLifecycleFacade {
+    impl LifecycleProductService for ChannelListLifecycleService {
         async fn execute(
             &self,
             _context: LifecycleProductContext,
@@ -410,10 +410,10 @@ mod tests {
         }
     }
 
-    struct ErrorLifecycleFacade;
+    struct ErrorLifecycleService;
 
     #[async_trait]
-    impl LifecycleProductFacade for ErrorLifecycleFacade {
+    impl LifecycleProductService for ErrorLifecycleService {
         async fn execute(
             &self,
             _context: LifecycleProductContext,
@@ -489,7 +489,8 @@ mod tests {
 
     #[tokio::test]
     async fn actor_none_returns_none() {
-        let provider = RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesFacade));
+        let provider =
+            RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesService));
         let result = provider
             .begin_communication_context(scope(), None)
             .resolve(false)
@@ -499,15 +500,15 @@ mod tests {
 
     // --- Tests: preference lookup is keyed by the run owner, not the actor ---
 
-    /// Preferences facade that records the `user_id` of the caller it received,
+    /// Preferences service that records the `user_id` of the caller it received,
     /// so tests can assert the provider keys the lookup by the run owner rather
     /// than the acting principal.
-    struct CaptureCallerPreferencesFacade {
+    struct CaptureCallerPreferencesService {
         seen_user_id: Arc<std::sync::Mutex<Option<String>>>,
     }
 
     #[async_trait]
-    impl OutboundPreferencesProductFacade for CaptureCallerPreferencesFacade {
+    impl OutboundPreferencesProductService for CaptureCallerPreferencesService {
         async fn get_outbound_preferences(
             &self,
             caller: ProductSurfaceCaller,
@@ -538,10 +539,10 @@ mod tests {
     #[tokio::test]
     async fn preferences_keyed_by_explicit_owner_not_actor() {
         let seen_user_id = Arc::new(std::sync::Mutex::new(None));
-        let facade = CaptureCallerPreferencesFacade {
+        let service = CaptureCallerPreferencesService {
             seen_user_id: Arc::clone(&seen_user_id),
         };
-        let provider = RuntimeCommunicationContextProvider::new(Arc::new(facade));
+        let provider = RuntimeCommunicationContextProvider::new(Arc::new(service));
 
         // Scope owned by a subject/creator distinct from the acting principal
         // (e.g. a trusted trigger or shared/channel inbound run).
@@ -569,10 +570,10 @@ mod tests {
     #[tokio::test]
     async fn preferences_fall_back_to_actor_without_explicit_owner() {
         let seen_user_id = Arc::new(std::sync::Mutex::new(None));
-        let facade = CaptureCallerPreferencesFacade {
+        let service = CaptureCallerPreferencesService {
             seen_user_id: Arc::clone(&seen_user_id),
         };
-        let provider = RuntimeCommunicationContextProvider::new(Arc::new(facade));
+        let provider = RuntimeCommunicationContextProvider::new(Arc::new(service));
 
         // `scope()` uses `TurnThreadOwner::ActorFallback` (no explicit owner).
         provider
@@ -592,7 +593,8 @@ mod tests {
 
     #[tokio::test]
     async fn none_configured_maps_to_none_set() {
-        let provider = RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesFacade));
+        let provider =
+            RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesService));
         let ctx = provider
             .begin_communication_context(scope(), Some(actor()))
             .resolve(false)
@@ -604,7 +606,7 @@ mod tests {
     #[tokio::test]
     async fn unavailable_status_maps_to_set_unresolved() {
         let provider =
-            RuntimeCommunicationContextProvider::new(Arc::new(UnavailablePreferencesFacade));
+            RuntimeCommunicationContextProvider::new(Arc::new(UnavailablePreferencesService));
         let ctx = provider
             .begin_communication_context(scope(), Some(actor()))
             .resolve(false)
@@ -616,7 +618,7 @@ mod tests {
     #[tokio::test]
     async fn target_set_maps_to_set_with_summary() {
         let provider =
-            RuntimeCommunicationContextProvider::new(Arc::new(TargetSetPreferencesFacade));
+            RuntimeCommunicationContextProvider::new(Arc::new(TargetSetPreferencesService));
         let ctx = provider
             .begin_communication_context(scope(), Some(actor()))
             .resolve(false)
@@ -631,7 +633,7 @@ mod tests {
 
     #[tokio::test]
     async fn preferences_error_maps_to_unknown() {
-        let provider = RuntimeCommunicationContextProvider::new(Arc::new(ErrorPreferencesFacade));
+        let provider = RuntimeCommunicationContextProvider::new(Arc::new(ErrorPreferencesService));
         let ctx = provider
             .begin_communication_context(scope(), Some(actor()))
             .resolve(false)
@@ -643,8 +645,9 @@ mod tests {
     // --- Tests: connected channels ---
 
     #[tokio::test]
-    async fn no_lifecycle_facade_returns_unknown_channels() {
-        let provider = RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesFacade));
+    async fn no_lifecycle_service_returns_unknown_channels() {
+        let provider =
+            RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesService));
         let ctx = provider
             .begin_communication_context(scope(), Some(actor()))
             .resolve(false)
@@ -657,8 +660,9 @@ mod tests {
     async fn empty_extension_list_returns_known_no_channels() {
         // Classification is available, so an empty extension list is genuine
         // certainty: no channels connected → Known([]), not Unknown.
-        let provider = RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesFacade))
-            .with_lifecycle_facade(Arc::new(EmptyLifecycleFacade));
+        let provider =
+            RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesService))
+                .with_lifecycle_service(Arc::new(EmptyLifecycleService));
         let ctx = provider
             .begin_communication_context(scope(), Some(actor()))
             .resolve(false)
@@ -682,14 +686,15 @@ mod tests {
             supports_threads: false,
             max_message_chars: Some(4096),
         });
-        let provider = RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesFacade))
-            .with_lifecycle_facade(Arc::new(ChannelListLifecycleFacade {
-                extensions: vec![
-                    telegram,
-                    non_channel_extension("github"),
-                    inactive_channel_extension("slack"),
-                ],
-            }));
+        let provider =
+            RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesService))
+                .with_lifecycle_service(Arc::new(ChannelListLifecycleService {
+                    extensions: vec![
+                        telegram,
+                        non_channel_extension("github"),
+                        inactive_channel_extension("slack"),
+                    ],
+                }));
         let ctx = provider
             .begin_communication_context(scope(), Some(actor()))
             .resolve(false)
@@ -719,9 +724,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lifecycle_facade_error_returns_unknown_channels() {
-        let provider = RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesFacade))
-            .with_lifecycle_facade(Arc::new(ErrorLifecycleFacade));
+    async fn lifecycle_service_error_returns_unknown_channels() {
+        let provider =
+            RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesService))
+                .with_lifecycle_service(Arc::new(ErrorLifecycleService));
         let ctx = provider
             .begin_communication_context(scope(), Some(actor()))
             .resolve(false)
@@ -732,16 +738,16 @@ mod tests {
 
     // --- Tests: timeout path ---
 
-    /// A preferences facade whose `get_outbound_preferences` never resolves.
+    /// A preferences service whose `get_outbound_preferences` never resolves.
     /// Used to exercise the shared-timeout Unknown path.
     ///
     /// Note: `tokio/test-util` is not in this crate's feature set, so
     /// `start_paused` / `tokio::time::advance` are unavailable. The test relies
     /// on the real 500 ms wall-clock timeout firing against a `pending()` future.
-    struct HangingPreferencesFacade;
+    struct HangingPreferencesService;
 
     #[async_trait]
-    impl OutboundPreferencesProductFacade for HangingPreferencesFacade {
+    impl OutboundPreferencesProductService for HangingPreferencesService {
         async fn get_outbound_preferences(
             &self,
             _caller: ProductSurfaceCaller,
@@ -768,14 +774,14 @@ mod tests {
         }
     }
 
-    /// A preferences facade whose `get_outbound_preferences` panics immediately.
+    /// A preferences service whose `get_outbound_preferences` panics immediately.
     /// This causes the spawned `fetch_communication_context` task to abort with a
     /// `JoinError`, exercising the actor-present degrade-to-unknown path in
     /// `begin_communication_context`.
-    struct PanickingPreferencesFacade;
+    struct PanickingPreferencesService;
 
     #[async_trait]
-    impl OutboundPreferencesProductFacade for PanickingPreferencesFacade {
+    impl OutboundPreferencesProductService for PanickingPreferencesService {
         async fn get_outbound_preferences(
             &self,
             _caller: ProductSurfaceCaller,
@@ -809,7 +815,7 @@ mod tests {
         // None would be ambiguous with the "no actor" path and would suppress
         // `delivery_tools_visible` stamping for a run that genuinely has an actor.
         let provider =
-            RuntimeCommunicationContextProvider::new(Arc::new(PanickingPreferencesFacade));
+            RuntimeCommunicationContextProvider::new(Arc::new(PanickingPreferencesService));
 
         let ctx = provider
             .begin_communication_context(scope(), Some(actor()))
@@ -899,7 +905,8 @@ mod tests {
         // Both delivery_target and connected_channels must be Unknown — never
         // fabricated definitive states. Uses real wall-clock time (500 ms) since
         // tokio/test-util is not in this crate's features.
-        let provider = RuntimeCommunicationContextProvider::new(Arc::new(HangingPreferencesFacade));
+        let provider =
+            RuntimeCommunicationContextProvider::new(Arc::new(HangingPreferencesService));
 
         let ctx = provider
             .begin_communication_context(scope(), Some(actor()))

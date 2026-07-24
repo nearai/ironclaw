@@ -470,7 +470,7 @@ async fn completion_evidence_reads_thread_under_the_run_caller_owner() {
         ThreadId::new("thread").expect("valid"),
     );
     let caller = UserId::new("user-a").expect("user");
-    // Thread created under the CALLER's owner, as the product facade does.
+    // Thread created under the CALLER's owner, as the product service does.
     let caller_scope = ThreadScope {
         tenant_id: turn_scope.tenant_id.clone(),
         agent_id: turn_scope.agent_id.clone().expect("agent id"),

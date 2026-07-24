@@ -68,7 +68,7 @@ pub struct ProductCreateThreadRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_thread_id: Option<String>,
     /// Optional project the new thread should be scoped to. The browser only
-    /// *proposes* it — the facade authorizes the caller's access to the project
+    /// *proposes* it — the service authorizes the caller's access to the project
     /// before adopting it as scope, so the body is never trusted on its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,
@@ -289,7 +289,7 @@ pub struct ProductRenameAutomationRequest {
 /// Browser body for WebUI extension-setup interaction.
 ///
 /// This is the v2 entrypoint inventory's "extensions onboarding" row.
-/// The native facade exposes the route surface so callers can
+/// The native service exposes the route surface so callers can
 /// inventory the API without v1 dependency. Concrete implementations return a
 /// product-safe lifecycle projection; auth, approval, and pairing requirements
 /// remain blockers owned by their dedicated Reborn services, not lifecycle
@@ -297,7 +297,7 @@ pub struct ProductRenameAutomationRequest {
 ///
 /// The package id is not part of the body — it is bound from the route
 /// path and lifted into a lifecycle package ref by the handler before
-/// it crosses the facade boundary.
+/// it crosses the service boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ProductSetupExtensionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]

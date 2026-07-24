@@ -37,7 +37,7 @@ mod tests {
     };
     use ironclaw_product::{
         LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext,
-        LifecycleProductFacade, LifecycleProductSurfaceContext, OutboundPreferencesProductFacade,
+        LifecycleProductService, LifecycleProductSurfaceContext, OutboundPreferencesProductService,
         RebornOutboundDeliveryTargetId,
     };
     use ironclaw_threads::{
@@ -63,7 +63,7 @@ mod tests {
     };
     use crate::outbound::{
         OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
-        OutboundDeliveryTargetRegistry, RebornOutboundPreferencesFacade,
+        OutboundDeliveryTargetRegistry, RebornOutboundPreferencesService,
     };
     use crate::runtime::local_dev_filesystem_skill_context_source;
 
@@ -689,7 +689,7 @@ mod tests {
         let operator = extension_management
             .tenant_operator_user_id_for_test()
             .clone();
-        let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
+        let service = crate::extension_host::lifecycle::RebornLocalLifecycleService::new(
             runtime_surfaces.skill_management.clone(),
         )
         .with_extension_management(extension_management)
@@ -706,7 +706,7 @@ mod tests {
                     project_id: None,
                 })
             };
-            facade
+            service
                 .execute(
                     operator_context(extension_id),
                     LifecycleProductAction::ExtensionInstall {
@@ -716,7 +716,7 @@ mod tests {
                 .await
                 .expect("install GSuite extension");
             if matches!(extension_state, GsuiteExtensionState::Activated) {
-                facade
+                service
                     .execute(
                         operator_context(extension_id),
                         LifecycleProductAction::ExtensionActivate { package_ref },
@@ -1476,7 +1476,7 @@ mod tests {
             project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: thread_service.clone(),
             trajectory_observer: None,
-            outbound_preferences_facade: None,
+            outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
@@ -1788,7 +1788,7 @@ mod tests {
             project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: thread_service.clone(),
             trajectory_observer: None,
-            outbound_preferences_facade: None,
+            outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
@@ -2299,7 +2299,7 @@ mod tests {
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: Some(Arc::clone(&activation_source)),
             trajectory_observer: None,
-            outbound_preferences_facade: None,
+            outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
@@ -2512,7 +2512,7 @@ mod tests {
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: None,
             trajectory_observer: None,
-            outbound_preferences_facade: None,
+            outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
@@ -2600,7 +2600,7 @@ mod tests {
             project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             trajectory_observer: None,
-            outbound_preferences_facade: None,
+            outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
@@ -2696,7 +2696,7 @@ mod tests {
 
         // The capability writes a real control-plane entity, not a workspace
         // file: the owner can now see the project through the same
-        // access-controlled `ProjectService` facade the WebUI lists from.
+        // access-controlled `ProjectService` service the WebUI lists from.
         let listed = runtime_surfaces
             .project_service
             .list_projects(
@@ -2804,7 +2804,7 @@ mod tests {
             project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: thread_service.clone(),
             trajectory_observer: None,
-            outbound_preferences_facade: None,
+            outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
@@ -3143,7 +3143,7 @@ mod tests {
             project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             trajectory_observer: None,
-            outbound_preferences_facade: None,
+            outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
@@ -3575,7 +3575,7 @@ mod tests {
             project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: thread_service.clone(),
             trajectory_observer: None,
-            outbound_preferences_facade: None,
+            outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
@@ -3680,8 +3680,8 @@ mod tests {
             Arc::new(OutboundDeliveryTargetRegistry::new(vec![
                 slack_provider_delegate,
             ]));
-        let outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade> =
-            Arc::new(RebornOutboundPreferencesFacade::new(
+        let outbound_preferences_service: Arc<dyn OutboundPreferencesProductService> =
+            Arc::new(RebornOutboundPreferencesService::new(
                 Arc::clone(runtime_surfaces.outbound_preferences_for_test()),
                 target_provider,
             ));
@@ -3729,7 +3729,7 @@ mod tests {
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: None,
             trajectory_observer: None,
-            outbound_preferences_facade: Some(outbound_preferences_facade),
+            outbound_preferences_service: Some(outbound_preferences_service),
             outbound_delivery_target_set_requires_approval: true,
             approval_settings,
             project_service: Arc::clone(&runtime_surfaces.project_service),
@@ -4410,8 +4410,8 @@ mod tests {
             Arc::new(OutboundDeliveryTargetRegistry::new(vec![
                 slack_provider_delegate,
             ]));
-        let outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade> =
-            Arc::new(RebornOutboundPreferencesFacade::new(
+        let outbound_preferences_service: Arc<dyn OutboundPreferencesProductService> =
+            Arc::new(RebornOutboundPreferencesService::new(
                 Arc::clone(runtime_surfaces.outbound_preferences_for_test()),
                 target_provider,
             ));
@@ -4440,7 +4440,7 @@ mod tests {
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
             None,
-            Some(outbound_preferences_facade),
+            Some(outbound_preferences_service),
             None,
         )
         .expect("capability wiring");
@@ -4551,7 +4551,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_outbound_delivery_capabilities_hidden_without_provider_facade() {
+    async fn local_dev_outbound_delivery_capabilities_hidden_without_provider_service() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services =
             crate::factory::build_runtime_substrate(crate::deployment::local_dev_build_input(
@@ -4585,7 +4585,7 @@ mod tests {
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: None,
             trajectory_observer: None,
-            outbound_preferences_facade: None,
+            outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
@@ -4703,7 +4703,7 @@ mod tests {
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: None,
             trajectory_observer: None,
-            outbound_preferences_facade: None,
+            outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
@@ -4955,7 +4955,7 @@ mod tests {
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: None,
             trajectory_observer: None,
-            outbound_preferences_facade: None,
+            outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
@@ -5076,7 +5076,7 @@ mod tests {
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: None,
             trajectory_observer: None,
-            outbound_preferences_facade: None,
+            outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
@@ -5212,14 +5212,14 @@ mod tests {
             let operator = extension_management
                 .tenant_operator_user_id_for_test()
                 .clone();
-            let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
+            let service = crate::extension_host::lifecycle::RebornLocalLifecycleService::new(
                 runtime_surfaces.skill_management.clone(),
             )
             .with_extension_management(extension_management)
             .with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
             let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
                 .expect("valid github ref");
-            facade
+            service
                 .execute(
                     operator_lifecycle_context("github-install", &operator),
                     LifecycleProductAction::ExtensionInstall {
@@ -5228,7 +5228,7 @@ mod tests {
                 )
                 .await
                 .expect("install github extension");
-            facade
+            service
                 .execute(
                     operator_lifecycle_context("github-activate", &operator),
                     LifecycleProductAction::ExtensionActivate { package_ref },
@@ -5314,14 +5314,14 @@ mod tests {
         let operator = extension_management
             .tenant_operator_user_id_for_test()
             .clone();
-        let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
+        let service = crate::extension_host::lifecycle::RebornLocalLifecycleService::new(
             runtime_surfaces.skill_management.clone(),
         )
         .with_extension_management(extension_management)
         .with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
             .expect("valid github ref");
-        facade
+        service
             .execute(
                 operator_lifecycle_context("github-live-install", &operator),
                 LifecycleProductAction::ExtensionInstall {
@@ -5330,7 +5330,7 @@ mod tests {
             )
             .await
             .expect("install github extension");
-        facade
+        service
             .execute(
                 operator_lifecycle_context("github-live-activate", &operator),
                 LifecycleProductAction::ExtensionActivate { package_ref },
@@ -5525,14 +5525,14 @@ mod tests {
         let operator = extension_management
             .tenant_operator_user_id_for_test()
             .clone();
-        let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
+        let service = crate::extension_host::lifecycle::RebornLocalLifecycleService::new(
             runtime_surfaces.skill_management.clone(),
         )
         .with_extension_management(extension_management)
         .with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
             .expect("valid github ref");
-        facade
+        service
             .execute(
                 operator_lifecycle_context("mid-response-install", &operator),
                 LifecycleProductAction::ExtensionInstall {
@@ -5541,7 +5541,7 @@ mod tests {
             )
             .await
             .expect("install github extension");
-        facade
+        service
             .execute(
                 operator_lifecycle_context("mid-response-activate", &operator),
                 LifecycleProductAction::ExtensionActivate { package_ref },

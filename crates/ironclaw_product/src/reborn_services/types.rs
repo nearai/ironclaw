@@ -1,4 +1,4 @@
-// arch-exempt: large_file, WebUI facade DTOs live with their contract awaiting the ProductSurface domain-port split, plan #5985
+// arch-exempt: large_file, WebUI service DTOs live with their contract awaiting the ProductSurface domain-port split, plan #5985
 use crate::{ProductOutboundEnvelope, ProjectionCursor};
 use chrono::{DateTime, Utc};
 use ironclaw_auth::{AuthAccountLastError, AuthAccountState};
@@ -301,7 +301,7 @@ pub enum RebornSubmitTurnResponse {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornTimelineRequest {
     pub thread_id: String,
-    /// Maximum number of messages returned in one response. The facade
+    /// Maximum number of messages returned in one response. The service
     /// clamps to the [`TIMELINE_DEFAULT_PAGE_SIZE`,
     /// `TIMELINE_MAX_PAGE_SIZE`] range so callers cannot bypass the
     /// per-response size bound by asking for an unbounded page. Falls
@@ -312,7 +312,7 @@ pub struct RebornTimelineRequest {
     pub limit: Option<u32>,
     /// Opaque pagination cursor returned in the previous response's
     /// `next_cursor`. Browsers do not need to interpret the value; the
-    /// facade encodes the earliest message sequence the page should
+    /// service encodes the earliest message sequence the page should
     /// include here and round-trips it on each follow-up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
@@ -451,7 +451,7 @@ pub enum RebornResolveGateResponse {
 ///
 /// Pure read — no idempotency key. Caller authority is supplied separately by
 /// `ProductSurfaceCaller` and combined with `thread_id` to produce the
-/// canonical [`ironclaw_turns::TurnScope`] inside the facade.
+/// canonical [`ironclaw_turns::TurnScope`] inside the service.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornGetRunStateRequest {
     pub thread_id: String,
@@ -553,7 +553,7 @@ impl RebornGetRunStateResponse {
 impl From<TurnRunState> for RebornGetRunStateResponse {
     /// Convenience conversion with no default-model fallback: a default-model
     /// run (no `resolved_model_route`) reports usage without cost. Callers that
-    /// can supply the live active model — the facade's `get_run_state` — use
+    /// can supply the live active model — the service's `get_run_state` — use
     /// [`RebornGetRunStateResponse::from_run_state`] so those runs are priced.
     fn from(value: TurnRunState) -> Self {
         Self::from_run_state(value, None)
@@ -1127,11 +1127,11 @@ impl<'de> Deserialize<'de> for RebornAutomationState {
     }
 }
 
-/// Browser-safe automation row returned by the WebUI facade.
+/// Browser-safe automation row returned by the WebUI service.
 ///
 /// This deliberately exposes source, state, run timestamps, sanitized status,
 /// and bounded recent-run history; trigger repository internals remain behind
-/// the product facade.
+/// the product service.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornAutomationInfo {
     pub automation_id: String,

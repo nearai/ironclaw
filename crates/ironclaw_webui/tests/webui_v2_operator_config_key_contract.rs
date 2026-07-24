@@ -161,7 +161,7 @@ async fn operator_config_key_routes_dispatch_path_and_body() {
 }
 
 #[tokio::test]
-async fn operator_config_key_rejects_invalid_key_and_missing_body_before_facade() {
+async fn operator_config_key_rejects_invalid_key_and_missing_body_before_service() {
     let services = Arc::new(RecordingServices::default());
     let router = router_with(services.clone());
 

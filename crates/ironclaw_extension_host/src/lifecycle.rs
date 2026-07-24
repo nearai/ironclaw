@@ -8,8 +8,8 @@
 //!
 //! The host record carries only the working subset it can prove —
 //! `InstallationState::{Installed, Active, Failed}` plus a redacted
-//! `last_error`. Removal is the facade path (`remove_record` drops the row and
-//! the facade runs auth/credential cleanup); the host does not own a
+//! `last_error`. Removal is the service path (`remove_record` drops the row and
+//! the service runs auth/credential cleanup); the host does not own a
 //! multi-step removal pipeline.
 
 use std::collections::BTreeSet;
@@ -294,7 +294,7 @@ impl ExtensionHost {
     }
 
     /// Drop an installation record. This is the live removal path: the
-    /// lifecycle facade unpublishes via [`Self::deactivate`], runs auth /
+    /// lifecycle service unpublishes via [`Self::deactivate`], runs auth /
     /// credential cleanup (`cleanup_for_lifecycle`), and drops the mirrored
     /// host record here.
     pub async fn remove_record(&self, extension_id: &str) -> Result<(), LifecycleError> {

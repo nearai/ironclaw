@@ -121,8 +121,8 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 
     // Surface 1 (#5886): the automations list entry must carry active_hold
     // while the fire is gate-parked.
-    let facade =
-        ironclaw_reborn_composition::test_support::local_dev_automation_product_facade_for_test(
+    let service =
+        ironclaw_reborn_composition::test_support::local_dev_automation_product_service_for_test(
             Arc::clone(&repo),
             Arc::clone(&g.shared.turn_store),
         );
@@ -130,7 +130,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         creator.thread_harness.service.clone(),
         creator.coordinator.clone(),
     )
-    .with_automation_product_facade(facade);
+    .with_automation_product_service(service);
     let caller = webui_caller_for(&creator.binding);
     let router = mount_webui_v2_router(Arc::new(services), caller);
     let entry = automation_entry(router.clone(), &trigger_id).await?;

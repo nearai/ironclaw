@@ -66,7 +66,7 @@ use crate::storage_catalog::validate_reborn_runtime_storage;
 use crate::support::fs::RebornProjectService;
 use crate::{
     RebornAuthContinuationDispatcher, RebornBuildError, RebornCompositionProfile,
-    RebornFacadeReadiness, RebornHostBindings, RebornProductAuthServices, RebornReadiness,
+    RebornHostBindings, RebornProductAuthServices, RebornReadiness, RebornServiceReadiness,
     RebornWorkerReadiness,
 };
 use ironclaw_approvals::{
@@ -121,7 +121,7 @@ use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRu
 use ironclaw_processes::ProcessServices;
 use ironclaw_product::{
     ExtensionAccountSetupRegistry, LifecycleProductSurfaceContext,
-    OutboundPreferencesProductFacade, ProductAuthTurnGateResumeDispatcher, ProjectService,
+    OutboundPreferencesProductService, ProductAuthTurnGateResumeDispatcher, ProjectService,
 };
 use ironclaw_projects::ProjectRepository;
 use ironclaw_resources::FilesystemBudgetGateStore;
@@ -405,7 +405,7 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) channel_dm_target_store:
         Arc<ironclaw_extension_host::FilesystemChannelDmTargetStore>,
     pub(crate) channel_disconnect_slot:
-        Arc<std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionFacade>>>,
+        Arc<std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionService>>>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     pub(crate) skill_mounts: MountView,
     pub(crate) memory_mounts: MountView,
@@ -451,7 +451,7 @@ pub(crate) struct RebornRuntimeStores {
     /// Readiness of the background credential keepalive worker (B1). Carries the
     /// worker's dependencies together so "both deps present or neither" is a type
     /// invariant rather than a runtime check. MUST stay private — the worker is
-    /// the only consumer; this field must never leak through any public facade.
+    /// the only consumer; this field must never leak through any public service.
     pub(crate) credential_refresh_worker: CredentialRefreshWorkerReady,
     /// The binary-assembled channel-extension bindings (extension-runtime
     /// DEL-7): adapters were handed to the generic host at build; the extras
@@ -683,7 +683,7 @@ pub(crate) async fn build_runtime_substrate(
     tracing::debug!(
         profile = %input.profile(),
         owner_id = %input.owner_id(),
-        "building Reborn composition facades"
+        "building Reborn composition services"
     );
     // Substrate selection is deployment *data* (§4.4/§5.6), not a profile
     // match: the config says which substrate to assemble and this dispatches
@@ -1836,7 +1836,7 @@ pub enum KeychainMasterKeyOutcome {
     Suppressed,
 }
 
-/// Facade over `ironclaw_secrets::keychain` for onboarding's OS-keychain
+/// Service over `ironclaw_secrets::keychain` for onboarding's OS-keychain
 /// master-key provisioning step.
 ///
 /// - Lets callers outside this crate (`ironclaw_reborn_cli`) avoid their own
@@ -1903,7 +1903,7 @@ fn local_dev_scoped_filesystem(
 ///
 /// All four trait roles must be satisfied on construction.  Every role is an
 /// `Arc` clone of a single `FilesystemOutboundStateStore` — which implements all
-/// four outbound-store traits — so the WebUI delivery-defaults facade and the
+/// four outbound-store traits — so the WebUI delivery-defaults service and the
 /// Slack delivery path share one backing tree.
 /// See docs/plans/2026-05-29-trigger-loop-delivery-resolution-implementation.md.
 pub(crate) struct OutboundStores {
@@ -1918,7 +1918,7 @@ fn local_dev_outbound_store(filesystem: Arc<CompositeRootFilesystem>) -> Outboun
     // (`/outbound` → `/tenants/<t>/users/<u>/outbound`). All four outbound
     // roles — preferences, state, delivered-gate routes, triggered-run delivery
     // — are Arc-cloned from this single instance so the WebUI delivery-defaults
-    // facade and the Slack delivery path share the same backing tree.
+    // service and the Slack delivery path share the same backing tree.
     #[allow(clippy::disallowed_methods)]
     let store: Arc<FilesystemOutboundStateStore<CompositeRootFilesystem>> = Arc::new(
         FilesystemOutboundStateStore::new(local_dev_scoped_filesystem(filesystem)),
@@ -3848,7 +3848,7 @@ async fn build_backend_production(
             // filesystem store directly.
             blocked_auth_snapshot_source: Some(Arc::clone(&turn_state)
                 as Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>),
-            // This production builder wires no lifecycle-activation facade, so an
+            // This production builder wires no lifecycle-activation service, so an
             // empty slot leaves lifecycle-activation auth continuations unsupported
             // here, preserving this builder's prior behavior.
             provider_composition,
@@ -4055,7 +4055,7 @@ async fn build_backend_production(
     );
     let account_setups = ExtensionAccountSetupRegistry::default();
     let channel_disconnect_slot: Arc<
-        std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionFacade>>,
+        std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionService>>,
     > = Arc::new(std::sync::OnceLock::new());
     let extension_management = Arc::new(
         RebornLocalExtensionManagementPort::new(
@@ -4174,12 +4174,12 @@ async fn build_backend_production(
     })?;
     let outbound_target_provider = Arc::clone(&outbound_delivery_targets)
         as Arc<dyn crate::outbound::OutboundDeliveryTargetProvider>;
-    let outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade> =
-        Arc::new(crate::outbound::RebornOutboundPreferencesFacade::new(
+    let outbound_preferences_service: Arc<dyn OutboundPreferencesProductService> =
+        Arc::new(crate::outbound::RebornOutboundPreferencesService::new(
             Arc::clone(&outbound_stores.outbound_preferences),
             outbound_target_provider,
         ));
-    insert_outbound_preferences_handler(&mut first_party_registry, outbound_preferences_facade)
+    insert_outbound_preferences_handler(&mut first_party_registry, outbound_preferences_service)
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("outbound preferences handler is invalid: {error}"),
         })?;
@@ -4575,7 +4575,7 @@ async fn build_postgres_production(
     // A4: Clone the pool before it is moved into PostgresTriggerRepository so we
     // can thread it to the credential keepalive worker as a leader-lock for
     // sweep serialization.
-    // This clone stays PRIVATE — it is never exposed through any public facade.
+    // This clone stays PRIVATE — it is never exposed through any public service.
     let pool_for_refresh_lock = pool.clone();
     let database_filesystem = Arc::new(PostgresRootFilesystem::new(pool.clone()));
     database_filesystem.run_migrations().await?;
@@ -4616,7 +4616,7 @@ fn readiness_for(
     RebornReadiness {
         profile,
         state,
-        facades: RebornFacadeReadiness {
+        services: RebornServiceReadiness {
             host_runtime,
             turn_coordinator,
             product_auth,

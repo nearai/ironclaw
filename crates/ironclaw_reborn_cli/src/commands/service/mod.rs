@@ -17,12 +17,12 @@
 //! OS-specific implementation (`launchd` or `systemd`), rather than every
 //! verb re-checking `cfg!(target_os)`.
 //!
-//! ## Canonical service identity, shared with the WebUI operator facade
+//! ## Canonical service identity, shared with the WebUI operator service
 //!
 //! [`SERVICE_LABEL`] and [`SYSTEMD_UNIT`] name the **one** OS service
 //! identity for the standalone Reborn binary. Two surfaces install and
 //! manage it today: this CLI (`ironclaw service install`), and the
-//! WebUI operator facade (`RebornLocalServiceLifecycle` in
+//! WebUI operator service (`RebornLocalServiceLifecycle` in
 //! `ironclaw_reborn_composition::observability::operator_service_lifecycle`,
 //! behind `POST /api/webchat/v2/operator/service`). Both target the same
 //! plist/unit path, so an install from either surface atomically replaces
@@ -33,9 +33,9 @@
 //! there is no shared crate to host one implementation today. Until that
 //! consolidation lands, this CLI's unit is the target state — it is
 //! secret-free (only `HOME`/profile env, no bearer token; `serve` reads
-//! the WebUI token from the 0600 token file at start), where the facade's
+//! the WebUI token from the 0600 token file at start), where the service's
 //! generated unit bakes the WebUI bearer token directly into the unit
-//! file's `Environment=` lines. A CLI install replacing a facade-installed
+//! file's `Environment=` lines. A CLI install replacing a service-installed
 //! unit is therefore a security improvement, not just a collision to
 //! avoid.
 
@@ -56,7 +56,7 @@ mod systemd;
 /// launchd label / systemd unit name for the canonical Reborn service
 /// identity. Shared, deliberately, with `RebornLocalServiceLifecycle` in
 /// `ironclaw_reborn_composition::observability::operator_service_lifecycle`
-/// (the WebUI operator-service facade) — see the module doc above. An
+/// (the WebUI operator-service service) — see the module doc above. An
 /// install from either surface atomically replaces the other's file at
 /// this same path; do not fork these constants to "avoid collisions"
 /// without updating both sides together.
@@ -444,7 +444,7 @@ fn status_label(installed: bool, running: bool) -> &'static str {
 /// definition until `service restart` — `None` when there is nothing to
 /// advise. Shared by both platforms so the wording (and the "must
 /// `service restart`" guidance) can't drift between them. Covers both a
-/// prior install by this same CLI and one by the WebUI operator facade
+/// prior install by this same CLI and one by the WebUI operator service
 /// (`RebornLocalServiceLifecycle`, see the module doc).
 ///
 /// Callers decide whether the "keeps the OLD definition" claim is true
@@ -921,9 +921,9 @@ mod tests {
 
         // Idempotent reinstall: overwrites cleanly, no fail or duplicate —
         // and, per the shared-identity contract with the WebUI operator
-        // facade (`RebornLocalServiceLifecycle`), must now report that it
+        // service (`RebornLocalServiceLifecycle`), must now report that it
         // replaced an existing unit (this reinstall stands in for the
-        // facade's unit being atomically replaced by the CLI's).
+        // service's unit being atomically replaced by the CLI's).
         let reinstall_replaced = systemd::install_with_runner(&context, &invocation, &mut runner)
             .expect("reinstall must succeed");
         assert!(unit_path.exists());

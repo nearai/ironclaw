@@ -6,7 +6,7 @@
 //! CORS, body limit, static security headers — is exercised end-to-end
 //! against the same axum `Router` `serve_webui_v2` binds at runtime.
 //! No TCP listener and no real Reborn runtime are required; the v2
-//! facade is mocked so the regression target stays the gateway-layer
+//! service is mocked so the regression target stays the gateway-layer
 //! composition.
 
 use std::sync::{Arc, Mutex};
@@ -147,7 +147,7 @@ impl WebuiAuthenticator for MultiUserToken {
 /// `WebuiAuthenticator` resolving [`VALID_TOKEN`] to a fixed,
 /// test-supplied user id. The trace-credits tests use it so the
 /// authenticated caller's user id equals a unique per-test trace
-/// scope — the facade derives the scope from the caller only.
+/// scope — the service derives the scope from the caller only.
 struct FixedUserToken {
     user_id: String,
 }
@@ -948,12 +948,12 @@ mod openai_compat_mount_tests {
 struct StubServices {
     create_thread_calls: Mutex<Vec<ProductSurfaceCaller>>,
     stream_events_calls: Mutex<Vec<ProductSurfaceCaller>>,
-    // Records the `gate_ref` value the facade observed on each
+    // Records the `gate_ref` value the service observed on each
     // `resolve_gate` call. Used by the JS-client contract tests to
     // assert axum's path extractor actually percent-decodes the gate
     // segment (e.g. `gate%3Aapproval` → `gate:approval`). The handler
     // overwrites `body.gate_ref` from the matched path param before
-    // calling the facade, so this captures whatever the path
+    // calling the service, so this captures whatever the path
     // extractor delivered.
     resolve_gate_refs: Mutex<Vec<Option<String>>>,
 }
@@ -1173,7 +1173,7 @@ fn build_app() -> (axum::Router, Arc<StubServices>) {
     // Match the host-installation pattern the CLI's `serve` command
     // uses: stamp trusted default agent_id / project_id onto the auth
     // layer. Without this, every authenticated v2 request would 400
-    // on the downstream facade.
+    // on the downstream service.
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         Arc::new(OnlyValidToken),
@@ -1267,7 +1267,7 @@ fn bundle_segment<'a>(body: &'a str, start: &str, end: &str) -> &'a str {
 // ─── tests ────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn bearer_happy_path_dispatches_to_facade_with_host_tenant() {
+async fn bearer_happy_path_dispatches_to_service_with_host_tenant() {
     let (app, services) = build_app();
     let response = app
         .oneshot(
@@ -1284,13 +1284,13 @@ async fn bearer_happy_path_dispatches_to_facade_with_host_tenant() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let calls = services.create_thread_calls.lock().expect("lock").clone();
-    assert_eq!(calls.len(), 1, "facade reached exactly once");
+    assert_eq!(calls.len(), 1, "service reached exactly once");
     assert_eq!(calls[0].tenant_id.as_str(), TENANT);
     assert_eq!(calls[0].user_id.as_str(), USER);
     // Regression: caller MUST carry the trusted default agent_id and
     // project_id stamped by `WebuiServeConfig::with_default_agent_id`
     // / `with_default_project_id`. Without those, the downstream
-    // facade rejects every mutation/read with 400 InvalidRequest
+    // service rejects every mutation/read with 400 InvalidRequest
     // because it cannot build `ThreadScope`.
     assert_eq!(
         calls[0].agent_id.as_ref().map(|a| a.as_str()),
@@ -1351,7 +1351,7 @@ async fn session_endpoint_reports_no_operator_capability_for_multi_user_authenti
 }
 
 #[tokio::test]
-async fn missing_bearer_returns_401_before_facade() {
+async fn missing_bearer_returns_401_before_service() {
     let (app, services) = build_app();
     let response = app
         .oneshot(
@@ -1395,7 +1395,7 @@ fn unique_trace_credits_user() -> String {
 
 #[tokio::test]
 async fn trace_credits_bearer_happy_path_returns_unenrolled_zero_state_for_fresh_scope() {
-    // Fresh, unique user scope: the facade derives the trace scope from
+    // Fresh, unique user scope: the service derives the trace scope from
     // the authenticated caller's user id only, so a uuid-suffixed user
     // guarantees no contributor-local state exists and the response is
     // the unenrolled zero-state — never an error.
@@ -1535,7 +1535,7 @@ async fn sse_query_token_authenticates_event_stream() {
         Some("text/event-stream"),
     );
     // The SSE handler runs on the background body task and polls the
-    // facade on a 1-second cadence. Pull one frame to drive the
+    // service on a 1-second cadence. Pull one frame to drive the
     // generator far enough to record at least the first poll, then
     // drop the body so the long-lived stream does not pin the test.
     let mut body = response.into_body();
@@ -1785,19 +1785,19 @@ async fn mutation_route_returns_429_after_descriptor_rate_limit_exhausted() {
     );
 
     // Auth ran but the rate-limit middleware short-circuited, so the
-    // facade only saw the 60 successful requests.
-    let facade_calls = services.create_thread_calls.lock().expect("lock").len();
+    // service only saw the 60 successful requests.
+    let service_calls = services.create_thread_calls.lock().expect("lock").len();
     assert_eq!(
-        facade_calls, 60,
+        service_calls, 60,
         "rate-limit must short-circuit BEFORE the v2 handler",
     );
 }
 
 #[tokio::test]
-async fn oversized_mutation_body_is_rejected_with_413_before_facade() {
+async fn oversized_mutation_body_is_rejected_with_413_before_service() {
     // `create_thread`'s descriptor caps the body at 16 KiB. Send 16 KiB
     // + 1 of JSON and expect 413 from the per-route body limit, with
-    // the facade untouched (the limit middleware sits in front of both
+    // the service untouched (the limit middleware sits in front of both
     // auth and the v2 handler).
     let (app, services) = build_app();
     let payload = format!(
@@ -1833,14 +1833,14 @@ async fn oversized_mutation_body_is_rejected_with_413_before_facade() {
             .lock()
             .expect("lock")
             .is_empty(),
-        "facade must not be reached on an oversized request",
+        "service must not be reached on an oversized request",
     );
 }
 
 #[tokio::test]
-async fn mutation_body_within_descriptor_cap_reaches_facade() {
+async fn mutation_body_within_descriptor_cap_reaches_service() {
     // Companion to the oversized test: a payload that fits inside the
-    // 16 KiB `create_thread` cap should pass through to the facade.
+    // 16 KiB `create_thread` cap should pass through to the service.
     // Locks the contract that the limit is "above max", not "above
     // some-fraction-of-max".
     let (app, services) = build_app();
@@ -1865,7 +1865,7 @@ async fn mutation_body_within_descriptor_cap_reaches_facade() {
     assert_eq!(
         services.create_thread_calls.lock().expect("lock").len(),
         1,
-        "facade should be reached for in-budget payload",
+        "service should be reached for in-budget payload",
     );
 }
 
@@ -2073,10 +2073,10 @@ async fn ws_upgrade_with_disallowed_origin_is_rejected_with_403() {
 }
 
 #[tokio::test]
-async fn list_threads_returns_facade_response_with_empty_default() {
+async fn list_threads_returns_service_response_with_empty_default() {
     // GET /api/webchat/v2/threads goes through the new list_threads
     // route — descriptor is NoBody + read rate limit. The stub
-    // facade returns an empty list which the handler serializes as
+    // service returns an empty list which the handler serializes as
     // `{ "threads": [], "next_cursor": null }`.
     let (app, _services) = build_app();
     let response = app
@@ -2099,7 +2099,7 @@ async fn list_threads_returns_facade_response_with_empty_default() {
 }
 
 #[tokio::test]
-async fn delete_thread_route_returns_facade_ack() {
+async fn delete_thread_route_returns_service_ack() {
     let (app, _services) = build_app();
     let response = app
         .oneshot(
@@ -2125,7 +2125,7 @@ async fn delete_thread_route_returns_facade_ack() {
 }
 
 #[tokio::test]
-async fn setup_extension_returns_lifecycle_projection_via_facade() {
+async fn setup_extension_returns_lifecycle_projection_via_service() {
     let (app, _services) = build_app();
     let response = app
         .oneshot(
@@ -2894,7 +2894,7 @@ async fn static_root_emits_a_fresh_nonce_per_request() {
 // doesn't currently own.
 
 #[tokio::test]
-async fn js_client_send_message_path_shape_reaches_facade() {
+async fn js_client_send_message_path_shape_reaches_service() {
     // api.ts → `sendMessage({threadId, content, clientActionId})`
     // builds `POST /api/webchat/v2/threads/{thread_id}/messages` with
     // body `{client_action_id, content}` (no thread_id in body —
@@ -2920,7 +2920,7 @@ async fn js_client_send_message_path_shape_reaches_facade() {
 }
 
 #[tokio::test]
-async fn js_client_cancel_run_path_shape_reaches_facade() {
+async fn js_client_cancel_run_path_shape_reaches_service() {
     // api.ts → `cancelRun({threadId, runId, reason, clientActionId})`
     // builds `POST /api/webchat/v2/threads/{thread_id}/runs/{run_id}/cancel`
     // with body `{client_action_id, reason}`.
@@ -2948,13 +2948,13 @@ async fn js_client_cancel_run_path_shape_reaches_facade() {
 }
 
 #[tokio::test]
-async fn js_client_resolve_gate_path_shape_dispatches_to_facade() {
+async fn js_client_resolve_gate_path_shape_dispatches_to_service() {
     // api.ts → `resolveGate({threadId, runId, gateRef, resolution, always, clientActionId})`
     // builds `POST /api/webchat/v2/threads/{thread_id}/runs/{run_id}/gates/{gate_ref}/resolve`
     // with body `{client_action_id, resolution, always}`.
     //
     // The stub's `resolve_gate` returns 500 by design; we only care
-    // that the path-params parsing succeeded and the facade was
+    // that the path-params parsing succeeded and the service was
     // reached. A routing-level regression (missing path segment,
     // wrong encoding) would surface as 404, not 500.
     let (app, services) = build_app();
@@ -2979,18 +2979,18 @@ async fn js_client_resolve_gate_path_shape_dispatches_to_facade() {
         )
         .await
         .expect("oneshot");
-    // 500 = facade reached and returned (stub returns Internal); 404
+    // 500 = service reached and returned (stub returns Internal); 404
     // would mean the path did not route. Anything else means contract
     // drift.
     assert_eq!(
         response.status(),
         StatusCode::INTERNAL_SERVER_ERROR,
-        "resolve_gate path must reach the stubbed facade (which returns 500)",
+        "resolve_gate path must reach the stubbed service (which returns 500)",
     );
     assert_eq!(
         services.resolve_gate_refs.lock().expect("lock").as_slice(),
         &[Some("gate-abc".to_string())],
-        "literal gate_ref must reach the facade unchanged",
+        "literal gate_ref must reach the service unchanged",
     );
 }
 
@@ -2999,7 +2999,7 @@ async fn js_client_resolve_gate_path_decodes_percent_encoded_gate_ref() {
     // Real gate refs can carry characters that require percent-encoding
     // in a URL segment (`:` in `gate:approval`, `/` in compound refs).
     // axum's path extractor must decode the segment before the handler
-    // assigns it to `body.gate_ref`, so the facade sees the literal
+    // assigns it to `body.gate_ref`, so the service sees the literal
     // ref the JS client built — dropping `encodeURIComponent` in
     // `api.ts` would otherwise either 404 (slash-bearing refs) or
     // silently mismatch (`%3A` left undecoded).
@@ -3029,12 +3029,12 @@ async fn js_client_resolve_gate_path_decodes_percent_encoded_gate_ref() {
     assert_eq!(
         response.status(),
         StatusCode::INTERNAL_SERVER_ERROR,
-        "path-decoded resolve_gate must reach the stubbed facade",
+        "path-decoded resolve_gate must reach the stubbed service",
     );
     assert_eq!(
         services.resolve_gate_refs.lock().expect("lock").as_slice(),
         &[Some("gate:approval".to_string())],
-        "facade must observe the decoded gate_ref, not the URL-encoded form",
+        "service must observe the decoded gate_ref, not the URL-encoded form",
     );
 }
 

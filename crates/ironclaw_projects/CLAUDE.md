@@ -14,7 +14,7 @@ durable project entity, live membership ACL, and repository contract over
 `ScopedFilesystem`; folding that into composition would put domain persistence
 behind the wiring layer. If this boundary is revisited later, the only plausible
 consumer-side target is `ironclaw_product` (which owns the
-`ProjectService` facade), and only if the project repository/domain contract can
+`ProjectService` service), and only if the project repository/domain contract can
 move there without forcing lower substrate crates to depend upward.
 
 ## What this crate owns
@@ -42,7 +42,7 @@ move there without forcing lower substrate crates to depend upward.
   (`ProjectError::backend("op", e)`); do not `map_err(|_| …)` away the source
   (see `.claude/rules/error-handling.md`).
 - This crate persists data; it does **not** authorize callers, expose HTTP, or
-  know about the facade. Authorization gating that combines `resolve_access`
+  know about the service. Authorization gating that combines `resolve_access`
   with a required role lives in the composition adapter (`RebornProjectService`),
   not here.
 

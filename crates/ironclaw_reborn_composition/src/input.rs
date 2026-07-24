@@ -357,7 +357,7 @@ impl RebornHostBindings {
     /// The WebChat v2 serve path uses this to pin the runtime owner to the
     /// authenticated WebUI user *after* the runtime input (and its host-access
     /// disclosure gate) has been built, so the turn-runner loop host reads
-    /// thread context from the same `owners/<user>` subtree the v2 facade
+    /// thread context from the same `owners/<user>` subtree the v2 service
     /// wrote to.
     pub fn with_owner_id(mut self, owner_id: impl Into<String>) -> Self {
         self.deployment.owner_id = owner_id.into();
@@ -365,7 +365,7 @@ impl RebornHostBindings {
     }
 
     /// Override the local runtime tenant/agent identity used by command-style
-    /// facades that need a surface context before a full runtime exists.
+    /// services that need a surface context before a full runtime exists.
     pub fn with_local_runtime_identity(mut self, tenant_id: TenantId, agent_id: AgentId) -> Self {
         self.deployment.local_runtime_identity = Some(RebornLocalRuntimeIdentity {
             tenant_id,

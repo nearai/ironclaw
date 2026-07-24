@@ -1,7 +1,7 @@
-//! Product-layer Trace Commons client facade.
+//! Product-layer Trace Commons client service.
 //!
 //! Reborn keeps product/userland surfaces away from raw kernel substrates. This
-//! facade gives agent/web/CLI callers a narrow client-side Trace Commons host:
+//! service gives agent/web/CLI callers a narrow client-side Trace Commons host:
 //! local capture, local queueing, remote upload/status sync, and local credit
 //! notice state. Hosted corpus storage and reviewer/admin control-plane state
 //! live in the TraceDAO server repo.

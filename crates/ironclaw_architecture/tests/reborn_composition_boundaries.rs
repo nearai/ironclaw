@@ -64,7 +64,7 @@ fn composition_root_is_workspace_member() {
 }
 
 #[test]
-fn composition_public_api_is_facade_shaped() {
+fn composition_public_api_is_service_shaped() {
     let lib = std::fs::read_to_string(
         workspace_root().join("crates/ironclaw_reborn_composition/src/lib.rs"),
     )
@@ -81,7 +81,7 @@ fn composition_public_api_is_facade_shaped() {
 
     assert!(
         !lib.contains("pub use input::RebornStorageInput"),
-        "composition facade API must not re-export raw storage input types"
+        "composition service API must not re-export raw storage input types"
     );
     assert!(
         !input.contains("pub enum RebornStorageInput"),
@@ -124,7 +124,7 @@ fn composition_public_pub_use_surface_matches_snapshot() {
     assert_eq!(
         snapshot, actual,
         "composition public pub-use surface must match docs/plans/composition-pubuse.snapshot; \
-         update the snapshot only for intentional public facade changes"
+         update the snapshot only for intentional public service changes"
     );
 }
 

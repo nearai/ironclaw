@@ -1,4 +1,4 @@
-// arch-exempt: large_file, host-managed model error contract remains at the crate facade, plan #4088
+// arch-exempt: large_file, host-managed model error contract remains at the crate service, plan #4088
 //! Loop host adapters for IronClaw Reborn.
 //!
 //! This crate adapts durable Reborn support boundaries (threads/transcripts plus

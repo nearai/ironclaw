@@ -569,21 +569,21 @@ fn admin_configuration_error(error: crate::AdminConfigurationServiceError) -> Ch
     }
 }
 
-/// The production [`ironclaw_product::ChannelConfigFacade`] port
-/// over [`ChannelConfigService`] — the surface the WebUI setup facade and
+/// The production [`ironclaw_product::ChannelConfigProductService`] port
+/// over [`ChannelConfigService`] — the surface the WebUI setup service and
 /// the lifecycle configure action route through.
-pub struct RebornChannelConfigFacade {
+pub struct RebornChannelConfigProductService {
     service: Arc<ChannelConfigService>,
 }
 
-impl RebornChannelConfigFacade {
+impl RebornChannelConfigProductService {
     pub fn new(service: Arc<ChannelConfigService>) -> Self {
         Self { service }
     }
 }
 
 #[async_trait]
-impl ironclaw_product::ChannelConfigFacade for RebornChannelConfigFacade {
+impl ironclaw_product::ChannelConfigProductService for RebornChannelConfigProductService {
     async fn field_status(
         &self,
         extension_id: &ExtensionId,

@@ -1,5 +1,5 @@
 //! Integration test: a production-shaped `RebornRuntime` wires the first-class
-//! projects (ACL) facade over its production store graph, and that facade is
+//! projects (ACL) service over its production store graph, and that service is
 //! tenant/user scoped.
 //!
 //! Regression for the bucket-2 production-parity gap (#5013 / audit #6389).
@@ -78,7 +78,7 @@ fn create_request(name: &str) -> RebornCreateProjectRequest {
     }
 }
 
-/// Regression guard: on a production runtime the project facade is reachable
+/// Regression guard: on a production runtime the project service is reachable
 /// (not `service_unavailable`), persists round-trip over the production
 /// substrate, and is scoped so a different tenant cannot see the project.
 #[tokio::test]
@@ -135,7 +135,7 @@ async fn production_runtime_wires_project_service_and_scopes_by_tenant() {
         None,
     );
 
-    // (1) THE WIRING. Before the production fallback, the facade fell through to
+    // (1) THE WIRING. Before the production fallback, the service fell through to
     // the `ProductSurface` default and this returned
     // `service_unavailable`. A successful create proves `with_project_service`
     // was wired from the production store graph.
@@ -148,7 +148,7 @@ async fn production_runtime_wires_project_service_and_scopes_by_tenant() {
             ironclaw_host_api::ActivityId::new(),
         )
         .await
-        .expect("production project facade must be reachable (not service_unavailable)");
+        .expect("production project service must be reachable (not service_unavailable)");
     assert_eq!(created.project.name, "Prod Project");
     let project_id = created.project.project_id.clone();
 

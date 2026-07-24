@@ -10,7 +10,7 @@
 //! 1. `EnvBearerAuthenticator` (the standalone CLI / single-operator
 //!    deployment) accept/reject on a protected v2 route.
 //! 2. Missing / malformed `Authorization` headers collapse to `401`
-//!    without ever reaching the facade.
+//!    without ever reaching the service.
 //! 3. `Bearer` prefix parsing is case-insensitive — parity with v1's
 //!    `auth.rs` extractor (documented as a KEEP in
 //!    `docs/reborn/security-parity/01-auth.md`).
@@ -67,7 +67,7 @@ const ENV_USER: &str = "operator-user";
 /// Compose `webui_v2_app` with the supplied authenticator and no public
 /// route mount (these tests never exercise the OAuth login surface —
 /// they inject bearers / sessions directly). Returns the router plus the
-/// facade stub so callers can assert whether a request reached the
+/// service stub so callers can assert whether a request reached the
 /// handler.
 fn compose(authenticator: Arc<dyn WebuiAuthenticator>) -> (axum::Router, Arc<StubServices>) {
     let services = Arc::new(StubServices::default());
@@ -150,7 +150,7 @@ async fn env_bearer_valid_token_authenticates_protected_route() {
         "valid env bearer must authenticate on the v2 surface",
     );
     let callers = services.create_thread_callers.lock().expect("lock");
-    assert_eq!(callers.len(), 1, "facade reached exactly once");
+    assert_eq!(callers.len(), 1, "service reached exactly once");
     assert_eq!(
         callers[0].tenant_id.as_str(),
         TENANT,
@@ -177,7 +177,7 @@ async fn env_bearer_wrong_token_rejected() {
             .lock()
             .expect("lock")
             .is_empty(),
-        "facade must not be reached when the bearer is wrong",
+        "service must not be reached when the bearer is wrong",
     );
 }
 
@@ -311,7 +311,7 @@ async fn revoked_session_bearer_rejected() {
     assert_eq!(
         callers_len(&services),
         1,
-        "facade must not be reached after revoke",
+        "service must not be reached after revoke",
     );
 }
 
@@ -420,7 +420,7 @@ async fn session_minted_for_one_tenant_does_not_authenticate_another_deployment(
             .lock()
             .expect("lock")
             .is_empty(),
-        "a cross-deployment bearer must never reach the facade",
+        "a cross-deployment bearer must never reach the service",
     );
     assert!(
         tenant_a_store
@@ -495,7 +495,7 @@ async fn query_token_honored_on_sse_events_route() {
     // session credential and stamped as that user — not merely yield a
     // 200. A mis-wire that left the route auth-gated but stamped a
     // default/empty caller would still 200. The SSE body is a lazy
-    // stream, so the facade's `stream_events` only runs once the body is
+    // stream, so the service's `stream_events` only runs once the body is
     // polled — drive frames briefly so it runs at least once (the
     // drain-poll loop may call it several times; assert on identity, not
     // count).
@@ -509,7 +509,7 @@ async fn query_token_honored_on_sse_events_route() {
     let callers = services.stream_events_callers.lock().expect("lock");
     assert!(
         !callers.is_empty(),
-        "the authenticated SSE request must reach the facade",
+        "the authenticated SSE request must reach the service",
     );
     assert_eq!(
         callers[0].user_id.as_str(),
@@ -547,7 +547,7 @@ async fn query_token_wrong_token_rejected_on_sse_route() {
             .lock()
             .expect("lock")
             .is_empty(),
-        "a rejected `?token=` must never reach the facade",
+        "a rejected `?token=` must never reach the service",
     );
 }
 
@@ -589,7 +589,7 @@ async fn expired_query_token_rejected_on_sse_route() {
             .lock()
             .expect("lock")
             .is_empty(),
-        "an expired `?token=` must never reach the facade",
+        "an expired `?token=` must never reach the service",
     );
 }
 
@@ -626,7 +626,7 @@ async fn query_token_rejected_on_mutation_route() {
         StatusCode::UNAUTHORIZED,
         "`?token=` must not authenticate a mutation route",
     );
-    assert_eq!(callers_len(&services), 0, "facade must not be reached");
+    assert_eq!(callers_len(&services), 0, "service must not be reached");
 }
 
 /// `GET /api/webchat/v2/threads/{id}/ws` (the WebSocket upgrade route)
@@ -722,7 +722,7 @@ async fn cookie_session_not_honored_on_protected_route() {
         StatusCode::UNAUTHORIZED,
         "an `ironclaw_session` cookie must not authenticate a v2 route (cookie transport dropped)",
     );
-    assert_eq!(callers_len(&services), 0, "facade must not be reached");
+    assert_eq!(callers_len(&services), 0, "service must not be reached");
 }
 
 // ─── operator-config mounting boundary ────────────────────────────────
@@ -731,7 +731,7 @@ async fn cookie_session_not_honored_on_protected_route() {
 /// exists at all depends on the authenticator's
 /// `allows_operator_webui_config()`; sending no credential lets us read
 /// the verdict as 401 (mounted, behind bearer auth) vs 404 (not
-/// mounted) without invoking the facade.
+/// mounted) without invoking the service.
 fn llm_providers_unauthenticated() -> Request<Body> {
     with_peer(
         Request::builder()
@@ -914,7 +914,7 @@ async fn oidc_signed_token_authenticates_protected_route_and_bad_claims_rejected
     assert_eq!(
         callers_len(&services),
         1,
-        "only the valid token may reach the facade",
+        "only the valid token may reach the service",
     );
     server.abort();
 }
@@ -926,7 +926,7 @@ async fn oidc_hs256_token_rejected_on_route() {
     // matching the JWKS key. A verifier that doesn't pin the algorithm
     // would verify the MAC with the public key and forge a valid caller.
     // The RS/ES-only allowlist must reject it at the gateway, and the
-    // facade must never be reached. (row 5 — locks the highest-value
+    // service must never be reached. (row 5 — locks the highest-value
     // OIDC control, which RS256-only tests cannot exercise.)
     let (_pem, public) = generate_oidc_key();
     let (jwks_url, server) = spawn_jwks_server(oidc_jwk(&public, OIDC_KID)).await;
@@ -961,7 +961,7 @@ async fn oidc_hs256_token_rejected_on_route() {
     assert_eq!(
         callers_len(&services),
         0,
-        "the forged token must never reach the facade",
+        "the forged token must never reach the service",
     );
     server.abort();
 }
@@ -971,7 +971,7 @@ async fn oidc_not_yet_valid_nbf_token_rejected_on_route() {
     // row 5 lists `nbf` as a validated claim. A correctly-signed token
     // with valid iss/aud/exp but a not-before in the future must collapse
     // to 401 at the gateway (not just inside `authenticate()`), and the
-    // facade must not be reached.
+    // service must not be reached.
     let (pem, public) = generate_oidc_key();
     let (jwks_url, server) = spawn_jwks_server(oidc_jwk(&public, OIDC_KID)).await;
     let (app, services) = oidc_app(jwks_url);
@@ -1003,7 +1003,7 @@ async fn oidc_not_yet_valid_nbf_token_rejected_on_route() {
         StatusCode::UNAUTHORIZED,
         "a token whose nbf is in the future must be rejected at the route layer",
     );
-    assert_eq!(callers_len(&services), 0, "facade must not be reached");
+    assert_eq!(callers_len(&services), 0, "service must not be reached");
     server.abort();
 }
 

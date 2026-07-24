@@ -12,16 +12,16 @@
 
 ## What This Crate Owns
 
-- Facade-shaped production composition root for Reborn.
+- Service-shaped production composition root for Reborn.
 - Top-level factories for runtime/profile inputs, storage substrate wiring, and LLM catalog wiring: `build_runtime` (`src/runtime.rs`), `RebornHostBindings`/`RebornBuildError` (`src/input.rs`, `src/error.rs`), and the feature-gated LLM catalog resolvers (`llm_admin::llm_catalog`).
-- The `RebornRuntime` conversation-level facade (`RebornRuntime`/`build_reborn_runtime`, `AssistantReply`, `ConversationId`, `RebornRuntimeError`) owns the composed `HostRuntime`, `TurnCoordinator`, readiness, and runtime inputs (`RebornRuntimeInput`/`RebornRuntimeIdentity`, `TurnRunnerSettings`/`PollSettings`, heartbeat/poll-interval defaults).
-- Product-live adapter wiring (`product_live_adapters`): `ProductLivePlannedRuntimeAdapters`, capability authority/IO/model-route settings, `capability_allowlist`, `visible_capability_request_for_run`; and the WebUI facade (`webui`).
+- The `RebornRuntime` conversation-level service (`RebornRuntime`/`build_reborn_runtime`, `AssistantReply`, `ConversationId`, `RebornRuntimeError`) owns the composed `HostRuntime`, `TurnCoordinator`, readiness, and runtime inputs (`RebornRuntimeInput`/`RebornRuntimeIdentity`, `TurnRunnerSettings`/`PollSettings`, heartbeat/poll-interval defaults).
+- Product-live adapter wiring (`product_live_adapters`): `ProductLivePlannedRuntimeAdapters`, capability authority/IO/model-route settings, `capability_allowlist`, `visible_capability_request_for_run`; and the WebUI service (`webui`).
 - Production and migration-dry-run profile validation for required handles (`profile`, `readiness`).
 
 ## Do Not Move In Here
 
 - Root `ironclaw` crate or `src/` module dependencies.
-- Lower substrate handles in public facade APIs.
+- Lower substrate handles in public service APIs.
 - Legacy bridge modes without accepted migration contract.
 - Live v1/product traffic routing; callers must opt into explicit Reborn adapters.
 - Low-level policy internals owned by service crates.
@@ -35,6 +35,6 @@
 
 ## Agent Notes
 
-- Keep composition facade small and explicit.
+- Keep composition service small and explicit.
 - Fail closed on local-only or missing required handles in production/migration-dry-run profiles.
 - Add readiness checks near the composed dependency they validate.

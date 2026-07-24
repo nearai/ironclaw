@@ -1,4 +1,4 @@
-// arch-exempt: large_file, pre-existing ~1.9K-line facade test suite; this change is a net-zero rename of build_local_dev_secret_store_for_test call sites with no cases added, plan #6168
+// arch-exempt: large_file, pre-existing ~1.9K-line service test suite; this change is a net-zero rename of build_local_dev_secret_store_for_test call sites with no cases added, plan #6168
 //
 // Decomposition of this suite travels with the composition god-crate shrink
 // (#6168); do not add unrelated cases here.
@@ -605,7 +605,7 @@ async fn disabled_returns_empty_services() {
 }
 
 #[tokio::test]
-async fn local_dev_builds_facades_without_production_claim() {
+async fn local_dev_builds_services_without_production_claim() {
     let dir = tempfile::tempdir().unwrap();
     let services = build_runtime_for_test(
         ironclaw_reborn_composition::local_dev_build_input("test-owner", dir.path().to_path_buf())
@@ -620,9 +620,9 @@ async fn local_dev_builds_facades_without_production_claim() {
     assert!(services.host_runtime_for_test().is_some());
     let _turn_coordinator = services.turn_coordinator_for_test();
     assert_eq!(services.readiness().state, RebornReadinessState::DevOnly);
-    assert!(services.readiness().facades.host_runtime);
-    assert!(services.readiness().facades.turn_coordinator);
-    assert!(services.readiness().facades.product_auth);
+    assert!(services.readiness().services.host_runtime);
+    assert!(services.readiness().services.turn_coordinator);
+    assert!(services.readiness().services.product_auth);
     let _product_auth = services.product_auth_for_test();
 }
 
@@ -780,11 +780,11 @@ async fn local_dev_runtime_policy_exposes_http_capability() {
     assert!(visible_ids.contains(&"builtin.echo"));
     assert!(
         visible_ids.contains(&"builtin.http"),
-        "local-dev facade should expose host HTTP when the runtime policy allows network"
+        "local-dev service should expose host HTTP when the runtime policy allows network"
     );
     assert!(
         visible_ids.contains(&"builtin.http.save"),
-        "local-dev facade should expose saved-body HTTP when network and filesystem are allowed"
+        "local-dev service should expose saved-body HTTP when network and filesystem are allowed"
     );
 }
 
@@ -814,11 +814,11 @@ async fn local_dev_runtime_policy_hides_http_capability() {
     assert!(visible_ids.contains(&"builtin.echo"));
     assert!(
         !visible_ids.contains(&"builtin.http"),
-        "local-dev facade must forward the supplied runtime policy before visible-surface filtering"
+        "local-dev service must forward the supplied runtime policy before visible-surface filtering"
     );
     assert!(
         !visible_ids.contains(&"builtin.http.save"),
-        "local-dev facade must hide saved-body HTTP when network is denied"
+        "local-dev service must hide saved-body HTTP when network is denied"
     );
 }
 

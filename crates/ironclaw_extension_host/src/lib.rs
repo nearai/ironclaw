@@ -56,7 +56,7 @@ pub use admin_configuration_store::{
 };
 pub use channel_config::{
     ChannelConfigError, ChannelConfigFieldStatus, ChannelConfigReactivation,
-    ChannelConfigReactivationError, ChannelConfigService, RebornChannelConfigFacade,
+    ChannelConfigReactivationError, ChannelConfigService, RebornChannelConfigProductService,
 };
 pub use channel_delivery::{IngressReplyContextSource, SnapshotChannelDeliveryResolver};
 pub use channel_dm_targets::{

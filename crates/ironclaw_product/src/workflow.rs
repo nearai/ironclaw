@@ -8,16 +8,19 @@ use std::sync::Arc;
 
 use crate::{
     ApprovalDecision, ExternalConversationRef, ParsedProductInbound, ProductAdapterError,
-    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductProjectionReadInput,
-    ProductProjectionSubject, ProductProjectionSubscribeInput, ProductRejection,
-    ProductRejectionKind, ProductSurfaceRejectionKind, ProjectionReadRequest,
+    ProductCommandResultPayload, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
+    ProductProjectionReadInput, ProductProjectionSubject, ProductProjectionSubscribeInput,
+    ProductRejection, ProductRejectionKind, ProductSurfaceRejectionKind, ProjectionReadRequest,
     ProjectionSubscriptionRequest, RedactedString, TrustedInboundContext, UserMessagePayload,
 };
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{AuthFlowId, CredentialAccountId};
-use ironclaw_host_api::{ProductSurfaceError, ProductSurfaceErrorCode, ThreadId, UserId};
+use ironclaw_host_api::{
+    ActivityId, CapabilityId, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
+    ProductSurfaceErrorCode, ProductSurfaceInvokeRequest, ThreadId, UserId,
+};
 use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejectionReason, GateRef, IdempotencyKey, TurnActor, TurnError,
     TurnErrorCategory, TurnRunId, TurnScope,
@@ -45,9 +48,12 @@ use crate::binding_ref::{
 };
 use crate::command_dispatch::{
     ProductCommandAdmission, ProductCommandAdmissionService, ProductCommandContext,
-    ProductCommandService, RejectingProductCommandAdmissionService, RejectingProductCommandService,
+    RejectingProductCommandAdmissionService,
 };
-use crate::commands::ProductCommand;
+use crate::commands::{
+    PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID, PRODUCT_MODEL_COMMAND_OPERATION_ID, ProductCommand,
+    ProductLifecycleCommandInput, ProductModelCommandInput,
+};
 use crate::error::ProductSurfaceFailure;
 use crate::inbound_turn::{InboundTurnService, InboundUserMessageDispatch};
 use crate::ledger::{IdempotencyDecision, IdempotencyLedger};
@@ -66,7 +72,7 @@ pub struct DefaultProductSurface {
     before_inbound_policy: Arc<dyn BeforeInboundPolicy>,
     binding_service: Arc<dyn ConversationBindingService>,
     command_admission_service: Arc<dyn ProductCommandAdmissionService>,
-    command_service: Arc<dyn ProductCommandService>,
+    command_surface: Option<Arc<dyn ProductSurface>>,
     approval_interaction_service: Arc<dyn ApprovalInteractionService>,
     auth_interaction_service: Arc<dyn AuthInteractionService>,
     delivered_gate_routes: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore>,
@@ -84,7 +90,7 @@ impl DefaultProductSurface {
             before_inbound_policy: Arc::new(NoopBeforeInboundPolicy),
             binding_service,
             command_admission_service: Arc::new(RejectingProductCommandAdmissionService),
-            command_service: Arc::new(RejectingProductCommandService),
+            command_surface: None,
             approval_interaction_service: Arc::new(RejectingApprovalInteractionService),
             auth_interaction_service: Arc::new(RejectingAuthInteractionService),
             delivered_gate_routes: Arc::new(ironclaw_outbound::NoopDeliveredGateRouteStore),
@@ -107,11 +113,11 @@ impl DefaultProductSurface {
         self
     }
 
-    pub fn with_product_command_service(
+    pub fn with_product_command_surface(
         mut self,
-        command_service: Arc<dyn ProductCommandService>,
+        command_surface: Arc<dyn ProductSurface>,
     ) -> Self {
-        self.command_service = command_service;
+        self.command_surface = Some(command_surface);
         self
     }
 
@@ -337,7 +343,7 @@ impl DefaultProductSurface {
                         before_inbound_policy: &*self.before_inbound_policy,
                         binding_service: &*self.binding_service,
                         command_admission_service: &*self.command_admission_service,
-                        command_service: &*self.command_service,
+                        command_surface: self.command_surface.as_deref(),
                         approval_interaction_service: &*self.approval_interaction_service,
                         auth_interaction_service: &*self.auth_interaction_service,
                         delivered_gate_routes: &*self.delivered_gate_routes,
@@ -429,7 +435,7 @@ struct DispatchPorts<'a> {
     before_inbound_policy: &'a dyn BeforeInboundPolicy,
     binding_service: &'a dyn ConversationBindingService,
     command_admission_service: &'a dyn ProductCommandAdmissionService,
-    command_service: &'a dyn ProductCommandService,
+    command_surface: Option<&'a dyn ProductSurface>,
     approval_interaction_service: &'a dyn ApprovalInteractionService,
     auth_interaction_service: &'a dyn AuthInteractionService,
     delivered_gate_routes: &'a dyn ironclaw_outbound::DeliveredGateRouteStore,
@@ -1122,11 +1128,14 @@ async fn dispatch_payload(
                     return Ok(DispatchedAction { ack, dispatch_kind });
                 }
             }
-            let ack = ports
-                .command_service
-                .execute(context, command)
-                .await
-                .map_err(product_surface_failure)?;
+            let ack = dispatch_product_command(
+                envelope,
+                action_id,
+                ports.binding_service,
+                ports.command_surface,
+                command,
+            )
+            .await?;
             let dispatch_kind = dispatch_kind_from_command_ack(&ack, envelope.payload())?;
             Ok(DispatchedAction { ack, dispatch_kind })
         }
@@ -1624,6 +1633,91 @@ fn product_surface_failure(error: ProductSurfaceError) -> ProductSurfaceFailure 
             reason: format!("product command surface failed: {:?}", error.code),
         },
     }
+}
+
+async fn dispatch_product_command(
+    envelope: &ProductInboundEnvelope,
+    action_id: crate::ProductActionId,
+    binding_service: &dyn ConversationBindingService,
+    command_surface: Option<&dyn ProductSurface>,
+    command: ProductCommand,
+) -> Result<ProductInboundAck, ProductSurfaceFailure> {
+    if matches!(
+        command,
+        ProductCommand::Status | ProductCommand::Unknown { .. }
+    ) {
+        return Ok(command_rejected_ack(&command));
+    }
+    let Some(command_surface) = command_surface else {
+        return Ok(command_rejected_ack(&command));
+    };
+    let (operation_id, input, command_name) = product_command_operation(command)?;
+    let binding = lookup_interaction_binding(envelope, binding_service).await?;
+    let caller = ProductSurfaceCaller::new(
+        binding.tenant_id,
+        binding.actor_user_id,
+        binding.agent_id,
+        binding.project_id,
+    );
+    let response = command_surface
+        .invoke(
+            caller,
+            ProductSurfaceInvokeRequest {
+                operation_id,
+                input,
+                activity_id: ActivityId::from_uuid(action_id.as_uuid()),
+            },
+        )
+        .await
+        .map_err(product_surface_failure)?;
+    Ok(ProductInboundAck::CommandResult {
+        command: command_name,
+        payload: ProductCommandResultPayload::new(response.output),
+    })
+}
+
+fn product_command_operation(
+    command: ProductCommand,
+) -> Result<(CapabilityId, serde_json::Value, String), ProductSurfaceFailure> {
+    match command {
+        ProductCommand::Lifecycle { action } => {
+            let command_name = action.command_name().to_string();
+            Ok((
+                command_operation_id(PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID)?,
+                serde_json::to_value(ProductLifecycleCommandInput { action })
+                    .map_err(product_command_internal_error)?,
+                command_name,
+            ))
+        }
+        ProductCommand::Model { action } => Ok((
+            command_operation_id(PRODUCT_MODEL_COMMAND_OPERATION_ID)?,
+            serde_json::to_value(ProductModelCommandInput { action })
+                .map_err(product_command_internal_error)?,
+            "model".to_string(),
+        )),
+        ProductCommand::Status | ProductCommand::Unknown { .. } => {
+            unreachable!("unsupported product commands are rejected before operation mapping")
+        }
+    }
+}
+
+fn command_operation_id(id: &str) -> Result<CapabilityId, ProductSurfaceFailure> {
+    CapabilityId::new(id).map_err(|error| ProductSurfaceFailure::Transient {
+        reason: format!("invalid product command operation id: {error}"),
+    })
+}
+
+fn product_command_internal_error(error: serde_json::Error) -> ProductSurfaceFailure {
+    ProductSurfaceFailure::Transient {
+        reason: format!("product command serialization failed: {error}"),
+    }
+}
+
+fn command_rejected_ack(command: &ProductCommand) -> ProductInboundAck {
+    ProductInboundAck::Rejected(ProductRejection::permanent(
+        ProductRejectionKind::PolicyDenied,
+        format!("command routing unavailable: {}", command.name()),
+    ))
 }
 
 fn dispatch_kind_from_command_ack(

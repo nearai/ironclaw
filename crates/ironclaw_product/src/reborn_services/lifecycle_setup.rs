@@ -6,12 +6,12 @@ use ironclaw_host_api::{
 };
 
 use crate::{
-    ChannelConfigFacade, LifecycleExtensionCredentialRequirement, LifecyclePackageKind,
-    LifecyclePackageRef, LifecycleProductContext, LifecycleProductFacade, LifecycleProductResponse,
-    LifecycleProductSurfaceContext, ProductSetupExtensionRequest, ProductSurfaceFailure,
-    RebornChannelConfigField, RebornExtensionCredentialSetup, RebornExtensionSetupField,
-    RebornExtensionSetupSecret, RebornSetupExtensionResponse, RebornViewDescriptor,
-    lifecycle_product_surface_error,
+    ChannelConfigProductService, LifecycleExtensionCredentialRequirement, LifecyclePackageKind,
+    LifecyclePackageRef, LifecycleProductContext, LifecycleProductResponse,
+    LifecycleProductService, LifecycleProductSurfaceContext, ProductSetupExtensionRequest,
+    ProductSurfaceFailure, RebornChannelConfigField, RebornExtensionCredentialSetup,
+    RebornExtensionSetupField, RebornExtensionSetupSecret, RebornSetupExtensionResponse,
+    RebornViewDescriptor, lifecycle_product_surface_error,
 };
 
 use super::{
@@ -31,9 +31,9 @@ enum SetupAction {
 }
 
 pub(super) async fn setup_extension_view(
-    facade: &dyn LifecycleProductFacade,
+    service: &dyn LifecycleProductService,
     extension_credentials: Option<&dyn ExtensionCredentialSetupService>,
-    channel_config: Option<&dyn ChannelConfigFacade>,
+    channel_config: Option<&dyn ChannelConfigProductService>,
     caller: ProductSurfaceCaller,
     params: serde_json::Value,
 ) -> Result<RebornSetupExtensionResponse, ProductSurfaceError> {
@@ -42,7 +42,7 @@ pub(super) async fn setup_extension_view(
         .map_err(ProductSurfaceFailure::from)
         .map_err(map_lifecycle_error)?;
     setup_extension(
-        facade,
+        service,
         extension_credentials,
         channel_config,
         caller,
@@ -53,9 +53,9 @@ pub(super) async fn setup_extension_view(
 }
 
 pub(super) async fn submit_extension_setup_capability(
-    facade: &dyn LifecycleProductFacade,
+    service: &dyn LifecycleProductService,
     extension_credentials: Option<&dyn ExtensionCredentialSetupService>,
-    channel_config: Option<&dyn ChannelConfigFacade>,
+    channel_config: Option<&dyn ChannelConfigProductService>,
     caller: ProductSurfaceCaller,
     input: serde_json::Value,
 ) -> Result<(), ProductSurfaceError> {
@@ -81,7 +81,7 @@ pub(super) async fn submit_extension_setup_capability(
     let request = serde_json::from_value(serde_json::Value::Object(object))
         .map_err(|_| validation_error("input", ProductSurfaceValidationCode::InvalidValue))?;
     setup_extension(
-        facade,
+        service,
         extension_credentials,
         channel_config,
         caller,
@@ -93,9 +93,9 @@ pub(super) async fn submit_extension_setup_capability(
 }
 
 pub(super) async fn setup_extension(
-    facade: &dyn LifecycleProductFacade,
+    service: &dyn LifecycleProductService,
     extension_credentials: Option<&dyn ExtensionCredentialSetupService>,
-    channel_config: Option<&dyn ChannelConfigFacade>,
+    channel_config: Option<&dyn ChannelConfigProductService>,
     caller: ProductSurfaceCaller,
     package_ref: LifecyclePackageRef,
     request: ProductSetupExtensionRequest,
@@ -110,7 +110,7 @@ pub(super) async fn setup_extension(
         agent_id: caller.agent_id,
         project_id: caller.project_id,
     });
-    let lifecycle = project_package(facade, context.clone(), package_ref.clone()).await?;
+    let lifecycle = project_package(service, context.clone(), package_ref.clone()).await?;
     let requirements = extension_setup_credentials::requirements(&lifecycle);
     if action == SetupAction::Submit {
         let mut submit = extension_setup_credentials::parse_submit_payload(request)?;
@@ -133,7 +133,7 @@ pub(super) async fn setup_extension(
             submit.secrets,
         )
         .await?;
-        let refreshed = project_package(facade, context, package_ref).await?;
+        let refreshed = project_package(service, context, package_ref).await?;
         let refreshed_requirements = extension_setup_credentials::requirements(&refreshed);
         return setup_extension_response(
             extension_credentials,
@@ -157,15 +157,15 @@ pub(super) async fn setup_extension(
 }
 
 async fn project_package(
-    facade: &dyn LifecycleProductFacade,
+    service: &dyn LifecycleProductService,
     context: LifecycleProductContext,
     package_ref: LifecyclePackageRef,
 ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
-    facade.project_package(context, package_ref).await
+    service.project_package(context, package_ref).await
 }
 
 async fn channel_field_status(
-    channel_config: Option<&dyn ChannelConfigFacade>,
+    channel_config: Option<&dyn ChannelConfigProductService>,
     extension_id: &ExtensionId,
 ) -> Result<Vec<RebornChannelConfigField>, ProductSurfaceError> {
     match channel_config {
@@ -215,7 +215,7 @@ fn route_channel_config_values(
 
 async fn setup_extension_response(
     extension_credentials: Option<&dyn ExtensionCredentialSetupService>,
-    channel_config: Option<&dyn ChannelConfigFacade>,
+    channel_config: Option<&dyn ChannelConfigProductService>,
     scope: AuthProductScope,
     extension_id: &ExtensionId,
     lifecycle: LifecycleProductResponse,
@@ -302,7 +302,7 @@ mod tests {
     use super::*;
     use ironclaw_host_api::ProductSurfaceErrorCode;
 
-    /// Scope-cut: the WebUI facade gets a plain sanitized 400, never the
+    /// Scope-cut: the WebUI service gets a plain sanitized 400, never the
     /// host-authored `reason` text — no free-text field exists on the wire
     /// contract (see the variant's doc comment in
     /// `ironclaw_product::error`).

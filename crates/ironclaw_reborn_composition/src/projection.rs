@@ -298,7 +298,7 @@ fn turn_wake_matches_request(
 ///
 /// This exposes runtime projection payloads that WebChat v2 has first-class
 /// SSE frames for: run status and capability activity. Timeline content stays
-/// behind the WebUI timeline facade until the browser event schema grows a
+/// behind the WebUI timeline service until the browser event schema grows a
 /// first-class timeline-entry mapper.
 #[derive(Clone)]
 struct ProductRuntimeProjectionStream {

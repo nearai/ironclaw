@@ -117,7 +117,7 @@ const FROZEN_OTHER_MODE_TYPES: &[&str] = &[
     //     composition surface; shrinks with Slice B (deployment mode becomes a
     //     `DeploymentConfig` value):
     "RebornLocalExtensionManagementPort",
-    "RebornLocalLifecycleFacade",
+    "RebornLocalLifecycleService",
     "RebornLocalRuntimeIdentity",
     "RebornLocalServiceLifecycle",
     "RebornLocalSkillManagementError",

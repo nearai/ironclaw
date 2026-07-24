@@ -1,4 +1,4 @@
-//! Planner facade for loop-family strategy composition.
+//! Planner service for loop-family strategy composition.
 //!
 //! The public trait is intentionally identity-only. The canonical executor
 //! consults strategies through the crate-private `AgentLoopPlannerInternal`

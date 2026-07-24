@@ -1,4 +1,4 @@
-//! Host runtime facade for IronClaw Reborn.
+//! Host runtime service for IronClaw Reborn.
 //!
 //! `ironclaw_host_runtime` is the narrow boundary upper Reborn services build
 //! against. It surfaces both:
@@ -10,13 +10,13 @@
 //!   authorization, approvals, run-state lifecycle, and process spawn) behind
 //!   that contract.
 //!
-//! The facade preserves three important boundaries:
+//! The service preserves three important boundaries:
 //!
 //! - callers see structured capability outcomes instead of lower substrate
 //!   handles;
 //! - approval/auth/resource waits are suspension states, not errors;
 //! - caller/workflow origin taxonomy is intentionally kept outside this lower
-//!   facade. Authority remains in [`ExecutionContext`] (principals, grants,
+//!   service. Authority remains in [`ExecutionContext`] (principals, grants,
 //!   leases, policy); projection selection is an opaque [`SurfaceKind`] label
 //!   the host treats as a cache/version dimension only. Caller-authority
 //!   filtering of which surface a particular UI or upper service is allowed to
@@ -277,7 +277,7 @@ impl fmt::Display for CapabilitySurfaceVersion {
 /// in upper-stack vocabulary (agent loop, adapter, admin, …) and must not
 /// derive authority or filtering decisions from the label. Upper layers are
 /// responsible for deciding which surface label a given caller is allowed to
-/// render; this lower facade simply returns the projection associated with
+/// render; this lower service simply returns the projection associated with
 /// whatever label is presented.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SurfaceKind(String);
@@ -843,7 +843,7 @@ pub trait RuntimeBackendHealth: Send + Sync {
     ) -> Result<Vec<RuntimeKind>, HostRuntimeError>;
 }
 
-/// Contract for the Reborn host runtime facade.
+/// Contract for the Reborn host runtime service.
 pub type RuntimeInvocation = (ExecutionContext, CapabilityId, ResourceEstimate, Value);
 pub type RuntimeApprovalResume = (
     ExecutionContext,

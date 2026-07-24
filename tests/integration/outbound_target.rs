@@ -1,16 +1,16 @@
 //! C-SYNTH outbound seam: the `outbound_target_tools` group surfaces the two
 //! local-dev synthetic `outbound_delivery_*` capabilities, dispatched through
 //! the REAL production synthetic-capability wrap over an injected
-//! `FakeOutboundPreferencesFacade` at the production-wired facade trait seam.
+//! `FakeOutboundPreferencesService` at the production-wired service trait seam.
 //!
 //! Covers the reachable model-visible routes: `targets_list` happy path (its
-//! only reachable route — every facade error is `driver_unavailable`);
-//! `target_set` happy path; settings-`Deny` → `Failed{policy_denied}`; facade
+//! only reachable route — every service error is `driver_unavailable`);
+//! `target_set` happy path; settings-`Deny` → `Failed{policy_denied}`; service
 //! `NotFound` → `Failed{invalid_input}`; approval gate `Ask` → approve applies
 //! the preference / deny leaves it unchanged.
 //!
-//! Read-back through the SAME facade double (`recorded_set_target_ids`) proves
-//! a `Completed`/applied outcome actually reached the facade seam — a no-op set
+//! Read-back through the SAME service double (`recorded_set_target_ids`) proves
+//! a `Completed`/applied outcome actually reached the service seam — a no-op set
 //! that still fabricated a success payload would leave it empty.
 
 #[allow(dead_code)]
@@ -90,7 +90,7 @@ async fn targets_list_capability_dispatches_and_returns_targets() {
 }
 
 #[tokio::test]
-async fn target_set_capability_applies_preference_through_facade() {
+async fn target_set_capability_applies_preference_through_service() {
     let group = RebornIntegrationGroup::outbound_target_tools()
         .await
         .expect("outbound-target-tools group builds");
@@ -116,9 +116,9 @@ async fn target_set_capability_applies_preference_through_facade() {
         .assert_tool_invoked("builtin.outbound_delivery_target_set")
         .await
         .expect("target_set dispatched through the synthetic-capability port");
-    // Assert the model-visible payload itself, not just the facade double's
+    // Assert the model-visible payload itself, not just the service double's
     // log — proves the preference round-tripped through the capability's own
-    // serialized response, not merely that the facade was called.
+    // serialized response, not merely that the service was called.
     let output = harness
         .tool_result_output("builtin.outbound_delivery_target_set")
         .await
@@ -133,15 +133,15 @@ async fn target_set_capability_applies_preference_through_facade() {
         serde_json::json!("available"),
         "tool result must report the applied target as available; saw {output}"
     );
-    let facade = group
+    let service = group
         .capability_harness()
         .expect("outbound_target_tools always uses HostRuntime")
-        .outbound_preferences_facade_for_test()
-        .expect("outbound_target_tools always wires a facade double");
+        .outbound_preferences_service_for_test()
+        .expect("outbound_target_tools always wires a service double");
     assert_eq!(
-        facade.recorded_set_target_ids(),
+        service.recorded_set_target_ids(),
         vec![KNOWN_TARGET_ID.to_string()],
-        "the applied preference must reach the facade set seam exactly once"
+        "the applied preference must reach the service set seam exactly once"
     );
 }
 
@@ -225,16 +225,16 @@ fn target_set_disabled_by_settings_routes_to_policy_denied() {
                 .await
                 .expect("a disabled tool surfaces as Failed(PolicyDenied)");
             // A policy-denied dispatch must short-circuit before ever reaching the
-            // facade set seam — proves the deny happened at the settings-decision gate,
+            // service set seam — proves the deny happened at the settings-decision gate,
             // not merely that the model observed a policy_denied error string.
-            let facade = group
+            let service = group
                 .capability_harness()
                 .expect("outbound_target_tools always uses HostRuntime")
-                .outbound_preferences_facade_for_test()
-                .expect("outbound_target_tools always wires a facade double");
+                .outbound_preferences_service_for_test()
+                .expect("outbound_target_tools always wires a service double");
             assert!(
-                facade.recorded_set_target_ids().is_empty(),
-                "a policy-denied target_set must not reach the facade set seam"
+                service.recorded_set_target_ids().is_empty(),
+                "a policy-denied target_set must not reach the service set seam"
             );
         },
     );
@@ -284,15 +284,15 @@ async fn target_set_approval_gate_approve_applies_preference() {
         .await
         .expect("post-resume tool result must reflect the approved target");
 
-    let facade = group
+    let service = group
         .capability_harness()
         .expect("outbound_target_tools always uses HostRuntime")
-        .outbound_preferences_facade_for_test()
-        .expect("outbound_target_tools always wires a facade double");
+        .outbound_preferences_service_for_test()
+        .expect("outbound_target_tools always wires a service double");
     assert_eq!(
-        facade.recorded_set_target_ids(),
+        service.recorded_set_target_ids(),
         vec![KNOWN_TARGET_ID.to_string()],
-        "the approved preference must reach the facade set seam after resume"
+        "the approved preference must reach the service set seam after resume"
     );
 }
 
@@ -342,16 +342,16 @@ async fn target_set_approval_gate_deny_leaves_preference_unchanged() {
         .await
         .expect("a denied approval gate surfaces a model-visible gate-declined failure");
 
-    // A denied gate must short-circuit BEFORE the facade set — the preference is
+    // A denied gate must short-circuit BEFORE the service set — the preference is
     // never applied.
-    let facade = group
+    let service = group
         .capability_harness()
         .expect("outbound_target_tools always uses HostRuntime")
-        .outbound_preferences_facade_for_test()
-        .expect("outbound_target_tools always wires a facade double");
+        .outbound_preferences_service_for_test()
+        .expect("outbound_target_tools always wires a service double");
     assert!(
-        facade.recorded_set_target_ids().is_empty(),
-        "a denied target_set must not reach the facade set seam"
+        service.recorded_set_target_ids().is_empty(),
+        "a denied target_set must not reach the service set seam"
     );
 }
 

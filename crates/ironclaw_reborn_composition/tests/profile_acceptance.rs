@@ -1,10 +1,10 @@
 use ironclaw_reborn_composition::{
-    RebornCompositionProfile, RebornFacadeReadiness, RebornHostBindings, RebornReadiness,
-    RebornReadinessDiagnostic, RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
+    RebornCompositionProfile, RebornHostBindings, RebornReadiness, RebornReadinessDiagnostic,
+    RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
     RebornReadinessDiagnosticStatus, RebornReadinessState, RebornRuntime, RebornRuntimeInput,
-    RebornRuntimeProfileOptions, RebornWorkerReadiness, build_reborn_runtime,
-    hosted_single_tenant_volume_runtime_policy, local_dev_yolo_runtime_policy,
-    local_runtime_build_input_with_options,
+    RebornRuntimeProfileOptions, RebornServiceReadiness, RebornWorkerReadiness,
+    build_reborn_runtime, hosted_single_tenant_volume_runtime_policy,
+    local_dev_yolo_runtime_policy, local_runtime_build_input_with_options,
 };
 
 use ironclaw_host_api::runtime_policy::{FilesystemBackendKind, RuntimeProfile, SecretMode};
@@ -183,7 +183,7 @@ fn readiness_serializes_diagnostics_with_stable_redacted_vocabulary() {
         json!({
             "profile": "production",
             "state": "production-validated",
-            "facades": {
+            "services": {
                 "host_runtime": true,
                 "turn_coordinator": true,
                 "product_auth": true
@@ -208,7 +208,7 @@ fn readiness_deserializes_legacy_payload_without_diagnostics() {
     let readiness: RebornReadiness = serde_json::from_value(json!({
         "profile": "production",
         "state": "production-validated",
-        "facades": {
+        "services": {
             "host_runtime": true,
             "turn_coordinator": true,
             "product_auth": false
@@ -239,7 +239,7 @@ fn hosted_single_tenant_readiness_serializes_as_ready_single_tenant_profile() {
         json!({
             "profile": "hosted-single-tenant",
             "state": "hosted-single-tenant-validated",
-            "facades": {
+            "services": {
                 "host_runtime": true,
                 "turn_coordinator": true,
                 "product_auth": true
@@ -264,7 +264,7 @@ fn readiness_deserializes_diagnostics_payload_into_typed_enums() {
     let readiness: RebornReadiness = serde_json::from_value(json!({
         "profile": "production",
         "state": "production-validated",
-        "facades": {
+        "services": {
             "host_runtime": true,
             "turn_coordinator": true,
             "product_auth": true
@@ -695,7 +695,7 @@ fn readiness_for_contract(
     RebornReadiness {
         profile,
         state,
-        facades: RebornFacadeReadiness {
+        services: RebornServiceReadiness {
             host_runtime: true,
             turn_coordinator: true,
             product_auth: true,

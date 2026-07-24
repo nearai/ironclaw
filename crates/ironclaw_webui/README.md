@@ -29,7 +29,7 @@ across it:
 The native WebChat v2 HTTP routes on top of
 `ironclaw_host_api::ProductSurface`. Handlers are thin: they read the
 `ProductSurfaceCaller` + `WebUiV2Capabilities` injected as axum extensions,
-dispatch to the facade, and render redacted responses through `WebUiV2HttpError`.
+dispatch to the service, and render redacted responses through `WebUiV2HttpError`.
 
 - `webui_v2_router(state)` / `webui_v2_router_with_options(state, opts)` — build
   the `axum::Router` from a `WebUiV2State`.
@@ -46,7 +46,7 @@ dispatch to the facade, and render redacted responses through `WebUiV2HttpError`
   one `SseCapacity` budget keyed by `(tenant, user)`; both render
   `ProductOutboundEnvelope`s into the redacted `WebChatV2EventFrame` schema and
   resume via `Last-Event-ID`. Slots are RAII and bounded by a max stream
-  lifetime so a stuck client or facade cannot pin a slot.
+  lifetime so a stuck client or service cannot pin a slot.
 - **SPA bundle:** the Vite/TypeScript frontend under `frontend/` is compiled by
   `build.rs` into Cargo's `OUT_DIR` and served from `src/webui_v2/static_assets/`.
 
@@ -84,7 +84,7 @@ attach under their feature flag.
 
 ## Layering & boundaries
 
-- Reaches the rest of Reborn **only** through composition's facade
+- Reaches the rest of Reborn **only** through composition's service
   (`RebornWebuiBundle`, product-auth mount builders, the
   `PublicRouteMount`/`ProtectedRouteMount` vocabulary) and
   `ironclaw_host_api::ProductSurface`.

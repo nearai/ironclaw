@@ -18,7 +18,7 @@ use ironclaw_host_runtime::{
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
 use ironclaw_product::{
-    OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OutboundPreferencesProductFacade,
+    OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OutboundPreferencesProductService,
     RebornSetOutboundPreferencesRequest,
 };
 
@@ -31,11 +31,11 @@ pub(crate) fn extend_builtin_first_party_package(
 
 pub(crate) fn insert_handler(
     registry: &mut FirstPartyCapabilityRegistry,
-    facade: Arc<dyn OutboundPreferencesProductFacade>,
+    service: Arc<dyn OutboundPreferencesProductService>,
 ) -> Result<(), HostApiError> {
     registry.insert_handler(
         CapabilityId::new(OUTBOUND_PREFERENCES_SET_CAPABILITY_ID)?,
-        Arc::new(SetOutboundPreferencesHandler { facade }),
+        Arc::new(SetOutboundPreferencesHandler { service }),
     );
     Ok(())
 }
@@ -71,7 +71,7 @@ fn manifest() -> Result<CapabilityManifest, ExtensionError> {
 }
 
 struct SetOutboundPreferencesHandler {
-    facade: Arc<dyn OutboundPreferencesProductFacade>,
+    service: Arc<dyn OutboundPreferencesProductService>,
 }
 
 #[async_trait]
@@ -86,7 +86,7 @@ impl FirstPartyCapabilityHandler for SetOutboundPreferencesHandler {
         let input: RebornSetOutboundPreferencesRequest = serde_json::from_value(request.input)
             .map_err(|_| dispatch_error(RuntimeDispatchErrorKind::InputEncode, started))?;
         let response = self
-            .facade
+            .service
             .set_outbound_preferences(caller, input)
             .await
             .map_err(|error| dispatch_error(map_services_error(error), started))?;

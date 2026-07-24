@@ -909,7 +909,7 @@ async fn resolve_local_dev_secret_master_key_rejects_empty_env_even_with_cached_
     // Seed directly (not through the resolver): this test is about
     // empty-env/cached-file precedence, not the keychain step, and this
     // crate can't suppress the OS keychain in-process (`forbid(unsafe_code)`
-    // blocks `set_var`; see the fallthrough test in `tests/facade_factory.rs`).
+    // blocks `set_var`; see the fallthrough test in `tests/service_factory.rs`).
     std::fs::write(
         &key_path,
         ironclaw_secrets::keychain::generate_master_key_hex(),
@@ -1060,7 +1060,7 @@ async fn open_local_dev_secret_store_is_visible_across_reopens_of_the_same_root(
 
 // The keychain-fallthrough + idempotency test for
 // `resolve_local_dev_secret_master_key_with_env` lives in
-// `tests/facade_factory.rs`
+// `tests/service_factory.rs`
 // (`local_dev_secret_store_falls_through_suppressed_keychain_to_dotfile`):
 // proving it needs the real process env var `IRONCLAW_DISABLE_OS_KEYCHAIN`
 // set, and `set_var` is `unsafe` — blocked here by this crate's
@@ -2452,12 +2452,12 @@ fn production_readiness_reflects_product_auth_presence() {
         without_auth.state,
         RebornReadinessState::ProductionValidated
     );
-    assert!(!without_auth.facades.product_auth);
+    assert!(!without_auth.services.product_auth);
     assert!(without_auth.diagnostics.is_empty());
 
     let with_auth = readiness_for(RebornCompositionProfile::Production, true, true, true);
     assert_eq!(with_auth.state, RebornReadinessState::ProductionValidated);
-    assert!(with_auth.facades.product_auth);
+    assert!(with_auth.services.product_auth);
     assert!(with_auth.diagnostics.is_empty());
 }
 

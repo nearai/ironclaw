@@ -35,12 +35,12 @@
 //! 9. [`trace_capture`] — `trace_capture_turn_event_sink_for_test`, the
 //!    production `TraceCaptureTurnEventSink` factory for the integration-test
 //!    harness (C-TRACECAP seam).
-//! 10. [`automation`] — `local_dev_automation_product_facade_for_test`, the
-//!     production `RebornAutomationProductFacade` constructor for the
+//! 10. [`automation`] — `local_dev_automation_product_service_for_test`, the
+//!     production `RebornAutomationProductService` constructor for the
 //!     automations-cold-LIST scenario (W5-WEBUI-API-1 Enabler B.2), plus
 //!     `local_dev_trigger_active_run_lookup_for_test` (the raw
 //!     `TriggerActiveRunLookup`, for wiring the `builtin.trigger_list`
-//!     capability directly rather than through the facade, #5886).
+//!     capability directly rather than through the service, #5886).
 //! 11. [`projection`] — `build_product_event_stream_for_test`, a deliberately
 //!     narrowed `ProjectionStream` (turn-lifecycle events only) for the SSE
 //!     activity-stream scenario (W5-WEBUI-API-1 Enabler A).
@@ -57,7 +57,7 @@
 //!     durable tool-result projection coverage (issue #5838).
 //! 15. [`channel_connection`] — [`ChannelConnectionTestBundle`],
 //!     `build_channel_connection_for_test` — the REAL generic
-//!     channel-connection facade (§6.4) + OAuth-callback-shaped identity
+//!     channel-connection service (§6.4) + OAuth-callback-shaped identity
 //!     binding over a composed harness's own stores, late-bound into the
 //!     same removal-cleanup slot production fills (C-SLACK-LIFECYCLE seam,
 //!     issue #6105).
@@ -82,7 +82,7 @@ mod user_profile;
 
 #[cfg(feature = "test-support")]
 pub use automation::{
-    local_dev_automation_product_facade_for_test, local_dev_trigger_active_run_lookup_for_test,
+    local_dev_automation_product_service_for_test, local_dev_trigger_active_run_lookup_for_test,
 };
 pub use budget_gateway::{
     BudgetTestGateway, FailingTestGateway, ScriptedReply, assistant_reply_without_text_for_test,

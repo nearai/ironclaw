@@ -390,7 +390,7 @@ where
         });
     }
 
-    /// Validates this graph and then builds the upper facade for production
+    /// Validates this graph and then builds the upper service for production
     /// callers. This consumes the service graph so callers cannot mutate shared
     /// runtime-adapter handoff slots after validation.
     pub fn host_runtime_for_production(
@@ -524,7 +524,7 @@ where
     }
 
     /// Builds and attaches the configured Reborn durable event/audit stores,
-    /// validates production wiring, and returns the host runtime facade.
+    /// validates production wiring, and returns the host runtime service.
     pub async fn host_runtime_for_production_with_event_store_config(
         self,
         event_store_config: RebornEventStoreConfig,

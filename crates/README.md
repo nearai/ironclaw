@@ -56,7 +56,7 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 | `ironclaw_wasm_limiter` | `ironclaw_wasm_limiter` | Shared `wasmtime::ResourceLimiter` used by WASM tool and hook runtimes so memory/table/instance limits do not drift. |
 | `ironclaw_extensions` | `ironclaw_extensions` | Extension manifest, lifecycle, and registration contracts. Owns install/activate/remove semantics; runtime crates consume validated descriptors from here. |
 | `ironclaw_extension_host` | `ironclaw_extension_host` | Generic channel-host assembly: binds installed extensions to inbound/outbound channel surfaces (ingress registration, delivery, per-extension idempotency ledgers) for the Reborn product surface. |
-| `ironclaw_host_runtime` | `ironclaw_host_runtime` | Narrow facade upper Reborn services depend on. Provides `HostRuntime` plus production composition around capability hosting. |
+| `ironclaw_host_runtime` | `ironclaw_host_runtime` | Narrow service upper Reborn services depend on. Provides `HostRuntime` plus production composition around capability hosting. |
 
 ### Durable state, eventing, and read models
 
@@ -90,8 +90,8 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 | `ironclaw_first_party_extensions` | `ironclaw_first_party_extensions` | Concrete first-party userland extension implementations behind scoped handles. |
 | `ironclaw_first_party_extension_ports` | `ironclaw_first_party_extension_ports` | Loop-facing adapters for first-party extensions: skill activation/context/execution ports over loop-host and turn-run contracts. |
 | `ironclaw_product` | `ironclaw_product` | Product-adapter contracts for mapping Reborn state and events into product-facing shapes. |
-| `ironclaw_product` | `ironclaw_product` | Product-facing workflow facade: inbound turn service, idempotency ledger, binding resolution. |
-| `ironclaw_product` | `ironclaw_product` | Product-facing workflow facade plus feature-gated durable filesystem/libSQL/PostgreSQL idempotency ledger adapters. |
+| `ironclaw_product` | `ironclaw_product` | Product-facing workflow service: inbound turn service, idempotency ledger, binding resolution. |
+| `ironclaw_product` | `ironclaw_product` | Product-facing workflow service plus feature-gated durable filesystem/libSQL/PostgreSQL idempotency ledger adapters. |
 | `ironclaw_engine` | `ironclaw_engine` | Unified thread-capability-CodeAct execution engine. It is closer to product/agent orchestration than low-level host policy. |
 | `ironclaw_skills` | `ironclaw_skills` | Skill selection, scoring, and management. |
 | `ironclaw_gateway` | `ironclaw_gateway` | Browser gateway frontend assets, layout configuration, and widget extension system. |

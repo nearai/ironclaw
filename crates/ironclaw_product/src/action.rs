@@ -1,7 +1,7 @@
 //! Durable inbound action ledger for idempotent product workflow dispatch.
 //!
 //! A [`ProductInboundAction`] represents a single mutating action accepted by the
-//! workflow facade. It is keyed by tenant + installation + external event fingerprint
+//! workflow service. It is keyed by tenant + installation + external event fingerprint
 //! so that retried/duplicated webhook deliveries are idempotent.
 
 use crate::{

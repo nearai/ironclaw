@@ -1,7 +1,7 @@
-//! Tests for `RebornAutomationProductFacade::resolve_run_thread_scope`.
+//! Tests for `RebornAutomationProductService::resolve_run_thread_scope`.
 //!
 //! Split from `automation.rs` to keep that file under the project's 800-900
-//! line file-size target (architecture rule #5).  The listing-facade tests
+//! line file-size target (architecture rule #5).  The listing-service tests
 //! remain in `automation.rs`; this file owns resolver-only coverage.
 
 use std::{sync::Arc, time::Duration};
@@ -9,7 +9,7 @@ use std::{sync::Arc, time::Duration};
 use async_trait::async_trait;
 use ironclaw_host_api::ProductSurfaceErrorCode;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
-use ironclaw_product::{AutomationProductFacade, ProductAgentBoundCaller};
+use ironclaw_product::{AutomationProductService, ProductAgentBoundCaller};
 use ironclaw_triggers::{
     ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClearActiveFireRequest,
     FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
@@ -19,8 +19,8 @@ use ironclaw_triggers::{
 };
 use ironclaw_turns::TurnRunId;
 
-use super::facade_over;
-use crate::automation::facade::RebornAutomationProductFacade;
+use super::service_over;
+use crate::automation::service::RebornAutomationProductService;
 
 // ---------------------------------------------------------------------------
 // Shared test helpers
@@ -283,7 +283,7 @@ impl TriggerRepository for FailingThreadLookupRepository {
 async fn resolve_run_thread_scope_returns_matching_trigger_scope_via_direct_lookup() {
     // Positive path: a run row with a known thread_id exists and the trigger
     // belongs to the caller.  Uses InMemoryTriggerRepository (the real impl)
-    // to verify the full chain from facade → repository → returned scope.
+    // to verify the full chain from service → repository → returned scope.
     let repo = Arc::new(InMemoryTriggerRepository::default());
     let c = caller();
     let trigger_id = TriggerId::new();
@@ -291,8 +291,8 @@ async fn resolve_run_thread_scope_returns_matching_trigger_scope_via_direct_look
     let thread_id = ThreadId::new("01890f0f-test-7000-8000-000000000001").expect("valid thread id");
     seed_accepted_run(&repo, trigger_id, &c, thread_id.clone()).await;
 
-    let facade = facade_over(repo);
-    let resolved = facade
+    let service = service_over(repo);
+    let resolved = service
         .resolve_run_thread_scope(c.clone(), &thread_id)
         .await
         .expect("resolver succeeds")
@@ -324,8 +324,8 @@ async fn resolve_run_thread_scope_returns_none_for_run_belonging_to_different_cr
 
     // The caller (user-alpha) asks about a thread that belongs to user-beta's
     // trigger.  Must get None, not the scope of user-beta's trigger.
-    let facade = facade_over(repo);
-    let result = facade
+    let service = service_over(repo);
+    let result = service
         .resolve_run_thread_scope(c, &thread_id)
         .await
         .expect("resolver must not error");
@@ -342,8 +342,8 @@ async fn resolve_run_thread_scope_returns_none_for_unknown_thread_id() {
     let c = caller();
     let unknown_thread =
         ThreadId::new("01890f0f-test-7000-8000-000000009999").expect("valid thread id");
-    let facade = facade_over(repo);
-    let result = facade
+    let service = service_over(repo);
+    let result = service
         .resolve_run_thread_scope(c, &unknown_thread)
         .await
         .expect("resolver must not error on unknown thread");
@@ -352,9 +352,9 @@ async fn resolve_run_thread_scope_returns_none_for_unknown_thread_id() {
 
 #[tokio::test]
 async fn resolve_run_thread_scope_backend_error_maps_to_unavailable() {
-    let facade = facade_over(Arc::new(FailingThreadLookupRepository(HangOrFail::Fail)));
+    let service = service_over(Arc::new(FailingThreadLookupRepository(HangOrFail::Fail)));
     let thread_id = ThreadId::new("01890f0f-test-7000-8000-000000000001").expect("valid thread id");
-    let error = facade
+    let error = service
         .resolve_run_thread_scope(caller(), &thread_id)
         .await
         .expect_err("backend error must propagate as 503");
@@ -414,8 +414,8 @@ async fn resolve_run_thread_scope_returns_none_for_trigger_with_no_agent_id() {
     // The resolver must return None: even though the run row exists and the
     // caller's tenant/user/project match, the NULL trigger agent_id does not
     // equal Some(caller.agent_id), so the visibility predicate rejects it.
-    let facade = facade_over(repo);
-    let result = facade
+    let service = service_over(repo);
+    let result = service
         .resolve_run_thread_scope(c, &thread_id)
         .await
         .expect("resolver must not error");
@@ -428,7 +428,7 @@ async fn resolve_run_thread_scope_returns_none_for_trigger_with_no_agent_id() {
 
 #[tokio::test]
 async fn resolve_run_thread_scope_timeout_maps_to_unavailable() {
-    let facade = RebornAutomationProductFacade::with_backend_timeout(
+    let service = RebornAutomationProductService::with_backend_timeout(
         Arc::new(FailingThreadLookupRepository(HangOrFail::Hang)),
         super::missing_lookup(),
         Duration::from_millis(10),
@@ -436,10 +436,10 @@ async fn resolve_run_thread_scope_timeout_maps_to_unavailable() {
     let thread_id = ThreadId::new("01890f0f-test-7000-8000-000000000001").expect("valid thread id");
     let error = tokio::time::timeout(
         Duration::from_secs(2),
-        facade.resolve_run_thread_scope(caller(), &thread_id),
+        service.resolve_run_thread_scope(caller(), &thread_id),
     )
     .await
-    .expect("facade timeout should complete promptly")
+    .expect("service timeout should complete promptly")
     .expect_err("stalled repository should time out");
     assert_eq!(error.code, ProductSurfaceErrorCode::Unavailable);
     assert_eq!(error.status_code, 503);

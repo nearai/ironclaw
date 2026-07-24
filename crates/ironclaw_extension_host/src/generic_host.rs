@@ -2,12 +2,12 @@
 //!
 //! Assembly only: this module constructs the generic lifecycle host with
 //! concrete loaders over the host-runtime lanes and injects its snapshot
-//! resolver into the dispatch chain. The lifecycle facade
+//! resolver into the dispatch chain. The lifecycle service
 //! (`extension_lifecycle.rs`) remains the durable-lifecycle owner and the
 //! production caller — it drives the host at its choke points
 //! (activation commit, removal, boot restore), so the active snapshot always
-//! mirrors what the facade published. Durable seven-state ownership and the
-//! host-owned removal order move here when the facade collapses (P6).
+//! mirrors what the service published. Durable seven-state ownership and the
+//! host-owned removal order move here when the service collapses (P6).
 //!
 //! Loader dispatch, by the resolved contract's runtime kind:
 //! - `first_party` with a binary-assembled [`NativeExtensionFactory`] → the
@@ -71,7 +71,7 @@ pub struct GenericExtensionHostParams {
 }
 
 /// Construct the generic extension host over the host-runtime lanes and
-/// hydrate it from the facade's durable installation state (every `Enabled`
+/// hydrate it from the service's durable installation state (every `Enabled`
 /// installation activates into the first published generation).
 pub async fn build_generic_extension_host(
     params: GenericExtensionHostParams,
@@ -106,8 +106,8 @@ pub async fn build_generic_extension_host(
     };
     let host = Arc::new(
         ExtensionHost::new(ExtensionHostDeps {
-            // The facade owns durable lifecycle state in P2b; this store is
-            // the host's working set, rehydrated below from the facade's
+            // The service owns durable lifecycle state in P2b; this store is
+            // the host's working set, rehydrated below from the service's
             // durable records at every boot.
             store: Arc::new(RehydratedInstallationRecordStore::default()),
             loader,

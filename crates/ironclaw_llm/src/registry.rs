@@ -177,7 +177,7 @@ pub enum SetupHint {
     /// The wizard renders a `WizardAuthPrompt` and resumes after token return.
     OAuthDeviceCode {
         display_name: String,
-        /// Identifier for [`crate::auth::AuthBackend`] in the auth facade.
+        /// Identifier for [`crate::auth::AuthBackend`] in the auth service.
         backend: String,
     },
     /// Read credentials from a JSON / token file on disk (e.g. Gemini Cloud
@@ -189,7 +189,7 @@ pub enum SetupHint {
         default_path_hint: Option<String>,
     },
     /// Interactive session-token login (NEAR AI). The wizard delegates to
-    /// the auth facade for the OAuth-style session flow.
+    /// the auth service for the OAuth-style session flow.
     SessionToken {
         display_name: String,
         /// URL where the user can manually obtain a session token.

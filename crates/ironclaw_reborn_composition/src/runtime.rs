@@ -1,7 +1,7 @@
 //! Assembled Reborn runtime: substrate + drivers + worker, started as one.
 //!
 //! This module is the "later slice" the crate-level docstring promises:
-//! product-level wiring on top of the substrate facades exposed by
+//! product-level wiring on top of the substrate services exposed by
 //! `build_runtime_substrate`. It is the **only** place in the workspace where
 //! `ironclaw_runner` (drivers, host factory, model gateway bridge),
 //! `ironclaw_threads` (session thread service), and `ironclaw_llm` are
@@ -57,7 +57,7 @@ use ironclaw_product::{
     ApprovalBlockedTurnRun, ApprovalInteractionScope, ApprovalInteractionService,
     ApprovalResolverPort, ApprovalTurnRunLocator, AuthInteractionService,
     DefaultApprovalInteractionService, DefaultAuthInteractionService,
-    LifecycleProductSurfaceContext, OutboundPreferencesProductFacade,
+    LifecycleProductSurfaceContext, OutboundPreferencesProductService,
     PersistentApprovalGranteeResolver, RunStateApprovalInteractionReadModel,
 };
 use ironclaw_runner::loop_exit_applier::{
@@ -124,7 +124,7 @@ use crate::outbound::{
 };
 use crate::outbound::{
     MutableOutboundDeliveryTargetRegistry, OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
-    OutboundDeliveryTargetProvider, RebornOutboundPreferencesFacade,
+    OutboundDeliveryTargetProvider, RebornOutboundPreferencesService,
     outbound_delivery_synthetic_provider,
 };
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
@@ -467,7 +467,7 @@ struct SubmittedTurn {
 /// production [`RebornRuntime::send_user_message`] submit path but returns when
 /// the run first reaches a terminal status *or* parks on a `Blocked*` gate,
 /// instead of waiting only for a terminal status. Gate *resolution* stays on
-/// the WebUI `ProductSurface` facade (`resolve_gate`) per the #3094 seam;
+/// the WebUI `ProductSurface` service (`resolve_gate`) per the #3094 seam;
 /// this type only observes where a run paused.
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone)]
@@ -475,7 +475,7 @@ pub enum RebornTurnDriveOutcome {
     /// The run reached a terminal status without pausing on a gate.
     Terminal(AssistantReply),
     /// The run parked on a user-resolvable gate (auth/approval/resource) and is
-    /// awaiting resolution through the facade. `gate_ref` is required: the
+    /// awaiting resolution through the service. `gate_ref` is required: the
     /// blocked-reason contract carries a `GateRef` for every such block, so its
     /// absence is an invariant violation, not a valid recorder outcome.
     BlockedOnGate {
@@ -572,8 +572,8 @@ pub struct RebornRuntime {
     pub(crate) delivered_gate_routes: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) delivery_coordinator: Option<Arc<ironclaw_product::DeliveryCoordinator>>,
-    pub(crate) channel_facade_slot:
-        Arc<std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionFacade>>>,
+    pub(crate) channel_service_slot:
+        Arc<std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionService>>>,
     pub(crate) channel_config: Arc<crate::extension_host::channel_config::ChannelConfigService>,
     pub(crate) admin_configuration: Arc<ComposedAdminConfigurationService>,
     pub(crate) admin_configuration_uses: Arc<Vec<AdminConfigurationCatalogUse>>,
@@ -645,7 +645,7 @@ pub struct RebornRuntime {
     pub(crate) skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     pub(crate) skill_activation_source: Option<Arc<ComposedSelectableSkillContextSource>>,
     skill_execution_adapter: Option<Arc<ComposedSkillExecutionAdapter>>,
-    /// Operator boot config, carried so the WebUI facade can compose the
+    /// Operator boot config, carried so the WebUI service can compose the
     /// LLM-config settings service over `providers.json` / `config.toml`.
     boot: Option<ironclaw_reborn_config::RebornBootConfig>,
     /// Hot-swap handle for the live LLM provider, when one was wired at boot.
@@ -1371,11 +1371,13 @@ impl RebornRuntime {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn channel_config_facade(&self) -> Option<Arc<dyn ironclaw_product::ChannelConfigFacade>> {
+    pub fn channel_config_service(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_product::ChannelConfigProductService>> {
         Some(Arc::new(
-            crate::extension_host::channel_config::RebornChannelConfigFacade::new(Arc::clone(
-                &self.channel_config,
-            )),
+            crate::extension_host::channel_config::RebornChannelConfigProductService::new(
+                Arc::clone(&self.channel_config),
+            ),
         ))
     }
 
@@ -1692,7 +1694,7 @@ impl RebornRuntime {
     }
 
     /// Operator boot config, when the runtime was assembled with one. The
-    /// WebUI facade uses it to compose the LLM-config settings service.
+    /// WebUI service uses it to compose the LLM-config settings service.
     pub(crate) fn webui_boot_config(&self) -> Option<&ironclaw_reborn_config::RebornBootConfig> {
         self.boot.as_ref()
     }
@@ -1752,7 +1754,7 @@ impl RebornRuntime {
     }
 
     /// Read-only reader exposing the live active/default model id so the WebUI
-    /// facade can price a default-model run (one with no `resolved_model_route`)
+    /// service can price a default-model run (one with no `resolved_model_route`)
     /// against the model that actually ran. Backed by the same hot-swappable
     /// primary provider the model gateway drives, so it tracks operator model
     /// swaps. `None` when no LLM provider was wired at boot.
@@ -1840,7 +1842,7 @@ impl RebornRuntime {
         )
     }
 
-    /// Test-only accessor for the admin user directory the WebUI facade wires.
+    /// Test-only accessor for the admin user directory the WebUI service wires.
     /// Mirrors the production call `build_webui_services` makes to
     /// [`Self::reborn_user_directory`] (`pub(crate)`), which integration tests
     /// in a separate crate cannot reach. Gated behind `test-support` so the
@@ -1861,7 +1863,7 @@ impl RebornRuntime {
         Arc::clone(&self.admin_secret_provisioner)
     }
 
-    /// First-class projects + membership (ACL) facade over the host-owned scoped
+    /// First-class projects + membership (ACL) service over the host-owned scoped
     /// substrate, backing the WebUI project surface.
     pub(crate) fn reborn_project_service(&self) -> Arc<dyn ironclaw_product::ProjectService> {
         Arc::clone(&self.project_service)
@@ -1893,7 +1895,7 @@ impl RebornRuntime {
     }
 
     /// The runtime's turn coordinator — the same `Arc` production wiring hands
-    /// to the WebUI facade and the channel hosts
+    /// to the WebUI service and the channel hosts
     /// ([`RebornRuntime::product_turn_coordinator`]) — so downstream integration
     /// tests can poll `GetRunStateRequest` for runs submitted through the
     /// composed surfaces (e.g. waiting on a `BlockedAuth` park and its resume).
@@ -1963,15 +1965,15 @@ impl RebornRuntime {
         )
     }
 
-    /// The generic per-user channel-connection facade over the same generic
+    /// The generic per-user channel-connection service over the same generic
     /// stores (discovery from the installation store; connected = an
     /// identity binding under the extension's installation prefix;
     /// disconnect clears bindings, vendor credentials, and the provisioned
     /// DM target). `None` when the composed runtime carries no durable
     /// channel-identity storage.
-    pub(crate) fn generic_channel_connection_facade(
+    pub(crate) fn generic_channel_connection_service(
         &self,
-    ) -> Option<Arc<dyn ironclaw_product::ChannelConnectionFacade>> {
+    ) -> Option<Arc<dyn ironclaw_product::ChannelConnectionService>> {
         let identity_store = self.channel_identity_store.clone();
         let installation_store = Some(self.extension_management.installation_store_handle());
         let credential_cleanup = Some(Arc::clone(&self.product_auth)
@@ -1979,7 +1981,7 @@ impl RebornRuntime {
         let account_status_reader = Some(Arc::clone(&self.product_auth)
             as Arc<dyn crate::extension_host::channel_connection::ChannelAccountStatusReader>);
         Some(Arc::new(
-            crate::extension_host::channel_connection::GenericChannelConnectionFacade::new(
+            crate::extension_host::channel_connection::GenericChannelConnectionService::new(
                 self.thread_scope.tenant_id.clone(),
                 Vec::new(),
                 installation_store,
@@ -2780,10 +2782,10 @@ impl RebornRuntime {
     /// instead of polling until those non-terminal states either resolve or hit
     /// `RunTimeout`.
     /// `BlockedDependentRun` is deliberately excluded — it is an internal wait
-    /// on a child run, not facade-resolvable, so it keeps polling. The returned
+    /// on a child run, not service-resolvable, so it keeps polling. The returned
     /// state carries the `Blocked*` status and
     /// `gate_ref`; the caller decides whether to resolve (through the WebUI
-    /// facade) or stop. Test/recording-support only.
+    /// service) or stop. Test/recording-support only.
     #[cfg(any(test, feature = "test-support"))]
     async fn wait_for_terminal_or_gate(
         &self,
@@ -2809,7 +2811,7 @@ impl RebornRuntime {
             // (auth/approval/resource/external-tool) short-circuit recording.
             // `BlockedDependentRun` is an internal wait on a child run (the
             // upstream contract names it `AwaitDependentRun`) — it is not
-            // resolvable through the gate facade, so it keeps polling like
+            // resolvable through the gate service, so it keeps polling like
             // `Queued`/`Running` until the dependent run completes or the poll
             // budget expires.
             let blocked_on_gate = match state.status {
@@ -2883,7 +2885,7 @@ impl RebornRuntime {
     /// gate and reports the pause, instead of sitting in the non-terminal
     /// `BlockedAuth` state until `RunTimeout` (a real recorder hang this method
     /// exists to eliminate). This method only *observes* where the run paused;
-    /// gate *resolution* stays on the WebUI `ProductSurface` facade
+    /// gate *resolution* stays on the WebUI `ProductSurface` service
     /// (`resolve_gate`) per the #3094 seam — do not add a resolution path here.
     #[cfg(any(test, feature = "test-support"))]
     pub async fn send_user_message_until_gate(
@@ -3370,7 +3372,7 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         agent_id,
         project_id: default_project_id,
         // Keep local-dev runtime threads aligned with WebUI's owner-scoped
-        // facade so both entrypoints drive the same runner/evidence path.
+        // service so both entrypoints drive the same runner/evidence path.
         owner_user_id: Some(actor_user_id.clone()),
         mission_id: None,
     };
@@ -3558,17 +3560,17 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
     // targets against the same registry product hosts register into.
     let outbound_delivery_target_registry =
         local_runtime.map(|local_runtime| Arc::clone(&local_runtime.outbound_delivery_targets));
-    let outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>> =
+    let outbound_preferences_service: Option<Arc<dyn OutboundPreferencesProductService>> =
         match (local_runtime, &outbound_delivery_target_registry) {
             (Some(local_runtime), Some(registry)) => {
                 let registry = Arc::clone(registry);
                 let provider: Arc<dyn OutboundDeliveryTargetProvider> = registry;
                 let outbound_preferences = &local_runtime.outbound_preferences;
-                Some(Arc::new(RebornOutboundPreferencesFacade::new(
+                Some(Arc::new(RebornOutboundPreferencesService::new(
                     Arc::clone(outbound_preferences),
                     provider,
                 ))
-                    as Arc<dyn OutboundPreferencesProductFacade>)
+                    as Arc<dyn OutboundPreferencesProductService>)
             }
             _ => None,
         };
@@ -3602,7 +3604,7 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
             model_gateway,
             milestone_sink.clone(),
             skill_activation_source.clone(),
-            outbound_preferences_facade.clone(),
+            outbound_preferences_service.clone(),
             trajectory_observer,
         )
         .ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
@@ -3769,19 +3771,19 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
 
     let communication_context_provider: Option<
         Arc<dyn ironclaw_turns::run_profile::CommunicationContextProvider>,
-    > = match (local_runtime, outbound_preferences_facade.clone()) {
-        (Some(local_runtime), Some(outbound_preferences_facade)) => {
-            let mut lifecycle_facade =
-                crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(Arc::clone(
+    > = match (local_runtime, outbound_preferences_service.clone()) {
+        (Some(local_runtime), Some(outbound_preferences_service)) => {
+            let mut lifecycle_service =
+                crate::extension_host::lifecycle::RebornLocalLifecycleService::new(Arc::clone(
                     &local_runtime.skill_management,
                 ));
-            lifecycle_facade = lifecycle_facade
+            lifecycle_service = lifecycle_service
                 .with_extension_management(Arc::clone(&local_runtime.extension_management));
             Some(Arc::new(
                 crate::root::communication_context::RuntimeCommunicationContextProvider::new(
-                    outbound_preferences_facade,
+                    outbound_preferences_service,
                 )
-                .with_lifecycle_facade(Arc::new(lifecycle_facade)),
+                .with_lifecycle_service(Arc::new(lifecycle_service)),
             )
                 as Arc<
                     dyn ironclaw_turns::run_profile::CommunicationContextProvider,
@@ -4387,7 +4389,7 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         delivered_gate_routes: services.delivered_gate_routes.clone(),
         #[cfg(any(test, feature = "test-support"))]
         delivery_coordinator: services.delivery_coordinator.clone(),
-        channel_facade_slot: services.channel_disconnect_slot.clone(),
+        channel_service_slot: services.channel_disconnect_slot.clone(),
         channel_config: services.channel_config.clone(),
         admin_configuration: services.admin_configuration.clone(),
         admin_configuration_uses: services.admin_configuration_uses.clone(),
@@ -4436,17 +4438,17 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         boot,
         llm_reload,
     };
-    // Fill the composition's late-bound channel-connection facade slot (§6.4)
+    // Fill the composition's late-bound channel-connection service slot (§6.4)
     // now the runtime's serving tenant is known: extension removal
     // (`RebornLocalExtensionManagementPort::remove`) disconnects the caller's
-    // channel identity through this facade, and the identity-binding write
+    // channel identity through this service, and the identity-binding write
     // hook is only reachable from runtime-backed compositions — so filling
     // here keeps "wherever a binding can be written, removal disconnects it".
     // First write wins by `OnceLock` contract: a test bundle that filled the
-    // slot before the runtime was built keeps its facade (same stores, same
+    // slot before the runtime was built keeps its service (same stores, same
     // durable state), so the discarded `set` result is deliberate.
-    if let Some(channel_connection) = runtime.generic_channel_connection_facade() {
-        let _ = runtime.channel_facade_slot.set(channel_connection);
+    if let Some(channel_connection) = runtime.generic_channel_connection_service() {
+        let _ = runtime.channel_service_slot.set(channel_connection);
     }
     Ok(runtime)
 }

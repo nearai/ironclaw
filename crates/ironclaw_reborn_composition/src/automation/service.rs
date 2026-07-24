@@ -4,7 +4,7 @@ use ironclaw_host_api::{
     ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind, ThreadId, Timestamp,
 };
 use ironclaw_product::{
-    AutomationListRequest, AutomationName, AutomationProductFacade, ProductAgentBoundCaller,
+    AutomationListRequest, AutomationName, AutomationProductService, ProductAgentBoundCaller,
     RebornAutomationActiveHold, RebornAutomationHoldReason, RebornAutomationInfo,
     RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
@@ -18,14 +18,14 @@ use ironclaw_triggers::{
 
 const AUTOMATION_BACKEND_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// WebUI panel facade for automation (trigger) listing.
+/// WebUI panel service for automation (trigger) listing.
 ///
 /// ## Dual-access design
 ///
 /// The model/agent-loop path uses the `builtin.trigger_list` capability with
 /// the full pipeline (trust evaluation, approval gates) in
 /// `ironclaw_host_runtime` first_party_tools::trigger_management. The panel
-/// path (this facade) calls scoped repository methods directly, which is
+/// path (this service) calls scoped repository methods directly, which is
 /// correct for a user-direct fetch-and-render surface where the approval
 /// pipeline would be wrong by design. Both paths converge on the same scoping
 /// contract: tenant + creator_user + agent + project.
@@ -35,7 +35,7 @@ const AUTOMATION_BACKEND_TIMEOUT: Duration = Duration::from_secs(30);
 /// those endpoints as user actions so host ingress audit policy remains the
 /// outer audit boundary.
 #[derive(Clone)]
-pub struct RebornAutomationProductFacade {
+pub struct RebornAutomationProductService {
     trigger_repository: Arc<dyn TriggerRepository>,
     active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
     backend_timeout: Duration,
@@ -46,17 +46,17 @@ pub struct RebornAutomationProductFacade {
     scheduler_enabled: bool,
 }
 
-impl std::fmt::Debug for RebornAutomationProductFacade {
+impl std::fmt::Debug for RebornAutomationProductService {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("RebornAutomationProductFacade")
+            .debug_struct("RebornAutomationProductService")
             .field("trigger_repository", &"Arc<dyn TriggerRepository>")
             .field("active_run_lookup", &"Arc<dyn TriggerActiveRunLookup>")
             .finish()
     }
 }
 
-impl RebornAutomationProductFacade {
+impl RebornAutomationProductService {
     pub(crate) fn new(
         trigger_repository: Arc<dyn TriggerRepository>,
         active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
@@ -112,7 +112,7 @@ impl RebornAutomationProductFacade {
 }
 
 #[async_trait::async_trait]
-impl AutomationProductFacade for RebornAutomationProductFacade {
+impl AutomationProductService for RebornAutomationProductService {
     fn scheduler_enabled(&self) -> bool {
         self.scheduler_enabled
     }
@@ -304,7 +304,7 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
     }
 }
 
-impl RebornAutomationProductFacade {
+impl RebornAutomationProductService {
     async fn set_automation_state(
         &self,
         caller: ProductAgentBoundCaller,
@@ -367,7 +367,7 @@ impl RebornAutomationProductFacade {
 /// Some(caller.agent_id)` correctly excludes NULL-agent triggers rather than
 /// granting phantom access.  The service-layer agent-id fallback in
 /// `check_automation_trigger_access` is only reachable via non-production
-/// facades that do not go through `ProductAgentBoundCaller`.
+/// services that do not go through `ProductAgentBoundCaller`.
 ///
 /// A `false` result causes `resolve_run_thread_scope` to return `Ok(None)` (404
 /// upstream) without leaking the existence of the trigger to an unauthorized
@@ -409,7 +409,7 @@ fn automation_info_from_record(
 }
 
 /// Maps the crate-neutral hold projection (`ironclaw_triggers`) to this
-/// facade's wire DTO. The reason/elapsed-occurrence derivation itself lives
+/// service's wire DTO. The reason/elapsed-occurrence derivation itself lives
 /// in `ironclaw_triggers::active_hold_projection` — only the wire-type
 /// mapping belongs here (#5886).
 fn wire_hold_from_projection(hold: ActiveHoldProjection) -> RebornAutomationActiveHold {

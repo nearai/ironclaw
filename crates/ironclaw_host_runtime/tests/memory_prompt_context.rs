@@ -1,7 +1,7 @@
 //! Production adapter tests for [`ProductionMemoryPromptContextService`].
 //!
 //! These tests intentionally drive the loop-facing caller and assert that it
-//! delegates to the memory service facade with host-derived scope.
+//! delegates to the memory service service with host-derived scope.
 
 use std::sync::{Arc, Mutex};
 
@@ -191,7 +191,7 @@ async fn host_derived_scope_is_passed_to_memory_service() {
     );
     assert_eq!(captured[0].1.query, "test query");
     assert_eq!(captured[0].1.max_snippets, 10);
-    // The caller's context profile must cross the facade unchanged so
+    // The caller's context profile must cross the service unchanged so
     // profile-routing regressions are caught at the request boundary.
     assert_eq!(captured[0].1.context_profile_id.as_str(), "default");
 }

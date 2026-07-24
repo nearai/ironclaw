@@ -450,7 +450,7 @@ async fn list_triggers(
         .map_err(|error| trigger_repository_error("list_trigger_run_history_batch", error))?;
     // Reason/elapsed-occurrence derivation and lookup batching live in
     // `ironclaw_triggers::active_holds_for_records`, shared with the
-    // automations facade so both read surfaces stay in lockstep (#5886).
+    // automations service so both read surfaces stay in lockstep (#5886).
     let mut holds: HashMap<TriggerId, Value> =
         active_holds_for_records(active_run_lookup, &records, now, ACTIVE_HOLD_LOOKUP_TIMEOUT)
             .await
@@ -471,7 +471,7 @@ async fn list_triggers(
 }
 
 /// Maps the crate-neutral hold projection (`ironclaw_triggers`) to this
-/// capability's `active_hold` wire object — same shape the automations facade
+/// capability's `active_hold` wire object — same shape the automations service
 /// maps to `RebornAutomationActiveHold`, just JSON instead of a typed DTO
 /// (#5886).
 fn active_hold_json(hold: ActiveHoldProjection) -> Value {

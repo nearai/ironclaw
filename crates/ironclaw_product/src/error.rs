@@ -1,7 +1,7 @@
 //! Workflow-layer error vocabulary.
 //!
 //! [`ProductSurfaceFailure`] is the internal error type used within the workflow
-//! crate. It converts to [`ProductAdapterError`] at the facade boundary so
+//! crate. It converts to [`ProductAdapterError`] at the service boundary so
 //! adapters never see host-layer details.
 
 use crate::{ProductAdapterError, ProductSurfaceRejectionKind, RedactedString};
@@ -40,7 +40,7 @@ impl AuthContinuationRejectionKind {
     }
 }
 
-/// Internal error type for the product workflow facade.
+/// Internal error type for the product workflow service.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ProductSurfaceFailure {
     /// The adapter installation is not mapped to a tenant.
@@ -70,7 +70,7 @@ pub enum ProductSurfaceFailure {
     /// composition type — this crate sits below `composition` in the
     /// dependency graph) carrying the exact remediation text (e.g. the
     /// `ironclaw config set` commands to run). Two independent consumers read
-    /// this variant differently: the WebUI facade
+    /// this variant differently: the WebUI service
     /// (`lifecycle_product_surface_error`) discards `reason` and maps
     /// the DISCRIMINANT alone to a sanitized 400 (no free text crosses the
     /// wire contract); the LLM tool path

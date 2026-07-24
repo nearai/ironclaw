@@ -1,4 +1,4 @@
-//! Reborn provider-admin facade.
+//! Reborn provider-admin service.
 //!
 //! This is the typed provider/model administration surface shared by the
 //! standalone CLI and product command workflow. It deliberately edits only

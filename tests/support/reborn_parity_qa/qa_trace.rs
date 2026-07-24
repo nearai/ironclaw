@@ -1447,7 +1447,7 @@ pub async fn record_qa_phrase(fixture_name: &str, phrase: &str) {
     // and reports the pause, instead of parking in the non-terminal
     // `BlockedAuth` state until `RunTimeout`. Resolving the gate to record the
     // post-auth turns is a deliberate follow-up that goes through the WebUI
-    // facade with a seeded credential — not wired here.
+    // service with a seeded credential — not wired here.
     let conversation = runtime
         .new_conversation()
         .await
