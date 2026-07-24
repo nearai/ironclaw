@@ -8,9 +8,9 @@ use ironclaw_capabilities::{ReplayPayload, ReplayPayloadStoreError, ReplayPayloa
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityDisplayOutputPreview, CapabilityId, CapabilitySet, CorrelationId,
     DispatchFailureDetail, DispatchInputIssue, DispatchInputIssueCode, EffectKind,
-    ExecutionContext, ExtensionId, GateRecord, GateRef, InvocationId, InvocationOrigin, MountView,
-    Principal, ProviderToolName, Resolution, ResolutionBatch, ResourceEstimate, ResourceScope,
-    RuntimeDispatchErrorKind, RuntimeKind, sha256_digest_token,
+    ExecutionContext, ExtensionId, GateRecord, GateRef, InvocationId, InvocationOrigin,
+    ModelDiagnostic, MountView, Principal, ProviderToolName, Resolution, ResolutionBatch,
+    ResourceEstimate, ResourceScope, RuntimeDispatchErrorKind, RuntimeKind, sha256_digest_token,
 };
 use ironclaw_host_runtime::{
     CapabilityFailureDisposition, HostRuntime, HostRuntimeError, IdempotencyKey,
@@ -3593,14 +3593,21 @@ async fn runtime_outcome_to_loop(
             }
             GatedResolution::bare(class.into_resolution())
         }
-        RuntimeCapabilityOutcome::Unknown(unknown) => GatedResolution::bare(resolution::failed(
-            capability_failure_kind(unknown.kind)?,
-            runtime_safe_summary(
-                unknown.message,
-                "capability invocation returned an unknown outcome",
-            ),
-            None,
-        )),
+        RuntimeCapabilityOutcome::Unknown(unknown) => {
+            let detail = unknown
+                .message
+                .as_deref()
+                .and_then(model_visible_diagnostic_text)
+                .unwrap_or_else(|| ModelDiagnostic::unavailable().into_inner());
+            GatedResolution::bare(resolution::failed(
+                capability_failure_kind(unknown.kind)?,
+                runtime_safe_summary(
+                    unknown.message,
+                    "capability invocation returned an unknown outcome",
+                ),
+                Some(CapabilityFailureDetail::Diagnostic { text: detail }),
+            ))
+        }
     })
 }
 
@@ -3693,7 +3700,7 @@ fn runtime_failure_to_loop(
         CapabilityFailureDisposition::RetrySameCall => {
             let detail = match runtime_failure_detail_to_loop(failure.detail.clone()) {
                 Some(structured) => Some(structured),
-                None => runtime_failure_diagnostic_detail(&failure),
+                None => Some(runtime_failure_diagnostic_detail(&failure)),
             };
             Ok(LoopFailureClass::Failed {
                 error_kind: runtime_failure_kind_to_loop(failure.kind)?,
@@ -3715,10 +3722,7 @@ fn runtime_failure_to_loop(
 /// ([`crate::scrub_model_visible_detail`]).
 fn runtime_failure_diagnostic_detail(
     failure: &RuntimeCapabilityFailure,
-) -> Option<CapabilityFailureDetail> {
-    if failure.detail.is_some() {
-        return None;
-    }
+) -> CapabilityFailureDetail {
     // Prefer the private in-process cause channel: the public `message` fails
     // closed (kind-only for wild raw causes), so the full descriptive cause
     // rides `model_visible_cause` and only becomes model-visible through this
@@ -3726,15 +3730,20 @@ fn runtime_failure_diagnostic_detail(
     let raw = failure
         .model_visible_cause()
         .map(str::to_owned)
-        .or_else(|| failure.safe_summary())?;
-    let text = if failure.kind == RuntimeFailureKind::InvalidInput
-        && is_process_sandbox_capability(&failure.capability_id)
-    {
-        sandbox_model_visible_diagnostic_text(&raw)
-    } else {
-        model_visible_diagnostic_text(&raw)
-    }?;
-    Some(CapabilityFailureDetail::Diagnostic { text })
+        .or_else(|| failure.safe_summary());
+    let text = raw
+        .as_deref()
+        .and_then(|raw| {
+            if failure.kind == RuntimeFailureKind::InvalidInput
+                && is_process_sandbox_capability(&failure.capability_id)
+            {
+                sandbox_model_visible_diagnostic_text(raw)
+            } else {
+                model_visible_diagnostic_text(raw)
+            }
+        })
+        .unwrap_or_else(|| ModelDiagnostic::unavailable().into_inner());
+    CapabilityFailureDetail::Diagnostic { text }
 }
 
 /// Sandbox validation diagnostics still cross the legacy host-api verdict
@@ -3809,7 +3818,7 @@ fn runtime_model_visible_failure_to_loop(
     let safe_summary = runtime_failure_safe_summary(&failure, "capability invocation failed");
     let detail = match runtime_failure_detail_to_loop(failure.detail.clone()) {
         Some(structured) => Some(structured),
-        None => runtime_failure_diagnostic_detail(&failure),
+        None => Some(runtime_failure_diagnostic_detail(&failure)),
     };
     Ok(LoopFailureClass::Failed {
         error_kind,
@@ -4658,10 +4667,10 @@ mod tests {
     }
 
     #[test]
-    fn runtime_diagnostic_detail_that_normalizes_to_nothing_is_dropped() {
+    fn runtime_diagnostic_detail_that_normalizes_to_nothing_uses_fallback() {
         // A diagnostic that is nothing but disallowed control characters
-        // normalizes to whitespace; an empty diagnostic would fail the
-        // model-observation validator downstream, so it is dropped instead.
+        // normalizes to whitespace. The failure still carries an explicit
+        // fallback rather than degrading to a bare category.
         let capability_id = CapabilityId::new("builtin.shell").expect("valid capability id");
         let failure =
             RuntimeCapabilityFailure::new(capability_id, RuntimeFailureKind::OperationFailed, None)
@@ -4674,7 +4683,10 @@ mod tests {
         let LoopFailureClass::Failed { detail, .. } = outcome else {
             panic!("expected a model-visible Failed outcome");
         };
-        assert_eq!(detail, None, "empty diagnostics must be dropped");
+        let Some(CapabilityFailureDetail::Diagnostic { text }) = detail else {
+            panic!("empty diagnostics must use the fixed fallback");
+        };
+        assert_eq!(text, ModelDiagnostic::unavailable().as_str());
     }
 
     #[test]
@@ -6056,6 +6068,7 @@ mod tests {
                 )),
                 CapabilityFailureKind::InvalidInput,
                 Some("invalid JSON: expected value at line 1 column 1"),
+                false,
             ),
             (
                 RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure::new(
@@ -6065,6 +6078,7 @@ mod tests {
                 )),
                 CapabilityFailureKind::InvalidInput,
                 Some(RuntimeDispatchErrorKind::InputEncode.human_summary()),
+                false,
             ),
             (
                 RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure::new(
@@ -6074,6 +6088,7 @@ mod tests {
                 )),
                 CapabilityFailureKind::InvalidInput,
                 Some(RuntimeDispatchErrorKind::InputEncode.human_summary()),
+                true,
             ),
             (
                 RuntimeCapabilityOutcome::Unknown(RuntimeCapabilityUnknown {
@@ -6083,10 +6098,21 @@ mod tests {
                 }),
                 capability_failure_kind("custom_failure").expect("valid custom failure kind"),
                 None,
+                false,
+            ),
+            (
+                RuntimeCapabilityOutcome::Unknown(RuntimeCapabilityUnknown {
+                    capability_id: CapabilityId::new("demo.echo").expect("valid capability id"),
+                    kind: "custom_failure".to_string(),
+                    message: None,
+                }),
+                capability_failure_kind("custom_failure").expect("valid custom failure kind"),
+                None,
+                true,
             ),
         ];
 
-        for (outcome, expected_kind, expected_summary) in cases {
+        for (outcome, expected_kind, expected_summary, expects_fallback) in cases {
             let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
             let provider_id = ExtensionId::new("demo").expect("valid provider id");
             let milestone_sink =
@@ -6111,7 +6137,24 @@ mod tests {
                 .await
                 .expect("runtime failure outcome maps to loop outcome");
 
-            assert!(matches!(&outcome, Resolution::Done(o) if o.verdict.error_kind().is_some()));
+            let Resolution::Done(done) = &outcome else {
+                panic!("runtime failure must be a recoverable outcome");
+            };
+            assert!(done.verdict.error_kind().is_some());
+            assert!(
+                done.verdict.diagnostic().is_some(),
+                "runtime failure must not degrade to a bare category"
+            );
+            if expects_fallback {
+                let Some(ModelFailureDiagnostic::Diagnostic { text }) = done.verdict.diagnostic()
+                else {
+                    panic!("missing cause must use a free-text fallback diagnostic");
+                };
+                assert!(
+                    text.as_str()
+                        .contains("did not provide additional diagnostic detail")
+                );
+            }
             let milestones = milestone_sink.milestones();
             assert_eq!(milestones.len(), 2);
             assert!(matches!(
@@ -6133,6 +6176,87 @@ mod tests {
             };
             assert_eq!(actual_summary, expected_summary);
         }
+    }
+
+    #[tokio::test]
+    async fn runtime_capability_failure_preserves_scrubbed_cause_through_resolution() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let cause = "failed to read /workspace/project/config.json at line 17";
+        let failure = RuntimeCapabilityFailure::new(
+            capability_id.clone(),
+            RuntimeFailureKind::OperationFailed,
+            Some("the capability operation failed".to_string()),
+        )
+        .with_model_visible_cause(cause);
+        let port = runtime_capability_port(
+            &capability_id,
+            &provider_id,
+            Arc::new(QueuedHostRuntime::new(
+                vec![visible_capability(
+                    capability_id.clone(),
+                    provider_id.clone(),
+                )],
+                vec![Ok(RuntimeCapabilityOutcome::Failed(failure))],
+            )),
+            Arc::new(RecordingResultWriter::default()),
+            dummy_milestone_sink(),
+            "thread-runtime-capability-diagnostic-cause",
+        )
+        .await;
+
+        let outcome = invoke_visible_runtime_capability(&port)
+            .await
+            .expect("runtime failure maps to a recoverable loop outcome");
+        let Resolution::Done(outcome) = outcome else {
+            panic!("expected a recoverable failure");
+        };
+        let Some(ModelFailureDiagnostic::Diagnostic { text }) = outcome.verdict.diagnostic() else {
+            panic!("expected an inline diagnostic");
+        };
+        assert_eq!(text.as_str(), cause);
+    }
+
+    #[tokio::test]
+    async fn runtime_capability_failure_without_backend_message_inlines_fallback_diagnostic() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let failure = RuntimeCapabilityFailure::new(
+            capability_id.clone(),
+            RuntimeFailureKind::OperationFailed,
+            None,
+        );
+        let port = runtime_capability_port(
+            &capability_id,
+            &provider_id,
+            Arc::new(QueuedHostRuntime::new(
+                vec![visible_capability(
+                    capability_id.clone(),
+                    provider_id.clone(),
+                )],
+                vec![Ok(RuntimeCapabilityOutcome::Failed(failure))],
+            )),
+            Arc::new(RecordingResultWriter::default()),
+            dummy_milestone_sink(),
+            "thread-runtime-capability-missing-diagnostic",
+        )
+        .await;
+
+        let outcome = invoke_visible_runtime_capability(&port)
+            .await
+            .expect("runtime failure maps to a recoverable loop outcome");
+        let Resolution::Done(outcome) = outcome else {
+            panic!("expected a recoverable failure");
+        };
+        let Some(ModelFailureDiagnostic::Diagnostic { text }) = outcome.verdict.diagnostic() else {
+            panic!("a missing backend message must not produce a bare failure category");
+        };
+        assert!(
+            text.as_str()
+                .contains("did not provide additional diagnostic detail"),
+            "unexpected fallback diagnostic: {}",
+            text.as_str()
+        );
     }
 
     #[tokio::test]
@@ -8634,7 +8758,7 @@ mod tests {
             text.as_str()
         );
         assert!(
-            text.as_str().contains("redacted"),
+            text.as_str().to_ascii_lowercase().contains("redacted"),
             "the diagnostic should retain an explicit redaction marker: {}",
             text.as_str()
         );

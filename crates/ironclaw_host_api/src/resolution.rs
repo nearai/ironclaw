@@ -858,7 +858,7 @@ mod tests {
         // The structured, model-visible diagnostic rides the verdict so a later
         // slice can render the correction hint without reading host storage.
         let diagnostic = ModelFailureDiagnostic::Diagnostic {
-            text: SafeSummary::new("tool input rejected").unwrap(),
+            text: crate::ModelDiagnostic::new("tool input rejected").unwrap(),
         };
         let verdict = ToolVerdict::RecoverableFailure {
             error_kind: FailureKind::InvalidInput,

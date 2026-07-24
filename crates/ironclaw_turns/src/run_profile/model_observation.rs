@@ -11,7 +11,7 @@ pub const MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION: u32 = 1;
 
 /// Maximum size of a model-visible free-text diagnostic. Larger than the
 /// summary cap because the diagnostic carries raw (secret-scrubbed) error text.
-pub const MODEL_OBSERVATION_DETAIL_MAX_BYTES: usize = 4096;
+pub const MODEL_OBSERVATION_DETAIL_MAX_BYTES: usize = ironclaw_host_api::MODEL_DIAGNOSTIC_MAX_BYTES;
 
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

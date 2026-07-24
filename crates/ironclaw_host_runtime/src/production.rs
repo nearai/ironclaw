@@ -1658,31 +1658,53 @@ fn failure_from(
 ) -> RuntimeCapabilityFailure {
     let kind = failure_kind_from(&error);
     let raw_cause = raw_failure_cause(&error);
+    let raw_cause_needs_detail = raw_cause
+        .as_ref()
+        .is_some_and(|cause| LoopSafeSummary::new(cause.clone()).is_err());
     let message = sanitized_failure_message(&error);
     let detail = match error {
         CapabilityInvocationError::Dispatch {
             detail: Some(detail),
             ..
         } => Some(detail),
-        CapabilityInvocationError::Dispatch {
-            detail: None,
-            safe_summary: Some(summary),
-            ..
-        } => rejected_summary_diagnostic(summary),
         _ => None,
     };
     let mut failure = RuntimeCapabilityFailure::new(capability_id, kind, message);
     if let Some(detail) = detail {
         failure = failure.with_detail(detail);
     }
-    if let Some(raw_cause) = raw_cause {
-        // Registry-scrubbed here (belt); the loop-support Diagnostic seam
-        // re-scrubs and injection-fences fail-closed (suspenders). Never
-        // rendered in Debug, run-state rows, or runtime events.
-        let (scrubbed, _) = model_visible_cause_scrubber().redact_all_secrets(&raw_cause);
-        failure = failure.with_model_visible_cause(scrubbed);
+    match raw_cause {
+        Some(raw_cause) => {
+            // Registry-scrubbed here (belt); the loop-support Diagnostic seam
+            // re-scrubs and injection-fences fail-closed (suspenders). Never
+            // rendered in Debug, run-state rows, or runtime events.
+            let (scrubbed, _) = model_visible_cause_scrubber().redact_all_secrets(&raw_cause);
+            if failure.detail.is_none() && raw_cause_needs_detail {
+                failure =
+                    failure.with_detail(ironclaw_host_api::DispatchFailureDetail::Diagnostic {
+                        text: bounded_diagnostic_text(&scrubbed),
+                    });
+            }
+            failure = failure.with_model_visible_cause(scrubbed);
+        }
+        None if failure.detail.is_none() => {
+            failure = failure.with_detail(ironclaw_host_api::DispatchFailureDetail::Diagnostic {
+                text: ironclaw_host_api::ModelDiagnostic::unavailable().into_inner(),
+            });
+        }
+        None => {}
     }
     failure
+}
+
+fn bounded_diagnostic_text(value: &str) -> String {
+    let mut end = value
+        .len()
+        .min(ironclaw_host_api::MODEL_DIAGNOSTIC_MAX_BYTES);
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string() // safety: `end` is moved to a UTF-8 boundary above.
 }
 
 /// The raw descriptive cause for the model-visible Diagnostic channel, before
@@ -1693,35 +1715,6 @@ fn raw_failure_cause(error: &CapabilityInvocationError) -> Option<String> {
         Dispatch { safe_summary, .. } => safe_summary.clone(),
         _ => None,
     }
-}
-
-/// Preserve a host-authored failure reason that the strict loop safe-summary
-/// validator rejects (paths, payload delimiters, newlines).
-///
-/// [`dispatch_failure_message`] degrades such reasons to the fixed category
-/// sentence, which is correct for the summary — but the reason itself is what
-/// the model needs to repair its call (e.g. which path was out of scope), so
-/// it must ride the model-visible diagnostic detail channel instead of being
-/// dropped. Secret VALUES are scrubbed and disallowed control characters
-/// normalized at the loop boundary before the model observes the text.
-fn rejected_summary_diagnostic(
-    summary: String,
-) -> Option<ironclaw_host_api::DispatchFailureDetail> {
-    if LoopSafeSummary::new(summary.clone()).is_ok() {
-        // The reason survives into `message`; the loop layer derives the
-        // model-visible diagnostic from it directly, so attaching it here
-        // would only duplicate it.
-        return None;
-    }
-    const MAX_DIAGNOSTIC_CHARS: usize = 512;
-    let text = if summary.chars().count() <= MAX_DIAGNOSTIC_CHARS {
-        summary
-    } else {
-        let mut text: String = summary.chars().take(MAX_DIAGNOSTIC_CHARS - 3).collect();
-        text.push_str("...");
-        text
-    };
-    Some(ironclaw_host_api::DispatchFailureDetail::Diagnostic { text })
 }
 
 /// Returns a stable, redacted summary message for a capability invocation
@@ -2431,13 +2424,16 @@ mod tests {
     }
 
     #[test]
-    fn failure_from_carries_rejected_safe_summary_on_the_diagnostic_detail() {
+    fn failure_from_inlines_bounded_rejected_summary_and_keeps_complete_private_cause() {
         // A path-bearing (or newline-bearing) failure reason fails the strict
         // loop safe-summary validator, so the message degrades to the fixed
-        // category sentence. The raw reason must NOT be dropped: it rides the
-        // model-visible diagnostic detail channel, which is exactly how the
-        // model learns what to repair (e.g. which path was denied).
-        let raw = "shell execution failed: cannot read /etc/passwd\nsecond line".to_string();
+        // category sentence. The complete reason must ride the private cause
+        // channel until the loop applies the 4096-byte diagnostic bound.
+        let raw = format!(
+            "shell execution failed: cannot read /workspace/{}\nsecond line",
+            "segment/".repeat(600)
+        );
+        assert!(raw.len() > ironclaw_host_api::MODEL_DIAGNOSTIC_MAX_BYTES);
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Executor),
             safe_summary: Some(raw.clone()),
@@ -2451,16 +2447,26 @@ mod tests {
             Some("the tool executor failed"),
             "message must stay the fixed category sentence"
         );
+        let Some(ironclaw_host_api::DispatchFailureDetail::Diagnostic { text }) =
+            failure.detail.as_ref()
+        else {
+            panic!("rejected public summary must ride the diagnostic detail");
+        };
         assert_eq!(
-            failure.detail,
-            Some(ironclaw_host_api::DispatchFailureDetail::Diagnostic { text: raw }),
-            "the raw reason must ride the diagnostic detail"
+            text,
+            &raw[..ironclaw_host_api::MODEL_DIAGNOSTIC_MAX_BYTES],
+            "the inline diagnostic uses the shared model-observation byte cap"
+        );
+        assert_eq!(
+            failure.model_visible_cause(),
+            Some(raw.as_str()),
+            "the cause must not be pre-truncated before the 4096-byte model boundary"
         );
     }
 
     #[test]
-    fn failure_from_bounds_rejected_summary_diagnostic_on_char_boundaries() {
-        let raw = format!("/{}", "é".repeat(600));
+    fn failure_from_bounds_rejected_summary_diagnostic_on_utf8_boundary() {
+        let raw = format!("/workspace/{}tail", "é".repeat(3_000));
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Executor),
             safe_summary: Some(raw),
@@ -2470,10 +2476,24 @@ mod tests {
         let failure = failure_from(error, cap());
         let Some(ironclaw_host_api::DispatchFailureDetail::Diagnostic { text }) = failure.detail
         else {
-            panic!("expected bounded diagnostic detail");
+            panic!("expected a bounded diagnostic");
         };
-        assert_eq!(text.chars().count(), 512);
-        assert!(text.ends_with("..."));
+        assert!(text.len() <= ironclaw_host_api::MODEL_DIAGNOSTIC_MAX_BYTES);
+        assert!(text.ends_with('é'));
+    }
+
+    #[test]
+    fn failure_from_inlines_unavailable_detail_when_no_cause_exists() {
+        let failure = failure_from(
+            CapabilityInvocationError::UnknownCapability { capability: cap() },
+            cap(),
+        );
+        assert_eq!(
+            failure.detail,
+            Some(ironclaw_host_api::DispatchFailureDetail::Diagnostic {
+                text: ironclaw_host_api::ModelDiagnostic::unavailable().into_inner(),
+            })
+        );
     }
 
     #[test]
