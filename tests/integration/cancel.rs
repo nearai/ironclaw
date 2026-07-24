@@ -168,6 +168,17 @@ async fn mid_turn_provider_error_reaches_failed_with_model_error_category() {
         "model_context_overflow",
         "expected the context-overflow fidelity category (ContextLengthExceeded), got {failure:?}"
     );
+    // The category alone doesn't prove the SAFE-SUMMARY text reaching the
+    // model-visible failure explainer is real, not the generic catch-all
+    // (`map_provider_error`'s `_ => "model service is unavailable"`,
+    // `crates/ironclaw_runner/src/model_gateway.rs`). A genuine, non-masked
+    // provider error gets its own class-specific summary.
+    assert_eq!(
+        failure.detail(),
+        Some("model request exceeded its context budget"),
+        "expected the context-overflow-specific safe summary (not the generic \
+         \"model service is unavailable\" catch-all), got {failure:?}"
+    );
 }
 
 /// Credentials sibling of the context-overflow test above (issue #6284 item

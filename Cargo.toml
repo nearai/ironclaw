@@ -284,6 +284,10 @@ name = "reborn_integration_comm_context"
 path = "tests/integration/comm_context.rs"
 
 [[test]]
+name = "reborn_integration_denied_mid_turn_tool_in_flight"
+path = "tests/integration/denied_mid_turn_tool_in_flight.rs"
+
+[[test]]
 name = "reborn_integration_durable"
 path = "tests/integration/durable.rs"
 
