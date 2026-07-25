@@ -120,6 +120,45 @@ echo "▶ F. a missing report is a loud error, not an empty queue"
 check "queue fails when missed.txt is absent" \
   bash -c "! python3 '$queue' --report-dir '$work/absent' --output '$work/x.md' 2>/dev/null"
 
+echo "▶ G. the audit hands the generator the directory cargo-mutants wrote to"
+# Sections D-F drive the generator directly with hand-built fixtures, so they
+# all passed while every real audit failed at its final step: cargo-mutants
+# creates mutants.out *inside* --output, and the script was reading $MUT_OUT
+# itself. Testing the helper proved nothing about the caller wiring it — the
+# gap .claude/rules/testing.md calls "test through the caller".
+#
+# A stub cargo reproduces that layout without compiling anything.
+stub_bin="$work/stub-bin"
+mkdir -p "$stub_bin"
+for tool in bash sed grep python3 mktemp rm dirname cat mkdir; do
+  src="$(command -v "$tool" 2>/dev/null || true)"
+  [ -n "$src" ] && ln -sf "$src" "$stub_bin/$tool"
+done
+: >"$stub_bin/cargo-mutants"
+chmod +x "$stub_bin/cargo-mutants"
+cat >"$stub_bin/cargo" <<'STUB'
+#!/usr/bin/env bash
+# Mimic the one behaviour under test: `--output DIR` yields DIR/mutants.out.
+out="."
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --output) out="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+mkdir -p "$out/mutants.out"
+echo 'crates/demo/src/lib.rs:12:5: replace add with ()' >"$out/mutants.out/missed.txt"
+: >"$out/mutants.out/caught.txt"
+STUB
+chmod +x "$stub_bin/cargo"
+
+audit_out="$work/audit-out"
+check "audit completes and writes the queue where cargo-mutants wrote results" \
+  bash -c "PATH='$stub_bin' MUT_OUT='$audit_out' '$audit' -p demo >/dev/null 2>&1 \
+    && [ -f '$audit_out/mutants.out/triage-queue.md' ]"
+check "the generated queue carries the survivor, not an empty shell" \
+  grep -q 'replace add with ()' "$audit_out/mutants.out/triage-queue.md"
+
 echo
 if [ "$failures" -eq 0 ]; then
   echo "all mutation-harness self-tests passed"

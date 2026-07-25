@@ -14,11 +14,13 @@
 # Options (env vars):
 #   MUT_JOBS=3          Parallel mutants (default: 3)
 #   MUT_TIMEOUT=300     Per-mutant timeout in seconds (default: 300)
-#   MUT_OUT=mutants.out Report directory (default: mutants.out)
+#   MUT_OUT=.           Directory to create mutants.out in (default: repo root)
 #   MUT_ITERATE=0       Set to 1 to skip mutants caught in a previous run
 #
-# Output: $MUT_OUT/triage-queue.md — one entry per survivor with its sabotage
-# diff and the enclosing source, so a reviewer never has to go hunting.
+# Output: $MUT_OUT/mutants.out/triage-queue.md — one entry per survivor with its
+# sabotage diff and the enclosing source, so a reviewer never has to go hunting.
+# cargo-mutants always creates a directory literally named mutants.out inside
+# --output, so MUT_OUT names that directory's parent, not the report itself.
 #
 # Requires: cargo-mutants (install: cargo install cargo-mutants --locked)
 #
@@ -31,7 +33,7 @@ set -euo pipefail
 
 MUT_JOBS="${MUT_JOBS:-3}"
 MUT_TIMEOUT="${MUT_TIMEOUT:-300}"
-MUT_OUT="${MUT_OUT:-mutants.out}"
+MUT_OUT="${MUT_OUT:-.}"
 MUT_ITERATE="${MUT_ITERATE:-0}"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -56,7 +58,7 @@ while [ $# -gt 0 ]; do
       shift 2
       ;;
     -h | --help)
-      sed -n '2,28p' "${BASH_SOURCE[0]}" | sed 's|^# \{0,1\}||'
+      sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's|^# \{0,1\}||'
       exit 0
       ;;
     *)
@@ -104,12 +106,17 @@ if [ "$mutants_status" -ne 0 ] && [ "$mutants_status" -ne 2 ]; then
   exit "$mutants_status"
 fi
 
+# cargo-mutants creates mutants.out *inside* --output. Reading the results from
+# $MUT_OUT itself finds nothing, which failed every audit at this final step —
+# see scripts/test-mutation-audit.sh section G.
+report_dir="$MUT_OUT/mutants.out"
+
 python3 "$repo_root/scripts/ci/mutation_triage_queue.py" \
-  --report-dir "$MUT_OUT" \
-  --output "$MUT_OUT/triage-queue.md"
+  --report-dir "$report_dir" \
+  --output "$report_dir/triage-queue.md"
 
 echo
-echo "▶ triage queue: $MUT_OUT/triage-queue.md"
+echo "▶ triage queue: $report_dir/triage-queue.md"
 echo "  Assign each survivor one verdict (see docs/internal/mutation-audit.md):"
 echo "    real-gap · equivalent-mutant · needs-product-decision"
 echo "  A fix for a real-gap survivor is only accepted once"
