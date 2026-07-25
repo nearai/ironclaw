@@ -249,14 +249,17 @@ test("ExtensionsPage restores install-triggered setup focus to the installed car
   });
   const [registry] = componentProps(harness.rendered, harness.RegistryTab);
   const installTrigger = { isConnected: true };
+  const stableSuccessor = { isConnected: true };
   const configureSuccessor = { isConnected: true };
   const installedCard = {
     getAttribute: (name) =>
       name === "data-extension-id" ? "github" : null,
     querySelector: (selector) =>
-      selector === "[data-extension-primary-action]"
-        ? configureSuccessor
-        : null,
+      ({
+        "[data-extension-return-focus]": stableSuccessor,
+        "[data-extension-primary-action]": configureSuccessor,
+      })[selector] || null,
+    matches: () => false,
   };
   Object.assign(harness.document, {
     activeElement: null,
@@ -283,8 +286,49 @@ test("ExtensionsPage restores install-triggered setup focus to the installed car
   assert.equal(typeof modal.returnFocusTo, "function");
   assert.equal(
     modal.returnFocusTo(),
-    configureSuccessor,
-    "the deferred target resolves after the registry card is replaced",
+    stableSuccessor,
+    "the deferred target prefers a control that survives activation",
+  );
+});
+
+test("ExtensionsPage restores install focus to a registry-only installed card", () => {
+  let installPayload = null;
+  const harness = renderExtensionsPage("registry", {
+    install: (payload) => {
+      installPayload = payload;
+    },
+  });
+  const [registry] = componentProps(harness.rendered, harness.RegistryTab);
+  const installTrigger = { isConnected: true };
+  const registryOnlyCard = {
+    getAttribute: (name) =>
+      name === "data-extension-id" ? "github" : null,
+    querySelector: () => null,
+    matches: (selector) => selector === "[data-extension-return-focus]",
+  };
+  Object.assign(harness.document, {
+    activeElement: null,
+    querySelectorAll: () => [registryOnlyCard],
+  });
+
+  registry.onInstall(
+    {
+      packageRef: { kind: "extension", id: "github" },
+      displayName: "GitHub",
+    },
+    installTrigger,
+  );
+  installTrigger.isConnected = false;
+  installPayload.onNeedsSetup({
+    packageRef: { kind: "extension", id: "github" },
+    displayName: "GitHub",
+  });
+
+  const [modal] = componentProps(harness.render(), harness.ConfigureModal);
+  assert.equal(
+    modal.returnFocusTo(),
+    registryOnlyCard,
+    "the installed registry card remains a programmatic focus fallback",
   );
 });
 

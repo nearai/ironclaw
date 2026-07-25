@@ -68,8 +68,14 @@ function installReturnFocusTarget(packageRef, installTrigger) {
     );
     return /** @type {HTMLElement | null} */ (
       installedCard?.querySelector(
+        "[data-extension-return-focus]",
+      ) ||
+      installedCard?.querySelector(
         "[data-extension-primary-action]",
-      ) || null
+      ) ||
+      (installedCard?.matches("[data-extension-return-focus]")
+        ? installedCard
+        : null)
     );
   };
 }

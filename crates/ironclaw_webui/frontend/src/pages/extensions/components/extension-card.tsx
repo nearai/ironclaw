@@ -85,6 +85,7 @@ function OverflowMenu({ actions, isBusy }) {
         aria-label={t("extensions.moreActions")}
         aria-haspopup="true"
         aria-expanded={open ? "true" : "false"}
+        data-extension-return-focus="true"
         disabled={isBusy}
         onClick={() => setOpen((v) => !v)}
         className="grid h-7 w-7 place-items-center rounded-md border border-transparent text-[var(--v2-text-faint)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)] disabled:cursor-not-allowed disabled:opacity-50"
@@ -338,6 +339,8 @@ export function RegistryCard({ entry, onInstall = null, isBusy, statusLabel = un
       className={CARD}
       data-testid="extension-card"
       data-extension-id={packageId(entry)}
+      data-extension-return-focus={statusLabel ? "true" : undefined}
+      tabIndex={statusLabel ? -1 : undefined}
     >
       <div className="flex items-start gap-2">
         <Badge

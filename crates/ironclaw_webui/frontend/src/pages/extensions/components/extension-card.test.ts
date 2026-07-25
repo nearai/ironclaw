@@ -270,6 +270,51 @@ test("RegistryCard passes the Install trigger to the install workflow", () => {
   assert.equal(installTrigger, trigger);
 });
 
+test("installed cards expose stable focus return targets", () => {
+  const context = makeContext();
+  vm.runInNewContext(extensionCardSourceWithInternals(), context);
+  const { ExtensionCard, RegistryCard, OverflowMenu } =
+    context.globalThis.__testExports;
+  const extensionCard = ExtensionCard({
+    ext: {
+      package_ref: { kind: "extension", id: "github" },
+      display_name: "GitHub",
+      runtime: "wasm",
+      surfaces: toolSurfaces,
+      installation_state: "setup_needed",
+    },
+    onConfigure() {},
+    onRemove() {},
+    isBusy: false,
+  });
+  const overflowActions = extractOverflowActions(extensionCard, OverflowMenu);
+  const overflowMenu = OverflowMenu({
+    actions: overflowActions,
+    isBusy: false,
+  });
+  const registryCard = RegistryCard({
+    entry: {
+      package_ref: { kind: "extension", id: "github" },
+      display_name: "GitHub",
+      runtime: "wasm",
+    },
+    statusLabel: "installed",
+    isBusy: false,
+  });
+
+  assert.equal(
+    overflowMenu.children[0].props["data-extension-return-focus"],
+    "true",
+    "the overflow trigger survives setup activation",
+  );
+  assert.equal(
+    registryCard.props["data-extension-return-focus"],
+    "true",
+    "registry-only installed cards provide a fallback target",
+  );
+  assert.equal(renderedContainsValue(registryCard, -1), true);
+});
+
 test("setup-needed cards never expose a separate Activate action", () => {
   const channel = renderExtensionCard({
     package_ref: { id: "slack" },
