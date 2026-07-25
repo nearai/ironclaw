@@ -58,7 +58,7 @@ if [ -n "$HOOKS_DIR" ]; then
     echo "  pre-commit hook installed (UTF-8, case-sensitivity, /tmp, redaction, composition-mass ratchet)"
     REPO_ROOT="$(git rev-parse --show-toplevel)"
     ln -sf "$REPO_ROOT/.githooks/pre-push" "$HOOKS_DIR/pre-push"
-    echo "  pre-push hook installed (merge check + CI-parity quality gate + WebUI provider replay + optional delta lint)"
+    echo "  pre-push hook installed (merge check + CI-parity quality gate + Reborn coverage ratchet + WebUI provider replay + optional delta lint)"
 else
     echo "  Skipped: not a git repository"
 fi
