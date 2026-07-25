@@ -293,6 +293,7 @@ SEL_V2 = {
     "appearance_theme_light": "[data-testid='appearance-theme-light']",
     "appearance_theme_dark": "[data-testid='appearance-theme-dark']",
     "chat_composer":  "[data-testid='chat-composer']",  # message textarea on /chat
+    "chat_cancel_run": "[data-testid='chat-cancel-run']",
     "attachment_file_input": "input[type=file][multiple]",
     "typing_indicator": "[data-testid='typing-indicator']",
     "connection_status": "[data-testid='connection-status']",
@@ -398,6 +399,9 @@ SEL_V2 = {
     ),
     "automation_name_button_for": (
         "[data-testid='automation-name-button'][data-automation-id='{id}']"
+    ),
+    "automation_filter_for": (
+        "[data-testid='automation-filter'][data-filter='{filter}']"
     ),
     "automation_detail": "[data-testid='automation-detail-panel']",
     "automation_detail_title": "[data-testid='automation-detail-title']",

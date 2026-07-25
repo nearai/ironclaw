@@ -1208,6 +1208,7 @@ registerPack("ar", {
   "common.pinned": "مثبت",
   "common.deleteChat": "حذف الدردشة",
   "chat.deleteFailed": "تعذّر حذف هذه المحادثة.",
+  "chat.cancelFailed": "تعذّر إيقاف هذا التشغيل. قد يظل قيد التشغيل. حاول مرة أخرى.",
   "chat.deleteBusy": "لا يمكن حذف محادثة أثناء تشغيلها. أوقفها أولاً ثم حاول مرة أخرى.",
   "command.placeholder": "اكتب أمرًا أو بحث...",
   "routine.searchPlaceholder": "اسم روتين البحث أو المشغل أو الإجراء",
