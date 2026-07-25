@@ -52,8 +52,15 @@ def _enclosing_rust_item(source_path: Path, line_number: int) -> tuple[str, int]
     # Keep entries readable; a very long function is a smell worth seeing, but
     # the queue should not become a source dump.
     if len(window) > 60:
-        window = window[:60] + ["    // … truncated, see the file for the rest"]
+        window = [*window[:60], "    // … truncated, see the file for the rest"]
     return ("\n".join(window), start + 1)
+
+
+def _count_nonempty_lines(path: Path) -> int:
+    """Non-blank lines in one of cargo-mutants' plain-text result files."""
+    if not path.is_file():
+        return 0
+    return len([line for line in path.read_text().splitlines() if line.strip()])
 
 
 def _diff_for(report_dir: Path, outcomes: dict, mutant: str) -> str:
@@ -93,20 +100,8 @@ def build_queue(report_dir: Path) -> str:
         except json.JSONDecodeError:
             outcomes = {}
 
-    caught = len(
-        [
-            line
-            for line in (report_dir / "caught.txt").read_text().splitlines()
-            if line.strip()
-        ]
-    ) if (report_dir / "caught.txt").is_file() else 0
-    unviable = len(
-        [
-            line
-            for line in (report_dir / "unviable.txt").read_text().splitlines()
-            if line.strip()
-        ]
-    ) if (report_dir / "unviable.txt").is_file() else 0
+    caught = _count_nonempty_lines(report_dir / "caught.txt")
+    unviable = _count_nonempty_lines(report_dir / "unviable.txt")
 
     viable = caught + len(survivors)
     out: list[str] = []

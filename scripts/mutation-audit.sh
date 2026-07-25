@@ -47,12 +47,6 @@ if [ -n "${CARGO_TARGET_DIR:-}" ]; then
   unset CARGO_TARGET_DIR
 fi
 
-if ! command -v cargo-mutants >/dev/null 2>&1; then
-  echo "error: cargo-mutants not installed." >&2
-  echo "       cargo install cargo-mutants --locked" >&2
-  exit 1
-fi
-
 package=""
 files=()
 while [ $# -gt 0 ]; do
@@ -62,7 +56,7 @@ while [ $# -gt 0 ]; do
       shift 2
       ;;
     -h | --help)
-      sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's|^# \{0,1\}||'
+      sed -n '2,28p' "${BASH_SOURCE[0]}" | sed 's|^# \{0,1\}||'
       exit 0
       ;;
     *)
@@ -78,6 +72,16 @@ if [ -z "$package" ]; then
   # a silent no-op that reads like "nothing to fix".
   echo "error: -p/--package is required (the workspace root has no lib/bin," >&2
   echo "       so an unscoped run silently finds zero mutants)." >&2
+  exit 1
+fi
+
+# Checked after argument validation on purpose: a usage error must report the
+# usage error, not a missing tool. Ordering these the other way round made the
+# unscoped-run guard unreachable on any machine without cargo-mutants installed
+# — and made this script's self-tests pass only because the author had it.
+if ! command -v cargo-mutants >/dev/null 2>&1; then
+  echo "error: cargo-mutants not installed." >&2
+  echo "       cargo install cargo-mutants --locked" >&2
   exit 1
 fi
 

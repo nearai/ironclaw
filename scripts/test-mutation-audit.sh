@@ -41,6 +41,24 @@ check "audit without --package exits non-zero" \
 check "audit without --package explains why" \
   bash -c "'$audit' 2>&1 | grep -q 'silently finds zero mutants'"
 
+echo "▶ A2. usage guards work with cargo-mutants absent from PATH"
+# Regression: the cargo-mutants presence check originally ran *before* argument
+# validation, so on a machine without the tool the unscoped-run guard was
+# unreachable and reported the wrong error. These cases passed anyway because
+# the author had cargo-mutants installed — the self-test depended on the
+# developer's environment, which is exactly what "hermetic" is supposed to rule
+# out. A stub PATH with no cargo at all reproduces a clean machine.
+bare_path="$work/bare-bin"
+mkdir -p "$bare_path"
+for tool in bash sed grep python3 mktemp rm dirname cd; do
+  src="$(command -v "$tool" 2>/dev/null || true)"
+  [ -n "$src" ] && ln -sf "$src" "$bare_path/$tool"
+done
+check "audit still reports the usage error, not a missing tool" \
+  bash -c "PATH='$bare_path' '$audit' 2>&1 | grep -q 'silently finds zero mutants'"
+check "verify still reports the usage error, not a missing tool" \
+  bash -c "PATH='$bare_path' '$verify' 2>&1 | grep -q 'usage:'"
+
 echo "▶ B. the verify gate refuses incomplete invocations"
 check "verify with no args exits non-zero" \
   bash -c "! '$verify' 2>/dev/null"

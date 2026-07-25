@@ -108,7 +108,7 @@ fi
 # Baseline failure means the suite does not pass on unmodified code, so nothing
 # downstream is meaningful — this catches a test written to match a mutant
 # rather than the intended behaviour.
-if grep -qiE "^(FAILED|ERROR).*[Uu]nmutated baseline|baseline failed" "$work/run.log"; then
+if grep -qiE "^(FAILED|ERROR).*([Uu]nmutated baseline|baseline failed)" "$work/run.log"; then
   echo "REJECTED: the test suite does not pass on unmodified code." >&2
   echo "          A regression test must pass before it can prove anything." >&2
   exit 1
