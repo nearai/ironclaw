@@ -426,15 +426,6 @@ impl CredentialManager {
         }
     }
 
-    // Unused after `pub mod gemini_oauth` → `pub(crate) mod gemini_oauth`. Kept
-    // in place because the boundary-cleanup move is meant to be behavior-preserving;
-    // delete in a follow-up if there's no future caller.
-    #[allow(dead_code)]
-    pub(crate) async fn get_valid_access_token(&self) -> Result<String> {
-        let cred = self.get_valid_credential().await?;
-        Ok(cred.access_token)
-    }
-
     /// Force a token refresh regardless of the current token's expiry time.
     /// This is useful when the server returns 401 Unauthorized for a supposedly valid token.
     pub(crate) async fn force_refresh(&self) -> Result<OAuthCredential> {
@@ -946,16 +937,6 @@ impl GeminiOauthProvider {
             last_response_meta: std::sync::Mutex::new(GeminiResponseMeta::default()),
             thought_signatures: std::sync::Mutex::new(HashMap::new()),
         })
-    }
-
-    /// Returns the latest response metadata from the last API call.
-    // Unused after module privatization; see `get_valid_access_token` above.
-    #[allow(dead_code)]
-    pub(crate) fn last_response_meta(&self) -> GeminiResponseMeta {
-        self.last_response_meta
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
     }
 
     /// Inject thought signatures into model functionCall parts in the active loop.
