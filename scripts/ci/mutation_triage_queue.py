@@ -85,94 +85,108 @@ def _diff_for(report_dir: Path, outcomes: dict, mutant: str) -> str:
     return ""
 
 
+def _preamble(survivors: int, caught: int, viable: int, unviable: int) -> list[str]:
+    """Header block: the counts, and how to read them."""
+    lines = [
+        "# Mutation audit triage queue",
+        "",
+        (
+            f"- **{survivors} survivors** to triage "
+            f"({caught} caught, {viable} viable, {unviable} unviable/ignored)"
+        ),
+    ]
+    if viable:
+        lines.append(f"- Caught rate over viable mutants: **{caught}/{viable}**")
+    lines += [
+        (
+            "- Score the caught rate over *viable* mutants only. Unviable "
+            "mutants failed to compile and carry no signal."
+        ),
+        "",
+        (
+            "Assign every entry exactly one verdict. See "
+            "`docs/internal/mutation-audit.md`."
+        ),
+        "",
+        "| verdict | meaning | next step |",
+        "|---|---|---|",
+        (
+            "| `real-gap` | behaviour genuinely unasserted | write a test, "
+            "then `scripts/mutation-verify-fix.sh` must accept it |"
+        ),
+        (
+            "| `equivalent-mutant` | no test *can* catch it — the change "
+            "cannot alter observable behaviour | record the reasoning; no test |"
+        ),
+        (
+            "| `needs-product-decision` | the intended contract is unclear | "
+            "route to an owner; **do not invent one** |"
+        ),
+        "",
+        "---",
+        "",
+    ]
+    return lines
+
+
+def _entry(index: int, mutant: str, report_dir: Path, outcomes: dict) -> list[str]:
+    """One survivor, with enough context to triage without opening the file."""
+    lines = [
+        f"## {index}. `{mutant}`",
+        "",
+        "- verdict: `TODO`",
+        "- reasoning: _TODO_",
+        "",
+    ]
+
+    match = MUTANT_LINE.match(mutant)
+    if match:
+        source_path = Path(match.group("file"))
+        body, start_line = _enclosing_rust_item(source_path, int(match.group("line")))
+        lines += [
+            f"Enclosing item (`{source_path}:{start_line}`):",
+            "",
+            "```rust",
+            body,
+            "```",
+            "",
+        ]
+
+    diff = _diff_for(report_dir, outcomes, mutant)
+    if diff:
+        lines += ["Sabotage applied:", "", "```diff", diff.strip(), "```", ""]
+
+    lines += ["---", ""]
+    return lines
+
+
+def _load_outcomes(report_dir: Path) -> dict:
+    """cargo-mutants' machine-readable report, when it wrote a usable one."""
+    outcomes_path = report_dir / "outcomes.json"
+    if not outcomes_path.is_file():
+        return {}
+    try:
+        return json.loads(outcomes_path.read_text())
+    except json.JSONDecodeError:
+        return {}
+
+
 def build_queue(report_dir: Path) -> str:
     missed_path = report_dir / "missed.txt"
     if not missed_path.is_file():
         raise SystemExit(f"no missed.txt in {report_dir} — was the audit run?")
 
     survivors = [line for line in missed_path.read_text().splitlines() if line.strip()]
-
-    outcomes: dict = {}
-    outcomes_path = report_dir / "outcomes.json"
-    if outcomes_path.is_file():
-        try:
-            outcomes = json.loads(outcomes_path.read_text())
-        except json.JSONDecodeError:
-            outcomes = {}
-
+    outcomes = _load_outcomes(report_dir)
     caught = _count_nonempty_lines(report_dir / "caught.txt")
     unviable = _count_nonempty_lines(report_dir / "unviable.txt")
 
-    viable = caught + len(survivors)
-    out: list[str] = []
-    out.append("# Mutation audit triage queue")
-    out.append("")
-    out.append(
-        f"- **{len(survivors)} survivors** to triage "
-        f"({caught} caught, {viable} viable, {unviable} unviable/ignored)"
-    )
-    if viable:
-        out.append(f"- Caught rate over viable mutants: **{caught}/{viable}**")
-    out.append(
-        "- Score the caught rate over *viable* mutants only. Unviable mutants "
-        "failed to compile and carry no signal."
-    )
-    out.append("")
-    out.append(
-        "Assign every entry exactly one verdict. See "
-        "`docs/internal/mutation-audit.md`."
-    )
-    out.append("")
-    out.append("| verdict | meaning | next step |")
-    out.append("|---|---|---|")
-    out.append(
-        "| `real-gap` | behaviour genuinely unasserted | write a test, then "
-        "`scripts/mutation-verify-fix.sh` must accept it |"
-    )
-    out.append(
-        "| `equivalent-mutant` | no test *can* catch it — the change cannot "
-        "alter observable behaviour | record the reasoning; no test |"
-    )
-    out.append(
-        "| `needs-product-decision` | the intended contract is unclear | route "
-        "to an owner; **do not invent one** |"
-    )
-    out.append("")
-    out.append("---")
-    out.append("")
-
+    out = _preamble(len(survivors), caught, caught + len(survivors), unviable)
     for index, mutant in enumerate(survivors, start=1):
-        match = MUTANT_LINE.match(mutant)
-        out.append(f"## {index}. `{mutant}`")
-        out.append("")
-        out.append("- verdict: `TODO`")
-        out.append("- reasoning: _TODO_")
-        out.append("")
-        if match:
-            source_path = Path(match.group("file"))
-            body, start_line = _enclosing_rust_item(
-                source_path, int(match.group("line"))
-            )
-            out.append(f"Enclosing item (`{source_path}:{start_line}`):")
-            out.append("")
-            out.append("```rust")
-            out.append(body)
-            out.append("```")
-            out.append("")
-        diff = _diff_for(report_dir, outcomes, mutant)
-        if diff:
-            out.append("Sabotage applied:")
-            out.append("")
-            out.append("```diff")
-            out.append(diff.strip())
-            out.append("```")
-            out.append("")
-        out.append("---")
-        out.append("")
+        out += _entry(index, mutant, report_dir, outcomes)
 
     if not survivors:
-        out.append("No surviving mutants. Nothing to triage.")
-        out.append("")
+        out += ["No surviving mutants. Nothing to triage.", ""]
 
     return "\n".join(out)
 
