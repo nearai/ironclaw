@@ -16,7 +16,7 @@
 //!
 //! `HostFailure` is introduced additively ahead of wiring (§9): nothing returns
 //! it yet. It is deliberately *not* the recoverable path — a lane-correctable or
-//! model-correctable error stays a recoverable outcome (`tools.md`), never a
+//! model-correctable error stays a recoverable outcome (`capability-access.md`), never a
 //! `HostFailure`.
 
 use serde::{Deserialize, Serialize};

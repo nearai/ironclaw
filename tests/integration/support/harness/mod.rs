@@ -982,7 +982,7 @@ impl HostRuntimeCapabilityHarness {
     /// durable append would fail closed as `UnknownThread` ->
     /// `AgentLoopHostErrorKind::Unavailable` -> a terminal
     /// `HostUnavailable { stage: Capability }` for the whole run (see
-    /// `.claude/rules/agent-loop-capabilities.md`).
+    /// capability-access contract).
     ///
     /// Interior mutability (not a builder field) because that real thread
     /// service is only constructed in `group.rs`'s `into_group`, AFTER

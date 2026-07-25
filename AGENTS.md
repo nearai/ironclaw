@@ -160,7 +160,7 @@ Update the owning contract/docs when behavior changes. Choose tests using
 `.claude/rules/testing.md` and
 `.claude/skills/ironclaw-reborn-testing/SKILL.md`; use the smallest tier that
 reaches the changed contract. Never commit secrets or PII. Before committing,
-follow `.claude/rules/review-discipline.md` for clippy and safety checks.
+follow `.claude/rules/testing.md` and the owning crate guidance for clippy and safety checks.
 
 Agents opening or updating a pull request must preserve and complete the
 `Test Strategy` section from `.github/pull_request_template.md`. Every test tier

@@ -585,7 +585,7 @@ fn extension_package_ref(
 /// Fixed, host-authored, validator-safe headline for the
 /// `dispatch_with_host_remediation` call below — the strict `safe_summary`
 /// validator rejects `{}[]<>/` and secret-like vocabulary
-/// (`agent-loop-capabilities` invariant 2), so the full `config set`
+/// (capability-access redaction invariant), so the full `config set`
 /// remediation text rides the trusted host-remediation channel instead;
 /// `safe_summary` stays this short fixed literal.
 const PROVIDER_INSTANCE_NOT_CONFIGURED_SAFE_SUMMARY: &str =
@@ -2015,7 +2015,7 @@ mod tests {
 
     /// The fixed `safe_summary` headline used
     /// for `ProviderInstanceNotConfigured` must itself pass the strict
-    /// `LoopSafeSummary` validator (agent-loop-capabilities invariant 2) —
+    /// `LoopSafeSummary` validator (capability-access redaction invariant) —
     /// proves the summary never trips the `{}[]<>/` / secret-vocabulary
     /// rejection that would otherwise kill the whole run — and the full
     /// remediation must ride the diagnostic-detail channel, naming the exact

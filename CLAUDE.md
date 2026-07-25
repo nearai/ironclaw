@@ -243,7 +243,7 @@ A Reborn channel is one capability surface of an **extension** (unified model):
 the manifest (`reborn.extension_manifest.v3`) declares `[channel]` (ingress
 verification recipe, `[channel.config]`, egress allowlist, presentation) beside
 the extension's tools and auth recipes, and the extension's `ChannelAdapter`
-(`crates/ironclaw_product_adapters`) implements inbound normalize / deliver /
+(`crates/ironclaw_host_api/src/product_adapter/channel_adapter.rs`) implements inbound normalize / deliver /
 activate / cleanup. Binaries supply adapters through
 `RebornHostBindings::with_channel_extension_bindings`
 (`crates/ironclaw_reborn_composition/src/input.rs`); composition wires the
@@ -252,20 +252,13 @@ delivery coordinator — never per-channel host code. Start from the
 `reborn-extension-surfaces` skill; the worked example is the Slack package
 (`crates/ironclaw_first_party_extensions/assets/slack/`).
 
-## Everything Goes Through Capability Dispatch
+## Capability dispatch
 
-**Core principle**: all actions originating from product/WebUI handlers,
-scheduled triggers, channels, or any other non-agent caller route through the
-**same capability/tool dispatch path** the agent loop uses — they do not reach
-around it to mutate stores directly. This gives every caller-initiated mutation
-the same audit trail, safety pipeline (param validation, redaction, output
-sanitization), and authorization/approval surface as agent-initiated tool
-calls.
-
-This invariant is enforced structurally in `ironclaw_product`, composition,
-and host-surface crates and by `cargo test -p ironclaw_architecture` (dependency and
-composition boundaries), not by a grep-based pre-commit check. See
-`.claude/rules/tools.md`.
+Product/WebUI handlers, scheduled triggers, channels, and agent callers use
+the typed `ProductSurface` and capability contracts. They must not reach around
+authorization, approvals, resource accounting, host mediation, or the owning
+domain operation to mutate stores directly. The architecture tests and the
+owning contracts are the source of truth for this boundary.
 
 ## Workspace & Memory
 

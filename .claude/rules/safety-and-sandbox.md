@@ -8,7 +8,6 @@ paths:
   - "crates/ironclaw_process_sandbox/**"
   - "crates/ironclaw_wasm/**"
   - "crates/ironclaw_mcp/**"
-  - "crates/ironclaw_product_adapters/**"
   - "crates/ironclaw_webui/**"
   - "crates/ironclaw_prompt_envelope/**"
 ---
@@ -103,7 +102,8 @@ phase separation, and malicious worker metadata.
 ## Process and shell execution: real OS isolation, per tenant
 
 Motivated by issue #6170 (a shipped cross-tenant file-disclosure via `shell`).
-Case study and target design: `docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md` §6.
+The current process boundary is defined by `docs/reborn/contracts/processes.md`
+and the owning host-runtime/process-sandbox crates.
 
 - **The virtual filesystem does not contain a subprocess.** `ScopedFilesystem` /
   `MountView` bound the *filesystem capability* (`filesystem.read`), a virtual-path

@@ -124,8 +124,8 @@ evidence; **Partial** = an equivalent exists but with a scoped delta noted;
    (`ironclaw_skills::learning`) carries the durable-knowledge half. Net: the
    engine-v2 CodeAct primitive is reshaped, not reproduced byte-for-byte. This
    is acceptable for removal because engine-v2 CodeAct was itself experimental
-   (Tier 1, RLM), never a production default, and the `.claude/rules/tool-evidence.md`
-   note records that even its side-effect gating was only a soft nudge, never a
+   (Tier 1, RLM), never a production default, and the capability evidence rules
+   record that even its side-effect gating was only a soft nudge, never a
    hard gate.
 
 5. **Sandbox (Covered).** The per-project Docker sandbox is reproduced as typed

@@ -27,7 +27,7 @@
 //! every one carries a [`SafeSummary`](crate::SafeSummary), never raw text. The
 //! loop renders credential requirements FROM the [`GateRecord::Auth`] record —
 //! it never reconstructs a credential demand from model-visible data
-//! (`tool-evidence.md`, `safety-and-sandbox.md`). Keeping the requirement on the
+//! (`capability-access.md`, `safety-and-sandbox.md`). Keeping the requirement on the
 //! host-owned record, not on any model-derived value, is what makes an auth gate
 //! forge-proof.
 //!
