@@ -1312,6 +1312,7 @@ registerPack("en", {
   "common.deleteChat": "Delete chat",
   "chat.deleteFailed": "Couldn't delete this conversation.",
   "chat.deleteBusy": "Can't delete a conversation while it's still running. Stop it first, then try again.",
+  "chat.cancelFailed": "Couldn't stop this run. It may still be running. Try again.",
   "command.placeholder": "Type a command or search...",
   "routine.searchPlaceholder": "Search routine name, trigger, or action",
   "routine.unavailable": "Routine unavailable",
