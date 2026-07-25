@@ -1363,6 +1363,11 @@ registerPack("fr", {
 
 registerPack("fr", {
   "app.checkingSession": "Vérification de la session...",
+  "app.loadingPage": "Chargement de la page...",
+  "app.pageLoadFailedTitle": "Impossible de charger cette page",
+  "app.pageLoadFailedDescription":
+    "Une nouvelle version est peut-être disponible ou la connexion a été interrompue. Rechargez la page pour réessayer.",
+  "app.reloadPage": "Recharger la page",
   "app.sessionCheckFailedTitle": "Impossible de vérifier votre session",
   "app.sessionCheckFailedDescription":
     "Impossible de vérifier votre session pour le moment. Vos informations de connexion restent enregistrées. Réessayez dans quelques instants.",

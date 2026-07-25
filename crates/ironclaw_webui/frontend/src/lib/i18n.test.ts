@@ -240,6 +240,23 @@ test("locale packs include automation action failure copy", () => {
   }
 });
 
+test("locale packs include lazy-route loading and recovery copy", () => {
+  const requiredKeys = [
+    "app.loadingPage",
+    "app.pageLoadFailedTitle",
+    "app.pageLoadFailedDescription",
+    "app.reloadPage",
+  ];
+
+  for (const locale of LOCALES) {
+    const pack = loadLocalePack(locale);
+    for (const key of requiredKeys) {
+      assert.equal(typeof pack[key], "string", `${locale} missing ${key}`);
+      assert.notEqual(pack[key].trim(), "", `${locale} ${key} should not be empty`);
+    }
+  }
+});
+
 test("locale packs include extension setup and OAuth failure copy", () => {
   const requiredKeys = [
     "extensions.state.setup_needed",

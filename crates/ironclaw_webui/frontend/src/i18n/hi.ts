@@ -1363,6 +1363,11 @@ registerPack("hi", {
 
 registerPack("hi", {
   "app.checkingSession": "सत्र जांचा जा रहा है...",
+  "app.loadingPage": "पेज लोड हो रहा है...",
+  "app.pageLoadFailedTitle": "यह पेज लोड नहीं हो सका",
+  "app.pageLoadFailedDescription":
+    "हो सकता है कि नया वर्ज़न उपलब्ध हो या कनेक्शन बाधित हुआ हो। फिर से कोशिश करने के लिए पेज को रीलोड करें।",
+  "app.reloadPage": "पेज रीलोड करें",
   "app.sessionCheckFailedTitle": "आपके सत्र की पुष्टि नहीं हो सकी",
   "app.sessionCheckFailedDescription":
     "अभी आपके सत्र की पुष्टि नहीं हो सकी। आपकी साइन-इन जानकारी अभी भी सहेजी हुई है। थोड़ी देर बाद फिर कोशिश करें।",

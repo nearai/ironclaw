@@ -1364,6 +1364,11 @@ registerPack("es", {
 
 registerPack("es", {
   "app.checkingSession": "Comprobando sesión...",
+  "app.loadingPage": "Cargando página...",
+  "app.pageLoadFailedTitle": "No se pudo cargar esta página",
+  "app.pageLoadFailedDescription":
+    "Puede que haya una nueva versión disponible o que se haya interrumpido la conexión. Recarga la página para volver a intentarlo.",
+  "app.reloadPage": "Recargar página",
   "app.sessionCheckFailedTitle": "No se pudo verificar tu sesión",
   "app.sessionCheckFailedDescription":
     "No pudimos verificar tu sesión en este momento. Tu inicio de sesión sigue guardado. Inténtalo de nuevo en unos instantes.",
