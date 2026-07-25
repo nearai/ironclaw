@@ -332,6 +332,7 @@ SEL_V2 = {
         "[data-testid='extension-card'][data-extension-id='{id}']"
     ),
     "extension_primary_action": "[data-extension-primary-action]",
+    "extension_return_focus": "[data-extension-return-focus]",
     "extension_more_actions_name": "More actions",
     "extension_reconfigure_name": "Reconfigure",
     "extension_configure_dialog_name_for": "Configure {name}",
