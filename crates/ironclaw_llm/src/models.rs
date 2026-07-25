@@ -1,7 +1,7 @@
 //! Model discovery and fetching for multiple LLM providers.
 //!
 //! External callers should use [`fetch_models_for`] — a single verb-based
-//! facade that dispatches on a provider ID string. The per-provider
+//! service that dispatches on a provider ID string. The per-provider
 //! fetcher functions below are `pub(crate)` and not part of the public
 //! surface of `ironclaw_llm`.
 

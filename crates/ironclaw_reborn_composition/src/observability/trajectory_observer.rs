@@ -9,13 +9,13 @@
 //! [`RebornRuntimeInput::with_trajectory_observer`](crate::RebornRuntimeInput::with_trajectory_observer)
 //! to receive those events live.
 //!
-//! # Facade ownership
+//! # Service ownership
 //!
 //! [`RebornTrajectoryObserver`] is a composition-owned trait. The capability
 //! port that drives the input hook lives in `ironclaw_loop_host` and speaks
 //! its own [`ironclaw_loop_host::CapabilityTrajectoryObserver`]; rather than
-//! re-export that substrate trait (which would commit this facade to a
-//! loop-host contract — see `CLAUDE.md`: "expose facade-shaped handles only;
+//! re-export that substrate trait (which would commit this service to a
+//! loop-host contract — see `CLAUDE.md`: "expose service-shaped handles only;
 //! keep lower substrate handles private"), we define our own trait and adapt it
 //! to the substrate one in [`as_capability_observer`]. Loop-support contract
 //! changes therefore stay internal to the adapter instead of breaking the
@@ -202,7 +202,7 @@ impl RebornTrajectoryObserver for SafePreviewTrajectoryObserver {
 
 /// Adapts a composition-owned [`RebornTrajectoryObserver`] to the substrate
 /// [`CapabilityTrajectoryObserver`] the loop-host capability port consumes,
-/// so the facade trait never appears in this crate's loop-host boundary. The
+/// so the service trait never appears in this crate's loop-host boundary. The
 /// substrate trait is input-only; the composition observer's result half is
 /// driven separately by `StagedCapabilityIo`.
 #[derive(Debug)]

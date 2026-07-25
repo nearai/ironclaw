@@ -603,7 +603,7 @@ impl ironclaw_host_api::ToolAdapter for AcmeFixtureToolAdapter {
 /// its assets copied into the storage root pre-build (the catalog discovers
 /// them), its native factory assembled into the composition input, its tool
 /// granted, and its provider trusted — the acme lifecycle then runs through
-/// the REAL facade (install → dispatch-from-snapshot → remove).
+/// the REAL service (install → activate → dispatch-from-snapshot → remove).
 pub(crate) fn extension_runtime_acme_tools_profile() -> HarnessResult<ToolsProfile> {
     let mut profile = extension_lifecycle_tools_profile()?;
     profile
@@ -778,6 +778,7 @@ fn slack_channel_extension_binding() -> ironclaw_reborn_composition::ChannelExte
         preference_target_codec: Some(Arc::new(
             ironclaw_slack_extension::SlackPreferenceTargetCodec,
         )),
+        inbound_payload_classifier: None,
     }
 }
 
@@ -786,6 +787,7 @@ fn telegram_channel_extension_binding() -> ironclaw_reborn_composition::ChannelE
         extension_id: "telegram".to_string(),
         adapter: Arc::new(ironclaw_telegram_extension::TelegramChannelAdapter::default()),
         preference_target_codec: None,
+        inbound_payload_classifier: None,
     }
 }
 

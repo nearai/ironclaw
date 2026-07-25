@@ -589,6 +589,7 @@ async fn build_runtime_with_slack_delivery(
     .with_channel_extension_bindings(vec![ChannelExtensionBinding {
         extension_id: "slack".to_string(),
         adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
+        inbound_payload_classifier: None,
         preference_target_codec: Some(Arc::new(
             ironclaw_slack_extension::SlackPreferenceTargetCodec,
         )),
@@ -619,9 +620,12 @@ async fn configure_and_activate_slack_for_delivery(runtime: &RebornRuntime) {
         .install_extension_for_test(package_ref.clone())
         .await
         .expect("install Slack through the production lifecycle port");
-    runtime
-        .configure_admin_group_for_test(
-            "extension.slack",
+    let channel_config = runtime
+        .channel_config_service()
+        .expect("channel config service is wired");
+    channel_config
+        .save_values(
+            &ExtensionId::new("slack").expect("valid Slack extension id"),
             vec![
                 (
                     "slack_bot_token".to_string(),
@@ -652,7 +656,7 @@ async fn configure_and_activate_slack_for_delivery(runtime: &RebornRuntime) {
             ],
         )
         .await
-        .expect("configure Slack through the production admin-configuration resolver");
+        .expect("configure Slack through the production channel-config service");
     runtime
         .activate_extension_for_test(package_ref)
         .await

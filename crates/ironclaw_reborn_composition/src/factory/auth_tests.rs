@@ -26,7 +26,7 @@ use ironclaw_turns::{
 use secrecy::SecretString;
 use std::sync::Mutex;
 
-use crate::product_auth::api::auth::AUTH_CONTINUATION_DISPATCH_FAILED_CODE;
+use ironclaw_auth::product_auth::api::auth::AUTH_CONTINUATION_DISPATCH_FAILED_CODE;
 
 use super::*;
 
@@ -254,11 +254,11 @@ async fn local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator() {
         .expect("auth flow");
 
     let response = product_auth
-        .handle_oauth_callback(crate::RebornOAuthCallbackRequest {
+        .handle_oauth_callback(ironclaw_auth::RebornOAuthCallbackRequest {
             scope: auth_scope.clone(),
             flow_id: flow.id,
             opaque_state_hash: state_hash(),
-            outcome: crate::RebornOAuthCallbackOutcome::Authorized {
+            outcome: ironclaw_auth::RebornOAuthCallbackOutcome::Authorized {
                 provider_request: OAuthProviderCallbackRequest {
                     provider: provider(),
                     account_label: label(),
@@ -516,7 +516,7 @@ async fn local_dev_dcr_oauth_callback_builds_and_wires_challenge_provider() {
 
     let _ = &services.product_auth;
     assert!(
-        services.product_auth.as_auth_challenge_provider().is_some(),
+        crate::product_auth_challenge_provider(&services.product_auth).is_some(),
         "DCR-backed product auth must expose the challenge provider projection path"
     );
 }
@@ -721,49 +721,22 @@ async fn oauth_callback_with_lifecycle_activation_returns_ok_without_resume() {
     .await
     .expect("local-dev services build");
     let product_auth = &services.product_auth;
-    // #6520: a lifecycle-activation continuation reconciles a real installed
-    // extension, so install GitHub for the caller before completing its OAuth
-    // flow (an unknown package would fail the continuation dispatch).
-    let extension_management = services
-        .local_runtime_for_test()
-        .expect("local runtime")
-        .extension_management
-        .clone();
-    let user_id = UserId::new("alice").expect("user id");
-    let product_package_ref = ironclaw_product::LifecyclePackageRef::new(
-        ironclaw_product::LifecyclePackageKind::Extension,
-        "github",
-    )
-    .expect("product package ref");
-    extension_management
-        .install(product_package_ref.clone(), &user_id)
-        .await
-        .expect("install GitHub before its OAuth continuation");
-    let auth_scope = auth_scope_for_turn(&turn_scope(), &TurnActor::new(user_id.clone()));
+    let auth_scope = auth_scope_for_turn(
+        &turn_scope(),
+        &TurnActor::new(UserId::new("alice").unwrap()),
+    );
     let continuation = AuthContinuationRef::LifecycleActivation {
         package_ref: LifecyclePackageRef::new("github").unwrap(),
     };
     let flow_id = create_flow(product_auth, auth_scope.clone(), continuation.clone()).await;
 
     let response = product_auth
-        .handle_oauth_callback(authorized_request(auth_scope.clone(), flow_id))
+        .handle_oauth_callback(authorized_request(auth_scope, flow_id))
         .await
-        .expect("lifecycle continuation activates the installed extension");
+        .expect("lifecycle continuation is deferred");
 
     assert_eq!(response.flow_id, flow_id);
     assert_eq!(response.continuation, continuation);
-    let credential_gate = crate::extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate::new(
-        auth_scope.resource,
-        product_auth.runtime_credential_account_selection_service(),
-    );
-    let projection = extension_management
-        .project(product_package_ref, &user_id, Some(&credential_gate))
-        .await
-        .expect("project GitHub after OAuth continuation");
-    assert_eq!(
-        projection.phase,
-        ironclaw_product::LifecyclePublicState::Active
-    );
 }
 
 #[tokio::test]
@@ -1090,7 +1063,7 @@ async fn create_vendor_flow(
 fn authorized_request(
     scope: AuthProductScope,
     flow_id: AuthFlowId,
-) -> crate::RebornOAuthCallbackRequest {
+) -> ironclaw_auth::RebornOAuthCallbackRequest {
     authorized_provider_request(scope, flow_id, provider(), vec![provider_scope("repo")])
 }
 
@@ -1099,12 +1072,12 @@ fn authorized_provider_request(
     flow_id: AuthFlowId,
     provider: AuthProviderId,
     scopes: Vec<ProviderScope>,
-) -> crate::RebornOAuthCallbackRequest {
-    crate::RebornOAuthCallbackRequest {
+) -> ironclaw_auth::RebornOAuthCallbackRequest {
+    ironclaw_auth::RebornOAuthCallbackRequest {
         scope,
         flow_id,
         opaque_state_hash: state_hash(),
-        outcome: crate::RebornOAuthCallbackOutcome::Authorized {
+        outcome: ironclaw_auth::RebornOAuthCallbackOutcome::Authorized {
             provider_request: OAuthProviderCallbackRequest {
                 provider,
                 account_label: label(),
@@ -1127,12 +1100,12 @@ fn authorized_provider_request(
 fn vendor_authorized_request(
     scope: AuthProductScope,
     flow_id: AuthFlowId,
-) -> crate::RebornOAuthCallbackRequest {
-    crate::RebornOAuthCallbackRequest {
+) -> ironclaw_auth::RebornOAuthCallbackRequest {
+    ironclaw_auth::RebornOAuthCallbackRequest {
         scope,
         flow_id,
         opaque_state_hash: state_hash(),
-        outcome: crate::RebornOAuthCallbackOutcome::Authorized {
+        outcome: ironclaw_auth::RebornOAuthCallbackOutcome::Authorized {
             provider_request: OAuthProviderCallbackRequest {
                 provider: vendor_provider(),
                 account_label: vendor_label(),

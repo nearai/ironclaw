@@ -2,9 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_approvals::ToolPermissionOverride;
-use ironclaw_authorization::{
-    CapabilityLeaseError, CapabilityLeaseStatus, CapabilityLeaseStorePort,
-};
+use ironclaw_authorization::{CapabilityLeaseError, CapabilityLeaseStatus};
 use ironclaw_host_api::{
     Action, ApprovalRequest, ApprovalRequestId, CapabilityGrantId, CapabilityId, CorrelationId,
     GateRecord, GateRef, InvocationFingerprint, InvocationId, Principal, ProductSurfaceCaller,
@@ -12,8 +10,8 @@ use ironclaw_host_api::{
     SafeSummary, UserId,
 };
 use ironclaw_loop_host::{CapabilityResultWrite, DurablePersistence};
-use ironclaw_product::{OutboundPreferencesProductFacade, RebornOutboundDeliveryTargetId};
-use ironclaw_run_state::{ApprovalRequestStorePort, ApprovalStatus, RunStateError};
+use ironclaw_product::{OutboundPreferencesProductService, RebornOutboundDeliveryTargetId};
+use ironclaw_run_state::{ApprovalStatus, RunStateError};
 use ironclaw_turns::{
     LoopGateRef,
     run_profile::{
@@ -43,10 +41,10 @@ use crate::runtime::local_dev::synthetic_capability::{
 // arch-exempt: too_many_args, outbound handler carries the replay-payload store (§5.3 Stage 2a-i), plan #6175
 #[allow(clippy::too_many_arguments)]
 pub(super) fn outbound_delivery_capabilities(
-    facade: Arc<dyn OutboundPreferencesProductFacade>,
+    service: Arc<dyn OutboundPreferencesProductService>,
     fallback_user_id: UserId,
-    approval_requests: Arc<dyn ApprovalRequestStorePort>,
-    capability_leases: Arc<dyn CapabilityLeaseStorePort>,
+    approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>,
+    capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStorePort>,
     target_set_requires_approval: bool,
     approval_settings: Arc<dyn ApprovalSettingsProvider>,
     replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort>,
@@ -62,7 +60,7 @@ pub(super) fn outbound_delivery_capabilities(
                 outbound_delivery_targets_list_input_schema(),
             )?,
             Arc::new(OutboundDeliveryTargetsListHandler {
-                facade: Arc::clone(&facade),
+                service: Arc::clone(&service),
                 fallback_user_id: fallback_user_id.clone(),
             }),
         ),
@@ -75,7 +73,7 @@ pub(super) fn outbound_delivery_capabilities(
                 outbound_delivery_target_set_input_schema(),
             )?,
             Arc::new(OutboundDeliveryTargetSetHandler {
-                facade,
+                service,
                 fallback_user_id,
                 approval_requests,
                 capability_leases,
@@ -89,7 +87,7 @@ pub(super) fn outbound_delivery_capabilities(
 }
 
 struct OutboundDeliveryTargetsListHandler {
-    facade: Arc<dyn OutboundPreferencesProductFacade>,
+    service: Arc<dyn OutboundPreferencesProductService>,
     fallback_user_id: UserId,
 }
 
@@ -112,7 +110,7 @@ impl SyntheticCapabilityHandler for OutboundDeliveryTargetsListHandler {
             parse_outbound_delivery_targets_list_input(&invocation.input).map_err(input_error)?;
         let caller = caller_for_run(&invocation, &self.fallback_user_id);
         let response =
-            match list_outbound_delivery_targets_for_model(self.facade.as_ref(), caller, input)
+            match list_outbound_delivery_targets_for_model(self.service.as_ref(), caller, input)
                 .await
             {
                 Ok(response) => response,
@@ -148,10 +146,10 @@ impl SyntheticCapabilityHandler for OutboundDeliveryTargetsListHandler {
 const APPROVAL_GATE_SUMMARY: &str = "changing the outbound delivery target requires approval";
 
 struct OutboundDeliveryTargetSetHandler {
-    facade: Arc<dyn OutboundPreferencesProductFacade>,
+    service: Arc<dyn OutboundPreferencesProductService>,
     fallback_user_id: UserId,
-    approval_requests: Arc<dyn ApprovalRequestStorePort>,
-    capability_leases: Arc<dyn CapabilityLeaseStorePort>,
+    approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>,
+    capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStorePort>,
     /// Host-private replay-payload store: this synthetic capability raises its own
     /// approval gate, so it persists {input, estimate} at the raise and
     /// reconstitutes them on resume host-side (§5.3 Stage 2a-i) rather than
@@ -262,7 +260,7 @@ impl SyntheticCapabilityHandler for OutboundDeliveryTargetSetHandler {
 
         let caller = caller_for_run(&invocation, &self.fallback_user_id);
         let response = match set_outbound_delivery_target_for_model(
-            self.facade.as_ref(),
+            self.service.as_ref(),
             caller,
             target_input,
         )

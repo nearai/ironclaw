@@ -79,6 +79,96 @@ async fn dispatcher_emits_events_for_resolved_dispatch_success() {
 }
 
 #[tokio::test]
+async fn dispatcher_marks_loop_dispatch_events_with_parent_run() {
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let events = InMemoryEventSink::new();
+    let resolver = ScriptedResolver::from_entries([(
+        "echo-wasm.say",
+        resolved_echo("echo-wasm", RuntimeKind::Wasm, &governor),
+    )]);
+    let dispatcher = RuntimeDispatcher::new(&resolver, governor.as_ref()).with_event_sink(&events);
+    let run_id = RunId::new();
+    let expected_parent = InvocationId::from_uuid(run_id.as_uuid());
+
+    dispatcher
+        .dispatch_json(loop_run_request(
+            run_id,
+            "echo-wasm.say",
+            json!({"message": "loop dispatch"}),
+        ))
+        .await
+        .unwrap();
+
+    let recorded = events.events();
+    assert_eq!(
+        recorded.iter().map(|event| event.kind).collect::<Vec<_>>(),
+        vec![
+            RuntimeEventKind::DispatchRequested,
+            RuntimeEventKind::RuntimeSelected,
+            RuntimeEventKind::DispatchSucceeded,
+        ]
+    );
+    assert!(
+        recorded
+            .iter()
+            .all(|event| event.parent_invocation_id == Some(expected_parent))
+    );
+}
+
+#[tokio::test]
+async fn dispatcher_marks_loop_dispatch_failure_events_with_parent_run() {
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let events = InMemoryEventSink::new();
+    let resolver = ScriptedResolver::from_entries([(
+        "echo-script.say",
+        ResolvedCapability {
+            provider: ExtensionId::new("echo-script").unwrap(),
+            runtime: RuntimeKind::Script,
+            adapter: Arc::new(FailingBinding {
+                error: || DispatchError::Script {
+                    kind: RuntimeDispatchErrorKind::ExitFailure,
+                    model_visible_cause: None,
+                },
+            }),
+        },
+    )]);
+    let dispatcher = RuntimeDispatcher::new(&resolver, governor.as_ref()).with_event_sink(&events);
+    let run_id = RunId::new();
+    let expected_parent = InvocationId::from_uuid(run_id.as_uuid());
+
+    let error = dispatcher
+        .dispatch_json(loop_run_request(
+            run_id,
+            "echo-script.say",
+            json!({"message": "loop dispatch fails"}),
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        DispatchError::Script {
+            kind: RuntimeDispatchErrorKind::ExitFailure,
+            ..
+        }
+    ));
+    let recorded = events.events();
+    assert_eq!(
+        recorded.iter().map(|event| event.kind).collect::<Vec<_>>(),
+        vec![
+            RuntimeEventKind::DispatchRequested,
+            RuntimeEventKind::RuntimeSelected,
+            RuntimeEventKind::DispatchFailed,
+        ]
+    );
+    assert!(
+        recorded
+            .iter()
+            .all(|event| event.parent_invocation_id == Some(expected_parent))
+    );
+}
+
+#[tokio::test]
 async fn dispatcher_ignores_event_sink_failures_on_success() {
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let events = FailingEventSink;
@@ -408,6 +498,24 @@ fn sample_request(capability_id: &str, input: Value) -> Authorized {
     authorized(CapabilityDispatchRequest {
         run_id: None,
         origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
+        capability_id: CapabilityId::new(capability_id).unwrap(),
+        scope: sample_scope(),
+        authenticated_actor_user_id: None,
+        estimate: ResourceEstimate {
+            concurrency_slots: Some(1),
+            output_bytes: Some(10_000),
+            ..ResourceEstimate::default()
+        },
+        mounts: None,
+        resource_reservation: None,
+        input,
+    })
+}
+
+fn loop_run_request(run_id: RunId, capability_id: &str, input: Value) -> Authorized {
+    authorized(CapabilityDispatchRequest {
+        run_id: Some(run_id),
+        origin: InvocationOrigin::LoopRun(run_id),
         capability_id: CapabilityId::new(capability_id).unwrap(),
         scope: sample_scope(),
         authenticated_actor_user_id: None,

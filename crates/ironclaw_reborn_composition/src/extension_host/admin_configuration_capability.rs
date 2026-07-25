@@ -7,7 +7,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use ironclaw_extension_host::{
     AdminConfigurationGroupState, AdminConfigurationIdempotencyKey, AdminConfigurationServiceError,
-    AdminConfigurationSubmittedValue, reconcile_admin_configuration_consumers,
+    AdminConfigurationSubmittedValue, ChannelConfigReactivation,
 };
 use ironclaw_extensions::{
     AdminConfigurationGroupId, CapabilityManifest, CapabilityVisibility, ExtensionError,
@@ -27,7 +27,6 @@ use ironclaw_secrets::SecretMaterial;
 use serde::Deserialize;
 
 use crate::extension_host::admin_configuration::ComposedAdminConfigurationService;
-use crate::extension_host::extension_lifecycle::ExtensionManagementPort;
 
 pub(crate) fn extend_builtin_first_party_package(
     mut package: ExtensionPackage,
@@ -40,16 +39,16 @@ pub(crate) fn insert_handler(
     registry: &mut FirstPartyCapabilityRegistry,
     service: Arc<ComposedAdminConfigurationService>,
     operator_user_id: UserId,
-    affected_extensions: BTreeMap<AdminConfigurationGroupId, BTreeSet<ExtensionId>>,
-    extension_management: Arc<ExtensionManagementPort>,
+    reactivation: Arc<dyn ChannelConfigReactivation>,
+    consumers: BTreeMap<AdminConfigurationGroupId, BTreeSet<ExtensionId>>,
 ) -> Result<(), HostApiError> {
     registry.insert_handler(
         CapabilityId::new(ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID)?,
         Arc::new(AdminConfigurationReplaceHandler {
             service,
             operator_user_id,
-            affected_extensions,
-            extension_management,
+            reactivation,
+            consumers: Arc::new(consumers),
         }),
     );
     Ok(())
@@ -58,7 +57,6 @@ pub(crate) fn insert_handler(
 fn manifest() -> Result<CapabilityManifest, ExtensionError> {
     Ok(CapabilityManifest {
         id: CapabilityId::new(ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID)?,
-        implements: Vec::new(),
         description: "Replace one manifest-declared tenant administrator configuration group through an authenticated operator gesture.".to_string(),
         effects: vec![
             EffectKind::ReadFilesystem,
@@ -96,8 +94,8 @@ fn manifest() -> Result<CapabilityManifest, ExtensionError> {
 struct AdminConfigurationReplaceHandler {
     service: Arc<ComposedAdminConfigurationService>,
     operator_user_id: UserId,
-    affected_extensions: BTreeMap<AdminConfigurationGroupId, BTreeSet<ExtensionId>>,
-    extension_management: Arc<ExtensionManagementPort>,
+    reactivation: Arc<dyn ChannelConfigReactivation>,
+    consumers: Arc<BTreeMap<AdminConfigurationGroupId, BTreeSet<ExtensionId>>>,
 }
 
 #[derive(Deserialize)]
@@ -162,37 +160,51 @@ impl FirstPartyCapabilityHandler for AdminConfigurationReplaceHandler {
                 })
             })
             .collect::<Result<Vec<_>, FirstPartyCapabilityError>>()?;
-        let reconcile = || async {
-            let Some(extension_ids) = self.affected_extensions.get(&group_id) else {
-                return Ok(());
-            };
-            reconcile_admin_configuration_consumers(&group_id, extension_ids, |extension_id| {
-                let extension_management = Arc::clone(&self.extension_management);
-                async move {
-                    extension_management
-                        .reconcile_runtime_after_admin_configuration(&extension_id)
-                        .await
-                }
-            })
-            .await
-        };
         let state = self
             .service
-            .replace_with_reconcile(
+            .replace(
                 &request.scope,
                 &group_id,
                 &idempotency_key,
                 input.expected_revision,
                 submitted,
-                reconcile,
             )
             .await
             .map_err(|error| map_service_error(error, started))?;
+        self.reactivate_consumers(&group_id, started).await?;
         let output = render_state(state);
         Ok(FirstPartyCapabilityResult::new(
             output,
             resource_usage(started),
         ))
+    }
+}
+
+impl AdminConfigurationReplaceHandler {
+    async fn reactivate_consumers(
+        &self,
+        group_id: &AdminConfigurationGroupId,
+        started: Instant,
+    ) -> Result<(), FirstPartyCapabilityError> {
+        let Some(consumers) = self.consumers.get(group_id) else {
+            return Ok(());
+        };
+        for extension_id in consumers {
+            self.reactivation
+                .reactivate_if_active(extension_id)
+                .await
+                .map_err(|error| {
+                    tracing::warn!(
+                        %error,
+                        extension_id = %extension_id,
+                        group_id = %group_id,
+                        "admin-configuration replacement could not refresh active extension"
+                    );
+                    FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+                        .with_usage(resource_usage(started))
+                })?;
+        }
+        Ok(())
     }
 }
 
@@ -231,10 +243,6 @@ fn map_service_error(
         | AdminConfigurationServiceError::ValueTooLarge => RuntimeDispatchErrorKind::InputEncode,
         AdminConfigurationServiceError::RevisionConflict { .. }
         | AdminConfigurationServiceError::IdempotencyConflict => {
-            RuntimeDispatchErrorKind::OperationFailed
-        }
-        AdminConfigurationServiceError::RuntimeReconciliationFailed
-        | AdminConfigurationServiceError::RuntimeRollbackFailed => {
             RuntimeDispatchErrorKind::OperationFailed
         }
         AdminConfigurationServiceError::InvalidDescriptor

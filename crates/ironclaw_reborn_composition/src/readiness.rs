@@ -19,7 +19,7 @@ pub enum RebornReadinessState {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornFacadeReadiness {
+pub struct RebornServiceReadiness {
     pub host_runtime: bool,
     pub turn_coordinator: bool,
     pub product_auth: bool,
@@ -142,15 +142,15 @@ pub enum RebornReadinessDiagnosticComponent {
     TrustPolicy,
     Filesystem,
     ResourceGovernor,
-    ProcessStorePort,
-    ProcessResultStorePort,
+    ProcessStore,
+    ProcessResultStore,
     RunState,
     ApprovalRequests,
     CapabilityLeases,
     PersistentApprovalPolicies,
     EventSink,
     AuditSink,
-    SecretStorePort,
+    SecretStore,
     CredentialAccountStore,
     CredentialSessionStore,
     RuntimeHttpEgress,
@@ -175,15 +175,15 @@ impl RebornReadinessDiagnosticComponent {
             Self::TrustPolicy => "trust_policy",
             Self::Filesystem => "filesystem",
             Self::ResourceGovernor => "resource_governor",
-            Self::ProcessStorePort => "process_store",
-            Self::ProcessResultStorePort => "process_result_store",
+            Self::ProcessStore => "process_store",
+            Self::ProcessResultStore => "process_result_store",
             Self::RunState => "run_state",
             Self::ApprovalRequests => "approval_requests",
             Self::CapabilityLeases => "capability_leases",
             Self::PersistentApprovalPolicies => "persistent_approval_policies",
             Self::EventSink => "event_sink",
             Self::AuditSink => "audit_sink",
-            Self::SecretStorePort => "secret_store",
+            Self::SecretStore => "secret_store",
             Self::CredentialAccountStore => "credential_account_store",
             Self::CredentialSessionStore => "credential_session_store",
             Self::RuntimeHttpEgress => "runtime_http_egress",
@@ -223,15 +223,15 @@ impl<'de> Deserialize<'de> for RebornReadinessDiagnosticComponent {
             "trust_policy" => Self::TrustPolicy,
             "filesystem" => Self::Filesystem,
             "resource_governor" => Self::ResourceGovernor,
-            "process_store" => Self::ProcessStorePort,
-            "process_result_store" => Self::ProcessResultStorePort,
+            "process_store" => Self::ProcessStore,
+            "process_result_store" => Self::ProcessResultStore,
             "run_state" => Self::RunState,
             "approval_requests" => Self::ApprovalRequests,
             "capability_leases" => Self::CapabilityLeases,
             "persistent_approval_policies" => Self::PersistentApprovalPolicies,
             "event_sink" => Self::EventSink,
             "audit_sink" => Self::AuditSink,
-            "secret_store" => Self::SecretStorePort,
+            "secret_store" => Self::SecretStore,
             "credential_account_store" => Self::CredentialAccountStore,
             "credential_session_store" => Self::CredentialSessionStore,
             "runtime_http_egress" => Self::RuntimeHttpEgress,
@@ -340,8 +340,8 @@ impl From<ProductionWiringComponent> for RebornReadinessDiagnosticComponent {
             ProductionWiringComponent::TrustPolicy => Self::TrustPolicy,
             ProductionWiringComponent::Filesystem => Self::Filesystem,
             ProductionWiringComponent::ResourceGovernor => Self::ResourceGovernor,
-            ProductionWiringComponent::ProcessStorePort => Self::ProcessStorePort,
-            ProductionWiringComponent::ProcessResultStorePort => Self::ProcessResultStorePort,
+            ProductionWiringComponent::ProcessStorePort => Self::ProcessStore,
+            ProductionWiringComponent::ProcessResultStorePort => Self::ProcessResultStore,
             ProductionWiringComponent::RunState => Self::RunState,
             ProductionWiringComponent::ApprovalRequests => Self::ApprovalRequests,
             ProductionWiringComponent::CapabilityLeases => Self::CapabilityLeases,
@@ -350,7 +350,7 @@ impl From<ProductionWiringComponent> for RebornReadinessDiagnosticComponent {
             }
             ProductionWiringComponent::EventSink => Self::EventSink,
             ProductionWiringComponent::AuditSink => Self::AuditSink,
-            ProductionWiringComponent::SecretStorePort => Self::SecretStorePort,
+            ProductionWiringComponent::SecretStorePort => Self::SecretStore,
             ProductionWiringComponent::CredentialAccountStore => Self::CredentialAccountStore,
             ProductionWiringComponent::CredentialSessionStore => Self::CredentialSessionStore,
             ProductionWiringComponent::RuntimeHttpEgress => Self::RuntimeHttpEgress,
@@ -382,7 +382,7 @@ impl From<ProductionWiringIssueKind> for RebornReadinessDiagnosticReason {
 pub struct RebornReadiness {
     pub profile: RebornCompositionProfile,
     pub state: RebornReadinessState,
-    pub facades: RebornFacadeReadiness,
+    pub services: RebornServiceReadiness,
     #[serde(default)]
     pub workers: RebornWorkerReadiness,
     #[serde(default)]
@@ -406,7 +406,7 @@ impl RebornReadiness {
         Self {
             profile: config.profile(),
             state: contract.state,
-            facades: RebornFacadeReadiness {
+            services: RebornServiceReadiness {
                 host_runtime: false,
                 turn_coordinator: false,
                 product_auth: false,
@@ -451,7 +451,7 @@ mod tests {
             r#"{
                 "profile": "local-dev",
                 "state": "dev-only",
-                "facades": {
+                "services": {
                     "host_runtime": true,
                     "turn_coordinator": true,
                     "product_auth": false

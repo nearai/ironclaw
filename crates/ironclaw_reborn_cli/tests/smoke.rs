@@ -3056,6 +3056,33 @@ fn run_reports_runtime_readiness_snapshot_without_touching_v1_state() {
 }
 
 #[test]
+fn no_subcommand_defaults_to_serve_command() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home_dir = temp.path().join("home");
+
+    let output = reborn_command()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("HOME", &home_dir)
+        .env_remove("IRONCLAW_REBORN_PROFILE")
+        .env_remove("IRONCLAW_REBORN_WEBUI_TOKEN")
+        .env_remove("IRONCLAW_REBORN_WEBUI_USER_ID")
+        .output()
+        .expect("ironclaw-reborn should default to serve");
+
+    assert!(
+        !output.status.success(),
+        "default serve must fail closed without a WebUI token; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("IRONCLAW_REBORN_WEBUI_TOKEN must be set"),
+        "stderr should match the `serve` auth gate: {stderr}"
+    );
+}
+
+#[test]
 fn doctor_uses_reborn_home_override_without_touching_v1_state() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
@@ -4899,7 +4926,7 @@ fn seed_stored_llm_key(reborn_home: &Path, provider_id: &str, key: &str) {
         let store = ironclaw_reborn_composition::open_local_dev_secret_store(&reborn_home)
             .await
             .expect("open local dev secret store");
-        ironclaw_reborn_composition::LlmKeyStore::new(store)
+        ironclaw_operator::LlmKeyStore::new(store)
             .put(&provider_id, ironclaw_secrets::SecretMaterial::from(key))
             .await
             .expect("seed provider key");

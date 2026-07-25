@@ -1,0 +1,10 @@
+{
+  "type": "object",
+  "properties": {
+    "path": { "type": "string", "description": "Relative memory document path that was read" },
+    "content": { "type": "string", "description": "Full document content" },
+    "word_count": { "type": "integer", "description": "Word count of the document content" }
+  },
+  "required": ["path", "content", "word_count"],
+  "additionalProperties": false
+}

@@ -103,7 +103,7 @@ impl PostAdmissionObserver for RecordingAdmissionObserver {
 
 struct AcmeIngress {
     parts: ExtensionIngressParts,
-    mount: ironclaw_reborn_composition::PublicRouteMount,
+    mount: ironclaw_host_ingress::PublicRouteMount,
     observer: Arc<RecordingAdmissionObserver>,
 }
 
@@ -118,7 +118,7 @@ impl AcmeIngress {
         harness: &reborn_support::builder::RebornIntegrationHarness,
     ) -> Self {
         let observer = Arc::new(RecordingAdmissionObserver::default());
-        let surface = harness.product_workflow_for_test() as Arc<dyn ChannelInboundProductSurface>;
+        let surface = harness.product_surface_for_test() as Arc<dyn ChannelInboundProductSurface>;
         let sink = Arc::new(GenericChannelInboundSink::new(ChannelInboundSinkConfig {
             adapter_id: ironclaw_product::ProductAdapterId::new("acme-messenger")
                 .expect("adapter id"),
@@ -126,6 +126,7 @@ impl AcmeIngress {
                 signature_header: "X-Acme-Signature".to_string(),
                 timestamp_header: Some("X-Acme-Request-Timestamp".to_string()),
             },
+            classifier: None,
             surface,
             observer: Some(Arc::clone(&observer) as Arc<dyn PostAdmissionObserver>),
         }));

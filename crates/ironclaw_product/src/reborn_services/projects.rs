@@ -1,4 +1,4 @@
-//! Project management port for the WebUI v2 facade.
+//! Project management port for the WebUI v2 service.
 //!
 //! Surfaces first-class projects — create, list, read, update, delete — plus
 //! their membership grants (the ACL surface). The port is injected by host
@@ -6,7 +6,7 @@
 //! access-control gating (owner/role checks via the repository's
 //! `resolve_access`) before any mutation.
 //!
-//! Identity is authority-bearing: the facade derives [`ProjectCaller`] from the
+//! Identity is authority-bearing: the service derives [`ProjectCaller`] from the
 //! authenticated caller (tenant + user), never from the request body. Roles and
 //! states are product-level enums here so this boundary stays free of the
 //! `ironclaw_projects` substrate types — the composition adapter maps between
@@ -21,7 +21,7 @@ use serde_json::Value as JsonValue;
 
 /// Trusted caller identity for project operations.
 ///
-/// Built by the facade from the authenticated caller. Never reconstructed from
+/// Built by the service from the authenticated caller. Never reconstructed from
 /// the request body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectCaller {
@@ -71,7 +71,7 @@ pub struct RebornProjectInfo {
     /// The calling user's effective role on this project.
     pub role: RebornProjectRole,
     /// RFC3339 on the wire (serde-serialized `DateTime<Utc>`); typed here to
-    /// match the other WebUI facade DTOs rather than an ambiguous `String`.
+    /// match the other WebUI service DTOs rather than an ambiguous `String`.
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -203,10 +203,10 @@ pub struct RebornRemoveMemberRequest {
 
 /// Errors a project operation may produce.
 ///
-/// Deliberately coarse and free of host paths / backend strings: the facade
+/// Deliberately coarse and free of host paths / backend strings: the service
 /// maps each variant to a sanitized [`ProductSurfaceError`](crate::ProductSurfaceError)
 /// at the boundary. Implementations outside this crate construct these instead
-/// of reaching for the facade error's `pub(super)` constructors.
+/// of reaching for the service error's `pub(super)` constructors.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ProjectServiceError {
     #[error("project not found")]
@@ -225,7 +225,7 @@ pub enum ProjectServiceError {
 
 /// Project management + membership (ACL) port.
 ///
-/// Every method takes a [`ProjectCaller`] the facade derived from the
+/// Every method takes a [`ProjectCaller`] the service derived from the
 /// authenticated caller. Implementations are responsible for access-control
 /// gating (owner/role checks) before mutating writes; reads return only
 /// projects the caller can access.

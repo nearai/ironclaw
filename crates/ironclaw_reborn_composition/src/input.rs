@@ -2,7 +2,9 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use ironclaw_auth::{AuthProductError, OAuthClientId, OAuthRedirectUri};
+use ironclaw_auth::{
+    AuthProductError, OAuthClientId, OAuthRedirectUri, RebornProductAuthServicePorts,
+};
 use ironclaw_host_api::runtime_policy::ProcessBackendKind;
 use ironclaw_host_api::runtime_policy::{DeploymentMode, RuntimeProfile};
 use ironclaw_host_api::runtime_policy::{
@@ -10,6 +12,7 @@ use ironclaw_host_api::runtime_policy::{
 };
 use ironclaw_host_api::{AgentId, TenantId};
 use ironclaw_host_runtime::TenantSandboxProcessPort;
+use ironclaw_host_runtime::memory_binding::MemoryBindingPolicy;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_trust::HostTrustPolicy;
@@ -19,9 +22,10 @@ use secrecy::SecretString;
 use ironclaw_reborn_config::StorageBackend;
 use ironclaw_reborn_event_store::{PostgresPoolTlsOptions, RebornPostgresSslMode};
 
+use crate::Mem0ConnectionConfig;
 use crate::RebornBuildError;
+use crate::RebornCompositionProfile;
 use crate::deployment::DeploymentConfig;
-use crate::{RebornCompositionProfile, RebornProductAuthServicePorts};
 
 const DEFAULT_REBORN_POSTGRES_URL_ENV: &str = "IRONCLAW_REBORN_POSTGRES_URL";
 const DEFAULT_REBORN_SECRET_MASTER_KEY_ENV: &str = "IRONCLAW_REBORN_SECRET_MASTER_KEY";
@@ -201,15 +205,23 @@ pub struct RebornHostBindings {
     /// web tooling): composition runs each once against the shared registry so
     /// the concrete executors live in the binary, not composition.
     pub(crate) first_party_registrars:
-        Vec<Arc<dyn crate::extension_host::first_party::FirstPartyHandlerRegistrar>>,
+        Vec<Arc<dyn ironclaw_extension_host::FirstPartyHandlerRegistrar>>,
     /// Injected credential-account visibility policy (extension-family-aware,
     /// e.g. the GSuite account visibility policy). `None` falls back to the safe
     /// fail-closed default in the product-auth services.
-    pub(crate) credential_account_visibility_policy: Option<
-        Arc<
-            dyn crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountVisibilityPolicy,
-        >,
-    >,
+    pub(crate) credential_account_visibility_policy:
+        Option<Arc<dyn ironclaw_auth::RuntimeCredentialAccountVisibilityPolicy>>,
+    /// Resolved memory profile binding policy (issue #3537). `None` means the
+    /// behavior-preserving default: every required memory profile binds to the
+    /// host-bundled native provider. The CLI resolves this from the `[memory]`
+    /// config section + deployment profile (fail-closed) before building.
+    pub(crate) memory_binding_policy: Option<MemoryBindingPolicy>,
+    /// Connection settings for the configured third-party memory provider
+    /// (issue #5264). Empty unless `memory_binding_policy` binds a third-party
+    /// provider (e.g. mem0); carries that provider's base URL + API key so the
+    /// build-time wiring can construct and register it. Selection stays in the
+    /// binding policy; this only carries the chosen provider's connection.
+    pub(crate) memory_provider_connection: Mem0ConnectionConfig,
 }
 
 /// One channel extension's binary-assembled vendor binding
@@ -224,6 +236,10 @@ pub struct ChannelExtensionBinding {
     pub extension_id: String,
     /// The channel adapter implementation linked into the deployment.
     pub adapter: std::sync::Arc<dyn ironclaw_product::ChannelAdapter>,
+    /// Protocol-specific inbound payload reclassification (gate-resolution
+    /// replies), registered on the channel host assembly.
+    pub inbound_payload_classifier:
+        Option<std::sync::Arc<crate::extension_host::extension_ingress::InboundPayloadClassifier>>,
     /// The vendor half of the preference-target codec, consumed by the
     /// generic outbound-target provider and triggered-delivery hook.
     pub preference_target_codec:
@@ -231,7 +247,7 @@ pub struct ChannelExtensionBinding {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct RuntimeOwnerIdentity {
+pub(crate) struct RebornLocalRuntimeIdentity {
     pub(crate) tenant_id: TenantId,
     pub(crate) agent_id: AgentId,
 }
@@ -353,17 +369,36 @@ impl RebornHostBindings {
     /// The WebChat v2 serve path uses this to pin the runtime owner to the
     /// authenticated WebUI user *after* the runtime input (and its host-access
     /// disclosure gate) has been built, so the turn-runner loop host reads
-    /// thread context from the same `owners/<user>` subtree the v2 facade
+    /// thread context from the same `owners/<user>` subtree the v2 service
     /// wrote to.
     pub fn with_owner_id(mut self, owner_id: impl Into<String>) -> Self {
         self.deployment.owner_id = owner_id.into();
         self
     }
 
+    /// Attach a resolved memory profile binding policy (issue #3537). The CLI
+    /// resolves this from the `[memory]` config section + deployment profile,
+    /// failing closed before composition is built. The factory reads the
+    /// resolved policy via the `memory_binding_policy` field when destructuring
+    /// the build input.
+    pub fn with_memory_binding_policy(mut self, policy: MemoryBindingPolicy) -> Self {
+        self.memory_binding_policy = Some(policy);
+        self
+    }
+
+    /// Attach connection settings for the configured third-party memory provider
+    /// (issue #5264). The CLI resolves these from the `[memory]` config section +
+    /// env (e.g. `MEMORY_MEM0_BASE_URL` / `MEMORY_MEM0_API_KEY`). Only consulted
+    /// when the binding policy binds a third-party provider; otherwise inert.
+    pub fn with_memory_provider_connection(mut self, connection: Mem0ConnectionConfig) -> Self {
+        self.memory_provider_connection = connection;
+        self
+    }
+
     /// Override the local runtime tenant/agent identity used by command-style
-    /// facades that need a surface context before a full runtime exists.
+    /// services that need a surface context before a full runtime exists.
     pub fn with_local_runtime_identity(mut self, tenant_id: TenantId, agent_id: AgentId) -> Self {
-        self.deployment.local_runtime_identity = Some(RuntimeOwnerIdentity {
+        self.deployment.local_runtime_identity = Some(RebornLocalRuntimeIdentity {
             tenant_id,
             agent_id,
         });
@@ -753,7 +788,7 @@ impl RebornHostBindings {
 
     pub fn with_nearai_mcp_bootstrap_config(
         mut self,
-        config: crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig,
+        config: ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig,
     ) -> Self {
         self.deployment.nearai_mcp_bootstrap_config = Some(config);
         self
@@ -761,7 +796,7 @@ impl RebornHostBindings {
 
     pub fn with_optional_nearai_mcp_bootstrap_config(
         mut self,
-        config: Option<crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
+        config: Option<ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
     ) -> Self {
         self.deployment.nearai_mcp_bootstrap_config = config;
         self
@@ -876,13 +911,15 @@ impl RebornHostBindings {
             channel_extension_bindings: Vec::new(),
             first_party_registrars: Vec::new(),
             credential_account_visibility_policy: None,
+            memory_binding_policy: None,
+            memory_provider_connection: Mem0ConnectionConfig::default(),
         }
     }
 
     /// Inject the binary-assembled neutral first-party package inventory.
     pub fn with_first_party_bundles(
         mut self,
-        bundles: Vec<crate::extension_host::first_party::FirstPartyPackageBundle>,
+        bundles: Vec<ironclaw_extension_host::FirstPartyPackageBundle>,
     ) -> Self {
         self.deployment.first_party_bundles = bundles;
         self
@@ -891,7 +928,7 @@ impl RebornHostBindings {
     /// Inject the binary-assembled first-party capability handler registrars.
     pub fn with_first_party_registrars(
         mut self,
-        registrars: Vec<Arc<dyn crate::extension_host::first_party::FirstPartyHandlerRegistrar>>,
+        registrars: Vec<Arc<dyn ironclaw_extension_host::FirstPartyHandlerRegistrar>>,
     ) -> Self {
         self.first_party_registrars = registrars;
         self
@@ -900,36 +937,33 @@ impl RebornHostBindings {
     /// Inject the credential-account visibility policy (see the field doc).
     pub fn with_credential_account_visibility_policy(
         mut self,
-        policy: Arc<
-            dyn crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountVisibilityPolicy,
-        >,
+        policy: Arc<dyn ironclaw_auth::RuntimeCredentialAccountVisibilityPolicy>,
     ) -> Self {
         self.credential_account_visibility_policy = Some(policy);
         self
     }
 
-    /// Test-support: inject the full first-party extension surface (catalog
+    /// Test-support: inject the neutral first-party extension surface (catalog
     /// bundles, capability-handler registrars, and the provider-account
-    /// visibility policy) exactly as the `ironclaw_reborn_cli` binary does in
-    /// production.
+    /// visibility policy).
     ///
     /// Composition names no concrete first-party extension in production
     /// (extension-runtime DEL-7); the binary supplies these on the build input.
     /// Composition's own unit tests need the same surface to install / activate /
     /// dispatch first-party extensions through the production seam, so this
-    /// mirrors the binary's assembly from the dev-dependency inventory. Gated
-    /// `test-support` because integration harnesses compile composition as a
-    /// dependency, not under composition's own `cfg(test)`.
+    /// mirrors the binary's neutral assembly from the dev-dependency inventory.
+    /// Concrete native factories and channel bindings are injected by the binary
+    /// or by test code that owns those concrete crates.
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_bundled_first_party_for_test(self) -> Self {
         self.with_first_party_bundles(
-            crate::extension_host::first_party::first_party_bundles_from_inventory(),
+            ironclaw_extension_host::test_support::first_party_bundles_from_inventory(),
         )
         .with_first_party_registrars(
-            crate::extension_host::first_party::test_support::bundled_first_party_registrars(),
+            crate::test_support::first_party_registrars::bundled_first_party_registrars(),
         )
         .with_credential_account_visibility_policy(
-            crate::extension_host::first_party::test_support::bundled_credential_account_visibility_policy(),
+            crate::test_support::first_party_registrars::bundled_credential_account_visibility_policy(),
         )
     }
 }

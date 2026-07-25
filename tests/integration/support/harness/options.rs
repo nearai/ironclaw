@@ -17,7 +17,7 @@ pub(crate) struct HostRuntimeHarnessOptions {
     pub(crate) runtime_policy: Option<ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy>,
     /// Override the local runtime tenant/agent before the composed runtime is
     /// built. Group harnesses set this to the canonical product scope so
-    /// runtime-owned facades keyed by tenant (for example channel connections)
+    /// runtime-owned services keyed by tenant (for example channel connections)
     /// match the turns that dispatch through the group.
     pub(crate) local_runtime_identity: Option<(TenantId, AgentId)>,
     pub(crate) seed_extension_credentials: bool,
@@ -34,14 +34,13 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// runtime construction. The runtime warms the system-skill descriptor cache
     /// during build, so system fixtures must exist before `build_runtime`.
     pub(crate) system_skill_fixtures: Vec<SystemSkillFixture>,
-    /// Injected outbound-delivery facade double + `target_set` approval flag
-    /// for the synthetic list/set test seam. The current-run router is a normal
-    /// first-party capability and is not backed by this double. Only
-    /// `outbound_target_tools()` sets this. `new_with_options` pairs the facade
-    /// with the local-dev settings stores captured from `RebornServices` to
-    /// build `OutboundTargetToolsParts`.
-    pub(crate) outbound_target_facade: Option<(
-        Arc<super::super::outbound_preferences::FakeOutboundPreferencesFacade>,
+    /// Injected outbound-delivery service double + `target_set` approval flag,
+    /// when this harness surfaces the synthetic `outbound_delivery_*`
+    /// capabilities (C-SYNTH outbound seam). Only `outbound_target_tools()` sets
+    /// this. `new_with_options` pairs the service with the local-dev settings
+    /// stores captured from `RebornServices` to build `OutboundTargetToolsParts`.
+    pub(crate) outbound_target_service: Option<(
+        Arc<super::super::outbound_preferences::FakeOutboundPreferencesService>,
         bool,
     )>,
     /// C-JOURNEY: override the local-dev host network HTTP egress
@@ -136,7 +135,7 @@ impl HostRuntimeHarnessOptions {
             seed_extension_credentials: false,
             skill_activation_tenant: None,
             system_skill_fixtures: Vec::new(),
-            outbound_target_facade: None,
+            outbound_target_service: None,
             network_http_egress_for_test: None,
             activate_bundled_extensions_for_test: Vec::new(),
             fixture_extension_dirs: Vec::new(),
@@ -193,10 +192,10 @@ impl HostRuntimeHarnessOptions {
 
     pub(crate) fn with_outbound_target_tools(
         mut self,
-        facade: Arc<super::super::outbound_preferences::FakeOutboundPreferencesFacade>,
+        service: Arc<super::super::outbound_preferences::FakeOutboundPreferencesService>,
         target_set_requires_approval: bool,
     ) -> Self {
-        self.outbound_target_facade = Some((facade, target_set_requires_approval));
+        self.outbound_target_service = Some((service, target_set_requires_approval));
         self
     }
 

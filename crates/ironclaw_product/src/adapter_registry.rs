@@ -779,7 +779,7 @@ mod tests {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::PublicCallback,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         })
         .expect("policy validates");
         IngressRouteDescriptor::new(

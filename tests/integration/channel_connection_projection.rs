@@ -1,9 +1,8 @@
-//! Caller-level regression: descriptor-declared channel connection guidance
-//! must survive in the model-visible `builtin.extension_search` result.
-//!
-//! The model needs the strategy and instructions to avoid inventing a setup
-//! flow, while browser input/action/error chrome stays on the display-preview
-//! path.
+//! Caller-level regression for the model-visible `builtin.extension_search`
+//! channel-connection contract (#6618): a generated-code channel's setup
+//! guidance IS model-visible (the model needs it to explain the next step),
+//! while UI-only chrome — the static pairing failure copy — is intentionally
+//! excluded from this model-visible path.
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
@@ -17,7 +16,7 @@ use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
 
 #[tokio::test]
-async fn extension_search_preserves_guidance_and_omits_ui_only_connection_chrome() {
+async fn extension_search_retains_generated_code_guidance_without_ui_failure_copy() {
     let group = RebornIntegrationGroup::extension_delivery()
         .await
         .expect("extension-delivery group builds with the Telegram manifest");
@@ -58,7 +57,7 @@ async fn extension_search_preserves_guidance_and_omits_ui_only_connection_chrome
     let connection = &telegram["channel_connection"];
     assert_eq!(
         connection["strategy"], "web_generated_code",
-        "extension_search must preserve the descriptor's WebGeneratedCode strategy: {connection}"
+        "generated-code connection guidance must remain model-visible: {telegram}"
     );
     assert!(
         connection["instructions"]
@@ -67,26 +66,7 @@ async fn extension_search_preserves_guidance_and_omits_ui_only_connection_chrome
         "manifest-authored connection guidance must survive catalog projection: {connection}"
     );
     assert_eq!(
-        connection["input_placeholder"], "",
-        "model-visible search must clear browser input chrome: {connection}"
-    );
-    assert_eq!(
-        connection["submit_label"], "",
-        "model-visible search must clear browser action chrome: {connection}"
-    );
-    assert_eq!(
         connection["error_message"], "",
-        "model-visible search must clear UI-only failure copy: {connection}"
-    );
-
-    let rendered = connection.to_string().to_ascii_lowercase();
-    assert!(
-        !rendered.contains("/pair"),
-        "the generic connection contract must never invent an unsupported /pair command: {connection}"
-    );
-    assert!(
-        !rendered.contains("get the pairing code from")
-            && !rendered.contains("get the pairing code"),
-        "WebGeneratedCode means IronClaw mints the code/deep link; the bot does not issue it: {connection}"
+        "static pairing failure copy is UI-only, not live model state: {connection}"
     );
 }

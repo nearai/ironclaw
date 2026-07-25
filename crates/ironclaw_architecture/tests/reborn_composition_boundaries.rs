@@ -64,7 +64,7 @@ fn composition_root_is_workspace_member() {
 }
 
 #[test]
-fn composition_public_api_is_facade_shaped() {
+fn composition_public_api_is_service_shaped() {
     let lib = std::fs::read_to_string(
         workspace_root().join("crates/ironclaw_reborn_composition/src/lib.rs"),
     )
@@ -81,7 +81,7 @@ fn composition_public_api_is_facade_shaped() {
 
     assert!(
         !lib.contains("pub use input::RebornStorageInput"),
-        "composition facade API must not re-export raw storage input types"
+        "composition service API must not re-export raw storage input types"
     );
     assert!(
         !input.contains("pub enum RebornStorageInput"),
@@ -124,7 +124,7 @@ fn composition_public_pub_use_surface_matches_snapshot() {
     assert_eq!(
         snapshot, actual,
         "composition public pub-use surface must match docs/plans/composition-pubuse.snapshot; \
-         update the snapshot only for intentional public facade changes"
+         update the snapshot only for intentional public service changes"
     );
 }
 
@@ -165,6 +165,14 @@ fn extension_host_cluster_stays_internal() {
         assert!(
             !has_module_decl(&lib, &root_decl) && !has_module_decl(&lib, &public_root_decl),
             "{module} must not be reintroduced as a crate-root module"
+        );
+    }
+
+    for module in EXTENSION_HOST_EXTERNALIZED_GENERIC_MODULES {
+        let composition_decl = format!("pub(crate) mod {module};");
+        assert!(
+            !has_module_decl(&extension_host, &composition_decl),
+            "{module} must stay owned by ironclaw_extension_host, not composition"
         );
     }
 }
@@ -294,21 +302,37 @@ fn strip_test_module(contents: &str) -> &str {
 }
 
 const EXTENSION_HOST_INTERNAL_MODULES: &[&str] = &[
-    "available_extensions",
     "bundled_skills",
     "extension_activation_credentials",
-    "extension_credential_requirements",
     "extension_lifecycle",
     "extension_lifecycle_capabilities",
     "extension_lifecycle_capabilities_auth_tests",
     "extension_lifecycle_command",
-    "first_party",
     "lifecycle",
-    "mcp",
-    "mcp_discovery",
     "skill_learning",
     "skill_listing",
     "webui_extension_credentials",
+];
+
+const EXTENSION_HOST_EXTERNALIZED_GENERIC_MODULES: &[&str] = &[
+    "active_publication",
+    "available_extension_import",
+    "available_extensions",
+    "channel_lifecycle",
+    "channel_delivery",
+    "channel_dm_targets",
+    "extension_credential_requirements",
+    "first_party_package",
+    "host_api_contracts",
+    "install_policy",
+    "lifecycle_restore",
+    "lifecycle_vocabulary",
+    "mcp",
+    "mcp_discovery",
+    "nearai_mcp",
+    "provider_instance_readiness",
+    "product_lifecycle",
+    "reply_contexts",
 ];
 
 fn composition_src_path() -> PathBuf {

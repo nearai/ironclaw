@@ -9,6 +9,7 @@
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
+use ironclaw_host_runtime::{MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID};
 use serde_json::json;
 
 pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
@@ -19,7 +20,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .thread("conv-memory-tree-writer")
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.memory_write",
+                MEMORY_WRITE_CAPABILITY_ID,
                 json!({
                     "target": "projects/atlas/runbook.md",
                     "content": "atlas service rollback runbook",
@@ -31,7 +32,9 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .build()
         .await?;
     writer.submit_turn("save the atlas runbook").await?;
-    writer.assert_tool_invoked("builtin.memory_write").await?;
+    writer
+        .assert_tool_invoked(MEMORY_WRITE_CAPABILITY_ID)
+        .await?;
 
     // ── Thread B: lister (DIFFERENT conversation, SAME shared store) ────────
     // List from the root with enough depth to reach the leaf
@@ -39,13 +42,18 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let lister = g
         .thread("conv-memory-tree-lister")
         .script([
-            RebornScriptedReply::tool_call("builtin.memory_tree", json!({"path": "", "depth": 3})),
+            RebornScriptedReply::tool_call(
+                MEMORY_TREE_CAPABILITY_ID,
+                json!({"path": "", "depth": 3}),
+            ),
             RebornScriptedReply::text("listed"),
         ])
         .build()
         .await?;
     lister.submit_turn("show the memory tree").await?;
-    lister.assert_tool_invoked("builtin.memory_tree").await?;
+    lister
+        .assert_tool_invoked(MEMORY_TREE_CAPABILITY_ID)
+        .await?;
     // The serialized tree array must contain both the intermediate directory
     // and the leaf file, proving the structure was reflected (not dropped).
     lister.assert_tool_result_contains("atlas/").await?;

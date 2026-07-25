@@ -10,7 +10,7 @@ use ironclaw_reborn_traces::contribution::{
 };
 
 fn unwrap_traces_command(cli: Cli) -> TracesSubcommand {
-    let Command::Traces(command) = cli.command else {
+    let Some(Command::Traces(command)) = cli.command else {
         panic!("expected traces command");
     };
     command.command

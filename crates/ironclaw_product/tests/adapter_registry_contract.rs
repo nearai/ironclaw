@@ -31,7 +31,7 @@ fn manifest_hash(value: &str) -> ManifestHash {
     ManifestHash::new(value).unwrap()
 }
 
-async fn installation_store() -> ExtensionInstallationStore {
+async fn filesystem_store() -> ExtensionInstallationStore {
     let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
     register_product_adapter_host_api_contract(&mut contracts).unwrap();
     ExtensionInstallationStore::load_at(
@@ -101,30 +101,30 @@ fn installation() -> ExtensionInstallation {
 }
 
 #[tokio::test]
-async fn default_store_has_no_installations() {
-    let store = installation_store().await;
+async fn default_store_has_no_enabled_installations() {
+    let store = filesystem_store().await;
 
     assert!(store.list_manifests().await.unwrap().is_empty());
     assert!(store.list_installations().await.unwrap().is_empty());
 }
 
 #[tokio::test]
-async fn installed_membership_surfaces_product_adapter_runtime_entries() {
-    let store = installation_store().await;
+async fn installed_extension_surfaces_product_adapter_runtime_entries() {
+    let store = filesystem_store().await;
     store
         .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
         .await
         .unwrap();
     store.upsert_installation(installation()).await.unwrap();
 
-    let installations = store.list_installations().await.unwrap();
-    assert_eq!(installations.len(), 1);
+    let installed = store.list_installations().await.unwrap();
+    assert_eq!(installed.len(), 1);
 
     let manifest = store
-        .get_manifest(installations[0].extension_id())
+        .get_manifest(installed[0].extension_id())
         .await
         .unwrap()
-        .expect("manifest for enabled installation");
+        .expect("manifest for installation");
     let sections = product_adapter_sections(&manifest).unwrap();
     assert_eq!(sections.len(), 1);
     assert_eq!(sections[0].adapter_id().as_str(), "telegram-v2/inbound");
@@ -187,7 +187,7 @@ prompt_doc_ref = "prompts/do.md"
     )
     .unwrap();
 
-    let store = installation_store().await;
+    let store = filesystem_store().await;
     store.upsert_manifest(plain_manifest.clone()).await.unwrap();
     store.upsert_installation(plain_install).await.unwrap();
 
@@ -200,7 +200,7 @@ prompt_doc_ref = "prompts/do.md"
 
 #[tokio::test]
 async fn manifest_hash_mismatch_is_rejected() {
-    let store = installation_store().await;
+    let store = filesystem_store().await;
     store
         .upsert_manifest(manifest("telegram_bot_token", "sha256:different"))
         .await
@@ -343,7 +343,7 @@ handle = "outbound_token"
     )
     .unwrap();
 
-    let store = installation_store().await;
+    let store = filesystem_store().await;
     store.upsert_manifest(multi_manifest.clone()).await.unwrap();
     store.upsert_installation(multi_install).await.unwrap();
 
@@ -359,7 +359,7 @@ handle = "outbound_token"
 
 #[tokio::test]
 async fn arc_store_delegation_works() {
-    let store = installation_store().await;
+    let store = filesystem_store().await;
     let arc_store: Arc<dyn ExtensionInstallationStorePort> = Arc::new(store);
     arc_store
         .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
@@ -367,13 +367,13 @@ async fn arc_store_delegation_works() {
         .unwrap();
     arc_store.upsert_installation(installation()).await.unwrap();
 
-    let installations = arc_store.list_installations().await.unwrap();
-    assert_eq!(installations.len(), 1);
+    let installed = arc_store.list_installations().await.unwrap();
+    assert_eq!(installed.len(), 1);
 }
 
 #[tokio::test]
 async fn update_health_uses_redacted_string() {
-    let store = installation_store().await;
+    let store = filesystem_store().await;
     store
         .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
         .await

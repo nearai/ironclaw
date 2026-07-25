@@ -2,26 +2,21 @@
 //!
 //! The `ironclaw_webui_v2` crate ships handlers that dispatch through
 //! `ProductSurface` but is deliberately unaware of bearer tokens,
-//! OIDC, CORS, body limits, and static security headers — its CLAUDE.md
-//! lists these as "host composition still owes". This module is the
-//! Reborn-side home for that work: it exposes [`webui_v2_app`], the
+//! OIDC, CORS, body limits, and static security headers. This module is
+//! WebUI ingress' home for that work: it exposes [`webui_v2_app`], the
 //! fully-composed axum [`Router`] (auth + rate limit + CORS + body
 //! limit + security headers + v2 route surface). Tests drive it
 //! through `tower::ServiceExt::oneshot`; the standalone
-//! `ironclaw-reborn serve` subcommand (on a follow-up PR) consumes the
-//! same `Router` and owns the listener lifecycle on the host side.
+//! `ironclaw-reborn serve` subcommand consumes the same `Router` and owns
+//! the listener lifecycle on the host side.
 //!
-//! ### Why no serve-and-bind helper here
+//! ### Why this module stops at Router assembly
 //!
-//! `ironclaw_reborn_composition` sits in the Reborn product/API
-//! boundary enforced by
-//! `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs::
-//! reborn_product_api_crates_do_not_bind_http_ingress`. Product/API
-//! crates may expose `Router` / `IngressRouteDescriptor`, but they may
-//! NOT bind `TcpListener`s, drive the axum `serve` future, or
-//! otherwise own server lifecycle — that responsibility lives in
-//! host-owned code. So the seam this PR provides is the `Router`; the
-//! consuming host binary writes the listener-binding line itself.
+//! The product/API boundary enforced by
+//! `reborn_product_api_crates_do_not_bind_http_ingress` means lower product
+//! crates may expose `Router` / `IngressRouteDescriptor`, but not bind
+//! listeners. `ironclaw_webui` is the host ingress crate: this module assembles
+//! the router, while `lib.rs` owns the optional serve-loop helper.
 //!
 //! The composition is intentionally Reborn-owned and does **not** share
 //! middleware with the v1 gateway under `/src/channels/web/`. Path A in
@@ -31,6 +26,12 @@
 
 use std::sync::Arc;
 
+use crate::webui_v2::{
+    DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, StaticRouterConfig, StaticRouterConfigError,
+    WebUiV2Capabilities, WebUiV2RouteOptions, WebUiV2State,
+    is_webui_v2_operator_webui_config_route_id, static_router_with_config,
+    webui_v2_router_with_options,
+};
 use axum::{
     Json, Router,
     extract::{Request, State},
@@ -40,20 +41,9 @@ use axum::{
     routing::get,
 };
 use ironclaw_host_api::ingress::IngressRouteDescriptor;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
-// The WebChat v2 route surface + static router are the folded-in `webui_v2`
-// module; the mount vocabulary + product-auth serve items are re-exported from
-// the composition facade.
-use crate::webui_v2::{
-    DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, StaticRouterConfig, StaticRouterConfigError,
-    WebUiV2Capabilities, WebUiV2RouteOptions, WebUiV2State,
-    is_webui_v2_operator_webui_config_route_id, static_router_with_config,
-    webui_v2_router_with_options,
-};
-use ironclaw_reborn_composition::{
-    ChannelIdentityBindingConfig, ProductAuthRouteState, ProtectedRouteMount, PublicRouteDrains,
-    PublicRouteMount, RebornWebuiBundle, channel_identity_binding_hook_factory,
-    product_auth_route_mount,
+use ironclaw_host_api::{AgentId, ProductSurface, ProjectId, TenantId, UserId};
+use ironclaw_host_ingress::{
+    ProtectedRouteMount, PublicRouteDrains, PublicRouteMount, SplitRouteMount,
 };
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::{AllowHeaders, CorsLayer};
@@ -67,6 +57,7 @@ use crate::webui_operator_auth::{
 use crate::webui_rate_limit::{build_rate_limit_state, enforce_rate_limit};
 use crate::webui_ws_origin::{build_websocket_origin_state, enforce_websocket_origin};
 use ironclaw_host_api::ProductSurfaceCaller;
+use ironclaw_product::mark_bearer_token_verified_for_tenant;
 use serde::Serialize;
 
 /// Default per-request body limit (14 MiB) — sized to cover ~10 MiB of
@@ -168,8 +159,8 @@ fn reborn_projects_enabled() -> bool {
         .unwrap_or(false)
 }
 
-/// Host-installation composition the Reborn HTTP gateway needs in
-/// addition to the [`RebornWebuiBundle`] it serves over.
+/// Host-installation composition the Reborn HTTP gateway needs in addition to
+/// the product surface it serves over.
 ///
 /// Fields are `pub(crate)` so the public surface is the typed builder
 /// methods only. This routes every host through `new` /
@@ -242,16 +233,11 @@ pub struct WebuiServeConfig {
     /// inside the bearer auth layer. These receive the same authenticated
     /// caller extensions and descriptor-driven policy enforcement as WebUI v2.
     pub(crate) protected_mounts: Vec<ProtectedRouteMount>,
-    /// Optional host hook that binds a successful channel-extension OAuth
-    /// identity to the authenticated Reborn user (the generic post-exchange
-    /// identity binding; extension-runtime §5.5).
-    pub(crate) channel_identity_binding: Option<ChannelIdentityBindingConfig>,
+    /// Host-supplied split route mounts merged as protected + public route
+    /// fragments with one shared descriptor inventory. Product-auth is the
+    /// current production user.
+    pub(crate) split_mounts: Vec<SplitRouteMount>,
 }
-
-// `PublicRouteDrain`, `PublicRouteMount`, `ProtectedRouteMount`, and
-// `PublicRouteDrains` are defined in `ironclaw_reborn_composition`
-// (`webui::route_mounts`) because composition's own route builders
-// (nearai login, OpenAI-compat) construct them; they are imported above.
 
 pub struct WebuiV2App {
     router: Router,
@@ -283,17 +269,8 @@ impl WebuiServeConfig {
             default_project_id: None,
             public_mounts: Vec::new(),
             protected_mounts: Vec::new(),
-            channel_identity_binding: None,
+            split_mounts: Vec::new(),
         }
-    }
-
-    /// Attach the generic post-OAuth channel identity binding: the
-    /// product-auth callback binds a proven vendor identity to the
-    /// authenticated caller for whichever installed channel extension
-    /// declares the callback's vendor.
-    pub fn with_channel_identity_binding(mut self, config: ChannelIdentityBindingConfig) -> Self {
-        self.channel_identity_binding = Some(config);
-        self
     }
 
     /// Attach a host-supplied public sub-router PLUS its route
@@ -334,6 +311,14 @@ impl WebuiServeConfig {
     /// descriptor-driven rate/body-limit enforcement.
     pub fn with_protected_route_mount(mut self, mount: ProtectedRouteMount) -> Self {
         self.protected_mounts.push(mount);
+        self
+    }
+
+    /// Attach a host-supplied split route mount. The protected half is merged
+    /// inside bearer auth, the public half outside bearer auth, and the shared
+    /// descriptors feed the same gateway policy derivation as every other mount.
+    pub fn with_split_route_mount(mut self, mount: SplitRouteMount) -> Self {
+        self.split_mounts.push(mount);
         self
     }
 
@@ -500,23 +485,20 @@ fn static_router_config_from_descriptors(
 ///   callback is per peer IP)
 /// - WebChat v2 route set from `crate::webui_v2::webui_v2_router`
 ///
-/// The returned [`Router`] is the seam between this composition crate
-/// and host-owned ingress code: tests drive it via
-/// `tower::ServiceExt::oneshot`, and the standalone `ironclaw-reborn
-/// serve` subcommand on a follow-up PR will hand it to axum's serve
-/// loop from a host-owned listener. This crate intentionally never
-/// binds a socket or drives the serve loop itself — that boundary is
-/// enforced by `reborn_product_api_crates_do_not_bind_http_ingress`
-/// in `ironclaw_architecture`.
+/// The returned [`Router`] is the seam between route/middleware assembly and
+/// listener lifecycle: tests drive it via `tower::ServiceExt::oneshot`, while
+/// host callers pass it to axum's serve loop from a host-owned listener.
 pub fn webui_v2_app(
-    bundle: RebornWebuiBundle,
+    product_surface: Arc<dyn ProductSurface>,
     config: WebuiServeConfig,
 ) -> Result<Router, WebuiServeError> {
-    Ok(webui_v2_app_with_lifecycle(bundle, config)?.into_parts().0)
+    Ok(webui_v2_app_with_lifecycle(product_surface, config)?
+        .into_parts()
+        .0)
 }
 
 pub fn webui_v2_app_with_lifecycle(
-    bundle: RebornWebuiBundle,
+    product_surface: Arc<dyn ProductSurface>,
     config: WebuiServeConfig,
 ) -> Result<WebuiV2App, WebuiServeError> {
     let csp_value = config.csp_header.clone().map(Ok).unwrap_or_else(|| {
@@ -539,24 +521,10 @@ pub fn webui_v2_app_with_lifecycle(
         ]))
         .allow_credentials(true);
 
-    let product_auth_mount = bundle.product_auth.clone().map(|product_auth| {
-        let mut state = ProductAuthRouteState::new(
-            product_auth,
-            config.tenant_id.clone(),
-            config.default_agent_id.clone(),
-            config.default_project_id.clone(),
-        )
-        .with_product_surface(bundle.product_surface.clone());
-        if let Some(channel_identity_binding) = config.channel_identity_binding.clone() {
-            state = state.with_provider_identity_hook(channel_identity_binding_hook_factory(
-                channel_identity_binding,
-            ));
-        }
-        product_auth_route_mount(state)
-    });
     let mount_operator_routes = config.authenticator.mounts_operator_webui_config_routes();
     let public_mounts = config.public_mounts;
     let protected_mounts = config.protected_mounts;
+    let split_mounts = config.split_mounts;
     let public_route_drains = PublicRouteDrains::new(
         public_mounts
             .iter()
@@ -577,13 +545,13 @@ pub fn webui_v2_app_with_lifecycle(
         });
         operator_descriptors.clear();
     }
-    if let Some(mount) = &product_auth_mount {
-        descriptors.extend(mount.descriptors.iter().cloned());
-    }
     for mount in &public_mounts {
         descriptors.extend(mount.descriptors.iter().cloned());
     }
     for mount in &protected_mounts {
+        descriptors.extend(mount.descriptors.iter().cloned());
+    }
+    for mount in &split_mounts {
         descriptors.extend(mount.descriptors.iter().cloned());
     }
     let static_router_config = static_router_config_from_descriptors(&descriptors)?;
@@ -611,11 +579,8 @@ pub fn webui_v2_app_with_lifecycle(
     } else {
         WebUiV2RouteOptions::without_operator_routes()
     };
-    let v2_state = WebUiV2State::new(
-        bundle.product_surface.clone(),
-        DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
-    )
-    .with_reborn_projects_enabled(reborn_projects_enabled());
+    let v2_state = WebUiV2State::new(product_surface, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+        .with_reborn_projects_enabled(reborn_projects_enabled());
     let v2_inner: Router<()> = webui_v2_router_with_options(v2_state, route_options).with_state(());
 
     let mut protected_inner = Router::new().merge(v2_inner);
@@ -623,14 +588,17 @@ pub fn webui_v2_app_with_lifecycle(
         protected_inner = protected_inner.merge(mount.router);
     }
     let mut public_inner: Option<Router> = None;
-    if let Some(mount) = product_auth_mount {
-        protected_inner = protected_inner.merge(mount.protected);
-        public_inner = Some(mount.public);
-    }
     for mount in public_mounts {
         public_inner = Some(match public_inner {
             Some(existing) => existing.merge(mount.router),
             None => mount.router,
+        });
+    }
+    for mount in split_mounts {
+        protected_inner = protected_inner.merge(mount.protected);
+        public_inner = Some(match public_inner {
+            Some(existing) => existing.merge(mount.public),
+            None => mount.public,
         });
     }
 
@@ -815,10 +783,8 @@ async fn authenticate_request(
             state.default_agent_id.clone(),
             state.default_project_id.clone(),
         );
-        let auth_evidence = ironclaw_reborn_composition::mark_bearer_token_verified_for_tenant(
-            openai_user_id.as_str(),
-            state.tenant_id.clone(),
-        );
+        let auth_evidence =
+            mark_bearer_token_verified_for_tenant(openai_user_id.as_str(), state.tenant_id.clone());
         let caller = match ironclaw_reborn_openai_compat::OpenAiCompatAuthenticatedCaller::new(
             scope,
             auth_evidence,
