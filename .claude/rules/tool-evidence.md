@@ -3,7 +3,7 @@ paths:
   - "crates/ironclaw_capabilities/**"
   - "crates/ironclaw_host_runtime/**"
   - "crates/ironclaw_dispatcher/**"
-  - "crates/ironclaw_product_workflow/**"
+  - "crates/ironclaw_product/**"
   - "crates/ironclaw_first_party_extensions/**"
   - "crates/ironclaw_webui/**"
   - "crates/ironclaw_reborn_composition/**"

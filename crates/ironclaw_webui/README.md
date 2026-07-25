@@ -20,7 +20,7 @@ across it:
 
 | Composed piece | Was | Now lives in |
 |---|---|---|
-| **WebChat v2 route surface + SPA** | crate `ironclaw_webui_v2` | `src/webui_v2/` (public module) + `frontend/` |
+| **WebChat v2 route surface + SPA** | folded from the former `ironclaw_webui_v2` crate | `src/webui_v2/` (public module) + `frontend/` |
 | **Gateway assembly + middleware** | host-supplied `ProductSurface` + WebUI middleware | `src/webui_serve.rs` + `src/webui_*.rs` |
 | **Serve loop + host auth** | crate `ironclaw_reborn_webui_ingress` (this crate's original scope) | `src/lib.rs`, `src/auth/`, `src/session.rs`, `src/oidc.rs`, `src/signed_session_login.rs` |
 
@@ -87,9 +87,11 @@ attach under their feature flag.
 - Reaches the rest of Reborn **only** through
   `ironclaw_host_api::ProductSurface` and the neutral
   `PublicRouteMount`/`ProtectedRouteMount` vocabulary supplied by the host.
-- **No** direct dependency on `ironclaw_product` or any lower substrate
-  crate; **no** v1 `src/` import; **no** v1 secrets / settings / DB. Host auth
-  stays host-owned here (Path A of `docs/reborn/how-to-port-channel-to-reborn.md`).
+- Direct `ironclaw_product` access is limited to wire DTOs and ProductSurface
+  descriptors; handlers reach behavior through `ironclaw_host_api::ProductSurface`.
+  There is no v1 `src/` import, v1 secrets/settings/DB, or lower-substrate
+  access. Host auth stays host-owned here (Path A of
+  `docs/reborn/how-to-port-channel-to-reborn.md`).
 - These edges are enforced by `crates/ironclaw_architecture` — see
   `tests/reborn_dependency_boundaries.rs`.
 

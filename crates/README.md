@@ -11,8 +11,8 @@ IronClaw Reborn keeps authority narrow and explicit:
 1. **Contracts describe authority**: `ironclaw_host_api` and adjacent contract crates define scoped identities, policies, requests, decisions, and DTOs.
 2. Policy gates decide: authorization, trust, runtime policy, resources, approvals, secrets, safety, filesystem, network, hooks, and prompt-envelope crates each own one kind of decision, label, or side effect.
 3. Capability hosts coordinate: capabilities, dispatcher, processes, scripts, MCP, WASM, shared WASM limiting, and host-runtime crates compose validated requests into sandboxed execution.
-4. State is durable and replayable: events, event streams, run state, threads, conversations, memory, outbound, product workflow storage, traces, and event projections keep the host observable without leaking secrets.
-5. Product surfaces adapt: agent loop, engine, loop host, gateway, WebChat v2, TUI, skills, first-party extensions, product adapters, and Reborn composition crates turn those lower-level boundaries into agent and user experiences.
+4. State is durable and replayable: events, event streams, run state, threads, conversations, memory, outbound, product storage, traces, and event projections keep the host observable without leaking secrets.
+5. Product surfaces adapt: agent loop, engine, loop host, WebChat, TUI, skills, first-party extensions, product adapters, and Reborn composition crates turn those lower-level boundaries into agent and user experiences.
 
 A good rule of thumb: if a change adds new authority or persistence, put it in the crate that owns that boundary instead of threading it through a UI or runtime crate.
 
@@ -89,9 +89,7 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 | `ironclaw_turns` | `ironclaw_turns` | Host-layer turn coordination contracts. Use it for turn lifecycle boundaries between loop/product code and host services. |
 | `ironclaw_first_party_extensions` | `ironclaw_first_party_extensions` | Concrete first-party userland extension implementations behind scoped handles. |
 | `ironclaw_first_party_extension_ports` | `ironclaw_first_party_extension_ports` | Loop-facing adapters for first-party extensions: skill activation/context/execution ports over loop-host and turn-run contracts. |
-| `ironclaw_product` | `ironclaw_product` | Product-adapter contracts for mapping Reborn state and events into product-facing shapes. |
-| `ironclaw_product` | `ironclaw_product` | Product-facing workflow service: inbound turn service, idempotency ledger, binding resolution. |
-| `ironclaw_product` | `ironclaw_product` | Product-facing workflow service plus feature-gated durable filesystem/libSQL/PostgreSQL idempotency ledger adapters. |
+| `ironclaw_product` | `ironclaw_product` | Product contracts and orchestration: adapter shapes, inbound turns, idempotency, binding resolution, ProductSurface descriptors, and feature-gated durable ledger adapters. |
 | `ironclaw_engine` | `ironclaw_engine` | Unified thread-capability-CodeAct execution engine. It is closer to product/agent orchestration than low-level host policy. |
 | `ironclaw_skills` | `ironclaw_skills` | Skill selection, scoring, and management. |
 | `ironclaw_gateway` | `ironclaw_gateway` | Browser gateway frontend assets, layout configuration, and widget extension system. |

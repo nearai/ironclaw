@@ -145,10 +145,10 @@ Reducer rules:
   label, authorization URL, and expiry, when that context is needed to rebuild
   OAuth/manual-token affordances. Clients must not infer gate run identity from
   the latest active run or from tool name/order heuristics.
-  Product adapters may additionally emit rich `GatePrompt`/`AuthPrompt`
+  Channel adapters may additionally emit rich `GatePrompt`/`AuthPrompt`
   payloads for immediate UI affordances such as OAuth URLs or approval context,
   but those prompt payloads are enrichments. Approval request details remain
-  prompt-only unless a product adapter defines an explicit redaction contract;
+  prompt-only unless a channel adapter defines an explicit redaction contract;
   replay/rebase reconstruction must still work from the product gate row's own
   `run_id`, `gate_kind`, `gate_ref`, and any product-safe auth context. This is
   a product gate surface, not the generic lifecycle projection surface.
@@ -237,7 +237,7 @@ The outbound path is:
 durable event or projection fact
   -> outbound candidate selection through ironclaw_outbound::OutboundPolicyService
   -> ironclaw_outbound::OutboundPolicyService validation and delivery-attempt record
-  -> product adapter render and host transport send
+  -> channel adapter render and host transport send
 ```
 
 Rules:
@@ -388,4 +388,4 @@ Run status projections are projection-local read models. Model/reply milestone e
 - a reply-target validation port used before each external push candidate is turned into a delivery attempt;
 - outbound delivery attempt/status rows for support-visible retry/dead-letter workflows.
 
-This state is not canonical transcript or projection content. Rows store refs, cursors, status enums, timestamps, and sanitized failure kinds only. Product adapters still revalidate reply-target binding authorization before every external push, and delivery failure must not mutate canonical transcript/projection state or mark turns/runs failed. If reply-target authorization is revoked at delivery time, the outbound policy service records a sanitized `authorization_revoked` delivery failure and does not return a sendable target.
+This state is not canonical transcript or projection content. Channel adapters still revalidate reply-target binding authorization before every external push, and delivery failure must not mutate canonical transcript/projection state or mark turns/runs failed. If reply-target authorization is revoked at delivery time, the outbound policy service records a sanitized `authorization_revoked` delivery failure and does not return a sendable target.

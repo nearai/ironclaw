@@ -43,7 +43,7 @@ product surface.
 | `ironclaw_event_projections` / `ironclaw_event_streams` | Durable event facts, projection rebuilds, notification/fan-out surfaces | Final outbound target choice, transport send, send authority |
 | `ChannelAdapter` implementations and transport glue | Rendering after outbound policy approves a candidate; host-provided transport execution | Communication policy selection, durable delivery state |
 
-The resolver must stay host-owned and deterministic. Product adapters can
+The resolver must stay host-owned and deterministic. Channel adapters can
 describe capabilities, but they do not get to define the resolver's policy
 language or inject product-specific behavior into the contract.
 
@@ -189,8 +189,8 @@ Product-facing outbound reads are descriptor-backed ProductSurface query views:
 `outbound_preferences` for the authenticated caller's preference projection and
 `outbound_delivery_targets` for the caller-scoped target inventory. The legacy
 `get_outbound_preferences` and `list_outbound_delivery_targets` facade methods
-are compatibility wrappers over those views while `RebornServicesApi` shrinks
-toward the generic read conduit. Preference writes remain side-effecting and
+are compatibility wrappers over those views; ProductSurface views are the
+canonical read conduit. Preference writes remain side-effecting and
 must move through the capability path.
 
 ---
@@ -251,7 +251,7 @@ OutboundPolicyService
   -> validates target and capability scope
   -> records delivery attempt
   -> returns validated target or rejection
-Product adapter / host transport
+Channel adapter / host transport
   -> renders through adapter and sends through host-owned transport only after validation
 ```
 

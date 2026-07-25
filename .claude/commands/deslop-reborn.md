@@ -54,7 +54,7 @@ List the crates (`ls crates/`). A crate is a **candidate** when ALL hold:
 **Selection bias:** prefer **smaller / leaf crates first** — they fit entirely in context, gate
 cleanly, and merge independently. A crate whose `src` is **under ~2k lines** can and SHOULD be read in
 full (§3). Clear the small, high-leverage crates before taking on the giants (e.g.
-`ironclaw_reborn_composition`, `ironclaw_product_workflow`, `ironclaw_gateway`-scale surfaces need
+`ironclaw_reborn_composition`, `ironclaw_product`, `ironclaw_gateway`-scale surfaces need
 targeted reading, not a full load, and may warrant splitting the de-slop across iterations
 module-by-module). When unsure, prefer a crate that is **load-bearing for invariants** (turns,
 dispatcher, authorization, approvals, secrets, run_state, event store) over a purely mechanical one —

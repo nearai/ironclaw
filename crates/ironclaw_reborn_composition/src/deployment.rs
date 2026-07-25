@@ -1,10 +1,8 @@
 //! Deployment configuration: a deployment mode is policy *data* resolved at
 //! the composition edge, never a type the kernel or a substrate names.
 //!
-//! This is the Slice B artifact of
-//! `docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`
-//! (§4.4 "Eliminate `Local*`", §5.6 "The deployment interface — modes are
-//! data"). Each deployment target is one [`DeploymentConfig`] value built by a
+//! Deployment modes are configuration data resolved at the composition edge;
+//! each deployment target is one [`DeploymentConfig`] value built by a
 //! named constructor; the difference between local-dev, local-dev-yolo, and
 //! the hosted volume preview is readable on this one page as data.
 //!

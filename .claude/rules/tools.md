@@ -85,7 +85,7 @@ no authorization, approval, resource, audit, or runtime obligation is lost.
 Review for parallel pipelines with:
 
 ```bash
-rg -n "\.dispatch\(|\.invoke\(|\.resume\(" crates/ironclaw_product_workflow \
+rg -n "\.dispatch\(|\.invoke\(|\.resume\(" crates/ironclaw_product \
   crates/ironclaw_reborn_composition crates/ironclaw_webui
 rg -n "RuntimeAdapter|CapabilityHost" crates
 ```
