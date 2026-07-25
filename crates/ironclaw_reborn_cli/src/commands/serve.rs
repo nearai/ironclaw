@@ -5,6 +5,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
 use clap::Args;
+use ironclaw_extension_host::reborn::channel_identity::channel_identity_binding_hook_factory;
+use ironclaw_extension_host::reborn::extension_ingress::extension_ingress_route_mount;
 use ironclaw_reborn_composition::build_openai_compat_route_mount;
 use ironclaw_reborn_composition::host_api::{
     AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
@@ -573,9 +575,7 @@ impl ServeCommand {
                 .with_product_surface(product_surface.clone());
                 if let Some(channel_identity_binding) = runtime.channel_identity_binding_config() {
                     state = state.with_provider_identity_hook(
-                        ironclaw_reborn_composition::channel_identity_binding_hook_factory(
-                            channel_identity_binding,
-                        ),
+                        channel_identity_binding_hook_factory(channel_identity_binding),
                     );
                 }
                 serve_config = serve_config.with_split_route_mount(product_auth_route_mount(state));
@@ -585,9 +585,8 @@ impl ServeCommand {
             // for every active extension; the route table follows the active
             // snapshot.
             if let Some(ingress_parts) = runtime.extension_ingress_parts() {
-                let ingress_mount =
-                    ironclaw_reborn_composition::extension_ingress_route_mount(&ingress_parts)
-                        .context("failed to compose the extension ingress route mount")?;
+                let ingress_mount = extension_ingress_route_mount(&ingress_parts)
+                    .context("failed to compose the extension ingress route mount")?;
                 serve_config = serve_config.with_public_route_mount(ingress_mount);
             }
             // Generic WebGeneratedCode pairing routes (mint/status/unpair per

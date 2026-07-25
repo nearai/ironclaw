@@ -8,7 +8,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
-use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
+use ironclaw_extension_host::reborn::extension_lifecycle::RebornLocalExtensionManagementPort;
 use ironclaw_product::ProductSurfaceFailure;
 
 #[derive(Clone, Default)]

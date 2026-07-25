@@ -56,15 +56,15 @@ mod tests {
         },
     };
 
-    use crate::extension_host::extension_lifecycle_capabilities::{
-        EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REMOVE_CAPABILITY_ID,
-        EXTENSION_SEARCH_CAPABILITY_ID,
-    };
     use crate::outbound::{
         OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
         OutboundDeliveryTargetRegistry, RebornOutboundPreferencesService,
     };
     use crate::runtime::local_dev_filesystem_skill_context_source;
+    use ironclaw_extension_host::reborn::extension_lifecycle_capabilities::{
+        EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REMOVE_CAPABILITY_ID,
+        EXTENSION_SEARCH_CAPABILITY_ID,
+    };
 
     /// The §5.3 flip collapsed `CapabilityOutcome::Completed` into
     /// `Resolution::Done(Outcome)`; the minted `refs.result` is an opaque uuid,

@@ -23,17 +23,11 @@ use ironclaw_product::{
 
 use ironclaw_triggers::TriggerRepository;
 
-use crate::extension_host::admin_configuration::AdminConfigurationViewProvider;
 use crate::operator_tool_catalog::ActiveRegistryOperatorToolCatalog;
 use crate::product_capability::RuntimeProductCapabilityInvoker;
 use crate::{
     RebornAutomationProductService, RebornBuildError, RebornReadiness, RebornReadinessDiagnostic,
     RebornReadinessDiagnosticStatus, RebornRuntime,
-    extension_host::lifecycle::{
-        RebornLocalLifecycleService, RebornLocalSkillManagementError,
-        RebornLocalSkillManagementPort,
-    },
-    extension_host::webui_extension_credentials::ProductAuthExtensionCredentialSetup,
     outbound::{
         OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistry,
         RebornOutboundPreferencesService, outbound_delivery_synthetic_provider,
@@ -44,6 +38,11 @@ use crate::{
         ProjectScopedFilesystemReader,
     },
 };
+use ironclaw_extension_host::reborn::admin_configuration::AdminConfigurationViewProvider;
+use ironclaw_extension_host::reborn::lifecycle::{
+    RebornLocalLifecycleService, RebornLocalSkillManagementError, RebornLocalSkillManagementPort,
+};
+use ironclaw_extension_host::reborn::webui_extension_credentials::ProductAuthExtensionCredentialSetup;
 
 /// A trigger repository paired with the turn-run snapshot source from the
 /// SAME runtime. Local-dev and production graphs both carry these two

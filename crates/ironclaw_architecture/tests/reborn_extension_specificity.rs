@@ -1062,6 +1062,9 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_host_api/src/product_adapter/identity.rs",
         "telegram",
     ),
+    // Moved pre-existing extension-host fixture debt; these entries should
+    // shrink as the old composition-hosted tests become manifest-driven.
+    ("crates/ironclaw_extension_host/Cargo.toml", "slack"),
     (
         "crates/ironclaw_host_api/src/product_adapter/outbound.rs",
         "github",

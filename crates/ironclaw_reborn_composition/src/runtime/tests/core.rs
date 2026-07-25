@@ -205,15 +205,16 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
         Some("A-RUNTIME".to_string()),
     )
     .expect("proven Slack identity");
-    let rollback = crate::extension_host::channel_identity::bind_channel_identities_for_callback(
-        &binding_config,
-        "slack",
-        &callback_scope,
-        Some(&identity),
-    )
-    .await
-    .expect("bind Slack identity before activation")
-    .expect("Slack callback maps to the installed channel extension");
+    let rollback =
+        ironclaw_extension_host::reborn::channel_identity::bind_channel_identities_for_callback(
+            &binding_config,
+            "slack",
+            &callback_scope,
+            Some(&identity),
+        )
+        .await
+        .expect("bind Slack identity before activation")
+        .expect("Slack callback maps to the installed channel extension");
     drop(rollback);
 
     let dm_targets = &runtime.channel_dm_target_store;
@@ -3576,7 +3577,7 @@ async fn send_user_message_until_gate_returns_blocked_on_auth_gate() {
                 )
                 .expect("valid scope"),
                 runtime_http_egress: Arc::new(
-                    crate::extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryEgress::with_tool_name("notion-search"),
+                    ironclaw_extension_host::reborn::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryEgress::with_tool_name("notion-search"),
                 ),
             },
         )
@@ -6197,7 +6198,7 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
 
     // Gateway state seeded after runtime build.
     struct LifecycleServiceHandle {
-        service: crate::extension_host::lifecycle::RebornLocalLifecycleService,
+        service: ironclaw_extension_host::reborn::lifecycle::RebornLocalLifecycleService,
     }
 
     impl std::fmt::Debug for LifecycleServiceHandle {
@@ -6362,9 +6363,9 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
 
     // Seed the lifecycle service before the model gateway runs.
     let extension_management = runtime.extension_management.clone();
-    let service = crate::extension_host::lifecycle::RebornLocalLifecycleService::new(Arc::clone(
-        &runtime.skill_management,
-    ))
+    let service = ironclaw_extension_host::reborn::lifecycle::RebornLocalLifecycleService::new(
+        Arc::clone(&runtime.skill_management),
+    )
     .with_extension_management(extension_management)
     .with_runtime_credential_accounts(Arc::new(MultiToolConfiguredCredentials));
     service_slot

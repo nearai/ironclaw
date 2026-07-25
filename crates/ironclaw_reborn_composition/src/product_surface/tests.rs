@@ -29,8 +29,8 @@ use ironclaw_product::{
 };
 use std::time::Duration;
 
-use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
 use ironclaw_extension_host::product_extension_host_api_contract_registry;
+use ironclaw_extension_host::reborn::extension_lifecycle::RebornLocalExtensionManagementPort;
 
 #[tokio::test]
 async fn operator_tool_catalog_reads_shared_registry_updates() {

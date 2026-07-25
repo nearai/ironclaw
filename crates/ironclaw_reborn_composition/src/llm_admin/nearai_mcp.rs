@@ -18,10 +18,10 @@ use ironclaw_product::{
 };
 
 use crate::RebornBuildError;
-use crate::extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
-use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
-use crate::extension_host::webui_extension_credentials::ProductAuthExtensionCredentialSetup;
 use ironclaw_auth::RebornProductAuthServices;
+use ironclaw_extension_host::reborn::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
+use ironclaw_extension_host::reborn::extension_lifecycle::RebornLocalExtensionManagementPort;
+use ironclaw_extension_host::reborn::webui_extension_credentials::ProductAuthExtensionCredentialSetup;
 
 pub(crate) async fn bootstrap_nearai_mcp(
     config: Option<NearAiMcpBootstrapConfig>,

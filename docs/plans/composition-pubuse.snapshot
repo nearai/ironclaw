@@ -2,23 +2,6 @@ pub use admin_token::AdminApiTokenMinter;
 pub use automation::service::RebornAutomationProductService;
 pub use automation::trigger_poller::PostSubmitDeliveryHook;
 pub use error::RebornBuildError;
-pub use extension_host::channel_host::{ChannelHostIdentity, GenericChannelHostAssembly};
-pub use extension_host::channel_identity::{
-    ChannelIdentityBindingConfig, channel_identity_binding_hook_factory,
-};
-pub use extension_host::extension_ingress::{
-    ChannelInboundSinkConfig, ChannelIngressDrain, ChannelIngressRegistration,
-    ExtensionIngressParts, ExtensionIngressRegistry, GenericChannelInboundSink,
-    PostAdmissionObserver, StaticIngressSecrets, VerifiedEvidenceMint,
-};
-pub use extension_host::extension_ingress::{
-    EXTENSION_INGRESS_ROUTE_PATTERN, extension_ingress_route_mount,
-};
-pub use extension_host::extension_lifecycle_command::{
-    RebornExtensionLifecycleCommand, RebornExtensionLifecycleCommandError,
-    execute_reborn_extension_lifecycle_command, render_reborn_extension_lifecycle_response,
-};
-pub use extension_host::skill_listing::{RebornSkillListError, list_reborn_local_skills};
 #[cfg(feature = "test-support")]
 pub use factory::AttachmentTestSupport;
 #[cfg(feature = "test-support")]
@@ -41,10 +24,6 @@ pub use ironclaw_auth::{
     CredentialAccountStatus, CredentialOwnership, Timestamp,
 };
 pub use ironclaw_auth::{CredentialAccount, CredentialAccountSelectionRequest};
-pub use ironclaw_extension_host::{
-    FirstPartyHandlerRegistrar, FirstPartyPackageAsset, FirstPartyPackageBundle,
-    FirstPartyPackageOAuthSetup, FirstPartyPackageOnboarding, FirstPartyRegistrarContext,
-};
 pub use ironclaw_host_api::{
     CapabilityId, HostApiError, NetworkScheme, NetworkTargetPattern, RuntimeCredentialRequirement,
     RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeDispatchErrorKind,
@@ -93,6 +72,7 @@ pub use deployment::{
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use deployment::{local_dev_build_input, local_dev_build_input_with_profile};
+pub use ironclaw_extension_host::reborn::provider_identity::ProviderIdentityActorResolver;
 pub use ironclaw_host_api::{
     RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
     RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,
@@ -111,7 +91,6 @@ pub use observability::hooks::{
 };
 pub use observability::trajectory_observer::RebornTrajectoryObserver;
 pub use production_runtime_policy::RebornProductionRuntimePolicy;
-pub use provider_identity::ProviderIdentityActorResolver;
 pub use readiness::{
     RebornReadiness, RebornReadinessDiagnostic, RebornReadinessDiagnosticComponent,
     RebornReadinessDiagnosticReason, RebornReadinessDiagnosticStatus, RebornReadinessState,

@@ -13,6 +13,8 @@
 //! The generic assembly layer binds those adapters and resolved manifests to
 //! the host-runtime lane binder without linking concrete extension crates.
 
+extern crate self as ironclaw_extension_host;
+
 mod activation_credentials;
 pub mod activation_transaction;
 pub mod active;
@@ -48,6 +50,7 @@ pub mod mcp_discovery;
 pub mod nearai_mcp;
 pub mod product_lifecycle;
 pub mod provider_instance_readiness;
+pub mod reborn;
 pub mod recipes;
 pub mod removal_cleanup;
 pub mod reply_contexts;
@@ -169,6 +172,7 @@ pub use product_lifecycle::{ExtensionCredentialCleanup, ExtensionLifecycleManage
 pub use provider_instance_readiness::{
     ProviderInstanceReadinessInput, provider_instance_readiness_map,
 };
+pub use reborn::RebornExtensionHostBuildError as RebornBuildError;
 pub use recipes::{SnapshotAuthRecipeResolver, VendorRecipeConflict, unified_vendor_recipes};
 pub use removal_cleanup::{
     ExtensionRemovalChannelId, ExtensionRemovalCleanupAdapter, ExtensionRemovalCleanupAdapterId,

@@ -1,10 +1,12 @@
 use anyhow::Context;
 use clap::{Args, Subcommand};
+use ironclaw_extension_host::reborn::extension_lifecycle_command::{
+    RebornExtensionLifecycleCommand, execute_reborn_extension_lifecycle_command,
+    render_reborn_extension_lifecycle_response,
+};
 use ironclaw_host_api::public_lifecycle_response_json;
 use ironclaw_reborn_composition::{
-    LifecycleProductResponse, RebornExtensionLifecycleCommand, RebornRuntimeInput,
-    build_reborn_runtime, execute_reborn_extension_lifecycle_command,
-    render_reborn_extension_lifecycle_response,
+    LifecycleProductResponse, RebornRuntimeInput, build_reborn_runtime,
 };
 
 use crate::context::RebornCliContext;

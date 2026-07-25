@@ -26,7 +26,7 @@ use ironclaw_product::{
 };
 
 use crate::RebornRuntime;
-use crate::extension_host::lifecycle::SkillManagementMountResolver;
+use ironclaw_extension_host::reborn::lifecycle::SkillManagementMountResolver;
 use tokio::sync::Mutex as AsyncMutex;
 
 const PRODUCT_RESULT_MAX_BYTES: usize = 4 * 1024 * 1024;

@@ -50,6 +50,7 @@ async fn oauth_connect_binds_channel_identity_through_the_generic_hook() {
         CredentialAccountLookupRequest, NewAuthFlow, OAuthAuthorizationCode, OAuthAuthorizationUrl,
         OAuthProviderCallbackRequest, PkceVerifierSecret, ProviderScope,
     };
+    use ironclaw_extension_host::reborn::channel_identity::ChannelIdentityBindingConfig;
     use ironclaw_extension_host::{
         AdminConfigurationIdempotencyKey, AdminConfigurationService,
         AdminConfigurationSubmittedValue, ChannelConfigReactivation,
@@ -66,9 +67,8 @@ async fn oauth_connect_binds_channel_identity_through_the_generic_hook() {
         ResourceScope, SecretHandle, UserId, VirtualPath,
     };
     use ironclaw_reborn_composition::{
-        ChannelIdentityBindingConfig, RebornUserIdentityBinding,
-        RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,
-        RebornUserIdentityBindingStore,
+        RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
+        RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
         test_support::{
             build_oauth_product_auth_with_identity_for_test,
             handle_oauth_callback_with_channel_identity_binding_for_test,
