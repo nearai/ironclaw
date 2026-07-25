@@ -60,12 +60,6 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     },
     FrozenPathCount {
         category: "dead-code",
-        item_kind: "field",
-        path: "crates/ironclaw_llm/src/openai_codex_session.rs",
-        count: 2,
-    },
-    FrozenPathCount {
-        category: "dead-code",
         item_kind: "method",
         path: "crates/ironclaw_hooks/src/self_authored.rs",
         count: 1,
@@ -475,12 +469,6 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
         category: "test-support",
         item_kind: "field",
-        path: "crates/ironclaw_reborn_composition/src/extension_host/channel_host.rs",
-        count: 2,
-    },
-    FrozenPathCount {
-        category: "test-support",
-        item_kind: "field",
         path: "crates/ironclaw_reborn_composition/src/runtime/local_dev/extension_surface.rs",
         count: 1,
     },
@@ -525,12 +513,6 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         item_kind: "method",
         path: "crates/ironclaw_host_runtime/src/services/runtime_adapters.rs",
         count: 1,
-    },
-    FrozenPathCount {
-        category: "test-support",
-        item_kind: "method",
-        path: "crates/ironclaw_reborn_composition/src/extension_host/channel_host.rs",
-        count: 2,
     },
     FrozenPathCount {
         category: "test-support",
