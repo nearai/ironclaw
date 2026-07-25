@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
+
 from emulate_provider import (
     github_headers,
     github_json,
@@ -24,6 +25,7 @@ from emulate_provider import (
     slack_post,
 )
 from helpers import EMULATE_GITHUB_BEARER, EMULATE_SLACK_BEARER
+from journey_cases import PROVIDER_JOURNEY_RUN_IDS, PROVIDER_JOURNEY_RUNS
 from provider_capability_inventory import (
     EMULATE_SUPPORTED_TOOLS,
     capability_id_to_wire_name,
@@ -110,65 +112,6 @@ GOOGLE_TOOL_PREFIXES = (
 PROVIDER_TOOL_NAMES = EMULATE_SUPPORTED_TOOLS
 ALL_EXTENSIONS = (*GOOGLE_EXTENSIONS, "github", "slack")
 TRACE_BOOTSTRAP_TOOLS = {"builtin__extension_search"}
-MUTATING_PROVIDER_TOOLS = {
-    "gmail__send_message": "google",
-    "google-docs__create_document": "google",
-    "google-sheets__create_spreadsheet": "google",
-    "google-sheets__append_values": "google",
-    "slack__send_message": "slack",
-}
-
-
-def _provider_journey_cases() -> tuple[str, ...]:
-    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
-    no_model = set(manifest["no_model_cases"])
-    # Quarantined traces encode the retired activation flow; their fixtures
-    # live under quarantined_retired_activation/ and are not replayable here.
-    quarantined = set(manifest.get("quarantined_model_cases", []))
-    cases = []
-    for case in manifest["selected_cases"]:
-        if case in no_model or case in quarantined:
-            continue
-        trace = json.loads((TRACE_DIR / f"{case}.json").read_text(encoding="utf-8"))
-        if any(
-            call["name"] in PROVIDER_TOOL_NAMES
-            for step in trace["steps"]
-            for call in step["response"].get("tool_calls", [])
-        ):
-            cases.append(case)
-    return tuple(cases)
-
-
-def _mutating_provider_services(case: str) -> set[str]:
-    trace = json.loads((TRACE_DIR / f"{case}.json").read_text(encoding="utf-8"))
-    return {
-        service
-        for step in trace["steps"]
-        for call in step["response"].get("tool_calls", [])
-        if (service := MUTATING_PROVIDER_TOOLS.get(call["name"])) is not None
-    }
-
-
-PROVIDER_JOURNEY_CASES = _provider_journey_cases()
-ISOLATION_REPEAT_CASES = (
-    "qa_5d_slack_strategy_doc_answer",
-    "qa_10f_slack_mention_encoding",
-)
-
-
-def _provider_journey_runs() -> tuple[tuple[str, ...], tuple[str, ...]]:
-    runs = []
-    ids = []
-    for case in PROVIDER_JOURNEY_CASES:
-        runs.append(case)
-        ids.append(case)
-        if case in ISOLATION_REPEAT_CASES:
-            runs.append(case)
-            ids.append(f"{case}-isolated-repeat")
-    return tuple(runs), tuple(ids)
-
-
-PROVIDER_JOURNEY_RUNS, PROVIDER_JOURNEY_RUN_IDS = _provider_journey_runs()
 
 
 @pytest.fixture(scope="module")
@@ -266,10 +209,10 @@ async def reborn_qa_emulate_runtime(
 async def reborn_qa_emulate_provider_server(
     reborn_qa_emulate_runtime,
     resettable_emulate_provider_world,
-    case,
+    journey_case,
 ):
     """Reset mutated providers while reusing the built binary and Reborn."""
-    services = _mutating_provider_services(case)
+    services = {str(world) for world in journey_case.mutable_provider_worlds}
     reset_services = services - {"slack"}
     try:
         yield reborn_qa_emulate_runtime
@@ -278,7 +221,7 @@ async def reborn_qa_emulate_provider_server(
             await _cleanup_slack_provider_mutations(
                 reborn_qa_emulate_runtime["emulate_slack_url"],
                 reborn_qa_emulate_runtime["slack_state"],
-                case,
+                journey_case.case_id,
             )
         if reset_services:
             await resettable_emulate_provider_world.reset(reset_services)
@@ -1333,16 +1276,17 @@ async def test_slack_mutation_cleanup_covers_thread_replies(
 
 
 @pytest.mark.parametrize(
-    "case", PROVIDER_JOURNEY_RUNS, ids=PROVIDER_JOURNEY_RUN_IDS
+    "journey_case", PROVIDER_JOURNEY_RUNS, ids=PROVIDER_JOURNEY_RUN_IDS
 )
 async def test_qa_journey_provider_leg_replays_through_emulate(
     reborn_qa_emulate_provider_server,
     mock_llm_server,
-    case,
+    journey_case,
 ):
     """Every harvested provider journey executes through standalone Reborn."""
+    case = journey_case.case_id
     server = reborn_qa_emulate_provider_server["base_url"]
-    trace_path = TRACE_DIR / f"{case}.json"
+    trace_path = ROOT / journey_case.trace
     if _raw_trace_uses_tool_prefix(
         trace_path, "google-sheets__"
     ):

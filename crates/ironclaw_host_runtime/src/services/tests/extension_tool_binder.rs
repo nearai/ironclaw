@@ -30,7 +30,6 @@ fn first_party_test_package(service: &str, capability_id: &str) -> ExtensionPack
             host_api_surfaces: Vec::new(),
             capabilities: vec![ironclaw_extensions::CapabilityManifest {
                 id: CapabilityId::new(capability_id).unwrap(),
-                implements: Vec::new(),
                 description: "binder fixture capability".to_string(),
                 effects: vec![EffectKind::DispatchCapability],
                 network_targets: Vec::new(),
@@ -339,7 +338,7 @@ async fn binder_invokes_a_discovered_mcp_tool_through_the_tool_adapter() {
 
 #[tokio::test]
 async fn registry_resolver_allowlist_restricts_to_builtin_provider() {
-    use ironclaw_dispatcher::ToolResolver;
+    use ironclaw_capabilities::ToolResolver;
     use ironclaw_extensions::SharedExtensionRegistry;
 
     let mut registry = ExtensionRegistry::new();

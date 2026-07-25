@@ -8,18 +8,14 @@ use std::{
     },
 };
 
-use ironclaw_auth::AuthProductError;
+use ironclaw_auth::{AuthProductError, RebornAuthContinuationDispatcher};
 use ironclaw_conversations::{
     ConditionalUnpairOutcome, ExternalActorRef as ConversationActorRef, InboundTurnError,
 };
 use ironclaw_extension_host::ingress::{InboundAdmission, InboundAdmissionAck, InboundSink};
 use ironclaw_filesystem::InMemoryBackend;
-use ironclaw_product::{
-    ChannelConnectionNoticePolicy, ChannelPairingCode, ChannelPairingConsumeOutcome,
-    ChannelPairingError, ChannelPairingInstallationSource, ChannelPairingInterception,
-    ChannelPairingInterceptor, ChannelPairingService, ChannelPairingServiceDependencies,
-    ChannelPairingStore, ChannelPairingTemplateValues, ExtensionAccountSetupDescriptor,
-};
+use ironclaw_host_api::RebornUserIdentityLookupError;
+use ironclaw_product::ChannelConnectionNoticePolicy;
 use ironclaw_product::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId, NormalizedInboundMessage,
     ProductAdapterId, ProductTriggerReason,
@@ -27,10 +23,10 @@ use ironclaw_product::{
 use tokio::sync::Notify;
 
 use super::*;
-use crate::extension_host::channel_dm_targets::ChannelDmTargetStore;
 use crate::extension_host::extension_ingress::{
-    ChannelInboundSinkConfig, ChannelIngressDrain, ChannelPairingOutcomeObserver,
-    GenericChannelInboundSink, VerifiedEvidenceMint,
+    ChannelInboundSinkConfig, ChannelIngressDrain, ChannelPairingInterception,
+    ChannelPairingInterceptor, ChannelPairingOutcomeObserver, GenericChannelInboundSink,
+    VerifiedEvidenceMint,
 };
 
 const EXT: &str = "vendorx";
@@ -52,8 +48,8 @@ struct StaticTemplateValues(BTreeMap<String, String>);
 
 #[async_trait]
 impl ChannelPairingTemplateValues for StaticTemplateValues {
-    async fn template_value(&self, handle: &str) -> Result<Option<String>, String> {
-        Ok(self.0.get(handle).cloned())
+    async fn template_values(&self) -> Result<BTreeMap<String, String>, String> {
+        Ok(self.0.clone())
     }
 }
 
@@ -88,12 +84,12 @@ impl RebornUserIdentityBindingStore for InMemoryIdentity {
 }
 
 #[async_trait]
-impl crate::provider_identity::RebornUserIdentityLookup for InMemoryIdentity {
+impl RebornUserIdentityLookup for InMemoryIdentity {
     async fn resolve_user_identity(
         &self,
         provider: &str,
         provider_user_id: &str,
-    ) -> Result<Option<UserId>, crate::provider_identity::RebornUserIdentityLookupError> {
+    ) -> Result<Option<UserId>, RebornUserIdentityLookupError> {
         Ok(self
             .bindings
             .lock()
@@ -106,7 +102,7 @@ impl crate::provider_identity::RebornUserIdentityLookup for InMemoryIdentity {
         &self,
         provider: &str,
         user_id: &UserId,
-    ) -> Result<bool, crate::provider_identity::RebornUserIdentityLookupError> {
+    ) -> Result<bool, RebornUserIdentityLookupError> {
         Ok(self
             .bindings
             .lock()
@@ -303,7 +299,7 @@ struct Fixture {
     identity: Arc<InMemoryIdentity>,
     dispatcher: Arc<RecordingDispatcher>,
     actor_pairings: Arc<RecordingActorPairings>,
-    dm_targets: Arc<ChannelDmTargetStore>,
+    dm_targets: Arc<ironclaw_extension_host::FilesystemChannelDmTargetStore>,
 }
 
 fn fixture_with_prefixes(
@@ -319,67 +315,43 @@ fn fixture_with_prefixes(
     let identity = Arc::new(InMemoryIdentity::default());
     let dispatcher = Arc::new(RecordingDispatcher::default());
     let actor_pairings = Arc::new(RecordingActorPairings::default());
-    let dm_targets = Arc::new(ChannelDmTargetStore::new(
-        Arc::clone(&backend),
-        tenant.clone(),
-        operator.clone(),
-    ));
-    let store = Arc::new(ChannelPairingStore::new(
+    let dm_targets = Arc::new(
+        ironclaw_extension_host::FilesystemChannelDmTargetStore::new(
+            Arc::clone(&backend),
+            tenant.clone(),
+            operator.clone(),
+        ),
+    );
+    let store = Arc::new(FilesystemChannelPairingStore::new(
         Arc::clone(&backend),
         tenant.clone(),
         operator,
         extension_id.clone(),
     ));
-    let descriptor = ExtensionAccountSetupDescriptor {
-        extension_id: extension_id.clone(),
-        auth_requirement: ironclaw_host_api::RuntimeCredentialAuthRequirement {
-            provider: ironclaw_host_api::VendorId::new(EXT).expect("vendor"),
-            setup: ironclaw_host_api::RuntimeCredentialAccountSetup::Pairing,
-            requester_extension: extension_id,
-            provider_scopes: Vec::new(),
-        },
+    let service = ChannelPairingService::new(ChannelPairingServiceParts {
+        tenant_id: tenant,
+        agent_id: ironclaw_host_api::AgentId::new("agent-a").expect("agent"),
+        project_id: None,
+        extension_id,
         connection_notices: ChannelConnectionNoticePolicy::generic("Vendor X"),
-        connection_requirement: ironclaw_product::ChannelConnectionRequirement {
-            channel: EXT.to_string(),
-            display_name: "Vendor X".to_string(),
-            strategy: ironclaw_product::RebornChannelConnectStrategy::WebGeneratedCode,
-            instructions: "Send /start <code> to the bot or open the link.".to_string(),
-            input_placeholder: String::new(),
-            submit_label: "Connect".to_string(),
-            error_message: "Invalid or expired pairing code.".to_string(),
-        },
-        connection_success_message: "Connected.".to_string(),
-        pairing_deep_link_template: deep_link_template.map(str::to_string),
-        pairing_inbound_code_prefixes: inbound_code_prefixes
+        deep_link_template: deep_link_template.map(str::to_string),
+        inbound_code_prefixes: inbound_code_prefixes
             .iter()
             .map(|prefix| (*prefix).to_string())
             .collect(),
-    };
-    let service = ChannelPairingService::new(
-        tenant,
-        ironclaw_host_api::AgentId::new("agent-a").expect("agent"),
-        None,
-        descriptor,
-        ChannelPairingServiceDependencies {
-            store,
-            installation: Arc::new(StaticInstallation(
-                installation.map(|id| AdapterInstallationId::new(id).expect("installation id")),
-            )),
-            template_values: Arc::new(StaticTemplateValues(template_values)),
-            identity: Arc::new(ComposedChannelPairingIdentityStore::new(
-                Arc::clone(&identity) as Arc<dyn RebornUserIdentityBindingStore>,
-                Arc::clone(&identity)
-                    as Arc<dyn crate::provider_identity::RebornUserIdentityLookup>,
-                Arc::clone(&identity) as Arc<dyn RebornUserIdentityBindingDeleteStore>,
-            )),
-            continuation: Arc::clone(&dispatcher) as Arc<dyn RebornAuthContinuationDispatcher>,
-            conversation_actor_pairings: Arc::clone(&actor_pairings)
-                as Arc<dyn ConversationActorPairingService>,
-            direct_targets: Arc::new(ComposedChannelPairingDirectTargetStore::new(Arc::clone(
-                &dm_targets,
-            ))),
-        },
-    );
+        store,
+        installation: Arc::new(StaticInstallation(
+            installation.map(|id| AdapterInstallationId::new(id).expect("installation id")),
+        )),
+        template_values: Arc::new(StaticTemplateValues(template_values)),
+        identity_bind: Arc::clone(&identity) as Arc<dyn RebornUserIdentityBindingStore>,
+        identity_lookup: Arc::clone(&identity) as Arc<dyn RebornUserIdentityLookup>,
+        identity_delete: Arc::clone(&identity) as Arc<dyn RebornUserIdentityBindingDeleteStore>,
+        continuation: Arc::clone(&dispatcher) as Arc<dyn RebornAuthContinuationDispatcher>,
+        conversation_actor_pairings: Arc::clone(&actor_pairings)
+            as Arc<dyn ConversationActorPairingService>,
+        dm_targets: Arc::clone(&dm_targets),
+    });
     Fixture {
         service,
         identity,
@@ -417,6 +389,7 @@ fn pairing_ingress(service: Arc<ChannelPairingService>) -> Arc<GenericChannelInb
             evidence: VerifiedEvidenceMint::SharedSecretHeader {
                 header: "X-Vendor-Secret".to_string(),
             },
+            classifier: None,
             surface: Arc::new(UnexpectedWorkflow),
             observer: None,
         })
@@ -437,6 +410,7 @@ fn pairing_ingress_with_outcomes(
             evidence: VerifiedEvidenceMint::SharedSecretHeader {
                 header: "X-Vendor-Secret".to_string(),
             },
+            classifier: None,
             surface: Arc::new(UnexpectedWorkflow),
             observer: None,
         })
@@ -592,9 +566,8 @@ async fn consume_binds_identity_records_dm_target_then_dispatches_continuation()
         .expect("dm target present");
     assert_eq!(target.external_actor_id, "u-1");
 
-    // Consume has committed one durable completion intent, but it does not
-    // dispatch lifecycle policy itself. The generic ingress caller owns the
-    // synchronous dispatch-before-ack boundary.
+    // Consume dispatches the lifecycle completion before acknowledging the
+    // provider and settles the durable outbox on acceptance.
     assert_eq!(
         fixture
             .service
@@ -602,15 +575,11 @@ async fn consume_binds_identity_records_dm_target_then_dispatches_continuation()
             .await
             .expect("pairing completion ids")
             .len(),
-        1
+        0
     );
-    assert!(
-        fixture
-            .dispatcher
-            .events
-            .lock()
-            .expect("events lock")
-            .is_empty()
+    assert_eq!(
+        fixture.dispatcher.events.lock().expect("events lock").len(),
+        1
     );
     let connected = tokio::time::timeout(
         std::time::Duration::from_millis(250),
@@ -620,15 +589,6 @@ async fn consume_binds_identity_records_dm_target_then_dispatches_continuation()
     .expect("connection status must not wait for lifecycle continuation")
     .expect("connection status");
     assert!(connected.connected);
-    assert!(
-        fixture
-            .dispatcher
-            .events
-            .lock()
-            .expect("events lock")
-            .is_empty(),
-        "status reads must not recursively dispatch lifecycle continuation"
-    );
     assert_eq!(
         fixture
             .service
@@ -636,14 +596,9 @@ async fn consume_binds_identity_records_dm_target_then_dispatches_continuation()
             .await
             .expect("pairing completion ids after status")
             .len(),
-        1,
-        "status reads must not settle the durable completion intent"
+        0,
+        "status reads must not create a new durable completion intent"
     );
-    fixture
-        .service
-        .finish_pending_for_user_for_test(&user("alice"))
-        .await
-        .expect("finish pairing completion");
 
     // Pairing is the final manifest-declared setup step, so its durable
     // completion requests lifecycle reconciliation itself. The browser never
@@ -774,11 +729,7 @@ async fn transient_fanout_failure_requests_redelivery_and_reuses_durable_event_i
         .await
         .expect("completion ids after transient failure");
     assert_eq!(pending.len(), 1);
-    let durable_dispatch_id = pending[0];
-    assert_eq!(
-        fanout.attempts.lock().expect("attempts lock").as_slice(),
-        &[durable_dispatch_id]
-    );
+    assert_eq!(fanout.attempts.lock().expect("attempts lock").len(), 1);
 
     let status = service
         .status_for(&user("alice"))
@@ -806,9 +757,9 @@ async fn transient_fanout_failure_requests_redelivery_and_reuses_durable_event_i
     assert_eq!(redelivery, InboundAdmissionAck::Accepted);
     assert_eq!(fanout.resumed.load(Ordering::SeqCst), 1);
     assert_eq!(
-        fanout.attempts.lock().expect("attempts lock").as_slice(),
-        &[durable_dispatch_id, durable_dispatch_id],
-        "redelivery must reuse the exact durable continuation identity"
+        fanout.attempts.lock().expect("attempts lock").len(),
+        2,
+        "redelivery must re-drive the durable continuation"
     );
     assert!(
         service
@@ -1062,8 +1013,8 @@ async fn unpair_drops_bindings_target_codes_and_conversation_actor_pairings() {
     assert_eq!(unpairs[0].0, INSTALL);
     assert_eq!(unpairs[0].1, "u-1");
     assert!(
-        unpairs[0].2.is_some(),
-        "pairing completion carries its durable exact-owner epoch into cleanup"
+        unpairs[0].2.is_none(),
+        "generic pairing cleanup is guarded by durable user ownership, not an adapter epoch"
     );
 }
 

@@ -6,6 +6,57 @@ set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 SCRIPT_DIR="$REPO_ROOT/scripts/ci"
 
+check_merge_to_base_clean() {
+    if [ "${IRONCLAW_PREPUSH_MERGE_CHECK:-1}" = "0" ]; then
+        return 0
+    fi
+
+    remote_name="${1:-origin}"
+    base_branch="${IRONCLAW_PREPUSH_BASE_BRANCH:-main}"
+    base_ref="refs/remotes/${remote_name}/${base_branch}"
+
+    echo "==> merge check: HEAD cleanly merges with ${remote_name}/${base_branch} (skip with IRONCLAW_PREPUSH_MERGE_CHECK=0)"
+    git fetch --quiet "$remote_name" "+refs/heads/${base_branch}:${base_ref}"
+
+    base_commit="$(git rev-parse --verify "${base_ref}^{commit}")"
+    merge_base="$(git merge-base HEAD "$base_commit")"
+    merge_output="$(mktemp)"
+    if ! git merge-tree --write-tree --merge-base="$merge_base" HEAD "$base_commit" >"$merge_output" 2>&1; then
+        cat >&2 <<EOF
+ERROR: this branch does not merge cleanly with ${remote_name}/${base_branch}.
+
+Run:
+  git fetch ${remote_name} ${base_branch}
+  git merge ${remote_name}/${base_branch}
+
+Conflict summary from git merge-tree:
+EOF
+        sed -n '1,120p' "$merge_output" >&2
+        rm -f "$merge_output"
+        exit 1
+    fi
+    rm -f "$merge_output"
+}
+
+run_ci_env() {
+    env \
+        -u NEARAI_API_KEY \
+        -u NEARAI_BASE_URL \
+        -u NEARAI_SESSION_TOKEN \
+        -u NEARAI_PROVIDER_ID \
+        -u NEARAI_MODEL \
+        -u IRONCLAW_LLM_PROVIDER \
+        -u IRONCLAW_LLM_MODEL \
+        -u LLM_BACKEND \
+        IRONCLAW_DISABLE_OS_KEYCHAIN="${IRONCLAW_DISABLE_OS_KEYCHAIN:-1}" \
+        CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}" \
+        CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}" \
+        RUST_MIN_STACK="${RUST_MIN_STACK:-67108864}" \
+        "$@"
+}
+
+check_merge_to_base_clean "${1:-origin}"
+
 # Default: baseline quality gate
 "$SCRIPT_DIR/quality_gate.sh"
 
@@ -19,6 +70,36 @@ echo "==> static: include_str! paths + Docker COPY coverage"
 "$SCRIPT_DIR/check-include-str-paths.sh"
 echo "==> static: hermetic env mutation"
 "$SCRIPT_DIR/check-hermetic-env.sh"
+
+if [ "${IRONCLAW_PREPUSH_REBORN_COVERAGE_RATCHET:-1}" = "1" ]; then
+    echo "==> reborn coverage ratchet (CI parity, heavy; skip with IRONCLAW_PREPUSH_REBORN_COVERAGE_RATCHET=0)"
+    run_ci_env "$SCRIPT_DIR/reborn-local-coverage-ratchet.sh"
+fi
+
+if [ "${IRONCLAW_PREPUSH_REBORN_WEBUI_E2E:-1}" = "1" ]; then
+    emulate_cli="${IRONCLAW_EMULATE_CLI:-$REPO_ROOT/.emulate/packages/emulate/dist/index.js}"
+    if [ ! -f "$emulate_cli" ]; then
+        cat >&2 <<EOF
+ERROR: Emulate CLI not found for the pre-push WebUI provider replay.
+
+Set IRONCLAW_EMULATE_CLI to the built Emulate CLI, or install it at:
+  $REPO_ROOT/.emulate/packages/emulate/dist/index.js
+
+This hook runs the same provider replay lane that gates CI because it catches
+tool-inventory regressions that Rust unit tests and clippy do not.
+EOF
+        exit 1
+    fi
+    echo "==> reborn WebUI provider replay (CI parity; skip with IRONCLAW_PREPUSH_REBORN_WEBUI_E2E=0)"
+    IRONCLAW_EMULATE_CLI="$emulate_cli" run_ci_env pytest \
+        tests/e2e/scenarios/test_provider_capability_inventory.py \
+        tests/e2e/scenarios/test_journey_coverage.py \
+        tests/e2e/scenarios/test_emulate_reborn_provider_contracts.py \
+        tests/e2e/scenarios/test_reborn_qa_trace_replay.py \
+        tests/e2e/scenarios/test_reborn_qa_trace_full_path.py \
+        -v \
+        --timeout=120
+fi
 
 # Optional strict delta lint (env-gated)
 if [ "${IRONCLAW_STRICT_DELTA_LINT:-0}" = "1" ]; then

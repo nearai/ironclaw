@@ -22,7 +22,7 @@ annotations and `.claude/rules/architecture.md` cite them; additions get
   `SpawnedChildRun` correctly non-suspending (§5.3); `ProductSurface` target
   actor-bound at mint (§5.2); product-gesture consent is policy-evaluated
   evidence, not blanket approval skip (§5.2.1); `resolve`/`authorize`/`abort`
-  Result-wrapped (§3/§5.3); facade count corrected to the 88-method trait
+  Result-wrapped (§3/§5.3); service count corrected to the 88-method trait
   block; `CapabilityOutcome` is ten variants; type-count restated as
   mirrors-not-names (§3/§7); Slice 0 scoped around merged #6200 (§9).
 - **r5** 2026-07-17 — added §5.10 (the five routing surfaces, one table) and
@@ -40,7 +40,7 @@ annotations and `.claude/rules/architecture.md` cite them; additions get
   §5.3.3 (reservation lifecycle: no-hold on pending gates, origin-scoped
   budgets, host-derived estimates, one-shot resource-gate delta,
   pending-gate quota against approval fatigue); budget/quota mutations
-  joined the §5.2.6 meta-set; §10 facade ratchet and §11.7 conformance
+  joined the §5.2.6 meta-set; §10 service ratchet and §11.7 conformance
   extended to the matrix, floor, rendering, reservation-lifecycle, and
   outcome-delivery invariants.
 - **r7** 2026-07-18 — editorial pass, no semantic changes: one canonical
@@ -63,7 +63,7 @@ annotations and `.claude/rules/architecture.md` cite them; additions get
   No design changes to §1–§13 other than the §5.3.4 addition and the §11.7
   extension noted above; §14 and the status log are mutable, the contract
   above them is frozen.
-- **r9** 2026-07-22 — status-only update for the ProductSurface facade collapse:
+- **r9** 2026-07-22 — status-only update for the ProductSurface service collapse:
   descriptor-backed reads are underway and the outbound preference mutation now
   follows the API-only first-party capability + query read-back approach. Skill
   management now follows the same split: content reads are a view, document
@@ -80,7 +80,7 @@ annotations and `.claude/rules/architecture.md` cite them; additions get
   upsert/delete and active-provider selection now use API-only ProductSurface
   capabilities with `llm_config` view read-back. Automation listing now uses
   the descriptor-backed `automations` ProductSurface query while retaining the
-  existing product automation facade behind the view builder. Thread listing
+  existing product automation service behind the view builder. Thread listing
   now uses the descriptor-backed paginated `threads` ProductSurface query while
   retaining hidden-automation-thread filtering and notification approval
   shaping behind the view builder; probe and login starts remain explicit
@@ -94,8 +94,8 @@ annotations and `.claude/rules/architecture.md` cite them; additions get
   capability mappings lightweight for simple API-only commands, avoids one
   bespoke struct or macro arm per route, and still leaves every product action
   auditable as an explicit descriptor declaration. Duplicate skill write
-  methods were removed from the composition WebUI skill facade after those
-  writes moved to first-party capabilities; the facade now serves only skill
+  methods were removed from the composition WebUI skill service after those
+  writes moved to first-party capabilities; the service now serves only skill
   reads used by ProductSurface views.
 - **r11** 2026-07-22 — added §5.2.10, the Urbit/terminal takeaway: channels are
   terminal-like endpoints that start or resume a durable causal path into the
@@ -147,6 +147,56 @@ annotations and `.claude/rules/architecture.md` cite them; additions get
   `host_api::BoundProductSurface`, and WebUI-specific ProductSurface DTO names
   were renamed to the neutral `Product*` vocabulary. File/attachment command
   bytes remain JSON/base64 for now.
+- **r16** 2026-07-23 — implementation status update: product consumers now share
+  host-owned `ProductSurface`, `BoundProductSurface`, `ProductSurfaceCaller`,
+  and `ProductSurfaceError` vocabulary; product-owned descriptors and DTOs stay
+  in `ironclaw_product`.
+- **r17** 2026-07-23 — extension/capability dispatch status update:
+  `host_api::Extension` and `ExtensionHostAssemblyConfig` are live, dispatch
+  routing moved into `ironclaw_capabilities`, `ironclaw_dispatcher` is a
+  compatibility re-export shim, and generic host assembly moved from
+  composition into `ironclaw_extension_host`.
+- **r18** 2026-07-23 — extension-host shrink follow-up: generic hosted MCP
+  runtime/discovery, provider readiness projection, channel delivery resolver,
+  reply-context and DM-target stores, extension bundle decoding, and credential
+  requirement projection moved from composition into `ironclaw_extension_host`.
+- **r19** 2026-07-24 — extension/channel vocabulary follow-up: lifecycle package
+  refs, lifecycle projections, channel connection/config vocabulary, extension
+  summaries, install-scope/onboarding DTOs, and channel connect strategy moved
+  to `ironclaw_host_api`; channel configuration service moved to
+  `ironclaw_extension_host`. `LifecycleProductService` now returns
+  host-owned `ProductSurfaceError`; workflow errors remain only in command and
+  internal adapter plumbing.
+- **r20** 2026-07-24 — product command-service boundary moved off workflow
+  errors: `ProductCommandAdmissionService`, `product-surface command operation`, lifecycle
+  command execution, and provider-admin command execution now return
+  `ProductSurfaceError`. The older inbound workflow still adapts command
+  surface failures internally while binding, ledger, auth/approval, policy, and
+  turn admission complete their separate `ProductSurfaceFailure` retirement.
+- **r21** 2026-07-24 — extension-host shrink follow-up: first-party package
+  bundle vocabulary, host API contract registry construction, channel lifecycle
+  projection, available-extension catalog/import, active publication, install
+  policy, NearAI MCP bootstrap helpers, lifecycle activation vocabulary, and
+  lifecycle restore/install-plan helpers moved to `ironclaw_extension_host`.
+  Composition `src/extension_host` is now primarily product-auth/channel wiring,
+  local lifecycle orchestration, skill surfaces, and compatibility tests.
+- **r22** 2026-07-24 — extension lifecycle manager moved to
+  `ironclaw_extension_host`: install/activate/remove rollback, active snapshot
+  sync, hosted-MCP discovery activation, installation owner/state projection,
+  materialized-file cleanup, and orphan repair now live in
+  `ExtensionLifecycleManager`. Composition keeps only the product-auth cleanup
+  adapter and compatibility type alias at `extension_host/extension_lifecycle.rs`.
+- **r23** 2026-07-24 — status-only update for product auth ownership:
+  production product-auth contracts, flows, durable filesystem services,
+  credential account selection/refresh, continuations, cleanup, recipes, and
+  fakes moved to `ironclaw_auth`; HTTP route serving moved to `ironclaw_webui`;
+  `ironclaw_reborn_composition` now wires `AuthEngine`, stores, secrets,
+  network, runtime credential adapters, and product prompt adapters. Source
+  anchors: `crates/ironclaw_auth/src/product_auth/api/auth.rs`
+  `RebornProductAuthServices`, `crates/ironclaw_auth/src/engine/mod.rs`
+  `AuthEngine`, `crates/ironclaw_webui/src/product_auth/mod.rs`
+  `product_auth_route_mount`, and `crates/ironclaw_reborn_composition/src/factory.rs`
+  `product_auth_ports` / `auth_execution_context` / `ProductAuthRuntimeCredentialResolver`.
 
 This note proposes a **fundamental** simplification of the Reborn host/runtime
 internals. The goal is to remove three recurring costs without weakening any
@@ -870,7 +920,7 @@ only the neutral host contract: `invoke`, `query`, and `stream_events`.
 Thread/project creation, turn submission, file/attachment byte reads,
 account/login probes, admin user bootstrap/secret deletion, automation controls,
 gate/run controls, operator-service lifecycle, and ordinary product mutations
-are descriptors over those conduits, not facade methods. A conversation-only API
+are descriptors over those conduits, not service methods. A conversation-only API
 cannot absorb the product, and per-feature methods must not return (that was the
 change-amplification cost — a feature touching 5–8 crates because each product
 method was per-feature). The resolution is the repo's own standing rule
@@ -879,7 +929,7 @@ authorization or typed product commands; pure reads go through typed query
 contracts.**
 
 ```rust
-/// The unbound kernel/facade service implemented by the product workflow.
+/// The unbound kernel/service service implemented by the product workflow.
 /// Trusted ingress constructs a `BoundProductSurface` once per authenticated
 /// caller and passes that actor-bound handle to WebUI, OpenAI-compat, CLI, or
 /// channel/product consumers. Operation request DTOs never carry caller
@@ -898,7 +948,7 @@ A feature — a settings page, a new tool, a model selector, an admin action —
 adds a **capability descriptor** (+ handler on the `FirstParty` lane) and/or a
 **view descriptor**, and optionally one event variant on the projection
 stream. Never a method. This generalizes §13.3's synthetic-capability
-promotion: the four synthetic product tools are simply the *first four* facade
+promotion: the four synthetic product tools are simply the *first four* service
 operations to make the migration every mutation makes.
 
 Implementation approach during migration: do not introduce macros for each
@@ -971,7 +1021,7 @@ Three consequences, all landing in the single `authorize()` fold:
    loop-visible" — that is intended — it is "an admin capability becomes
    loop-invocable *without a gate*," and the reviewed `Ungated` allowlist plus
    the meta-capability floor (§5.2.6) are the structural
-   answer. This is still a security *upgrade* over the facade, where the
+   answer. This is still a security *upgrade* over the service, where the
    loop/product split was implicit in which trait happened to have the
    method; after the change it is one auditable declaration per capability.
 2. **`ConsentSufficient` names the approval semantics of a direct user
@@ -1002,7 +1052,7 @@ Three consequences, all landing in the single `authorize()` fold:
 
 Forcing `GET`-shaped reads through authorize/dispatch/idempotency records is
 ceremony with no invariant behind it, and `tools.md` already draws the line
-("pure product reads through typed query/facade contracts"). The split is
+("pure product reads through typed query/service contracts"). The split is
 CQRS-shaped: **commands are command/capability descriptors; reads are view
 descriptors over the read models/projections**, registered as data the same
 way. `query(view, params, cursor)` is the request/response half of the read
@@ -1043,18 +1093,18 @@ handler, which owns the transaction/rollback — a product never sequences two
 
 ### 5.2.5 Migration and ratchet (feeds §10)
 
-1. **Freeze the facade now.** Check in the current `ProductSurface` method
+1. **Freeze the service now.** Check in the current `ProductSurface` method
    set as a set-membership allowlist in `ironclaw_architecture`; any *new*
-   facade method fails CI. New product features land as descriptors from day
+   service method fails CI. New product features land as descriptors from day
    one — the ratchet stops the bleeding before any migration happens.
 2. **Slice 1 is already decided:** the four synthetic tools (§13.3).
-3. **Then facade mutations, opportunistically** — settings first (simplest
+3. **Then service mutations, opportunistically** — settings first (simplest
    handlers), each migration shrinking the allowlist monotonically. Every
    migrated mutation gains audit, idempotency, redaction, and its
    origin→gate matrix for free, from the one pipeline.
 4. **Reads migrate to view descriptors separately and later** — lower risk,
    lower value.
-5. **Definition of done:** the facade *is* the host API trait —
+5. **Definition of done:** the service *is* the host API trait —
    `invoke` + `query` + `stream_events` — operation request DTOs carry no caller
    authority, and the URT's Deletion/Addition tests (§5.9, §10) pass over it.
 
@@ -1207,7 +1257,7 @@ The product-side path is explicit and boring on purpose:
 
 ```text
 IngressRef(channel/vendor event, received_at)
-  -> ProductSurfaceRef(actor-binding target facade)
+  -> ProductSurfaceRef(actor-binding target service)
   -> ConversationId / TurnRunId
   -> ActivityId / InvocationOrigin
   -> GateRef? / Authorized? / RuntimeLane?
@@ -1271,6 +1321,8 @@ Batch invocation (`LoopRequestBatch`, `stop_on_first_suspension`) is
 resume state, modeled in §11.1 (the #6137 bug class lives there, not in the
 single-invocation vocabulary).
 
+<a id="auth-turn-gate-host-api-port"></a>
+
 ### 5.3.1 Decision: gates arise at dispatch time too — and only `Auth`
 
 `authorize()` pre-flights everything pre-flightable: trust, approval,
@@ -1286,7 +1338,14 @@ lane-originated Approval/Resource gate is a `HostFailure::Permanent`, never a
 gate. "ALL policy, one place" is therefore stated precisely: *all pre-flightable
 policy in `authorize()`; dispatch-time auth discovery re-enters through the
 same gate vocabulary and the same resume path* — one gate model, two points of
-discovery.
+discovery. Current implementation anchors: `ironclaw_host_api/src/resolution.rs`
+defines the neutral `Blocked::Auth` gate vocabulary, composition's
+`extension_host/run_delivery_ports.rs` adapts the product prompt source, and
+`ironclaw_reborn_composition/src/runtime.rs` passes neutral gate/run refs into
+`ironclaw_auth`'s `OAuthGateChallengeRequest`. Cleanup milestone for the current
+`ironclaw_auth` -> `ironclaw_turns` layer exception: move the blocked-gate prompt
+driver to a host-api-owned port so auth continues to receive only neutral
+gate/run refs.
 
 ### 5.3.2 Decision: the `Authorized` lifecycle is part of the contract
 
@@ -1568,19 +1627,27 @@ the core of #6168:
 
 | Surface | Split across today | Target |
 | --- | --- | --- |
-| **WebUI** | `ironclaw_webui_v2` (routes, ~7.2K) + `ironclaw_reborn_webui_ingress` (listen/auth/serve, ~6.2K) + `ironclaw_webui_v2_static` (SPA) + `composition/src/webui/` (~4.6K) + `web_access.rs` / `host_ingress.rs` | one `WebUiProductAdapter` over `ProductSurface` (SPA stays an asset bundle) |
+| **WebUI** | `ironclaw_webui` (routes/listen/auth/serve/static) + neutral Axum route-mount carriers in `ironclaw_host_ingress` (`crates/ironclaw_host_ingress/src/lib.rs` defines `PublicRouteMount`, `ProtectedRouteMount`, and `SplitRouteMount`); descriptor vocabulary remains in `ironclaw_host_api`; product-auth and runtime-built route mounts are supplied by host assembly over `ProductSurface` (`RebornRuntime::product_surface`, `crates/ironclaw_reborn_composition/src/runtime.rs`) | one `WebUiProductAdapter` over `ProductSurface` (SPA stays an asset bundle) |
 | **Slack** | `ironclaw_slack_v2_adapter` (protocol, ~3K) + `composition/src/slack/` (**~40.6K** host: serve / delivery / egress / setup / identity) | `ironclaw_slack_extension::SlackChannelAdapter` under the generic extension/channel host (#6116) |
 | **Telegram** | `ironclaw_telegram_v2_adapter` (~2.7K) + ~69 refs in composition | `ironclaw_telegram_extension::TelegramChannelAdapter` under the generic extension/channel host (#6116) |
 | **OpenAI-compat API** | `ironclaw_reborn_openai_compat` (~7.5K) + ~441 refs in composition | one OpenAI-compat terminal over product workflow / `ProductSurface` |
-| **CLI** | canonical `ironclaw` package over the `RebornRuntime` facade | CLI adapter over `ProductSurface` (`RebornRuntime` is today's proto-`ProductSurface`) |
+| **CLI** | canonical `ironclaw` package over the `RebornRuntime` service | CLI adapter over `ProductSurface` (`RebornRuntime` is today's proto-`ProductSurface`) |
 
 Plus cross-cutting product concerns currently inside composition that belong to the
 adapters (their deliver / auth side) or the kernel, not the assembler:
 
-- `composition/src/product_auth/` (**~32.7K**) — product-facing auth/onboarding → **recipe
-  data + one host `AuthEngine`**, not per-adapter code (§5.9): vendors differ in parameters,
-  not flow, so this collapses to per-vendor OAuth/api-key recipes behind the kernel
-  `resolve_gate` seam.
+- `composition/src/product_auth/` (**moved in r16**) — product-facing
+  auth/onboarding now lives in `ironclaw_auth` (contracts, durable services,
+  recipes, credential account selection/refresh, continuations, cleanup, and
+  fakes) plus `ironclaw_webui` route serving. Composition keeps only
+  `AuthEngine`/store/secret/network wiring and generic runtime adapters supplied
+  by owning crates; it must not own product-, channel-, or transport-specific
+  auth behavior. Implementation anchors:
+  `crates/ironclaw_auth/src/product_auth/api/auth.rs` `RebornProductAuthServices`,
+  `crates/ironclaw_auth/src/engine/mod.rs` `AuthEngine`,
+  `crates/ironclaw_webui/src/product_auth/mod.rs` `product_auth_route_mount`,
+  and `crates/ironclaw_reborn_composition/src/factory.rs`
+  `product_auth_ports` / `ProductAuthRuntimeCredentialResolver`.
 - `composition/src/outbound/` (~1.8K) — delivery → the adapter's deliver path over the
   outbound port.
 - `composition/src/automation/` (~6.1K), `llm_admin/` (~8.5K) — these are *product
@@ -1845,7 +1912,7 @@ containment. That is the entire thesis in one incident.
 | `LocalDev*` identifiers | ~66 across 42 files | 0 (one `DeploymentConfig` value) |
 | Deployment modes | struct family (`Local*`/`Hosted*`) | `DeploymentConfig` constants (data) |
 | `host_api` boundary | ~124 types incl. mode/policy | neutral authority vocab, frozen by test |
-| Product facade | `host_api::ProductSurface` is the shared consumer contract (`invoke`, `query`, `stream_events`); product-local `ProductSurface` and subscription extension methods are deleted; callers use actor-bound handles | mutations are command/capability descriptors with an origin→gate matrix (§5.2.1); reads are view descriptors; remaining work is host byte-response refinement for file/attachment commands |
+| Product service | `host_api::ProductSurface` is the shared consumer contract (`invoke`, `query`, `stream_events`); product-local `ProductSurface` and subscription extension methods are deleted; callers use actor-bound handles | mutations are command/capability descriptors with an origin→gate matrix (§5.2.1); reads are view descriptors; remaining work is host byte-response refinement for file/attachment commands |
 
 ---
 
@@ -1990,7 +2057,7 @@ type duplication in `scripts/check-type-duplicates.py`, cross-tenant behavior in
 | `Local*` types (§4.4) | no `Local` / `LocalDev` / `Hosted` / `Enterprise` in public type names | `ironclaw_architecture` | freeze the ~66-identifier allowlist; fail on any new one | allowlist empty |
 | `host_api` freeze (§4.5) | checked-in allowlist of public type names; `runtime_policy` mode enums absent from `host_api` | `ironclaw_architecture` | freeze the allowlist (set membership); a new type needs a justified allowlist entry | mode enums moved to the edge; only neutral authority vocab remains |
 | Products in composition (§5.8) | no `slack` / `webui` / `telegram` / `openai` / HTTP-route / transport identifier in `ironclaw_reborn_composition` | `ironclaw_architecture` | freeze the current product footprint; fail on new product/transport code landing in composition | composition is assembler-only; products are adapters + a `DeploymentConfig` list |
-| Product facade (§5.2) | host `ProductSurface` method set; absence of product-local `ProductSurface`; every capability descriptor declares an origin→gate matrix (§5.2.1) | `ironclaw_architecture` | freeze `invoke`/`query`/`stream_events` as the only host methods; fail if `ironclaw_product` reintroduces a local `ProductSurface` trait; fail on any descriptor without a gate matrix; the `Ungated`-for-`LoopRun` allowlist is pinned to its reviewed seed (§14) and may only change by reviewed diff; the meta-capability set is pinned with its `AskAlways` floor (§5.2.6) | consumer contract = `host_api::ProductSurface` plus actor-bound `BoundProductSurface`; product-local subscription extension stays deleted |
+| Product service (§5.2) | host `ProductSurface` method set; absence of product-local `ProductSurface`; every capability descriptor declares an origin→gate matrix (§5.2.1) | `ironclaw_architecture` | freeze `invoke`/`query`/`stream_events` as the only host methods; fail if `ironclaw_product` reintroduces a local `ProductSurface` trait; fail on any descriptor without a gate matrix; the `Ungated`-for-`LoopRun` allowlist is pinned to its reviewed seed (§14) and may only change by reviewed diff; the meta-capability set is pinned with its `AskAlways` floor (§5.2.6) | consumer contract = `host_api::ProductSurface` plus actor-bound `BoundProductSurface`; product-local subscription extension stays deleted |
 
 Each axis's "hard ban" column is also its **definition of done**: the migration slice for
 that axis is complete when its ratchet flips from a frozen allowlist to an empty one (or the
@@ -2321,7 +2388,7 @@ decorator gating and synthetic-capability promotion are settled here.**
   pins that **no promoted capability id appears in any hosted surface unless it is in a
   reviewed allowlist** (initially empty). That restores the structural guarantee the
   synthetic mechanism's absence used to provide, while keeping the scope-binding gains.
-  This promotion is **Slice 1 of the §5.2.5 facade migration**: the same descriptor +
+  This promotion is **Slice 1 of the §5.2.5 service migration**: the same descriptor +
   origin→gate-matrix shape then absorbs the product-surface methods one by one.
 
 **Genuinely remaining (tuning/ops, not architecture):** the lease-TTL latency multiplier
@@ -2331,7 +2398,7 @@ knobs to calibrate against measured latency, not open architectural questions.
 
 ---
 
-## 14. Implementation status (as of 2026-07-22)
+## 14. Implementation status (as of 2026-07-23)
 
 This section tracks what has landed against the slices (§9) and axes (§10). It is
 the **mutable status log** — the design in §1–§13 is the frozen contract; this
@@ -2347,10 +2414,10 @@ open PR not yet on `main`.
 | Request/witness vocabulary | **Done** — `Invocation`, `Actor`, `InvocationOrigin`, `Authorized`, and dispatch-through-witness are live. | `crates/ironclaw_host_api/src/invocation.rs`; `crates/ironclaw_host_api/src/authorized.rs`; `crates/ironclaw_host_api/src/dispatch.rs`; `crates/ironclaw_architecture/tests/reborn_authorized_seal_ratchet.rs`. |
 | Pre-flight authority fold | **Done** — trust, grants, approvals, credentials, resources, and lane resolution are folded through `authorize()`. | `crates/ironclaw_capabilities/src/host.rs::CapabilityHost::authorize`, including `evaluate_trust`, `enforce_runtime_policy`, `apply_persistent_approval`, credential pre-flight, obligation preparation, and `seal_authorization`. |
 | Origin→gate matrix | **Live, tightening remains** — matrices are descriptor data and ratcheted; `LoopRun` ungated set is a reviewed 17-id seed to shrink. | `crates/ironclaw_host_api/src/capability.rs` (`OriginGatePolicy`, `OriginGateMatrix`, `UNGATED_LOOP_RUN_CAPABILITIES`); `crates/ironclaw_architecture/tests/reborn_origin_gate_matrix_ratchet.rs`. |
-| `InMemory*Store` mirror deletion | **Done for tracked domain stores** — the ratchet was deleted after the allowlist reached empty. | Deletion landed in #6430; replacement write sites include `crates/ironclaw_secrets/src/secret_store.rs`, `crates/ironclaw_resources/src/gate.rs`, `crates/ironclaw_authorization/src/lib.rs`, and `crates/ironclaw_outbound/src/delivered_gate_routes.rs`. |
-| Generic extension/channel runtime | **Landed** — `ChannelAdapter` + `ironclaw_extension_host`; Slack/Telegram are extension adapters, not bespoke product trees. | `crates/ironclaw_product/src/lib.rs::ChannelAdapter`; `crates/ironclaw_extension_host/src/lib.rs::ExtensionHost`; `crates/ironclaw_slack_extension/src/channel.rs::SlackChannelAdapter`; `crates/ironclaw_telegram_extension/src/channel.rs::TelegramChannelAdapter`; `crates/ironclaw_architecture/tests/reborn_extension_specificity.rs`. |
-| Product facade collapse | **Done for the method collapse** — consumers use `host_api::ProductSurface::{invoke, query, stream_events}`; former typed WebUI/product methods are command descriptors or capability descriptors; `execute_command`, product-operation wrappers, `ProductCapabilityInput`, compatibility trait-object methods, the product-local `ProductSurface`, and the subscription extension are gone. Consumers bind caller authority once with `BoundProductSurface`; file/attachment command bytes remain JSON/base64 pending a later byte-response refinement. | `crates/ironclaw_host_api/src/product_surface.rs` (`ProductSurface`, `BoundProductSurface`, `ProductSurfaceCaller`, `ChannelInboundProductSurface`, `ProductSurfaceError`); `crates/ironclaw_product/src/reborn_services.rs` (`ProductSurfaceCommandDescriptor`, `ProductView`, `ProductCapabilityDescriptor`); `crates/ironclaw_architecture/tests/reborn_facade_method_freeze_ratchet.rs`. |
-| Deployment mode as data | **Partial** — deployment-neutral type renames are live and ratcheted; profile-edge branching still exists. `DeploymentMode` / `RuntimeProfile` remain in `host_api` as shared kernel vocabulary for config parse/audit and resolver input, while execution consumes resolved policy data. | `crates/ironclaw_architecture/tests/reborn_localdev_typename_ratchet.rs`; `crates/ironclaw_architecture/tests/reborn_deployment_mode_typename_ratchet.rs`; `crates/ironclaw_architecture/tests/reborn_deployment_mode_branching_ratchet.rs`; `crates/ironclaw_host_api/src/runtime_policy.rs`. |
+| `InMemory*Store` mirror deletion | **Done for tracked domain stores** — the ratchet was deleted after the allowlist reached empty. | Deletion landed in #6430; replacement write sites include `crates/ironclaw_secrets/src/filesystem_store.rs`, `crates/ironclaw_resources/src/gate.rs`, `crates/ironclaw_authorization/src/lib.rs`, and `crates/ironclaw_outbound/src/delivered_gate_routes.rs`. |
+| Generic extension/channel runtime | **Landed, shrinking composition** — `ChannelAdapter` + `ironclaw_extension_host`; Slack/Telegram are extension adapters, not bespoke product trees. Generic host assembly, lane/native/channel binding, active snapshot publication, hosted MCP runtime/discovery, provider readiness projection, channel delivery, reply-context/DM-target stores, bundle decoding, credential requirement projection, channel configuration, available-extension catalog/import, active publication, install policy, NearAI MCP bootstrap helpers, first-party bundle vocabulary, lifecycle restore/install-plan helpers, and the durable lifecycle manager now live in `ironclaw_extension_host`; composition supplies product factories/adapters/config and keeps product-auth/channel wiring plus lifecycle command/capability adapters. Common lifecycle/channel vocabulary lives in `ironclaw_host_api`, and lifecycle product services return `ProductSurfaceError` instead of workflow errors. Composition `src/extension_host` is now primarily production wiring, skill surfaces, and compatibility tests. | `crates/ironclaw_product/src/lib.rs::ChannelAdapter`; `crates/ironclaw_host_api/src/extension.rs` (`Extension`, `ExtensionHostAssemblyConfig`); `crates/ironclaw_host_api/src/package_lifecycle.rs`; `crates/ironclaw_extension_host/src/product_lifecycle.rs`; `crates/ironclaw_extension_host/src/generic_host.rs`; `crates/ironclaw_extension_host/src/channel_config.rs`; `crates/ironclaw_extension_host/src/channel_delivery.rs`; `crates/ironclaw_extension_host/src/available_extensions.rs`; `crates/ironclaw_extension_host/src/lifecycle_restore.rs`; `crates/ironclaw_extension_host/src/mcp.rs`; `crates/ironclaw_architecture/tests/reborn_extension_specificity.rs`; `crates/ironclaw_architecture/tests/reborn_composition_boundaries.rs`. |
+| Product service collapse | **Done for the method collapse** — consumers use `host_api::ProductSurface::{invoke, query, stream_events}`; former typed WebUI/product methods are command descriptors or capability descriptors; `execute_command`, product-operation wrappers, `ProductCapabilityInput`, compatibility trait-object methods, the product-local `ProductSurface`, and the subscription extension are gone. Consumers bind caller authority once with `BoundProductSurface`; file/attachment command bytes remain JSON/base64 pending a later byte-response refinement. | `crates/ironclaw_host_api/src/product_surface.rs` (`ProductSurface`, `BoundProductSurface`, `ProductSurfaceCaller`, `ChannelInboundProductSurface`, `ProductSurfaceError`); `crates/ironclaw_product/src/reborn_services.rs` (`ProductSurfaceCommandDescriptor`, `ProductView`, `ProductCapabilityDescriptor`); `crates/ironclaw_architecture/tests/reborn_service_method_freeze_ratchet.rs`. |
+| Deployment mode as data | **Partial** — renames/ratchets are live, but profile enums and profile-edge branching still exist. | `crates/ironclaw_architecture/tests/reborn_localdev_typename_ratchet.rs`; remaining mode vocabulary in `crates/ironclaw_host_api/src/runtime_policy.rs`. |
 | Causal routing / product terminal path | **Design added here, implementation pending** — no first-class duct/path contract yet. | §5.2.10 is the design target; no event-schema/path-contract/conformance write site exists yet. |
 | Recoverability endgame | **Partial** — vocabulary and model-visible recovery base are live; conformance/diagnostic observation remain. | `crates/ironclaw_host_api/src/resolution.rs`; `crates/ironclaw_host_api/src/result_meta.rs`; `crates/ironclaw_runner/src/failure_classification.rs`; §11.7 still names the missing conformance matrix. |
 
@@ -2381,7 +2448,7 @@ open PR not yet on `main`.
   adapter request name are gone. The ratchet is now a retired-name ban
   (`RETIRED_COLLAPSE_DTOS`), not a shrinkable allowlist. The live shape keeps
   `LoopRequest` at the loop membrane, tuple parts through the object-safe
-  host-runtime facade, direct `CapabilityHost` parameters, and
+  host-runtime service, direct `CapabilityHost` parameters, and
   `RuntimeLaneRequest` as a private lane-local assembly value.
 - **Origin→gate matrix is live (#6396 / #6432).** `OriginGatePolicy` /
   `OriginGateMatrix` live in `ironclaw_host_api::capability`, production
@@ -2418,14 +2485,30 @@ open PR not yet on `main`.
   `ironclaw_slack_extension` / `ironclaw_telegram_extension` adapters with
   conformance tests. Composition still has generic extension/channel host glue,
   but the concrete `slack/` and `telegram/` product trees are gone.
+- **Extension/capability dispatch ownership moved closer to target.**
+  `host_api::Extension` is the neutral live-extension contract for descriptors
+  plus callable tool/channel facets; active snapshots publish that contract.
+  The dispatcher implementation and new `CapabilityDispatchRegistry` live in
+  `ironclaw_capabilities`; `ironclaw_dispatcher` remains only as a compatibility
+  re-export shim. Generic extension-host assembly (`build_generic_extension_host`,
+  runtime-lane/native factory/channel adapter binding, resolver publication, and
+  boot activation over prepared records) moved into `ironclaw_extension_host`.
+  Generic hosted MCP runtime/discovery, provider readiness, channel delivery,
+  reply-context and DM-target stores, bundle decoding, and credential
+  requirement projection also moved there. Channel configuration service is now
+  in `ironclaw_extension_host`, while lifecycle/channel DTO vocabulary is
+  host-owned in `ironclaw_host_api::package_lifecycle`. Composition's
+  `extension_host/generic_host.rs` is now a thin boot-record preparation shim
+  over product-owned channel config, and `LifecycleProductService` exposes
+  `ProductSurfaceError` rather than `ProductSurfaceFailure`.
 - **§10 ratchets live, updated for current shape.** The active architecture
   ratchets include LocalDev/deployment-mode type and branching guards,
-  capability-DTO collapse, `Authorized` seal, origin→gate matrix, facade-method
+  capability-DTO collapse, `Authorized` seal, origin→gate matrix, service-method
   freeze, extension specificity, manifest reparse, and retired taxonomy. The
   product-surface ratchet now freezes the host `ProductSurface` method set to
   `invoke`, `query`, and `stream_events`, and asserts the product-local
   `ProductSurface` trait stays retired. A new product operation must be a
-  capability/view descriptor, not a new facade method.
+  capability/view descriptor, not a new service method.
 - **Recoverability groundwork (feeds §5.3.4 / #6284).** The collapsed
   no-run-borking recoverability stack (#5692), loop resilience / model-visible
   tool-failure reasons (#5959), and "recoverable errors reach the model" stack
@@ -2476,7 +2559,7 @@ loop-facing capability result and every result mirror is deleted.
   §11.9), the model-error observation channel, `read_diagnostic(diag_ref)`, and
   the per-kind remediation generalization. The vocabulary prerequisites are now
   merged; the conformance/observation work remains.
-- **§5.2 `ProductSurface`** facade collapse — the `ProductSurface` freeze has
+- **§5.2 `ProductSurface`** service collapse — the `ProductSurface` freeze has
   landed (§10 ratchet, above), so the surface can only shrink. Initial reads now
   flow through view descriptors (`query`) rather than per-feature methods:
   LLM config, operator status/diagnostics/setup/config validation, extension
@@ -2504,13 +2587,13 @@ loop-facing capability result and every result mirror is deleted.
   `builtin.llm_provider_upsert`, `builtin.llm_provider_delete`, and
   `builtin.llm_active_set`, then read back `LLM_CONFIG_VIEW`; LLM probes and
   login starts now use typed product command descriptors over the host
-  `invoke` envelope rather than product-local facade methods. The migrated
+  `invoke` envelope rather than product-local service methods. The migrated
   legacy product-surface methods were removed from the ratchet allowlist. This is
   the migration pattern for product mutations: authenticated product gesture ->
   `ProductSurface::invoke` -> descriptor-declared first-party handler or
   product-workflow-owned API capability -> authoritative `query` read-back where
   an authoritative read model exists.
-  Channel ingress now follows the same facade direction: transport verification,
+  Channel ingress now follows the same service direction: transport verification,
   pairing, and pure adapter normalization stay in composition, then the generic
   channel sink calls the typed
   `host_api::ChannelInboundProductSurface::admit_channel_inbound` door.
@@ -2534,6 +2617,15 @@ loop-facing capability result and every result mirror is deleted.
   transports, and the composition projection helpers use product event-stream
   names instead of WebUI-specific names. WebUI/OpenAI/channel callers now meet
   on the same host vocabulary and differ only at their wire adapters.
+  r17 removed the transitional `product_auth_wiring` subtree from composition:
+  product-auth contracts/flows/accounts/refresh/continuations/cleanup/recipes
+  remain in `ironclaw_auth`, HTTP routes remain in `ironclaw_webui`, and
+  composition keeps direct factory/runtime assembly code plus the retained
+  provider, runtime, and challenge adapters. Anchors:
+  `crates/ironclaw_auth/src/product_auth/api/auth.rs` `RebornProductAuthServices`,
+  `crates/ironclaw_webui/src/product_auth/mod.rs` `product_auth_route_mount`,
+  and `crates/ironclaw_reborn_composition/src/factory.rs`
+  `product_auth_ports` / `auth_execution_context` / `ProductAuthRuntimeCredentialResolver`.
 - **§5.2.10 causal routing / product-terminal path** — design added here and
   vocabulary aligned around terminals/channels, but no first-class duct/path
   event contract or conformance suite exists yet. Until that lands, claims in
@@ -2561,7 +2653,7 @@ mint broken-links
 - `crates/ironclaw_host_api/src/product_surface.rs` — the host-owned
   `ProductSurface` conduit (`invoke`, `query`, `stream_events`), sealed caller
   wrapper, shared caller/error vocabulary, and test support.
-- `crates/ironclaw_product/src/reborn_services.rs` — the product workflow facade
+- `crates/ironclaw_product/src/reborn_services.rs` — the product workflow service
   behind `ProductSurface`; product-owned command/view descriptors and DTOs stay
   here while temporary per-feature methods are replaced by matrix-declared
   capability descriptors + view descriptors.

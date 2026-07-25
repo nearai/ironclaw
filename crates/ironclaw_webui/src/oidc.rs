@@ -156,8 +156,8 @@ struct Jwk {
     // infers the curve from the algorithm. Kept in the struct so a
     // future audit can reject keys whose declared curve disagrees
     // with the token's algorithm.
-    #[allow(dead_code)]
-    crv: Option<String>,
+    #[serde(rename = "crv")]
+    _crv: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -894,7 +894,7 @@ mod tests {
                 e: None,
                 x: None,
                 y: None,
-                crv: None,
+                _crv: None,
             },
             Jwk {
                 kid: Some("key-2".into()),
@@ -905,7 +905,7 @@ mod tests {
                 e: None,
                 x: None,
                 y: None,
-                crv: None,
+                _crv: None,
             },
         ];
         assert!(lookup_jwk(&keys, Some("key-2")).is_some());
@@ -923,7 +923,7 @@ mod tests {
             e: None,
             x: None,
             y: None,
-            crv: None,
+            _crv: None,
         }];
         assert!(lookup_jwk(&single, None).is_some());
     }

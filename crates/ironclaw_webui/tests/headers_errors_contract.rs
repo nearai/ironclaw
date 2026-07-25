@@ -1,7 +1,7 @@
 //! Caller-level contract for static security headers and sanitized
 //! errors on the WebChat v2 surface.
 //!
-//! The composition crate's `webui_v2_serve.rs` already asserts that a
+//! The broader WebUI serve tests already assert that a
 //! successful (200) response carries `X-Content-Type-Options: nosniff`,
 //! `X-Frame-Options: DENY`, and a `content-security-policy` header
 //! (presence only). This file covers what that test does NOT:
@@ -15,7 +15,7 @@
 //!    a regression that widened `object-src` or dropped
 //!    `frame-ancestors 'none'` would pass a presence-only check.
 //! 3. A malformed request body yields a **sanitized client error**
-//!    (400) without reaching the facade or leaking internal detail.
+//!    (400) without reaching the service or leaking internal detail.
 //! 4. The per-caller SSE concurrency cap is enforced end-to-end (the
 //!    connection-limit row of `02-network-limits.md` previously had only
 //!    unit coverage in `sse_capacity.rs`): holding the cap open makes the
@@ -33,7 +33,6 @@ use axum::body::Body;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
-use ironclaw_reborn_composition::{RebornReadiness, RebornWebuiBundle};
 use ironclaw_webui::EnvBearerAuthenticator;
 use ironclaw_webui::{WebuiServeConfig, webui_v2_app};
 use secrecy::SecretString;
@@ -60,11 +59,6 @@ fn build_app_from(services: StubServices) -> (axum::Router, Arc<StubServices>) {
         )
         .expect("env bearer authenticator"),
     );
-    let bundle = RebornWebuiBundle {
-        product_surface: services.clone(),
-        product_auth: None,
-        readiness: RebornReadiness::disabled(),
-    };
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         authenticator,
@@ -73,7 +67,7 @@ fn build_app_from(services: StubServices) -> (axum::Router, Arc<StubServices>) {
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
     .with_default_project_id(ProjectId::new(PROJECT).expect("project"));
     (
-        webui_v2_app(bundle, config).expect("webui v2 app"),
+        webui_v2_app(services.clone(), config).expect("webui v2 app"),
         services,
     )
 }
@@ -170,7 +164,7 @@ async fn csp_directives_are_locked() {
 #[tokio::test]
 async fn malformed_request_body_returns_sanitized_client_error() {
     // A malformed JSON body must yield a clean 4xx (not a 500 / panic),
-    // must not reach the facade, and must not leak internal detail
+    // must not reach the service, and must not leak internal detail
     // (paths, type names, tracebacks) per `.claude/rules/error-handling.md`.
     let (app, services) = build_app();
     let response = app
@@ -191,7 +185,7 @@ async fn malformed_request_body_returns_sanitized_client_error() {
             .lock()
             .expect("lock")
             .is_empty(),
-        "a malformed body must be rejected before the facade",
+        "a malformed body must be rejected before the service",
     );
     // The body is axum's standard `JsonRejection` text — it does include
     // serde's structural parse position (`line`/`column`), which is not
@@ -220,7 +214,7 @@ async fn malformed_request_body_returns_sanitized_client_error() {
 async fn panic_boundary_returns_sanitized_500() {
     // Row 9: a handler panic must unwind into `CatchPanicLayer::custom`
     // and return a generic 500 with the detail logged, not echoed. Drive
-    // a facade that panics with a sensitive-looking message and assert
+    // a service that panics with a sensitive-looking message and assert
     // the response body is exactly the opaque string — no path, SQL,
     // token, or `::` from the panic payload reaches the client — and that
     // the static security headers still ride the 500.

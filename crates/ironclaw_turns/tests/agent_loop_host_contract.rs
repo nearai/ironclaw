@@ -600,6 +600,85 @@ async fn instruction_bundle_renders_runtime_context_section() {
     );
 }
 
+/// Tier 1 (rendering): a `LoopContextBundle` carrying a non-empty
+/// `memory_snippets` must render a model-visible "memory" section (`msg:memory.*`)
+/// in the instruction bundle, PRESERVING the host's insertion order so the
+/// short-term (active-thread) lane stays ahead of the long-term lane at the render
+/// boundary. This is the surface that makes proactive memory reach the model, so
+/// it must materialize from the bundle just like the instruction and runtime
+/// sections — without re-sorting the snippets by opaque ref (which would scramble
+/// the lane priority the host deliberately built).
+#[tokio::test]
+async fn instruction_bundle_renders_memory_section_from_memory_snippets() {
+    let context = claimed_run_context().await;
+    let builder = InstructionBundleBuilder::new(context);
+    // The host concatenates short-term BEFORE long-term. Refs are chosen so an
+    // alphabetical re-sort ("memory:long-term" < "memory:short-term") would REVERSE
+    // the insertion order — the rendered order proves whether the builder preserves
+    // it or re-sorts.
+    let request = InstructionBundleRequest {
+        context_bundle: LoopContextBundle {
+            identity_messages: Vec::new(),
+            messages: Vec::new(),
+            compaction_message_index: Vec::new(),
+            instruction_snippets: Vec::new(),
+            memory_snippets: vec![
+                LoopContextSnippet {
+                    snippet_ref: "memory:short-term".to_string(),
+                    model_content: "Untrusted memory content: active thread note".to_string(),
+                    safe_summary: "Untrusted memory content: active thread note".to_string(),
+                    metadata: None,
+                },
+                LoopContextSnippet {
+                    snippet_ref: "memory:long-term".to_string(),
+                    model_content: "Untrusted memory content: durable user fact".to_string(),
+                    safe_summary: "Untrusted memory content: durable user fact".to_string(),
+                    metadata: None,
+                },
+            ],
+        },
+        visible_surface: None,
+        safety_context: None,
+        inline_messages: Vec::new(),
+        runtime_context: None,
+    };
+
+    let bundle = builder.build(request).unwrap();
+
+    let memory_idx = bundle
+        .materialized_messages
+        .iter()
+        .position(|m| m.content_ref.as_str().starts_with("msg:memory."))
+        .expect("memory section message must exist when memory_snippets is non-empty");
+    assert_eq!(bundle.materialized_messages[memory_idx].role, "system");
+
+    // The rendered memory section must keep the host's insertion order (short-term
+    // lane first), NOT the alphabetical ref order.
+    let memory_contents: Vec<&str> = bundle
+        .materialized_messages
+        .iter()
+        .filter(|m| m.content_ref.as_str().starts_with("msg:memory."))
+        .map(|m| m.model_content.as_str())
+        .collect();
+    assert_eq!(
+        memory_contents,
+        vec![
+            "Untrusted memory content: active thread note",
+            "Untrusted memory content: durable user fact",
+        ],
+        "memory snippets must render in host insertion order (short-term lane \
+         first), not re-sorted by opaque ref"
+    );
+
+    assert!(
+        bundle
+            .messages
+            .iter()
+            .any(|m| m.content_ref.as_str().starts_with("msg:memory.")),
+        "the memory section must appear in the model-visible messages list"
+    );
+}
+
 #[tokio::test]
 async fn instruction_bundle_runtime_fingerprint_stable_within_minute() {
     // Two requests that differ only in the seconds component within the same
@@ -1335,8 +1414,13 @@ async fn instruction_bundle_allows_trusted_skill_host_path() {
         .expect("trusted skill body must bypass the host-path check after #5169");
 }
 
+/// CR review (lane priority at the render boundary): memory snippets render in the
+/// host's insertion order and are NOT re-sorted by ref/summary/model_content. Two
+/// snippets that collide on ref AND summary therefore keep their insertion order
+/// (here "zeta", inserted first, stays first) rather than being reordered by
+/// model_content as the pre-CR sort did.
 #[tokio::test]
-async fn instruction_bundle_orders_snippets_by_model_content_when_summary_matches() {
+async fn instruction_bundle_preserves_memory_snippet_insertion_order() {
     let context = claimed_run_context().await;
 
     let bundle = InstructionBundleBuilder::new(context)
@@ -1375,7 +1459,9 @@ async fn instruction_bundle_orders_snippets_by_model_content_when_summary_matche
         .collect();
     assert_eq!(
         model_contents,
-        ["alpha model content", "zeta model content"]
+        ["zeta model content", "alpha model content"],
+        "memory snippets must keep host insertion order even when ref and summary \
+         collide — no model_content re-sort"
     );
 }
 

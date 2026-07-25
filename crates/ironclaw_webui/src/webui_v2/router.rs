@@ -83,7 +83,7 @@ impl WebUiV2RouteOptions {
 
 /// Shared state injected into every WebChat v2 handler.
 ///
-/// Handlers receive a single facade so they can never reach into the
+/// Handlers receive a single service so they can never reach into the
 /// dispatcher, run-state, or any runtime lane directly. The state also
 /// owns the [`SseCapacity`] gate that bounds concurrent SSE streams per
 /// `(tenant, user)`; cloning the state shares the same gate so all
@@ -140,7 +140,7 @@ impl WebUiV2State {
 }
 
 /// Build a [`Router`] mounting the WebChat v2 routes against the supplied
-/// facade. Path patterns match
+/// service. Path patterns match
 /// [`crate::webui_v2::descriptors::webui_v2_routes`] exactly; host composition is
 /// expected to apply its own auth / CORS / body-limit middleware in front
 /// of this router.
@@ -163,7 +163,7 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
             delete(handlers::delete_thread),
         )
         // Admin user-management. Authorization (operator token or admin/owner
-        // role) and last-admin protection are enforced in the facade, so these
+        // role) and last-admin protection are enforced in the service, so these
         // are mounted unconditionally — a non-admin caller gets 403.
         .route(
             WEBUI_V2_PATTERN_ADMIN_USERS,

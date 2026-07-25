@@ -15,7 +15,7 @@ use chrono::{DateTime, Duration, Utc};
 
 use crate::{
     ActionFingerprintKey, IdempotencyDecision, IdempotencyLedger, ProductInboundAction,
-    ProductWorkflowError,
+    ProductSurfaceFailure,
 };
 
 const DEFAULT_IN_FLIGHT_LEASE: Duration = Duration::seconds(60);
@@ -60,7 +60,7 @@ impl InMemoryIdempotencyLedger {
     pub fn expire_in_flight_before(
         &self,
         cutoff: DateTime<Utc>,
-    ) -> Result<usize, ProductWorkflowError> {
+    ) -> Result<usize, ProductSurfaceFailure> {
         let mut state = self.lock_state()?;
         let before = state.in_flight.len();
         state
@@ -71,10 +71,10 @@ impl InMemoryIdempotencyLedger {
 
     fn lock_state(
         &self,
-    ) -> Result<std::sync::MutexGuard<'_, InMemoryIdempotencyState>, ProductWorkflowError> {
+    ) -> Result<std::sync::MutexGuard<'_, InMemoryIdempotencyState>, ProductSurfaceFailure> {
         self.state
             .lock()
-            .map_err(|_| ProductWorkflowError::Transient {
+            .map_err(|_| ProductSurfaceFailure::Transient {
                 reason: "idempotency ledger state lock poisoned".into(),
             })
     }
@@ -92,7 +92,7 @@ impl IdempotencyLedger for InMemoryIdempotencyLedger {
         &self,
         fingerprint: ActionFingerprintKey,
         received_at: DateTime<Utc>,
-    ) -> Result<IdempotencyDecision, ProductWorkflowError> {
+    ) -> Result<IdempotencyDecision, ProductSurfaceFailure> {
         let mut state = self.lock_state()?;
         if let Some(prior) = state.settled.get(&fingerprint) {
             return Ok(IdempotencyDecision::Replay(prior.clone()));
@@ -100,7 +100,7 @@ impl IdempotencyLedger for InMemoryIdempotencyLedger {
         if let Some(in_flight) = state.in_flight.get(&fingerprint) {
             let expires_at = in_flight.received_at + self.in_flight_lease;
             if expires_at > received_at {
-                return Err(ProductWorkflowError::Transient {
+                return Err(ProductSurfaceFailure::Transient {
                     reason: "idempotency fingerprint already in flight; retry after recovery lease"
                         .into(),
                 });
@@ -113,23 +113,23 @@ impl IdempotencyLedger for InMemoryIdempotencyLedger {
         Ok(IdempotencyDecision::New(action))
     }
 
-    async fn settle(&self, action: ProductInboundAction) -> Result<(), ProductWorkflowError> {
+    async fn settle(&self, action: ProductInboundAction) -> Result<(), ProductSurfaceFailure> {
         let mut state = self.lock_state()?;
         if let Some(prior) = state.settled.get(&action.fingerprint) {
             if prior.action_id == action.action_id {
                 return Ok(());
             }
-            return Err(ProductWorkflowError::Transient {
+            return Err(ProductSurfaceFailure::Transient {
                 reason: "idempotency reservation was superseded before terminal settle".into(),
             });
         }
         let Some(current) = state.in_flight.get(&action.fingerprint) else {
-            return Err(ProductWorkflowError::Transient {
+            return Err(ProductSurfaceFailure::Transient {
                 reason: "idempotency reservation missing before terminal settle".into(),
             });
         };
         if current.action_id != action.action_id {
-            return Err(ProductWorkflowError::Transient {
+            return Err(ProductSurfaceFailure::Transient {
                 reason: "idempotency reservation was superseded before terminal settle".into(),
             });
         }
@@ -139,7 +139,7 @@ impl IdempotencyLedger for InMemoryIdempotencyLedger {
         Ok(())
     }
 
-    async fn release(&self, action: ProductInboundAction) -> Result<(), ProductWorkflowError> {
+    async fn release(&self, action: ProductInboundAction) -> Result<(), ProductSurfaceFailure> {
         let mut state = self.lock_state()?;
         if matches!(
             state.in_flight.get(&action.fingerprint),

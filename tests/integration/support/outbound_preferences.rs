@@ -1,9 +1,9 @@
-//! In-process `OutboundPreferencesProductFacade` double for the C-SYNTH seam
+//! In-process `OutboundPreferencesProductService` double for the C-SYNTH seam
 //! (`ironclaw_reborn_composition::runtime::local_dev::outbound_delivery`). Fixed
 //! in-memory inventory: succeeds for a known target, `NotFound` otherwise — one
 //! double drives both the happy path and the reject route without per-test
 //! config. Distinct from `delivery::RecordingOutboundDeliverySink` (the
-//! final-reply delivery sink; this is the delivery-*preference* facade).
+//! final-reply delivery sink; this is the delivery-*preference* service).
 
 #![allow(dead_code)]
 
@@ -14,7 +14,7 @@ use ironclaw_host_api::{
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
 };
 use ironclaw_product::{
-    OutboundPreferencesProductFacade, RebornOutboundDeliveryModality,
+    OutboundPreferencesProductService, RebornOutboundDeliveryModality,
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
     RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
@@ -29,36 +29,34 @@ struct FakeOutboundState {
     last_accepted: Option<RebornOutboundDeliveryTargetSummary>,
 }
 
-/// Fixed in-memory `OutboundPreferencesProductFacade` double. Stateful:
+/// Fixed in-memory `OutboundPreferencesProductService` double. Stateful:
 /// `set_outbound_preferences` updates `last_accepted`, and
 /// `get_outbound_preferences` reads it back — proves a `set` persisted via a
-/// different facade method, not just an echo.
-pub(crate) struct FakeOutboundPreferencesFacade {
+/// different service method, not just an echo.
+pub(crate) struct FakeOutboundPreferencesService {
     targets: Vec<RebornOutboundDeliveryTargetOption>,
     state: Mutex<FakeOutboundState>,
 }
 
-impl FakeOutboundPreferencesFacade {
-    /// Seed a double whose inventory carries two Slack targets plus the
-    /// host-owned WebApp destination the production registry always exposes
-    /// (`host_owned_outbound_delivery_target_registry` in composition — the
-    /// double must mirror that contract or web_app routing tests diverge from
-    /// production). A `target_set` call for a listed id resolves; any other id
-    /// surfaces as `NotFound`.
+impl FakeOutboundPreferencesService {
+    /// Seed a double whose inventory carries two Slack targets. A `target_set`
+    /// call for either id resolves; any other id surfaces as `NotFound`.
     pub(crate) fn with_default_targets() -> Arc<Self> {
         Arc::new(Self {
             targets: vec![
                 target_option("slack:dm:alpha", "Slack DM Alpha"),
                 target_option("slack:channel:beta", "Slack Channel Beta"),
-                ironclaw_product::web_app_outbound_delivery_target_option()
-                    .expect("host-owned web_app target option"),
+                target_option(
+                    ironclaw_outbound::WEB_APP_OUTBOUND_DELIVERY_TARGET_ID,
+                    "Web App",
+                ),
             ],
             state: Mutex::new(FakeOutboundState::default()),
         })
     }
 
     /// Target ids passed to `set_outbound_preferences`, in call order — proves a
-    /// `Completed` outcome reached the facade (a no-op set would leave this empty).
+    /// `Completed` outcome reached the service (a no-op set would leave this empty).
     pub(crate) fn recorded_set_target_ids(&self) -> Vec<String> {
         self.state
             .lock()
@@ -81,7 +79,7 @@ impl FakeOutboundPreferencesFacade {
 }
 
 #[async_trait]
-impl OutboundPreferencesProductFacade for FakeOutboundPreferencesFacade {
+impl OutboundPreferencesProductService for FakeOutboundPreferencesService {
     async fn get_outbound_preferences(
         &self,
         _caller: ProductSurfaceCaller,

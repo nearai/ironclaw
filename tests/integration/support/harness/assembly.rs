@@ -21,12 +21,13 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{
     BUILTIN_FIRST_PARTY_PROVIDER, CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest,
     CapabilitySurfaceVersion as HostRuntimeCapabilitySurfaceVersion, HostRuntime, HostRuntimeError,
-    HostRuntimeHealth, HostRuntimeServices, HostRuntimeStatus, RuntimeApprovalResume,
-    RuntimeAuthResume, RuntimeCapabilityOutcome, RuntimeInvocation, RuntimeProcessPort,
-    RuntimeStatusRequest, TriggerCreateHook,
+    HostRuntimeHealth, HostRuntimeServices, HostRuntimeStatus, NATIVE_MEMORY_FIRST_PARTY_PROVIDER,
+    RuntimeApprovalResume, RuntimeAuthResume, RuntimeCapabilityOutcome, RuntimeInvocation,
+    RuntimeProcessPort, RuntimeStatusRequest, TriggerCreateHook,
     VisibleCapabilityRequest as RuntimeVisibleCapabilityRequest,
     VisibleCapabilitySurface as RuntimeVisibleCapabilitySurface, builtin_first_party_handlers,
     builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
+    native_memory_first_party_package,
 };
 use ironclaw_network::{PolicyNetworkHttpEgress, ReqwestNetworkTransport};
 use ironclaw_resources::InMemoryResourceGovernor;
@@ -62,6 +63,7 @@ pub(crate) fn local_dev_host_runtime_with_http_egress(
 ) -> HarnessResult<Arc<dyn HostRuntime>> {
     let mut registry = ExtensionRegistry::new();
     registry.insert(builtin_first_party_package()?)?;
+    registry.insert(native_memory_first_party_package()?)?;
     local_dev_host_runtime_with_registry_and_runtime_http_egress(
         storage_root,
         registry,
@@ -325,6 +327,7 @@ pub(crate) fn local_dev_host_runtime_with_live_http_egress(
 ) -> HarnessResult<Arc<dyn HostRuntime>> {
     let mut registry = ExtensionRegistry::new();
     registry.insert(builtin_first_party_package()?)?;
+    registry.insert(native_memory_first_party_package()?)?;
 
     let services = HostRuntimeServices::new(
         Arc::new(registry),
@@ -552,23 +555,43 @@ pub(crate) fn local_dev_mount_descriptor(
 
 pub(crate) fn first_party_trust_policy() -> HarnessResult<HostTrustPolicy> {
     Ok(HostTrustPolicy::new(vec![Box::new(
-        AdminConfig::with_entries(vec![AdminEntry::for_local_manifest(
-            PackageId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
-            "/system/extensions/builtin/manifest.toml".to_string(),
-            None,
-            HostTrustAssignment::first_party(),
-            vec![
-                EffectKind::DispatchCapability,
-                EffectKind::ReadFilesystem,
-                EffectKind::WriteFilesystem,
-                EffectKind::DeleteFilesystem,
-                EffectKind::Network,
-                EffectKind::SpawnProcess,
-                EffectKind::ExecuteCode,
-                EffectKind::ExternalWrite,
-            ],
-            None,
-        )]),
+        AdminConfig::with_entries(vec![
+            AdminEntry::for_local_manifest(
+                PackageId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+                "/system/extensions/builtin/manifest.toml".to_string(),
+                None,
+                HostTrustAssignment::first_party(),
+                vec![
+                    EffectKind::DispatchCapability,
+                    EffectKind::ReadFilesystem,
+                    EffectKind::WriteFilesystem,
+                    EffectKind::DeleteFilesystem,
+                    EffectKind::Network,
+                    EffectKind::SpawnProcess,
+                    EffectKind::ExecuteCode,
+                    EffectKind::ExternalWrite,
+                ],
+                None,
+            ),
+            AdminEntry::for_local_manifest(
+                PackageId::new(NATIVE_MEMORY_FIRST_PARTY_PROVIDER)?,
+                "/system/extensions/ironclaw.memory/manifest.toml".to_string(),
+                None,
+                HostTrustAssignment::first_party(),
+                // Mirror the production native-memory ceiling
+                // (`builtin_first_party_trust_policy` in factory.rs and the
+                // local-dev provider trust in runtime/local_dev.rs): the v3
+                // memory tools carry `DispatchCapability` like every other
+                // first-party model tool (echo/http/shell/…), so the ceiling
+                // must include it or every memory dispatch is `PolicyDenied`.
+                vec![
+                    EffectKind::DispatchCapability,
+                    EffectKind::ReadFilesystem,
+                    EffectKind::WriteFilesystem,
+                ],
+                None,
+            ),
+        ]),
     )])?)
 }
 

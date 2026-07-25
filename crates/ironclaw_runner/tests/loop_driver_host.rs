@@ -25,11 +25,12 @@ use ironclaw_hooks::{
 };
 use ironclaw_host_api::{
     AgentId, ApprovalRequestId, Blocked, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId,
-    CapabilityId, CapabilitySet, DenyReason, EffectKind, ExecutionContext, ExtensionId,
-    FailureKind, GrantConstraints, HostPath, HostPortCatalog, MountAlias, MountGrant,
-    MountPermissions, MountView, NetworkPolicy, PackageId, PermissionMode, Principal, ProcessId,
-    ProjectId, Resolution, ResourceEstimate, ResourceUsage, RuntimeKind, SecretHandle, Suspension,
-    TenantId, ThreadId, ToolVerdict, TrustClass, UserId, VirtualPath,
+    CapabilityId, CapabilitySet, CorrelationId, DenyReason, EffectKind, ExecutionContext,
+    ExtensionId, FailureKind, GrantConstraints, HostPath, HostPortCatalog, InvocationId,
+    MountAlias, MountGrant, MountPermissions, MountView, NetworkPolicy, PackageId, PermissionMode,
+    Principal, ProcessId, ProjectId, Resolution, ResourceEstimate, ResourceScope, ResourceUsage,
+    RuntimeKind, SecretHandle, Suspension, TenantId, ThreadId, ToolVerdict, TrustClass, UserId,
+    VirtualPath,
 };
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfacePolicy, HostRuntime,
@@ -55,8 +56,11 @@ use ironclaw_loop_host::{
     RunCancellationHandle, SubagentSpawnGoalStore, identity_message_ref,
     loop_driver_execution_extension_id,
 };
+use ironclaw_memory::{MemoryInvocation, MemoryService, MemoryServiceReadRequest};
+use ironclaw_memory_native::NativeMemoryService;
 use ironclaw_processes::ProcessServices;
 use ironclaw_resources::InMemoryResourceGovernor;
+use ironclaw_runner::after_turn_memory::AfterTurnMemoryRecorder;
 use ironclaw_runner::app_loop_family::build_loop_family_registry_with_overrides;
 use ironclaw_runner::driver_registry::{
     DriverKind, DriverRegistry, DriverRequirements, LoopDriverRegistryKey, RequirementLevel,
@@ -1849,6 +1853,267 @@ async fn turn_runner_worker_completes_queued_run_after_turn_store_reopen() {
             && message.content.as_deref() == Some("model says hi")
             && message.turn_run_id.as_deref() == Some(expected_run_id.as_str())
     }));
+}
+
+/// Caller-level coverage for Phase 2 after-turn interaction recording: a real
+/// `NativeMemoryService` (over `InMemoryBackend`) is wired into an
+/// `AfterTurnMemoryRecorder` on the executor. Once the turn-runner worker drives
+/// a queued run to `Completed`, the executor's run-end seam must record the
+/// run's full transcript — so the memory store's per-run doc at
+/// `threads/<thread_id>/<turn_run_id>.md` ends up containing BOTH the user message
+/// and the assistant reply ("model says hi"). This drives the production call site
+/// (`apply_exit`), not the recorder in isolation (testing.md "test through the
+/// caller").
+#[tokio::test]
+async fn turn_runner_worker_records_after_turn_memory_on_completed_run() {
+    let fixture = HostFixture::new_unsubmitted(
+        "thread-after-turn-memory",
+        "remember the launch is on friday",
+    )
+    .await;
+    let turn_store = Arc::new(in_memory_turn_state_store());
+    let resolver = InMemoryRunProfileResolver::default();
+    let resolved = resolver
+        .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+        .await
+        .unwrap();
+    let descriptor = resolved.loop_driver.clone();
+    let run_id = queue_fixture_turn(
+        &fixture,
+        turn_store.as_ref(),
+        &resolver,
+        "idem-after-turn-memory",
+    )
+    .await;
+
+    let mut registry = DriverRegistry::new();
+    registry
+        .register_driver(
+            Arc::new(TextOnlyFinalReplyDriver { descriptor }),
+            DriverRequirements::all_required(),
+            DriverKind::Reference,
+        )
+        .unwrap();
+
+    // Real native memory provider over an in-memory filesystem backend.
+    let memory_writer: Arc<dyn MemoryService> = Arc::new(NativeMemoryService::from_filesystem(
+        Arc::new(InMemoryBackend::new()) as Arc<dyn RootFilesystem>,
+        None,
+    ));
+    let recorder = Arc::new(AfterTurnMemoryRecorder::new(
+        fixture.thread_service.clone() as Arc<dyn SessionThreadService>,
+        Arc::clone(&memory_writer),
+        fixture.thread_scope.clone(),
+    ));
+
+    let executor = Arc::new(
+        RebornTurnRunExecutor::new(
+            loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
+            Arc::new(registry),
+            Arc::new(fixture.factory_with_loop_checkpoint_store(turn_store.clone()))
+                as Arc<dyn HostFactory>,
+            None,
+        )
+        .with_after_turn_memory_recorder(recorder),
+    );
+    let scheduler_handle = TurnRunScheduler::new(
+        turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
+        executor,
+        TurnRunSchedulerConfig::default()
+            .with_runner_heartbeat_interval(std::time::Duration::from_millis(20))
+            .with_poll_interval(std::time::Duration::from_millis(10)),
+    )
+    .start();
+
+    wait_for_run_status(
+        turn_store.as_ref(),
+        &fixture.context.scope,
+        run_id,
+        TurnStatus::Completed,
+        "turn runner should complete queued run for after-turn memory recording",
+    )
+    .await;
+
+    let content =
+        wait_for_after_turn_memory_doc(&memory_writer, &fixture.thread_id, run_id, "thread log")
+            .await;
+
+    assert!(
+        content.contains("remember the launch is on friday"),
+        "after-turn memory must record the user message: {content:?}"
+    );
+    assert!(
+        content.contains("model says hi"),
+        "after-turn memory must record the assistant reply: {content:?}"
+    );
+
+    // Shut down only AFTER the memory read/assertions: the recorder runs after the
+    // status flips to Completed, so tearing the worker down first could race the
+    // side effect this test asserts.
+    scheduler_handle.shutdown().await;
+}
+
+/// Caller-level coverage of the after-turn memory WIRING (testing.md "test
+/// through the caller"). The sibling
+/// `turn_runner_worker_records_after_turn_memory_on_completed_run` installs the
+/// recorder directly on the executor via `with_after_turn_memory_recorder`, so it
+/// stays green even if `build_default_planned_runtime_inner` stops plumbing
+/// `DefaultPlannedRuntimeParts.after_turn_memory_writer` into the executor. This
+/// drives the real composition factory `build_default_planned_runtime` with
+/// `after_turn_memory_writer: Some(...)` and asserts the per-run thread doc is
+/// written once a queued run reaches `Completed`, so that exact call site cannot
+/// regress unnoticed.
+#[tokio::test]
+async fn build_default_planned_runtime_wires_after_turn_memory_writer() {
+    let fixture =
+        HostFixture::new_unsubmitted("thread-after-turn-wiring", "remember the demo is on monday")
+            .await;
+    let turn_store = Arc::new(in_memory_turn_state_store());
+
+    let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
+        capability_descriptor("demo.allowed"),
+    ])));
+    let io = Arc::new(InMemoryCapabilityIo::default());
+    let capability_factory = Arc::new(TestHostRuntimeCapabilityFactory {
+        runtime,
+        visible_request: host_runtime_visible_request(&fixture, ["demo"]),
+        io: io.clone(),
+        milestone_sink: fixture.milestone_sink.clone(),
+    });
+    let surface_resolver = Arc::new(StaticCapabilitySurfaceProfileResolver::new(
+        CapabilityAllowSet::allowlist([CapabilityId::new("demo.allowed").unwrap()]),
+    ));
+    let subagent_goal_store = in_memory_subagent_goal_store();
+    let (await_edge_store, await_edge_resolver, await_edge_writer) = build_test_await_edge_trio(
+        subagent_goal_store.clone() as Arc<dyn SubagentSpawnGoalStore>,
+        turn_store.clone() as Arc<dyn TurnSpawnTreeStateStore>,
+        io.clone() as Arc<dyn LoopCapabilityResultWriter>,
+        fixture.thread_service.clone(),
+    );
+    let evidence = Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
+        fixture.thread_service.clone(),
+        turn_state_store_dyn(&turn_store),
+        turn_store.clone(),
+        await_edge_store.clone() as Arc<dyn AwaitDependentRunEvidenceStore>,
+    ));
+
+    // Real native memory provider over an in-memory filesystem backend, wired
+    // through the composition's `after_turn_memory_writer` — NOT the executor
+    // builder shortcut the sibling test uses.
+    let memory_writer: Arc<dyn MemoryService> = Arc::new(NativeMemoryService::from_filesystem(
+        Arc::new(InMemoryBackend::new()) as Arc<dyn RootFilesystem>,
+        None,
+    ));
+
+    let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
+        attachment_read_port: None,
+        gate_record_store: None,
+        turn_state: turn_store.clone(),
+        thread_service: fixture.thread_service.clone() as Arc<dyn SessionThreadService>,
+        thread_scope: fixture.thread_scope.clone(),
+        model_gateway: fixture.gateway.clone(),
+        checkpoint_state_store: fixture.checkpoint_state_store.clone(),
+        loop_checkpoint_store: turn_store.clone(),
+        milestone_sink: fixture.milestone_sink.clone(),
+        capability_factory,
+        capability_surface_resolver: surface_resolver,
+        capability_result_writer: io.clone(),
+        subagent_goal_store,
+        subagent_await_edge_writer: await_edge_writer,
+        subagent_await_edge_settler: await_edge_resolver as Arc<dyn AwaitEdgeSettler>,
+        subagent_await_edge_evidence: await_edge_store as Arc<dyn AwaitDependentRunEvidenceStore>,
+        subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
+        subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
+        subagent_spawn_limits: ironclaw_loop_host::SubagentSpawnLimits::default(),
+        loop_exit_evidence: evidence,
+        config: DefaultPlannedRuntimeConfig {
+            heartbeat_interval: std::time::Duration::from_millis(20),
+            poll_interval: std::time::Duration::from_millis(10),
+            ..DefaultPlannedRuntimeConfig::default()
+        },
+        model_route_resolver: None,
+        cancellation_factory: None,
+        skill_context_source: None,
+        input_queue: None,
+        identity_context_source: Arc::new(StaticIdentityContextSource::new(Vec::new())),
+        user_profile_source: Arc::new(EmptyUserProfileSource),
+        memory_context_service: None,
+        after_turn_memory_writer: Some(Arc::clone(&memory_writer)),
+        model_policy_guard: None,
+        model_budget_accountant: None,
+        safety_context: None,
+        hook_dispatcher_builder_factory: None,
+        communication_context_provider: None,
+        hook_security_audit_sink: None,
+        turn_event_sink: None,
+        scheduler_wake_wiring: None,
+    })
+    .unwrap();
+
+    // Submit through the composition's OWN coordinator (queues the run and wakes
+    // the composition-internal scheduler), then wait for that scheduler to drive
+    // the run to Completed — the production submit→run→exit path end to end.
+    let SubmitTurnResponse::Accepted { run_id, .. } = composition
+        .coordinator
+        .submit_turn(SubmitTurnRequest {
+            scope: fixture.context.scope.clone(),
+            actor: TurnActor::new(UserId::new("user-text-host").unwrap()),
+            accepted_message_ref: AcceptedMessageRef::new("accepted-after-turn-wiring").unwrap(),
+            source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
+            requested_run_profile: None,
+            requested_model: None,
+            idempotency_key: IdempotencyKey::new("idem-after-turn-wiring").unwrap(),
+            received_at: Utc::now(),
+            requested_run_id: None,
+            parent_run_id: None,
+            subagent_depth: 0,
+            spawn_tree_root_run_id: None,
+            product_context: None,
+        })
+        .await
+        .unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let state = turn_store
+                .get_run_state(GetRunStateRequest {
+                    scope: fixture.context.scope.clone(),
+                    run_id,
+                })
+                .await
+                .unwrap();
+            if state.status == TurnStatus::Completed {
+                return;
+            }
+            assert!(
+                !matches!(state.status, TurnStatus::Failed),
+                "run unexpectedly failed: {state:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("composition scheduler should drive the submitted run to Completed");
+
+    let content = wait_for_after_turn_memory_doc(
+        &memory_writer,
+        &fixture.thread_id,
+        run_id,
+        "composition wiring doc",
+    )
+    .await;
+
+    // The recorded assistant reply proves the after-turn recorder fired via the
+    // composition's `after_turn_memory_writer` wiring (the run produced it from the
+    // fixture gateway). That end-to-end path is the regression this caller-level
+    // test guards — the sibling test only covers the executor-builder shortcut.
+    assert!(
+        content.contains("model says hi"),
+        "after-turn memory (via composition wiring) must record the assistant reply: {content:?}"
+    );
+
+    composition.scheduler_handle.shutdown().await;
 }
 
 /// Verifies that `TurnRunScheduler` emits a "turn run started" debug event with
@@ -3743,6 +4008,8 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
         input_queue: None,
         identity_context_source: Arc::new(StaticIdentityContextSource::new(Vec::new())),
         user_profile_source: Arc::new(EmptyUserProfileSource),
+        memory_context_service: None,
+        after_turn_memory_writer: None,
         model_policy_guard: None,
         model_budget_accountant: None,
         safety_context: None,
@@ -3921,6 +4188,8 @@ async fn pre_minted_scheduler_wake_wiring_drives_scheduler_on_coordinator_submit
         input_queue: None,
         identity_context_source: Arc::new(StaticIdentityContextSource::new(Vec::new())),
         user_profile_source: Arc::new(EmptyUserProfileSource),
+        memory_context_service: None,
+        after_turn_memory_writer: None,
         model_policy_guard: None,
         model_budget_accountant: None,
         safety_context: None,
@@ -4094,6 +4363,8 @@ async fn build_runtime_host_with_optional_hooks(
         input_queue: None,
         identity_context_source: Arc::new(StaticIdentityContextSource::new(Vec::new())),
         user_profile_source: Arc::new(EmptyUserProfileSource),
+        memory_context_service: None,
+        after_turn_memory_writer: None,
         model_policy_guard: None,
         model_budget_accountant: None,
         safety_context: None,
@@ -4455,6 +4726,8 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
         input_queue: Some(Arc::new(EmptyHostInputQueue)),
         identity_context_source: Arc::new(EmptyIdentityContextSource),
         user_profile_source: Arc::new(EmptyUserProfileSource),
+        memory_context_service: None,
+        after_turn_memory_writer: None,
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),
@@ -4584,6 +4857,8 @@ async fn product_live_parts_for_gate_test(
         input_queue: Some(Arc::new(EmptyHostInputQueue)),
         identity_context_source: Arc::new(EmptyIdentityContextSource),
         user_profile_source: Arc::new(EmptyUserProfileSource),
+        memory_context_service: None,
+        after_turn_memory_writer: None,
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),
@@ -8534,6 +8809,45 @@ async fn wait_for_run_status(
             state.failure
         );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+async fn wait_for_after_turn_memory_doc(
+    memory_writer: &Arc<dyn MemoryService>,
+    thread_id: &ThreadId,
+    run_id: TurnRunId,
+    label: &'static str,
+) -> String {
+    let read_invocation = MemoryInvocation {
+        scope: ResourceScope {
+            tenant_id: TenantId::new("tenant-text-host").unwrap(),
+            user_id: UserId::new("user-text-host").unwrap(),
+            agent_id: Some(AgentId::new("agent-text-host").unwrap()),
+            project_id: Some(ProjectId::new("project-text-host").unwrap()),
+            mission_id: None,
+            thread_id: Some(thread_id.clone()),
+            invocation_id: InvocationId::new(),
+        },
+        correlation_id: CorrelationId::new(),
+    };
+    let log_path = format!("threads/{thread_id}/{run_id}.md");
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match memory_writer
+            .read(
+                read_invocation.clone(),
+                MemoryServiceReadRequest {
+                    path: log_path.clone(),
+                },
+            )
+            .await
+        {
+            Ok(read) => break read.content,
+            Err(_) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Err(error) => panic!("after-turn memory {label} was never written: {error:?}"),
+        }
     }
 }
 

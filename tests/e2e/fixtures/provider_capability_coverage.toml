@@ -1,8 +1,14 @@
 schema_version = 1
 
-# A capability is "tested" only when a harvested journey or typed operation
-# case observes Emulate, or an integration_evidence entry names its executable
-# test at the real local-WASM or hosted-MCP seam.
+# "tested" means the capability is claimed by some executable evidence tier —
+# a typed operation case, a journey_evidence entry, an integration_evidence
+# entry, or (for reads) a harvested journey that exercises it.
+#
+# It does NOT mean the capability is fully covered. Coverage is enforced per
+# capability x outcome class by test_provider_capability_inventory.py:
+# `external_write` capabilities may not rest on a harvested tool-call name,
+# and reads need both a success and an empty-result case. Whatever does not
+# meet those rules yet is listed in coverage_backlog below, with an owner.
 [classifications]
 tested = [
   "github.add_issue_assignees",
@@ -156,3 +162,123 @@ capability = "web-access.search"
 target = "reborn_integration_web_access"
 source = "tests/integration/web_access.rs"
 test = "web_search_dispatches_through_scripted_exa_mcp"
+
+# Journey evidence: the capability is asserted with provider-side readback
+# inside a harvested full-path journey rather than a typed operation case.
+# The named source, test, and assertion helper must all still exist.
+
+[[journey_evidence]]
+capability = "gmail.send_message"
+source = "tests/e2e/scenarios/test_reborn_qa_trace_full_path.py"
+test = "test_qa_journey_provider_leg_replays_through_emulate"
+assertion = "_assert_google_provider_outcome"
+
+[[journey_evidence]]
+capability = "google-docs.create_document"
+source = "tests/e2e/scenarios/test_reborn_qa_trace_full_path.py"
+test = "test_qa_journey_provider_leg_replays_through_emulate"
+assertion = "_assert_google_provider_outcome"
+
+[[journey_evidence]]
+capability = "google-docs.insert_text"
+source = "tests/e2e/scenarios/test_reborn_qa_trace_full_path.py"
+test = "test_qa_journey_provider_leg_replays_through_emulate"
+assertion = "_assert_google_provider_outcome"
+
+[[journey_evidence]]
+capability = "google-sheets.append_values"
+source = "tests/e2e/scenarios/test_reborn_qa_trace_full_path.py"
+test = "test_qa_journey_provider_leg_replays_through_emulate"
+assertion = "_assert_google_provider_outcome"
+
+[[journey_evidence]]
+capability = "google-sheets.create_spreadsheet"
+source = "tests/e2e/scenarios/test_reborn_qa_trace_full_path.py"
+test = "test_qa_journey_provider_leg_replays_through_emulate"
+assertion = "_assert_google_provider_outcome"
+
+[[journey_evidence]]
+capability = "slack.send_message"
+source = "tests/e2e/scenarios/test_reborn_qa_trace_full_path.py"
+test = "test_qa_journey_provider_leg_replays_through_emulate"
+assertion = "_assert_slack_provider_outcome"
+
+
+[[coverage_backlog]]
+rule = "read_requires_outcome_classes"
+owner = "@serrrfirat"
+reason = "Has a seeded success case but no empty-result case; the runtime is unproven to distinguish no results from a failed call."
+issue = "#6524"
+review_condition = "Add a ProviderOperationCase with outcome_class = empty."
+capabilities = [
+  "github.get_authenticated_user",
+  "github.get_combined_status",
+  "github.get_file_content",
+  "github.get_issue",
+  "github.get_job_logs",
+  "github.get_pull_request",
+  "github.get_pull_request_files",
+  "github.get_pull_request_reviews",
+  "github.get_repo",
+  "github.get_workflow_run_artifacts",
+  "github.get_workflow_run_jobs",
+  "github.get_workflow_runs",
+  "github.list_branches",
+  "github.list_issue_comments",
+  "github.list_issues",
+  "github.list_pull_request_comments",
+  "github.list_pull_request_review_threads",
+  "github.list_pull_requests",
+  "github.list_releases",
+  "github.list_repos",
+  "github.search_code",
+  "github.search_issues",
+  "github.search_issues_pull_requests",
+  "github.search_repositories",
+  "google-calendar.find_free_slots",
+  "google-calendar.get_event",
+  "google-calendar.list_calendars",
+  "google-docs.get_document",
+  "google-drive.get_file",
+  "google-drive.list_permissions",
+  "google-drive.list_shared_drives",
+  "google-sheets.batch_read_values",
+  "google-slides.get_presentation",
+  "google-slides.get_thumbnail",
+]
+
+[[coverage_backlog]]
+rule = "read_requires_outcome_classes"
+owner = "@serrrfirat"
+reason = "No typed operation case at all; evidence is a harvested tool-call name or a journey-specific branch, not a per-operation contract."
+issue = "#6524"
+review_condition = "Add seeded success and empty-result ProviderOperationCase entries."
+capabilities = [
+  "gmail.get_message",
+  "gmail.list_messages",
+  "google-calendar.list_events",
+  "google-docs.read_content",
+  "google-drive.download_file",
+  "google-drive.list_files",
+  "google-sheets.get_spreadsheet",
+  "slack.get_conversation_history",
+  "slack.get_conversation_info",
+  "slack.get_thread_replies",
+  "slack.get_user_info",
+  "slack.list_conversations",
+  "slack.search_messages",
+  "slack.whoami",
+]
+
+[[coverage_backlog]]
+rule = "read_requires_outcome_classes"
+owner = "@serrrfirat"
+reason = "Evidenced by a named Cargo integration test at a non-Emulate seam (local WASM, hosted MCP, Exa-backed web access), so there is no provider world in which to seed an empty result. integration_evidence names one executable test per capability and carries no outcome class, so it must not silently exempt these from the read rule."
+issue = "#6524"
+review_condition = "Make integration_evidence outcome-aware, or add a hermetic double for these seams, then require success and empty like every other read."
+capabilities = [
+  "github.handle_webhook",
+  "nearai.web_search",
+  "web-access.get_content",
+  "web-access.search",
+]

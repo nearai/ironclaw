@@ -4,17 +4,14 @@ use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_auth::{
     AuthContinuationRef, AuthErrorCode, AuthProductError, CredentialAccountLabel,
-    CredentialAccountSelectionRequest,
+    CredentialAccountSelectionRequest, RebornAuthProductError, RebornManualTokenSetupRequest,
+    RebornManualTokenSubmitRequest, RebornProductAuthServices,
+    RuntimeCredentialAccountSelectionRequest,
 };
 use ironclaw_host_api::{ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind};
 use ironclaw_product::{
     ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
     ExtensionCredentialSubmitRequest, LifecycleExtensionCredentialSetup,
-};
-
-use crate::{
-    RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest, RebornProductAuthServices,
-    product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionRequest,
 };
 
 const EXTENSION_CREDENTIAL_SETUP_TTL_SECONDS: i64 = 300;
@@ -99,7 +96,7 @@ impl ExtensionCredentialSetupService for ProductAuthExtensionCredentialSetup {
     }
 }
 
-fn map_auth_error(error: crate::RebornAuthProductError) -> ProductSurfaceError {
+fn map_auth_error(error: RebornAuthProductError) -> ProductSurfaceError {
     match error.code {
         AuthErrorCode::InvalidRequest | AuthErrorCode::MalformedCallback => {
             invalid_auth_setup_request()
@@ -110,15 +107,16 @@ fn map_auth_error(error: crate::RebornAuthProductError) -> ProductSurfaceError {
             403,
             false,
         ),
-        AuthErrorCode::BackendUnavailable | AuthErrorCode::MalformedConfig => services_error(
+        AuthErrorCode::BackendUnavailable
+        | AuthErrorCode::MalformedConfig
+        | AuthErrorCode::LifecycleActivationFailed => services_error(
             ProductSurfaceErrorCode::Unavailable,
             ProductSurfaceErrorKind::ServiceUnavailable,
             503,
             error.retryable,
         ),
         AuthErrorCode::AccountSelectionRequired
-        | AuthErrorCode::ProviderIdentityAlreadyConnected
-        | AuthErrorCode::LifecycleActivationFailed => services_error(
+        | AuthErrorCode::ProviderIdentityAlreadyConnected => services_error(
             ProductSurfaceErrorCode::Conflict,
             ProductSurfaceErrorKind::BlockedAuthentication,
             409,
@@ -190,6 +188,7 @@ mod tests {
         AuthContinuationEvent, AuthProductError, AuthProductScope, AuthProviderId, AuthSurface,
         CredentialAccountLabel, CredentialAccountService, CredentialAccountStatus,
         CredentialOwnership, InMemoryAuthProductServices, NewCredentialAccount, ProviderScope,
+        RebornAuthContinuationDispatcher, RebornProductAuthServices,
     };
     use ironclaw_host_api::{
         ExtensionId, InvocationId, ResourceScope, SecretHandle, TenantId, UserId,
@@ -198,8 +197,6 @@ mod tests {
         ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
         LifecycleExtensionCredentialSetup,
     };
-
-    use crate::{RebornAuthContinuationDispatcher, RebornProductAuthServices};
 
     struct NoopDispatcher;
 

@@ -666,7 +666,7 @@ async def test_delete_user_and_verify_gone(admin_client):
 
 
 async def test_admin_routes_require_auth(reborn_v2_server):
-    """No bearer -> the admin surface rejects before any facade work."""
+    """No bearer -> the admin surface rejects before any service work."""
     async with httpx.AsyncClient(base_url=reborn_v2_server, timeout=15) as anon:
         r = await anon.get(f"{ADMIN_BASE}/users")
     assert r.status_code == 401

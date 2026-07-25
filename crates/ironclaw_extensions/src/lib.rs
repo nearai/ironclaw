@@ -762,7 +762,7 @@ fn validate_asset_path(value: &str) -> Result<(), ExtensionError> {
             reason: "asset path must not be empty".to_string(),
         });
     }
-    if value.contains(' ') || value.chars().any(char::is_control) {
+    if value.contains('\0') || value.chars().any(char::is_control) {
         return Err(ExtensionError::InvalidAssetPath {
             path: value.to_string(),
             reason: "NUL/control characters are not allowed".to_string(),

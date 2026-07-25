@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use ironclaw_reborn_composition::{RebornProviderAdmin, RebornProviderAdminError, RebornV1State};
+use ironclaw_operator::{RebornProviderAdmin, RebornProviderAdminError, RebornV1State};
 use ironclaw_reborn_config::{RebornBootConfig, RebornHome, RebornProfile};
 
 struct RuntimeEnvMaskGuard {

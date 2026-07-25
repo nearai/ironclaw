@@ -13,12 +13,13 @@ use ironclaw_loop_host::{
     HostManagedModelResponse,
 };
 use ironclaw_product::{
-    AuthInteractionRejectionKind, ListPendingAuthInteractionsRequest, ProductWorkflowError,
+    AuthInteractionRejectionKind, ListPendingAuthInteractionsRequest, ProductSurfaceFailure,
 };
 use ironclaw_turns::{TurnActor, TurnScope};
 
+use crate::RebornRuntimeProcessBinding;
 use crate::runtime_input::{RebornRuntimeIdentity, RebornRuntimeInput, TurnRunnerSettings};
-use crate::{RebornProductAuthServicePorts, RebornRuntimeProcessBinding};
+use ironclaw_auth::RebornProductAuthServicePorts;
 
 use super::{RebornRuntime, build_reborn_runtime};
 
@@ -72,7 +73,7 @@ async fn local_dev_runtime_auth_interactions_are_unavailable_without_flow_record
 
     assert!(matches!(
         error,
-        ProductWorkflowError::AuthInteractionRejected {
+        ProductSurfaceFailure::AuthInteractionRejected {
             kind: AuthInteractionRejectionKind::FlowUnavailable
         }
     ));

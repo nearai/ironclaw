@@ -15,111 +15,36 @@
 //! configured yet (no scope, or a scope without any expected claim values)
 //! rejects the bind with a typed reason instead of binding unscoped.
 //!
-//! Scoping values live in the extension's non-secret administrator
-//! configuration
+//! Scoping values live in the extension's non-secret `[channel.config]`
 //! fields. The mapping from config field to identity claim is by handle
 //! suffix: a non-secret field whose handle is `team_id` / `enterprise_id` /
 //! `app_id` (or ends with `_team_id` / `_enterprise_id` / `_app_id`)
-//! declares the expected value for that claim. A channel lane with an
-//! externally supplied scope source uses a
+//! declares the expected value for that claim. A channel lane whose
+//! configure surface predates `[channel.config]` supplies a
 //! [`ChannelIdentityOverride`] with its own scope source instead.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use ironclaw_auth::{AuthProductError, AuthProductScope, OAuthProviderIdentity};
-use ironclaw_extensions::ExtensionInstallationStorePort;
-use ironclaw_host_api::{ExtensionId, TenantId, UserId};
-use ironclaw_product::AdapterInstallationId;
-
-use crate::extension_host::admin_configuration::ComposedExtensionAdminConfigurationResolver;
-use crate::product_auth::api::auth::{
+use ironclaw_auth::{
+    AuthProductError, AuthProductScope, OAuthProviderIdentity,
     OAuthProviderIdentityBindingRollback, OAuthProviderIdentityCheck,
-    OAuthProviderIdentityCheckFuture,
+    OAuthProviderIdentityCheckFuture, ProviderIdentityHookFactory,
 };
-use crate::provider_identity::{
-    RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
-    RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,
-    RebornUserIdentityBindingStore, installation_scoped_provider_user_id,
+use ironclaw_extension_host::{
+    ChannelConfigService, channel_config_connection_scope_source, discover_channel_extensions,
+};
+use ironclaw_host_api::{
+    ChannelConnectionScopeSource, ChannelIdentityOverride, ChannelIdentityPostBind,
+    ChannelIdentityPostBindFactory, ExtensionId, RebornIdentityProviderId,
+    RebornIdentityProviderUserId, RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
+    RebornUserIdentityBindingError, RebornUserIdentityBindingStore, TenantId, UserId,
+    installation_scoped_provider_user_id,
 };
 
 /// The identity claims the OAuth token exchange can prove
 /// ([`OAuthProviderIdentity`]'s optional fields).
 const SCOPING_CLAIMS: [&str; 3] = ["team_id", "enterprise_id", "app_id"];
-
-/// Factory producing one post-exchange provider-identity check for a
-/// callback's vendor id and scope (or `None` when nothing needs binding).
-/// Registered on the product-auth route state by composition wiring.
-pub(crate) type ProviderIdentityHookFactory =
-    dyn Fn(&str, &AuthProductScope) -> Option<OAuthProviderIdentityCheck> + Send + Sync;
-
-/// One extension's connection scope: the adapter installation the bindings
-/// key under plus the identity claim values a proven vendor identity must
-/// match before it may bind.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ChannelConnectionScope {
-    pub(crate) installation_id: AdapterInstallationId,
-    pub(crate) expected_team_id: Option<String>,
-    pub(crate) expected_enterprise_id: Option<String>,
-    pub(crate) expected_app_id: Option<String>,
-}
-
-impl ChannelConnectionScope {
-    /// Whether any scoping claim value is configured. A scope with no
-    /// expected claims is "not configured yet" — the bind path fails closed.
-    pub(crate) fn has_expected_claims(&self) -> bool {
-        self.expected_team_id.is_some()
-            || self.expected_enterprise_id.is_some()
-            || self.expected_app_id.is_some()
-    }
-
-    /// The installation-scoped provider-user-id prefix every binding under
-    /// this scope shares (the same composite-key scheme inbound actor
-    /// resolution uses).
-    pub(crate) fn provider_user_id_prefix(&self) -> String {
-        format!("{}:", self.installation_id.as_str())
-    }
-}
-
-/// Resolves one extension's current [`ChannelConnectionScope`].
-///
-/// `Ok(None)` means the extension's connection scoping is not configured
-/// yet; the identity-binding and connection paths fail closed on it.
-#[async_trait]
-pub(crate) trait ChannelConnectionScopeSource: Send + Sync {
-    async fn resolve_connection_scope(&self) -> Result<Option<ChannelConnectionScope>, String>;
-}
-
-/// Vendor residue port: fire-and-forget provisioning after a successful
-/// identity bind (for example, opening the caller's personal DM target so
-/// outbound delivery can reach them). Implementations spawn their own work
-/// and surface failures via logs — a provisioning failure must never fail
-/// the OAuth callback that already bound the identity.
-pub(crate) trait ChannelIdentityPostBind: Send + Sync {
-    fn provision_after_bind(&self, user_id: UserId, external_actor_id: &str);
-}
-
-/// Builds per-extension post-bind provisioning for generically-discovered
-/// channel extensions (a lane override carries its own `post_bind`; the
-/// generic DM-target provisioning implements this).
-pub(crate) trait ChannelIdentityPostBindFactory: Send + Sync {
-    fn post_bind_for_extension(
-        &self,
-        extension_id: &str,
-    ) -> Option<Arc<dyn ChannelIdentityPostBind>>;
-}
-
-/// Per-extension override for a channel lane with an external scope source:
-/// the lane names the provider it binds under
-/// and supplies its own scope source (and optional post-bind provisioning).
-#[derive(Clone)]
-pub(crate) struct ChannelIdentityOverride {
-    pub(crate) extension_id: String,
-    pub(crate) provider: String,
-    pub(crate) scope_source: Arc<dyn ChannelConnectionScopeSource>,
-    pub(crate) post_bind: Option<Arc<dyn ChannelIdentityPostBind>>,
-}
 
 /// Everything the generic post-OAuth identity binding hook needs.
 ///
@@ -130,11 +55,12 @@ pub struct ChannelIdentityBindingConfig {
     pub(crate) tenant_id: TenantId,
     /// Generic discovery + scoping-value source. `None` when the composed
     /// runtime has no durable installation store — only overrides bind then.
-    pub(crate) installation_store: Option<Arc<dyn ExtensionInstallationStorePort>>,
-    /// Effective manifest-driven administrator configuration. `None` means
-    /// no deployment values are available and scoping fails closed.
-    pub(crate) admin_configuration_resolver:
-        Option<Arc<ComposedExtensionAdminConfigurationResolver>>,
+    pub(crate) installation_store:
+        Option<Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>>,
+    /// Effective manifest-driven channel configuration, including tenant
+    /// administrator values. `None` preserves the retired per-installation
+    /// configuration source for compatibility and focused test fixtures.
+    pub(crate) channel_config: Option<Arc<ChannelConfigService>>,
     pub(crate) binding_store: Arc<dyn RebornUserIdentityBindingStore>,
     /// Undoes bindings written by the callback hook when OAuth completion
     /// fails afterwards; the binding is the user-visible "connected" signal,
@@ -153,14 +79,14 @@ impl ChannelIdentityBindingConfig {
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_test(
         tenant_id: TenantId,
-        installation_store: Arc<dyn ExtensionInstallationStorePort>,
+        installation_store: Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>,
         binding_store: Arc<dyn RebornUserIdentityBindingStore>,
         rollback_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
     ) -> Self {
         Self {
             tenant_id,
             installation_store: Some(installation_store),
-            admin_configuration_resolver: None,
+            channel_config: None,
             binding_store,
             rollback_store,
             post_bind_factory: None,
@@ -168,77 +94,13 @@ impl ChannelIdentityBindingConfig {
         }
     }
 
-    /// Test-support constructor for the production manifest-driven scoping
-    /// path. Values are written through the canonical administrator
-    /// configuration service; the installation store supplies membership and
-    /// manifests only.
     #[cfg(any(test, feature = "test-support"))]
-    pub async fn for_test_with_admin_configuration(
-        tenant_id: TenantId,
-        installation_store: Arc<dyn ExtensionInstallationStorePort>,
-        binding_store: Arc<dyn RebornUserIdentityBindingStore>,
-        rollback_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
-        values: Vec<(String, String)>,
-    ) -> Result<Self, String> {
-        use ironclaw_extension_host::{AdminConfigurationService, AdminConfigurationStore};
-        use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
-        use ironclaw_host_api::{InvocationId, ResourceScope};
-        use ironclaw_secrets::{SecretStore, SecretStorePort};
-
-        let manifests = installation_store
-            .list_manifests()
-            .await
-            .map_err(|error| error.to_string())?
-            .into_iter()
-            .map(|record| Arc::new(record.resolved().clone()))
-            .collect::<Vec<_>>();
-        let descriptors = manifests
-            .iter()
-            .flat_map(|manifest| manifest.admin_configuration.clone())
-            .collect::<Vec<_>>();
-        let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
-        let secrets: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
-        let admin = Arc::new(
-            AdminConfigurationService::new(
-                AdminConfigurationStore::new(Arc::new(ScopedFilesystem::new(
-                    filesystem,
-                    crate::invocation_mount_view,
-                ))),
-                secrets,
-                descriptors.clone(),
-            )
-            .map_err(|error| error.to_string())?,
-        );
-        let mut scope = ResourceScope::local_default(
-            UserId::new("admin-configuration-test").map_err(|error| error.to_string())?,
-            InvocationId::new(),
-        )
-        .map_err(|error| error.to_string())?;
-        scope.tenant_id = tenant_id.clone();
-        let admin_configuration_resolver = Arc::new(
-            ComposedExtensionAdminConfigurationResolver::new(admin, scope, manifests),
-        );
-        for descriptor in descriptors {
-            let group_values = values
-                .iter()
-                .filter(|(handle, _)| {
-                    descriptor
-                        .fields
-                        .iter()
-                        .any(|field| field.handle.as_str() == handle)
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            if !group_values.is_empty() {
-                admin_configuration_resolver
-                    .configure_admin_group_for_test(descriptor.group_id.as_str(), group_values)
-                    .await?;
-            }
-        }
-        let mut config =
-            Self::for_test(tenant_id, installation_store, binding_store, rollback_store);
-        config.admin_configuration_resolver = Some(admin_configuration_resolver);
-        Ok(config)
+    pub fn with_channel_config_for_test(
+        mut self,
+        channel_config: Arc<ChannelConfigService>,
+    ) -> Self {
+        self.channel_config = Some(channel_config);
+        self
     }
 }
 
@@ -264,142 +126,6 @@ struct ChannelIdentityTarget {
     extension_id: String,
     scope_source: Arc<dyn ChannelConnectionScopeSource>,
     post_bind: Option<Arc<dyn ChannelIdentityPostBind>>,
-}
-
-/// The generic administrator-configuration-backed scope source: the
-/// installation record supplies the adapter installation id; non-secret
-/// manifest fields whose handles carry a claim suffix supply expected claims.
-struct AdminConfigurationConnectionScopeSource {
-    installation_store: Arc<dyn ExtensionInstallationStorePort>,
-    extension_id: ExtensionId,
-    admin_configuration_resolver: Option<Arc<ComposedExtensionAdminConfigurationResolver>>,
-}
-
-#[async_trait]
-impl ChannelConnectionScopeSource for AdminConfigurationConnectionScopeSource {
-    async fn resolve_connection_scope(&self) -> Result<Option<ChannelConnectionScope>, String> {
-        let Some(record) = self
-            .installation_store
-            .get_manifest(&self.extension_id)
-            .await
-            .map_err(|error| error.to_string())?
-        else {
-            return Ok(None);
-        };
-        if record.resolved().channel.is_none() {
-            return Ok(None);
-        }
-        let installation = self
-            .installation_store
-            .list_installations()
-            .await
-            .map_err(|error| error.to_string())?
-            .into_iter()
-            .find(|installation| installation.extension_id() == &self.extension_id);
-        let Some(installation) = installation else {
-            return Ok(None);
-        };
-        let installation_id = AdapterInstallationId::new(installation.installation_id().as_str())
-            .map_err(|error| error.to_string())?;
-        let values = if let Some(admin_configuration_resolver) = &self.admin_configuration_resolver
-        {
-            admin_configuration_resolver
-                .effective_non_secret_config(&self.extension_id)
-                .await
-                .map_err(|error| error.to_string())?
-        } else {
-            Vec::new()
-        };
-        let expected = |claim: &str| -> Option<String> {
-            record
-                .resolved()
-                .admin_configuration
-                .iter()
-                .flat_map(|descriptor| &descriptor.fields)
-                .filter(|field| !field.secret)
-                .find(|field| handle_declares_claim(field.handle.as_str(), claim))
-                .and_then(|field| {
-                    values
-                        .iter()
-                        .find(|(handle, _)| handle == field.handle.as_str())
-                        .map(|(_, value)| value.clone())
-                })
-                .filter(|value| !value.trim().is_empty())
-        };
-        Ok(Some(ChannelConnectionScope {
-            installation_id,
-            expected_team_id: expected("team_id"),
-            expected_enterprise_id: expected("enterprise_id"),
-            expected_app_id: expected("app_id"),
-        }))
-    }
-}
-
-/// Handle-suffix convention: `{claim}` or `*_{claim}` declares the expected
-/// value for that identity claim.
-fn handle_declares_claim(handle: &str, claim: &str) -> bool {
-    handle == claim
-        || handle
-            .strip_suffix(claim)
-            .is_some_and(|prefix| prefix.ends_with('_'))
-}
-
-/// The generic scope source for one extension over the durable installation
-/// store — also used by the generic connection facade so the connect-report
-/// prefix and the bind prefix can never diverge.
-pub(crate) fn admin_configuration_connection_scope_source(
-    installation_store: Arc<dyn ExtensionInstallationStorePort>,
-    extension_id: ExtensionId,
-    admin_configuration_resolver: Option<Arc<ComposedExtensionAdminConfigurationResolver>>,
-) -> Arc<dyn ChannelConnectionScopeSource> {
-    Arc::new(AdminConfigurationConnectionScopeSource {
-        installation_store,
-        extension_id,
-        admin_configuration_resolver,
-    })
-}
-
-/// A generically-discovered channel extension: its id and the auth vendors
-/// its manifest declares. Shared by the identity hook and the connection
-/// facade.
-pub(crate) struct DiscoveredChannelExtension {
-    pub(crate) extension_id: String,
-    pub(crate) providers: Vec<String>,
-}
-
-/// Installed extensions whose manifest declares a channel surface, excluding
-/// `overridden` extension ids (their lane owns identity binding). OAuth
-/// channels expose one or more auth vendors; proof-code paired channels expose
-/// none but must still be discoverable by the generic connection facade so
-/// removal can revoke their pairing-owned state.
-pub(crate) async fn discover_channel_extensions(
-    installation_store: &Arc<dyn ExtensionInstallationStorePort>,
-    overridden: &BTreeSet<String>,
-) -> Result<Vec<DiscoveredChannelExtension>, String> {
-    let manifests = installation_store
-        .list_manifests()
-        .await
-        .map_err(|error| error.to_string())?;
-    let mut discovered = Vec::new();
-    for record in manifests {
-        let resolved = record.resolved();
-        if resolved.channel.is_none() {
-            continue;
-        }
-        let extension_id = resolved.id.as_str().to_string();
-        if overridden.contains(&extension_id) {
-            continue;
-        }
-        discovered.push(DiscoveredChannelExtension {
-            extension_id,
-            providers: resolved
-                .auth
-                .iter()
-                .map(|surface| surface.vendor.as_str().to_string())
-                .collect(),
-        });
-    }
-    Ok(discovered)
 }
 
 /// Build the provider-identity hook factory product-auth serve registers:
@@ -530,10 +256,10 @@ async fn channel_identity_targets(
                 .and_then(|factory| factory.post_bind_for_extension(&extension.extension_id));
             targets.push(ChannelIdentityTarget {
                 extension_id: extension.extension_id,
-                scope_source: admin_configuration_connection_scope_source(
+                scope_source: channel_config_connection_scope_source(
                     Arc::clone(installation_store),
                     extension_id,
-                    config.admin_configuration_resolver.clone(),
+                    config.channel_config.clone(),
                 ),
                 post_bind,
             });
@@ -665,20 +391,22 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
-    use ironclaw_extension_host::{AdminConfigurationService, AdminConfigurationStore};
+    use async_trait::async_trait;
+    use ironclaw_extension_host::handle_declares_claim;
     use ironclaw_extensions::{
         ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStore,
-        ExtensionManifestRecord, ExtensionManifestRef, ManifestSource,
+        ExtensionInstallationStorePort as _, ExtensionManifestRecord, ExtensionManifestRef,
+        ManifestSource,
     };
-    use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
-    use ironclaw_host_api::{InvocationId, ResourceScope};
-    use ironclaw_secrets::{SecretStore, SecretStorePort};
+    use ironclaw_host_api::{
+        AdapterInstallationId, ChannelConnectionScope, InvocationId, ResourceScope,
+    };
 
     use super::*;
-    use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
+    use ironclaw_extension_host::product_extension_host_api_contract_registry;
 
     /// An invented channel + auth extension: the vendor id is `acmechat`,
-    /// the administrator schema declares two non-secret scoping fields keyed by
+    /// the channel config declares two non-secret scoping fields keyed by
     /// the claim-suffix convention.
     const CHANNEL_AUTH_FIXTURE_MANIFEST: &str = r#"
 schema_version = "reborn.extension_manifest.v3"
@@ -687,16 +415,6 @@ name = "AcmeChat"
 version = "0.1.0"
 description = "channel identity binding fixture"
 trust = "first_party_requested"
-
-[admin_configuration]
-group_id = "extension.acmechat"
-display_name = "AcmeChat deployment configuration"
-fields = [
-  { handle = "acmechat_webhook_secret", label = "Webhook secret", secret = true, required = false },
-  { handle = "acmechat_team_id", label = "Workspace ID", secret = false, required = false },
-  { handle = "acmechat_app_id", label = "App ID", secret = false, required = false },
-  { handle = "acmechat_oauth_client_id", label = "OAuth client ID", secret = false, required = false },
-]
 
 [runtime]
 kind = "first_party"
@@ -735,6 +453,15 @@ body_limit_bytes = 1048576
 kind = "shared_secret_header"
 secret_handle = "acmechat_webhook_secret"
 header = "X-AcmeChat-Secret"
+
+[admin_configuration]
+group_id = "acmechat.channel"
+display_name = "AcmeChat channel"
+fields = [
+  { handle = "acmechat_webhook_secret", label = "Webhook secret", secret = true },
+  { handle = "acmechat_team_id", label = "Workspace ID", secret = false },
+  { handle = "acmechat_app_id", label = "App ID", secret = false },
+]
 
 [channel.presentation]
 supports_markdown = false
@@ -780,30 +507,13 @@ app_id = "/app_id"
                     ExtensionManifestRef::new(extension_id, None),
                     Vec::new(),
                     chrono::Utc::now(),
-                    ironclaw_extensions::InstallationOwner::user(
-                        UserId::new("user:operator").expect("fixture user"),
-                    ),
+                    ironclaw_extensions::InstallationOwner::Tenant,
                 )
                 .expect("installation"),
             )
             .await
             .expect("persist install");
         store
-    }
-
-    async fn store_scoping_values(
-        admin_configuration_resolver: &ComposedExtensionAdminConfigurationResolver,
-    ) {
-        admin_configuration_resolver
-            .configure_admin_group_for_test(
-                "extension.acmechat",
-                vec![
-                    ("acmechat_team_id".to_string(), "T-team".to_string()),
-                    ("acmechat_app_id".to_string(), "A-app".to_string()),
-                ],
-            )
-            .await
-            .expect("store scoping values");
     }
 
     fn identity(team: &str, app: &str) -> OAuthProviderIdentity {
@@ -826,48 +536,32 @@ app_id = "/app_id"
     struct Fixture {
         config: ChannelIdentityBindingConfig,
         identity_store: Arc<RecordingIdentityStore>,
-        admin_configuration_resolver: Arc<ComposedExtensionAdminConfigurationResolver>,
+    }
+
+    fn configure_scoping_values(fixture: &mut Fixture, post_bind: Option<Arc<RecordingPostBind>>) {
+        fixture.config.installation_store = None;
+        fixture.config.overrides = vec![ChannelIdentityOverride {
+            extension_id: "acmechat".to_string(),
+            provider: "acmechat".to_string(),
+            scope_source: Arc::new(StaticScopeSource(Some(ChannelConnectionScope {
+                installation_id: AdapterInstallationId::new(FIXTURE_INSTALLATION_ID)
+                    .expect("installation"),
+                expected_team_id: Some("T-team".to_string()),
+                expected_enterprise_id: None,
+                expected_app_id: Some("A-app".to_string()),
+            }))),
+            post_bind: post_bind.map(|post_bind| post_bind as Arc<dyn ChannelIdentityPostBind>),
+        }];
     }
 
     async fn fixture() -> Fixture {
         let installation_store = installed_fixture_store().await;
-        let manifest = Arc::new(
-            installation_store
-                .get_manifest(&ExtensionId::new("acmechat").expect("extension id"))
-                .await
-                .expect("load manifest")
-                .expect("installed manifest")
-                .resolved()
-                .clone(),
-        );
-        let scope = ResourceScope::local_default(
-            UserId::new("operator").expect("user id"),
-            InvocationId::new(),
-        )
-        .expect("resource scope");
-        let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
-        let secrets: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
-        let admin = Arc::new(
-            AdminConfigurationService::new(
-                AdminConfigurationStore::new(Arc::new(ScopedFilesystem::new(
-                    filesystem,
-                    crate::invocation_mount_view,
-                ))),
-                secrets,
-                manifest.admin_configuration.clone(),
-            )
-            .expect("admin configuration service"),
-        );
-        let admin_configuration_resolver = Arc::new(
-            ComposedExtensionAdminConfigurationResolver::new(admin, scope, [manifest]),
-        );
         let identity_store = Arc::new(RecordingIdentityStore::default());
         let config = ChannelIdentityBindingConfig {
             tenant_id: tenant(),
-            installation_store: Some(
-                Arc::clone(&installation_store) as Arc<dyn ExtensionInstallationStorePort>
-            ),
-            admin_configuration_resolver: Some(Arc::clone(&admin_configuration_resolver)),
+            installation_store: Some(Arc::clone(&installation_store)
+                as Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>),
+            channel_config: None,
             binding_store: identity_store.clone(),
             rollback_store: identity_store.clone(),
             post_bind_factory: None,
@@ -876,20 +570,16 @@ app_id = "/app_id"
         Fixture {
             config,
             identity_store,
-            admin_configuration_resolver,
         }
     }
 
     #[tokio::test]
     async fn matching_identity_binds_installation_scoped_and_rollback_undoes_it() {
         let mut fixture = fixture().await;
-        store_scoping_values(&fixture.admin_configuration_resolver).await;
         // Generic post-bind provisioning: the factory serves discovered
         // extensions; a successful bind must hand it the caller + subject.
         let post_bind = Arc::new(RecordingPostBind::default());
-        fixture.config.post_bind_factory = Some(Arc::new(StaticPostBindFactory {
-            post_bind: post_bind.clone(),
-        }));
+        configure_scoping_values(&mut fixture, Some(post_bind.clone()));
 
         let rollback = bind_channel_identities_for_callback(
             &fixture.config,
@@ -935,8 +625,8 @@ app_id = "/app_id"
 
     #[tokio::test]
     async fn claim_mismatch_rejects_without_write() {
-        let fixture = fixture().await;
-        store_scoping_values(&fixture.admin_configuration_resolver).await;
+        let mut fixture = fixture().await;
+        configure_scoping_values(&mut fixture, None);
 
         for wrong in [identity("T-other", "A-app"), identity("T-team", "A-other")] {
             let error = expect_reject(
@@ -991,8 +681,8 @@ app_id = "/app_id"
 
     #[tokio::test]
     async fn provider_without_channel_extension_is_a_no_op() {
-        let fixture = fixture().await;
-        store_scoping_values(&fixture.admin_configuration_resolver).await;
+        let mut fixture = fixture().await;
+        configure_scoping_values(&mut fixture, None);
 
         let rollback = bind_channel_identities_for_callback(
             &fixture.config,
@@ -1008,8 +698,8 @@ app_id = "/app_id"
 
     #[tokio::test]
     async fn missing_identity_and_foreign_tenant_reject() {
-        let fixture = fixture().await;
-        store_scoping_values(&fixture.admin_configuration_resolver).await;
+        let mut fixture = fixture().await;
+        configure_scoping_values(&mut fixture, None);
 
         let error = expect_reject(
             bind_channel_identities_for_callback(
@@ -1040,8 +730,8 @@ app_id = "/app_id"
 
     #[tokio::test]
     async fn already_bound_identity_maps_to_already_connected() {
-        let fixture = fixture().await;
-        store_scoping_values(&fixture.admin_configuration_resolver).await;
+        let mut fixture = fixture().await;
+        configure_scoping_values(&mut fixture, None);
         fixture.identity_store.seed(
             format!("{FIXTURE_INSTALLATION_ID}:U123"),
             UserId::new("user-bob").expect("user"),
@@ -1066,13 +756,13 @@ app_id = "/app_id"
     #[tokio::test]
     async fn override_scope_source_wins_and_post_bind_fires() {
         // A lane override binds under its own scope (its configure surface
-        // uses an external scope source) and receives the post-bind signal.
+        // predates [channel.config]) and receives the post-bind signal.
         let identity_store = Arc::new(RecordingIdentityStore::default());
         let post_bind = Arc::new(RecordingPostBind::default());
         let config = ChannelIdentityBindingConfig {
             tenant_id: tenant(),
             installation_store: None,
-            admin_configuration_resolver: None,
+            channel_config: None,
             binding_store: identity_store.clone(),
             rollback_store: identity_store.clone(),
             post_bind_factory: None,
@@ -1118,7 +808,7 @@ app_id = "/app_id"
         let config = ChannelIdentityBindingConfig {
             tenant_id: tenant(),
             installation_store: None,
-            admin_configuration_resolver: None,
+            channel_config: None,
             binding_store: identity_store.clone(),
             rollback_store: identity_store.clone(),
             post_bind_factory: None,
@@ -1180,20 +870,6 @@ app_id = "/app_id"
     }
 
     struct StaticScopeSource(Option<ChannelConnectionScope>);
-
-    /// Serves one recording post-bind for every discovered extension.
-    struct StaticPostBindFactory {
-        post_bind: Arc<RecordingPostBind>,
-    }
-
-    impl ChannelIdentityPostBindFactory for StaticPostBindFactory {
-        fn post_bind_for_extension(
-            &self,
-            _extension_id: &str,
-        ) -> Option<Arc<dyn ChannelIdentityPostBind>> {
-            Some(Arc::clone(&self.post_bind) as Arc<dyn ChannelIdentityPostBind>)
-        }
-    }
 
     #[async_trait]
     impl ChannelConnectionScopeSource for StaticScopeSource {

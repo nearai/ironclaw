@@ -18,17 +18,12 @@ use std::{
 
 use chrono_tz::Tz;
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::{HostApiError, TenantId, UserId};
-use ironclaw_memory::{MemoryContext, MemoryDocumentPath, MemoryDocumentScope};
-use ironclaw_memory_native::{
-    FilesystemMemoryDocumentRepository, MemoryBackend, RepositoryMemoryBackend,
-};
+use ironclaw_host_api::{CorrelationId, InvocationId, ResourceScope, TenantId, UserId};
+use ironclaw_memory::{MemoryInvocation, MemoryService};
+use ironclaw_memory_native::NativeMemoryService;
 use ironclaw_turns::run_profile::{Locale, LoopRunContext, UserProfileContext};
 use serde::Deserialize;
 use tokio::sync::Notify;
-
-/// Relative path of the per-user agent-context profile document.
-pub const PROFILE_DOCUMENT_PATH: &str = "context/profile.json";
 
 /// Hard cap on the profile document size. profile_set writes are small and
 /// bounded; a document larger than this can only come from an external/manual
@@ -38,44 +33,56 @@ const MAX_PROFILE_DOCUMENT_BYTES: usize = 64 * 1024;
 const PROFILE_CACHE_TTL: Duration = Duration::from_secs(5);
 const PROFILE_CACHE_MAX_ENTRIES: usize = 1024;
 
-/// Single home for the profile scope decision: keyed to the human user at
-/// `agent=None, project=None` (spec §10) regardless of run scope. BOTH the
-/// producer (read) and `profile_merge_write` (write) call this so the scope
-/// narrowing — and any future project-override — lives in exactly one place.
-pub(crate) fn profile_scope_and_path(
-    tenant_id: &str,
-    user_id: &str,
-) -> Result<(MemoryDocumentScope, MemoryDocumentPath), HostApiError> {
-    let scope = MemoryDocumentScope::new_with_agent(tenant_id, user_id, None, None)?;
-    let path =
-        MemoryDocumentPath::new_with_agent(tenant_id, user_id, None, None, PROFILE_DOCUMENT_PATH)?;
-    Ok((scope, path))
-}
-
-/// Reads `context/profile.json` for the run owner and resolves it into a
-/// validated `UserProfileContext`. Owns the `ironclaw_memory` dependency so the
-/// loop driver and `ironclaw_runner` never import it.
+/// Reads the run owner's profile document and resolves it into a validated
+/// `UserProfileContext`.
+///
+/// Reads flow through the provider-neutral [`MemoryService::profile_read`] — the
+/// same facade `profile_set` writes through — so the scope/path decision lives in
+/// exactly one place (the provider) and a future provider can swap profile reads
+/// alongside the rest of the memory facade. This source owns the
+/// `ironclaw_memory` / `ironclaw_memory_native` dependency so the loop driver and
+/// `ironclaw_runner` never import it.
+///
+/// A short-TTL read-through cache with single-flight dedup sits in front of the
+/// provider on this hot loop-start path: concurrent turns for the same
+/// `(tenant, user)` coalesce onto one read, and repeat reads inside the TTL serve
+/// the already-resolved value. The profile is keyed to the human user
+/// (`agent=None, project=None`, spec §10) regardless of run scope, so the cache
+/// key is `(tenant_id, user_id)` only.
 pub struct MemoryBackedUserProfileSource {
-    filesystem: Arc<dyn RootFilesystem>,
+    memory_service: Arc<dyn MemoryService>,
     cache: Mutex<UserProfileCache>,
     inflight: Arc<Mutex<HashMap<UserProfileCacheKey, Arc<Notify>>>>,
     cache_ttl: Duration,
 }
 
 impl MemoryBackedUserProfileSource {
-    pub fn new(filesystem: Arc<dyn RootFilesystem>) -> Self {
+    /// Build a source over an explicit memory provider. Production wires the
+    /// native provider via [`from_filesystem`](Self::from_filesystem); tests
+    /// inject a stub.
+    pub fn new(memory_service: Arc<dyn MemoryService>) -> Self {
         Self {
-            filesystem,
+            memory_service,
             cache: Mutex::new(UserProfileCache::default()),
             inflight: Arc::new(Mutex::new(HashMap::new())),
             cache_ttl: PROFILE_CACHE_TTL,
         }
     }
 
+    /// Build a source backed by the native memory provider over `filesystem`.
+    /// The host owns the provider choice here (matching the memory capability),
+    /// while reads still flow through the provider-neutral
+    /// [`MemoryService::profile_read`].
+    pub fn from_filesystem(filesystem: Arc<dyn RootFilesystem>) -> Self {
+        Self::new(Arc::new(NativeMemoryService::from_filesystem(
+            filesystem, None,
+        )))
+    }
+
     #[cfg(test)]
-    fn new_with_cache_ttl(filesystem: Arc<dyn RootFilesystem>, cache_ttl: Duration) -> Self {
+    fn new_with_cache_ttl(memory_service: Arc<dyn MemoryService>, cache_ttl: Duration) -> Self {
         Self {
-            filesystem,
+            memory_service,
             cache: Mutex::new(UserProfileCache::default()),
             inflight: Arc::new(Mutex::new(HashMap::new())),
             cache_ttl,
@@ -88,13 +95,14 @@ impl MemoryBackedUserProfileSource {
         &self,
         run_context: &LoopRunContext,
     ) -> Option<UserProfileContext> {
-        // Profile is keyed to the human user at agent=None, project=None
-        // (spec §10) regardless of the run's agent/project scope.
+        // Profile is keyed to the human user; the provider narrows to
+        // `agent=None, project=None` internally (spec §10) regardless of the run's
+        // agent/project scope, so the cache key is `(tenant_id, user_id)` only.
+        let actor = run_context.actor.as_ref()?;
         let scope = &run_context.scope;
-        let user_id = run_context.actor.as_ref().map(|a| a.user_id.clone())?;
         let cache_key = UserProfileCacheKey {
             tenant_id: scope.tenant_id.clone(),
-            user_id,
+            user_id: actor.user_id.clone(),
         };
         loop {
             if let Some(profile) = self.cached_profile(&cache_key) {
@@ -105,12 +113,7 @@ impl MemoryBackedUserProfileSource {
                     notify.notified().await;
                 }
                 ProfileLoad::Leader(leader) => {
-                    let profile = self
-                        .resolve_user_profile_uncached(
-                            cache_key.tenant_id.as_str(),
-                            cache_key.user_id.as_str(),
-                        )
-                        .await;
+                    let profile = self.resolve_user_profile_uncached(run_context).await;
                     self.store_cached_profile(cache_key.clone(), profile.clone());
                     leader.finish();
                     return profile;
@@ -121,34 +124,38 @@ impl MemoryBackedUserProfileSource {
 
     async fn resolve_user_profile_uncached(
         &self,
-        tenant_id: &str,
-        user_id: &str,
+        run_context: &LoopRunContext,
     ) -> Option<UserProfileContext> {
-        // Shared scope helper — same keying as the writer (no duplicated decision).
-        let (doc_scope, path) = match profile_scope_and_path(tenant_id, user_id) {
-            Ok(pair) => pair,
+        let actor = run_context.actor.as_ref()?;
+        let scope = &run_context.scope;
+        let invocation = MemoryInvocation {
+            scope: ResourceScope {
+                tenant_id: scope.tenant_id.clone(),
+                user_id: actor.user_id.clone(),
+                agent_id: scope.agent_id.clone(),
+                project_id: scope.project_id.clone(),
+                mission_id: None,
+                thread_id: Some(scope.thread_id.clone()),
+                invocation_id: InvocationId::new(),
+            },
+            correlation_id: CorrelationId::new(),
+        };
+
+        let document = match self.memory_service.profile_read(invocation).await {
+            Ok(response) => response.document,
             Err(error) => {
-                // silent-ok: profile is optional loop-start context; a scope-construction
-                // failure degrades to no-profile rather than failing the user's turn.
-                tracing::debug!(%error, "user profile scope construction failed; continuing without profile");
+                // silent-ok: profile is optional loop-start context; an unreadable
+                // profile (incl. scope-construction failure) degrades to no-profile
+                // rather than failing the user's turn. `MemoryServiceError`'s
+                // `Display` is sanitized, so no backend detail leaks.
+                tracing::debug!(%error, "user profile read failed; continuing without profile");
                 return None;
             }
         };
-        let context = MemoryContext::new(doc_scope);
 
-        let repository = Arc::new(FilesystemMemoryDocumentRepository::new(Arc::clone(
-            &self.filesystem,
-        )));
-        let backend = RepositoryMemoryBackend::new(repository);
-
-        let bytes = match backend.read_document(&context, &path).await {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => return None,
-            Err(error) => {
-                tracing::debug!(error = %error, "user profile read failed; continuing without profile");
-                // silent-ok: optional loop-start context; an unreadable profile degrades to no-profile, not a failed turn.
-                return None;
-            }
+        let bytes = match document {
+            Some(bytes) => bytes,
+            None => return None,
         };
 
         if bytes.len() > MAX_PROFILE_DOCUMENT_BYTES {
@@ -331,14 +338,12 @@ struct ProfileJson {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
-    use ironclaw_filesystem::{InMemoryBackend, RootFilesystem};
+    use async_trait::async_trait;
     use ironclaw_host_api::{TenantId, ThreadId, UserId};
-    use ironclaw_memory::MemoryContext;
-    use ironclaw_memory_native::{
-        FilesystemMemoryDocumentRepository, MemoryBackend, MemoryBackendCapabilities,
-        MemoryBackendWriteOptions, RepositoryMemoryBackend,
+    use ironclaw_memory::{
+        MemoryInvocation, MemoryService, MemoryServiceError, MemoryServiceProfileReadResponse,
     };
     use ironclaw_turns::{
         RunProfileResolver, TurnActor, TurnId, TurnRunId, TurnScope,
@@ -346,6 +351,43 @@ mod tests {
     };
 
     use super::*;
+
+    /// Stub memory provider: `profile_read` returns the currently-held document so
+    /// the tests exercise the host's parse/size-cap/validation and cache logic, not
+    /// the provider's scope/path resolution (covered by the native facade +
+    /// round-trip tests). The document is swappable so the cache tests can mutate
+    /// the underlying store between reads.
+    struct StubProfileMemoryService {
+        document: Mutex<Option<Vec<u8>>>,
+    }
+
+    impl StubProfileMemoryService {
+        fn new(document: Option<Vec<u8>>) -> Self {
+            Self {
+                document: Mutex::new(document),
+            }
+        }
+
+        fn set_document(&self, document: Option<Vec<u8>>) {
+            *self.document.lock().unwrap() = document;
+        }
+    }
+
+    #[async_trait]
+    impl MemoryService for StubProfileMemoryService {
+        async fn profile_read(
+            &self,
+            _invocation: MemoryInvocation,
+        ) -> Result<MemoryServiceProfileReadResponse, MemoryServiceError> {
+            Ok(MemoryServiceProfileReadResponse {
+                document: self.document.lock().unwrap().clone(),
+            })
+        }
+    }
+
+    fn source_with_document(document: Option<Vec<u8>>) -> MemoryBackedUserProfileSource {
+        MemoryBackedUserProfileSource::new(Arc::new(StubProfileMemoryService::new(document)))
+    }
 
     /// Build a test `LoopRunContext` with an actor, mirroring the `identity_context.rs` pattern.
     async fn run_context_with_user(tenant_id: &str, user_id: &str) -> LoopRunContext {
@@ -364,45 +406,13 @@ mod tests {
             .with_actor(actor)
     }
 
-    /// Write profile JSON bytes directly into an in-memory filesystem, scoped to user-only scope.
-    async fn write_profile_json(
-        fs: &Arc<dyn RootFilesystem>,
-        tenant_id: &str,
-        user_id: &str,
-        json: &str,
-    ) {
-        let (scope, path) = profile_scope_and_path(tenant_id, user_id).unwrap();
-        let context = MemoryContext::new(scope);
-        let repository = Arc::new(FilesystemMemoryDocumentRepository::new(Arc::clone(fs)));
-        let backend =
-            RepositoryMemoryBackend::new(repository).with_capabilities(MemoryBackendCapabilities {
-                file_documents: true,
-                metadata: true,
-                ..MemoryBackendCapabilities::default()
-            });
-        backend
-            .write_document_with_backend_options(
-                &context,
-                &path,
-                json.as_bytes(),
-                &MemoryBackendWriteOptions::default(),
-            )
-            .await
-            .expect("write_profile_json: write failed");
-    }
-
     #[tokio::test]
     async fn resolves_timezone_locale_location_from_profile_doc() {
-        let fs: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
-        write_profile_json(
-            &fs,
-            "tenant-a",
-            "user-1",
-            r#"{"timezone":"Asia/Tokyo","locale":"ja-JP","location":"Tokyo, Japan"}"#,
-        )
-        .await;
-
-        let source = MemoryBackedUserProfileSource::new(Arc::clone(&fs));
+        let source = source_with_document(Some(
+            r#"{"timezone":"Asia/Tokyo","locale":"ja-JP","location":"Tokyo, Japan"}"#
+                .as_bytes()
+                .to_vec(),
+        ));
         let run_ctx = run_context_with_user("tenant-a", "user-1").await;
         let resolved = source.resolve_user_profile(&run_ctx).await.unwrap();
 
@@ -425,16 +435,9 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_timezone_resolves_to_none_not_guess() {
-        let fs: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
-        write_profile_json(
-            &fs,
-            "tenant-a",
-            "user-1",
-            r#"{"timezone":"Pacific Time","locale":"en-US"}"#,
-        )
-        .await;
-
-        let source = MemoryBackedUserProfileSource::new(Arc::clone(&fs));
+        let source = source_with_document(Some(
+            r#"{"timezone":"Pacific Time","locale":"en-US"}"#.as_bytes().to_vec(),
+        ));
         let run_ctx = run_context_with_user("tenant-a", "user-1").await;
         let resolved = source.resolve_user_profile(&run_ctx).await.unwrap();
 
@@ -452,8 +455,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_doc_resolves_to_none() {
-        let fs: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
-        let source = MemoryBackedUserProfileSource::new(fs);
+        let source = source_with_document(None);
         let run_ctx = run_context_with_user("tenant-a", "user-1").await;
         assert!(
             source.resolve_user_profile(&run_ctx).await.is_none(),
@@ -463,18 +465,20 @@ mod tests {
 
     #[tokio::test]
     async fn profile_cache_serves_hits_until_ttl_expires() {
-        let fs: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
-        write_profile_json(&fs, "tenant-a", "user-1", r#"{"locale":"ja-JP"}"#).await;
-
+        let stub = Arc::new(StubProfileMemoryService::new(Some(
+            r#"{"locale":"ja-JP"}"#.as_bytes().to_vec(),
+        )));
         let source = MemoryBackedUserProfileSource::new_with_cache_ttl(
-            Arc::clone(&fs),
+            stub.clone(),
             Duration::from_secs(60),
         );
         let run_ctx = run_context_with_user("tenant-a", "user-1").await;
         let resolved = source.resolve_user_profile(&run_ctx).await.unwrap();
         assert_eq!(resolved.locale.as_ref().map(|l| l.as_str()), Some("ja-JP"));
 
-        write_profile_json(&fs, "tenant-a", "user-1", r#"{"locale":"en-US"}"#).await;
+        // Change the underlying store; the cache should still serve the resolved
+        // value inside the TTL.
+        stub.set_document(Some(r#"{"locale":"en-US"}"#.as_bytes().to_vec()));
         let cached = source.resolve_user_profile(&run_ctx).await.unwrap();
         assert_eq!(
             cached.locale.as_ref().map(|l| l.as_str()),
@@ -485,30 +489,31 @@ mod tests {
 
     #[tokio::test]
     async fn profile_cache_does_not_serve_misses_after_profile_is_created() {
-        let fs: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+        let stub = Arc::new(StubProfileMemoryService::new(None));
         let source = MemoryBackedUserProfileSource::new_with_cache_ttl(
-            Arc::clone(&fs),
+            stub.clone(),
             Duration::from_secs(60),
         );
         let run_ctx = run_context_with_user("tenant-a", "user-1").await;
         assert!(source.resolve_user_profile(&run_ctx).await.is_none());
 
-        write_profile_json(&fs, "tenant-a", "user-1", r#"{"locale":"en-US"}"#).await;
+        // A miss is not cached, so a profile created afterwards resolves on the next read.
+        stub.set_document(Some(r#"{"locale":"en-US"}"#.as_bytes().to_vec()));
         let resolved = source.resolve_user_profile(&run_ctx).await.unwrap();
         assert_eq!(resolved.locale.as_ref().map(|l| l.as_str()), Some("en-US"));
     }
 
     #[tokio::test]
     async fn profile_cache_refreshes_after_ttl_expires() {
-        let fs: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+        let stub = Arc::new(StubProfileMemoryService::new(None));
         let source = MemoryBackedUserProfileSource::new_with_cache_ttl(
-            Arc::clone(&fs),
+            stub.clone(),
             Duration::from_millis(1),
         );
         let run_ctx = run_context_with_user("tenant-a", "user-1").await;
         assert!(source.resolve_user_profile(&run_ctx).await.is_none());
 
-        write_profile_json(&fs, "tenant-a", "user-1", r#"{"locale":"en-US"}"#).await;
+        stub.set_document(Some(r#"{"locale":"en-US"}"#.as_bytes().to_vec()));
         tokio::time::sleep(Duration::from_millis(10)).await;
 
         let resolved = source.resolve_user_profile(&run_ctx).await.unwrap();
@@ -517,11 +522,8 @@ mod tests {
 
     #[tokio::test]
     async fn no_actor_resolves_to_none() {
-        let fs: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
-        write_profile_json(&fs, "tenant-a", "user-1", r#"{"timezone":"Asia/Tokyo"}"#).await;
-
-        let source = MemoryBackedUserProfileSource::new(Arc::clone(&fs));
-        // Build a run context without an actor
+        let source = source_with_document(Some(r#"{"timezone":"Asia/Tokyo"}"#.as_bytes().to_vec()));
+        // Build a run context without an actor.
         let resolved_run_profile = InMemoryRunProfileResolver::default()
             .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
             .await
@@ -534,7 +536,7 @@ mod tests {
         );
         let run_ctx =
             LoopRunContext::new(scope, TurnId::new(), TurnRunId::new(), resolved_run_profile);
-        // No actor → user_id is None → should return None
+        // No actor → user_id is None → should return None (no provider call needed).
         assert!(
             source.resolve_user_profile(&run_ctx).await.is_none(),
             "run context without actor must resolve to None"
@@ -545,16 +547,11 @@ mod tests {
     async fn all_blank_fields_resolve_to_none() {
         // A profile document with only invalid/blank fields must resolve to None
         // (the `profile == UserProfileContext::default()` guard should fire).
-        let fs: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
-        write_profile_json(
-            &fs,
-            "tenant-a",
-            "user-1",
-            r#"{"timezone":"Not/AZone","locale":"","location":"   "}"#,
-        )
-        .await;
-
-        let source = MemoryBackedUserProfileSource::new(Arc::clone(&fs));
+        let source = source_with_document(Some(
+            r#"{"timezone":"Not/AZone","locale":"","location":"   "}"#
+                .as_bytes()
+                .to_vec(),
+        ));
         let run_ctx = run_context_with_user("tenant-a", "user-1").await;
         assert!(
             source.resolve_user_profile(&run_ctx).await.is_none(),
@@ -567,13 +564,9 @@ mod tests {
         // A profile document larger than MAX_PROFILE_DOCUMENT_BYTES must degrade
         // to no-profile rather than burning per-turn CPU/heap parsing it.
         // The document is valid JSON (only the size guard, not a parse error, triggers).
-        let fs: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
-        // Build a valid JSON object whose "location" value exceeds the 64 KiB cap.
         let large_location = "A".repeat(70_000);
         let json = format!(r#"{{"location":"{}"}}"#, large_location);
-        write_profile_json(&fs, "tenant-a", "user-1", &json).await;
-
-        let source = MemoryBackedUserProfileSource::new(Arc::clone(&fs));
+        let source = source_with_document(Some(json.into_bytes()));
         let run_ctx = run_context_with_user("tenant-a", "user-1").await;
         assert!(
             source.resolve_user_profile(&run_ctx).await.is_none(),

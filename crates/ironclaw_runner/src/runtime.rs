@@ -15,6 +15,7 @@ use ironclaw_loop_host::{
     SubagentPromptMaterialSource, SubagentSpawnCapabilityPort, SubagentSpawnDeps,
     SubagentSpawnGoalStore, SubagentSpawnLimits, verify_product_live_cancellation_probe,
 };
+use ironclaw_memory::MemoryService;
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 use ironclaw_turns::{
     AgentLoopDriverError, CheckpointStateStorePort, DefaultTurnCoordinator,
@@ -26,7 +27,7 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, CommunicationContextProvider, InstructionSafetyContext,
         LoopCapabilityPort, LoopHostMilestoneSink, LoopModelBudgetAccountant, LoopModelPolicyGuard,
-        LoopRunContext,
+        LoopRunContext, MemoryPromptContextService,
     },
     runner::TurnRunTransitionPort,
 };
@@ -338,6 +339,23 @@ where
     /// `EmptyUserProfileSource` (always `None`) is acceptable for compositions
     /// that do not yet wire a profile backend.
     pub user_profile_source: Arc<dyn HostUserProfileSource>,
+    /// Proactive-memory source (#3537 / mem0 flow). Resolved once per run at the
+    /// first prompt build and surfaced into the prompt's "memory" section.
+    /// `None` is acceptable — and is the default for compositions whose memory
+    /// binding is disabled or third-party-without-a-provider — degrading to no
+    /// memory rather than failing the turn, the same optionality as
+    /// `user_profile_source`.
+    pub memory_context_service: Option<Arc<dyn MemoryPromptContextService>>,
+    /// After-turn memory writer (#3537 / mem0 `add` flow). The RAW document-store
+    /// provider — the same `Arc<dyn MemoryService>` the memory tools resolve, NOT
+    /// wrapped in a prompt-context adapter. When `Some`, the executor forwards each
+    /// `Completed` run's full transcript to `record_interaction`, skipping only
+    /// runs with no user/assistant content (the provider decides what to retain).
+    /// `None` is acceptable — and is the default for compositions whose memory
+    /// binding is disabled or third-party-without-a-provider — degrading to no
+    /// after-turn recording rather than failing the turn (mirrors
+    /// `memory_context_service`).
+    pub after_turn_memory_writer: Option<Arc<dyn MemoryService>>,
     /// Product-live readiness extensions. `RebornLoopDriverHostFactory`
     /// defaults these to no-op implementations so helper tests keep compiling.
     /// `build_product_live_planned_runtime` fails closed when any of them is
@@ -754,6 +772,17 @@ where
     let safety_context = parts
         .safety_context
         .unwrap_or_else(local_development_noop_safety_context);
+    // Build the after-turn memory recorder before `parts.thread_scope` is moved
+    // into the host factory below. Present only when a memory document-store
+    // provider was resolved; it owner-rewrites the base thread scope per run
+    // before reading the just-finished exchange back.
+    let after_turn_memory_recorder = parts.after_turn_memory_writer.clone().map(|memory_writer| {
+        Arc::new(crate::after_turn_memory::AfterTurnMemoryRecorder::new(
+            Arc::clone(&parts.thread_service),
+            memory_writer,
+            parts.thread_scope.clone(),
+        ))
+    });
     let mut host_factory = RebornLoopDriverHostFactory::new(
         Arc::clone(&parts.thread_service),
         parts.thread_scope,
@@ -800,6 +829,9 @@ where
     }
     host_factory = host_factory.with_identity_context_source(parts.identity_context_source);
     host_factory = host_factory.with_user_profile_source(parts.user_profile_source);
+    if let Some(service) = parts.memory_context_service {
+        host_factory = host_factory.with_memory_context_service(service);
+    }
     let host_factory = Arc::new(host_factory);
 
     let transition_port: Arc<dyn TurnRunTransitionPort> = turn_state;
@@ -807,12 +839,16 @@ where
         Arc::clone(&transition_port),
         parts.loop_exit_evidence,
     ));
-    let executor = Arc::new(RebornTurnRunExecutor::new(
+    let mut executor = RebornTurnRunExecutor::new(
         Arc::clone(&loop_exit_applier),
         Arc::clone(&driver_registry),
         host_factory.clone() as Arc<dyn crate::turn_runner::HostFactory>,
         parts.gate_record_store.clone(),
-    ));
+    );
+    if let Some(recorder) = after_turn_memory_recorder {
+        executor = executor.with_after_turn_memory_recorder(recorder);
+    }
+    let executor = Arc::new(executor);
     let scheduler_config = TurnRunSchedulerConfig::default()
         .with_max_concurrent_runs(scheduler_permit_count(parts.config.worker_count))
         .with_runner_heartbeat_interval(parts.config.heartbeat_interval)

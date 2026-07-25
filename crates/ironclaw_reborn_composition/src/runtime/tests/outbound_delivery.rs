@@ -8,8 +8,9 @@ use ironclaw_loop_host::{
     HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
 };
 use ironclaw_outbound::{
-    DeliveryTargetCapabilities, OutboundDeliveryTargetRegistrationOutcome,
-    OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary, OutboundError,
+    DeliveryTargetCapabilities, OutboundDeliveryTargetId,
+    OutboundDeliveryTargetRegistrationOutcome, OutboundDeliveryTargetScope,
+    OutboundDeliveryTargetSummary, OutboundError,
 };
 use ironclaw_product::RebornOutboundDeliveryTargetId;
 use ironclaw_threads::{LoadContextMessagesRequest, MessageKind, ThreadHistoryRequest};
@@ -23,6 +24,7 @@ use crate::outbound::{
     OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
 };
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
+use ironclaw_outbound::RunFinalReplyDestination;
 
 use super::build_reborn_runtime;
 
@@ -52,7 +54,7 @@ impl OutboundDeliveryTargetProvider for StaticOutboundDeliveryTargetProvider {
         Ok(vec![OutboundDeliveryTargetEntry {
             summary: self.summary.clone(),
             capabilities: self.capabilities.clone(),
-            destination: ironclaw_outbound::RunFinalReplyDestination::External {
+            destination: RunFinalReplyDestination::External {
                 reply_target_binding_ref: self.reply_target_binding_ref.clone(),
             },
             owner: OutboundDeliveryTargetOwner::for_scope(caller),
@@ -215,7 +217,7 @@ async fn local_dev_runtime_selects_outbound_delivery_target_before_trigger_creat
         "slack:test",
         Arc::new(StaticOutboundDeliveryTargetProvider {
             summary: OutboundDeliveryTargetSummary::new(
-                slack_target_id,
+                OutboundDeliveryTargetId::new(slack_target_id.as_str()).expect("target id"),
                 "slack",
                 "Slack DM",
                 Some("Personal Slack direct message".to_string()),

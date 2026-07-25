@@ -923,7 +923,7 @@ impl RebornIntegrationHarness {
     /// The REAL per-thread `DefaultProductSurface` (durable idempotency
     /// ledger → conversation binding → turn submission). The generic channel
     /// inbound sink submits through this exact instance.
-    pub(crate) fn product_workflow_for_test(&self) -> std::sync::Arc<DefaultProductSurface> {
+    pub(crate) fn product_surface_for_test(&self) -> std::sync::Arc<DefaultProductSurface> {
         std::sync::Arc::clone(&self.workflow)
     }
 

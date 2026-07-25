@@ -23,11 +23,11 @@ handling, gate routing, mission routing, and redacted acknowledgements.
 | `InMemoryIdempotencyLedger` | Local-dev/test ledger with in-flight lease recovery semantics |
 | `ProductInboundAction` | Durable ledger record for inbound actions |
 | `ProductCommandAdmissionService` | Source/auth-aware admission port that decides whether a typed product command may execute |
-| `ProductCommandService` | Reborn-native product command execution port for already-admitted typed commands |
+| `product-surface command operation` | Reborn-native product command execution port for already-admitted typed commands |
 | `ApprovalInteractionService` / `DefaultApprovalInteractionService` | Approval-only product/WebUI boundary for listing redacted pending approval gates and resolving click approve/deny through canonical approval resolver + turn coordinator ports |
 | `RunStateApprovalInteractionReadModel` | Canonical read model that returns status-bearing approval gates from scoped approval-request records plus the parked turn-run locator; `ApprovalInteractionService::list_pending` filters those records to pending UI DTOs |
 | `AuthInteractionService` / `DefaultAuthInteractionService` | Auth-required product/WebUI boundary for listing redacted pending auth gates and resolving credential/callback/cancel decisions through typed auth-flow manager + turn coordinator ports |
-| `ProductSurface` / `RebornServices` | Native WebChat v2 facade — stable surface beta WebUI route handlers consume in place of reaching into turn coordination, thread stores, runtime lanes, dispatchers, or capability hosts. Enforces caller ownership of the thread before any turn mutation; projects channel discovery as extension-surface data on the extensions list (typed direction + connect affordance; no separate channel registry); rejects stale or attacker-supplied `gate_ref` on denied/cancelled gate resolutions; routes approval-gate `always: true` resolutions through the approval interaction policy path while keeping generic gate fallback one-shot only |
+| `ProductSurface` / `RebornServices` | Native WebChat v2 service — stable surface beta WebUI route handlers consume in place of reaching into turn coordination, thread stores, runtime lanes, dispatchers, or capability hosts. Enforces caller ownership of the thread before any turn mutation; projects channel discovery as extension-surface data on the extensions list (typed direction + connect affordance; no separate channel registry); rejects stale or attacker-supplied `gate_ref` on denied/cancelled gate resolutions; routes approval-gate `always: true` resolutions through the approval interaction policy path while keeping generic gate fallback one-shot only |
 
 ## Dependencies
 
@@ -55,7 +55,7 @@ Product commands are not turns. Adapters may parse slash syntax at the edge, but
 `ProductInboundPayload::Command` must enter the workflow as normalized command
 payloads. The source/auth decision belongs to `ProductCommandAdmissionService`;
 the source-agnostic command model must not know which product surface produced
-the command. Admitted commands dispatch through `ProductCommandService`, not
+the command. Admitted commands dispatch through the product-surface command operation, not
 `InboundTurnService`, v1 `SubmissionParser`, v1 command routers, or agent-loop
 command handlers.
 
@@ -91,7 +91,7 @@ Typed auth/approval interaction services intentionally re-read run-state through
 second read as a freshness/TOCTOU guard unless a future coordinator returns a
 sealed gate grant that can safely replace it.
 
-WebUI-facing facade methods must bind browser thread ids through
+WebUI-facing service methods must bind browser thread ids through
 `SessionThreadService` using a `ThreadScope` derived from the authenticated
 caller before accepting messages, streaming events, canceling runs, or resolving
 gates. Browser/session metadata is not authority by itself, and send-message
@@ -105,7 +105,7 @@ the WebUI caller's session user. The caller-scoped `SessionThreadService` probe
 therefore misses them.
 
 When a thread lookup misses under the caller's session scope, `RebornServices`
-falls back to `AutomationProductFacade::resolve_run_thread_scope`. That method
+falls back to `AutomationProductService::resolve_run_thread_scope`. That method
 is caller-scoped: it scans only the triggers owned by the authenticated caller
 (matched on tenant_id + creator_user_id + agent_id + project_id), so the
 authorization check is embedded in the lookup. If a matching trigger run is
@@ -125,7 +125,7 @@ keep the active panel uncluttered. But completed triggers' run threads remain
 authorized through this resolver — their history is retained user data and must
 stay accessible. `resolve_run_thread_scope` does not filter on trigger state.
 
-**No caching.** Every call revalidates automation visibility through the facade.
+**No caching.** Every call revalidates automation visibility through the service.
 A caller that loses automation visibility mid-session cannot keep accessing the
 trigger-owned thread after their access is revoked. Caching the authz result
 is explicitly forbidden.
@@ -134,13 +134,13 @@ is explicitly forbidden.
 `Unavailable` (503, retryable), never as 404. Only `Ok(None)` (thread not in
 any caller-visible trigger) produces a 404 response.
 
-WebUI-facing facade errors must expose stable, sanitized taxonomy. Keep
+WebUI-facing service errors must expose stable, sanitized taxonomy. Keep
 `ProductSurfaceErrorCode` aligned with coarse transport/status shape and
 `ProductSurfaceErrorKind` aligned with M1-renderable user-safe families such as
 validation, duplicate, busy, participant denied, blocked approval/auth/resource,
 replay/timeline unavailable, service unavailable, conflict, not found, and
 internal. Do not surface backend strings, host paths, provider/runtime details,
-raw prompts, tool args, or secrets through the facade error payload.
+raw prompts, tool args, or secrets through the service error payload.
 
 Product adapter bindings must choose `TenantId` only from trusted host
 installation configuration, never from inbound adapter payloads. Default

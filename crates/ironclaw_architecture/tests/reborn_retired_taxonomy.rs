@@ -32,13 +32,13 @@ fn workspace_root() -> PathBuf {
 /// outside the sanctioned paths is a regression, not a style issue.
 const RETIRED_TERMS: &[&str] = &[
     // The connectable-channels rail (replaced by extension-surface discovery).
-    "ConnectableChannelsProductFacade",
+    "ConnectableChannelsProductService",
     "RebornConnectableChannelInfo",
     "RebornConnectableChannelListResponse",
     "list_connectable_channels",
     "listConnectableChannels",
     "SlackOperatorRouteVisibility",
-    "channel_connection_facade_slot",
+    "channel_connection_service_slot",
     // The one-variant lifecycle surface enum (replaced by the shared
     // CapabilitySurfaceKind vocabulary in ironclaw_host_api).
     "LifecycleExtensionSurfaceKind",

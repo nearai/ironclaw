@@ -1,7 +1,7 @@
 //! Reborn WebChat v2 HTTP route surface.
 //!
 //! This crate ships the minimal native WebUI v2 route set on top of the
-//! [`ironclaw_host_api::ProductSurface`] facade. It is compiled into
+//! [`ironclaw_host_api::ProductSurface`] service. It is compiled into
 //! every build.
 //!
 //! ## Boundaries
@@ -25,7 +25,7 @@
 //! drains once, renders each product envelope into a
 //! [`WebChatV2EventFrame`] SSE message with the projection cursor as the
 //! SSE id, then polls at a low cadence for newly-arrived events. When the
-//! facade gains a real subscription API the handler can migrate without
+//! service gains a real subscription API the handler can migrate without
 //! changing the descriptor or browser-visible event schema.
 //!
 //! Beyond the route descriptor's per-caller request rate limit, the

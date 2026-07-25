@@ -1268,7 +1268,7 @@ async fn adapter_bundle_wires_required_product_live_components() {
         .unwrap();
     assert!(
         !visible.version.as_str().is_empty(),
-        "host-runtime capability facade should supply a concrete surface version"
+        "host-runtime capability service should supply a concrete surface version"
     );
 }
 
@@ -1434,6 +1434,8 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
         input_queue: Some(adapters.input_queue),
         identity_context_source: adapters.identity_context_source,
         user_profile_source: Arc::new(EmptyUserProfileSource),
+        memory_context_service: None,
+        after_turn_memory_writer: None,
         model_policy_guard: Some(adapters.model_policy_guard),
         model_budget_accountant: Some(adapters.model_budget_accountant),
         safety_context: Some(adapters.safety_context),
