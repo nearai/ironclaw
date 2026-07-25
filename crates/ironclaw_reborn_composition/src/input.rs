@@ -239,9 +239,7 @@ pub struct ChannelExtensionBinding {
     /// Protocol-specific inbound payload reclassification (gate-resolution
     /// replies), registered on the channel host assembly.
     pub inbound_payload_classifier: Option<
-        std::sync::Arc<
-            ironclaw_extension_host::reborn::extension_ingress::InboundPayloadClassifier,
-        >,
+        std::sync::Arc<ironclaw_extension_host::extension_ingress::InboundPayloadClassifier>,
     >,
     /// The vendor half of the preference-target codec, consumed by the
     /// generic outbound-target provider and triggered-delivery hook.

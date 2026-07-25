@@ -14,8 +14,8 @@ use ironclaw_product::{LifecyclePackageKind, LifecyclePackageRef};
 use crate::factory::{RebornRuntimeStores, build_runtime_substrate};
 use ironclaw_auth::RuntimeCredentialAccountSelectionRequest;
 use ironclaw_auth::{RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest};
-use ironclaw_extension_host::reborn::extension_lifecycle::RebornLocalExtensionManagementPort;
-use ironclaw_extension_host::reborn::extension_lifecycle_capabilities::EXTENSION_ACTIVATE_CAPABILITY_ID;
+use ironclaw_extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
+use ironclaw_extension_host::extension_lifecycle_capabilities::EXTENSION_ACTIVATE_CAPABILITY_ID;
 
 #[tokio::test]
 async fn local_dev_extension_activate_accepts_manual_token_from_webui_gate_scope() {

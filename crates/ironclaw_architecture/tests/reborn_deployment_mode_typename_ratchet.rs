@@ -114,10 +114,7 @@ const FROZEN_OTHER_MODE_TYPES: &[&str] = &[
     //     composition surface; shrinks with Slice B (deployment mode becomes a
     //     `DeploymentConfig` value):
     "RebornLocalExtensionManagementPort",
-    "RebornLocalLifecycleService",
     "RebornLocalRuntimeIdentity",
-    "RebornLocalSkillManagementError",
-    "RebornLocalSkillManagementPort",
     //   mid-name LocalDev entries: none — cleared by the DeploymentConfig
     //     refactor (Slice B); the sibling ratchet's empty allowlist plus
     //     `contains_mode_term` here keep new ones out.

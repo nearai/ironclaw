@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
 use clap::Args;
-use ironclaw_extension_host::reborn::channel_identity::channel_identity_binding_hook_factory;
-use ironclaw_extension_host::reborn::extension_ingress::extension_ingress_route_mount;
+use ironclaw_extension_host::channel_identity_binding::channel_identity_binding_hook_factory;
+use ironclaw_extension_host::extension_ingress::extension_ingress_route_mount;
 use ironclaw_reborn_composition::build_openai_compat_route_mount;
 use ironclaw_reborn_composition::host_api::{
     AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,

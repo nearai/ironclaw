@@ -21,8 +21,8 @@ use ironclaw_product::{
 };
 use serde::Deserialize;
 
-use crate::reborn::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
-use crate::reborn::extension_lifecycle::RebornLocalExtensionManagementPort;
+use crate::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
+use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
 use ironclaw_auth::RuntimeCredentialAccountSelectionService;
 use ironclaw_extension_host::ExtensionActivationMode;
 
@@ -676,7 +676,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::reborn::lifecycle_test_support::{
+    use crate::lifecycle_test_support::{
         ExtensionLifecycleTestServices, build_lifecycle_test_services,
         invoke_json_with_local_dev_approval, invoke_with_local_dev_approval,
     };
@@ -1564,7 +1564,7 @@ mod tests {
     #[tokio::test]
     async fn local_dev_extension_activate_hosted_mcp_stages_discovery_and_publishes_tools() {
         let discovery_script = std::sync::Arc::new(
-            crate::reborn::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryNetworkScript::with_tool_name("notion-search")
+            crate::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryNetworkScript::with_tool_name("notion-search")
                 // Real hosted MCP providers may return verbose prose. The
                 // generic MCP boundary must bound it without dropping the
                 // entire catalog or preventing activation.

@@ -10,9 +10,9 @@ use ironclaw_product::{
 };
 use thiserror::Error;
 
-use crate::reborn::extension_lifecycle::RebornLocalExtensionManagementPort;
-use crate::reborn::lifecycle::RebornLocalLifecycleService;
-use crate::reborn::lifecycle::RebornLocalSkillManagementPort;
+use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
+use crate::lifecycle_product_service::ExtensionHostLifecycleProductService;
+use ironclaw_skills::ScopedSkillManagementPort;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RebornExtensionLifecycleCommand {
@@ -33,7 +33,7 @@ pub enum RebornExtensionLifecycleCommandError {
 }
 
 pub trait RebornExtensionLifecycleRuntime {
-    fn skill_management(&self) -> Arc<RebornLocalSkillManagementPort>;
+    fn skill_management(&self) -> Arc<ScopedSkillManagementPort>;
     fn extension_management(&self) -> Arc<RebornLocalExtensionManagementPort>;
     fn runtime_http_egress(&self) -> Option<Arc<dyn RuntimeHttpEgress>>;
     fn runtime_credential_accounts(&self) -> Arc<dyn RuntimeCredentialAccountSelectionService>;
@@ -44,7 +44,7 @@ pub async fn execute_reborn_extension_lifecycle_command(
     runtime: &impl RebornExtensionLifecycleRuntime,
     command: RebornExtensionLifecycleCommand,
 ) -> Result<LifecycleProductResponse, RebornExtensionLifecycleCommandError> {
-    let mut service = RebornLocalLifecycleService::new(runtime.skill_management())
+    let mut service = ExtensionHostLifecycleProductService::new(runtime.skill_management())
         .with_extension_management(runtime.extension_management());
     if let Some(runtime_http_egress) = runtime.runtime_http_egress() {
         service = service.with_runtime_http_egress(runtime_http_egress);
@@ -55,7 +55,7 @@ pub async fn execute_reborn_extension_lifecycle_command(
 }
 
 pub async fn execute_reborn_extension_lifecycle_service_command(
-    service: &RebornLocalLifecycleService,
+    service: &ExtensionHostLifecycleProductService,
     context: LifecycleProductContext,
     command: RebornExtensionLifecycleCommand,
 ) -> Result<LifecycleProductResponse, RebornExtensionLifecycleCommandError> {
@@ -68,7 +68,7 @@ pub async fn execute_reborn_extension_lifecycle_service_command(
 }
 
 async fn execute_install_with_activation(
-    service: &RebornLocalLifecycleService,
+    service: &ExtensionHostLifecycleProductService,
     context: LifecycleProductContext,
     package_ref: LifecyclePackageRef,
 ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
@@ -255,9 +255,7 @@ mod tests {
     use secrecy::SecretString;
 
     use super::*;
-    use crate::reborn::lifecycle_test_support::{
-        build_lifecycle_test_services, lifecycle_product_context,
-    };
+    use crate::lifecycle_test_support::{build_lifecycle_test_services, lifecycle_product_context};
     use ironclaw_auth::{RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest};
 
     #[tokio::test]

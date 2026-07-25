@@ -131,16 +131,16 @@ use crate::outbound::{
 use crate::root::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::turn_run_snapshot::TurnRunSnapshotSource;
 use ironclaw_extension_host::AdminConfigurationCatalogUse;
-use ironclaw_extension_host::reborn::admin_configuration::{
+use ironclaw_extension_host::admin_configuration::{
     ComposedAdminConfigurationService, ComposedExtensionAdminConfigurationResolver,
 };
 #[cfg(any(test, feature = "test-support"))]
-use ironclaw_extension_host::reborn::channel_pairing::ChannelPairingConsumeOutcome;
-use ironclaw_extension_host::reborn::channel_pairing::ChannelPairingRegistry;
-use ironclaw_extension_host::reborn::extension_lifecycle::RebornLocalExtensionManagementPort;
-use ironclaw_extension_host::reborn::lifecycle::RebornLocalSkillManagementPort;
+use ironclaw_extension_host::channel_pairing::ChannelPairingConsumeOutcome;
+use ironclaw_extension_host::channel_pairing::ChannelPairingRegistry;
+use ironclaw_extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
 use ironclaw_product::projection::{RebornProjectionServices, build_reborn_projection_services};
 use ironclaw_secrets::SecretStorePort;
+use ironclaw_skills::ScopedSkillManagementPort;
 
 struct ProductAuthChallengeAdapter {
     product_auth: Arc<RebornProductAuthServices>,
@@ -694,7 +694,7 @@ pub struct RebornRuntime {
     pub(crate) host_runtime: Arc<dyn HostRuntime>,
     pub(crate) product_auth: Arc<RebornProductAuthServices>,
     pub(crate) readiness: RebornReadiness,
-    pub(crate) skill_management: Arc<RebornLocalSkillManagementPort>,
+    pub(crate) skill_management: Arc<ScopedSkillManagementPort>,
     pub(crate) extension_lifecycle_surface_context: LifecycleProductSurfaceContext,
     pub(crate) secret_store: Arc<dyn SecretStorePort>,
     pub(crate) scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
@@ -749,21 +749,20 @@ pub struct RebornRuntime {
     pub(crate) channel_dm_target_store:
         Arc<ironclaw_extension_host::FilesystemChannelDmTargetStore>,
     pub(crate) extension_ingress:
-        Option<ironclaw_extension_host::reborn::extension_ingress::ExtensionIngressParts>,
+        Option<ironclaw_extension_host::extension_ingress::ExtensionIngressParts>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) deployment_channels: Arc<ironclaw_extension_host::DeploymentChannelRegistry>,
     pub(crate) channel_pairing: Option<Arc<ChannelPairingRegistry>>,
     pub(crate) channel_delivery_resolver:
         Option<Arc<dyn ironclaw_product::ChannelDeliveryResolver>>,
     #[cfg(feature = "test-support")]
-    pub(crate) channel_egress_credential_bridges: Option<
-        Arc<ironclaw_extension_host::reborn::channel_egress::BridgedChannelEgressCredentials>,
-    >,
+    pub(crate) channel_egress_credential_bridges:
+        Option<Arc<ironclaw_extension_host::channel_egress::BridgedChannelEgressCredentials>>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     /// Generic channel host assembly (extension-runtime P6 S2), held so the
     /// reconcile loop lives exactly as long as the runtime.
     _channel_host_assembly:
-        Option<Arc<ironclaw_extension_host::reborn::channel_host::GenericChannelHostAssembly>>,
+        Option<Arc<ironclaw_extension_host::channel_host::GenericChannelHostAssembly>>,
     /// Turn-state row-store flusher, kept so graceful `shutdown` can drain the
     /// write-behind durable tail (awaiting the acks of non-critical transitions
     /// that committed at memory speed) so a planned restart recovers in-flight
@@ -778,7 +777,7 @@ pub struct RebornRuntime {
     credential_refresh_worker_handle: Option<ironclaw_auth::KeepaliveSweepHandle>,
     trace_flush_worker: crate::observability::trace_capture::TraceQueueFlushWorkerHandle,
     skill_learning_extraction_tasks:
-        Option<Arc<ironclaw_extension_host::reborn::skill_learning::SkillLearningExtractionTasks>>,
+        Option<Arc<ironclaw_extension_host::skill_learning::SkillLearningExtractionTasks>>,
     #[cfg(any(test, feature = "test-support"))]
     trigger_conversation_pairing:
         Option<Arc<dyn ironclaw_conversations::ConversationActorPairingService>>,
@@ -812,19 +811,16 @@ pub struct RebornRuntime {
     llm_reload: Option<RebornLlmReloadParts>,
 }
 
-impl ironclaw_extension_host::reborn::extension_lifecycle_command::RebornExtensionLifecycleRuntime
+impl ironclaw_extension_host::extension_lifecycle_command::RebornExtensionLifecycleRuntime
     for RebornRuntime
 {
-    fn skill_management(
-        &self,
-    ) -> Arc<ironclaw_extension_host::reborn::lifecycle::RebornLocalSkillManagementPort> {
+    fn skill_management(&self) -> Arc<ironclaw_skills::ScopedSkillManagementPort> {
         Arc::clone(&self.skill_management)
     }
 
     fn extension_management(
         &self,
-    ) -> Arc<ironclaw_extension_host::reborn::extension_lifecycle::RebornLocalExtensionManagementPort>
-    {
+    ) -> Arc<ironclaw_extension_host::extension_lifecycle::RebornLocalExtensionManagementPort> {
         Arc::clone(&self.extension_management)
     }
 
@@ -860,7 +856,7 @@ pub(crate) struct InteractionServiceTestParts {
     persistent_approval_policies: Arc<ComposedPersistentApprovalPolicyStore>,
     tool_permission_overrides: Arc<ComposedToolPermissionOverrideStore>,
     extension_management: Arc<RebornLocalExtensionManagementPort>,
-    skill_management: Arc<RebornLocalSkillManagementPort>,
+    skill_management: Arc<ScopedSkillManagementPort>,
     admin_configuration_resolver: Arc<ComposedExtensionAdminConfigurationResolver>,
     product_auth: Arc<RebornProductAuthServices>,
     runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
@@ -1463,7 +1459,7 @@ impl RebornRuntime {
 
     pub fn extension_ingress_parts(
         &self,
-    ) -> Option<ironclaw_extension_host::reborn::extension_ingress::ExtensionIngressParts> {
+    ) -> Option<ironclaw_extension_host::extension_ingress::ExtensionIngressParts> {
         self.extension_ingress.clone()
     }
 
@@ -1656,9 +1652,8 @@ impl RebornRuntime {
     pub fn start_channel_host_assembly_for_test(
         &self,
         wiring: crate::ChannelHostAssemblyTestWiring,
-    ) -> Option<Arc<ironclaw_extension_host::reborn::channel_host::GenericChannelHostAssembly>>
-    {
-        use ironclaw_extension_host::reborn::channel_host::GenericChannelHostDeps;
+    ) -> Option<Arc<ironclaw_extension_host::channel_host::GenericChannelHostAssembly>> {
+        use ironclaw_extension_host::channel_host::GenericChannelHostDeps;
 
         let crate::ChannelHostAssemblyTestWiring {
             thread_service,
@@ -1670,12 +1665,12 @@ impl RebornRuntime {
         let ingress = self.extension_ingress.as_ref()?;
         let workflow_filesystem: Arc<dyn RootFilesystem> = self.extension_filesystem.clone();
         let workflow_state = Arc::new(
-            ironclaw_extension_host::reborn::channel_host::FilesystemChannelWorkflowStateFactory::new(
+            ironclaw_extension_host::channel_host::FilesystemChannelWorkflowStateFactory::new(
                 workflow_filesystem,
             ),
         );
         let delivery = self.delivery_coordinator.clone().map(|coordinator| {
-            ironclaw_extension_host::reborn::channel_host::ChannelHostDeliveryDeps {
+            ironclaw_extension_host::channel_host::ChannelHostDeliveryDeps {
                 coordinator,
                 outbound_store: Arc::clone(&self.outbound_state),
                 route_store: Arc::clone(&self.delivered_gate_routes),
@@ -1689,7 +1684,7 @@ impl RebornRuntime {
         let identity_lookup = Some(Arc::clone(&self.channel_identity_store)
             as Arc<dyn ironclaw_host_api::RebornUserIdentityLookup>);
         Some(
-            ironclaw_extension_host::reborn::channel_host::GenericChannelHostAssembly::start(
+            ironclaw_extension_host::channel_host::GenericChannelHostAssembly::start(
                 GenericChannelHostDeps {
                     watch: generic_host.snapshot_watch(),
                     deployment_channels: Arc::clone(&self.deployment_channels),
@@ -1830,9 +1825,9 @@ impl RebornRuntime {
         &self,
     ) -> Option<ironclaw_host_ingress::ProtectedRouteMount> {
         self.channel_pairing.as_ref().map(|registry| {
-            ironclaw_extension_host::reborn::channel_pairing_serve::channel_pairing_route_mount(
-                Arc::clone(registry),
-            )
+            ironclaw_extension_host::channel_pairing_serve::channel_pairing_route_mount(Arc::clone(
+                registry,
+            ))
         })
     }
 
@@ -1856,9 +1851,7 @@ impl RebornRuntime {
             return false;
         };
         bridges.register(Arc::new(
-            ironclaw_extension_host::reborn::channel_egress::StaticChannelEgressCredentials::new(
-                entries,
-            ),
+            ironclaw_extension_host::channel_egress::StaticChannelEgressCredentials::new(entries),
         ));
         true
     }
@@ -2231,7 +2224,7 @@ impl RebornRuntime {
         &self,
     ) -> Option<ironclaw_host_ingress::ProtectedRouteMount> {
         self.channel_pairing.as_ref().map(|registry| {
-            ironclaw_extension_host::reborn::channel_pairing_serve::channel_pairing_route_mount(
+            ironclaw_extension_host::channel_pairing_serve::channel_pairing_route_mount(
                 std::sync::Arc::clone(registry),
             )
         })
@@ -2239,7 +2232,7 @@ impl RebornRuntime {
 
     pub fn channel_identity_binding_config(
         &self,
-    ) -> Option<ironclaw_extension_host::reborn::channel_identity::ChannelIdentityBindingConfig>
+    ) -> Option<ironclaw_extension_host::channel_identity_binding::ChannelIdentityBindingConfig>
     {
         let identity_store = self.channel_identity_store.clone();
         let installation_store = Some(self.extension_management.installation_store_handle());
@@ -2253,7 +2246,7 @@ impl RebornRuntime {
             snapshot_updates,
         ) {
             (Some(delivery), Some(store), Some(snapshot_updates)) => Some(Arc::new(
-                ironclaw_extension_host::reborn::channel_dm_provisioning::ChannelDmTargetProvisioning::new(
+                ironclaw_extension_host::channel_dm_provisioning::ChannelDmTargetProvisioning::new(
                     delivery,
                     store,
                     snapshot_updates,
@@ -2263,7 +2256,7 @@ impl RebornRuntime {
             _ => None,
         };
         Some(
-            ironclaw_extension_host::reborn::channel_identity::ChannelIdentityBindingConfig {
+            ironclaw_extension_host::channel_identity_binding::ChannelIdentityBindingConfig {
                 tenant_id: self.thread_scope.tenant_id.clone(),
                 installation_store,
                 channel_config: Some(self.channel_config_service.clone()),
@@ -2289,15 +2282,11 @@ impl RebornRuntime {
         let identity_store = self.channel_identity_store.clone();
         let installation_store = Some(self.extension_management.installation_store_handle());
         let credential_cleanup = Some(Arc::clone(&self.product_auth)
-            as Arc<
-                dyn ironclaw_extension_host::reborn::channel_connection::ChannelCredentialCleanup,
-            >);
+            as Arc<dyn ironclaw_extension_host::channel_connection::ChannelCredentialCleanup>);
         let account_status_reader = Some(Arc::clone(&self.product_auth)
-            as Arc<
-                dyn ironclaw_extension_host::reborn::channel_connection::ChannelAccountStatusReader,
-            >);
+            as Arc<dyn ironclaw_extension_host::channel_connection::ChannelAccountStatusReader>);
         Some(Arc::new(
-            ironclaw_extension_host::reborn::channel_connection::GenericChannelConnectionService::new(
+            ironclaw_extension_host::channel_connection::GenericChannelConnectionService::new(
                 self.thread_scope.tenant_id.clone(),
                 Vec::new(),
                 installation_store,
@@ -4034,13 +4023,13 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
     let mut turn_event_sinks: Vec<Arc<dyn ironclaw_turns::TurnEventSink>> =
         vec![trace_capture_sink, projection_turn_event_wake_sink];
     let mut skill_learning_extraction_tasks: Option<
-        Arc<ironclaw_extension_host::reborn::skill_learning::SkillLearningExtractionTasks>,
+        Arc<ironclaw_extension_host::skill_learning::SkillLearningExtractionTasks>,
     > = None;
     if let (Some((learning_provider, learning_model)), Some(local_runtime)) =
         (skill_learning_provider, local_runtime)
     {
         let inference: Arc<dyn ironclaw_skills::learning::SkillInferencePort> = Arc::new(
-            ironclaw_extension_host::reborn::skill_learning::SkillLearningInferenceAdapter::new(
+            ironclaw_extension_host::skill_learning::SkillLearningInferenceAdapter::new(
                 learning_provider,
                 learning_model,
             ),
@@ -4050,34 +4039,32 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         // loads it. The writer evolves an existing learned skill in place when a
         // recurring task is re-learned, using the same learning model to refine
         // it (accumulated gotchas, bumped version) instead of accreting siblings.
-        let skill_refiner: Arc<dyn ironclaw_extension_host::reborn::skill_learning::SkillRefiner> =
+        let skill_refiner: Arc<dyn ironclaw_extension_host::skill_learning::SkillRefiner> =
             Arc::new(
-                ironclaw_extension_host::reborn::skill_learning::LlmSkillRefiner::new(Arc::clone(
+                ironclaw_extension_host::skill_learning::LlmSkillRefiner::new(Arc::clone(
                     &inference,
                 )),
             );
-        let skill_writer: Arc<dyn ironclaw_extension_host::reborn::skill_learning::SkillWriter> =
-            Arc::new(
-                ironclaw_extension_host::reborn::skill_learning::PortSkillWriter::new(
-                    Arc::clone(&local_runtime.skill_management),
-                    skill_refiner,
-                ),
-            );
+        let skill_writer: Arc<dyn ironclaw_extension_host::skill_learning::SkillWriter> = Arc::new(
+            ironclaw_extension_host::skill_learning::PortSkillWriter::new(
+                Arc::clone(&local_runtime.skill_management),
+                skill_refiner,
+            ),
+        );
         // Live "learned a skill" bubble on the run's thread stream (reuses the
         // SkillActivation projection -> existing chat bubble).
         let skill_learned_notifier: Arc<
-            dyn ironclaw_extension_host::reborn::skill_learning::SkillLearnedNotifier,
+            dyn ironclaw_extension_host::skill_learning::SkillLearnedNotifier,
         > = Arc::new(
-            ironclaw_extension_host::reborn::skill_learning::LiveSkillLearnedNotifier::new(
+            ironclaw_extension_host::skill_learning::LiveSkillLearnedNotifier::new(
                 skill_learning_publisher,
             ),
         );
-        let extraction_tasks = Arc::new(
-            ironclaw_extension_host::reborn::skill_learning::SkillLearningExtractionTasks::new(),
-        );
+        let extraction_tasks =
+            Arc::new(ironclaw_extension_host::skill_learning::SkillLearningExtractionTasks::new());
         skill_learning_extraction_tasks = Some(Arc::clone(&extraction_tasks));
         turn_event_sinks.push(Arc::new(
-            ironclaw_extension_host::reborn::skill_learning::SkillLearningTurnEventSink::new(
+            ironclaw_extension_host::skill_learning::SkillLearningTurnEventSink::new(
                 Arc::clone(&thread_service),
                 inference,
                 skill_writer,
@@ -4087,9 +4074,7 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         ));
     }
     let turn_event_sink: Arc<dyn ironclaw_turns::TurnEventSink> = Arc::new(
-        ironclaw_extension_host::reborn::skill_learning::CompositeTurnEventSink::new(
-            turn_event_sinks,
-        ),
+        ironclaw_extension_host::skill_learning::CompositeTurnEventSink::new(turn_event_sinks),
     );
 
     let communication_context_provider: Option<
@@ -4097,9 +4082,9 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
     > = match (local_runtime, outbound_preferences_facade.clone()) {
         (Some(local_runtime), Some(outbound_preferences_facade)) => {
             let lifecycle_service =
-                ironclaw_extension_host::reborn::lifecycle::RebornLocalLifecycleService::new(
-                    Arc::clone(&local_runtime.skill_management),
-                )
+                ironclaw_extension_host::ExtensionHostLifecycleProductService::new(Arc::clone(
+                    &local_runtime.skill_management,
+                ))
                 .with_extension_management(Arc::clone(&local_runtime.extension_management))
                 .with_channel_config(Arc::clone(&local_runtime.channel_config_service));
             Some(Arc::new(
@@ -4392,14 +4377,14 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
     // availability (no coordinator -> ingress-only registrations).
     let channel_host_assembly = {
         let approval_context = Some(Arc::new(
-            ironclaw_extension_host::reborn::run_delivery_ports::ProjectionApprovalPromptContextSource::new(
+            ironclaw_extension_host::run_delivery_ports::ProjectionApprovalPromptContextSource::new(
                 Arc::clone(&services.approval_requests)
                     as Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>,
             ),
         )
             as Arc<dyn ironclaw_product::ApprovalPromptContextSource>);
         let blocked_auth_prompts = Some(Arc::new(
-            ironclaw_extension_host::reborn::run_delivery_ports::ProductAuthBlockedAuthPromptSource::new(
+            ironclaw_extension_host::run_delivery_ports::ProductAuthBlockedAuthPromptSource::new(
                 auth_challenges.clone(),
             ),
         )
@@ -4410,7 +4395,7 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
             turn_coordinator: Arc::clone(&planned_turn_coordinator),
             approval_interaction: Some(Arc::clone(&approval_interaction_service)),
             auth_interaction: Some(Arc::clone(&auth_interaction_service)),
-            identity: ironclaw_extension_host::reborn::channel_host::ChannelHostIdentity {
+            identity: ironclaw_extension_host::channel_host::ChannelHostIdentity {
                 tenant_id: thread_scope.tenant_id.clone(),
                 agent_id: thread_scope.agent_id.clone(),
                 project_id: thread_scope.project_id.clone(),
@@ -4431,7 +4416,7 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
             assembly
                 .register_extras(
                     &binding.extension_id,
-                    ironclaw_extension_host::reborn::channel_host::ChannelExtras {
+                    ironclaw_extension_host::channel_host::ChannelExtras {
                         classifier: None,
                         preference_target_codec: binding.preference_target_codec.clone(),
                         subject_route_resolver: None,
@@ -4452,15 +4437,15 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         local_runtime,
     ) {
         let dm_targets = local_runtime.channel_dm_target_store.clone();
-        ironclaw_extension_host::reborn::channel_outbound_targets::register_generic_channel_outbound_targets(
+        ironclaw_extension_host::channel_outbound_targets::register_generic_channel_outbound_targets(
             registry,
-            ironclaw_extension_host::reborn::channel_outbound_targets::GenericChannelOutboundTargetDeps {
+            ironclaw_extension_host::channel_outbound_targets::GenericChannelOutboundTargetDeps {
                 watch: assembly.snapshot_watch(),
                 assembly: Arc::clone(assembly),
                 channel_config: Arc::clone(&local_runtime.channel_config_service),
                 dm_targets,
                 identity:
-                    ironclaw_extension_host::reborn::channel_outbound_targets::ChannelOutboundTargetIdentity {
+                    ironclaw_extension_host::channel_outbound_targets::ChannelOutboundTargetIdentity {
                         tenant_id: thread_scope.tenant_id.clone(),
                         agent_id: thread_scope.agent_id.clone(),
                         project_id: thread_scope.project_id.clone(),
@@ -4609,7 +4594,7 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         let generic_trigger_hook: Arc<
             dyn crate::automation::trigger_poller::PostSubmitDeliveryHook,
         > = Arc::new(
-            ironclaw_extension_host::reborn::channel_triggered_delivery::GenericTriggeredRunDeliveryHook::new(
+            ironclaw_extension_host::channel_triggered_delivery::GenericTriggeredRunDeliveryHook::new(
                 Arc::clone(assembly),
                 Arc::clone(triggered_run_delivery),
                 Arc::clone(outbound_preferences),

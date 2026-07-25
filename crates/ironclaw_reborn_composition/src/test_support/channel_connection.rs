@@ -36,11 +36,11 @@ use ironclaw_host_api::{
 };
 use ironclaw_product::ChannelConnectionService;
 
-use ironclaw_extension_host::reborn::channel_connection::{
+use ironclaw_extension_host::channel_connection::{
     ChannelAccountStatusReader, ChannelCredentialCleanup, GenericChannelConnectionService,
 };
-use ironclaw_extension_host::reborn::channel_dm_provisioning::ChannelDmTargetProvisioning;
-use ironclaw_extension_host::reborn::channel_identity::{
+use ironclaw_extension_host::channel_dm_provisioning::ChannelDmTargetProvisioning;
+use ironclaw_extension_host::channel_identity_binding::{
     ChannelIdentityBindingConfig, bind_channel_identities_for_callback,
 };
 use ironclaw_host_api::{ChannelIdentityPostBindFactory, RebornUserIdentityLookup};

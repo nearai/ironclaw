@@ -5,7 +5,7 @@ use ironclaw_extensions::{InstallationOwner, SharedExtensionRegistry};
 use ironclaw_host_api::{EffectKind, ExtensionId, RuntimeKind, UserId};
 use ironclaw_product::{RebornOperatorToolCatalog, RebornOperatorToolInfo};
 
-use ironclaw_extension_host::reborn::extension_lifecycle::RebornLocalExtensionManagementPort;
+use ironclaw_extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
 
 #[derive(Clone)]
 pub(crate) struct ActiveRegistryOperatorToolCatalog {

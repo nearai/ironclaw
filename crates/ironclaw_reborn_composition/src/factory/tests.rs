@@ -38,7 +38,7 @@ use crate::{
     RebornReadinessDiagnostic, RebornReadinessState, runtime::SKILL_ACTIVATE_CAPABILITY_ID,
 };
 use ironclaw_extension_host::ExtensionActivationMode;
-use ironclaw_extension_host::reborn::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryEgress;
+use ironclaw_extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryEgress;
 use ironclaw_host_api::InstallationState;
 
 #[test]

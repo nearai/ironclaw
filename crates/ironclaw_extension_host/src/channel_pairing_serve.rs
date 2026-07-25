@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use crate::reborn::channel_pairing::{
+use crate::channel_pairing::{
     ChannelPairingError, ChannelPairingIssue, ChannelPairingRegistry, ChannelPairingService,
     ChannelPairingStatus,
 };

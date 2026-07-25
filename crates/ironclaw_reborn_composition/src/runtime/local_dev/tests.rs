@@ -61,7 +61,7 @@ mod tests {
         OutboundDeliveryTargetRegistry, RebornOutboundPreferencesService,
     };
     use crate::runtime::local_dev_filesystem_skill_context_source;
-    use ironclaw_extension_host::reborn::extension_lifecycle_capabilities::{
+    use ironclaw_extension_host::extension_lifecycle_capabilities::{
         EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REMOVE_CAPABILITY_ID,
         EXTENSION_SEARCH_CAPABILITY_ID,
     };

@@ -837,7 +837,7 @@ pub fn build_oauth_product_auth_with_identity_for_test(
 pub async fn handle_oauth_callback_with_channel_identity_binding_for_test(
     services: &ironclaw_auth::RebornProductAuthServices,
     request: ironclaw_auth::RebornOAuthCallbackRequest,
-    binding: &ironclaw_extension_host::reborn::channel_identity::ChannelIdentityBindingConfig,
+    binding: &ironclaw_extension_host::channel_identity_binding::ChannelIdentityBindingConfig,
 ) -> Result<ironclaw_auth::RebornOAuthCallbackResponse, ironclaw_auth::RebornOAuthCallbackError> {
     let provider = match &request.outcome {
         ironclaw_auth::RebornOAuthCallbackOutcome::Authorized { provider_request } => {
@@ -846,7 +846,7 @@ pub async fn handle_oauth_callback_with_channel_identity_binding_for_test(
         _ => String::new(),
     };
     let factory =
-        ironclaw_extension_host::reborn::channel_identity::channel_identity_binding_hook_factory(
+        ironclaw_extension_host::channel_identity_binding::channel_identity_binding_hook_factory(
             binding.clone(),
         );
     let check = factory(&provider, &request.scope);

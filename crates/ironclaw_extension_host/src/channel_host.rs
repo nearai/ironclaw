@@ -56,8 +56,8 @@ use ironclaw_product::{
 use ironclaw_threads::SessionThreadService;
 use ironclaw_turns::{TurnCoordinator, TurnScope};
 
-use crate::reborn::channel_pairing::ChannelPairingConsumeOutcome;
-use crate::reborn::extension_ingress::{
+use crate::channel_pairing::ChannelPairingConsumeOutcome;
+use crate::extension_ingress::{
     ChannelInboundSinkConfig, ChannelIngressDrain, ChannelIngressRegistration,
     ChannelPairingOutcomeObserver, ExtensionIngressRegistry, GenericChannelInboundSink,
     InboundPayloadClassifier, ManagedRegistrationOutcome, PostAdmissionObserver,
@@ -287,7 +287,7 @@ pub struct GenericChannelHostDeps {
     /// Pairing services for `WebGeneratedCode` channel extensions: drives the
     /// sink's pre-admission consume gate and identity-based actor resolution
     /// for extensions that pair without an OAuth vendor.
-    pub channel_pairing: Option<Arc<crate::reborn::channel_pairing::ChannelPairingRegistry>>,
+    pub channel_pairing: Option<Arc<crate::channel_pairing::ChannelPairingRegistry>>,
 }
 
 /// What the assembly last reconciled for one extension id.
@@ -695,9 +695,7 @@ impl GenericChannelHostAssembly {
             .channel_pairing
             .as_ref()
             .and_then(|registry| registry.get(source.extension_id()))
-            .map(|service| {
-                service as Arc<dyn crate::reborn::extension_ingress::ChannelPairingInterceptor>
-            });
+            .map(|service| service as Arc<dyn crate::extension_ingress::ChannelPairingInterceptor>);
         let surface = Arc::new(workflow) as Arc<dyn ChannelInboundProductSurface>;
         let mut sink = GenericChannelInboundSink::new(ChannelInboundSinkConfig {
             adapter_id,
@@ -777,7 +775,7 @@ impl GenericChannelHostAssembly {
             source.resolved().auth.first(),
         ) {
             (Some(lookup), Some(auth)) => Arc::new(
-                crate::reborn::provider_identity::ProviderIdentityActorResolver::for_any_actor_kind(
+                crate::provider_identity::ProviderIdentityActorResolver::for_any_actor_kind(
                     auth.vendor.as_str(),
                     source.extension_id(),
                     Arc::clone(lookup),
@@ -788,7 +786,7 @@ impl GenericChannelHostAssembly {
             // consume wrote, keyed by the extension id as provider. Unbound
             // actors fail closed instead of inheriting the operator.
             (Some(lookup), None) if pairing_extension => Arc::new(
-                crate::reborn::provider_identity::ProviderIdentityActorResolver::for_any_actor_kind(
+                crate::provider_identity::ProviderIdentityActorResolver::for_any_actor_kind(
                     source.extension_id(),
                     source.extension_id(),
                     Arc::clone(lookup),

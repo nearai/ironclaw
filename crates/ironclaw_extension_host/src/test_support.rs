@@ -33,17 +33,14 @@ pub mod first_party_registrars;
 /// wrapper types locally.
 #[cfg(feature = "test-support")]
 pub struct ExtensionManagementTestHandle {
-    extension_management:
-        Arc<crate::reborn::extension_lifecycle::RebornLocalExtensionManagementPort>,
+    extension_management: Arc<crate::extension_lifecycle::RebornLocalExtensionManagementPort>,
 }
 
 #[cfg(feature = "test-support")]
 impl ExtensionManagementTestHandle {
     /// Build a test-support handle over the local extension-management port.
     pub fn new(
-        extension_management: Arc<
-            crate::reborn::extension_lifecycle::RebornLocalExtensionManagementPort,
-        >,
+        extension_management: Arc<crate::extension_lifecycle::RebornLocalExtensionManagementPort>,
     ) -> Self {
         Self {
             extension_management,
@@ -53,7 +50,7 @@ impl ExtensionManagementTestHandle {
     /// Return the wrapped local extension-management port.
     pub fn extension_management(
         &self,
-    ) -> Arc<crate::reborn::extension_lifecycle::RebornLocalExtensionManagementPort> {
+    ) -> Arc<crate::extension_lifecycle::RebornLocalExtensionManagementPort> {
         self.extension_management.clone()
     }
 }

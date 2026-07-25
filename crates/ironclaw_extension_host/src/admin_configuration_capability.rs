@@ -26,7 +26,7 @@ use ironclaw_product::ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID;
 use ironclaw_secrets::SecretMaterial;
 use serde::Deserialize;
 
-use crate::reborn::admin_configuration::ComposedAdminConfigurationService;
+use crate::admin_configuration::ComposedAdminConfigurationService;
 
 pub fn extend_builtin_first_party_package(
     mut package: ExtensionPackage,

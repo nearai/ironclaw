@@ -30,7 +30,7 @@ use ironclaw_product::{
 use ironclaw_triggers::TriggerFire;
 use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId, TurnScope};
 
-use crate::reborn::channel_host::GenericChannelHostAssembly;
+use crate::channel_host::GenericChannelHostAssembly;
 use ironclaw_outbound::{MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetProvider};
 
 /// Hook invoked by the trigger poller after a successful fire submission has

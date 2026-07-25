@@ -29,8 +29,8 @@ use ironclaw_product::{
 };
 use std::time::Duration;
 
+use ironclaw_extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
 use ironclaw_extension_host::product_extension_host_api_contract_registry;
-use ironclaw_extension_host::reborn::extension_lifecycle::RebornLocalExtensionManagementPort;
 
 #[tokio::test]
 async fn operator_tool_catalog_reads_shared_registry_updates() {
@@ -538,7 +538,7 @@ async fn skills_product_service_surfaces_shared_auto_activate_learned_flag() {
         )
         .expect("mount storage root");
     let filesystem: Arc<dyn ironclaw_filesystem::RootFilesystem> = Arc::new(filesystem);
-    let skill_management = Arc::new(RebornLocalSkillManagementPort::new_with_mount_resolver(
+    let skill_management = Arc::new(ScopedSkillManagementPort::new_with_mount_resolver(
         UserId::new("runtime-owner").expect("user"),
         filesystem,
         Arc::new(scoped_skill_mounts),
@@ -596,7 +596,7 @@ async fn skills_product_service_defaults_auto_activate_learned_when_no_selector_
         )
         .expect("mount storage root");
     let filesystem: Arc<dyn ironclaw_filesystem::RootFilesystem> = Arc::new(filesystem);
-    let skill_management = Arc::new(RebornLocalSkillManagementPort::new_with_mount_resolver(
+    let skill_management = Arc::new(ScopedSkillManagementPort::new_with_mount_resolver(
         UserId::new("runtime-owner").expect("user"),
         filesystem,
         Arc::new(scoped_skill_mounts),
@@ -632,7 +632,7 @@ async fn skills_product_service_hides_owner_user_skills_from_other_callers() {
         )
         .expect("mount storage root");
     let filesystem: Arc<dyn ironclaw_filesystem::RootFilesystem> = Arc::new(filesystem);
-    let skill_management = Arc::new(RebornLocalSkillManagementPort::new_with_mount_resolver(
+    let skill_management = Arc::new(ScopedSkillManagementPort::new_with_mount_resolver(
         UserId::new("runtime-owner").expect("user"),
         filesystem,
         Arc::new(scoped_skill_mounts),

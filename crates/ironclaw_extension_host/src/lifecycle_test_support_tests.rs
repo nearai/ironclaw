@@ -32,11 +32,11 @@ use ironclaw_run_state::{ApprovalRequestStore, ApprovalRequestStorePort as _};
 use ironclaw_secrets::{SecretStore, SecretStorePort};
 use ironclaw_trust::{AdminConfig, HostTrustPolicy, InvalidationBus};
 
-use crate::reborn::extension_lifecycle::{
+use crate::extension_lifecycle::{
     RebornLocalExtensionManagementPort, RebornProductAuthCredentialCleanup,
 };
-use crate::reborn::extension_lifecycle_capabilities;
-use crate::reborn::lifecycle::{RebornLocalLifecycleService, RebornLocalSkillManagementPort};
+use crate::extension_lifecycle_capabilities;
+use crate::lifecycle_product_service::ExtensionHostLifecycleProductService;
 use crate::{
     ActiveExtensionPublisher, AvailableExtensionCatalog, ExtensionLifecycleManager,
     ExtensionRemovalCleanupRegistry, ProviderInstanceReadinessInput, boot_installation_records,
@@ -44,6 +44,7 @@ use crate::{
     product_extension_host_api_contract_registry, provider_instance_readiness_map,
     restore_extension_lifecycle_state,
 };
+use ironclaw_skills::ScopedSkillManagementPort;
 
 pub type TestApprovalRequestStore = ApprovalRequestStore<InMemoryBackend>;
 pub type TestCapabilityLeaseStore = CapabilityLeaseStore<InMemoryBackend>;
@@ -52,7 +53,7 @@ pub struct ExtensionLifecycleTestServices {
     pub host_runtime: Arc<dyn HostRuntime>,
     pub product_auth: Arc<RebornProductAuthServices>,
     pub extension_management: Arc<RebornLocalExtensionManagementPort>,
-    pub lifecycle_service: Arc<RebornLocalLifecycleService>,
+    pub lifecycle_service: Arc<ExtensionHostLifecycleProductService>,
     pub approval_requests: Arc<TestApprovalRequestStore>,
     pub capability_leases: Arc<TestCapabilityLeaseStore>,
     secret_store: Arc<dyn SecretStorePort>,
@@ -256,12 +257,12 @@ pub async fn build_lifecycle_test_services(
         .with_capability_leases(Arc::clone(&capability_leases))
         .with_persistent_approval_policies(persistent_approval_policies);
 
-    let skill_management = Arc::new(RebornLocalSkillManagementPort::new(
+    let skill_management = Arc::new(ScopedSkillManagementPort::new(
         ironclaw_host_api::UserId::new(owner_id).expect("valid owner id"),
         Arc::clone(&extension_filesystem),
         MountView::default(),
     ));
-    let mut lifecycle_service = RebornLocalLifecycleService::new(skill_management)
+    let mut lifecycle_service = ExtensionHostLifecycleProductService::new(skill_management)
         .with_extension_management(Arc::clone(&extension_management));
     if let Some(runtime_http_egress) = host_services.runtime_http_egress() {
         lifecycle_service = lifecycle_service.with_runtime_http_egress(runtime_http_egress);

@@ -50,7 +50,7 @@ async fn oauth_connect_binds_channel_identity_through_the_generic_hook() {
         CredentialAccountLookupRequest, NewAuthFlow, OAuthAuthorizationCode, OAuthAuthorizationUrl,
         OAuthProviderCallbackRequest, PkceVerifierSecret, ProviderScope,
     };
-    use ironclaw_extension_host::reborn::channel_identity::ChannelIdentityBindingConfig;
+    use ironclaw_extension_host::channel_identity_binding::ChannelIdentityBindingConfig;
     use ironclaw_extension_host::{
         AdminConfigurationIdempotencyKey, AdminConfigurationService,
         AdminConfigurationSubmittedValue, ChannelConfigReactivation,

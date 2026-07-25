@@ -26,7 +26,7 @@ use ironclaw_product::{
 };
 
 use crate::RebornRuntime;
-use ironclaw_extension_host::reborn::lifecycle::SkillManagementMountResolver;
+use ironclaw_skills::ScopedSkillManagementMountResolver;
 use tokio::sync::Mutex as AsyncMutex;
 
 const PRODUCT_RESULT_MAX_BYTES: usize = 4 * 1024 * 1024;
@@ -44,7 +44,7 @@ pub(crate) struct RuntimeProductCapabilityInvoker {
     // mounts the agent loop's skill tools do; the unified runtime graph exposes
     // a single composite filesystem, so which resolver is live is the only
     // deployment-shape distinction the invoker still needs.
-    skill_mount_resolver: Arc<SkillManagementMountResolver>,
+    skill_mount_resolver: Arc<ScopedSkillManagementMountResolver>,
     system_extensions_lifecycle_mounts: MountView,
     activity_locks: Arc<AsyncMutex<HashMap<ActivityId, Arc<AsyncMutex<()>>>>>,
 }
@@ -153,7 +153,7 @@ fn product_execution_context(
     caller: &ProductSurfaceCaller,
     activity_id: ActivityId,
     descriptor: Option<&CapabilityDescriptor>,
-    skill_mount_resolver: &SkillManagementMountResolver,
+    skill_mount_resolver: &ScopedSkillManagementMountResolver,
     system_extensions_lifecycle_mounts: &MountView,
 ) -> Result<ExecutionContext, ProductSurfaceError> {
     let invocation_id = InvocationId::from_uuid(activity_id.as_uuid());
@@ -273,7 +273,7 @@ fn product_gesture_grant(
 fn product_invocation_mounts(
     scope: &ResourceScope,
     descriptor: Option<&CapabilityDescriptor>,
-    skill_mount_resolver: &SkillManagementMountResolver,
+    skill_mount_resolver: &ScopedSkillManagementMountResolver,
     system_extensions_lifecycle_mounts: &MountView,
 ) -> Result<MountView, ProductSurfaceError> {
     let Some(descriptor) = descriptor else {

@@ -15,7 +15,7 @@ use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, Trust
 pub struct ChannelHostAssemblyTestWiring {
     pub thread_service: Arc<dyn SessionThreadService>,
     pub turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
-    pub identity: ironclaw_extension_host::reborn::channel_host::ChannelHostIdentity,
+    pub identity: ironclaw_extension_host::channel_host::ChannelHostIdentity,
     pub run_delivery_settings: ironclaw_product::RunDeliverySettings,
 }
 
@@ -192,7 +192,7 @@ impl RebornRuntimeStores {
     /// extension host (extension-runtime P4).
     pub(crate) fn extension_ingress_parts(
         &self,
-    ) -> Option<ironclaw_extension_host::reborn::extension_ingress::ExtensionIngressParts> {
+    ) -> Option<ironclaw_extension_host::extension_ingress::ExtensionIngressParts> {
         self.extension_ingress.clone()
     }
 
@@ -278,14 +278,14 @@ impl RebornRuntimeStores {
             .await
             .map_err(|error| error.to_string())?;
         let paired_user = match outcome {
-            ironclaw_extension_host::reborn::channel_pairing::ChannelPairingConsumeOutcome::Paired {
+            ironclaw_extension_host::channel_pairing::ChannelPairingConsumeOutcome::Paired {
                 user_id,
             }
-            | ironclaw_extension_host::reborn::channel_pairing::ChannelPairingConsumeOutcome::AlreadyPairedSameUser {
+            | ironclaw_extension_host::channel_pairing::ChannelPairingConsumeOutcome::AlreadyPairedSameUser {
                 user_id,
             } => Some(user_id),
-            ironclaw_extension_host::reborn::channel_pairing::ChannelPairingConsumeOutcome::AlreadyBoundToOtherUser
-            | ironclaw_extension_host::reborn::channel_pairing::ChannelPairingConsumeOutcome::ExpiredOrUnknown => None,
+            ironclaw_extension_host::channel_pairing::ChannelPairingConsumeOutcome::AlreadyBoundToOtherUser
+            | ironclaw_extension_host::channel_pairing::ChannelPairingConsumeOutcome::ExpiredOrUnknown => None,
         };
         if let Some(user_id) = paired_user.as_ref() {
             let (turn_coordinator, turn_state, tenant_id) = turn_world;
@@ -350,8 +350,7 @@ impl RebornRuntimeStores {
     pub(crate) fn start_channel_host_assembly_for_test(
         &self,
         wiring: ChannelHostAssemblyTestWiring,
-    ) -> Option<Arc<ironclaw_extension_host::reborn::channel_host::GenericChannelHostAssembly>>
-    {
+    ) -> Option<Arc<ironclaw_extension_host::channel_host::GenericChannelHostAssembly>> {
         self.start_channel_host_assembly(ChannelHostAssemblyWiring {
             thread_service: wiring.thread_service,
             turn_coordinator: wiring.turn_coordinator,
@@ -645,9 +644,7 @@ impl RebornRuntimeStores {
             return false;
         };
         bridges.register(Arc::new(
-            ironclaw_extension_host::reborn::channel_egress::StaticChannelEgressCredentials::new(
-                entries,
-            ),
+            ironclaw_extension_host::channel_egress::StaticChannelEgressCredentials::new(entries),
         ));
         true
     }

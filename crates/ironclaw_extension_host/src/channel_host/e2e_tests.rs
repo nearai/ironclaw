@@ -90,11 +90,11 @@ use super::{
     ChannelExtras, ChannelHostDeliveryDeps, ChannelHostIdentity,
     FilesystemChannelWorkflowStateFactory, GenericChannelHostAssembly, GenericChannelHostDeps,
 };
-use crate::reborn::extension_ingress::{
+use crate::extension_ingress::{
     ExtensionIngressParts, InboundPayloadClassifier, PostAdmissionObserver,
     build_extension_ingress, extension_ingress_route_mount,
 };
-use crate::reborn::run_delivery_ports::ProductAuthBlockedAuthPromptSource;
+use crate::run_delivery_ports::ProductAuthBlockedAuthPromptSource;
 use ironclaw_extension_host::{
     AdminConfigurationService, ChannelConfigReactivation, ChannelConfigService,
     FilesystemAdminConfigurationStore,
@@ -500,8 +500,7 @@ fn slack_gate_reply_classifier() -> Arc<InboundPayloadClassifier> {
 /// the REAL slack manifest is installed into a durable installation store
 /// and the ingress verification secret is saved under its manifest handle.
 async fn configured_channel_config() -> Arc<ChannelConfigService> {
-    let installation_store =
-        Arc::new(crate::reborn::filesystem_installation_store_for_test().await);
+    let installation_store = Arc::new(crate::filesystem_installation_store_for_test().await);
     let record = ExtensionManifestRecord::from_toml(
         slack_manifest_from_bundled_inventory(),
         ManifestSource::HostBundled,
@@ -3961,11 +3960,11 @@ async fn slack_approval_then_auth_resume_completes_without_second_approval() {
 
 // ─── Generic outbound-delivery targets + generic triggered hook (P6 c-rest) ─
 
-use crate::reborn::channel_outbound_targets::{
+use crate::channel_outbound_targets::{
     ChannelOutboundTargetIdentity, GenericChannelOutboundTargetDeps,
     GenericChannelOutboundTargetProvider,
 };
-use crate::reborn::channel_triggered_delivery::GenericTriggeredRunDeliveryHook;
+use crate::channel_triggered_delivery::GenericTriggeredRunDeliveryHook;
 use ironclaw_extension_host::{FilesystemChannelDmTargetStore, dm_target_payload};
 use ironclaw_outbound::OutboundDeliveryTargetProvider;
 use ironclaw_outbound::{OutboundDeliveryTargetScope, TriggeredRunDeliveryStore};
@@ -4313,7 +4312,7 @@ async fn generic_triggered_hook_routes_fire_to_the_owning_extension_driver() {
         prompt: "generic triggered delivery".to_string(),
         delivery_target: None,
     };
-    use crate::reborn::channel_triggered_delivery::PostSubmitDeliveryHook as _;
+    use crate::channel_triggered_delivery::PostSubmitDeliveryHook as _;
     hook.on_trigger_submitted(fire, blocked_run_id, foreign_run_scope())
         .await;
 
@@ -4465,7 +4464,7 @@ async fn generic_triggered_hook_honors_per_trigger_target_without_global_default
             ironclaw_triggers::TriggerDeliveryTargetId::new(target_id).expect("target id"),
         ),
     };
-    use crate::reborn::channel_triggered_delivery::PostSubmitDeliveryHook as _;
+    use crate::channel_triggered_delivery::PostSubmitDeliveryHook as _;
     hook.on_trigger_submitted(fire, run_id, scope).await;
 
     for _ in 0..200 {

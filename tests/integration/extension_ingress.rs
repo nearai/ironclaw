@@ -30,7 +30,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
-use ironclaw_extension_host::reborn::extension_ingress::{
+use ironclaw_extension_host::extension_ingress::{
     ChannelInboundSinkConfig, ChannelIngressDrain, ChannelIngressRegistration,
     ExtensionIngressParts, GenericChannelInboundSink, PostAdmissionObserver, StaticIngressSecrets,
     VerifiedEvidenceMint, extension_ingress_route_mount,

@@ -33,7 +33,7 @@ use ironclaw_product::{
 };
 use tokio::task::JoinSet;
 
-use crate::reborn::channel_pairing::ChannelPairingConsumeOutcome;
+use crate::channel_pairing::ChannelPairingConsumeOutcome;
 
 /// Fixed host route paths inside the extension ingress namespace
 /// (`/webhooks/extensions/…`). An extension whose canonical route collides
@@ -331,7 +331,7 @@ pub struct ChannelInboundSinkConfig {
 
 #[derive(Clone)]
 pub enum ChannelPairingOutcomeObserver {
-    RunDelivery(Arc<crate::reborn::channel_host::RunDeliveryPostAdmissionObserver>),
+    RunDelivery(Arc<crate::channel_host::RunDeliveryPostAdmissionObserver>),
     #[cfg(test)]
     Recording(Arc<std::sync::Mutex<Vec<ChannelPairingConsumeOutcome>>>),
 }
@@ -792,7 +792,7 @@ mod tests {
     use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
 
     use super::*;
-    use crate::reborn::channel_pairing::ChannelPairingConsumeOutcome;
+    use crate::channel_pairing::ChannelPairingConsumeOutcome;
 
     struct CountingSurface {
         submissions: AtomicUsize,

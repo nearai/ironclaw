@@ -23,7 +23,7 @@ use ironclaw_product::{
 use tokio::sync::Notify;
 
 use super::*;
-use crate::reborn::extension_ingress::{
+use crate::extension_ingress::{
     ChannelInboundSinkConfig, ChannelIngressDrain, ChannelPairingInterception,
     ChannelPairingInterceptor, ChannelPairingOutcomeObserver, GenericChannelInboundSink,
     VerifiedEvidenceMint,

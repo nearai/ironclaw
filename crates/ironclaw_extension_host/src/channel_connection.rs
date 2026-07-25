@@ -176,7 +176,7 @@ pub struct GenericChannelConnectionService {
     /// Pairing services for `WebGeneratedCode` channels: their connected
     /// state and disconnect semantics (codes + DM target + conversation-actor
     /// cleanup) are owned by the pairing service, not the OAuth lane.
-    channel_pairing: Option<Arc<crate::reborn::channel_pairing::ChannelPairingRegistry>>,
+    channel_pairing: Option<Arc<crate::channel_pairing::ChannelPairingRegistry>>,
 }
 
 impl GenericChannelConnectionService {
@@ -191,7 +191,7 @@ impl GenericChannelConnectionService {
         credential_cleanup: Option<Arc<dyn ChannelCredentialCleanup>>,
         account_status_reader: Option<Arc<dyn ChannelAccountStatusReader>>,
         dm_target_store: Option<Arc<FilesystemChannelDmTargetStore>>,
-        channel_pairing: Option<Arc<crate::reborn::channel_pairing::ChannelPairingRegistry>>,
+        channel_pairing: Option<Arc<crate::channel_pairing::ChannelPairingRegistry>>,
     ) -> Self {
         Self {
             tenant_id,
@@ -209,7 +209,7 @@ impl GenericChannelConnectionService {
     fn pairing_service_for(
         &self,
         extension_id: &str,
-    ) -> Option<Arc<crate::reborn::channel_pairing::ChannelPairingService>> {
+    ) -> Option<Arc<crate::channel_pairing::ChannelPairingService>> {
         self.channel_pairing
             .as_ref()
             .and_then(|registry| registry.get(extension_id))
@@ -991,8 +991,7 @@ account_id = "/authed_user/id"
 team_id = "/team/id"
 "#;
 
-        let installation_store =
-            Arc::new(crate::reborn::filesystem_installation_store_for_test().await);
+        let installation_store = Arc::new(crate::filesystem_installation_store_for_test().await);
         let record = ExtensionManifestRecord::from_toml(
             DISCOVERED_FIXTURE_MANIFEST,
             ManifestSource::HostBundled,
@@ -1138,8 +1137,7 @@ credential_handle = "pairchat_bot_token"
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 "#;
 
-        let installation_store =
-            Arc::new(crate::reborn::filesystem_installation_store_for_test().await);
+        let installation_store = Arc::new(crate::filesystem_installation_store_for_test().await);
         let record = ExtensionManifestRecord::from_toml(
             PAIRING_CHANNEL_MANIFEST,
             ManifestSource::HostBundled,

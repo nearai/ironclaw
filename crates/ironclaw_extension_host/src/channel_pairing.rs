@@ -1083,13 +1083,13 @@ fn candidate_code<'a>(text: &'a str, inbound_code_prefixes: &[String]) -> Option
 }
 
 #[async_trait]
-impl crate::reborn::extension_ingress::ChannelPairingInterceptor for ChannelPairingService {
+impl crate::extension_ingress::ChannelPairingInterceptor for ChannelPairingService {
     async fn intercept(
         &self,
         installation_id: &AdapterInstallationId,
         message: &ironclaw_product::NormalizedInboundMessage,
-    ) -> crate::reborn::extension_ingress::ChannelPairingInterception {
-        use crate::reborn::extension_ingress::ChannelPairingInterception;
+    ) -> crate::extension_ingress::ChannelPairingInterception {
+        use crate::extension_ingress::ChannelPairingInterception;
 
         if message.trigger != ironclaw_product::ProductTriggerReason::DirectChat {
             return ChannelPairingInterception::NotHandled;

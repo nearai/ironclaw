@@ -486,7 +486,7 @@ app_id = "/app_id"
     const FIXTURE_INSTALLATION_ID: &str = "acmechat-install-1";
 
     async fn installed_fixture_store() -> Arc<ExtensionInstallationStore> {
-        let store = Arc::new(crate::reborn::filesystem_installation_store_for_test().await);
+        let store = Arc::new(crate::filesystem_installation_store_for_test().await);
         let record = ExtensionManifestRecord::from_toml(
             CHANNEL_AUTH_FIXTURE_MANIFEST,
             ManifestSource::HostBundled,

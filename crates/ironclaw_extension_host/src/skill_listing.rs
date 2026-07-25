@@ -1,12 +1,12 @@
 use std::collections::HashSet;
 
-use ironclaw_skills::{ManagedSkillSource, SkillManagementError, SkillManagementErrorKind};
+use ironclaw_skills::{
+    ManagedSkillSource, ScopedSkillManagementBuildError, ScopedSkillManagementError,
+    SkillManagementError, SkillManagementErrorKind, build_existing_local_dev_skill_management_port,
+};
 
 use crate::RebornBuildError;
-use crate::reborn::bundled_skills::bundled_reborn_skill_summaries;
-use crate::reborn::lifecycle::{
-    RebornLocalSkillManagementError, build_existing_local_dev_skill_management_port,
-};
+use crate::bundled_skills::bundled_reborn_skill_summaries;
 
 pub async fn list_reborn_local_skills(
     owner_id: impl Into<String>,
@@ -55,6 +55,8 @@ pub async fn list_reborn_local_skills(
 pub enum RebornSkillListError {
     #[error(transparent)]
     Build(#[from] RebornBuildError),
+    #[error(transparent)]
+    SkillBuild(#[from] ScopedSkillManagementBuildError),
     #[error("skill list request rejected: {reason}")]
     InvalidRequest { reason: String },
     #[error("skill list access denied")]
@@ -63,14 +65,12 @@ pub enum RebornSkillListError {
     Unavailable { reason: String },
 }
 
-fn map_local_skill_management_error(
-    error: RebornLocalSkillManagementError,
-) -> RebornSkillListError {
+fn map_local_skill_management_error(error: ScopedSkillManagementError) -> RebornSkillListError {
     match error {
-        RebornLocalSkillManagementError::InvalidContext { reason } => {
+        ScopedSkillManagementError::InvalidContext { reason } => {
             RebornSkillListError::InvalidRequest { reason }
         }
-        RebornLocalSkillManagementError::Skill(error) => map_skill_management_error(error),
+        ScopedSkillManagementError::Skill(error) => map_skill_management_error(error),
     }
 }
 
@@ -156,7 +156,9 @@ mod tests {
         assert!(
             matches!(
                 error,
-                RebornSkillListError::Build(RebornBuildError::InvalidConfig { .. })
+                RebornSkillListError::SkillBuild(
+                    ScopedSkillManagementBuildError::InvalidConfig { .. }
+                )
             ),
             "unexpected error: {error}"
         );
@@ -180,7 +182,9 @@ mod tests {
         assert!(
             matches!(
                 error,
-                RebornSkillListError::Build(RebornBuildError::InvalidConfig { .. })
+                RebornSkillListError::SkillBuild(
+                    ScopedSkillManagementBuildError::InvalidConfig { .. }
+                )
             ),
             "unexpected error: {error}"
         );
