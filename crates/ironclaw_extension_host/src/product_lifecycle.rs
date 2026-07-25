@@ -493,11 +493,6 @@ impl ExtensionLifecycleManager {
         self
     }
 
-    #[allow(dead_code)]
-    pub fn account_setup_registry(&self) -> ExtensionAccountSetupRegistry {
-        self.account_setups.clone()
-    }
-
     pub fn with_removal_cleanup_registry(
         mut self,
         removal_cleanup: Arc<ExtensionRemovalCleanupRegistry>,

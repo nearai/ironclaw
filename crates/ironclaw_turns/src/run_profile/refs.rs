@@ -12,16 +12,9 @@ macro_rules! profile_ref {
                 Ok(Self(value))
             }
 
-            #[allow(dead_code)]
             pub(crate) fn from_trusted_static(value: &'static str) -> Self {
                 debug_assert!(validate_profile_ref($kind, value).is_ok());
                 Self(value.to_string())
-            }
-
-            #[allow(dead_code)]
-            pub(crate) fn from_trusted_string(value: String) -> Self {
-                debug_assert!(validate_profile_ref($kind, &value).is_ok());
-                Self(value)
             }
 
             pub fn as_str(&self) -> &str {
@@ -63,6 +56,13 @@ profile_ref!(ResourceBudgetTier, "resource_budget_tier");
 profile_ref!(RunProfileFingerprint, "run_profile_fingerprint");
 profile_ref!(RunProfileSourceLayer, "run_profile_source_layer");
 profile_ref!(RunProfileSourceRef, "run_profile_source_ref");
+
+impl RunProfileFingerprint {
+    pub(crate) fn from_trusted_string(value: String) -> Self {
+        debug_assert!(validate_profile_ref("run_profile_fingerprint", &value).is_ok());
+        Self(value)
+    }
+}
 
 impl ResourceBudgetTier {
     /// The privileged high-budget tier: runs requesting it are clamped to
