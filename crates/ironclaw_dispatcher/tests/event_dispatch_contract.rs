@@ -115,6 +115,55 @@ async fn dispatcher_marks_loop_dispatch_events_with_parent_run() {
     );
 }
 
+/// A process-backed loop invocation gets no parent lineage, so its events stay
+/// out of the top-level run projection.
+///
+/// This is the discriminating half of the `process_id.is_none()` guard added in
+/// #6636. Every other test in this file leaves `process_id` unset, so deleting
+/// that guard changed nothing any assertion looked at — and without lineage
+/// suppression a recovered tool failure resurfaces as a generic failed-run card
+/// in the WebUI, which is the bug #6636 fixed.
+#[tokio::test]
+async fn dispatcher_omits_parent_run_for_process_backed_loop_dispatch() {
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let events = InMemoryEventSink::new();
+    let resolver = ScriptedResolver::from_entries([(
+        "echo-wasm.say",
+        resolved_echo("echo-wasm", RuntimeKind::Wasm, &governor),
+    )]);
+    let dispatcher = RuntimeDispatcher::new(&resolver, governor.as_ref()).with_event_sink(&events);
+
+    dispatcher
+        .dispatch_json(loop_run_request_in_process(
+            RunId::new(),
+            ProcessId::new(),
+            "echo-wasm.say",
+            json!({"message": "process dispatch"}),
+        ))
+        .await
+        .unwrap();
+
+    let recorded = events.events();
+    assert_eq!(
+        recorded.iter().map(|event| event.kind).collect::<Vec<_>>(),
+        vec![
+            RuntimeEventKind::DispatchRequested,
+            RuntimeEventKind::RuntimeSelected,
+            RuntimeEventKind::DispatchSucceeded,
+        ]
+    );
+    assert!(
+        recorded
+            .iter()
+            .all(|event| event.parent_invocation_id.is_none()),
+        "process-backed loop dispatch must not inherit run lineage, got {:?}",
+        recorded
+            .iter()
+            .map(|event| event.parent_invocation_id)
+            .collect::<Vec<_>>()
+    );
+}
+
 #[tokio::test]
 async fn dispatcher_marks_loop_dispatch_failure_events_with_parent_run() {
     let governor = Arc::new(InMemoryResourceGovernor::new());
@@ -461,6 +510,13 @@ where
 }
 
 fn authorized(request: CapabilityDispatchRequest) -> Authorized {
+    authorized_in_process(request, None)
+}
+
+fn authorized_in_process(
+    request: CapabilityDispatchRequest,
+    process_id: Option<ProcessId>,
+) -> Authorized {
     let lane = match request.capability_id.as_str() {
         id if id.contains("mcp") => RuntimeLane::Mcp,
         id if id.contains("script") => RuntimeLane::Process,
@@ -482,7 +538,7 @@ fn authorized(request: CapabilityDispatchRequest) -> Authorized {
             .unwrap_or_else(|| InvocationOrigin::Product(ProductKind::new("test").unwrap())),
         estimate: request.estimate,
         correlation_id: CorrelationId::new(),
-        process_id: None,
+        process_id,
         parent_process_id: None,
     };
     Authorized::seal_for_test_with_mounts(
@@ -510,6 +566,32 @@ fn sample_request(capability_id: &str, input: Value) -> Authorized {
         resource_reservation: None,
         input,
     })
+}
+
+fn loop_run_request_in_process(
+    run_id: RunId,
+    process_id: ProcessId,
+    capability_id: &str,
+    input: Value,
+) -> Authorized {
+    authorized_in_process(
+        CapabilityDispatchRequest {
+            run_id: Some(run_id),
+            origin: InvocationOrigin::LoopRun(run_id),
+            capability_id: CapabilityId::new(capability_id).unwrap(),
+            scope: sample_scope(),
+            authenticated_actor_user_id: None,
+            estimate: ResourceEstimate {
+                concurrency_slots: Some(1),
+                output_bytes: Some(10_000),
+                ..ResourceEstimate::default()
+            },
+            mounts: None,
+            resource_reservation: None,
+            input,
+        },
+        Some(process_id),
+    )
 }
 
 fn loop_run_request(run_id: RunId, capability_id: &str, input: Value) -> Authorized {
