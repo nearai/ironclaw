@@ -24,7 +24,7 @@ and `ironclaw_filesystem` (the durable substrate). It must never reach upstream
 legacy enclave. This is machine-enforced: `reborn_crate_dependency_boundaries_hold`
 in `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs` allows
 exactly those two edges. The only external consumer is
-`ironclaw_reborn_composition`, which re-exports a curated subset via its facade.
+`ironclaw_reborn_composition`, which re-exports a curated subset via its service.
 
 ## Canonical key
 
@@ -102,12 +102,12 @@ stack; the boundary tests still allow no new edge).
 - `record_last_login` — sets `last_login_at` only; deliberately does **not** bump
   `updated_at`, which tracks profile edits rather than login activity.
 - `delete_user` — **cascades** (see invariant 5 below).
-- `count_active_admins` — supports last-admin protection in the facade.
+- `count_active_admins` — supports last-admin protection in the service.
 
 A malformed persisted `user_id` / `created_by` / `tenant_id` surfaces
 `InvalidUserId` / `Backend` on read-back (a backend inconsistency, never
 silently dropped); a mutation of an absent user surfaces `UserNotFound` so the
-facade can map it to a 404.
+service can map it to a 404.
 
 ## Invariants (and where each is enforced)
 

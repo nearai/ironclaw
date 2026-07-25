@@ -124,7 +124,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_SEND_MESSAGE,
@@ -158,7 +158,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_GET_TIMELINE,
@@ -226,7 +226,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_STREAM_EVENTS,
@@ -345,7 +345,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_PAUSE_AUTOMATION,
@@ -362,7 +362,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_RESUME_AUTOMATION,
@@ -379,7 +379,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_RENAME_AUTOMATION,
@@ -396,7 +396,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_DELETE_AUTOMATION,
@@ -413,7 +413,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_TRACE_CREDITS,
@@ -430,7 +430,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_TRACE_ACCOUNT_TRACES,
@@ -447,7 +447,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_TRACE_ACCOUNT_LOGIN_LINK,
@@ -464,7 +464,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_TRACE_HOLD_AUTHORIZE,
@@ -481,7 +481,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_GET_OUTBOUND_PREFERENCES,
@@ -498,7 +498,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_SET_OUTBOUND_PREFERENCES,
@@ -515,7 +515,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_LIST_OUTBOUND_DELIVERY_TARGETS,
@@ -532,7 +532,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_LIST_EXTENSIONS,
@@ -583,7 +583,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_INSTALL_EXTENSION,
@@ -600,7 +600,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_REMOVE_EXTENSION,
@@ -617,7 +617,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_GET_EXTENSION_SETUP,
@@ -651,7 +651,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_LIST_SKILLS,
@@ -685,7 +685,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_INSTALL_SKILL,
@@ -702,7 +702,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_GET_SKILL,
@@ -719,7 +719,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_UPDATE_SKILL,
@@ -736,7 +736,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_REMOVE_SKILL,
@@ -753,7 +753,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_SET_SKILL_AUTO_ACTIVATE,
@@ -770,7 +770,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_SET_AUTO_ACTIVATE_LEARNED,
@@ -787,7 +787,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_LIST_SETTINGS_TOOLS,
@@ -821,7 +821,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_SET_SETTINGS_TOOL_PERMISSION,
@@ -838,7 +838,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_GET_LLM_CONFIG,
@@ -872,7 +872,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_DELETE_LLM_PROVIDER,
@@ -889,7 +889,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_SET_ACTIVE_LLM,
@@ -906,7 +906,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_TEST_LLM_CONNECTION,
@@ -923,7 +923,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_LIST_LLM_MODELS,
@@ -940,7 +940,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_START_NEARAI_LOGIN,
@@ -957,7 +957,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_COMPLETE_NEARAI_WALLET_LOGIN,
@@ -974,7 +974,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_START_CODEX_LOGIN,
@@ -991,7 +991,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_OPERATOR_GET_SETUP,
@@ -1025,7 +1025,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_OPERATOR_LIST_CONFIG,
@@ -1076,7 +1076,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_OPERATOR_VALIDATE_CONFIG,
@@ -1093,7 +1093,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_OPERATOR_DIAGNOSTICS,
@@ -1161,7 +1161,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_OPERATOR_LIST_EXTENSION_CONFIGURATION,
@@ -1195,7 +1195,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_LIST_PROJECT_FILES,
@@ -1212,7 +1212,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_STAT_PROJECT_FILE,
@@ -1229,7 +1229,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_READ_PROJECT_FILE,
@@ -1246,7 +1246,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_LIST_FS_MOUNTS,
@@ -1263,7 +1263,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_LIST_PROJECTS,
@@ -1280,7 +1280,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_BROWSE_FS_DIR,
@@ -1297,7 +1297,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_CREATE_PROJECT,
@@ -1314,7 +1314,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_GET_PROJECT,
@@ -1331,7 +1331,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_STAT_FS_PATH,
@@ -1348,7 +1348,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_UPDATE_PROJECT,
@@ -1365,7 +1365,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_DELETE_PROJECT,
@@ -1382,7 +1382,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_LIST_PROJECT_MEMBERS,
@@ -1399,7 +1399,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_READ_FS_FILE,
@@ -1416,7 +1416,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_ADD_PROJECT_MEMBER,
@@ -1433,7 +1433,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_UPDATE_PROJECT_MEMBER,
@@ -1450,7 +1450,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_REMOVE_PROJECT_MEMBER,
@@ -1467,7 +1467,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_ADMIN_LIST_USERS,
@@ -1484,7 +1484,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_ADMIN_CREATE_USER,
@@ -1501,7 +1501,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_ADMIN_GET_USER,
@@ -1518,7 +1518,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_ADMIN_UPDATE_USER,
@@ -1535,7 +1535,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_ADMIN_DELETE_USER,
@@ -1552,7 +1552,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_ADMIN_SET_USER_STATUS,
@@ -1569,7 +1569,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_ADMIN_SET_USER_ROLE,
@@ -1586,7 +1586,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_ADMIN_LIST_USER_SECRETS,
@@ -1603,7 +1603,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_ADMIN_PUT_USER_SECRET,
@@ -1620,7 +1620,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_ADMIN_DELETE_USER_SECRET,
@@ -1637,7 +1637,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         },
     ]
 }

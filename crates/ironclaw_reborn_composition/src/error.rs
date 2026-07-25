@@ -90,7 +90,7 @@ mod tests {
     use super::RebornBuildError;
 
     #[test]
-    fn composition_missing_secret_master_key_stays_typed_for_facade_errors() {
+    fn composition_missing_secret_master_key_stays_typed_for_service_errors() {
         let error = RebornBuildError::from(crate::RebornCompositionError::MissingSecretMasterKey);
 
         assert!(matches!(error, RebornBuildError::MissingSecretMasterKey));

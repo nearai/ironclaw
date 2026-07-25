@@ -106,11 +106,11 @@ impl<F: RootFilesystem> LoopAttachmentReadPort for ProjectScopedAttachmentReader
     }
 }
 
-/// Read counterpart wired into the WebUI facade so the bytes endpoint can serve
+/// Read counterpart wired into the product surface so the bytes endpoint can serve
 /// image thumbnails. It reuses the loop read port — the same bounded,
 /// `MountView`-re-scoped read — and translates the scope and error taxonomy to
-/// the facade's surface. A missing/oversized/forbidden read becomes a sanitized
-/// facade error rather than leaking a host path or backend string.
+/// the product API surface. A missing/oversized/forbidden read becomes a sanitized
+/// product error rather than leaking a host path or backend string.
 #[async_trait]
 impl<F: RootFilesystem> InboundAttachmentReader for ProjectScopedAttachmentReader<F> {
     async fn read(

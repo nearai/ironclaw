@@ -5,14 +5,16 @@ use std::time::Duration;
 use std::{future::Future, thread};
 
 use anyhow::Context;
+use ironclaw_extension_host::FirstPartyPackageBundle;
+use ironclaw_operator::OperatorLogLayer;
+use ironclaw_operator::llm_admin::nearai_mcp::nearai_mcp_bootstrap_config_from_env;
 use ironclaw_reborn_composition::TriggerFireAccessPolicy;
 use ironclaw_reborn_composition::host_api::{AgentId, TenantId, UserId};
 use ironclaw_reborn_composition::hosted_single_tenant_runtime_policy;
 use ironclaw_reborn_composition::{
-    FirstPartyPackageBundle, KeepaliveSweepSettings, OAuthClientConfig, OperatorLogLayer,
-    PollSettings, RebornCompositionProfile, RebornHostBindings, RebornRuntimeIdentity,
-    RebornRuntimeInput, RebornRuntimeProfileOptions, TurnRunnerSettings, build_reborn_runtime,
-    local_runtime_build_input_with_options, nearai_mcp_bootstrap_config_from_env,
+    KeepaliveSweepSettings, OAuthClientConfig, PollSettings, RebornCompositionProfile,
+    RebornHostBindings, RebornRuntimeIdentity, RebornRuntimeInput, RebornRuntimeProfileOptions,
+    TurnRunnerSettings, build_reborn_runtime, local_runtime_build_input_with_options,
 };
 use ironclaw_reborn_config::{
     REBORN_PROFILE_ENV, RebornBootConfig, RebornProfile, seed_default_config_file_if_missing,
@@ -482,16 +484,18 @@ fn resolve_reborn_runtime_llm_with_stored_key_fallback(
     config: &RebornBootConfig,
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
     caller: RuntimeInputCaller,
-) -> anyhow::Result<Option<ironclaw_reborn_composition::ResolvedRebornLlm>> {
-    let error = match ironclaw_reborn_composition::resolve_reborn_runtime_llm(config, config_file) {
+) -> anyhow::Result<Option<ironclaw_operator::ResolvedRebornLlm>> {
+    let error = match ironclaw_operator::resolve_reborn_runtime_llm(config, config_file) {
         Ok(resolved) => return Ok(resolved),
         Err(error) => error,
     };
     if caller != RuntimeInputCaller::Serve {
         return Err(error.into());
     }
-    let ironclaw_reborn_composition::RebornLlmCatalogError::ApiKeyEnvUnset { ref provider, .. } =
-        error
+    let ironclaw_operator::llm_admin::llm_catalog::RebornLlmCatalogError::ApiKeyEnvUnset {
+        ref provider,
+        ..
+    } = error
     else {
         return Err(error.into());
     };
@@ -513,7 +517,7 @@ fn resolve_reborn_runtime_llm_with_stored_key_fallback(
         let store = ironclaw_reborn_composition::open_local_dev_secret_store(&runtime_storage_root)
             .await
             .map_err(anyhow::Error::from)?;
-        ironclaw_reborn_composition::LlmKeyStore::new(store)
+        ironclaw_operator::LlmKeyStore::new(store)
             .exists(&provider_id)
             .await
             .map_err(anyhow::Error::from)
@@ -521,11 +525,11 @@ fn resolve_reborn_runtime_llm_with_stored_key_fallback(
     if !has_stored_key {
         return Err(error.into());
     }
-    ironclaw_reborn_composition::resolve_llm_selection_allow_missing_key(
+    ironclaw_operator::llm_admin::llm_catalog::resolve_llm_selection_allow_missing_key(
         selection,
         Some(config.home().providers_file_path().as_path()),
     )
-    .map(ironclaw_reborn_composition::ResolvedRebornLlm::from_llm_config)
+    .map(ironclaw_operator::ResolvedRebornLlm::from_llm_config)
     .map(Some)
     .map_err(Into::into)
 }
@@ -690,6 +694,44 @@ pub(crate) fn build_services_input_with_options(
     let tenant_id = TenantId::new(identity.tenant_id).context("invalid runtime tenant identity")?;
     let agent_id = AgentId::new(identity.agent_id).context("invalid runtime agent identity")?;
     services_input = services_input.with_local_runtime_identity(tenant_id, agent_id);
+
+    // Resolve the memory profile binding from the `[memory]` config section +
+    // deployment profile and attach it (issue #3537). Fail-closed: a production
+    // deployment that binds a required memory profile to `memory.disabled` or an
+    // unverified third-party extension without an admin override fails startup
+    // here, before the runtime is built.
+    let memory_binding_policy = ironclaw_reborn_composition::resolve_memory_binding_policy(
+        config_file.as_ref().and_then(|file| file.memory.as_ref()),
+        composition_profile(profile),
+    )?;
+    for diagnostic in
+        ironclaw_reborn_composition::memory_binding_diagnostics(&memory_binding_policy)
+    {
+        // `debug!` (not `info!`/`warn!`) so the REPL/TUI display is not corrupted.
+        tracing::debug!(target: "ironclaw_reborn", "{diagnostic}");
+    }
+    services_input = services_input.with_memory_binding_policy(memory_binding_policy);
+
+    // Connection settings for a third-party memory provider (issue #5264), read
+    // the same way the embedding providers read theirs: base URL from the
+    // `[memory]` config section or the `MEMORY_MEM0_BASE_URL` env override. There
+    // is NO default — mem0 stays off unless an operator both binds it (the binding
+    // policy owns selection) AND supplies a base URL; a bound-but-unconfigured
+    // mem0 fails closed in the factory. The API key is OPTIONAL (a self-hosted
+    // server with `AUTH_DISABLED=true` needs none) and, when set, comes as a
+    // secret from `MEMORY_MEM0_API_KEY`. Inert unless a binding selects mem0.
+    let mem0_base_url = optional_nonempty_env("MEMORY_MEM0_BASE_URL").or_else(|| {
+        config_file
+            .as_ref()
+            .and_then(|file| file.memory.as_ref())
+            .and_then(|memory| memory.mem0_base_url.clone())
+    });
+    let memory_provider_connection = ironclaw_reborn_composition::Mem0ConnectionConfig {
+        base_url: mem0_base_url,
+        api_key: optional_nonempty_env("MEMORY_MEM0_API_KEY").map(SecretString::from),
+        app_id: optional_nonempty_env("MEMORY_MEM0_APP_ID"),
+    };
+    services_input = services_input.with_memory_provider_connection(memory_provider_connection);
 
     Ok(RuntimeServicesInput {
         services_input,
@@ -1064,9 +1106,15 @@ fn resolve_google_oauth_config(
     }
 }
 
-/// Read an env var with lenient presence semantics: unset OR
-/// present-but-blank both collapse to `None`. Used for optional-config
-/// callers (OAuth client overrides, etc.) where a blank slot is benign.
+/// Read an env var with lenient presence semantics: unset OR present-but-blank
+/// both collapse to `Ok(None)`. Used for optional-config callers (the memory
+/// provider connection knobs, OAuth client overrides, etc.) where a blank slot is
+/// benign.
+///
+/// Fail-loud on the one case that is NOT benign: a value that is present but
+/// holds non-UTF-8 bytes is a hard error rather than being silently dropped (the
+/// repo fail-loud convention — `std::env::var(..).ok()` would collapse
+/// `VarError::NotUnicode` to `None` and hide the misconfiguration).
 ///
 /// **Not** for operator-control knobs like `IRONCLAW_TRIGGER_POLLER_*` —
 /// those use a strict-presence variant in the `trigger_poller` submodule,

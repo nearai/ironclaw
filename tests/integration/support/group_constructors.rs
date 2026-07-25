@@ -200,7 +200,7 @@ impl RebornIntegrationGroup {
     }
 
     /// Group surfacing the two synthetic `outbound_delivery_*` capabilities over
-    /// an injected facade double (C-SYNTH outbound seam). `target_set` requires
+    /// an injected service double (C-SYNTH outbound seam). `target_set` requires
     /// approval; global auto-approve defaults ON so the happy/`NotFound` arms
     /// dispatch through `Allow`. The approval-gate arm disables auto-approve
     /// per-test with `disable_auto_approve`; the deny arm persists a `Disabled`
@@ -336,12 +336,12 @@ impl RebornIntegrationGroupBuilder {
         let profile = profile_for_user(subject_user.as_str())?;
         let host_runtime = build_group_capability_with_base(profile, &base).await?;
         // C-SLACK-LIFECYCLE (issue #6105): wire the REAL generic
-        // channel-connection facade over this harness's own `RebornServices`,
+        // channel-connection service over this harness's own `RebornServices`,
         // mirroring the production `build_reborn_runtime` slot fill — so
         // `builtin.extension_remove` of a channel extension runs the real
-        // per-caller disconnect instead of skipping it on an empty facade
+        // per-caller disconnect instead of skipping it on an empty service
         // slot. Identities come from the group's single-source dispatch scope
-        // so the facade's tenant check matches dispatch-time callers.
+        // so the service's tenant check matches dispatch-time callers.
         let scope = &base.product_harness.scope;
         let channel_connection =
             ironclaw_reborn_composition::test_support::build_channel_connection_for_test(
@@ -372,7 +372,7 @@ impl RebornIntegrationGroupBuilder {
         // declares a channel surface backed by an auth vendor, so
         // `builtin.extension_remove` fail-closes on an empty channel
         // disconnect slot once removal runs under an authenticated actor.
-        // Wire the real generic facade over this harness's own
+        // Wire the real generic service over this harness's own
         // `RebornServices`, keyed to the group's dispatch scope.
         let scope = &base.product_harness.scope;
         let channel_connection =
@@ -397,9 +397,6 @@ impl RebornIntegrationGroupBuilder {
     /// Build a delivery-proof group. See
     /// [`RebornIntegrationGroup::extension_delivery`].
     pub async fn extension_delivery(mut self) -> HarnessResult<RebornIntegrationGroup> {
-        self.run_delivery_events = Some(Arc::new(
-            ironclaw_product::RunDeliveryEventRouter::new_ephemeral_for_test(),
-        ));
         let base = self.build_base().await?;
         let host_runtime = build_group_capability_with_base(
             super::super::harness::profiles::extension::extension_delivery_tools_profile()?,

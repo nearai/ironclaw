@@ -4,7 +4,7 @@
 //!
 //! Per the issue #4116 acceptance criteria — "session use on a
 //! protected WebChat v2 route" — this test composes the full
-//! `webui_v2_app` (`ironclaw_reborn_composition`) with:
+//! `webui_v2_app` with:
 //!
 //! - the OAuth public router from `webui_v2_auth_router` (mints
 //!   sessions),
@@ -15,7 +15,7 @@
 //!
 //! The chain it locks: OAuth callback → SignedTokenSessionStore::create_session
 //! → one-time `login_ticket` exchange → SessionAuthenticator → v2
-//! route handler → facade call. A regression that loses any link
+//! route handler → service call. A regression that loses any link
 //! (e.g. store mismatch, bearer exchange drift, missing user_id
 //! stamp) would break exactly the path users hit when they sign in
 //! with Google.
@@ -37,7 +37,6 @@ use ironclaw_host_api::{
     ThreadId, UserId,
 };
 use ironclaw_product::RebornCreateThreadResponse;
-use ironclaw_reborn_composition::{RebornReadiness, RebornWebuiBundle};
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use ironclaw_webui::{
     EmailUserDirectory, OAuthProvider, OAuthProviderName, OAuthRouterConfig, OAuthUserProfile,
@@ -53,7 +52,7 @@ const TENANT: &str = "tenant-a";
 const AGENT: &str = "agent-default";
 const PROJECT: &str = "project-default";
 
-// ─── stub facade ──────────────────────────────────────────────────────
+// ─── stub service ──────────────────────────────────────────────────────
 
 /// `ProductSurface` stub — only `create_thread` returns Ok with a
 /// fake thread (the protected route this test exercises). Every
@@ -206,11 +205,6 @@ fn build_app() -> (
     );
 
     let services = Arc::new(StubServices::default());
-    let bundle = RebornWebuiBundle {
-        product_surface: services.clone(),
-        product_auth: None,
-        readiness: RebornReadiness::disabled(),
-    };
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         bearer_authenticator,
@@ -219,7 +213,7 @@ fn build_app() -> (
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
     .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
     .with_public_route_mount(oauth_mount);
-    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+    let app = webui_v2_app(services.clone(), config).expect("webui v2 app");
     (app, services, session_store)
 }
 
@@ -329,7 +323,7 @@ async fn session_minted_via_oauth_callback_authenticates_protected_v2_route() {
         "OAuth-issued bearer must authenticate on the v2 surface",
     );
     let callers = services.create_thread_callers.lock().expect("lock").clone();
-    assert_eq!(callers.len(), 1, "facade reached exactly once");
+    assert_eq!(callers.len(), 1, "service reached exactly once");
     assert_eq!(callers[0].tenant_id.as_str(), TENANT);
     assert_eq!(callers[0].user_id.as_str(), "alice@example.com");
     assert_eq!(
@@ -385,7 +379,7 @@ async fn session_minted_via_oauth_callback_authenticates_protected_v2_route() {
     assert_eq!(
         services.create_thread_callers.lock().expect("lock").len(),
         1,
-        "facade must not be reached after revoke",
+        "service must not be reached after revoke",
     );
 }
 

@@ -12,7 +12,7 @@ use ironclaw_host_api::{
 use ironclaw_product::ProductInboundAck;
 use ironclaw_product::RebornFilesystemIdempotencyLedger;
 use ironclaw_product::{
-    ActionFingerprintKey, IdempotencyDecision, IdempotencyLedger, ProductWorkflowError,
+    ActionFingerprintKey, IdempotencyDecision, IdempotencyLedger, ProductSurfaceFailure,
 };
 
 #[path = "durable_ledger_support/mod.rs"]
@@ -22,7 +22,7 @@ use support::*;
 
 fn scoped_custom_root(suffix: &str) -> ScopedPath {
     ScopedPath::new(format!(
-        "/engine/product_workflow/idempotency/test_roots/{suffix}"
+        "/engine/product_surface/idempotency/test_roots/{suffix}"
     ))
     .expect("valid scoped custom ledger root")
 }
@@ -94,7 +94,7 @@ fn scoped_ledger_root(scope: &ResourceScope) -> ScopedPath {
         .map(|thread_id| thread_id.as_str())
         .unwrap_or("_");
     ScopedPath::new(format!(
-        "/engine/product_workflow/idempotency/actions/_scope/{}/{}/{}/{}/{}/{}",
+        "/engine/product_surface/idempotency/actions/_scope/{}/{}/{}/{}/{}/{}",
         hex_component(scope.tenant_id.as_str()),
         hex_component(scope.user_id.as_str()),
         hex_component(agent_id),
@@ -122,7 +122,7 @@ async fn write_scoped_prune_lease(
 ) {
     let payload = serde_json::json!({ "expires_at_ms": expires_at_ms });
     let entry = Entry::record(
-        RecordKind::new("product_workflow_prune_lease").expect("valid record kind"),
+        RecordKind::new("product_surface_prune_lease").expect("valid record kind"),
         &payload,
     )
     .expect("valid prune lease entry");
@@ -340,7 +340,7 @@ async fn scoped_filesystem_corrupt_action_record_returns_transient() {
         .begin_or_replay(fingerprint, Utc::now())
         .await
         .expect_err("corrupt action record returns transient");
-    assert!(matches!(error, ProductWorkflowError::Transient { .. }));
+    assert!(matches!(error, ProductSurfaceFailure::Transient { .. }));
 }
 
 #[tokio::test]

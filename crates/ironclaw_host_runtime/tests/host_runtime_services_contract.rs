@@ -19,8 +19,8 @@ use ironclaw_authorization::{
 };
 use ironclaw_capabilities::{CapabilityHost, CapabilitySpawnRequest};
 use ironclaw_event_projections::{
-    AuditProjectionError, AuditProjectionRequest, AuditProjectionService, EventProjectionService,
-    ProjectionCursor, ProjectionError, ProjectionRequest, ProjectionScope,
+    AuditProjectionError, AuditProjectionRequest, AuditProjectionService, CapabilityActivityStatus,
+    EventProjectionService, ProjectionCursor, ProjectionError, ProjectionRequest, ProjectionScope,
     ReplayAuditProjectionService, ReplayEventProjectionService, RunProjectionStatus,
     TimelineEntryKind,
 };
@@ -1897,9 +1897,16 @@ async fn host_runtime_services_runtime_events_project_through_replay_projection_
             TimelineEntryKind::DispatchSucceeded,
         ]
     );
-    assert_eq!(snapshot.runs.len(), 1);
-    assert_eq!(snapshot.runs[0].status, RunProjectionStatus::Completed);
-    assert_eq!(snapshot.runs[0].capability_id, script_capability_id());
+    assert!(snapshot.runs.is_empty());
+    assert_eq!(snapshot.capability_activities.len(), 1);
+    assert_eq!(
+        snapshot.capability_activities[0].status,
+        CapabilityActivityStatus::Completed
+    );
+    assert_eq!(
+        snapshot.capability_activities[0].capability_id,
+        script_capability_id()
+    );
     assert_eq!(
         snapshot.timeline.entries[2].output_bytes,
         Some(serde_json::to_vec(&payload).unwrap().len() as u64)
@@ -2090,8 +2097,12 @@ async fn host_runtime_services_jsonl_event_store_projects_same_runtime_sequence_
             TimelineEntryKind::DispatchSucceeded,
         ]
     );
-    assert_eq!(snapshot.runs.len(), 1);
-    assert_eq!(snapshot.runs[0].status, RunProjectionStatus::Completed);
+    assert!(snapshot.runs.is_empty());
+    assert_eq!(snapshot.capability_activities.len(), 1);
+    assert_eq!(
+        snapshot.capability_activities[0].status,
+        CapabilityActivityStatus::Completed
+    );
 
     let projection_json = serde_json::to_string(&snapshot).unwrap();
     let jsonl_bytes = read_directory_text(&store_root);

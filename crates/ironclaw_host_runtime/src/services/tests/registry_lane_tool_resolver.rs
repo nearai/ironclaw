@@ -2,9 +2,9 @@
 //! prebound bindings per registry generation, with the dispatcher-era
 //! selection failures (missing backend, unknown provider, runtime mismatch)
 //! preserved as error bindings. These pins relocated here from the deleted
-//! `ironclaw_dispatcher` per-invocation-selection tests.
+//! `ironclaw_capabilities` per-invocation-selection tests.
 
-use ironclaw_dispatcher::{
+use ironclaw_capabilities::{
     BoundCapabilityAdapter, CapabilityDispatchRequest, RuntimeDispatcher, ToolResolver,
 };
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};

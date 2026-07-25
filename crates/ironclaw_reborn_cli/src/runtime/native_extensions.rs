@@ -31,11 +31,13 @@ pub(crate) fn bundled_channel_extension_bindings() -> Vec<ChannelExtensionBindin
             preference_target_codec: Some(Arc::new(
                 ironclaw_slack_extension::SlackPreferenceTargetCodec,
             )),
+            inbound_payload_classifier: None,
         },
         ChannelExtensionBinding {
             extension_id: "telegram".to_string(),
             adapter: Arc::new(TelegramChannelAdapter::default()),
             preference_target_codec: Some(Arc::new(TelegramPreferenceTargetCodec)),
+            inbound_payload_classifier: None,
         },
     ]
 }

@@ -114,6 +114,7 @@ full-path Emulate tests still start the legacy gateway binary.
 | `test_emulate_reborn_provider_contracts.py` | Reborn Emulate fixture contracts: Google account isolation and stateful reads/writes, Slack QA 9/10 provider shapes and strict-scope failures, and GitHub identity plus positive/negative state transitions |
 | `test_provider_fault_proxy.py` | Harness self-tests for reusable provider status, response, timeout, connection-reset, and lost-acknowledgement profiles plus safe request evidence and reset |
 | `test_provider_capability_inventory.py` | Fast completeness gate derived from shipped first-party manifests. Every static provider capability must be tested, live-only, unsupported, or covered by an owned waiver in `fixtures/provider_capability_coverage.toml`; non-Emulate evidence names its exact Cargo target, source, and executable test. |
+| `test_journey_coverage.py` | Fast whole-path completeness gate. Harvested provider traces are typed `JourneyCase` entries, while representative WebUI, Slack, Telegram, and scheduled-trigger journeys name exact executable Pytest or Cargo evidence. Production channel manifests cannot add an inbound or outbound surface without journey evidence. |
 | `test_reborn_qa_trace_full_path.py` | Harvested and typed provider operations through standalone Reborn and Emulate, including representative read/idempotent-write/non-idempotent-write fault cases with provider readback |
 | `test_reborn_emulate_full_path.py` | Install/auth a first-party extension, drive scripted Gmail/Calendar/Drive/GitHub tool calls, assert provider state and cleanup via Emulate |
 | `test_oauth_refresh.py` | Hosted Gmail OAuth refresh: expire token, real tool call, refresh via mock proxy without leaking `client_secret` |
@@ -202,6 +203,14 @@ success plus provider readback rather than recorded final-answer wording.
 baseline, and readback cases for operations not yet present in harvested
 journeys. These cases reuse the same Reborn process and reset only their mutable
 provider world.
+`JourneyCase` is the small composition layer above those operation contracts.
+It declares the trace (when recorded), provider worlds, ingress, execution
+lane, delivery target, observable assertions, and exact executable evidence.
+The harvested provider runner consumes these declarations directly; provider
+setup, normalization, and readback remain in provider-owned helpers rather
+than moving into a generic DSL. The journey coverage gate derives channel
+ingress and delivery requirements from shipped manifests and adds the built-in
+WebUI and scheduled-trigger surfaces.
 `ProviderFaultProfile` places a transparent proxy between that Reborn process
 and Emulate. Reusable profiles cover HTTP 400/401/403/404/409/429/5xx,
 timeout, connection reset, malformed/truncated/missing-field responses, and a
@@ -226,15 +235,40 @@ routing, tool execution, and provider mutation together.
 The pinned `serrrfirat/emulate` fork adds the Google Calendar, Docs, Drive,
 Sheets, and Slides operations; Slack `search.messages`; and GitHub Contents,
 GraphQL review threads, and seeded Actions workflows used by the provider
-contract catalog. All 123 shipped static provider capabilities now have
-executable hermetic evidence: 119 cross the standalone Reborn + Emulate path,
-while `github.handle_webhook`, `nearai.web_search`,
+contract catalog. All 123 shipped static provider capabilities are classified
+and named in the inventory, and `github.handle_webhook`, `nearai.web_search`,
 `web-access.get_content`, and `web-access.search` use Reborn integration tests
 at their actual local-WASM or hosted-MCP seams. The inventory records the exact
 Cargo target, source, and test for those non-Emulate cases and fails if that
 evidence stops being executable. Manual QA rows that mention Telegram or
 Twitter/X remain model-replay-only unless paired with their own provider
 fixture.
+
+**Being classified `tested` is not the same as being fully covered, and the
+inventory now says so mechanically.** Coverage is counted per
+*capability × outcome class*, not per capability:
+
+- An `external_write` capability (the effect is declared in the shipped
+  manifest, so the read/write split is production-derived) may not be
+  evidenced by a harvested tool-call name. A recorded model response naming
+  `slack__send_message` proves tool *choice*; it proves nothing about whether
+  the provider committed the effect. Writes need a `ProviderOperationCase`
+  with provider readback, an `integration_evidence` entry, or a
+  `journey_evidence` entry naming the exact test *and* the assertion helper
+  that performs the readback.
+- A read capability needs both a seeded `success` case and an `empty`-result
+  case, so the runtime is proven to distinguish "no results" from "the call
+  failed". Status and transport failures stay with the reusable fault
+  profiles; `outcome_class` covers only the per-operation semantic outcomes no
+  fault profile can stand in for.
+
+Everything not yet meeting those rules is listed in `coverage_backlog` with an
+owner, reason, issue, and review condition. The backlog is a ratchet: entries
+must be removed as coverage lands, and the gate fails if an entry names a write
+that now has a case, or a read that now covers every required outcome class. As
+of this writing it holds no write capabilities and 48 read capabilities missing
+an empty-result case. That gap was previously invisible because a harvested
+tool-call name satisfied the old gate.
 
 ### Environment passed to ironclaw in tests
 

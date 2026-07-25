@@ -21,7 +21,7 @@ pub async fn open_local_dev_extension_installation_store_for_test(
 }
 
 /// Test-support entry point (C-DURABLE): reopen a fresh, independent
-/// `ApprovalRequestStorePort` at an existing local-dev `storage_root`. Mirrors
+/// `ApprovalRequestStore` at an existing local-dev `storage_root`. Mirrors
 /// [`open_local_dev_extension_installation_store_for_test`] for approval-gate
 /// records instead of extension installs. Tests only.
 #[cfg(feature = "test-support")]
@@ -58,8 +58,8 @@ pub async fn open_local_dev_outbound_preferences_store_for_test(
 }
 
 /// Test-support entry point (W5-WEBUI-API-1 seam): reopen FRESH, independent
-/// `ToolPermissionOverrideStorePort` / `AutoApproveSettingStorePort` /
-/// `PersistentApprovalPolicyStorePort` handles at an existing local-dev
+/// `ToolPermissionOverrideStore` / `AutoApproveSettingStore` /
+/// `PersistentApprovalPolicyStore` handles at an existing local-dev
 /// `storage_root`. Mirrors [`open_local_dev_extension_installation_store_for_test`]
 /// for the tool-settings/approval-policy stores instead of extension installs
 /// — lets a cold-reopen test prove settings state survives a fresh local-dev

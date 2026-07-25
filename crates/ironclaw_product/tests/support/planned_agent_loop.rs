@@ -235,12 +235,6 @@ impl ProductLiveAgentLoopHarness {
             tenant_id: TenantId::new(config.tenant_id).expect("valid harness tenant id"),
             actor_user_id: user_id.clone(),
             subject_user_id: Some(user_id),
-            source_binding_ref: ironclaw_turns::SourceBindingRef::new("source:live-harness")
-                .expect("valid harness source binding ref"),
-            reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
-                "reply:live-harness",
-            )
-            .expect("valid harness reply target binding ref"),
             thread_id: ThreadId::new(config.thread_id).expect("valid harness thread id"),
             agent_id: Some(AgentId::new(config.agent_id).expect("valid harness agent id")),
             project_id: None,
@@ -436,6 +430,8 @@ impl ProductLiveAgentLoopHarness {
             input_queue: Some(Arc::new(EmptyInputQueue)),
             identity_context_source: Arc::new(EmptyIdentityContextSource),
             user_profile_source: Arc::new(EmptyUserProfileSource),
+            memory_context_service: None,
+            after_turn_memory_writer: None,
             model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
             model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
             safety_context: Some(test_safety_context()),
@@ -521,7 +517,7 @@ impl ProductLiveAgentLoopHarness {
     pub async fn accept_user_message(
         &self,
         envelope: &ProductInboundEnvelope,
-    ) -> Result<InboundTurnOutcome, ironclaw_product::ProductWorkflowError> {
+    ) -> Result<InboundTurnOutcome, ironclaw_product::ProductSurfaceFailure> {
         let service = DefaultInboundTurnService::new(
             self.binding_service.clone(),
             self.thread_service.clone(),

@@ -9,9 +9,8 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_approvals::{
-    AutoApproveSettingKey, AutoApproveSettingStorePort, PersistentApprovalAction,
-    PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort, PersistentApprovalScope,
-    ToolPermissionOverride, ToolPermissionOverrideKey, ToolPermissionOverrideStorePort,
+    AutoApproveSettingKey, PersistentApprovalAction, PersistentApprovalPolicyKey,
+    PersistentApprovalScope, ToolPermissionOverride, ToolPermissionOverrideKey,
 };
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
 use ironclaw_host_api::{
@@ -53,9 +52,9 @@ const APPROVAL_SETTINGS_CACHE_TTL: Duration = Duration::from_millis(500);
 /// dispatch while prompt construction does not reread the same settings once
 /// per visible capability.
 pub(crate) struct StoreApprovalSettingsProvider {
-    overrides: Arc<dyn ToolPermissionOverrideStorePort>,
-    auto_approve: Arc<dyn AutoApproveSettingStorePort>,
-    persistent_policies: Arc<dyn PersistentApprovalPolicyStorePort>,
+    overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>,
+    auto_approve: Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort>,
+    persistent_policies: Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStorePort>,
     auto_approve_cache: Mutex<AutoApproveSettingsCache>,
     override_cache:
         Mutex<ApprovalSettingsScopeCache<HashMap<CapabilityId, ToolPermissionOverride>>>,
@@ -67,9 +66,9 @@ pub(crate) struct StoreApprovalSettingsProvider {
 
 impl StoreApprovalSettingsProvider {
     pub(crate) fn new(
-        overrides: Arc<dyn ToolPermissionOverrideStorePort>,
-        auto_approve: Arc<dyn AutoApproveSettingStorePort>,
-        persistent_policies: Arc<dyn PersistentApprovalPolicyStorePort>,
+        overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>,
+        auto_approve: Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort>,
+        persistent_policies: Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStorePort>,
     ) -> Self {
         Self {
             overrides,

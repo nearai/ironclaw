@@ -9,15 +9,16 @@ use ironclaw_host_api::{
     ThreadId, TrustClass, UserId,
 };
 use ironclaw_host_runtime::RuntimeCapabilityOutcome;
+use ironclaw_product::{LifecyclePackageKind, LifecyclePackageRef};
 
-use crate::extension_host::extension_lifecycle::ExtensionManagementPort;
-use crate::extension_host::extension_lifecycle_capabilities::EXTENSION_INSTALL_CAPABILITY_ID;
+use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
+use crate::extension_host::extension_lifecycle_capabilities::EXTENSION_ACTIVATE_CAPABILITY_ID;
 use crate::factory::{RebornRuntimeStores, build_runtime_substrate};
-use crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionRequest;
-use crate::{RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest};
+use ironclaw_auth::RuntimeCredentialAccountSelectionRequest;
+use ironclaw_auth::{RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest};
 
 #[tokio::test]
-async fn local_dev_extension_readiness_accepts_manual_token_from_webui_gate_scope() {
+async fn local_dev_extension_activate_accepts_manual_token_from_webui_gate_scope() {
     let dir = tempfile::tempdir().expect("tempdir");
     let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
         "3eee560a-7fe5-474c-965a-67cb69df3d04",
@@ -34,16 +35,9 @@ async fn local_dev_extension_readiness_accepts_manual_token_from_webui_gate_scop
     let auth_scope_resource = webui_gate_resource_scope();
     let activate_scope = webui_gate_resource_scope();
 
-    let install_outcome = invoke_outcome_with_context(
-        &services,
-        EXTENSION_INSTALL_CAPABILITY_ID,
-        execution_context_for_scope(install_scope, [EXTENSION_INSTALL_CAPABILITY_ID]),
-        serde_json::json!({"extension_id": "github"}),
-    )
-    .await;
-    let RuntimeCapabilityOutcome::AuthRequired(_) = install_outcome else {
-        panic!("install must stop at setup_needed before token submission: {install_outcome:?}");
-    };
+    install_inactive_for_user(&services, "github", &install_scope.user_id)
+        .await
+        .expect("durable inactive install succeeds");
 
     let auth_scope = AuthProductScope::new(auth_scope_resource.clone(), AuthSurface::Callback);
     let product_auth = services.product_auth.as_ref();
@@ -98,28 +92,17 @@ async fn local_dev_extension_readiness_accepts_manual_token_from_webui_gate_scop
         "runtime selector must return the configured manual-token access secret"
     );
 
-    let credential_gate = crate::extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate::new(
-        activate_scope.clone(),
-        product_auth.runtime_credential_account_selection_service(),
-    );
-    let caller = activate_scope.user_id.clone();
-    let reconciled = extension_management
-        .activate_with_credential_gate(
-            ironclaw_product::LifecyclePackageRef::new(
-                ironclaw_product::LifecyclePackageKind::Extension,
-                "github",
-            )
-            .expect("package ref"),
-            crate::extension_host::extension_lifecycle::ExtensionActivationMode::Static,
-            credential_gate,
-            &caller,
-        )
-        .await
-        .expect("internal readiness reconciliation uses submitted manual token");
-    assert_eq!(
-        reconciled.phase,
-        ironclaw_product::LifecyclePublicState::Active
-    );
+    let activate_outcome = invoke_outcome_with_context(
+        &services,
+        EXTENSION_ACTIVATE_CAPABILITY_ID,
+        execution_context_for_scope(activate_scope, [EXTENSION_ACTIVATE_CAPABILITY_ID]),
+        serde_json::json!({"extension_id": "github"}),
+    )
+    .await;
+    let RuntimeCapabilityOutcome::Completed(activate_completed) = activate_outcome else {
+        panic!("expected activation to use submitted manual token, got {activate_outcome:?}");
+    };
+    assert_eq!(activate_completed.output["payload"]["activated"], true);
 
     let active = active_extension_capability_ids(&extension_management).await;
     assert!(active.iter().any(|id| id == "github.search_issues"));
@@ -279,7 +262,7 @@ async fn invoke_outcome_with_context(
 }
 
 async fn active_extension_capability_ids(
-    extension_management: &ExtensionManagementPort,
+    extension_management: &RebornLocalExtensionManagementPort,
 ) -> Vec<String> {
     extension_management
         .active_model_visible_capabilities()
@@ -288,6 +271,22 @@ async fn active_extension_capability_ids(
         .into_iter()
         .map(|capability| capability.id.as_str().to_string())
         .collect()
+}
+
+async fn install_inactive_for_user(
+    services: &RebornRuntimeStores,
+    extension_id: &str,
+    caller: &UserId,
+) -> Result<(), ironclaw_product::ProductSurfaceFailure> {
+    let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id)
+        .expect("valid extension package ref"); // safety: test helper callers pass static extension ids.
+    services
+        .local_runtime_for_test()
+        .expect("local runtime substrate") // safety: this helper is only used with local-runtime test substrates.
+        .extension_management
+        .install(package_ref, caller)
+        .await
+        .map(|_| ())
 }
 
 fn execution_context_for_scope<'a>(

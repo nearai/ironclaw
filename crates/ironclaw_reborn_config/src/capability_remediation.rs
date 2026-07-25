@@ -94,7 +94,7 @@ pub fn google_backend_auth_text() -> String {
 /// array they must extend (see that method's note on the residual gap).
 ///
 /// Only fixed texts live here. Two producers build their text from a runtime
-/// `reason` string (`ProductWorkflowError::ProviderInstanceNotConfigured` and
+/// `reason` string (`ProductSurfaceFailure::ProviderInstanceNotConfigured` and
 /// `InvalidBindingRequest`); those reasons are themselves assembled from the
 /// constants below, and the composed result is covered at the integration tier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

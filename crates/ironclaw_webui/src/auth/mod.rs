@@ -37,7 +37,7 @@ pub use config::{GitHubOAuthConfig, GoogleOAuthConfig};
 pub use error::{OAuthError, ProviderInitError};
 pub use github::GitHubProvider;
 pub use google::GoogleProvider;
-pub use ironclaw_reborn_composition::PublicRouteMount;
+pub use ironclaw_host_ingress::PublicRouteMount;
 pub use profile::OAuthUserProfile;
 pub use provider::OAuthProvider;
 pub use provider_name::{OAuthProviderName, OAuthProviderNameError};

@@ -1,19 +1,20 @@
+use ironclaw_host_api::{InstallationState, ProductSurfaceError};
 use ironclaw_product::{
     LifecycleExtensionSource, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction,
-    LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
-    LifecycleProductResponse, LifecyclePublicState, LifecycleSearchExtensionSummary,
-    ProductWorkflowError,
+    LifecycleProductContext, LifecycleProductPayload, LifecycleProductResponse,
+    LifecycleProductService, LifecycleSearchExtensionSummary, ProductSurfaceFailure,
 };
 use std::sync::Arc;
 use thiserror::Error;
 
-use crate::extension_host::lifecycle::LifecycleFacade;
+use crate::extension_host::lifecycle::RebornLocalLifecycleService;
 use crate::runtime::RebornRuntime;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RebornExtensionLifecycleCommand {
     Search { query: String },
     Install { id: String },
+    Activate { id: String },
     Remove { id: String },
 }
 
@@ -21,27 +22,84 @@ pub enum RebornExtensionLifecycleCommand {
 pub enum RebornExtensionLifecycleCommandError {
     #[error("extension lifecycle is available only for local-dev Reborn services")]
     LocalRuntimeUnavailable,
+    #[error("extension lifecycle command is invalid: {0}")]
+    ProductCommand(#[from] ProductSurfaceFailure),
     #[error("extension lifecycle failed: {0}")]
-    Product(#[from] ProductWorkflowError),
+    ProductSurface(#[from] ProductSurfaceError),
 }
 
 pub async fn execute_reborn_extension_lifecycle_command(
     runtime: &RebornRuntime,
     command: RebornExtensionLifecycleCommand,
 ) -> Result<LifecycleProductResponse, RebornExtensionLifecycleCommandError> {
-    let mut facade = LifecycleFacade::new(Arc::clone(&runtime.skill_management));
-    facade = facade.with_extension_management(runtime.extension_management.clone());
+    let mut service = RebornLocalLifecycleService::new(Arc::clone(&runtime.skill_management));
+    service = service.with_extension_management(runtime.extension_management.clone());
     if let Some(runtime_http_egress) = &runtime.runtime_http_egress {
-        facade = facade.with_runtime_http_egress(runtime_http_egress.clone());
+        service = service.with_runtime_http_egress(runtime_http_egress.clone());
     }
-    facade = facade.with_runtime_credential_accounts(
+    service = service.with_runtime_credential_accounts(
         runtime
             .product_auth
             .runtime_credential_account_selection_service(),
     );
     let context =
         LifecycleProductContext::Surface(runtime.extension_lifecycle_surface_context.clone());
-    Ok(facade.execute(context, command.into_action()?).await?)
+    Ok(match command {
+        RebornExtensionLifecycleCommand::Install { id } => {
+            execute_install_with_activation(&service, context, extension_package_ref(id)?).await?
+        }
+        command => service.execute(context, command.into_action()?).await?,
+    })
+}
+
+async fn execute_install_with_activation(
+    service: &RebornLocalLifecycleService,
+    context: LifecycleProductContext,
+    package_ref: LifecyclePackageRef,
+) -> Result<LifecycleProductResponse, ProductSurfaceError> {
+    let mut install_response = service
+        .execute(
+            context.clone(),
+            LifecycleProductAction::ExtensionInstall {
+                package_ref: package_ref.clone(),
+            },
+        )
+        .await?;
+    let activation_response = service
+        .execute(
+            context,
+            LifecycleProductAction::ExtensionActivate { package_ref },
+        )
+        .await;
+    let Ok(activation_response) = activation_response else {
+        return Ok(install_response);
+    };
+    install_response.phase = activation_response.phase;
+    install_response.blockers = activation_response.blockers;
+    install_response.message = activation_response.message;
+    let activation_visible_capability_ids = match activation_response.payload {
+        Some(LifecycleProductPayload::ExtensionActivate {
+            visible_capability_ids,
+            ..
+        }) => Some(visible_capability_ids),
+        _ => None,
+    };
+    if let Some(LifecycleProductPayload::ExtensionInstall {
+        visible_capability_ids,
+        next_step,
+        ..
+    }) = install_response.payload.as_mut()
+    {
+        if let Some(activation_visible_capability_ids) = activation_visible_capability_ids {
+            *visible_capability_ids = activation_visible_capability_ids;
+        }
+        *next_step = if install_response.phase == InstallationState::Active {
+            "Activation completed; model-visible extension tools are ready.".to_string()
+        } else {
+            "Activation did not complete; inspect the lifecycle phase and blockers.".to_string()
+        };
+    }
+    Ok(install_response)
 }
 
 pub fn render_reborn_extension_lifecycle_response(
@@ -72,15 +130,18 @@ pub fn render_reborn_extension_lifecycle_response(
             installed,
             visible_capability_ids,
             next_step,
-            ..
         }) => {
             push_line(&mut output, format_args!("installed: {installed}"));
-            push_line(
-                &mut output,
-                format_args!("active: {}", response.phase == LifecyclePublicState::Active),
-            );
             render_string_array(&mut output, visible_capability_ids, "visible_capability");
             push_line(&mut output, format_args!("next_step: {next_step}"));
+        }
+        Some(LifecycleProductPayload::ExtensionActivate {
+            activated,
+            visible_capability_ids,
+            ..
+        }) => {
+            push_line(&mut output, format_args!("activated: {activated}"));
+            render_string_array(&mut output, visible_capability_ids, "visible_capability");
         }
         Some(LifecycleProductPayload::ExtensionRemove { removed }) => {
             push_line(&mut output, format_args!("removed: {removed}"));
@@ -91,10 +152,13 @@ pub fn render_reborn_extension_lifecycle_response(
 }
 
 impl RebornExtensionLifecycleCommand {
-    fn into_action(self) -> Result<LifecycleProductAction, ProductWorkflowError> {
+    fn into_action(self) -> Result<LifecycleProductAction, ProductSurfaceFailure> {
         Ok(match self {
             Self::Search { query } => LifecycleProductAction::ExtensionSearch { query },
             Self::Install { id } => LifecycleProductAction::ExtensionInstall {
+                package_ref: extension_package_ref(id)?,
+            },
+            Self::Activate { id } => LifecycleProductAction::ExtensionActivate {
                 package_ref: extension_package_ref(id)?,
             },
             Self::Remove { id } => LifecycleProductAction::ExtensionRemove {
@@ -106,8 +170,11 @@ impl RebornExtensionLifecycleCommand {
 
 fn extension_package_ref(
     id: impl Into<String>,
-) -> Result<LifecyclePackageRef, ProductWorkflowError> {
-    LifecyclePackageRef::new(LifecyclePackageKind::Extension, id)
+) -> Result<LifecyclePackageRef, ProductSurfaceFailure> {
+    Ok(LifecyclePackageRef::new(
+        LifecyclePackageKind::Extension,
+        id,
+    )?)
 }
 
 fn render_search_payload(
@@ -166,15 +233,15 @@ mod tests {
     use ironclaw_auth::{
         AuthContinuationRef, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
     };
-    use ironclaw_host_api::{AgentId, InvocationId, ResourceScope, TenantId, UserId};
+    use ironclaw_host_api::{
+        AgentId, InstallationState, InvocationId, ResourceScope, TenantId, UserId,
+    };
     use ironclaw_product::LifecycleExtensionSummary;
     use secrecy::SecretString;
 
     use super::*;
-    use crate::{
-        RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest, RebornRuntimeInput,
-        build_reborn_runtime,
-    };
+    use crate::{RebornRuntimeInput, build_reborn_runtime};
+    use ironclaw_auth::{RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest};
 
     #[tokio::test]
     async fn extension_lifecycle_command_activates_credentialed_extension_with_product_auth() {
@@ -232,7 +299,7 @@ mod tests {
             .await
             .expect("manual-token submit");
 
-        let install = execute_reborn_extension_lifecycle_command(
+        execute_reborn_extension_lifecycle_command(
             &runtime,
             RebornExtensionLifecycleCommand::Install {
                 id: "github".to_string(),
@@ -240,15 +307,25 @@ mod tests {
         )
         .await
         .expect("install credentialed extension");
+        let activate = execute_reborn_extension_lifecycle_command(
+            &runtime,
+            RebornExtensionLifecycleCommand::Activate {
+                id: "github".to_string(),
+            },
+        )
+        .await
+        .expect("activate uses product-auth credentials");
 
-        assert_eq!(install.phase, LifecyclePublicState::Active);
-        let Some(LifecycleProductPayload::ExtensionInstall {
+        assert_eq!(activate.phase, InstallationState::Active);
+        let Some(LifecycleProductPayload::ExtensionActivate {
+            activated,
             visible_capability_ids,
             ..
-        }) = install.payload
+        }) = activate.payload
         else {
-            panic!("expected extension install payload");
+            panic!("expected extension activation payload");
         };
+        assert!(activated);
         assert!(
             visible_capability_ids
                 .iter()
@@ -265,7 +342,7 @@ mod tests {
     fn human_renderer_escapes_terminal_control_characters() {
         let response = LifecycleProductResponse {
             package_ref: None,
-            phase: LifecyclePublicState::SetupNeeded,
+            phase: InstallationState::Installed,
             blockers: Vec::new(),
             message: None,
             payload: Some(LifecycleProductPayload::ExtensionSearch {

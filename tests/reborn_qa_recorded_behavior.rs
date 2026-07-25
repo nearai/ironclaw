@@ -85,8 +85,10 @@ use std::{
 };
 
 use chrono::Utc;
-use ironclaw_host_api::TenantId;
+use ironclaw_host_api::{AgentId, TenantId, UserId};
+use ironclaw_reborn_composition::{AssistantReply, RebornRuntime};
 use ironclaw_triggers::{TriggerRunStatus, TriggerState};
+use ironclaw_turns::{GetRunStateRequest, TurnScope};
 use parity_qa_support::model_replay::RebornTraceReplayModelGateway;
 use parity_qa_support::qa_trace::{
     build_qa_trace_runtime_with_http_exchanges,
@@ -837,11 +839,19 @@ async fn replay_routine_phrase(case: &QaPhrase, cron_fragment: &str) {
     )
     .await;
     let reply = send_qa_phrase(&runtime, case.phrase).await;
+    let failure_detail = if reply.is_successful_final_reply() {
+        None
+    } else {
+        replay_failure_detail(&runtime, &reply).await
+    };
     assert!(
         reply.is_successful_final_reply(),
-        "replayed {} should finalize a reply; status {:?}",
+        "replayed {} should finalize a reply; status {:?}, failure_category {:?}, text {:?}, failure_detail {:?}",
         case.fixture,
-        reply.status
+        reply.status,
+        reply.failure_category,
+        reply.text,
+        failure_detail
     );
     gateway.assert_exhausted();
 
@@ -882,6 +892,25 @@ fn append_fired_routine_reply(trace: &mut LlmTrace) {
     });
 }
 
+async fn replay_failure_detail(runtime: &RebornRuntime, reply: &AssistantReply) -> Option<String> {
+    let scope = TurnScope::new_with_owner(
+        TenantId::new(qa_trace_tenant_id()).ok()?,
+        Some(AgentId::new("qa-trace-agent").ok()?),
+        None,
+        reply.conversation.0.clone(),
+        Some(UserId::new("qa-trace-owner").ok()?),
+    );
+    runtime
+        .turn_coordinator_for_test()
+        .get_run_state(GetRunStateRequest {
+            scope,
+            run_id: reply.run_id,
+        })
+        .await
+        .ok()
+        .and_then(|state| state.failure.map(|failure| format!("{failure:?}")))
+}
+
 /// Replay a routine-creation fixture, make the persisted trigger due, and
 /// assert the poller submits a real fired turn carrying the recorded prompt.
 async fn replay_routine_phrase_fires(case: &QaPhrase, cron_fragment: &str) {
@@ -900,11 +929,19 @@ async fn replay_routine_phrase_fires(case: &QaPhrase, cron_fragment: &str) {
     )
     .await;
     let reply = send_qa_phrase(&runtime, case.phrase).await;
+    let failure_detail = if reply.is_successful_final_reply() {
+        None
+    } else {
+        replay_failure_detail(&runtime, &reply).await
+    };
     assert!(
         reply.is_successful_final_reply(),
-        "replayed {} should finalize creation before firing; status {:?}",
+        "replayed {} should finalize creation before firing; status {:?}, failure_category {:?}, text {:?}, failure_detail {:?}",
         case.fixture,
-        reply.status
+        reply.status,
+        reply.failure_category,
+        reply.text,
+        failure_detail
     );
 
     let repo = runtime.trigger_repository();

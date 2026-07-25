@@ -1,9 +1,8 @@
 //! Reborn integration test — the generic extension runtime (P2, TEST-4).
 //!
 //! Drives the invented-vendor fixture through the REAL production pipeline:
-//! model tool calls hit `builtin.extension_install`, which reconciles every
-//! internal readiness/publication checkpoint it can,
-//! the lifecycle facade mirrors the activation into the generic extension
+//! model tool calls hit `builtin.extension_install` / `extension_activate`,
+//! the lifecycle service mirrors the activation into the generic extension
 //! host, the fixture's `first_party` native factory (assembled through the
 //! same `RebornHostBindings` seam the binary uses) binds its adapters, and the
 //! fixture tool dispatches from the ACTIVE SNAPSHOT — the registry lane
