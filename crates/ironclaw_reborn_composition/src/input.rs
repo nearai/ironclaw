@@ -238,8 +238,9 @@ pub struct ChannelExtensionBinding {
     pub adapter: std::sync::Arc<dyn ironclaw_product::ChannelAdapter>,
     /// Protocol-specific inbound payload reclassification (gate-resolution
     /// replies), registered on the channel host assembly.
-    pub inbound_payload_classifier:
-        Option<std::sync::Arc<crate::extension_host::extension_ingress::InboundPayloadClassifier>>,
+    pub inbound_payload_classifier: Option<
+        std::sync::Arc<ironclaw_extension_host::extension_ingress::InboundPayloadClassifier>,
+    >,
     /// The vendor half of the preference-target codec, consumed by the
     /// generic outbound-target provider and triggered-delivery hook.
     pub preference_target_codec:
@@ -960,10 +961,10 @@ impl RebornHostBindings {
             ironclaw_extension_host::test_support::first_party_bundles_from_inventory(),
         )
         .with_first_party_registrars(
-            crate::test_support::first_party_registrars::bundled_first_party_registrars(),
+            ironclaw_extension_host::test_support::first_party_registrars::bundled_first_party_registrars(),
         )
         .with_credential_account_visibility_policy(
-            crate::test_support::first_party_registrars::bundled_credential_account_visibility_policy(),
+            ironclaw_extension_host::test_support::first_party_registrars::bundled_credential_account_visibility_policy(),
         )
     }
 }

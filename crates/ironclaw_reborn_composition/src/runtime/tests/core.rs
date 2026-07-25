@@ -205,15 +205,16 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
         Some("A-RUNTIME".to_string()),
     )
     .expect("proven Slack identity");
-    let rollback = crate::extension_host::channel_identity::bind_channel_identities_for_callback(
-        &binding_config,
-        "slack",
-        &callback_scope,
-        Some(&identity),
-    )
-    .await
-    .expect("bind Slack identity before activation")
-    .expect("Slack callback maps to the installed channel extension");
+    let rollback =
+        ironclaw_extension_host::channel_identity_binding::bind_channel_identities_for_callback(
+            &binding_config,
+            "slack",
+            &callback_scope,
+            Some(&identity),
+        )
+        .await
+        .expect("bind Slack identity before activation")
+        .expect("Slack callback maps to the installed channel extension");
     drop(rollback);
 
     let dm_targets = &runtime.channel_dm_target_store;
@@ -3576,7 +3577,7 @@ async fn send_user_message_until_gate_returns_blocked_on_auth_gate() {
                 )
                 .expect("valid scope"),
                 runtime_http_egress: Arc::new(
-                    crate::extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryEgress::with_tool_name("notion-search"),
+                    ironclaw_extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryEgress::with_tool_name("notion-search"),
                 ),
             },
         )
@@ -5346,7 +5347,7 @@ async fn install_webui_extension_for_setup(
 }
 
 #[tokio::test]
-async fn local_dev_webui_bundle_uses_local_lifecycle_service_for_setup_extension() {
+async fn local_dev_webui_bundle_uses_lifecycle_product_service_for_setup_extension() {
     let root = tempfile::tempdir().expect("tempdir");
     let gateway = Arc::new(RecordingGateway {
         reply: "webui lifecycle ok".to_string(),
@@ -5440,7 +5441,7 @@ async fn local_dev_webui_bundle_uses_local_lifecycle_service_for_setup_extension
                     && extensions[0].summary.package_ref.id.as_str() == "github"
                     && extensions[0].summary.credential_requirements.len() == 1
         ),
-        "local product surface should use the local lifecycle service package projection"
+        "local product surface should use the lifecycle product service package projection"
     );
     assert!(
         !setup.blockers.iter().any(|blocker| matches!(
@@ -6197,7 +6198,7 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
 
     // Gateway state seeded after runtime build.
     struct LifecycleServiceHandle {
-        service: crate::extension_host::lifecycle::RebornLocalLifecycleService,
+        service: ironclaw_extension_host::ExtensionHostLifecycleProductService,
     }
 
     impl std::fmt::Debug for LifecycleServiceHandle {
@@ -6362,7 +6363,7 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
 
     // Seed the lifecycle service before the model gateway runs.
     let extension_management = runtime.extension_management.clone();
-    let service = crate::extension_host::lifecycle::RebornLocalLifecycleService::new(Arc::clone(
+    let service = ironclaw_extension_host::ExtensionHostLifecycleProductService::new(Arc::clone(
         &runtime.skill_management,
     ))
     .with_extension_management(extension_management)

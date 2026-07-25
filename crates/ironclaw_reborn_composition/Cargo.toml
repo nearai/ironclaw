@@ -191,9 +191,5 @@ name = "production_runtime_automations"
 [[test]]
 name = "resource_governor_libsql_contract"
 
-[build-dependencies]
-ironclaw_skills = { path = "../ironclaw_skills" }
-serde_json = "1"
-
 [lints]
 workspace = true

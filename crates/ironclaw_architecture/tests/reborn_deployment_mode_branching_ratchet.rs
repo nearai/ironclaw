@@ -1,5 +1,5 @@
 //! Anti-slippage ratchet for the deployment-mode *branching* axis (§4.4 / §10
-//! of `docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`).
+//! of `docs/reborn/contracts/runtime-profiles.md`).
 //!
 //! Its two siblings own deployment mode as a **type name**
 //! (`reborn_localdev_typename_ratchet`, `reborn_deployment_mode_typename_ratchet`).

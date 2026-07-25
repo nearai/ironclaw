@@ -10,11 +10,11 @@ This repo exposes Reborn structure primarily through implementation crates, crat
 
 | Need | Start with |
 | --- | --- |
-| Standalone Reborn binary | `docs/reborn-binary.md` |
+| Standalone Reborn binary | `crates/ironclaw_reborn_cli/` and `docs/reborn/onboarding.md` |
 | Standalone Reborn onboarding | `docs/reborn/onboarding.md` |
 | Production cutover readiness closeout | `docs/reborn/production-cutover-readiness-closeout.md` |
 | Standalone Reborn Slack setup | `docs/reborn/setup-slack-for-reborn-binary.md` |
-| Porting v1 channels to Reborn surfaces/ProductAdapters | `docs/reborn/how-to-port-channel-to-reborn.md` |
+| Porting v1 channels to Reborn surfaces/ChannelAdapters | `docs/reborn/how-to-port-channel-to-reborn.md` |
 | Proposed subagent spawn design | `docs/reborn/subagent-spawn/README.md` |
 | Host API vocabulary | `crates/ironclaw_host_api/` |
 | Host API local rules | `crates/ironclaw_host_api/CLAUDE.md` |
@@ -110,4 +110,5 @@ Preserve these Reborn boundaries unless the relevant contract or architecture te
 - Reborn substrate/cutover parent: #2987
 - Reborn compatibility gate: #3020
 - Reborn product-surface migration: #3031
-- Reborn lifecycle UX realignment: `docs/reborn/2026-05-24-3288-lifecycle-ux-realignment.md`
+- Reborn lifecycle behavior: `docs/reborn/contracts/extensions.md` and
+  `docs/reborn/contracts/skills-extension.md`

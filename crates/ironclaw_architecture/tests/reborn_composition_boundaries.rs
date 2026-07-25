@@ -132,47 +132,33 @@ fn composition_public_pub_use_surface_matches_snapshot() {
 fn extension_host_cluster_stays_internal() {
     let lib = std::fs::read_to_string(composition_src_path().join("lib.rs"))
         .expect("composition lib.rs readable");
-    let extension_host =
-        std::fs::read_to_string(composition_src_path().join("extension_host/mod.rs"))
-            .expect("composition extension_host mod.rs readable");
 
     assert!(
-        has_module_decl(&lib, "mod extension_host;"),
-        "extension_host must stay an internal crate-root module"
+        !has_module_decl(&lib, "mod extension_host;"),
+        "extension_host compatibility facade must stay removed from composition"
     );
     assert!(
         !has_module_decl(&lib, "pub mod extension_host;"),
         "extension_host must not become public"
     );
     assert!(
+        !composition_src_path().join("extension_host").exists(),
+        "composition must not grow a replacement extension_host module directory"
+    );
+    assert!(
         has_module_decl(&lib, "mod builtin_capability_policy;"),
         "builtin_capability_policy is runtime-profile policy and must stay at the crate root"
     );
-    assert!(
-        !extension_host.contains("builtin_capability_policy"),
-        "builtin_capability_policy must not be dragged into extension_host"
-    );
 
-    for module in EXTENSION_HOST_INTERNAL_MODULES {
-        let extension_host_decl = format!("pub(crate) mod {module};");
-        assert!(
-            has_module_decl(&extension_host, &extension_host_decl),
-            "{module} must stay behind extension_host as `pub(crate)`"
-        );
-
+    for module in EXTENSION_HOST_MOVED_MODULES
+        .iter()
+        .chain(EXTENSION_HOST_EXTERNALIZED_GENERIC_MODULES.iter())
+    {
         let root_decl = format!("mod {module};");
         let public_root_decl = format!("pub mod {module};");
         assert!(
             !has_module_decl(&lib, &root_decl) && !has_module_decl(&lib, &public_root_decl),
             "{module} must not be reintroduced as a crate-root module"
-        );
-    }
-
-    for module in EXTENSION_HOST_EXTERNALIZED_GENERIC_MODULES {
-        let composition_decl = format!("pub(crate) mod {module};");
-        assert!(
-            !has_module_decl(&extension_host, &composition_decl),
-            "{module} must stay owned by ironclaw_extension_host, not composition"
         );
     }
 }
@@ -301,13 +287,12 @@ fn strip_test_module(contents: &str) -> &str {
     }
 }
 
-const EXTENSION_HOST_INTERNAL_MODULES: &[&str] = &[
+const EXTENSION_HOST_MOVED_MODULES: &[&str] = &[
     "bundled_skills",
     "extension_activation_credentials",
     "extension_lifecycle",
     "extension_lifecycle_capabilities",
     "extension_lifecycle_capabilities_auth_tests",
-    "extension_lifecycle_command",
     "lifecycle",
     "skill_learning",
     "skill_listing",

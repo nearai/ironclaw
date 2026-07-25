@@ -25,9 +25,11 @@ mod approval_test_support;
 mod automation;
 mod blocked_auth_resume;
 mod builtin_capability_policy;
+#[cfg(test)]
+#[path = "extension_lifecycle_capabilities_auth_tests.rs"]
+mod composition_extension_lifecycle_auth_tests;
 pub mod deployment;
 mod error;
-mod extension_host;
 mod factory;
 mod google_oauth_secret_store;
 mod input;
@@ -43,7 +45,6 @@ mod product_capability;
 mod product_surface;
 mod production_runtime_policy;
 mod profile_approval_authorization;
-mod provider_identity;
 mod readiness;
 mod root;
 mod runtime;
@@ -60,23 +61,6 @@ pub use admin_token::AdminApiTokenMinter;
 pub use automation::service::RebornAutomationProductService;
 pub use automation::trigger_poller::PostSubmitDeliveryHook;
 pub use error::RebornBuildError;
-pub use extension_host::channel_host::{ChannelHostIdentity, GenericChannelHostAssembly};
-pub use extension_host::channel_identity::{
-    ChannelIdentityBindingConfig, channel_identity_binding_hook_factory,
-};
-pub use extension_host::extension_ingress::{
-    ChannelInboundSinkConfig, ChannelIngressDrain, ChannelIngressRegistration,
-    ExtensionIngressParts, ExtensionIngressRegistry, GenericChannelInboundSink,
-    PostAdmissionObserver, StaticIngressSecrets, VerifiedEvidenceMint,
-};
-pub use extension_host::extension_ingress::{
-    EXTENSION_INGRESS_ROUTE_PATTERN, extension_ingress_route_mount,
-};
-pub use extension_host::extension_lifecycle_command::{
-    RebornExtensionLifecycleCommand, RebornExtensionLifecycleCommandError,
-    execute_reborn_extension_lifecycle_command, render_reborn_extension_lifecycle_response,
-};
-pub use extension_host::skill_listing::{RebornSkillListError, list_reborn_local_skills};
 #[cfg(feature = "test-support")]
 pub use factory::AttachmentTestSupport;
 #[cfg(feature = "test-support")]
@@ -108,18 +92,7 @@ pub use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountId, CredentialAccountLabel,
     CredentialAccountStatus, CredentialOwnership, Timestamp,
 };
-/// First-party capability-wiring vocabulary re-exported so the assembling
-/// binary (`ironclaw_reborn_cli`) can build the concrete GSuite / web tooling
-/// [`FirstPartyHandlerRegistrar`]s and the credential-account visibility policy
-/// without depending on `ironclaw_host_api` / `ironclaw_host_runtime` /
-/// `ironclaw_auth` directly (extension-runtime DEL-7). The CLI's exact-deps
-/// allow-list is frozen to the composition facade, so these types travel
-/// through here.
 pub use ironclaw_auth::{CredentialAccount, CredentialAccountSelectionRequest};
-pub use ironclaw_extension_host::{
-    FirstPartyHandlerRegistrar, FirstPartyPackageAsset, FirstPartyPackageBundle,
-    FirstPartyPackageOAuthSetup, FirstPartyPackageOnboarding, FirstPartyRegistrarContext,
-};
 pub use ironclaw_host_api::{
     CapabilityId, HostApiError, NetworkScheme, NetworkTargetPattern, RuntimeCredentialRequirement,
     RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeDispatchErrorKind,
@@ -180,6 +153,7 @@ pub use deployment::{
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use deployment::{local_dev_build_input, local_dev_build_input_with_profile};
+pub use ironclaw_extension_host::provider_identity::ProviderIdentityActorResolver;
 pub use ironclaw_host_api::{
     RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
     RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,
@@ -198,7 +172,6 @@ pub use observability::hooks::{
 };
 pub use observability::trajectory_observer::RebornTrajectoryObserver;
 pub use production_runtime_policy::RebornProductionRuntimePolicy;
-pub use provider_identity::ProviderIdentityActorResolver;
 pub use readiness::{
     RebornReadiness, RebornReadinessDiagnostic, RebornReadinessDiagnosticComponent,
     RebornReadinessDiagnosticReason, RebornReadinessDiagnosticStatus, RebornReadinessState,

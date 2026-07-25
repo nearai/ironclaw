@@ -56,6 +56,12 @@ use axum::http::{Request, StatusCode};
 use chrono::Utc;
 use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
+use ironclaw_extension_host::channel_host::{ChannelHostIdentity, GenericChannelHostAssembly};
+use ironclaw_extension_host::extension_ingress::{
+    ChannelInboundSinkConfig, ChannelIngressDrain, ChannelIngressRegistration,
+    ExtensionIngressParts, GenericChannelInboundSink, PostAdmissionObserver, StaticIngressSecrets,
+    VerifiedEvidenceMint, extension_ingress_route_mount,
+};
 use ironclaw_host_api::ChannelInboundProductSurface;
 use ironclaw_host_api::ProductSurfaceCaller;
 use ironclaw_host_api::{
@@ -79,12 +85,7 @@ use ironclaw_product::{
     ChannelConnectionNoticePolicy, ConversationBindingService, ResolveBindingRequest,
     RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
 };
-use ironclaw_reborn_composition::{
-    ChannelHostAssemblyTestWiring, ChannelHostIdentity, ChannelInboundSinkConfig,
-    ChannelIngressRegistration, ExtensionIngressParts, GenericChannelHostAssembly,
-    GenericChannelInboundSink, PostAdmissionObserver, RebornRuntime, StaticIngressSecrets,
-    VerifiedEvidenceMint, extension_ingress_route_mount,
-};
+use ironclaw_reborn_composition::{ChannelHostAssemblyTestWiring, RebornRuntime};
 use ironclaw_turns::{GetRunStateRequest, TurnCoordinator, TurnRunId, TurnScope, TurnStatus};
 use reborn_support::builder::{RebornIntegrationHarness, StorageMode};
 use reborn_support::group::RebornIntegrationGroup;
@@ -437,7 +438,7 @@ impl VendorIngress {
                     },
                 ])),
                 sink: sink.clone() as Arc<dyn ironclaw_extension_host::ingress::InboundSink>,
-                drain: Some(sink as Arc<dyn ironclaw_reborn_composition::ChannelIngressDrain>),
+                drain: Some(sink as Arc<dyn ChannelIngressDrain>),
             },
         );
         let mount = extension_ingress_route_mount(&parts).expect("production mount builds");

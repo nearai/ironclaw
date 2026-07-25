@@ -10,7 +10,7 @@
 
 The trigger system owns scheduled trigger intake, trigger records, source-provider evaluation, and conversion of a due trigger into a synthetic inbound turn.
 
-It does **not** own a parallel agent loop, product adapter lifecycles, or outbound delivery targets. A trigger fire is routed into the normal Reborn turn pipeline and then persists through the same turn, run, and recovery machinery as any other inbound submission.
+It does **not** own a parallel agent loop, channel-adapter lifecycles, or outbound delivery targets. A trigger fire is routed into the normal Reborn turn pipeline and then persists through the same turn, run, and recovery machinery as any other inbound submission.
 
 ---
 
@@ -229,7 +229,7 @@ plumbing, not capability APIs.
   queries used by the trusted poller path.
 - Trigger-owned poller code must keep worker-local call sites explicit about the
   trusted poller transition without adding a user-facing capability surface.
-- Product adapters, first-party capability code, and other untrusted callers
+- Channel adapters, first-party capability code, and other untrusted callers
   must not treat the global list methods as a user-facing surface.
 - The poller may continue to use the raw repository methods internally, but the
   contract treats them as implementation plumbing, not a capability contract.
@@ -243,7 +243,7 @@ A trigger fire is synthetic inbound, not a parallel agent loop.
 - The fire must enter the normal Reborn inbound/turn pipeline.
 - The trusted submitter implementation is conversation-owned and exposed to host composition through `trusted_trigger_fire_submitter(...) -> Arc<dyn TrustedTriggerFireSubmitter>`. This public factory is wiring only; trusted authority lives in the sealed `TrustedTriggerSubmitRequest` minted by the trigger worker. The raw `TrustedInboundTurnRequest` constructor and concrete submitter type stay private inside `ironclaw_conversations`; host/composition code only wires the trait object into the poller while the conversation crate converts the worker-carried canonical binding into the private trusted turn request.
 - Binding resolution for trigger fires must use the trusted-scope path from `conversation-binding.md`.
-- Product adapters, first-party capabilities, and product workflow code must not construct the conversation-owned trusted trigger submitter or submit `TrustedTriggerSubmitRequest`. PR18.5a enforces this with a private trusted request and architecture tests over adapter/product paths.
+- Channel adapters, first-party capabilities, and product-surface code must not construct the conversation-owned trusted trigger submitter or submit `TrustedTriggerSubmitRequest`. PR18.5a enforces this with a private trusted request and architecture tests over adapter/product paths.
 - The host mints the trusted trigger ingress request from `TriggerRecord` state:
   `tenant_id`, `creator_user_id`, `agent_id`, and `project_id` are host state,
   not product payload data.
@@ -288,7 +288,7 @@ A trigger fire is synthetic inbound, not a parallel agent loop.
 Host-trusted trigger ingress request fields are:
 
 - `source`: `TriggerFire`;
-- `adapter_kind`: host-trusted trigger ingress marker, not a product adapter kind;
+- `adapter_kind`: host-trusted trigger ingress marker, not a channel adapter kind;
 - `adapter_installation_id`: host-trusted trigger installation marker;
 - `external_actor_ref`: canonical actor route for the trigger creator authority;
 - `external_conversation_ref`: synthetic trigger conversation key plus the

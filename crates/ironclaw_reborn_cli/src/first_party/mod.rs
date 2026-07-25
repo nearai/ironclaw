@@ -2,22 +2,21 @@
 //!
 //! The CLI is the one generic-side crate allowed to link
 //! `ironclaw_first_party_extensions`; it converts the concrete package inventory
-//! into composition's neutral bundle set, supplies the concrete GSuite /
+//! into extension-host's neutral bundle set, supplies the concrete GSuite /
 //! web-access capability handler registrars, and injects the Google-account
 //! credential visibility policy. Composition receives all of this as input and
 //! never names a concrete first-party extension.
 //!
 //! This module lives OUTSIDE `src/runtime/` because the CLI runtime tree is
 //! banned from `use ironclaw_host_runtime::` (a dependency-boundary test); the
-//! host-runtime / host-api types these builders touch are reached through
-//! `ironclaw_reborn_composition` facade re-exports, while auth-owned contracts
-//! are named from `ironclaw_auth`.
+//! host-runtime / host-api types these builders touch are named from their
+//! owning crates, while auth-owned contracts are named from `ironclaw_auth`.
 
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
 use ironclaw_auth::RuntimeCredentialAccountVisibilityPolicy;
-use ironclaw_reborn_composition::{FirstPartyHandlerRegistrar, FirstPartyPackageBundle};
+use ironclaw_extension_host::{FirstPartyHandlerRegistrar, FirstPartyPackageBundle};
 
 mod bundles;
 mod gsuite;

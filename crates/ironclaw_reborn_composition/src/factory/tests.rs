@@ -34,11 +34,11 @@ use rust_decimal_macros::dec;
 use secrecy::ExposeSecret;
 
 use crate::builtin_capability_policy::{BuiltinApprovalPolicyAction, BuiltinCapabilityPolicyError};
-use crate::extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryEgress;
 use crate::{
     RebornReadinessDiagnostic, RebornReadinessState, runtime::SKILL_ACTIVATE_CAPABILITY_ID,
 };
 use ironclaw_extension_host::ExtensionActivationMode;
+use ironclaw_extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryEgress;
 use ironclaw_host_api::InstallationState;
 
 #[test]

@@ -30,12 +30,12 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
-use ironclaw_host_api::ChannelInboundProductSurface;
-use ironclaw_reborn_composition::{
-    ChannelInboundSinkConfig, ChannelIngressRegistration, ExtensionIngressParts,
-    GenericChannelInboundSink, PostAdmissionObserver, StaticIngressSecrets, VerifiedEvidenceMint,
-    extension_ingress_route_mount,
+use ironclaw_extension_host::extension_ingress::{
+    ChannelInboundSinkConfig, ChannelIngressDrain, ChannelIngressRegistration,
+    ExtensionIngressParts, GenericChannelInboundSink, PostAdmissionObserver, StaticIngressSecrets,
+    VerifiedEvidenceMint, extension_ingress_route_mount,
 };
+use ironclaw_host_api::ChannelInboundProductSurface;
 use reborn_support::builder::StorageMode;
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
@@ -140,7 +140,7 @@ impl AcmeIngress {
                     },
                 ])),
                 sink: sink.clone() as Arc<dyn ironclaw_extension_host::ingress::InboundSink>,
-                drain: Some(sink as Arc<dyn ironclaw_reborn_composition::ChannelIngressDrain>),
+                drain: Some(sink as Arc<dyn ChannelIngressDrain>),
             },
         );
         let mount = extension_ingress_route_mount(&parts).expect("production mount builds");

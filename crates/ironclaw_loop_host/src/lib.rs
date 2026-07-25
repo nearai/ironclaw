@@ -787,7 +787,7 @@ where
         // summary is only the inline label for the result reference (the model
         // sees the real output via the result ref / observation), so a
         // malformed label must not end the run
-        // (.claude/rules/agent-loop-capabilities.md Invariant 1). Degrade to a
+        // (capability-access contract). Degrade to a
         // fixed host-authored marker; the raw text stays out of the transcript.
         let safe_summary = LoopSafeSummary::new(request.safe_summary)
             .and_then(|summary| {

@@ -1,4 +1,8 @@
-# Unified Extension Runtime — Acceptance Checklist
+# Unified Extension Runtime — Historical Acceptance Checklist
+
+> **Superseded.** This checklist records the migration work and historical
+> evidence. It is not a current release gate. Use live crate tests, contracts,
+> and `.claude/rules/testing.md` for current verification.
 
 **Companions:** `overview.md` (model), `implementation.md` (changes).
 

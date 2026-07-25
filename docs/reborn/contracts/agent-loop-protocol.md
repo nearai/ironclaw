@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-25
 **Status:** Draft contract
-**Depends on:** `docs/reborn/2026-04-24-os-like-architecture-design.md`, `docs/reborn/contracts/runtime-workflows.md`, `docs/reborn/contracts/capability-access.md`, `docs/reborn/contracts/run-state.md`
+**Depends on:** `docs/reborn/contracts/runtime-workflows.md`, `docs/reborn/contracts/capability-access.md`, `docs/reborn/contracts/run-state.md`
 **Reference loop mechanics:** `docs/reborn/contracts/lightweight-agent-loop.md`
 
 ---

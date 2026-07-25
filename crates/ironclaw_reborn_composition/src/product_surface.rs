@@ -23,17 +23,11 @@ use ironclaw_product::{
 
 use ironclaw_triggers::TriggerRepository;
 
-use crate::extension_host::admin_configuration::AdminConfigurationViewProvider;
 use crate::operator_tool_catalog::ActiveRegistryOperatorToolCatalog;
 use crate::product_capability::RuntimeProductCapabilityInvoker;
 use crate::{
     RebornAutomationProductService, RebornBuildError, RebornReadiness, RebornReadinessDiagnostic,
     RebornReadinessDiagnosticStatus, RebornRuntime,
-    extension_host::lifecycle::{
-        RebornLocalLifecycleService, RebornLocalSkillManagementError,
-        RebornLocalSkillManagementPort,
-    },
-    extension_host::webui_extension_credentials::ProductAuthExtensionCredentialSetup,
     outbound::{
         OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistry,
         RebornOutboundPreferencesService, outbound_delivery_synthetic_provider,
@@ -44,6 +38,10 @@ use crate::{
         ProjectScopedFilesystemReader,
     },
 };
+use ironclaw_extension_host::ExtensionHostLifecycleProductService;
+use ironclaw_extension_host::admin_configuration::AdminConfigurationViewProvider;
+use ironclaw_extension_host::webui_extension_credentials::ProductAuthExtensionCredentialSetup;
+use ironclaw_skills::{ScopedSkillManagementError, ScopedSkillManagementPort};
 
 /// A trigger repository paired with the turn-run snapshot source from the
 /// SAME runtime. Local-dev and production graphs both carry these two
@@ -191,7 +189,7 @@ pub(crate) fn build_product_surface_with_channel_connection(
             )),
         );
         let mut lifecycle_service =
-            RebornLocalLifecycleService::new(Arc::clone(&runtime.skill_management));
+            ExtensionHostLifecycleProductService::new(Arc::clone(&runtime.skill_management));
         lifecycle_service =
             lifecycle_service.with_extension_management(runtime.extension_management.clone());
         lifecycle_service =
@@ -326,7 +324,7 @@ impl OperatorStatusService for ReadinessOperatorStatusService {
 }
 
 struct LocalSkillsProductService {
-    skill_management: Arc<RebornLocalSkillManagementPort>,
+    skill_management: Arc<ScopedSkillManagementPort>,
     // `RebornRuntimeStores::skill_auto_activate_learned`); the read service
     // reports it for the skills view. Writes go through the first-party
     // `builtin.skill_auto_activate_learned_set` capability. `None` when no
@@ -341,7 +339,7 @@ struct LocalSkillsProductService {
 
 impl LocalSkillsProductService {
     fn new(
-        skill_management: Arc<RebornLocalSkillManagementPort>,
+        skill_management: Arc<ScopedSkillManagementPort>,
         auto_activate_learned: Option<Arc<AtomicBool>>,
     ) -> Self {
         Self {
@@ -470,10 +468,10 @@ fn skill_info(skill: ironclaw_skills::SkillSummary) -> RebornSkillInfo {
     }
 }
 
-fn map_skill_management_error(error: RebornLocalSkillManagementError) -> ProductSurfaceError {
+fn map_skill_management_error(error: ScopedSkillManagementError) -> ProductSurfaceError {
     match error {
-        RebornLocalSkillManagementError::InvalidContext { .. } => internal_skill_error(),
-        RebornLocalSkillManagementError::Skill(error) => match error.kind() {
+        ScopedSkillManagementError::InvalidContext { .. } => internal_skill_error(),
+        ScopedSkillManagementError::Skill(error) => match error.kind() {
             ironclaw_skills::SkillManagementErrorKind::NotFound => ProductSurfaceError {
                 code: ProductSurfaceErrorCode::NotFound,
                 kind: ProductSurfaceErrorKind::NotFound,

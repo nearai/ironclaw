@@ -16,7 +16,7 @@ Living companions to the tier tree in `../SKILL.md`. Each exemplar is a real in-
 
 ## 2. The scripted-model harness seam
 
-The in-process harness (code in `tests/integration/support/`, spec in `tests/integration/CLAUDE.md`) fakes exactly one thing: the vendor SDK at the bottom (`TraceLlm`). Everything else — product workflow, coordinator, scheduler, agent loop, the real `ironclaw_llm` retry/failover/circuit-breaker chain — executes for real, and assertions read *persisted state* (filesystem, thread history), never internals.
+The in-process harness (code in `tests/integration/support/`, spec in `tests/integration/CLAUDE.md`) fakes exactly one thing: the vendor SDK at the bottom (`TraceLlm`). Everything else — product orchestration, coordinator, scheduler, agent loop, the real `ironclaw_llm` retry/failover/circuit-breaker chain — executes for real, and assertions read *persisted state* (filesystem, thread history), never internals.
 
 - **Right**: mock at the vendor-SDK seam; assert from durable state; `cargo test --test reborn_integration_<name>` runs offline with zero setup.
 - **Wrong**: mocking at the gateway seam (skips the whole `ironclaw_llm` chain — that's the separate binary-replay tier's job); hand-building `TraceStep`s; asserting on internal structs.
@@ -32,7 +32,7 @@ The *enforcement* side (real HTTP 401/413/429/CORS through the composed app) liv
 
 ## 4. Helper-only coverage: the cautionary shape
 
-When a predicate selects what goes out the wire, the test must construct the real adapter and inspect the rendered egress body, not call the predicate directly. Use `crates/ironclaw_product_workflow/tests/outbound_delivery_contract.rs` and its Telegram egress case as the shape to copy. If you're adding a channel, write the caller-level adapter test on day one.
+When a predicate selects what goes out the wire, the test must construct the real adapter and inspect the rendered egress body, not call the predicate directly. Use the owning product adapter's caller-level delivery contract and its Telegram egress case as the shape to copy. If you're adding a channel, write the caller-level adapter test on day one.
 
 ## 5. Silent skip vs loud skip
 

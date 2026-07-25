@@ -1208,6 +1208,7 @@ registerPack("hi", {
   "common.pinned": "पिन किया गया",
   "common.deleteChat": "चैट हटाएं",
   "chat.deleteFailed": "यह बातचीत हटाई नहीं जा सकी.",
+  "chat.cancelFailed": "इस रन को रोका नहीं जा सका। यह अभी भी चल रहा हो सकता है। फिर से कोशिश करें।",
   "chat.deleteBusy": "चल रही बातचीत को हटाया नहीं जा सकता. पहले उसे रोकें, फिर दोबारा कोशिश करें.",
   "command.placeholder": "एक कमांड टाइप करें या खोजें...",
   "routine.searchPlaceholder": "रूटीन नाम, ट्रिगर, या क्रिया खोजें",
@@ -1363,6 +1364,11 @@ registerPack("hi", {
 
 registerPack("hi", {
   "app.checkingSession": "सत्र जांचा जा रहा है...",
+  "app.loadingPage": "पेज लोड हो रहा है...",
+  "app.pageLoadFailedTitle": "यह पेज लोड नहीं हो सका",
+  "app.pageLoadFailedDescription":
+    "हो सकता है कि नया वर्ज़न उपलब्ध हो या कनेक्शन बाधित हुआ हो। फिर से कोशिश करने के लिए पेज को रीलोड करें।",
+  "app.reloadPage": "पेज रीलोड करें",
   "app.sessionCheckFailedTitle": "आपके सत्र की पुष्टि नहीं हो सकी",
   "app.sessionCheckFailedDescription":
     "अभी आपके सत्र की पुष्टि नहीं हो सकी। आपकी साइन-इन जानकारी अभी भी सहेजी हुई है। थोड़ी देर बाद फिर कोशिश करें।",

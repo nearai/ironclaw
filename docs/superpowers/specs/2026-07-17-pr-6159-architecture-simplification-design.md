@@ -6,7 +6,8 @@
 
 **Baseline:** `nearai/ironclaw#6159` at `0575d3815d03fce0d43e6247f0bb3956af9e9ada`
 
-**Governing direction:** `docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`
+**Governing direction:** current host/product contracts and
+`docs/reborn/contracts/kernel-boundary.md`
 
 ## Goal
 
@@ -17,7 +18,8 @@ state uses the existing filesystem seam instead of local test-store families, an
 represent distinct states rather than mirrored transport wrappers.
 
 This is a structure-preserving refactor. The Telegram setup, webhook, pairing, identity,
-delivery, security, and rollback contracts in `docs/reborn/contracts/telegram-v2.md` remain
+delivery, security, and rollback contracts in the current extension/channel
+contracts remain
 unchanged.
 
 ## Scope boundary

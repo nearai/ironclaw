@@ -191,7 +191,7 @@ async def post():
         method="POST",
         url=f"https://api.github.com/repos/{owner}/{repo}/pulls/{number}/comments",
         body={
-            "body": "**High** — `state.store` accessed directly, bypassing dispatch. See `.claude/rules/tools.md`.",
+            "body": "**High** — `state.store` accessed directly, bypassing the owning capability or domain contract.",
             "commit_id": head_sha,
             "path": "src/channels/web/handlers/foo.rs",
             "start_line": 140,

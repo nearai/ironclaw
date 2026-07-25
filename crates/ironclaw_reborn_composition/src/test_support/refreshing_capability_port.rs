@@ -8,6 +8,9 @@
 //! (surface disclosure, external tools, StaleSurface refresh, the shared
 //! `StagedCapabilityIo`) is automatically exercised by the harness too.
 
+#[cfg(feature = "test-support")]
+pub use ironclaw_extension_host::test_support::ExtensionManagementTestHandle;
+
 /// Typed bundle of the parts the harness controls, passed by value through
 /// the `test_support` -> `runtime` -> `runtime::local_dev` forwarding chain
 /// so no layer needs `#[allow(clippy::too_many_arguments)]`. Mirrors
@@ -53,14 +56,12 @@ pub struct RefreshingCapabilityPortTestParts {
     /// (`local_dev.rs` `create_capability_port`).
     pub thread_service: std::sync::Arc<dyn ironclaw_threads::SessionThreadService>,
     /// Opaque handle built by
-    /// [`build_extension_management_for_test`]. Wraps the
-    /// crate-private (`pub(crate)`) `RebornLocalExtensionManagementPort` so it
-    /// never appears in this (public, `test-support`-gated) struct's field
-    /// types; mirrors `skill_activation_source` above. Active-extension
-    /// registry (installed/activated extensions like `github`, `gmail`, MCP
-    /// servers) whose capabilities and provider trust get folded into the
-    /// visible-capability grants on every refresh — mirrors production
-    /// `capability_wiring`'s
+    /// [`build_extension_management_for_test`]. Wraps the extension-host
+    /// local management port; mirrors `skill_activation_source` above.
+    /// Active-extension registry (installed/activated extensions like
+    /// `github`, `gmail`, MCP servers) whose capabilities and provider trust
+    /// get folded into the visible-capability grants on every refresh —
+    /// mirrors production `capability_wiring`'s
     /// `ExtensionCapabilitySurfaceSource::new(runtime_surfaces.extension_management.clone())`
     /// (`runtime/local_dev.rs:132-133`). `None` (the default a harness gets by
     /// simply omitting extension setup) reproduces the no-op surface this
@@ -108,36 +109,6 @@ pub struct RefreshingCapabilityPortTestParts {
     pub additional_capability_grants: Vec<ironclaw_host_api::CapabilityGrant>,
 }
 
-/// Opaque handle (harness-port-seam P1 Change 3) carrying the crate-private
-/// `RebornLocalExtensionManagementPort`. Hides the type from the
-/// integration-test crate, which cannot name it (it is only `pub(crate)`
-/// inside `ironclaw_reborn_composition`); the private type is recovered
-/// internally via [`ExtensionManagementTestHandle::extension_management`]
-/// when forwarding to the production factory. Mirrors `SkillActivationTestSource`.
-#[cfg(feature = "test-support")]
-pub struct ExtensionManagementTestHandle {
-    extension_management: std::sync::Arc<
-        crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort,
-    >,
-}
-
-#[cfg(feature = "test-support")]
-impl ExtensionManagementTestHandle {
-    /// Crate-internal accessor for the wrapped port. Kept `pub(crate)` (never
-    /// `pub`) so the crate-private `RebornLocalExtensionManagementPort` type
-    /// never appears in this crate's public API; only `runtime::local_dev`'s
-    /// test-support constructor (which already names the type) may call this.
-    /// For tests only -- gated behind `test-support`, ships zero bytes in
-    /// production builds.
-    pub(crate) fn extension_management(
-        &self,
-    ) -> std::sync::Arc<
-        crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort,
-    > {
-        self.extension_management.clone()
-    }
-}
-
 /// Reads the same `runtime_surfaces.extension_management` handle production's
 /// `capability_wiring` reads (`runtime/local_dev.rs:132-133`) off a built
 /// `RebornRuntimeStores`, for wiring
@@ -154,9 +125,7 @@ pub fn build_extension_management_for_test(
     runtime: &crate::RebornRuntime,
 ) -> Option<ExtensionManagementTestHandle> {
     let extension_management = runtime.extension_management.clone();
-    Some(ExtensionManagementTestHandle {
-        extension_management,
-    })
+    Some(ExtensionManagementTestHandle::new(extension_management))
 }
 
 /// Test-support entry point that drives the real

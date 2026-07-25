@@ -1,9 +1,13 @@
 pub(crate) mod outbound_preferences_capability;
 
+#[allow(unused_imports)]
 pub(crate) use ironclaw_outbound::{
-    DeliveryTargetCapabilities, MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetEntry,
-    OutboundDeliveryTargetId, OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
-    OutboundDeliveryTargetRegistry, OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary,
+    DeliveryTargetCapabilities, OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner,
+    OutboundDeliveryTargetSummary,
+};
+pub(crate) use ironclaw_outbound::{
+    MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetId,
+    OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistry, OutboundDeliveryTargetScope,
 };
 pub(crate) use ironclaw_product::{
     OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGET_SET_DESCRIPTION,

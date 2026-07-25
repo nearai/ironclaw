@@ -73,19 +73,25 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
         category: "dead-code",
         item_kind: "method",
-        path: "crates/ironclaw_reborn_composition/src/extension_host/channel_pairing.rs",
+        path: "crates/ironclaw_extension_host/src/channel_pairing.rs",
         count: 1,
     },
     FrozenPathCount {
         category: "dead-code",
         item_kind: "method",
-        path: "crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle/hosted_mcp_test_support.rs",
+        path: "crates/ironclaw_extension_host/src/extension_lifecycle/hosted_mcp_test_support.rs",
         count: 2,
     },
     FrozenPathCount {
         category: "dead-code",
         item_kind: "method",
         path: "crates/ironclaw_trust/src/decision.rs",
+        count: 2,
+    },
+    FrozenPathCount {
+        category: "test-support",
+        item_kind: "field",
+        path: "crates/ironclaw_extension_host/src/channel_host.rs",
         count: 2,
     },
     FrozenPathCount {
@@ -153,6 +159,24 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         item_kind: "method",
         path: "crates/ironclaw_extension_host/src/available_extensions.rs",
         count: 2,
+    },
+    FrozenPathCount {
+        category: "test-support",
+        item_kind: "method",
+        path: "crates/ironclaw_extension_host/src/channel_host.rs",
+        count: 2,
+    },
+    FrozenPathCount {
+        category: "test-support",
+        item_kind: "method",
+        path: "crates/ironclaw_extension_host/src/channel_identity_binding.rs",
+        count: 2,
+    },
+    FrozenPathCount {
+        category: "test-support",
+        item_kind: "method",
+        path: "crates/ironclaw_extension_host/src/channel_pairing.rs",
+        count: 4,
     },
     FrozenPathCount {
         category: "test-support",
@@ -290,24 +314,6 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         category: "test-support",
         item_kind: "method",
         path: "crates/ironclaw_reborn_composition/src/builtin_capability_policy.rs",
-        count: 1,
-    },
-    FrozenPathCount {
-        category: "test-support",
-        item_kind: "method",
-        path: "crates/ironclaw_reborn_composition/src/extension_host/channel_identity.rs",
-        count: 2,
-    },
-    FrozenPathCount {
-        category: "test-support",
-        item_kind: "method",
-        path: "crates/ironclaw_reborn_composition/src/extension_host/channel_pairing.rs",
-        count: 4,
-    },
-    FrozenPathCount {
-        category: "test-support",
-        item_kind: "method",
-        path: "crates/ironclaw_reborn_composition/src/extension_host/lifecycle.rs",
         count: 1,
     },
     FrozenPathCount {

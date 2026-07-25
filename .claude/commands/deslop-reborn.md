@@ -54,7 +54,7 @@ List the crates (`ls crates/`). A crate is a **candidate** when ALL hold:
 **Selection bias:** prefer **smaller / leaf crates first** — they fit entirely in context, gate
 cleanly, and merge independently. A crate whose `src` is **under ~2k lines** can and SHOULD be read in
 full (§3). Clear the small, high-leverage crates before taking on the giants (e.g.
-`ironclaw_reborn_composition`, `ironclaw_product_workflow`, `ironclaw_gateway`-scale surfaces need
+`ironclaw_reborn_composition`, `ironclaw_product`, `ironclaw_gateway`-scale surfaces need
 targeted reading, not a full load, and may warrant splitting the de-slop across iterations
 module-by-module). When unsure, prefer a crate that is **load-bearing for invariants** (turns,
 dispatcher, authorization, approvals, secrets, run_state, event store) over a purely mechanical one —
@@ -199,7 +199,7 @@ it.** When grep floods on a name collision, when you can't tell which of two sam
 site means, when tracing a value across layers required re-reading three files, or when an item's
 purpose was unclear until you found (or failed to find) its caller — the defect is in the code's
 **naming or comments**, and it is in-scope for this de-slop. Rename the colliding/ambiguous item so the
-name is load-bearing for grep and agents (unique names are an invariant — `.claude/rules/type-placement.md`),
+name is load-bearing for grep and agents (unique names are an invariant — `.claude/rules/types.md`),
 or add the one-line comment that would have saved the trace. Record it as a finding alongside the ones
 the sub-agents raised; the friction you just hit is the next reader's friction too.
 

@@ -362,7 +362,7 @@ Not defaultable in the first E2E:
 
 - `docs/reborn/contracts/communication-delivery-resolution.md`
   - preference fields, rule order, and trigger delivery boundary.
-- `docs/reborn/contracts/product-adapters.md`
+- `docs/reborn/how-to-port-channel-to-reborn.md`
   - adapter outbound rendering boundary and Slack-like external channel
     capability model.
 - `crates/ironclaw_outbound/src/communication_preferences.rs`

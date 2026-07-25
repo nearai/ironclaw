@@ -1,6 +1,6 @@
 //! Anti-slippage ratchet for the deployment-mode-name axis, the broader
 //! companion to [`reborn_localdev_typename_ratchet`] (§4.4 / §10 of
-//! `docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`).
+//! `docs/reborn/contracts/runtime-profiles.md`).
 //!
 //! §4.4 mandates one enforcement test: **"no public type name contains
 //! `Local`/`LocalDev`/`Hosted`/`Enterprise`"** — a deployment mode is a
@@ -114,10 +114,7 @@ const FROZEN_OTHER_MODE_TYPES: &[&str] = &[
     //     composition surface; shrinks with Slice B (deployment mode becomes a
     //     `DeploymentConfig` value):
     "RebornLocalExtensionManagementPort",
-    "RebornLocalLifecycleService",
     "RebornLocalRuntimeIdentity",
-    "RebornLocalSkillManagementError",
-    "RebornLocalSkillManagementPort",
     //   mid-name LocalDev entries: none — cleared by the DeploymentConfig
     //     refactor (Slice B); the sibling ratchet's empty allowlist plus
     //     `contains_mode_term` here keep new ones out.

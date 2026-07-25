@@ -42,6 +42,22 @@ pub enum RebornBuildError {
     Mount(#[from] ironclaw_host_api::HostApiError),
 }
 
+impl From<ironclaw_extension_host::RebornExtensionHostBuildError> for RebornBuildError {
+    fn from(error: ironclaw_extension_host::RebornExtensionHostBuildError) -> Self {
+        match error {
+            ironclaw_extension_host::RebornExtensionHostBuildError::InvalidConfig { reason } => {
+                Self::InvalidConfig { reason }
+            }
+            ironclaw_extension_host::RebornExtensionHostBuildError::Filesystem(error) => {
+                Self::Filesystem(error)
+            }
+            ironclaw_extension_host::RebornExtensionHostBuildError::Mount(error) => {
+                Self::Mount(error)
+            }
+        }
+    }
+}
+
 impl From<ironclaw_host_runtime::ProductionWiringReport> for crate::RebornCompositionError {
     fn from(report: ironclaw_host_runtime::ProductionWiringReport) -> Self {
         Self::ProductionWiring { report }

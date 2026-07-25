@@ -42,7 +42,7 @@ manager authority, and V1 secret stores are inventory evidence only.
 | `AuthInteractionService` | redacted auth-required projections and secure manual-token submit | secret persistence internals or model-visible token transport |
 | `CredentialSetupService` | create/update account records from OAuth/manual setup results | durable encryption or runtime injection |
 | `CredentialAccountService` | account metadata, ownership, grants, status, redacted projections | raw access/refresh token material |
-| `AuthProviderClient` | one-shot OAuth provider exchange/refresh vocabulary over host egress | product workflow or route state |
+| `AuthProviderClient` | one-shot OAuth provider exchange/refresh vocabulary over host egress | product-surface orchestration or route state |
 | `SecretCleanupService` | ownership-aware uninstall/deactivate cleanup reports | deleting reusable/shared accounts by default |
 
 Low-level encrypted storage, leases, host-mediated HTTP credential injection,
@@ -155,8 +155,8 @@ states such as `failed`, `completed`, `expired`, and `canceled` must not be
 rendered as actionable auth gates.
 
 Legacy web/CLI/channel auth UX may remain behavior-compatible during
-migration, but Reborn paths should enter through `ProductWorkflow` or the
-WebUI-facing `RebornServicesApi` facade. They must not call V1 pending maps,
+migration, but Reborn paths should enter through `ProductSurface`. They must
+not call V1 pending maps,
 V1 OAuth routes, extension-manager authority, or route-local credential state.
 Dedicated HTTP route serving for manual-token and OAuth callback transports
 belongs in `ironclaw_webui`; composition supplies the configured
@@ -402,7 +402,7 @@ secret material. Composition resolves this boundary as follows:
   pick the first account as a fallback.
 - Missing, expired, revoked, refresh-failed, inactive, unauthorized, or
   ambiguous credentials project typed auth recovery (`setup_required`,
-  `reauthorize_required`, or `account_selection_required`) so product workflow
+  `reauthorize_required`, or `account_selection_required`) so product-surface orchestration
   can surface `AuthRequired` and resume the blocked turn. Non-recoverable
   backend failures return stable fail-closed errors.
 - Refresh-on-use is provider-specific behind
@@ -645,7 +645,7 @@ Rules:
 
 ## AuthPromptView v2 enrichment (issue #4112)
 
-`AuthPromptView` in `crates/ironclaw_product_adapters/src/outbound.rs` carries
+`AuthPromptView` in `crates/ironclaw_host_api/src/product_adapter/outbound.rs` carries
 five new optional fields added in #4112 for WebUI v2 OAuth/PAT rendering:
 
 | Field | Type | Present when |
