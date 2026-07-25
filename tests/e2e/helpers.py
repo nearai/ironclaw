@@ -290,6 +290,9 @@ SEL_V2 = {
     "thread_search": "input[placeholder='Search chats...']",
     "thread_load_more": "[data-testid='thread-load-more']",
     "sign_out_button": "button[title='Sign out']",
+    "nav_chat": "a[href='/chat']",
+    "nav_settings_inference": "a[href='/settings/inference']",
+    "settings_search_input": "input[type='search'][placeholder='Search settings...']",
     "appearance_theme_light": "[data-testid='appearance-theme-light']",
     "appearance_theme_dark": "[data-testid='appearance-theme-dark']",
     "chat_composer":  "[data-testid='chat-composer']",  # message textarea on /chat
@@ -332,6 +335,13 @@ SEL_V2 = {
     "extension_card_for": (
         "[data-testid='extension-card'][data-extension-id='{id}']"
     ),
+    "extension_primary_action": "[data-extension-primary-action]",
+    "extension_return_focus": "[data-extension-return-focus]",
+    "extension_more_actions_name": "More actions",
+    "extension_reconfigure_name": "Reconfigure",
+    "extension_configure_dialog_name_for": "Configure {name}",
+    "extension_dialog_close_name": "Close",
+    "extension_dialog_save_name": "Save",
     "pairing_section": "[data-testid='pairing-section']",
     "pairing_code_input": "[data-testid='pairing-code-input']",
     "pairing_submit": "[data-testid='pairing-submit']",

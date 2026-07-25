@@ -1364,6 +1364,11 @@ registerPack("uk", {
 
 registerPack("uk", {
   "app.checkingSession": "Перевірка сеансу...",
+  "app.loadingPage": "Завантаження сторінки...",
+  "app.pageLoadFailedTitle": "Не вдалося завантажити цю сторінку",
+  "app.pageLoadFailedDescription":
+    "Можливо, доступна нова версія або з’єднання було перервано. Перезавантажте сторінку, щоб повторити спробу.",
+  "app.reloadPage": "Перезавантажити сторінку",
   "app.sessionCheckFailedTitle": "Не вдалося перевірити сеанс",
   "app.sessionCheckFailedDescription":
     "Зараз не вдалося перевірити ваш сеанс. Дані для входу залишаються збереженими. Повторіть спробу трохи пізніше.",

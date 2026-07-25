@@ -1364,6 +1364,11 @@ registerPack("pt-BR", {
 
 registerPack("pt-BR", {
   "app.checkingSession": "Verificando sessão...",
+  "app.loadingPage": "Carregando página...",
+  "app.pageLoadFailedTitle": "Não foi possível carregar esta página",
+  "app.pageLoadFailedDescription":
+    "Uma nova versão pode estar disponível ou a conexão foi interrompida. Recarregue a página para tentar novamente.",
+  "app.reloadPage": "Recarregar página",
   "app.sessionCheckFailedTitle": "Não foi possível verificar sua sessão",
   "app.sessionCheckFailedDescription":
     "Não foi possível verificar sua sessão agora. Seu login continua salvo. Tente novamente em alguns instantes.",

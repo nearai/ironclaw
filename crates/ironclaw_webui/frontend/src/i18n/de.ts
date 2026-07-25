@@ -1364,6 +1364,11 @@ registerPack("de", {
 
 registerPack("de", {
   "app.checkingSession": "Sitzung wird geprüft...",
+  "app.loadingPage": "Seite wird geladen...",
+  "app.pageLoadFailedTitle": "Diese Seite konnte nicht geladen werden",
+  "app.pageLoadFailedDescription":
+    "Möglicherweise ist eine neue Version verfügbar oder die Verbindung wurde unterbrochen. Laden Sie die Seite neu, um es erneut zu versuchen.",
+  "app.reloadPage": "Seite neu laden",
   "app.sessionCheckFailedTitle": "Sitzung konnte nicht überprüft werden",
   "app.sessionCheckFailedDescription":
     "Ihre Sitzung konnte gerade nicht überprüft werden. Ihre Anmeldung bleibt gespeichert. Versuchen Sie es in Kürze erneut.",

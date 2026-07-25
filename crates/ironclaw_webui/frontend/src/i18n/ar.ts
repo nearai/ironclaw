@@ -1364,6 +1364,11 @@ registerPack("ar", {
 
 registerPack("ar", {
   "app.checkingSession": "جارٍ التحقق من الجلسة...",
+  "app.loadingPage": "جارٍ تحميل الصفحة...",
+  "app.pageLoadFailedTitle": "تعذّر تحميل هذه الصفحة",
+  "app.pageLoadFailedDescription":
+    "قد يتوفر إصدار جديد أو ربما انقطع الاتصال. أعد تحميل الصفحة للمحاولة مرة أخرى.",
+  "app.reloadPage": "إعادة تحميل الصفحة",
   "app.sessionCheckFailedTitle": "تعذّر التحقق من جلستك",
   "app.sessionCheckFailedDescription":
     "تعذّر التحقق من جلستك الآن. ما زالت معلومات تسجيل دخولك محفوظة. حاول مرة أخرى بعد قليل.",

@@ -1364,6 +1364,11 @@ registerPack("ko", {
 
 registerPack("ko", {
   "app.checkingSession": "세션 확인 중...",
+  "app.loadingPage": "페이지 불러오는 중...",
+  "app.pageLoadFailedTitle": "이 페이지를 불러올 수 없습니다",
+  "app.pageLoadFailedDescription":
+    "새 버전을 사용할 수 있거나 연결이 중단되었을 수 있습니다. 페이지를 새로고침하여 다시 시도하세요.",
+  "app.reloadPage": "페이지 새로고침",
   "app.sessionCheckFailedTitle": "세션을 확인할 수 없습니다",
   "app.sessionCheckFailedDescription":
     "현재 세션을 확인할 수 없습니다. 로그인 정보는 계속 저장되어 있습니다. 잠시 후 다시 시도하세요.",

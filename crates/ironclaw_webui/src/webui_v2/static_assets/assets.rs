@@ -29,7 +29,10 @@ mod tests {
     fn bundled_javascript() -> String {
         ASSETS
             .iter()
-            .filter(|(path, _)| path.starts_with("assets/app-") && path.ends_with(".js"))
+            // Route splitting moves feature code out of the app entry and into
+            // named lazy chunks, so source-contract assertions must search the
+            // complete embedded JavaScript graph.
+            .filter(|(path, _)| path.ends_with(".js"))
             .map(|(_, asset)| std::str::from_utf8(asset.bytes).expect("asset is utf-8"))
             .collect::<Vec<_>>()
             .join("\n")

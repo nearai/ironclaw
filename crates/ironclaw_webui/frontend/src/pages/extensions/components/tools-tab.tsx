@@ -1,5 +1,9 @@
 import { useT } from "../../../lib/i18n";
 import { ExtensionCard, RegistryCard } from "./extension-card";
+import type {
+  ConfigureFocusHandler,
+  InstallFocusHandler,
+} from "../lib/focus-target";
 
 function packageId(item) {
   return item.package_ref?.id || "";
@@ -7,6 +11,16 @@ function packageId(item) {
 
 // The tools view over extensions with tool surfaces (any runtime — wasm and
 // MCP-backed extensions sit side by side; runtime shows as a card badge).
+/**
+ * @param {{
+ *   tools: any[];
+ *   toolRegistry: any[];
+ *   onConfigure: ConfigureFocusHandler<any>;
+ *   onRemove: (extension: any) => void;
+ *   onInstall: InstallFocusHandler;
+ *   isBusy: boolean;
+ * }} props
+ */
 export function ToolsTab({
   tools,
   toolRegistry,

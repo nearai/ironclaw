@@ -1364,6 +1364,11 @@ registerPack("ja", {
 
 registerPack("ja", {
   "app.checkingSession": "セッションを確認中...",
+  "app.loadingPage": "ページを読み込み中...",
+  "app.pageLoadFailedTitle": "このページを読み込めませんでした",
+  "app.pageLoadFailedDescription":
+    "新しいバージョンが利用可能になったか、接続が中断された可能性があります。ページを再読み込みして、もう一度お試しください。",
+  "app.reloadPage": "ページを再読み込み",
   "app.sessionCheckFailedTitle": "セッションを確認できませんでした",
   "app.sessionCheckFailedDescription":
     "現在セッションを確認できません。サインイン情報は引き続き保持されています。しばらくしてからもう一度お試しください。",
