@@ -12,7 +12,7 @@
 //! - an active persistent grant → a re-authorize with that grant injected.
 //!
 //! Keeping *decisions* in the kernel and *mechanism* behind this port is the
-//! §5.3.2 security milestone (`docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`):
+//! Security milestone covered by `docs/reborn/contracts/capability-access.md`:
 //! it makes the `Authorized` seal's guarantee real instead of vacuous. A port
 //! that returned decisions would recreate the four-layer authority smear behind
 //! a single trait — the exact failure this milestone exists to remove.

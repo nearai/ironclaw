@@ -25,7 +25,7 @@ scripts/check-boundaries.sh
 scripts/reborn-e2e-rust.sh
 ```
 
-Use targeted crate tests first. Add `ironclaw_architecture` when dependency edges or layer ownership change. Run Reborn e2e when turns, runtime lanes, host services, authorization, approvals, networking, secrets, product workflow, or capability dispatch change. Note: `scripts/check-boundaries.sh` inspects the v1 `src/` tree only — for `crates/`, boundary enforcement is `cargo test -p ironclaw_architecture`.
+Use targeted crate tests first. Add `ironclaw_architecture` when dependency edges or layer ownership change. Run Reborn e2e when turns, runtime lanes, host services, authorization, approvals, networking, secrets, ProductSurface behavior, or capability dispatch change. Note: `scripts/check-boundaries.sh` inspects the v1 `src/` tree only — for `crates/`, boundary enforcement is `cargo test -p ironclaw_architecture`.
 
 ## Guidance Files
 
@@ -48,8 +48,8 @@ common / host_api / prompt_envelope
   -> secrets / network / outbound / channel_host / channel_delivery / run_state / authorization / approvals / runtime_policy / hooks
   -> host_runtime / processes / dispatcher / runtime lanes (scripts, mcp, wasm, wasm_limiter)
   -> turns / threads / agent_loop / loop_host / capabilities
-  -> reborn composition / product adapters / product workflow / product workflow storage / CLI
-  -> engine / llm / gateway / webui_v2 / webui_ingress / tui / root product integration
+  -> reborn composition / product adapters / product orchestration / CLI
+  -> engine / llm / gateway / webui / webui ingress / tui / root product integration
 ```
 
 Boundary rule: if you need an upstream crate in a low-level crate, stop and check `crates/ironclaw_architecture` plus matching Reborn contract.
@@ -139,11 +139,10 @@ Boundary rule: if you need an upstream crate in a low-level crate, stop and chec
 | `ironclaw_first_party_extensions` | `ironclaw_first_party_extensions/AGENTS.md`, `Cargo.toml` | Concrete first-party userland extension implementations and deterministic tool behavior behind scoped handles. | Host runtime composition, loop-facing ports, ambient runtime authority, dispatcher/network/secrets handles. |
 | `ironclaw_first_party_extension_ports` | `ironclaw_first_party_extension_ports/AGENTS.md`, `Cargo.toml` | Loop-facing adapters for first-party extensions: skill activation/context/execution ports over loop-host and turn-run contracts. | Concrete tool behavior, host runtime composition, product workflow, raw host authority. |
 | `ironclaw` | `ironclaw_reborn_cli/AGENTS.md` | Standalone Reborn CLI, command files, CLI context, shell completions, doctor/home/profile commands. | V1 runtime imports, root `ironclaw_legacy` deps, side effects in pure commands. |
-| `ironclaw_product` | `ironclaw_product/AGENTS.md`, `ironclaw_product/CLAUDE.md` | Product-adapter contracts: adapter trait, auth, egress, identity, workflow, external/projection/inbound, redaction, fakes. | Host runtime internals or specific WASM runner implementation. |
-| `ironclaw_product` | `ironclaw_product/AGENTS.md`, `ironclaw_product/CLAUDE.md` | Product-facing workflow service: inbound turns, bindings, ledger, workflow/errors, Reborn service bridges, and feature-gated durable ledger adapters. | Low-level runtime lane internals, direct provider-specific transports, or durable ledger access outside the `IdempotencyLedger` port. |
+| `ironclaw_product` | `ironclaw_product/AGENTS.md`, `ironclaw_product/CLAUDE.md` | Product contracts and orchestration: adapters, identity, inbound turns, bindings, idempotency, ProductSurface views/commands/capabilities, redaction, and feature-gated durable ledger adapters. | Host runtime internals, specific runtime lanes, direct provider transports, or backend access outside typed ports. |
 | `ironclaw_telegram_v2_adapter` | `ironclaw_telegram_v2_adapter/AGENTS.md`, `Cargo.toml`, `src/lib.rs` | Telegram WASM v2 ProductAdapter tracer bullet: payload parsing, rendering, adapter implementation. | Shared adapter contracts or registry semantics. |
 | `ironclaw_telegram_extension` | `ironclaw_telegram_extension/AGENTS.md`, `Cargo.toml`, `src/lib.rs` | Telegram WASM v2 ProductAdapter tracer bullet: payload parsing, rendering, adapter implementation. | Shared adapter contracts or registry semantics. |
-| `ironclaw_webui` | `ironclaw_webui/AGENTS.md`, `ironclaw_webui/CLAUDE.md`, `ironclaw_webui/README.md` | The whole WebUI host stack for Reborn WebChat v2: the `webui_v2` route surface + axum handlers + descriptor table + redacted `WebUiV2HttpError` (folded up from the former `ironclaw_webui`), the Vite SPA bundle (`frontend/`), the `webui_v2_app` gateway assembly + middleware stack, the listener/serve loop, and host authentication (Env/Session/OIDC authenticators, `SessionStore`, `/auth/*` OAuth login). | Product/API business logic (consume `ProductSurface` only), a direct `ironclaw_product` edge, transcript storage, v1 channel code. |
+| `ironclaw_webui` | `ironclaw_webui/AGENTS.md`, `ironclaw_webui/CLAUDE.md`, `ironclaw_webui/README.md` | The whole WebUI host stack for Reborn WebChat v2: the `webui_v2` route surface + axum handlers + descriptor table + redacted `WebUiV2HttpError` (folded up from the former `ironclaw_webui`), the Vite SPA bundle (`frontend/`), the `webui_v2_app` gateway assembly + middleware stack, the listener/serve loop, and host authentication (Env/Session/OIDC authenticators, `SessionStore`, `/auth/*` OAuth login). | Product/API business logic, product services, lower substrates, transcript storage, and v1 channel code. Use `ProductSurface`; direct `ironclaw_product` imports are DTOs/descriptors only. |
 | `ironclaw_extension_host` | `Cargo.toml`, `src/lib.rs` | Generic channel-host assembly binding installed extensions to inbound/outbound channel surfaces for the Reborn product surface: ingress registration, extension lifecycle command execution, delivery, and per-extension idempotency ledgers. | Host authority (signing secrets, bot tokens, network egress) and workflow admission; keep those in lower host crates and `ironclaw_reborn_composition`. |
 | `ironclaw_slack_extension` | `ironclaw_slack_extension/AGENTS.md` | Slack v2 ProductAdapter: protocol parsing/rendering only (payloads, mrkdwn, delivery DTOs). Host-side Slack (signature verify, delivery fan-out, setup/secrets) currently lives in `ironclaw_reborn_composition`. | Signing secrets, bot tokens, network, workflow admission — the boundary test bans host concerns here. |
 | `ironclaw_reborn_identity` | `Cargo.toml`, `src/lib.rs` | Canonical identity mapping: every external identity (OAuth login, channel actor) → stable `UserId` before runtime state; filesystem-backed resolver fronted through composition. | Auth flows, session storage, provider HTTP. |
@@ -155,16 +154,15 @@ Boundary rule: if you need an upstream crate in a low-level crate, stop and chec
 | `ironclaw_llm` | `ironclaw_llm/AGENTS.md`, `ironclaw_llm/CLAUDE.md`, `ironclaw_llm/Cargo.toml` | Multi-provider LLM integration: provider trait, auth, registry, retry/failover/circuit breaker/cache, tool schemas, reasoning, tracing, transcription/vision. | Engine loop ownership or product workflow. |
 | `ironclaw_skills` | `ironclaw_skills/AGENTS.md` | Skill catalog, parser, gating, selector/scoring, registry, validation, v2 skill types, and pure skill-learning distillation/refinement logic. | Agent-loop execution, concrete LLM adapters, filesystem writes, or UI command routing. |
 | `ironclaw_safety` | `ironclaw_safety/AGENTS.md`, `crates/ironclaw_safety/fuzz/README.md` | Prompt-injection detection, validation, sanitization, safety policy, sensitive paths, credential detection, leak scanning, fuzz/benches. | Sandbox execution, credential storage/injection, network allowlists, dispatch, UI decisions. |
-| `ironclaw_gateway` | `ironclaw_gateway/AGENTS.md` | **v1-only (legacy).** v1 gateway frontend assets, layout config, bundle metadata, widget extension system. WebChat v2 assets live in `ironclaw_webui_v2_static`. | Browser API/web channel runtime (`src/channels/web/`) or product workflow; Reborn WebChat v2 work. |
+| `ironclaw_gateway` | `ironclaw_gateway/AGENTS.md` | **v1-only (legacy).** v1 gateway frontend assets, layout config, bundle metadata, widget extension system. | Browser API/web channel runtime (`src/channels/web/`) or Reborn WebChat work. |
 | `ironclaw_tui` | `ironclaw_tui/AGENTS.md`, `ironclaw_tui/CLAUDE.md` | **v1-only today** (sole consumer: the root crate). Ratatui app, widgets, layout, render, theme, event/input loop, spinner. | Main crate channel bridge (`src/channels/tui.rs`) or backend workflow; new Reborn surfaces. |
 | `ironclaw_silk_decoder` | `ironclaw_silk_decoder/AGENTS.md`, `ironclaw_silk_decoder/README.md`, `ironclaw_silk_decoder/Cargo.toml`, `ironclaw_silk_decoder/src/main.rs` | Excluded helper binary that decodes WeChat SILK v3 voice notes to WAV. | Main workspace build dependencies; keep libclang isolated. |
-| `ironclaw_webui_v2_static` | `frontend/README.md`, `src/lib.rs` | WebChat v2 static SPA bundle: a thin Rust embedding harness (`static_router`) over the `static/` JS app; zero workspace deps by design. | Route semantics / listener / auth — all now in `ironclaw_webui`. |
 | `ironclaw_embeddings` | `ironclaw_embeddings/AGENTS.md` | `EmbeddingProvider` trait + OpenAI/NearAI/Ollama/Bedrock impls + caching decorator. **v1-only today** (sole consumer: the root crate; not yet wired Reborn-side). | Reborn runtime wiring assumptions; memory-native's same-named local port (deliberately separate). |
 
 ## Common Change Routes
 
 - Host API shape: `ironclaw_host_api` -> matching `docs/reborn/contracts/*.md` -> affected service/runtime crates -> `ironclaw_architecture`.
-- Storage and persistence: owning domain crate for schemas/queries; preserve libSQL/PostgreSQL parity where applicable. Product workflow ledger adapters live behind `ironclaw_product`'s `storage`/`libsql`/`postgres` features; event/audit store backends live in `ironclaw_reborn_event_store`.
+- Storage and persistence: owning domain crate for schemas/queries; preserve libSQL/PostgreSQL parity where applicable. Product ledger adapters live behind `ironclaw_product`'s `storage`/`libsql`/`postgres` features; event/audit store backends live in `ironclaw_reborn_event_store`.
 - Files/memory: `ironclaw_filesystem` for mount/path authority; `ironclaw_memory` for memory documents/search/chunking/indexing.
 - Events/projections/outbound: `ironclaw_events` for canonical redacted events; `ironclaw_event_projections` for projection model; `ironclaw_event_streams` for transport-neutral live/replay streams; `ironclaw_outbound` for metadata-only delivery/subscription policy; adapters for concrete delivery.
 - Trust/auth/approval: `ironclaw_trust` -> `ironclaw_authorization` -> `ironclaw_run_state`/`ironclaw_approvals` -> `ironclaw_capabilities` as needed.
@@ -173,8 +171,8 @@ Boundary rule: if you need an upstream crate in a low-level crate, stop and chec
 - Reborn turns/agent loop: `ironclaw_turns` for turn coordination; `ironclaw_agent_loop` for strategy/planner/executor contracts; `ironclaw_loop_host` for host support ports. Use `ironclaw_engine` only for existing v1 CodeAct/thread runtime maintenance.
 - Product adapter flow: `ironclaw_product` contracts and `adapter_registry` manifest projection -> `ironclaw_product` orchestration -> concrete adapter crate.
 - Reborn binary/composition: `ironclaw_reborn_config` for boot config; `ironclaw_reborn_composition` for production wiring; the `ironclaw_reborn_cli/` directory (package `ironclaw`) for commands; `ironclaw_runner` for standalone adapters/driver registry; `ironclaw_webui` for host-owned WebChat v2 listener lifecycle.
-- Model/provider behavior: `ironclaw_llm`; do not leak provider auth/cache/retry concerns into engine or product workflow.
-- UI presentation: `ironclaw_webui` (route surface + serve + auth) and `ironclaw_webui_v2_static` for Reborn WebChat v2; `ironclaw_tui` and `ironclaw_gateway` only for existing v1 UI maintenance. Backend API/web channel code remains under root `src/` unless the surface is the Reborn WebChat v2 host crate.
+- Model/provider behavior: `ironclaw_llm`; do not leak provider auth/cache/retry concerns into engine or product orchestration.
+- UI presentation: `ironclaw_webui` owns the Reborn WebChat route surface, Vite SPA, serving, and auth. `ironclaw_tui` and `ironclaw_gateway` are v1-only UI maintenance. Backend API/web channel code remains under root `src/` only for legacy surfaces.
 
 ## Testing
 

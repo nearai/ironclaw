@@ -2854,7 +2854,7 @@ fn gate_ref_for_resolution(resolution: &Resolution) -> Option<GateRef> {
 /// Map a gate-record store failure to a fail-closed host error. The bound cause
 /// (which may carry a host path) is logged server-side at `warn` — a genuine
 /// host storage fault operators must see — and never interpolated into the
-/// model-visible summary (agent-loop-capabilities.md).
+/// model-visible summary (capability-access contract).
 fn gate_record_store_error(error: RunStateError) -> AgentLoopHostError {
     tracing::warn!(error = %error, "failed to persist capability gate record at loop host seam");
     AgentLoopHostError::new(
@@ -2905,7 +2905,7 @@ impl GateRecordStorePort for NoopGateRecordStore {
 /// Map a replay-payload store failure to a fail-closed host error. The bound
 /// cause (which may carry a host path) is logged server-side at `warn` — a
 /// genuine host storage fault operators must see — and never interpolated into
-/// the model-visible summary (agent-loop-capabilities.md). Mirrors
+/// the model-visible summary (capability-access contract). Mirrors
 /// `gate_record_store_error`.
 fn replay_payload_store_error(error: ReplayPayloadStoreError) -> AgentLoopHostError {
     tracing::warn!(error = %error, "failed to persist/load capability replay payload at loop host seam");

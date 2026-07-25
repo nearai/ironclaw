@@ -1,6 +1,6 @@
 //! Anti-slippage ratchet for the product-surface method contract (§5.2 /
 //! §5.2.5 / §10 of
-//! `docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`).
+//! `docs/reborn/contracts/kernel-boundary.md`).
 //!
 //! §5.2's target: product consumers share the neutral
 //! `ironclaw_host_api::ProductSurface` vocabulary (`invoke`, `query`, and

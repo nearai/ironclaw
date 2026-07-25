@@ -135,8 +135,8 @@ Rules:
 
 The LLM provider settings snapshot is exposed as the descriptor-backed
 ProductSurface query view `llm_config`. The legacy `get_llm_config` facade
-method is a compatibility wrapper over that view while `RebornServicesApi`
-shrinks toward the generic read conduit.
+method is a compatibility wrapper over that view; the ProductSurface view is
+the canonical read conduit.
 
 ---
 

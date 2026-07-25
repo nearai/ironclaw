@@ -86,7 +86,7 @@ when introduced:
   with the feature and a `-D warnings` error without it. PR CI runs only
   the slim `all-features` lane, so this class breaks `main` after a green
   PR. Run all three legs locally when you add, move, or remove a gate —
-  see `.claude/rules/review-discipline.md` ("Required checks").
+  see `.claude/rules/testing.md` ("Validation").
 - **Deleting a feature is not just deleting `#[cfg]` lines.** Also
   handle: `#[cfg(not(...))]` items (delete them — they are dead
   alternates), optional dependencies that become mandatory, forwards in

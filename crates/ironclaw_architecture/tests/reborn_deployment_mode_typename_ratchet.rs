@@ -1,6 +1,6 @@
 //! Anti-slippage ratchet for the deployment-mode-name axis, the broader
 //! companion to [`reborn_localdev_typename_ratchet`] (§4.4 / §10 of
-//! `docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`).
+//! `docs/reborn/contracts/runtime-profiles.md`).
 //!
 //! §4.4 mandates one enforcement test: **"no public type name contains
 //! `Local`/`LocalDev`/`Hosted`/`Enterprise`"** — a deployment mode is a

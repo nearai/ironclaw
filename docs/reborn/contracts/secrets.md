@@ -21,7 +21,7 @@ ResourceScope + SecretHandle
   -> SecretMaterial exactly once
 ```
 
-The crate owns storage mechanics and one-shot lease state. It does not decide authorization, run approval flows, contact networks, emit audit events, or execute product workflows. It only provides the metadata and lease/consume primitive; host-runtime composition owns any concrete injection into runtime requests.
+The crate owns storage mechanics and one-shot lease state. It does not decide authorization, run approval flows, contact networks, emit audit events, or own product-surface orchestration. It only provides the metadata and lease/consume primitive; host-runtime composition owns any concrete injection into runtime requests.
 
 ---
 
@@ -179,7 +179,7 @@ This slice does not implement:
 - OAuth/token refresh flows
 - network policy enforcement
 
-Those should be added as separate service/composition slices without moving runtime or product workflow semantics into this crate.
+Those should be added as separate service/composition slices without moving runtime or product-surface orchestration semantics into this crate.
 
 ---
 

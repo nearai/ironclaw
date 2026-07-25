@@ -176,7 +176,7 @@ struct ApprovedDispatchLease {
 /// `Approved` carries the claimed lease to consume; `Denied` carries a
 /// model-visible denial so the run continues and the user can re-request
 /// approval, instead of a terminal `Err(AgentLoopHostError)` that would end the
-/// run (see .claude/rules/agent-loop-capabilities.md, Invariant 1).
+/// run (see the capability-access contract).
 enum ApprovedResumeDecision {
     Approved(ApprovedDispatchLease),
     Denied(Resolution),
@@ -298,7 +298,7 @@ impl SyntheticCapabilityHandler for OutboundDeliveryTargetSetHandler {
         // `target_id`: a delimiter (`/ < > [ ] { } ` + "`" + ` \`) trips
         // `ToolResultSafeSummary` validation in `append_capability_result_ref`,
         // which surfaces as a terminal `HostUnavailable` that kills the whole
-        // turn (see .claude/rules/agent-loop-capabilities.md, Invariant 2). The
+        // turn (see the capability-access contract). The
         // model still gets the target id from the result `output`; the summary
         // stays a fixed, delimiter-free string.
         write_completed_result(invocation, output, "set delivery target".to_string()).await

@@ -1,10 +1,24 @@
 import { useT } from "../../../lib/i18n";
 import { ExtensionCard, RegistryCard } from "./extension-card";
+import type {
+  ConfigureFocusHandler,
+  InstallFocusHandler,
+} from "../lib/focus-target";
 
 function packageId(item) {
   return item?.package_ref?.id || "";
 }
 
+/**
+ * @param {{
+ *   channels?: any[];
+ *   channelRegistry: any[];
+ *   onConfigure: ConfigureFocusHandler<any>;
+ *   onRemove: (extension: any) => void;
+ *   onInstall: InstallFocusHandler;
+ *   isBusy: boolean;
+ * }} props
+ */
 export function ChannelsTab({
   channels,
   channelRegistry,

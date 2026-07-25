@@ -312,7 +312,7 @@ Do not add in `ironclaw_resources` V1:
 - approval UI
 - auth/secret storage
 - network clients
-- product workflows
+- product-surface orchestration
 - retry/stuck-loop heuristics except as future input signals
 
 

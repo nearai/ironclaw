@@ -3303,7 +3303,7 @@ mod tests {
         // handler's other, unrelated `InvalidInput` fallback (the "reference
         // unavailable" path). All cases must stay a model-recoverable
         // `Failed(InvalidInput)`, never an `Err` that would terminate the run
-        // (agent-loop-capabilities.md).
+        // (capability-access contract).
         let valid_ref = "result:matrix-target";
         let max_bytes_range = format!(
             "4..={}",

@@ -1,4 +1,9 @@
-# Unified Extension Runtime — Implementation
+# Unified Extension Runtime — Historical Implementation Plan
+
+> **Superseded.** This is a migration record, not current implementation
+> guidance. Use `docs/reborn/extension-runtime/overview.md` and the live crate
+> code under `crates/ironclaw_extensions`, `crates/ironclaw_extension_host`,
+> `crates/ironclaw_product`, and the first-party extension crates.
 
 **Companions:** `overview.md` (model — read it first), `checklist.md` (acceptance).
 **Baseline:** this branch. It already contains the pending unified-extension-taxonomy PR stack (eight PRs, merge chain ending in #5850) that must land on main before this work starts.

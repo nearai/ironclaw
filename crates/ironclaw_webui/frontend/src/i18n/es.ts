@@ -1209,6 +1209,7 @@ registerPack("es", {
   "common.pinned": "Fijado",
   "common.deleteChat": "Eliminar chat",
   "chat.deleteFailed": "No se pudo eliminar esta conversación.",
+  "chat.cancelFailed": "No se pudo detener esta ejecución. Puede que siga en curso. Inténtalo de nuevo.",
   "chat.deleteBusy": "No se puede eliminar una conversación mientras se está ejecutando. Detenla primero y vuelve a intentarlo.",
   "command.placeholder": "Escriba un comando o busque...",
   "routine.searchPlaceholder": "Buscar nombre de rutina, activador o acción",
@@ -1364,6 +1365,11 @@ registerPack("es", {
 
 registerPack("es", {
   "app.checkingSession": "Comprobando sesión...",
+  "app.loadingPage": "Cargando página...",
+  "app.pageLoadFailedTitle": "No se pudo cargar esta página",
+  "app.pageLoadFailedDescription":
+    "Puede que haya una nueva versión disponible o que se haya interrumpido la conexión. Recarga la página para volver a intentarlo.",
+  "app.reloadPage": "Recargar página",
   "app.sessionCheckFailedTitle": "No se pudo verificar tu sesión",
   "app.sessionCheckFailedDescription":
     "No pudimos verificar tu sesión en este momento. Tu inicio de sesión sigue guardado. Inténtalo de nuevo en unos instantes.",
