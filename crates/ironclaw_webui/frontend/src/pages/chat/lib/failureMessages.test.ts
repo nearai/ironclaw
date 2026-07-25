@@ -10,6 +10,7 @@ import {
   upsertConnectionLostRunFailure,
 } from "./failureMessages";
 import { CONNECTION_STATUS } from "./connection-status";
+import { ApiError, describeApiError } from "../../../lib/api";
 
 const ENGLISH_FAILURE_COPY = {
   "chat.failure.connectionLost":
@@ -173,15 +174,22 @@ test("failureMessageForRequestError safely handles malformed and oversized API e
   );
   assert.equal(
     failureMessageForRequestError(
-      {
-        name: "ApiError",
-        message: "Service Unavailable",
-        body: "x".repeat(10_000),
-        statusText: "Service Unavailable",
-      },
-      t,
+      new ApiError(
+        describeApiError({
+          body: "x".repeat(10_000),
+          statusText: "Service Unavailable",
+        }),
+        {
+          body: "x".repeat(10_000),
+          statusText: "Service Unavailable",
+        },
+      ),
+      testTranslator({
+        ...ENGLISH_FAILURE_COPY,
+        "chat.failure.request": "请求在发送前失败。",
+      }),
     ),
-    "Service Unavailable",
+    "请求在发送前失败。",
   );
   assert.equal(
     failureMessageForRequestError(

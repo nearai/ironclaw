@@ -93,6 +93,7 @@ const API_KEY_LABEL_PATTERN = /\bapi[_ -]?key\b/gi;
 const LONG_CREDENTIAL_TOKEN_PREFIX_PATTERN = /\b[A-Za-z0-9_-]{24}/;
 const MAX_API_KEY_TOKEN_GAP = 80;
 const MIN_LONG_CREDENTIAL_TOKEN_LENGTH = 24;
+const MAX_SERVER_AUTHORED_BODY_LENGTH = 200;
 
 const PRODUCT_SURFACE_ERROR_KINDS = new Set([
   "validation",
@@ -177,10 +178,18 @@ function isClientGeneratedRequestMessage(
     return true;
   }
   const body = normalizeText(requestError.body);
-  if (body && !body.startsWith("{") && !body.startsWith("[")) {
-    return false;
-  }
   const statusText = normalizeText(requestError.statusText);
+  if (body && !body.startsWith("{") && !body.startsWith("[")) {
+    // `describeApiError` selects non-JSON body prose only within this bound.
+    // Longer proxy bodies fall back to generic statusText copy, which must
+    // remain localizable.
+    const messageCameFromBody =
+      body.length <= MAX_SERVER_AUTHORED_BODY_LENGTH && message === body;
+    return (
+      !messageCameFromBody &&
+      (message === statusText || message === "Request failed")
+    );
+  }
   return !body || message === statusText || message === "Request failed";
 }
 
