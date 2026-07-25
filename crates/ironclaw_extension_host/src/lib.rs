@@ -86,7 +86,7 @@ mod build_error;
 #[cfg(test)]
 mod host_remediation_contract_tests;
 #[cfg(test)]
-#[path = "lifecycle_test_support_tests.rs"]
+#[path = "test_support/lifecycle.rs"]
 pub mod lifecycle_test_support;
 
 #[cfg(any(test, feature = "test-support"))]
