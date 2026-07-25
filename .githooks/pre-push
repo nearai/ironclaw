@@ -6,6 +6,38 @@ set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 SCRIPT_DIR="$REPO_ROOT/scripts/ci"
 
+check_merge_to_base_clean() {
+    if [ "${IRONCLAW_PREPUSH_MERGE_CHECK:-1}" = "0" ]; then
+        return 0
+    fi
+
+    remote_name="${1:-origin}"
+    base_branch="${IRONCLAW_PREPUSH_BASE_BRANCH:-main}"
+    base_ref="refs/remotes/${remote_name}/${base_branch}"
+
+    echo "==> merge check: HEAD cleanly merges with ${remote_name}/${base_branch} (skip with IRONCLAW_PREPUSH_MERGE_CHECK=0)"
+    git fetch --quiet "$remote_name" "+refs/heads/${base_branch}:${base_ref}"
+
+    base_commit="$(git rev-parse --verify "${base_ref}^{commit}")"
+    merge_base="$(git merge-base HEAD "$base_commit")"
+    merge_output="$(mktemp)"
+    if ! git merge-tree --write-tree --merge-base="$merge_base" HEAD "$base_commit" >"$merge_output" 2>&1; then
+        cat >&2 <<EOF
+ERROR: this branch does not merge cleanly with ${remote_name}/${base_branch}.
+
+Run:
+  git fetch ${remote_name} ${base_branch}
+  git merge ${remote_name}/${base_branch}
+
+Conflict summary from git merge-tree:
+EOF
+        sed -n '1,120p' "$merge_output" >&2
+        rm -f "$merge_output"
+        exit 1
+    fi
+    rm -f "$merge_output"
+}
+
 run_ci_env() {
     env \
         -u NEARAI_API_KEY \
@@ -22,6 +54,8 @@ run_ci_env() {
         RUST_MIN_STACK="${RUST_MIN_STACK:-67108864}" \
         "$@"
 }
+
+check_merge_to_base_clean "${1:-origin}"
 
 # Default: baseline quality gate
 "$SCRIPT_DIR/quality_gate.sh"
