@@ -38,7 +38,7 @@ use crate::{
 /// Per-invocation execution request handed to a runtime lane.
 ///
 /// Host-internal seam behind the prebound
-/// [`ironclaw_dispatcher::BoundCapabilityAdapter`] bindings: the registry-lane
+/// [`ironclaw_capabilities::BoundCapabilityAdapter`] bindings: the registry-lane
 /// resolver captures the static fields (package, descriptor, runtime policy,
 /// filesystem, governor) when it constructs a binding and materializes one of
 /// these per call. If `resource_reservation` is present, the lane must

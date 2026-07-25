@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex};
 
-use ironclaw_authorization::CapabilityLeaseStorePort;
 use ironclaw_host_api::{
     CapabilityId, ExtensionId, MountView, Resolution, ResolutionBatch, UserId,
 };
@@ -9,11 +8,7 @@ use ironclaw_host_runtime::HostRuntime;
 use ironclaw_loop_host::{
     HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
 };
-use ironclaw_product::{
-    LifecycleProductContext, LifecycleProductSurfaceContext, OutboundPreferencesProductFacade,
-    ProjectService,
-};
-use ironclaw_run_state::ApprovalRequestStorePort;
+use ironclaw_product::{OutboundPreferencesProductService, ProjectService};
 use ironclaw_threads::SessionThreadService;
 use ironclaw_trust::TrustDecision;
 use ironclaw_turns::ExternalToolCatalog;
@@ -28,7 +23,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::builtin_capability_policy::BuiltinCapabilityPolicy;
 use crate::profile_approval_authorization::ApprovalSettingsProvider;
 use crate::runtime::ComposedSelectableSkillContextSource;
-use crate::runtime::extension_surface::ExtensionCapabilitySurfaceSource;
+use crate::runtime::local_dev::extension_surface::ExtensionCapabilitySurfaceSource;
 use crate::runtime::local_dev::external_tool_capability::wrap_external_tools;
 use crate::runtime::local_dev::outbound_delivery::outbound_delivery_capabilities;
 use crate::runtime::local_dev::project_create::project_create_capability;
@@ -39,7 +34,7 @@ use crate::runtime::local_dev::synthetic_capability::wrap_synthetic_capabilities
 
 use super::{
     VisibleCapabilityInputs, capability_io_error, host_api_agent_loop_error,
-    local_dev_resource_scope_for_run, visible_capability_request,
+    visible_capability_request,
 };
 
 pub(crate) struct RefreshingCapabilityPortConfig {
@@ -59,11 +54,11 @@ pub(crate) struct RefreshingCapabilityPortConfig {
     pub(super) project_service: Arc<dyn ProjectService>,
     pub(super) thread_service: Arc<dyn SessionThreadService>,
     pub(super) trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
-    pub(super) outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
+    pub(super) outbound_preferences_service: Option<Arc<dyn OutboundPreferencesProductService>>,
     pub(super) outbound_delivery_target_set_requires_approval: bool,
     pub(super) approval_settings: Arc<dyn ApprovalSettingsProvider>,
-    pub(super) approval_requests: Arc<dyn ApprovalRequestStorePort>,
-    pub(super) capability_leases: Arc<dyn CapabilityLeaseStorePort>,
+    pub(super) approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>,
+    pub(super) capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStorePort>,
     /// Durable model-visible gate-record store the built capability port persists
     /// pending-gate records into (wires the #6245 production gap closed).
     pub(super) gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort>,
@@ -116,7 +111,7 @@ pub(crate) async fn create_refreshing_capability_port(
         project_service: config.project_service,
         thread_service: config.thread_service,
         trajectory_observer: config.trajectory_observer,
-        outbound_preferences_facade: config.outbound_preferences_facade,
+        outbound_preferences_service: config.outbound_preferences_service,
         outbound_delivery_target_set_requires_approval: config
             .outbound_delivery_target_set_requires_approval,
         approval_settings: config.approval_settings,
@@ -156,11 +151,11 @@ struct RefreshingCapabilityPort {
     project_service: Arc<dyn ProjectService>,
     thread_service: Arc<dyn SessionThreadService>,
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
-    outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
+    outbound_preferences_service: Option<Arc<dyn OutboundPreferencesProductService>>,
     outbound_delivery_target_set_requires_approval: bool,
     approval_settings: Arc<dyn ApprovalSettingsProvider>,
-    approval_requests: Arc<dyn ApprovalRequestStorePort>,
-    capability_leases: Arc<dyn CapabilityLeaseStorePort>,
+    approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>,
+    capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStorePort>,
     gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort>,
     replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort>,
     external_tool_catalog: Arc<dyn ExternalToolCatalog>,
@@ -174,18 +169,9 @@ struct RefreshingCapabilityPort {
 
 impl RefreshingCapabilityPort {
     async fn build_inner(&self) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
-        let caller_scope =
-            local_dev_resource_scope_for_run(&self.run_context, &self.fallback_user_id);
         let extension_surface = self
             .extension_surface_source
-            .snapshot(LifecycleProductContext::Surface(
-                LifecycleProductSurfaceContext {
-                    tenant_id: caller_scope.tenant_id,
-                    user_id: caller_scope.user_id,
-                    agent_id: caller_scope.agent_id,
-                    project_id: caller_scope.project_id,
-                },
-            ))
+            .snapshot()
             .await
             .map_err(host_api_agent_loop_error)?;
         let mut visible_request = visible_capability_request(
@@ -327,9 +313,9 @@ impl RefreshingCapabilityPort {
             Arc::clone(&self.thread_service),
             self.fallback_user_id.clone(),
         )?);
-        if let Some(outbound_preferences_facade) = &self.outbound_preferences_facade {
+        if let Some(outbound_preferences_service) = &self.outbound_preferences_service {
             synthetic_capabilities.extend(outbound_delivery_capabilities(
-                Arc::clone(outbound_preferences_facade),
+                Arc::clone(outbound_preferences_service),
                 self.fallback_user_id.clone(),
                 Arc::clone(&self.approval_requests),
                 Arc::clone(&self.capability_leases),
@@ -499,7 +485,7 @@ pub(crate) async fn create_refreshing_capability_port_for_test(
         project_service,
         thread_service,
         trajectory_observer,
-        outbound_preferences_facade,
+        outbound_preferences_service,
         outbound_delivery_target_set_requires_approval,
         tool_permission_overrides,
         auto_approve_settings,
@@ -530,7 +516,6 @@ pub(crate) async fn create_refreshing_capability_port_for_test(
     // the opaque `SkillActivationTestSource` handle the harness passed in
     // (see the field's doc-comment on `RefreshingCapabilityPortTestParts`).
     let skill_activation_source = skill_activation_source.map(|handle| handle.activation_source());
-    let extension_readiness_source = extension_management.map(|handle| handle.readiness_source());
 
     create_refreshing_capability_port(RefreshingCapabilityPortConfig {
         runtime,
@@ -547,7 +532,9 @@ pub(crate) async fn create_refreshing_capability_port_for_test(
         // `ExtensionManagementTestHandle` (see its doc-comment); `None` when
         // the harness never wired one, reproducing the prior always-no-op
         // surface.
-        extension_surface_source: ExtensionCapabilitySurfaceSource::new(extension_readiness_source),
+        extension_surface_source: ExtensionCapabilitySurfaceSource::new(
+            extension_management.map(|handle| handle.extension_management()),
+        ),
         input_resolver,
         result_writer,
         milestone_sink,
@@ -555,7 +542,7 @@ pub(crate) async fn create_refreshing_capability_port_for_test(
         project_service,
         thread_service,
         trajectory_observer,
-        outbound_preferences_facade,
+        outbound_preferences_service,
         outbound_delivery_target_set_requires_approval,
         approval_settings,
         approval_requests,

@@ -49,12 +49,6 @@ pub(super) struct ConcurrencyLimiter {
 }
 
 impl ConcurrencyLimiter {
-    /// Build a limiter with no limits configured (all counters stay empty).
-    #[allow(dead_code)]
-    pub(super) fn unlimited() -> Self {
-        Self::default()
-    }
-
     /// Build a limiter with the given limits.  If no cap is enabled the
     /// counters are never populated (short-circuit matches original behaviour).
     pub(super) fn with_limits(limits: ConcurrencyLimits) -> Self {

@@ -11,7 +11,8 @@
 //! Tool names recorded at this seam are the model-facing names the Reborn
 //! gateway advertises, which equal capability ids (`builtin.trigger_create`)
 //! for every first-party tool except `builtin.skill_activate` (advertised as
-//! `builtin__skill_activate`); the QA phrases do not exercise that tool.
+//! `builtin__skill_activate`). Recorded QA phrases may exercise that tool before
+//! continuing with the selected skill's workflow.
 
 #![allow(dead_code)] // Shared by the QA recorder/replay test binaries only.
 
@@ -21,6 +22,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ironclaw_approvals::AutoApproveSettingInput;
+use ironclaw_auth::RebornProductAuthServices;
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccount,
     CredentialAccountSelectionRequest, CredentialAccountStatus, CredentialOwnership,
@@ -45,10 +47,9 @@ use ironclaw_network::{
 };
 use ironclaw_product::RebornOutboundDeliveryTargetId;
 use ironclaw_reborn_composition::{
-    AssistantReply, PollSettings, RebornCompositionProfile, RebornProductAuthServices,
-    RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput, RebornRuntimeProfileOptions,
-    RebornTurnDriveOutcome, TriggerPollerSettings, build_reborn_runtime, build_runtime,
-    local_runtime_build_input_with_options,
+    AssistantReply, PollSettings, RebornCompositionProfile, RebornRuntime, RebornRuntimeIdentity,
+    RebornRuntimeInput, RebornRuntimeProfileOptions, RebornTurnDriveOutcome, TriggerPollerSettings,
+    build_reborn_runtime, build_runtime, local_runtime_build_input_with_options,
 };
 use ironclaw_reborn_config::{RebornConfigFile, RebornHome};
 use ironclaw_runner::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
@@ -851,7 +852,7 @@ impl RebornQaCredentialSource {
 }
 
 async fn select_source_credential_account(
-    product_auth: &ironclaw_reborn_composition::RebornProductAuthServices,
+    product_auth: &ironclaw_auth::RebornProductAuthServices,
     source: &RebornQaCredentialSource,
     source_auth_scope: &AuthProductScope,
     provider: AuthProviderId,
@@ -1447,7 +1448,7 @@ pub async fn record_qa_phrase(fixture_name: &str, phrase: &str) {
     // and reports the pause, instead of parking in the non-terminal
     // `BlockedAuth` state until `RunTimeout`. Resolving the gate to record the
     // post-auth turns is a deliberate follow-up that goes through the WebUI
-    // facade with a seeded credential — not wired here.
+    // service with a seeded credential — not wired here.
     let conversation = runtime
         .new_conversation()
         .await

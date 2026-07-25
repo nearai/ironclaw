@@ -1,4 +1,4 @@
-//! Generic multi-mount filesystem-browse read port for the WebUI v2 facade.
+//! Generic multi-mount filesystem-browse read port for the WebUI v2 service.
 //!
 //! Where [`ProjectFilesystemReader`](super::project_fs::ProjectFilesystemReader)
 //! surfaces a single thread's project workspace, this port surfaces the agent's
@@ -9,7 +9,7 @@
 //!
 //! Design notes:
 //!
-//! - **Mount, not thread.** The browse scope is derived by the facade from the
+//! - **Mount, not thread.** The browse scope is derived by the service from the
 //!   authenticated caller (tenant/user/agent/project). An optional typed
 //!   project selector is authorized through the project service before it is
 //!   adopted; it never directly supplies a filesystem scope. A [`FsMount`] selects *which* virtual mount to read;
@@ -116,7 +116,7 @@ pub struct RebornFsStatRequest {
     pub mount: FsMount,
     #[serde(default)]
     pub path: String,
-    /// Optional project selector. The facade authorizes it before resolving
+    /// Optional project selector. The service authorizes it before resolving
     /// the browse scope.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<ProjectId>,
@@ -134,7 +134,7 @@ pub struct RebornFsReadRequest {
     pub mount: FsMount,
     #[serde(default)]
     pub path: String,
-    /// Optional project selector. The facade authorizes it before resolving
+    /// Optional project selector. The service authorizes it before resolving
     /// the browse scope.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<ProjectId>,
@@ -143,13 +143,13 @@ pub struct RebornFsReadRequest {
 /// Read-only navigation + download access to the agent's internal filesystem
 /// across multiple logical mounts.
 ///
-/// Every method takes a [`ResourceScope`] the facade has already derived from
+/// Every method takes a [`ResourceScope`] the service has already derived from
 /// the authenticated caller and authorized; mutations are intentionally absent.
 /// Entry/stat paths are mount-relative — the same value passes back to
 /// [`Self::read_file`]/[`Self::stat`].
 #[async_trait]
 pub trait FilesystemBrowseReader: Send + Sync {
-    /// The mounts this composition can actually serve. The facade filters
+    /// The mounts this composition can actually serve. The service filters
     /// requests against this set so an unwired mount yields a clean
     /// "not found" rather than a backend error.
     fn available_mounts(&self) -> Vec<FsMount>;

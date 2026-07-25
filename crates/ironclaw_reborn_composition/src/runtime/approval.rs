@@ -6,7 +6,7 @@ use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_host_api::{EffectKind, MountView, Principal};
 use ironclaw_product::{
     ApprovalGateRecord, ApprovalInteractionRejectionKind, ApprovalLeaseTermsProvider,
-    LifecycleProductContext, LifecycleProductSurfaceContext, ProductWorkflowError,
+    ProductSurfaceFailure,
 };
 
 use crate::builtin_capability_policy::{
@@ -15,7 +15,7 @@ use crate::builtin_capability_policy::{
 };
 use crate::outbound::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID;
 
-use super::extension_surface::ExtensionCapabilitySurfaceSource;
+use super::local_dev::extension_surface::ExtensionCapabilitySurfaceSource;
 
 pub(super) struct PolicyApprovalLeaseTermsProvider {
     policy: Arc<BuiltinCapabilityPolicy>,
@@ -52,7 +52,7 @@ impl PolicyApprovalLeaseTermsProvider {
         &self,
         gate: &ApprovalGateRecord,
         action: BuiltinApprovalPolicyAction<'_>,
-    ) -> Result<LeaseApproval, ProductWorkflowError> {
+    ) -> Result<LeaseApproval, ProductSurfaceFailure> {
         self.extension_lease_terms_for_active_capability(gate, action)
             .await?
             .ok_or_else(lease_terms_unavailable)
@@ -62,14 +62,14 @@ impl PolicyApprovalLeaseTermsProvider {
         &self,
         gate: &ApprovalGateRecord,
         action: BuiltinApprovalPolicyAction<'_>,
-    ) -> Result<Option<LeaseApproval>, ProductWorkflowError> {
+    ) -> Result<Option<LeaseApproval>, ProductSurfaceFailure> {
         let capability = action.capability();
         let Principal::Extension(extension_id) = &gate.request().requested_by else {
             return Ok(None);
         };
         let surface = self
             .extension_surface_source
-            .snapshot(lifecycle_context_for_gate(gate))
+            .snapshot()
             .await
             .map_err(|error| {
                 tracing::error!(%error, "local-dev extension approval lease terms are unavailable");
@@ -103,12 +103,11 @@ impl PolicyApprovalLeaseTermsProvider {
 
     async fn active_extension_persistent_approval_allowed(
         &self,
-        gate: &ApprovalGateRecord,
         action: BuiltinApprovalPolicyAction<'_>,
-    ) -> Result<bool, ProductWorkflowError> {
+    ) -> Result<bool, ProductSurfaceFailure> {
         let surface = self
             .extension_surface_source
-            .snapshot(lifecycle_context_for_gate(gate))
+            .snapshot()
             .await
             .map_err(|error| {
                 tracing::error!(%error, "local-dev extension approval surface is unavailable");
@@ -135,9 +134,9 @@ impl ApprovalLeaseTermsProvider for PolicyApprovalLeaseTermsProvider {
     async fn lease_terms_for(
         &self,
         gate: &ApprovalGateRecord,
-    ) -> Result<ironclaw_approvals::LeaseApproval, ProductWorkflowError> {
+    ) -> Result<ironclaw_approvals::LeaseApproval, ProductSurfaceFailure> {
         let action = BuiltinApprovalPolicyAction::from_host_action(gate.request().action.as_ref())
-            .ok_or(ProductWorkflowError::ApprovalInteractionRejected {
+            .ok_or(ProductSurfaceFailure::ApprovalInteractionRejected {
                 kind: ApprovalInteractionRejectionKind::UnsupportedAction,
             })?;
         if action.is_spawn_capability()
@@ -168,27 +167,16 @@ impl ApprovalLeaseTermsProvider for PolicyApprovalLeaseTermsProvider {
     async fn persistent_approval_allowed(
         &self,
         gate: &ApprovalGateRecord,
-    ) -> Result<(), ProductWorkflowError> {
+    ) -> Result<(), ProductSurfaceFailure> {
         let action = BuiltinApprovalPolicyAction::from_host_action(gate.request().action.as_ref())
-            .ok_or(ProductWorkflowError::ApprovalInteractionRejected {
+            .ok_or(ProductSurfaceFailure::ApprovalInteractionRejected {
                 kind: ApprovalInteractionRejectionKind::UnsupportedAction,
             })?;
-        if self
-            .registry
-            .get_capability(action.capability_id())
-            .is_some()
-        {
-            // Registry presence is provider-global package metadata, not
-            // caller authority. Require the same caller-scoped active surface
-            // used for model visibility and dispatch before issuing durable
-            // approval authority for a registry-backed extension capability.
-            if self
-                .active_extension_persistent_approval_allowed(gate, action)
-                .await?
-            {
+        if let Some(descriptor) = self.registry.get_capability(action.capability_id()) {
+            if permission_mode_allows_persistent_approval(descriptor.default_permission) {
                 return Ok(());
             }
-            return Err(ProductWorkflowError::ApprovalInteractionRejected {
+            return Err(ProductSurfaceFailure::ApprovalInteractionRejected {
                 kind: ApprovalInteractionRejectionKind::AlwaysAllowUnsupported,
             });
         }
@@ -212,30 +200,20 @@ impl ApprovalLeaseTermsProvider for PolicyApprovalLeaseTermsProvider {
             }
         }
         if self
-            .active_extension_persistent_approval_allowed(gate, action)
+            .active_extension_persistent_approval_allowed(action)
             .await?
         {
             Ok(())
         } else {
-            Err(ProductWorkflowError::ApprovalInteractionRejected {
+            Err(ProductSurfaceFailure::ApprovalInteractionRejected {
                 kind: ApprovalInteractionRejectionKind::AlwaysAllowUnsupported,
             })
         }
     }
 }
 
-fn lifecycle_context_for_gate(gate: &ApprovalGateRecord) -> LifecycleProductContext {
-    let scope = gate.resource_scope();
-    LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
-        tenant_id: scope.tenant_id.clone(),
-        user_id: scope.user_id.clone(),
-        agent_id: scope.agent_id.clone(),
-        project_id: scope.project_id.clone(),
-    })
-}
-
-fn lease_terms_unavailable() -> ProductWorkflowError {
-    ProductWorkflowError::ApprovalInteractionRejected {
+fn lease_terms_unavailable() -> ProductSurfaceFailure {
+    ProductSurfaceFailure::ApprovalInteractionRejected {
         kind: ApprovalInteractionRejectionKind::LeaseTermsUnavailable,
     }
 }
@@ -253,10 +231,10 @@ mod tests {
     use ironclaw_turns::{GateRef, TurnRunId};
 
     use crate::builtin_capability_policy::builtin_capability_policy;
-    use crate::extension_host::extension_lifecycle::ActiveExtensionCapability;
-    use crate::runtime::extension_surface::{
+    use crate::runtime::local_dev::extension_surface::{
         ExtensionCapabilitySurface, ExtensionCapabilitySurfaceSource,
     };
+    use ironclaw_extension_host::ActiveExtensionCapability;
 
     use super::*;
 
@@ -540,7 +518,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            ProductWorkflowError::ApprovalInteractionRejected {
+            ProductSurfaceFailure::ApprovalInteractionRejected {
                 kind: ApprovalInteractionRejectionKind::AlwaysAllowUnsupported
             }
         ));

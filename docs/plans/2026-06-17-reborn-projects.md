@@ -125,7 +125,7 @@ unchanged.
 4. **Composition adapter** — `ironclaw_reborn_composition/src/project_service.rs`:
    `RebornProjectService` (repo + `resolve_access` gating). Construct repo in
    `factory.rs` next to `trigger_repository`; thread via `RebornRuntimeInput`;
-   attach in `build_webui_services`.
+   attach in the runtime-backed product surface.
 5. **HTTP** — `ironclaw_webui_v2`: route consts + patterns + descriptors +
    `webui_v2_routes()` + thin handlers + router mounting + contract-test rows.
 6. **Thread + automation binding** — `create_thread`/`submit_turn` stamp the

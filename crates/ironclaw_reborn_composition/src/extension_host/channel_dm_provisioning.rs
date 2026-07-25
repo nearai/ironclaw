@@ -16,14 +16,11 @@
 
 use std::{sync::Arc, time::Duration};
 
-use ironclaw_host_api::UserId;
+use ironclaw_host_api::{ChannelIdentityPostBind, ChannelIdentityPostBindFactory, UserId};
 use ironclaw_product::ChannelDeliveryResolver;
 use ironclaw_product::TargetQuery;
 
-use crate::extension_host::channel_dm_targets::{ChannelDmTargetStore, dm_target_payload};
-use crate::extension_host::channel_identity::{
-    ChannelIdentityPostBind, ChannelIdentityPostBindFactory,
-};
+use ironclaw_extension_host::{FilesystemChannelDmTargetStore, dm_target_payload};
 
 const ACTIVATION_PUBLICATION_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -51,14 +48,14 @@ fn direct_conversation_query(external_actor_id: &str) -> String {
 /// wiring.
 pub(crate) struct ChannelDmTargetProvisioning {
     delivery: Arc<dyn ChannelDeliveryResolver>,
-    store: Arc<ChannelDmTargetStore>,
+    store: Arc<FilesystemChannelDmTargetStore>,
     snapshot_updates: tokio::sync::watch::Receiver<u64>,
 }
 
 impl ChannelDmTargetProvisioning {
     pub(crate) fn new(
         delivery: Arc<dyn ChannelDeliveryResolver>,
-        store: Arc<ChannelDmTargetStore>,
+        store: Arc<FilesystemChannelDmTargetStore>,
         snapshot_updates: tokio::sync::watch::Receiver<u64>,
     ) -> Self {
         Self {
@@ -87,7 +84,7 @@ impl ChannelIdentityPostBindFactory for ChannelDmTargetProvisioning {
 struct ChannelDmTargetPostBind {
     extension_id: String,
     delivery: Arc<dyn ChannelDeliveryResolver>,
-    store: Arc<ChannelDmTargetStore>,
+    store: Arc<FilesystemChannelDmTargetStore>,
     snapshot_updates: tokio::sync::watch::Receiver<u64>,
 }
 
@@ -130,7 +127,7 @@ impl ChannelIdentityPostBind for ChannelDmTargetPostBind {
 async fn provision_dm_target_after_bind(
     extension_id: &str,
     delivery: &Arc<dyn ChannelDeliveryResolver>,
-    store: &Arc<ChannelDmTargetStore>,
+    store: &Arc<FilesystemChannelDmTargetStore>,
     user_id: &UserId,
     external_actor_id: &str,
     mut snapshot_updates: tokio::sync::watch::Receiver<u64>,
@@ -159,7 +156,7 @@ async fn provision_dm_target_after_bind(
 async fn provision_dm_target(
     extension_id: &str,
     delivery: &Arc<dyn ChannelDeliveryResolver>,
-    store: &Arc<ChannelDmTargetStore>,
+    store: &Arc<FilesystemChannelDmTargetStore>,
     user_id: &UserId,
     external_actor_id: &str,
 ) -> Result<bool, DmTargetProvisioningError> {
@@ -340,8 +337,8 @@ mod tests {
         }
     }
 
-    fn store() -> Arc<ChannelDmTargetStore> {
-        Arc::new(ChannelDmTargetStore::new(
+    fn store() -> Arc<FilesystemChannelDmTargetStore> {
+        Arc::new(FilesystemChannelDmTargetStore::new(
             Arc::new(InMemoryBackend::new()),
             TenantId::new("tenant-alpha").expect("tenant"),
             UserId::new("operator").expect("user"),

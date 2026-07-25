@@ -197,10 +197,10 @@ async fn extensions_group_e2e_inner() {
     );
 
     // Scenario 11: the retired Activate action's structural successor — an
-    // EXISTING member's idempotent install retry reconciles setup_needed →
+    // EXISTING member's idempotent install retry reconciles installed →
     // active on the shared store (distinct actor via `with_actor_id`, so no
     // scenario-order coupling; no remove in between; positively pins the
-    // intermediate setup_needed phase cross-thread).
+    // intermediate installed phase cross-thread).
     report.record(
         "existing_member_reinstall_reconciles_to_active",
         scenario_existing_member_reinstall_reconciles_to_active::run(&g).await,

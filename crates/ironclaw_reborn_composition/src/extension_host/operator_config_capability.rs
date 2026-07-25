@@ -5,10 +5,9 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use ironclaw_approvals::{
-    AutoApproveSettingInput, AutoApproveSettingStorePort, PersistentApprovalAction,
-    PersistentApprovalPolicyError, PersistentApprovalPolicyInput, PersistentApprovalPolicyKey,
-    PersistentApprovalPolicyStorePort, ToolPermissionOverride, ToolPermissionOverrideInput,
-    ToolPermissionOverrideKey, ToolPermissionOverrideStorePort, ToolPermissionState,
+    AutoApproveSettingInput, PersistentApprovalAction, PersistentApprovalPolicyError,
+    PersistentApprovalPolicyInput, PersistentApprovalPolicyKey, ToolPermissionOverride,
+    ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionState,
 };
 use ironclaw_extensions::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionPackage,
@@ -41,9 +40,9 @@ pub(crate) fn extend_builtin_first_party_package(
 
 pub(crate) fn insert_handler(
     registry: &mut FirstPartyCapabilityRegistry,
-    auto_approve: Arc<dyn AutoApproveSettingStorePort>,
-    overrides: Arc<dyn ToolPermissionOverrideStorePort>,
-    persistent_policies: Arc<dyn PersistentApprovalPolicyStorePort>,
+    auto_approve: Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort>,
+    overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>,
+    persistent_policies: Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStorePort>,
     tool_catalog: Arc<dyn RebornOperatorToolCatalog>,
 ) -> Result<(), HostApiError> {
     registry.insert_handler(
@@ -64,7 +63,6 @@ pub(crate) fn insert_handler(
 fn manifest() -> Result<CapabilityManifest, ExtensionError> {
     Ok(CapabilityManifest {
         id: CapabilityId::new(OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID)?,
-        implements: Vec::new(),
         description: "Set the authenticated operator's global auto-approve-tools setting."
             .to_string(),
         effects: vec![EffectKind::ModifyApproval],
@@ -94,7 +92,6 @@ fn manifest() -> Result<CapabilityManifest, ExtensionError> {
 fn tool_permission_manifest() -> Result<CapabilityManifest, ExtensionError> {
     Ok(CapabilityManifest {
         id: CapabilityId::new(OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY_ID)?,
-        implements: Vec::new(),
         description: "Set the authenticated operator's permission for one tool.".to_string(),
         effects: vec![EffectKind::ModifyApproval],
         default_permission: PermissionMode::Allow,
@@ -121,7 +118,7 @@ fn tool_permission_manifest() -> Result<CapabilityManifest, ExtensionError> {
 }
 
 struct SetAutoApproveHandler {
-    auto_approve: Arc<dyn AutoApproveSettingStorePort>,
+    auto_approve: Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort>,
 }
 
 #[async_trait]
@@ -160,8 +157,8 @@ impl FirstPartyCapabilityHandler for SetAutoApproveHandler {
 }
 
 struct SetToolPermissionHandler {
-    overrides: Arc<dyn ToolPermissionOverrideStorePort>,
-    persistent_policies: Arc<dyn PersistentApprovalPolicyStorePort>,
+    overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>,
+    persistent_policies: Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStorePort>,
     tool_catalog: Arc<dyn RebornOperatorToolCatalog>,
 }
 
@@ -344,8 +341,8 @@ async fn find_operator_tool(
 }
 
 async fn apply_tool_permission_state(
-    overrides: &dyn ToolPermissionOverrideStorePort,
-    persistent_policies: &dyn PersistentApprovalPolicyStorePort,
+    overrides: &dyn ironclaw_approvals::ToolPermissionOverrideStorePort,
+    persistent_policies: &dyn ironclaw_approvals::PersistentApprovalPolicyStorePort,
     scope: &ResourceScope,
     actor: &UserId,
     tool: &RebornOperatorToolInfo,
@@ -433,7 +430,7 @@ async fn apply_tool_permission_state(
 }
 
 async fn revoke_persistent_policy(
-    persistent_policies: &dyn PersistentApprovalPolicyStorePort,
+    persistent_policies: &dyn ironclaw_approvals::PersistentApprovalPolicyStorePort,
     operator_scope: &ResourceScope,
     tool: &RebornOperatorToolInfo,
     started: Instant,
@@ -504,8 +501,9 @@ fn resource_usage(started: Instant) -> ResourceUsage {
 #[cfg(test)]
 mod tests {
     use ironclaw_approvals::{
-        AutoApproveSettingStore, CapabilityPermissionOverrideStorePort,
-        PersistentApprovalPolicyStore, ToolPermissionOverrideStore,
+        AutoApproveSettingStore, CapabilityPermissionOverrideStorePort as _,
+        PersistentApprovalPolicyStore, PersistentApprovalPolicyStorePort as _,
+        ToolPermissionOverrideStore,
     };
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{AgentId, ExtensionId, InvocationId, ResourceScope, TenantId};

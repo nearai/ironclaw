@@ -7,6 +7,13 @@ from provider_operation_types import ProviderOperationCase
 
 SPREADSHEET_ID = "sheet_reborn_abc"
 ADDED_SHEET = "ProviderCase"
+RENAMED_SHEET = "RenamedByProviderCase"
+# Deliberately below the seeded rows so a write here cannot be confused with an
+# append, and so the empty-range read has somewhere to look that is genuinely
+# empty rather than merely trimmed.
+WRITE_RANGE = "Sheet1!A4:C4"
+EMPTY_RANGE = "Sheet1!A50:C60"
+WRITTEN_ROW = ["REBORN_WRITE_VALUES", "isolated", "row"]
 
 
 async def _spreadsheet(emulate_url: str) -> dict:
@@ -73,6 +80,56 @@ async def _delete_sheet_outcome(emulate_url: str, preview: dict) -> None:
     assert SPREADSHEET_ID in json.dumps(preview), preview
 
 
+async def _write_values_baseline(emulate_url: str) -> None:
+    await _baseline(emulate_url)
+    assert not await _values(emulate_url, WRITE_RANGE), (
+        "provider world already has data in the write-values target range"
+    )
+
+
+async def _write_values_outcome(emulate_url: str, preview: dict) -> None:
+    # Assert the exact target range, not "a row exists somewhere". qa_7e could
+    # not tell write_values from its sibling append_values because it only
+    # checked that one marker landed in a wide range; pinning A4:C4 can only
+    # be satisfied by the write.
+    assert await _values(emulate_url, WRITE_RANGE) == [WRITTEN_ROW], (
+        await _values(emulate_url, WRITE_RANGE)
+    )
+    seeded = await _values(emulate_url, "Sheet1!A1:E2")
+    assert seeded[1][-1] == "REBORN_QA_SEEDED", seeded
+    assert "REBORN_WRITE_VALUES" in json.dumps(preview), preview
+
+
+async def _rename_sheet_outcome(emulate_url: str, preview: dict) -> None:
+    spreadsheet = await _spreadsheet(emulate_url)
+    titles = {
+        sheet["properties"]["sheetId"]: sheet["properties"]["title"]
+        for sheet in spreadsheet["sheets"]
+    }
+    # Same sheetId, new title: proves a rename rather than a delete + recreate.
+    assert titles == {0: "Sheet1", 7: RENAMED_SHEET}, spreadsheet
+    assert RENAMED_SHEET in json.dumps(preview), preview
+
+
+async def _read_values_outcome(emulate_url: str, preview: dict) -> None:
+    await _baseline(emulate_url)
+    rendered = json.dumps(preview)
+    assert "REBORN_QA_SEEDED" in rendered, preview
+    assert "Company" in rendered, preview
+
+
+async def _read_values_empty_outcome(emulate_url: str, preview: dict) -> None:
+    # The contract is positive, not merely "no marker leaked": the model is
+    # handed an explicit empty values array for the range it asked about, so it
+    # can distinguish "the sheet has nothing there" from "the call failed".
+    assert not await _values(emulate_url, EMPTY_RANGE)
+    assert preview["truncated"] is False, preview
+    assert json.loads(preview["output_preview"]) == {
+        "range": EMPTY_RANGE,
+        "values": [],
+    }, preview
+
+
 async def _format_cells_outcome(emulate_url: str, preview: dict) -> None:
     await _baseline(emulate_url)
     assert SPREADSHEET_ID in json.dumps(preview), preview
@@ -116,6 +173,47 @@ GOOGLE_SHEETS_PROVIDER_OPERATION_CASES = (
         arguments={"spreadsheet_id": SPREADSHEET_ID, "sheet_id": 7},
         assert_baseline=_baseline,
         assert_outcome=_delete_sheet_outcome,
+    ),
+    ProviderOperationCase(
+        case_id="google_sheets_write_values",
+        provider_service="google",
+        capability_id="google-sheets.write_values",
+        arguments={
+            "spreadsheet_id": SPREADSHEET_ID,
+            "range": WRITE_RANGE,
+            "values": [WRITTEN_ROW],
+        },
+        assert_baseline=_write_values_baseline,
+        assert_outcome=_write_values_outcome,
+    ),
+    ProviderOperationCase(
+        case_id="google_sheets_rename_sheet",
+        provider_service="google",
+        capability_id="google-sheets.rename_sheet",
+        arguments={
+            "spreadsheet_id": SPREADSHEET_ID,
+            "sheet_id": 7,
+            "title": RENAMED_SHEET,
+        },
+        assert_baseline=_baseline,
+        assert_outcome=_rename_sheet_outcome,
+    ),
+    ProviderOperationCase(
+        case_id="google_sheets_read_values",
+        provider_service="google",
+        capability_id="google-sheets.read_values",
+        arguments={"spreadsheet_id": SPREADSHEET_ID, "range": "Sheet1!A1:E2"},
+        assert_baseline=_baseline,
+        assert_outcome=_read_values_outcome,
+    ),
+    ProviderOperationCase(
+        case_id="google_sheets_read_values_empty",
+        provider_service="google",
+        capability_id="google-sheets.read_values",
+        arguments={"spreadsheet_id": SPREADSHEET_ID, "range": EMPTY_RANGE},
+        assert_baseline=_baseline,
+        assert_outcome=_read_values_empty_outcome,
+        outcome_class="empty",
     ),
     ProviderOperationCase(
         case_id="google_sheets_format_cells",

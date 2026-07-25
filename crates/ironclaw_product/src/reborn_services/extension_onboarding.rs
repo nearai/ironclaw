@@ -1,19 +1,29 @@
+use ironclaw_host_api::InstallationState;
+
 use crate::{
-    LifecycleExtensionRuntimeKind, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
-    LifecycleProductPayload, LifecycleProductResponse, LifecyclePublicState,
+    LifecycleExtensionCredentialSetup, LifecycleExtensionRuntimeKind, LifecycleExtensionSummary,
+    LifecycleInstalledExtensionSummary, LifecycleProductPayload, LifecycleProductResponse,
 };
 
 use super::extension_credentials::ExtensionCredentialReadiness;
-use super::types::RebornExtensionOnboardingPayload;
+use super::types::{RebornExtensionOnboardingPayload, RebornExtensionOnboardingState};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ExtensionOnboarding {
+    pub(super) state: Option<RebornExtensionOnboardingState>,
     pub(super) onboarding: Option<RebornExtensionOnboardingPayload>,
+    pub(super) instructions: Option<String>,
+    pub(super) awaiting_token: Option<bool>,
 }
 
 impl ExtensionOnboarding {
     pub(super) fn empty() -> Self {
-        Self { onboarding: None }
+        Self {
+            state: None,
+            onboarding: None,
+            instructions: None,
+            awaiting_token: None,
+        }
     }
 }
 
@@ -24,32 +34,29 @@ pub(super) fn for_installed(extension: &LifecycleInstalledExtensionSummary) -> E
 pub(super) fn for_installed_with_credential_status(
     extension: &LifecycleInstalledExtensionSummary,
     readiness: ExtensionCredentialReadiness,
-    activation_failed: bool,
 ) -> ExtensionOnboarding {
-    if activation_failed {
-        return failed_onboarding(&extension.summary);
-    }
     if readiness == ExtensionCredentialReadiness::MissingRequired {
         return credential_onboarding(&extension.summary);
     }
     if readiness == ExtensionCredentialReadiness::Configured
-        && extension.phase == LifecyclePublicState::SetupNeeded
+        && matches!(
+            extension.phase,
+            InstallationState::Installed
+                | InstallationState::Configured
+                | InstallationState::Failed
+        )
     {
-        return automatic_setup_onboarding(&extension.summary);
+        let phase = if extension.phase == InstallationState::Failed {
+            InstallationState::Failed
+        } else {
+            InstallationState::Configured
+        };
+        return no_credential_onboarding(&extension.summary, phase);
     }
     for_installed(extension)
 }
 
-#[cfg(test)]
 pub(super) fn from_lifecycle(lifecycle: &LifecycleProductResponse) -> ExtensionOnboarding {
-    from_lifecycle_with_credential_status(lifecycle, ExtensionCredentialReadiness::Unknown, false)
-}
-
-pub(super) fn from_lifecycle_with_credential_status(
-    lifecycle: &LifecycleProductResponse,
-    readiness: ExtensionCredentialReadiness,
-    activation_failed: bool,
-) -> ExtensionOnboarding {
     let Some(LifecycleProductPayload::ExtensionList { extensions, .. }) = &lifecycle.payload else {
         return ExtensionOnboarding::empty();
     };
@@ -65,25 +72,35 @@ pub(super) fn from_lifecycle_with_credential_status(
     let Some(extension) = extension else {
         return ExtensionOnboarding::empty();
     };
-    for_installed_with_credential_status(extension, readiness, activation_failed)
+    for_installed(extension)
 }
 
 fn for_summary(
     summary: &LifecycleExtensionSummary,
-    phase: LifecyclePublicState,
+    phase: InstallationState,
 ) -> ExtensionOnboarding {
-    match phase {
-        LifecyclePublicState::Active | LifecyclePublicState::Uninstalled => {
-            ExtensionOnboarding::empty()
-        }
-        LifecyclePublicState::SetupNeeded if summary.credential_requirements.is_empty() => {
-            automatic_setup_pending_onboarding(summary)
-        }
-        LifecyclePublicState::SetupNeeded => credential_onboarding(summary),
+    if phase == InstallationState::Active {
+        return ExtensionOnboarding::empty();
     }
+    if phase == InstallationState::Configured || summary.credential_requirements.is_empty() {
+        return no_credential_onboarding(summary, phase);
+    }
+    credential_onboarding(summary)
 }
 
 fn credential_onboarding(summary: &LifecycleExtensionSummary) -> ExtensionOnboarding {
+    let has_oauth = summary.credential_requirements.iter().any(|requirement| {
+        matches!(
+            requirement.setup,
+            LifecycleExtensionCredentialSetup::OAuth { .. }
+        )
+    });
+    let state = if has_oauth {
+        RebornExtensionOnboardingState::AuthRequired
+    } else {
+        RebornExtensionOnboardingState::SetupRequired
+    };
+    let instructions = instructions(summary);
     let credential_instructions = summary
         .onboarding
         .as_ref()
@@ -91,80 +108,90 @@ fn credential_onboarding(summary: &LifecycleExtensionSummary) -> ExtensionOnboar
         .unwrap_or_else(|| format!("Configure the credentials required by {}.", summary.name));
     let credential_next_step = credential_next_step(summary);
     ExtensionOnboarding {
+        state: Some(state),
         onboarding: Some(RebornExtensionOnboardingPayload {
             credential_instructions: Some(credential_instructions),
             setup_url: setup_url(summary),
             credential_next_step: Some(credential_next_step),
         }),
+        instructions: Some(instructions),
+        awaiting_token: Some(!has_oauth),
     }
 }
 
-fn automatic_setup_pending_onboarding(summary: &LifecycleExtensionSummary) -> ExtensionOnboarding {
-    let instructions = if let Some(onboarding) = &summary.onboarding {
+fn no_credential_onboarding(
+    summary: &LifecycleExtensionSummary,
+    phase: InstallationState,
+) -> ExtensionOnboarding {
+    let state = match phase {
+        InstallationState::Installed | InstallationState::Configured => {
+            Some(RebornExtensionOnboardingState::Installed)
+        }
+        InstallationState::Failed => Some(RebornExtensionOnboardingState::Failed),
+        _ => None,
+    };
+    let instructions = if phase == InstallationState::Configured {
+        Some(activation_instructions(summary))
+    } else if let Some(onboarding) = &summary.onboarding {
         Some(onboarding.instructions.clone())
     } else if matches!(
         summary.runtime_kind,
         LifecycleExtensionRuntimeKind::McpServer
     ) {
         Some(format!(
-            "IronClaw is finishing {} setup automatically; its MCP tools will appear when ready.",
+            "{} is installed. Activate it to make its MCP tools available.",
+            summary.name
+        ))
+    } else if phase == InstallationState::Installed {
+        Some(format!(
+            "{} is installed. Activate it to make its tools available.",
             summary.name
         ))
     } else {
-        Some(format!(
-            "IronClaw is finishing {} setup automatically; its tools will appear when ready.",
-            summary.name
-        ))
+        None
     };
     ExtensionOnboarding {
-        onboarding: instructions.map(|instructions| RebornExtensionOnboardingPayload {
-            credential_instructions: Some(instructions),
-            setup_url: None,
-            credential_next_step: Some(credential_next_step(summary)),
-        }),
+        state,
+        onboarding: instructions
+            .as_ref()
+            .map(|instructions| RebornExtensionOnboardingPayload {
+                credential_instructions: Some(instructions.clone()),
+                setup_url: None,
+                credential_next_step: Some(credential_next_step(summary)),
+            }),
+        instructions,
+        awaiting_token: None,
     }
 }
 
-fn automatic_setup_onboarding(summary: &LifecycleExtensionSummary) -> ExtensionOnboarding {
-    let instructions = readiness_instructions(summary);
-    ExtensionOnboarding {
-        onboarding: Some(RebornExtensionOnboardingPayload {
-            credential_instructions: Some(instructions),
-            setup_url: None,
-            credential_next_step: Some(credential_next_step(summary)),
-        }),
-    }
-}
-
-fn failed_onboarding(summary: &LifecycleExtensionSummary) -> ExtensionOnboarding {
-    let instructions = summary
-        .onboarding
-        .as_ref()
-        .map(|onboarding| onboarding.instructions.clone());
-    ExtensionOnboarding {
-        onboarding: instructions.map(|instructions| RebornExtensionOnboardingPayload {
-            credential_instructions: Some(instructions),
-            setup_url: None,
-            credential_next_step: Some(credential_next_step(summary)),
-        }),
-    }
-}
-
-fn readiness_instructions(summary: &LifecycleExtensionSummary) -> String {
+fn activation_instructions(summary: &LifecycleExtensionSummary) -> String {
     if matches!(
         summary.runtime_kind,
         LifecycleExtensionRuntimeKind::McpServer
     ) {
         format!(
-            "{} setup is complete. IronClaw publishes its MCP tools automatically; no separate activation action is required.",
+            "{} is installed. Activate it to make its MCP tools available.",
             summary.name
         )
     } else {
         format!(
-            "{} setup is complete. IronClaw publishes its tools automatically; no separate activation action is required.",
+            "{} is installed. Activate it to make its tools available.",
             summary.name
         )
     }
+}
+
+fn instructions(summary: &LifecycleExtensionSummary) -> String {
+    summary
+        .onboarding
+        .as_ref()
+        .map(|onboarding| onboarding.instructions.clone())
+        .unwrap_or_else(|| {
+            format!(
+                "{} needs configuration before its tools can run.",
+                summary.name
+            )
+        })
 }
 
 fn setup_url(summary: &LifecycleExtensionSummary) -> Option<String> {
@@ -181,7 +208,7 @@ fn credential_next_step(summary: &LifecycleExtensionSummary) -> String {
         .and_then(|onboarding| onboarding.credential_next_step.clone())
         .unwrap_or_else(|| {
             format!(
-                "After configuration completes, IronClaw finishes {} installation automatically and publishes its tools.",
+                "After configuration completes, activate {} to publish its tools.",
                 summary.name
             )
         })
@@ -191,9 +218,8 @@ fn credential_next_step(summary: &LifecycleExtensionSummary) -> String {
 mod tests {
     use super::*;
     use crate::{
-        LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
-        LifecycleExtensionOnboarding, LifecycleExtensionSource, LifecyclePackageKind,
-        LifecyclePackageRef,
+        LifecycleExtensionCredentialRequirement, LifecycleExtensionOnboarding,
+        LifecycleExtensionSource, LifecyclePackageKind, LifecyclePackageRef,
     };
 
     #[test]
@@ -201,27 +227,36 @@ mod tests {
         let extension = installed_extension(
             "github",
             "GitHub",
-            LifecyclePublicState::SetupNeeded,
+            InstallationState::Installed,
             vec![manual_requirement("github_runtime_token", "github")],
             LifecycleExtensionRuntimeKind::WasmTool,
             Some(LifecycleExtensionOnboarding {
                 instructions: "GitHub needs a personal access token before its repository and pull request tools can run.".to_string(),
                 credential_instructions: Some("Create a GitHub personal access token with the repository permissions you want IronClaw to use, then paste it here.".to_string()),
                 setup_url: Some("https://github.com/settings/personal-access-tokens/new".to_string()),
-                credential_next_step: Some("After saving the token, IronClaw finishes GitHub installation automatically and publishes its tools.".to_string()),
+                credential_next_step: Some("After saving the token, activate GitHub to publish its tools.".to_string()),
             }),
         );
 
         let onboarding = for_installed(&extension);
-        let payload = onboarding.onboarding.expect("onboarding payload");
+
         assert_eq!(
-            payload.credential_instructions.as_deref(),
+            onboarding.state,
+            Some(RebornExtensionOnboardingState::SetupRequired)
+        );
+        assert_eq!(onboarding.awaiting_token, Some(true));
+        assert_eq!(
+            onboarding.instructions.as_deref(),
             Some(
-                "Create a GitHub personal access token with the repository permissions you want IronClaw to use, then paste it here."
+                "GitHub needs a personal access token before its repository and pull request tools can run."
             )
         );
         assert_eq!(
-            payload.setup_url.as_deref(),
+            onboarding
+                .onboarding
+                .expect("onboarding payload")
+                .setup_url
+                .as_deref(),
             Some("https://github.com/settings/personal-access-tokens/new")
         );
     }
@@ -231,7 +266,7 @@ mod tests {
         let extension = installed_extension(
             "gmail",
             "Gmail",
-            LifecyclePublicState::SetupNeeded,
+            InstallationState::Installed,
             vec![oauth_requirement("gmail_account", "google")],
             LifecycleExtensionRuntimeKind::FirstParty,
             Some(LifecycleExtensionOnboarding {
@@ -242,83 +277,91 @@ mod tests {
                 ),
                 setup_url: None,
                 credential_next_step: Some(
-                    "After authorization completes, IronClaw finishes Gmail installation automatically and publishes its tools."
+                    "After authorization completes, activate Gmail to publish its tools."
                         .to_string(),
                 ),
             }),
         );
 
         let onboarding = for_installed(&extension);
-        let payload = onboarding.onboarding.expect("onboarding payload");
+
         assert_eq!(
-            payload.credential_instructions.as_deref(),
-            Some("Authorize the Google account that IronClaw should use for Gmail.")
+            onboarding.state,
+            Some(RebornExtensionOnboardingState::AuthRequired)
+        );
+        assert_eq!(onboarding.awaiting_token, Some(false));
+        assert_eq!(
+            onboarding.instructions.as_deref(),
+            Some("Gmail needs Google OAuth authorization before mail tools can run.")
         );
     }
 
     #[test]
-    fn web_access_projects_automatic_readiness_message_without_credentials() {
+    fn web_access_projects_activation_message_without_credentials() {
         let extension = installed_extension(
             "web-access",
             "Web Access",
-            LifecyclePublicState::SetupNeeded,
+            InstallationState::Installed,
             Vec::new(),
             LifecycleExtensionRuntimeKind::FirstParty,
             Some(LifecycleExtensionOnboarding {
-                instructions: "Web Access does not need credentials and becomes active as soon as it is installed.".to_string(),
+                instructions: "Web Access does not need credentials. Activate it to make web search and page-content retrieval tools available.".to_string(),
                 credential_instructions: Some("No credentials are required for Web Access.".to_string()),
                 setup_url: None,
-                credential_next_step: Some("IronClaw publishes Web Access tools automatically during installation.".to_string()),
+                credential_next_step: Some("Activate Web Access to publish its tools.".to_string()),
             }),
         );
 
         let onboarding = for_installed(&extension);
-        let payload = onboarding.onboarding.expect("onboarding payload");
+
         assert_eq!(
-            payload.credential_instructions.as_deref(),
+            onboarding.state,
+            Some(RebornExtensionOnboardingState::Installed)
+        );
+        assert_eq!(onboarding.awaiting_token, None);
+        assert_eq!(
+            onboarding.instructions.as_deref(),
             Some(
-                "Web Access does not need credentials and becomes active as soon as it is installed."
+                "Web Access does not need credentials. Activate it to make web search and page-content retrieval tools available."
             )
         );
     }
 
     #[test]
-    fn configured_credentialed_extension_projects_automatic_readiness_message() {
+    fn configured_credentialed_extension_projects_activation_message() {
         let extension = installed_extension(
             "github",
             "GitHub",
-            LifecyclePublicState::SetupNeeded,
+            InstallationState::Configured,
             vec![manual_requirement("github_runtime_token", "github")],
             LifecycleExtensionRuntimeKind::WasmTool,
             Some(LifecycleExtensionOnboarding {
                 instructions: "GitHub needs a personal access token before its repository and pull request tools can run.".to_string(),
                 credential_instructions: Some("Create a GitHub personal access token with the repository permissions you want IronClaw to use, then paste it here.".to_string()),
                 setup_url: Some("https://github.com/settings/personal-access-tokens/new".to_string()),
-                credential_next_step: Some("After saving the token, IronClaw finishes GitHub installation automatically and publishes its tools.".to_string()),
+                credential_next_step: Some("After saving the token, activate GitHub to publish its tools.".to_string()),
             }),
         );
 
-        let onboarding = for_installed_with_credential_status(
-            &extension,
-            ExtensionCredentialReadiness::Configured,
-            false,
-        );
+        let onboarding = for_installed(&extension);
 
-        let payload = onboarding.onboarding.expect("onboarding payload");
         assert_eq!(
-            payload.credential_instructions.as_deref(),
-            Some(
-                "GitHub setup is complete. IronClaw publishes its tools automatically; no separate activation action is required."
-            )
+            onboarding.state,
+            Some(RebornExtensionOnboardingState::Installed)
+        );
+        assert_eq!(onboarding.awaiting_token, None);
+        assert_eq!(
+            onboarding.instructions.as_deref(),
+            Some("GitHub is installed. Activate it to make its tools available.")
         );
     }
 
     #[test]
-    fn credential_ready_installed_extension_projects_automatic_readiness_message() {
+    fn credential_ready_installed_extension_projects_activation_message() {
         let extension = installed_extension(
             "gmail",
             "Gmail",
-            LifecyclePublicState::SetupNeeded,
+            InstallationState::Installed,
             vec![oauth_requirement("gmail_account", "google")],
             LifecycleExtensionRuntimeKind::FirstParty,
             Some(LifecycleExtensionOnboarding {
@@ -329,7 +372,7 @@ mod tests {
                 ),
                 setup_url: None,
                 credential_next_step: Some(
-                    "After authorization completes, IronClaw finishes Gmail installation automatically and publishes its tools."
+                    "After authorization completes, activate Gmail to publish its tools."
                         .to_string(),
                 ),
             }),
@@ -338,15 +381,16 @@ mod tests {
         let onboarding = for_installed_with_credential_status(
             &extension,
             ExtensionCredentialReadiness::Configured,
-            false,
         );
 
-        let payload = onboarding.onboarding.expect("onboarding payload");
         assert_eq!(
-            payload.credential_instructions.as_deref(),
-            Some(
-                "Gmail setup is complete. IronClaw publishes its tools automatically; no separate activation action is required."
-            )
+            onboarding.state,
+            Some(RebornExtensionOnboardingState::Installed)
+        );
+        assert_eq!(onboarding.awaiting_token, None);
+        assert_eq!(
+            onboarding.instructions.as_deref(),
+            Some("Gmail is installed. Activate it to make its tools available.")
         );
     }
 
@@ -355,17 +399,17 @@ mod tests {
         let extension = installed_extension(
             "gmail",
             "Gmail",
-            LifecyclePublicState::SetupNeeded,
+            InstallationState::Failed,
             vec![oauth_requirement("gmail_account", "google")],
             LifecycleExtensionRuntimeKind::FirstParty,
             Some(LifecycleExtensionOnboarding {
-                instructions: "Gmail setup failed.".to_string(),
+                instructions: "Gmail activation failed.".to_string(),
                 credential_instructions: Some(
                     "Authorize the Google account that IronClaw should use for Gmail.".to_string(),
                 ),
                 setup_url: None,
                 credential_next_step: Some(
-                    "After authorization completes, IronClaw finishes Gmail installation automatically and publishes its tools."
+                    "After authorization completes, activate Gmail to publish its tools."
                         .to_string(),
                 ),
             }),
@@ -374,13 +418,16 @@ mod tests {
         let onboarding = for_installed_with_credential_status(
             &extension,
             ExtensionCredentialReadiness::Configured,
-            true,
         );
 
-        let payload = onboarding.onboarding.expect("onboarding payload");
         assert_eq!(
-            payload.credential_instructions.as_deref(),
-            Some("Gmail setup failed.")
+            onboarding.state,
+            Some(RebornExtensionOnboardingState::Failed)
+        );
+        assert_eq!(onboarding.awaiting_token, None);
+        assert_eq!(
+            onboarding.instructions.as_deref(),
+            Some("Gmail activation failed.")
         );
     }
 
@@ -391,7 +438,7 @@ mod tests {
                 LifecyclePackageRef::new(LifecyclePackageKind::Extension, "target")
                     .expect("valid package ref"),
             ),
-            phase: LifecyclePublicState::SetupNeeded,
+            phase: InstallationState::Installed,
             blockers: Vec::new(),
             message: None,
             payload: Some(LifecycleProductPayload::ExtensionList {
@@ -399,7 +446,7 @@ mod tests {
                     installed_extension(
                         "other",
                         "Other",
-                        LifecyclePublicState::SetupNeeded,
+                        InstallationState::Installed,
                         Vec::new(),
                         LifecycleExtensionRuntimeKind::FirstParty,
                         Some(LifecycleExtensionOnboarding {
@@ -412,7 +459,7 @@ mod tests {
                     installed_extension(
                         "target",
                         "Target",
-                        LifecyclePublicState::SetupNeeded,
+                        InstallationState::Installed,
                         Vec::new(),
                         LifecycleExtensionRuntimeKind::FirstParty,
                         Some(LifecycleExtensionOnboarding {
@@ -429,20 +476,13 @@ mod tests {
 
         let onboarding = from_lifecycle(&lifecycle);
 
-        assert_eq!(
-            onboarding
-                .onboarding
-                .expect("onboarding payload")
-                .credential_instructions
-                .as_deref(),
-            Some("Target message")
-        );
+        assert_eq!(onboarding.instructions.as_deref(), Some("Target message"));
     }
 
     fn installed_extension(
         package_id: &str,
         name: &str,
-        phase: LifecyclePublicState,
+        phase: InstallationState,
         credential_requirements: Vec<LifecycleExtensionCredentialRequirement>,
         runtime_kind: LifecycleExtensionRuntimeKind,
         onboarding: Option<LifecycleExtensionOnboarding>,

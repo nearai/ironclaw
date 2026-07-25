@@ -54,7 +54,7 @@ pub struct RefreshingCapabilityPortTestParts {
     pub thread_service: std::sync::Arc<dyn ironclaw_threads::SessionThreadService>,
     /// Opaque handle built by
     /// [`build_extension_management_for_test`]. Wraps the
-    /// crate-private (`pub(crate)`) `ExtensionManagementPort` so it
+    /// crate-private (`pub(crate)`) `RebornLocalExtensionManagementPort` so it
     /// never appears in this (public, `test-support`-gated) struct's field
     /// types; mirrors `skill_activation_source` above. Active-extension
     /// registry (installed/activated extensions like `github`, `gmail`, MCP
@@ -69,8 +69,8 @@ pub struct RefreshingCapabilityPortTestParts {
     /// activates them AND passes the resulting handle here.
     pub extension_management: Option<ExtensionManagementTestHandle>,
     pub trajectory_observer: Option<std::sync::Arc<dyn crate::RebornTrajectoryObserver>>,
-    pub outbound_preferences_facade:
-        Option<std::sync::Arc<dyn ironclaw_product::OutboundPreferencesProductFacade>>,
+    pub outbound_preferences_service:
+        Option<std::sync::Arc<dyn ironclaw_product::OutboundPreferencesProductService>>,
     pub outbound_delivery_target_set_requires_approval: bool,
     /// Per-tool approval-setting overrides; wrapped into the same
     /// `StoreApprovalSettingsProvider` production wires (`local_dev.rs:1002`).
@@ -109,28 +109,32 @@ pub struct RefreshingCapabilityPortTestParts {
 }
 
 /// Opaque handle (harness-port-seam P1 Change 3) carrying the crate-private
-/// `ExtensionManagementPort`. Hides the type from the
+/// `RebornLocalExtensionManagementPort`. Hides the type from the
 /// integration-test crate, which cannot name it (it is only `pub(crate)`
 /// inside `ironclaw_reborn_composition`); the private type is recovered
 /// internally via [`ExtensionManagementTestHandle::extension_management`]
 /// when forwarding to the production factory. Mirrors `SkillActivationTestSource`.
 #[cfg(feature = "test-support")]
 pub struct ExtensionManagementTestHandle {
-    readiness_source: std::sync::Arc<crate::extension_host::lifecycle::LifecycleFacade>,
+    extension_management: std::sync::Arc<
+        crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort,
+    >,
 }
 
 #[cfg(feature = "test-support")]
 impl ExtensionManagementTestHandle {
-    /// Crate-internal accessor for the caller-scoped readiness facade. Kept
-    /// `pub(crate)` (never `pub`) so the crate-private
-    /// `LifecycleFacade` type never appears in this crate's public
-    /// API; only `runtime::local_dev`'s test-support constructor (which
-    /// already names the type) may call this. For tests only -- gated behind
-    /// `test-support`, ships zero bytes in production builds.
-    pub(crate) fn readiness_source(
+    /// Crate-internal accessor for the wrapped port. Kept `pub(crate)` (never
+    /// `pub`) so the crate-private `RebornLocalExtensionManagementPort` type
+    /// never appears in this crate's public API; only `runtime::local_dev`'s
+    /// test-support constructor (which already names the type) may call this.
+    /// For tests only -- gated behind `test-support`, ships zero bytes in
+    /// production builds.
+    pub(crate) fn extension_management(
         &self,
-    ) -> std::sync::Arc<crate::extension_host::lifecycle::LifecycleFacade> {
-        self.readiness_source.clone()
+    ) -> std::sync::Arc<
+        crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort,
+    > {
+        self.extension_management.clone()
     }
 }
 
@@ -149,20 +153,9 @@ impl ExtensionManagementTestHandle {
 pub fn build_extension_management_for_test(
     runtime: &crate::RebornRuntime,
 ) -> Option<ExtensionManagementTestHandle> {
-    let mut facade =
-        crate::extension_host::lifecycle::LifecycleFacade::new(runtime.skill_management.clone())
-            .with_extension_management(runtime.extension_management.clone())
-            .with_admin_configuration_resolver(runtime.admin_configuration_resolver.clone())
-            .with_runtime_credential_accounts(
-                runtime
-                    .product_auth
-                    .runtime_credential_account_selection_service(),
-            );
-    if let Some(egress) = runtime.runtime_http_egress.as_ref() {
-        facade = facade.with_runtime_http_egress(egress.clone());
-    }
+    let extension_management = runtime.extension_management.clone();
     Some(ExtensionManagementTestHandle {
-        readiness_source: std::sync::Arc::new(facade),
+        extension_management,
     })
 }
 

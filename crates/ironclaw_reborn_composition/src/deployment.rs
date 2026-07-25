@@ -87,7 +87,7 @@ impl RebornReadinessDiagnostic {
 /// deployment selects a substrate, it does not *have a mode that implies one*.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeSubstrate {
-    /// No runtime is assembled — the facades report disabled.
+    /// No runtime is assembled — the services report disabled.
     None,
     /// The production-shaped substrate (libSQL or PostgreSQL store graph).
     ProductionShaped,
@@ -254,7 +254,7 @@ pub struct DeploymentConfig {
     /// Late-overridable via [`DeploymentConfig::with_owner_id`] (WebChat serve
     /// pins the authenticated user after the disclosure gate is built).
     pub(crate) owner_id: String,
-    pub(crate) local_runtime_identity: Option<crate::input::RuntimeOwnerIdentity>,
+    pub(crate) local_runtime_identity: Option<crate::input::RebornLocalRuntimeIdentity>,
     /// Resolved runtime policy. Populated late (the yolo host-access disclosure
     /// is not known at preset-construction time); the profile→bindings bridge
     /// installs the accurate value.
@@ -263,10 +263,9 @@ pub struct DeploymentConfig {
     pub(crate) oauth_provider_configs: Vec<crate::input::OAuthProviderBackendConfig>,
     pub(crate) oauth_dcr_callback: Option<crate::input::OAuthDcrCallbackConfig>,
     pub(crate) nearai_mcp_bootstrap_config:
-        Option<crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
+        Option<ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
     pub(crate) account_setup_descriptors: Vec<ironclaw_product::ExtensionAccountSetupDescriptor>,
-    pub(crate) first_party_bundles:
-        Vec<crate::extension_host::first_party::FirstPartyPackageBundle>,
+    pub(crate) first_party_bundles: Vec<ironclaw_extension_host::FirstPartyPackageBundle>,
 }
 
 impl DeploymentConfig {
@@ -547,25 +546,6 @@ impl DeploymentConfig {
             yolo_disclosure_acknowledged: request.yolo_disclosure_acknowledged,
         })
         .map(Some)
-    }
-
-    /// The deployment's capability-policy *data* (§4.4.1 category 1): the
-    /// embedded `builtin_capability_policy.toml` — provider policy, approval
-    /// gates/defaults, and capability grants — parsed once through the
-    /// `OnceLock`-cached loader. Like [`DeploymentConfig::resolve`], this is a
-    /// thin adapter over the owning module's loader, not a second policy
-    /// source.
-    // dead_code allow: config-scoped accessor added by the §4.4 relocation;
-    // existing composition call sites still reach the module loader directly
-    // and migrate here separately.
-    #[allow(dead_code)]
-    pub(crate) fn builtin_capability_policy(
-        &self,
-    ) -> Result<
-        crate::builtin_capability_policy::BuiltinCapabilityPolicy,
-        crate::builtin_capability_policy::BuiltinCapabilityPolicyError,
-    > {
-        crate::builtin_capability_policy::builtin_capability_policy()
     }
 }
 

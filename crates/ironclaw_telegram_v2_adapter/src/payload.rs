@@ -72,7 +72,7 @@ pub enum PayloadParseError {
 /// `payload = ProductInboundPayload::NoOp` and synthetic external refs
 /// for the slots that genuinely have no source. The webhook still
 /// acks 200 OK; the NoOp payload variant short-circuits inside the
-/// workflow facade.
+/// workflow service.
 pub fn parse_telegram_update(
     raw_payload: &[u8],
     auth_evidence: &ProtocolAuthEvidence,

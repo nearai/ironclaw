@@ -179,6 +179,7 @@ mod tests {
             mcp: None,
             tools: Vec::new(),
             channel: None,
+            memory: None,
             admin_configuration: Vec::new(),
             auth: vec![ResolvedAuthSurface {
                 vendor: ironclaw_host_api::VendorId::new(vendor).expect("vendor id"),

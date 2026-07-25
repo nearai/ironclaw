@@ -4,13 +4,14 @@
 //! Composition owns the generic `FirstPartyHandlerRegistrar` seam and the
 //! shared context; the concrete GSuite executor, credential stager, error
 //! mapping, and Google-account visibility policy live here in the assembling
-//! binary. Every host-api / host-runtime / auth type is reached through the
-//! `ironclaw_reborn_composition` facade re-exports so the CLI's exact-deps
-//! allow-list stays frozen to the facade set plus `ironclaw_first_party_extensions`.
+//! binary. Host-api / host-runtime types still enter through the
+//! `ironclaw_reborn_composition` facade; auth-owned contracts are named from
+//! `ironclaw_auth`.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_auth::RuntimeCredentialAccountVisibilityPolicy;
 use ironclaw_first_party_extensions::{
     GOOGLE_PROVIDER_ID, GsuiteCapabilitySpec, GsuiteCredentialDispatchReason,
     GsuiteCredentialStageError, GsuiteCredentialStageRequest, GsuiteCredentialStager,
@@ -23,9 +24,9 @@ use ironclaw_reborn_composition::{
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult, FirstPartyHandlerRegistrar,
     FirstPartyRegistrarContext, HostApiError, NetworkScheme, NetworkTargetPattern,
     ProductAuthProviderRuntimePorts, RuntimeCredentialAccountSetup,
-    RuntimeCredentialAccountVisibilityPolicy, RuntimeCredentialAuthRequirement,
-    RuntimeCredentialRequirement, RuntimeCredentialRequirementSource, RuntimeCredentialTarget,
-    RuntimeDispatchErrorKind, SecretHandle, VendorId,
+    RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement,
+    RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeDispatchErrorKind,
+    SecretHandle, VendorId,
 };
 
 /// Installs the GSuite first-party capability handlers into the shared registry.
@@ -45,7 +46,7 @@ impl FirstPartyHandlerRegistrar for GsuiteFirstPartyRegistrar {
                     context.product_auth_runtime_ports.clone(),
                 )),
             ),
-            google_oauth_configured: context.google_oauth_configured,
+            google_oauth_configured: context.oauth_backend_configured,
         });
         for package in gsuite_package_specs() {
             for capability in package.capabilities {

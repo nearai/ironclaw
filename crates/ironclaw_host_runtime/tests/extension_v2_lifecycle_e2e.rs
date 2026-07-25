@@ -4,7 +4,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_dispatcher::{
+use ironclaw_capabilities::{
     BoundCapabilityAdapter, CapabilityDispatchRequest, CapabilityDispatcher, DispatchError,
     ResolvedCapability, RuntimeAdapterResult, RuntimeDispatchErrorKind, RuntimeDispatcher,
     ToolResolver,

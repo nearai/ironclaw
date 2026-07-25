@@ -1,4 +1,4 @@
-//! Generic project-filesystem read port for the WebUI v2 facade.
+//! Generic project-filesystem read port for the WebUI v2 service.
 //!
 //! Surfaces a thread's project workspace (the same `/workspace` mount the
 //! agent's file tools and inbound-attachment landing resolve through) as a
@@ -10,7 +10,7 @@
 //! browser.
 //!
 //! The port is injected by host composition, which owns the project-scoped
-//! filesystem authority. The facade verifies the caller owns the thread before
+//! filesystem authority. The service verifies the caller owns the thread before
 //! calling the port and hands it a [`ThreadScope`] derived from the
 //! authenticated caller; the port never sees raw request identity. Paths in and
 //! out are scoped paths (`/workspace/...`) — never host or virtual paths.
@@ -74,10 +74,10 @@ pub struct ProjectFsFile {
 
 /// Errors a project-filesystem read may produce.
 ///
-/// Deliberately coarse and free of host paths / backend strings: the facade
+/// Deliberately coarse and free of host paths / backend strings: the service
 /// maps each variant to a sanitized [`ProductSurfaceError`](crate::ProductSurfaceError)
 /// at the boundary. Implementations outside this crate construct these instead
-/// of reaching for the facade error's `pub(super)` constructors.
+/// of reaching for the service error's `pub(super)` constructors.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ProjectFsError {
     #[error("path not found")]
@@ -133,7 +133,7 @@ pub struct RebornProjectFsReadRequest {
 
 /// Read-only access to a thread's project workspace filesystem.
 ///
-/// Every method takes a [`ThreadScope`] the facade has already authorized and a
+/// Every method takes a [`ThreadScope`] the service has already authorized and a
 /// scoped path; mutations are intentionally absent (this is a navigation +
 /// download surface, not a write surface).
 #[async_trait]
