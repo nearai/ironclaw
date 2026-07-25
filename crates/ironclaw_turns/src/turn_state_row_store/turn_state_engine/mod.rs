@@ -324,40 +324,6 @@ impl TurnStateEngine {
         }
     }
 
-    #[allow(dead_code)] // preserved engine API, in-crate-only post-#6263
-    pub(crate) fn with_admission_limit_provider(
-        admission_limit_provider: Arc<dyn TurnAdmissionLimitProvider>,
-    ) -> Self {
-        Self::with_limits_and_admission_limit_provider(
-            TurnStateStoreLimits::default(),
-            admission_limit_provider,
-        )
-    }
-
-    pub(crate) fn with_limits_and_admission_limit_provider(
-        limits: TurnStateStoreLimits,
-        admission_limit_provider: Arc<dyn TurnAdmissionLimitProvider>,
-    ) -> Self {
-        Self {
-            inner: Mutex::new(Inner {
-                concurrency: ConcurrencyLimiter::with_limits(ConcurrencyLimits {
-                    max_concurrent_runs_per_user: limits.max_concurrent_runs_per_user,
-                    max_concurrent_trigger_runs: limits.max_concurrent_trigger_runs,
-                    max_concurrent_conversation_runs: limits.max_concurrent_conversation_runs,
-                }),
-                limits,
-                ..Inner::default()
-            }),
-            submit_idempotency_ready: Notify::new(),
-            admission_limit_provider,
-            block_persistence: None,
-            persist_lock: AsyncMutex::new(()),
-            persist_seq: AtomicU64::new(0),
-            last_persisted_seq: AtomicU64::new(0),
-            gate_persisted_runs: Mutex::new(HashSet::new()),
-        }
-    }
-
     pub(crate) fn active_admission_reservations(&self) -> Vec<TurnAdmissionReservationRecord> {
         match self.inner.lock() {
             Ok(inner) => inner.active_admission_reservations(),
@@ -510,18 +476,6 @@ impl TurnStateEngine {
         }
     }
 
-    #[allow(dead_code)] // preserved engine API, in-crate-only post-#6263
-    pub(crate) fn from_persistence_snapshot(
-        snapshot: TurnPersistenceSnapshot,
-        limits: TurnStateStoreLimits,
-    ) -> Result<Self, TurnError> {
-        Self::from_persistence_snapshot_with_admission_limit_provider(
-            snapshot,
-            limits,
-            Arc::new(AllowAllTurnAdmissionLimitProvider),
-        )
-    }
-
     pub(crate) fn from_persistence_snapshot_with_admission_limit_provider(
         snapshot: TurnPersistenceSnapshot,
         limits: TurnStateStoreLimits,
@@ -650,11 +604,6 @@ impl TurnStateEngine {
     /// used by tests, no-DB builds, and the stress tool). A hard crash (SIGKILL /
     /// OOM) still loses in-flight state — bounding that needs a periodic flush,
     /// which is a separate follow-up.
-    #[allow(dead_code)] // preserved engine API, in-crate-only post-#6263
-    pub(crate) async fn flush(&self) {
-        self.persist_blocked_state().await;
-    }
-
     /// After a terminal transition, if `run_id` still had an outstanding
     /// gate-persisted snapshot, write once more so the durable snapshot converges
     /// to the terminal state — otherwise a run that blocked, resumed, and then

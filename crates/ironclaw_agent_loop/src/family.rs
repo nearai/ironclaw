@@ -112,7 +112,6 @@ impl ComponentIdentity {
 pub struct LoopFamily {
     id: LoopFamilyId,
     version: ComponentIdentity,
-    #[allow(dead_code)]
     planner: Arc<dyn AgentLoopPlannerInternal>,
 }
 
@@ -137,7 +136,6 @@ impl LoopFamily {
         &self.version
     }
 
-    #[allow(dead_code)]
     pub(crate) fn planner(&self) -> &dyn AgentLoopPlannerInternal {
         self.planner.as_ref()
     }

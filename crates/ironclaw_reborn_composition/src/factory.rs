@@ -1105,10 +1105,6 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) secret_store: Arc<dyn SecretStorePort>,
     #[cfg(test)]
     pub(crate) local_dev_wasm_runtime_credential_provider_captured: bool,
-    #[cfg(any(test, feature = "test-support"))]
-    #[allow(dead_code)]
-    pub(crate) product_auth_product_continuation_dispatcher:
-        Arc<dyn ironclaw_product::ProductAuthContinuationDispatcher>,
     /// Readiness of the background credential keepalive worker (B1). Carries the
     /// worker's dependencies together so "both deps present or neither" is a type
     /// invariant rather than a runtime check. MUST stay private — the worker is
@@ -5613,8 +5609,6 @@ async fn build_backend_production(
         secret_store,
         #[cfg(test)]
         local_dev_wasm_runtime_credential_provider_captured,
-        #[cfg(any(test, feature = "test-support"))]
-        product_auth_product_continuation_dispatcher: lifecycle_wrapped_product_continuation,
         // `Ready` only when this path built a durable candidate source (i.e. no
         // caller-supplied product_auth_ports override); `Absent` otherwise. The
         // leader lock is always available on this production path.
