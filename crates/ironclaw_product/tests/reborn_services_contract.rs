@@ -910,6 +910,7 @@ impl AuthInteractionService for RecordingAuthInteractionService {
 
 struct RecordingLifecycleService {
     package_refs: Mutex<Vec<LifecyclePackageRef>>,
+    actions: Mutex<Vec<LifecycleProductAction>>,
     imported_bundles: Mutex<Vec<Vec<u8>>>,
     credential_requirements: Vec<LifecycleExtensionCredentialRequirement>,
     onboarding: Option<LifecycleExtensionOnboarding>,
@@ -919,6 +920,7 @@ impl RecordingLifecycleService {
     fn new() -> Self {
         Self {
             package_refs: Mutex::new(Vec::new()),
+            actions: Mutex::new(Vec::new()),
             imported_bundles: Mutex::new(Vec::new()),
             credential_requirements: Vec::new(),
             onboarding: None,
@@ -930,6 +932,7 @@ impl RecordingLifecycleService {
     ) -> Self {
         Self {
             package_refs: Mutex::new(Vec::new()),
+            actions: Mutex::new(Vec::new()),
             imported_bundles: Mutex::new(Vec::new()),
             credential_requirements,
             onboarding: None,
@@ -942,6 +945,7 @@ impl RecordingLifecycleService {
     ) -> Self {
         Self {
             package_refs: Mutex::new(Vec::new()),
+            actions: Mutex::new(Vec::new()),
             imported_bundles: Mutex::new(Vec::new()),
             credential_requirements,
             onboarding: Some(onboarding),
@@ -954,6 +958,10 @@ impl RecordingLifecycleService {
 
     fn imported_bundles(&self) -> Vec<Vec<u8>> {
         self.imported_bundles.lock().expect("lock").clone()
+    }
+
+    fn actions(&self) -> Vec<LifecycleProductAction> {
+        self.actions.lock().expect("lock").clone()
     }
 
     fn extension_list_payload(
@@ -995,9 +1003,25 @@ impl LifecycleProductService for RecordingLifecycleService {
     async fn execute(
         &self,
         _context: LifecycleProductContext,
-        _action: ironclaw_product::LifecycleProductAction,
+        action: ironclaw_product::LifecycleProductAction,
     ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
-        panic!("setup_extension should project package state, not execute lifecycle actions")
+        self.actions.lock().expect("lock").push(action.clone());
+        match action {
+            LifecycleProductAction::ExtensionActivate { package_ref } => {
+                Ok(LifecycleProductResponse {
+                    package_ref: Some(package_ref),
+                    phase: InstallationState::Active,
+                    blockers: Vec::new(),
+                    message: Some("activated".to_string()),
+                    payload: Some(LifecycleProductPayload::ExtensionActivate {
+                        activated: true,
+                        visible_capability_ids: Vec::new(),
+                        connection_required: None,
+                    }),
+                })
+            }
+            other => panic!("unexpected lifecycle action in setup test service: {other:?}"),
+        }
     }
 
     async fn project_package(
@@ -9689,10 +9713,16 @@ async fn setup_extension_projects_and_routes_channel_config_values() {
         channel_config_field("bot_token", "Bot token", true),
         channel_config_field("public_url", "Public webhook URL", false),
     ]));
-    let services =
-        setup_services_with_requirements(vec![manual_credential_requirement("api_token", false)])
-            .with_extension_credentials(credentials.clone())
-            .with_channel_config_product_service(channel_config.clone());
+    let lifecycle_service = Arc::new(RecordingLifecycleService::with_credential_requirements(
+        vec![manual_credential_requirement("api_token", false)],
+    ));
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_lifecycle_product_service(lifecycle_service.clone())
+    .with_extension_credentials(credentials.clone())
+    .with_channel_config_product_service(channel_config.clone());
 
     // View: fields from the non-secret descriptors, secret channel fields in
     // the secrets list (presence only, manual-token shape).
@@ -9757,6 +9787,14 @@ async fn setup_extension_projects_and_routes_channel_config_values() {
         credentials.submit_count(),
         1,
         "the credential secret still reaches the credential path"
+    );
+    assert_eq!(
+        lifecycle_service.actions(),
+        vec![LifecycleProductAction::ExtensionActivate {
+            package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
+                .expect("package ref")
+        }],
+        "setup submit should activate after storing credentials and channel config"
     );
 }
 

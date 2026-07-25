@@ -1121,7 +1121,7 @@ impl ExtensionLifecycleManager {
         caller: &UserId,
     ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
         let credential_gate = crate::PrecheckedExtensionActivationCredentialGate;
-        self.activate_inner(package_ref, mode, &credential_gate, &caller)
+        self.activate_inner(package_ref, mode, &credential_gate, caller)
             .await
     }
 

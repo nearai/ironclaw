@@ -5326,6 +5326,25 @@ async fn submit_webui_extension_setup(
     query_webui_extension_setup(api, caller, package_id).await
 }
 
+async fn install_webui_extension_for_setup(
+    api: &dyn ironclaw_host_api::ProductSurface,
+    caller: ProductSurfaceCaller,
+    package_id: &str,
+) {
+    let resolution = invoke_product_capability(
+        api,
+        caller,
+        ironclaw_product::EXTENSION_INSTALL_CAPABILITY_ID,
+        serde_json::json!({ "extension_id": package_id }),
+    )
+    .await
+    .expect("install extension before setup");
+    assert!(
+        matches!(resolution, Resolution::Done(_) | Resolution::Blocked(_)),
+        "install should either complete or park on setup-required credentials: {resolution:?}"
+    );
+}
+
 #[tokio::test]
 async fn local_dev_webui_bundle_uses_local_lifecycle_service_for_setup_extension() {
     let root = tempfile::tempdir().expect("tempdir");
@@ -5834,6 +5853,7 @@ async fn local_dev_webui_setup_extension_stores_and_rotates_runtime_credentials(
         Some(AgentId::new("runtime-webui-credential-agent").unwrap()),
         None,
     );
+    install_webui_extension_for_setup(bundle.as_ref(), caller.clone(), "github").await;
     let first = submit_webui_extension_setup(
         bundle.as_ref(),
         caller.clone(),

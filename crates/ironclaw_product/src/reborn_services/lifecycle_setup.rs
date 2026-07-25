@@ -7,7 +7,7 @@ use ironclaw_host_api::{
 
 use crate::{
     ChannelConfigProductService, LifecycleExtensionCredentialRequirement, LifecyclePackageKind,
-    LifecyclePackageRef, LifecycleProductContext, LifecycleProductResponse,
+    LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext, LifecycleProductResponse,
     LifecycleProductService, LifecycleProductSurfaceContext, ProductSetupExtensionRequest,
     ProductSurfaceFailure, RebornChannelConfigField, RebornExtensionCredentialSetup,
     RebornExtensionSetupField, RebornExtensionSetupSecret, RebornSetupExtensionResponse,
@@ -133,6 +133,14 @@ pub(super) async fn setup_extension(
             submit.secrets,
         )
         .await?;
+        let _activation = service
+            .execute(
+                context.clone(),
+                LifecycleProductAction::ExtensionActivate {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await?;
         let refreshed = project_package(service, context, package_ref).await?;
         let refreshed_requirements = extension_setup_credentials::requirements(&refreshed);
         return setup_extension_response(
@@ -300,7 +308,20 @@ pub(super) fn map_lifecycle_error(error: ProductSurfaceFailure) -> ProductSurfac
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::ProductSurfaceErrorCode;
+    use crate::{
+        ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest,
+        LifecycleExtensionCredentialSetup, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
+        LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecycleProductPayload,
+    };
+    use async_trait::async_trait;
+    use ironclaw_auth::{CredentialAccountId, CredentialAccountProjection};
+    use ironclaw_host_api::{
+        CapabilitySurfaceKind, InstallationState, ProductSurfaceErrorCode, TenantId, UserId,
+    };
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
 
     /// Scope-cut: the WebUI service gets a plain sanitized 400, never the
     /// host-authored `reason` text — no free-text field exists on the wire
@@ -318,5 +339,169 @@ mod tests {
         assert_eq!(mapped.code, ProductSurfaceErrorCode::InvalidRequest);
         assert_eq!(mapped.status_code, 400);
         assert!(!mapped.retryable);
+    }
+
+    #[tokio::test]
+    async fn submit_extension_setup_activates_after_manual_credentials_are_stored() {
+        let activated = Arc::new(AtomicBool::new(false));
+        let service = RecordingLifecycleService {
+            activated: Arc::clone(&activated),
+        };
+        let credentials = AcceptingCredentialSetupService;
+        let caller = ProductSurfaceCaller::new(
+            TenantId::new("setup-tenant").expect("tenant"),
+            UserId::new("setup-user").expect("user"),
+            None,
+            None,
+        );
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
+            .expect("package ref");
+
+        let response = setup_extension(
+            &service,
+            Some(&credentials),
+            None,
+            caller,
+            package_ref,
+            ProductSetupExtensionRequest {
+                client_action_id: None,
+                action: Some("submit".to_string()),
+                payload: Some(serde_json::json!({
+                    "secrets": {
+                        "github_runtime_token": "github-token"
+                    }
+                })),
+            },
+        )
+        .await
+        .expect("setup submit should store credentials and activate");
+
+        assert!(activated.load(Ordering::SeqCst));
+        assert_eq!(response.phase, InstallationState::Active);
+        assert!(
+            response
+                .secrets
+                .iter()
+                .any(|secret| secret.name == "github_runtime_token" && secret.provided)
+        );
+    }
+
+    struct RecordingLifecycleService {
+        activated: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl LifecycleProductService for RecordingLifecycleService {
+        async fn execute(
+            &self,
+            _context: LifecycleProductContext,
+            action: LifecycleProductAction,
+        ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
+            match action {
+                LifecycleProductAction::ExtensionActivate { package_ref } => {
+                    self.activated.store(true, Ordering::SeqCst);
+                    Ok(LifecycleProductResponse {
+                        package_ref: Some(package_ref),
+                        phase: InstallationState::Active,
+                        blockers: Vec::new(),
+                        message: None,
+                        payload: Some(LifecycleProductPayload::ExtensionActivate {
+                            activated: true,
+                            visible_capability_ids: vec!["github.get_workflow_runs".to_string()],
+                            connection_required: None,
+                        }),
+                    })
+                }
+                _ => Err(ProductSurfaceError::service_unavailable(false)),
+            }
+        }
+
+        async fn project_package(
+            &self,
+            _context: LifecycleProductContext,
+            package_ref: LifecyclePackageRef,
+        ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
+            Ok(LifecycleProductResponse {
+                package_ref: Some(package_ref),
+                phase: if self.activated.load(Ordering::SeqCst) {
+                    InstallationState::Active
+                } else {
+                    InstallationState::Installed
+                },
+                blockers: Vec::new(),
+                message: None,
+                payload: Some(LifecycleProductPayload::ExtensionList {
+                    extensions: vec![LifecycleInstalledExtensionSummary {
+                        summary: LifecycleExtensionSummary {
+                            package_ref: LifecyclePackageRef::new(
+                                LifecyclePackageKind::Extension,
+                                "github",
+                            )
+                            .expect("package ref"),
+                            name: "github".to_string(),
+                            version: "1.0.0".to_string(),
+                            description: "GitHub".to_string(),
+                            source: LifecycleExtensionSource::HostBundled,
+                            runtime_kind: LifecycleExtensionRuntimeKind::WasmTool,
+                            surface_kinds: vec![CapabilitySurfaceKind::Tool],
+                            channel_directions: None,
+                            channel_connection: None,
+                            channel_presentation: None,
+                            visible_capability_ids: vec!["github.get_workflow_runs".to_string()],
+                            visible_read_only_capability_ids: Vec::new(),
+                            credential_requirements: vec![
+                                LifecycleExtensionCredentialRequirement {
+                                    name: "github_runtime_token".to_string(),
+                                    provider: "github".to_string(),
+                                    required: true,
+                                    setup: LifecycleExtensionCredentialSetup::ManualToken,
+                                },
+                            ],
+                            onboarding: None,
+                        },
+                        phase: if self.activated.load(Ordering::SeqCst) {
+                            InstallationState::Active
+                        } else {
+                            InstallationState::Installed
+                        },
+                        install_scope: None,
+                    }],
+                    count: 1,
+                }),
+            })
+        }
+    }
+
+    struct AcceptingCredentialSetupService;
+
+    #[async_trait]
+    impl ExtensionCredentialSetupService for AcceptingCredentialSetupService {
+        async fn credential_status(
+            &self,
+            request: ExtensionCredentialStatusRequest,
+        ) -> Result<Option<CredentialAccountProjection>, ProductSurfaceError> {
+            if request.provider.as_str() == "github" {
+                Ok(Some(CredentialAccountProjection {
+                    id: CredentialAccountId::new(),
+                    provider: request.provider,
+                    label: ironclaw_auth::CredentialAccountLabel::new("github")
+                        .expect("credential label"),
+                    status: ironclaw_auth::CredentialAccountStatus::Configured,
+                    ownership: ironclaw_auth::CredentialOwnership::UserReusable,
+                    owner_extension: None,
+                    granted_extensions: Vec::new(),
+                    secret_handle_count: 1,
+                }))
+            } else {
+                Ok(None)
+            }
+        }
+
+        async fn submit_manual_token(
+            &self,
+            _request: ExtensionCredentialSubmitRequest,
+        ) -> Result<CredentialAccountId, ProductSurfaceError> {
+            Ok(CredentialAccountId::new())
+        }
     }
 }
