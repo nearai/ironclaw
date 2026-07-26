@@ -607,6 +607,19 @@ fn default_patterns() -> Vec<LeakPattern> {
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
         },
+        // Sandbox credential placeholder (icsbx_<identifier>). The credential
+        // firewall injects these inert placeholders into the sandbox in place
+        // of real secrets; the egress proxy swaps them for the real credential
+        // at request time. A placeholder must never cross the trust boundary
+        // into model output, logs, or transcripts, so it is treated like any
+        // other secret. Word boundaries keep this from matching `icsbx_` as a
+        // substring of a longer identifier.
+        LeakPattern {
+            name: "sandbox_credential_placeholder".to_string(),
+            regex: Regex::new(r"\bicsbx_[A-Za-z0-9]{16,}\b").unwrap(), // safety: hardcoded literal
+            severity: LeakSeverity::Critical,
+            action: LeakAction::Block,
+        },
         // High entropy hex (potential secrets, warn only)
         // Uses word boundary since look-around isn't supported in the regex crate.
         // This catches standalone 64-char hex strings (like SHA256 hashes used as secrets).
@@ -1178,6 +1191,59 @@ mod tests {
         assert!(
             detector.scan_and_clean(content).is_err(),
             "scan_and_clean should block Telegram token"
+        );
+    }
+
+    #[test]
+    fn test_detect_sandbox_credential_placeholder() {
+        let detector = LeakDetector::new();
+        let content = "found in ~/.git-credentials: icsbx_7f3a9b2c1d4e5f60";
+        let result = detector.scan(content);
+        assert!(result.should_block, "sandbox placeholder not detected");
+        assert!(
+            result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "sandbox_credential_placeholder")
+        );
+    }
+
+    #[test]
+    fn test_sandbox_credential_placeholder_short_suffix_passes() {
+        let detector = LeakDetector::new();
+        let content = "icsbx_ab";
+        let result = detector.scan(content);
+        assert!(
+            !result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "sandbox_credential_placeholder"),
+            "short suffix should not match placeholder pattern"
+        );
+    }
+
+    #[test]
+    fn test_sandbox_credential_placeholder_substring_of_longer_word_passes() {
+        let detector = LeakDetector::new();
+        // "icsbx_" embedded inside a longer identifier, not at a word boundary.
+        let content = "myicsbx_7f3a9b2c1d4e5f60prefix";
+        let result = detector.scan(content);
+        assert!(
+            !result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "sandbox_credential_placeholder"),
+            "icsbx_ substring inside a longer word should not match"
+        );
+    }
+
+    #[test]
+    fn test_scan_and_clean_blocks_sandbox_credential_placeholder() {
+        let detector = LeakDetector::new();
+        let content = "icsbx_7f3a9b2c1d4e5f60";
+        assert!(
+            detector.scan_and_clean(content).is_err(),
+            "scan_and_clean should block sandbox credential placeholder"
         );
     }
 
