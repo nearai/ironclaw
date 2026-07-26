@@ -24,6 +24,25 @@ structurally unable to fail. Reading it tells you nothing; only the sabotage
 does. Fixed in PR #6674 by going to six invocations (~1-in-720 rather than
 ~1-in-2), verified by 20 consecutive hand-sabotaged runs.
 
+## What the escape-history targets found
+
+The frontier below starts with "modules where a bug already escaped to `main`".
+Run against the first of those:
+
+`crates/ironclaw_dispatcher/src/lib.rs` — 23 mutants, **9 caught / 1 missed /
+13 unviable** (9 of 10 viable). The one survivor was the
+`invocation.process_id.is_none()` match guard, which *is* the #6636 fix: it
+decides whether a loop invocation carries parent lineage, and lineage is what
+keeps a nested capability failure out of the top-level run projection. Every
+test in the file left `process_id` unset, so only one side of the guard was ever
+exercised. The fix for an escaped bug had no assertion on the input that
+discriminates it, and deleting the guard changed nothing any test looked at.
+
+That is the same shape as the motivating finding, and worth stating plainly
+because it is the argument for the frontier order: **a module that just had an
+escape is a module whose fix is likely unasserted.** The bug was found and fixed
+by hand; the test that would notice it coming back was not written.
+
 ## Running one
 
 ```bash
@@ -44,6 +63,21 @@ sabotage diff and the enclosing source inlined so nobody has to go hunting.
 Measured cost: 39 mutants over one 449-line file in ~9 minutes (a one-time
 baseline build, then ~3s build + ~3s test per mutant via incremental
 compilation).
+
+### Auditing anything that depends on `ironclaw_webui`
+
+`ironclaw_webui`'s `build.rs` shells out to a frontend build. cargo-mutants
+compiles in a fresh copy of the tree, so that build runs for real on every job
+and fails on any machine whose node/corepack setup can't complete it — the
+audit dies at the baseline with no mutants tested. Set `SKIP_FRONTEND_BUILD=1`,
+which the build script already honours:
+
+```bash
+SKIP_FRONTEND_BUILD=1 ./scripts/mutation-audit.sh -p ironclaw_reborn_composition \
+    crates/ironclaw_reborn_composition/src/extension_host/channel_outbound_targets.rs
+```
+
+The frontend is not under mutation, so skipping it costs no coverage.
 
 ## Never inherit `CARGO_TARGET_DIR`
 
@@ -155,3 +189,12 @@ wrong answers during development: an unscoped run silently finding zero mutants,
 an inherited `CARGO_TARGET_DIR`, scoring over all mutants instead of viable
 ones, and a missing report reading as an empty queue. Guardrails are code; a
 checker that silently does nothing is worse than none.
+
+Section G exists because the first four sections were not enough. They drive
+`mutation_triage_queue.py` directly with hand-built fixtures, so they stayed
+green while every real audit failed at its last step: cargo-mutants writes to
+`$MUT_OUT/mutants.out`, and the script was reading `$MUT_OUT`. The helper was
+correct and the caller wired it to the wrong path — the gap
+`.claude/rules/testing.md` calls *test through the caller*. Section G runs
+`mutation-audit.sh` end to end behind a stub `cargo` that reproduces the
+directory layout, so the wiring itself is asserted.
