@@ -16,7 +16,7 @@ layer = "contracts"
 dist = false
 
 [dependencies]
-base64 = "0.22"
+base64 = "0.23"
 chrono-tz = "0.10"
 dirs = "6"
 hex = "0.4"
