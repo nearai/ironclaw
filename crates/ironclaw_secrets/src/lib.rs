@@ -11,8 +11,13 @@
 mod crypto;
 pub mod keychain;
 mod legacy_store;
+mod placeholder;
 mod secret_store;
 
+pub use placeholder::{
+    CREDENTIAL_PLACEHOLDER_PREFIX, CredentialPlaceholderOwner, CredentialPlaceholderRegistry,
+    CredentialPlaceholderToken, CredentialSessionLease,
+};
 pub use secret_store::{CredentialBroker, SecretStore};
 
 use std::collections::HashMap;
@@ -465,6 +470,8 @@ pub enum CredentialBrokerError {
     CredentialExtensionMismatch { account_id: CredentialAccountId },
     #[error("credential account {account_id} is not allowed for requested target")]
     CredentialPolicyMismatch { account_id: CredentialAccountId },
+    #[error("credential placeholder token {value} is invalid: {reason}")]
+    InvalidPlaceholderToken { value: String, reason: String },
 }
 
 impl CredentialBrokerError {
@@ -482,6 +489,7 @@ impl CredentialBrokerError {
             Self::CredentialRevoked { .. } => "CredentialRevoked",
             Self::CredentialExtensionMismatch { .. } => "CredentialPolicyMismatch",
             Self::CredentialPolicyMismatch { .. } => "CredentialPolicyMismatch",
+            Self::InvalidPlaceholderToken { .. } => "MissingCredential",
         }
     }
 
@@ -561,6 +569,15 @@ pub trait CredentialSessionStore: Send + Sync {
 pub struct InMemoryCredentialBroker {
     accounts: Mutex<HashMap<CredentialAccountKey, CredentialAccount>>,
     sessions: Mutex<HashMap<CredentialSessionId, CredentialSessionRecord>>,
+    /// Secondary index for JIT minting: `(invocation, capability, account)` ->
+    /// the session already minted for it, so re-use within the same dispatch
+    /// does not mint a second session. See [`placeholder::JitMintKey`] and
+    /// [`InMemoryCredentialBroker::mint_on_first_use`].
+    jit_minted: Mutex<HashMap<placeholder::JitMintKey, CredentialSessionId>>,
+    /// Secondary index the egress proxy (W6) will use: placeholder token ->
+    /// the session currently bound to it. See
+    /// [`InMemoryCredentialBroker::find_session_by_placeholder`].
+    sessions_by_placeholder: Mutex<HashMap<CredentialPlaceholderToken, CredentialSessionId>>,
 }
 
 #[derive(Debug, Clone)]
