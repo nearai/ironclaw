@@ -13,8 +13,6 @@ use ironclaw_host_api::{
 pub struct HostedMcpDiscoveryEgress {
     tool_name: String,
     read_only: bool,
-    methods: std::sync::Mutex<Vec<String>>,
-    credential_counts: std::sync::Mutex<Vec<usize>>,
 }
 
 impl Default for HostedMcpDiscoveryEgress {
@@ -30,8 +28,6 @@ impl HostedMcpDiscoveryEgress {
         Self {
             tool_name: tool_name.to_string(),
             read_only: false,
-            methods: std::sync::Mutex::new(Vec::new()),
-            credential_counts: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -41,22 +37,6 @@ impl HostedMcpDiscoveryEgress {
     pub fn read_only(mut self) -> Self {
         self.read_only = true;
         self
-    }
-
-    #[allow(dead_code)]
-    pub fn methods(&self) -> Vec<String> {
-        self.methods
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-    }
-
-    #[allow(dead_code)]
-    pub fn credential_counts(&self) -> Vec<usize> {
-        self.credential_counts
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
     }
 }
 
@@ -87,14 +67,6 @@ impl RuntimeHttpEgress for HostedMcpDiscoveryEgress {
                 request_bytes: request.body.len() as u64,
                 response_bytes: 0,
             })?;
-        self.methods
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(method.to_string());
-        self.credential_counts
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(request.credential_injections.len());
         match method {
             "initialize" => runtime_json_response(
                 body["id"].as_u64(),

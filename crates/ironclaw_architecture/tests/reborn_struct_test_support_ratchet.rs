@@ -31,26 +31,8 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
         category: "dead-code",
         item_kind: "field",
-        path: "crates/ironclaw_extensions/src/v3.rs",
-        count: 1,
-    },
-    FrozenPathCount {
-        category: "dead-code",
-        item_kind: "field",
-        path: "crates/ironclaw_hooks/src/middleware/model_port.rs",
-        count: 2,
-    },
-    FrozenPathCount {
-        category: "dead-code",
-        item_kind: "field",
         path: "crates/ironclaw_hooks/src/self_authored.rs",
         count: 2,
-    },
-    FrozenPathCount {
-        category: "dead-code",
-        item_kind: "field",
-        path: "crates/ironclaw_hooks/src/wasm/runtime.rs",
-        count: 1,
     },
     FrozenPathCount {
         category: "dead-code",
@@ -61,26 +43,8 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
         category: "dead-code",
         item_kind: "method",
-        path: "crates/ironclaw_hooks/src/self_authored.rs",
-        count: 1,
-    },
-    FrozenPathCount {
-        category: "dead-code",
-        item_kind: "method",
         path: "crates/ironclaw_extension_host/src/channel_pairing.rs",
         count: 1,
-    },
-    FrozenPathCount {
-        category: "dead-code",
-        item_kind: "method",
-        path: "crates/ironclaw_extension_host/src/extension_lifecycle/hosted_mcp_test_support.rs",
-        count: 2,
-    },
-    FrozenPathCount {
-        category: "dead-code",
-        item_kind: "method",
-        path: "crates/ironclaw_trust/src/decision.rs",
-        count: 2,
     },
     FrozenPathCount {
         category: "test-support",
