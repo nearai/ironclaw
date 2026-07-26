@@ -16,6 +16,5 @@ tempfile = "3"
 # `ironclaw_architecture` ships no runtime code.
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 proc-macro2 = { version = "1", features = ["span-locations"] }
-quote = "1"
 syn = { version = "2", features = ["full"] }
 toml = "1.1"

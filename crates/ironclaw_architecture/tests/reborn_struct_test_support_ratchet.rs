@@ -14,10 +14,10 @@ mod ratchet_support;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use quote::ToTokens;
 use ratchet_support::workspace_root;
+use syn::parse::Parser;
 use syn::spanned::Spanned;
-use syn::{Attribute, Fields, ImplItem, Item};
+use syn::{Attribute, Fields, ImplItem, Item, Meta, Token};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct FrozenPathCount {
@@ -42,9 +42,33 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     },
     FrozenPathCount {
         category: "dead-code",
+        item_kind: "field",
+        path: "crates/ironclaw_reborn_composition/src/factory.rs",
+        count: 2,
+    },
+    FrozenPathCount {
+        category: "dead-code",
+        item_kind: "field",
+        path: "crates/ironclaw_reborn_composition/src/runtime.rs",
+        count: 2,
+    },
+    FrozenPathCount {
+        category: "dead-code",
+        item_kind: "method",
+        path: "crates/ironclaw_auth/src/product_auth/api/auth.rs",
+        count: 3,
+    },
+    FrozenPathCount {
+        category: "dead-code",
         item_kind: "method",
         path: "crates/ironclaw_extension_host/src/channel_pairing.rs",
         count: 1,
+    },
+    FrozenPathCount {
+        category: "dead-code",
+        item_kind: "method",
+        path: "crates/ironclaw_host_api/src/product_adapter/auth.rs",
+        count: 5,
     },
     FrozenPathCount {
         category: "test-support",
@@ -56,6 +80,12 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         category: "test-support",
         item_kind: "field",
         path: "crates/ironclaw_host_runtime/src/first_party_tools/memory.rs",
+        count: 1,
+    },
+    FrozenPathCount {
+        category: "test-support",
+        item_kind: "field",
+        path: "crates/ironclaw_host_runtime/src/services/runtime_adapters.rs",
         count: 1,
     },
     FrozenPathCount {
@@ -79,14 +109,38 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
         category: "test-support",
         item_kind: "field",
+        path: "crates/ironclaw_reborn_composition/src/runtime/local_dev/extension_surface.rs",
+        count: 1,
+    },
+    FrozenPathCount {
+        category: "test-support",
+        item_kind: "field",
         path: "crates/ironclaw_reborn_composition/src/runtime_input.rs",
         count: 3,
+    },
+    FrozenPathCount {
+        category: "test-support",
+        item_kind: "field",
+        path: "crates/ironclaw_resources/src/filesystem_governor.rs",
+        count: 1,
+    },
+    FrozenPathCount {
+        category: "test-support",
+        item_kind: "field",
+        path: "crates/ironclaw_resources/src/filesystem_governor/journal.rs",
+        count: 1,
     },
     FrozenPathCount {
         category: "test-support",
         item_kind: "method",
         path: "crates/ironclaw_agent_loop/src/executor/input.rs",
         count: 2,
+    },
+    FrozenPathCount {
+        category: "test-support",
+        item_kind: "method",
+        path: "crates/ironclaw_approvals/src/cas_record.rs",
+        count: 3,
     },
     FrozenPathCount {
         category: "test-support",
@@ -104,6 +158,12 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         category: "test-support",
         item_kind: "method",
         path: "crates/ironclaw_auth/src/product_auth/credentials/runtime_credentials.rs",
+        count: 1,
+    },
+    FrozenPathCount {
+        category: "test-support",
+        item_kind: "method",
+        path: "crates/ironclaw_auth/src/product_auth/durable/mod.rs",
         count: 1,
     },
     FrozenPathCount {
@@ -129,6 +189,12 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         item_kind: "method",
         path: "crates/ironclaw_extension_host/src/channel_identity_binding.rs",
         count: 2,
+    },
+    FrozenPathCount {
+        category: "test-support",
+        item_kind: "method",
+        path: "crates/ironclaw_extension_host/src/channel_identity_store.rs",
+        count: 1,
     },
     FrozenPathCount {
         category: "test-support",
@@ -170,7 +236,7 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         category: "test-support",
         item_kind: "method",
         path: "crates/ironclaw_host_api/src/product_adapter/auth.rs",
-        count: 7,
+        count: 2,
     },
     FrozenPathCount {
         category: "test-support",
@@ -187,8 +253,20 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
         category: "test-support",
         item_kind: "method",
+        path: "crates/ironclaw_host_runtime/src/services.rs",
+        count: 1,
+    },
+    FrozenPathCount {
+        category: "test-support",
+        item_kind: "method",
         path: "crates/ironclaw_host_runtime/src/services/production_wiring.rs",
         count: 2,
+    },
+    FrozenPathCount {
+        category: "test-support",
+        item_kind: "method",
+        path: "crates/ironclaw_host_runtime/src/services/runtime_adapters.rs",
+        count: 1,
     },
     FrozenPathCount {
         category: "test-support",
@@ -319,6 +397,12 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
         category: "test-support",
         item_kind: "method",
+        path: "crates/ironclaw_reborn_composition/src/runtime/test_support.rs",
+        count: 4,
+    },
+    FrozenPathCount {
+        category: "test-support",
+        item_kind: "method",
         path: "crates/ironclaw_reborn_composition/src/runtime_input.rs",
         count: 5,
     },
@@ -343,6 +427,18 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
         category: "test-support",
         item_kind: "method",
+        path: "crates/ironclaw_resources/src/filesystem_governor.rs",
+        count: 3,
+    },
+    FrozenPathCount {
+        category: "test-support",
+        item_kind: "method",
+        path: "crates/ironclaw_resources/src/filesystem_governor/journal.rs",
+        count: 3,
+    },
+    FrozenPathCount {
+        category: "test-support",
+        item_kind: "method",
         path: "crates/ironclaw_runner/src/loop_exit_applier.rs",
         count: 7,
     },
@@ -350,6 +446,12 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         category: "test-support",
         item_kind: "method",
         path: "crates/ironclaw_runner/src/tool_disclosure.rs",
+        count: 1,
+    },
+    FrozenPathCount {
+        category: "test-support",
+        item_kind: "method",
+        path: "crates/ironclaw_threads/src/filesystem_service.rs",
         count: 1,
     },
     FrozenPathCount {
@@ -400,114 +502,6 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         path: "crates/ironclaw_webui/src/webui_v2/sse_capacity.rs",
         count: 2,
     },
-    FrozenPathCount {
-        category: "dead-code",
-        item_kind: "field",
-        path: "crates/ironclaw_reborn_composition/src/factory.rs",
-        count: 2,
-    },
-    FrozenPathCount {
-        category: "dead-code",
-        item_kind: "field",
-        path: "crates/ironclaw_reborn_composition/src/runtime.rs",
-        count: 2,
-    },
-    FrozenPathCount {
-        category: "dead-code",
-        item_kind: "method",
-        path: "crates/ironclaw_auth/src/product_auth/api/auth.rs",
-        count: 3,
-    },
-    FrozenPathCount {
-        category: "dead-code",
-        item_kind: "method",
-        path: "crates/ironclaw_host_api/src/product_adapter/auth.rs",
-        count: 5,
-    },
-    FrozenPathCount {
-        category: "test-support",
-        item_kind: "field",
-        path: "crates/ironclaw_host_runtime/src/services/runtime_adapters.rs",
-        count: 1,
-    },
-    FrozenPathCount {
-        category: "test-support",
-        item_kind: "field",
-        path: "crates/ironclaw_reborn_composition/src/runtime/local_dev/extension_surface.rs",
-        count: 1,
-    },
-    FrozenPathCount {
-        category: "test-support",
-        item_kind: "field",
-        path: "crates/ironclaw_resources/src/filesystem_governor.rs",
-        count: 1,
-    },
-    FrozenPathCount {
-        category: "test-support",
-        item_kind: "field",
-        path: "crates/ironclaw_resources/src/filesystem_governor/journal.rs",
-        count: 1,
-    },
-    FrozenPathCount {
-        category: "test-support",
-        item_kind: "method",
-        path: "crates/ironclaw_approvals/src/cas_record.rs",
-        count: 3,
-    },
-    FrozenPathCount {
-        category: "test-support",
-        item_kind: "method",
-        path: "crates/ironclaw_auth/src/product_auth/durable/mod.rs",
-        count: 1,
-    },
-    FrozenPathCount {
-        category: "test-support",
-        item_kind: "method",
-        path: "crates/ironclaw_extension_host/src/channel_identity_store.rs",
-        count: 1,
-    },
-    FrozenPathCount {
-        category: "test-support",
-        item_kind: "method",
-        path: "crates/ironclaw_host_runtime/src/services.rs",
-        count: 1,
-    },
-    FrozenPathCount {
-        category: "test-support",
-        item_kind: "method",
-        path: "crates/ironclaw_host_runtime/src/services/runtime_adapters.rs",
-        count: 1,
-    },
-    FrozenPathCount {
-        category: "test-support",
-        item_kind: "method",
-        path: "crates/ironclaw_reborn_composition/src/runtime/local_dev/extension_surface.rs",
-        count: 2,
-    },
-    FrozenPathCount {
-        category: "test-support",
-        item_kind: "method",
-        path: "crates/ironclaw_reborn_composition/src/runtime/test_support.rs",
-        count: 4,
-    },
-    FrozenPathCount {
-        category: "test-support",
-        item_kind: "method",
-        path: "crates/ironclaw_resources/src/filesystem_governor.rs",
-        count: 3,
-    },
-    FrozenPathCount {
-        category: "test-support",
-        item_kind: "method",
-        path: "crates/ironclaw_resources/src/filesystem_governor/journal.rs",
-        count: 3,
-    },
-    FrozenPathCount {
-        category: "test-support",
-        item_kind: "method",
-        path: "crates/ironclaw_threads/src/filesystem_service.rs",
-        count: 1,
-    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -518,33 +512,81 @@ struct Occurrence {
     member: String,
 }
 
+fn nested_meta(meta: &Meta) -> Option<Vec<Meta>> {
+    let Meta::List(list) = meta else {
+        return None;
+    };
+    syn::punctuated::Punctuated::<Meta, Token![,]>::parse_terminated
+        .parse2(list.tokens.clone())
+        .ok()
+        .map(|metas| metas.into_iter().collect())
+}
+
+fn is_test_cfg(meta: &Meta) -> bool {
+    match meta {
+        Meta::Path(path) => path.is_ident("test"),
+        Meta::NameValue(value) => {
+            value.path.is_ident("feature")
+                && matches!(
+                    &value.value,
+                    syn::Expr::Lit(expr)
+                        if matches!(&expr.lit, syn::Lit::Str(lit) if lit.value() == "test-support")
+                )
+        }
+        Meta::List(list) if list.path.is_ident("any") || list.path.is_ident("all") => {
+            nested_meta(meta).is_some_and(|metas| metas.iter().any(is_test_cfg))
+        }
+        _ => false,
+    }
+}
+
+fn is_dead_code_lint(meta: &Meta) -> bool {
+    matches!(
+        meta,
+        Meta::Path(path) if path.is_ident("dead_code")
+    )
+}
+
+fn is_lint_attribute(meta: &Meta) -> bool {
+    let Meta::List(list) = meta else {
+        return false;
+    };
+    (list.path.is_ident("allow") || list.path.is_ident("expect"))
+        && nested_meta(meta).is_some_and(|metas| metas.iter().any(is_dead_code_lint))
+}
+
 fn attr_categories(attrs: &[Attribute]) -> Vec<&'static str> {
-    let joined = attrs
-        .iter()
-        .map(|attribute| attribute.meta.to_token_stream().to_string())
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .collect::<String>();
     let mut categories = Vec::new();
-    if joined.contains("cfg(test)")
-        || joined.contains("cfg(any(test")
-        || joined.contains("feature = \"test-support\"")
-        || joined.contains("feature=\"test-support\"")
-    {
+    let mut test_support = false;
+    let mut dead_code = false;
+    for attribute in attrs {
+        match &attribute.meta {
+            Meta::List(list) if list.path.is_ident("cfg") => {
+                test_support |=
+                    nested_meta(&attribute.meta).is_some_and(|metas| metas.iter().any(is_test_cfg));
+            }
+            Meta::List(list) if list.path.is_ident("cfg_attr") => {
+                if let Some(metas) = nested_meta(&attribute.meta) {
+                    test_support |= metas.first().is_some_and(is_test_cfg);
+                    dead_code |= metas.iter().skip(1).any(is_lint_attribute);
+                }
+            }
+            meta => dead_code |= is_lint_attribute(meta),
+        }
+    }
+    if test_support {
         categories.push("test-support");
     }
-    if joined.contains("allow(dead_code") || joined.contains("expect(dead_code") {
+    if dead_code {
         categories.push("dead-code");
     }
     categories
 }
 
-fn scan_member_occurrences(source: &str) -> Vec<Occurrence> {
+fn scan_member_occurrences(source: &str, origin: &str) -> Vec<Occurrence> {
     let mut occurrences = Vec::new();
     let file =
-        syn::parse_file(source).unwrap_or_else(|err| panic!("failed to parse fixture: {err}"));
+        syn::parse_file(source).unwrap_or_else(|err| panic!("failed to parse {origin}: {err}"));
     scan_items(&file.items, false, &mut occurrences);
     occurrences
 }
@@ -571,7 +613,7 @@ fn scan_items(items: &[Item], in_test_module: bool, occurrences: &mut Vec<Occurr
             _ => continue,
         };
         let is_test_item = attr_categories(attrs).contains(&"test-support");
-        if in_test_module || is_test_item && matches!(item, Item::Mod(_)) {
+        if in_test_module || is_test_item {
             if let Item::Mod(item) = item
                 && let Some((_, nested)) = &item.content
             {
@@ -581,19 +623,22 @@ fn scan_items(items: &[Item], in_test_module: bool, occurrences: &mut Vec<Occurr
         }
         match item {
             Item::Struct(item) => {
-                if let Fields::Named(fields) = &item.fields {
-                    for field in &fields.named {
-                        for category in attr_categories(&field.attrs) {
-                            occurrences.push(Occurrence {
-                                category,
-                                item_kind: "field",
-                                line: field.span().start().line,
-                                member: field
-                                    .ident
-                                    .as_ref()
-                                    .map_or_else(|| "_".to_string(), ToString::to_string),
-                            });
-                        }
+                let fields = match &item.fields {
+                    Fields::Named(fields) => fields.named.iter().enumerate().collect(),
+                    Fields::Unnamed(fields) => fields.unnamed.iter().enumerate().collect(),
+                    Fields::Unit => Vec::new(),
+                };
+                for (index, field) in fields {
+                    for category in attr_categories(&field.attrs) {
+                        occurrences.push(Occurrence {
+                            category,
+                            item_kind: "field",
+                            line: field.span().start().line,
+                            member: field
+                                .ident
+                                .as_ref()
+                                .map_or_else(|| index.to_string(), ToString::to_string),
+                        });
                     }
                 }
             }
@@ -654,7 +699,7 @@ fn scan_dir(root: &Path, dir: &Path, out: &mut BTreeMap<(String, String, String)
             .unwrap_or(&path)
             .to_string_lossy()
             .replace('\\', "/");
-        for occurrence in scan_member_occurrences(&contents) {
+        for occurrence in scan_member_occurrences(&contents, &relative) {
             *out.entry((
                 occurrence.category.to_string(),
                 occurrence.item_kind.to_string(),
@@ -675,19 +720,18 @@ fn reborn_production_struct_test_support_and_dead_code_members_do_not_grow() {
     let mut found = BTreeMap::new();
     scan_dir(&root, &root.join("crates"), &mut found);
 
-    let frozen: BTreeMap<(String, String, String), usize> = FROZEN_PATH_COUNTS
-        .iter()
-        .map(|entry| {
-            (
-                (
-                    entry.category.to_string(),
-                    entry.item_kind.to_string(),
-                    entry.path.to_string(),
-                ),
-                entry.count,
-            )
-        })
-        .collect();
+    let mut frozen = BTreeMap::new();
+    for entry in FROZEN_PATH_COUNTS {
+        let key = (
+            entry.category.to_string(),
+            entry.item_kind.to_string(),
+            entry.path.to_string(),
+        );
+        assert!(
+            frozen.insert(key.clone(), entry.count).is_none(),
+            "duplicate FROZEN_PATH_COUNTS entry: {key:?}"
+        );
+    }
 
     let added: Vec<String> = found
         .iter()
@@ -728,6 +772,25 @@ fn reborn_struct_member_scanner_self_test() {
             test_only: usize,
             #[allow(dead_code)]
             reserved: String,
+            #[allow(dead_code_extra)]
+            near_match: String,
+        }
+
+        struct TupleProduction(
+            usize,
+            #[allow(dead_code)] usize,
+        );
+
+        #[cfg(test)]
+        struct TestStruct {
+            #[allow(dead_code)]
+            field: usize,
+        }
+
+        #[cfg(test)]
+        impl TestStruct {
+            #[allow(dead_code)]
+            fn method(&self) {}
         }
 
         impl Production {
@@ -755,22 +818,23 @@ fn reborn_struct_member_scanner_self_test() {
         }
 
         #[cfg(test)]
-        mod tests {
-            struct Fixture {
-                #[allow(dead_code)]
-                field: usize,
-            }
+        #[cfg(any(testing))]
+        struct NearMatch {
+            #[allow(dead_code_extra)]
+            field: usize,
         }
     "#;
-    let got: Vec<(String, &'static str, &'static str)> = scan_member_occurrences(source)
-        .into_iter()
-        .map(|occurrence| (occurrence.member, occurrence.category, occurrence.item_kind))
-        .collect();
+    let got: Vec<(String, &'static str, &'static str)> =
+        scan_member_occurrences(source, "self-test fixture")
+            .into_iter()
+            .map(|occurrence| (occurrence.member, occurrence.category, occurrence.item_kind))
+            .collect();
     assert_eq!(
         got,
         vec![
             ("test_only".to_string(), "test-support", "field"),
             ("reserved".to_string(), "dead-code", "field"),
+            ("1".to_string(), "dead-code", "field"),
             ("with_fake_state".to_string(), "test-support", "method"),
             ("with_fake_state".to_string(), "dead-code", "method"),
             (

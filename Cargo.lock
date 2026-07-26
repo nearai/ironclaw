@@ -3371,7 +3371,6 @@ version = "0.1.0"
 dependencies = [
  "ironclaw_host_api",
  "proc-macro2",
- "quote",
  "serde_json",
  "syn 2.0.117",
  "tempfile",
