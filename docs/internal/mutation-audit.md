@@ -79,6 +79,31 @@ SKIP_FRONTEND_BUILD=1 ./scripts/mutation-audit.sh -p ironclaw_reborn_composition
 
 The frontend is not under mutation, so skipping it costs no coverage.
 
+### Give the audit the machine
+
+Do not run other cargo work while an audit runs. cargo-mutants already uses
+`MUT_JOBS` parallel jobs, each building and testing a full copy of the tree;
+adding a second heavy build on top starves the test processes, and **starvation
+is indistinguishable from a hang** — libtest prints "has been running for over
+60 seconds" and then nothing.
+
+This cost real time while writing this guide. `ironclaw_reborn_composition`'s
+lib suite appeared to hang at 807 of 981 tests, twice, and was written up as an
+environment problem needing Docker. Run on an idle machine it is
+**981 passed in 77 seconds**. Nothing was wrong with the suite; the audit was
+competing with itself.
+
+If a suite looks hung, re-run it alone before concluding anything:
+
+```bash
+SKIP_FRONTEND_BUILD=1 cargo test -p <package>
+```
+
+That matters beyond wasted time: an audit is only as trustworthy as its
+baseline. Every verdict is relative to one unmutated run, so a suite that
+cannot finish makes the run either die at the baseline or — the dangerous
+case — report mutants as surviving because the tests never reached them.
+
 ## Never inherit `CARGO_TARGET_DIR`
 
 Both scripts unset it and say so. This is not fussiness — it silently corrupts
