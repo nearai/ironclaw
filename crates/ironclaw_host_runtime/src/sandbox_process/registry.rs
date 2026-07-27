@@ -178,6 +178,16 @@ pub(crate) struct BackgroundJob {
 /// into the activity map.
 ///
 /// No production caller in this PR — see [`BackgroundJob`].
+///
+/// **Known tradeoff, not fixed here:** nothing bounds how many jobs
+/// accumulate per user before `drop_dead` prunes them, and `jobs_for` clones
+/// the whole retained `Vec` on every call. The right bound (job-count cap?
+/// command-preview truncation?) depends on exec_transport's launch rate and
+/// the reaper's `drop_dead` cadence, neither of which exist yet — bounding
+/// blind, before that caller is wired, risks guessing a cap that's wrong in
+/// either direction. `drop_dead` is already the exact pruning seam the
+/// future reaper hookup calls; left as a follow-up for that PR rather than
+/// spec'd speculatively here.
 #[derive(Debug, Default)]
 #[allow(dead_code)]
 pub(crate) struct BackgroundJobRegistry {
@@ -211,8 +221,13 @@ impl BackgroundJobRegistry {
     }
 
     pub(crate) fn drop_dead(&self, key: &RebornSandboxUserKey, alive_pids: &[u32]) {
+        // Build the membership set once per call rather than doing an O(A)
+        // linear scan of `alive_pids` per retained job (O(J x A) overall) —
+        // with many tracked background jobs this reaper-driven prune runs
+        // repeatedly, so constant-time membership checks matter here.
+        let alive: std::collections::HashSet<u32> = alive_pids.iter().copied().collect();
         if let Some(jobs) = self.lock().get_mut(key) {
-            jobs.retain(|job| alive_pids.contains(&job.pid));
+            jobs.retain(|job| alive.contains(&job.pid));
         }
     }
 }
@@ -353,6 +368,18 @@ mod tests {
 
         // Must not panic when the key was never recorded.
         registry.drop_dead(&key, &[111]);
+
+        assert!(registry.jobs_for(&key).is_empty());
+    }
+
+    #[test]
+    fn background_job_registry_drop_dead_with_empty_alive_pids_removes_all_jobs() {
+        let registry = BackgroundJobRegistry::new();
+        let key = test_key("t", "u");
+        registry.record(&key, 111, "sleep 60".to_string());
+        registry.record(&key, 222, "tail -f log".to_string());
+
+        registry.drop_dead(&key, &[]);
 
         assert!(registry.jobs_for(&key).is_empty());
     }

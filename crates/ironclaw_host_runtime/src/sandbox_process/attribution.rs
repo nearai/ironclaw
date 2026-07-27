@@ -183,6 +183,16 @@ impl<L: NetworkContainerLookup> ConnectionAttributionResolver<L> {
 
     /// Resolves `peer_ip` to its owning `{tenant, user}`, consulting the
     /// cache first. See the type doc for the cache's staleness guarantee.
+    ///
+    /// **Known tradeoff, not fixed here:** the Docker query below runs
+    /// outside the cache lock, so concurrent misses for the same (or
+    /// different) IPs each independently query Docker rather than coalescing
+    /// onto one in-flight request — a thundering herd during a connection
+    /// burst. Coalescing needs to know the real call shape (one `resolve`
+    /// per TCP accept? fanned out?), which only exists once W6 wires the
+    /// proxy's accept loop to this resolver; building a dedup mechanism
+    /// blind, before that caller exists, risks the wrong shape. Left as a
+    /// W6-time follow-up rather than spec'd speculatively here.
     #[allow(dead_code)] // consumed by W6; not wired yet
     pub(crate) async fn resolve(&self, peer_ip: IpAddr) -> ConnectionAttribution {
         if let Some(cached) = self.cached(peer_ip) {
@@ -667,6 +677,52 @@ mod tests {
             1,
             "expired entry for 10.200.0.5 should have been swept, leaving only the fresh 10.200.0.6 entry"
         );
+    }
+
+    #[tokio::test]
+    async fn concurrent_resolve_calls_complete_with_consistent_attribution() {
+        // `resolve` checks the cache, awaits the Docker query outside the
+        // lock, then re-locks to sweep+insert — so concurrent callers race
+        // through that miss/query/insert window. This drives many
+        // simultaneous `resolve` calls for two distinct IPs sharing one
+        // resolver and asserts every call lands on the correct owner, with
+        // no panic/deadlock across the shared cache mutex.
+        use std::sync::Arc;
+
+        let lookup = FakeLookup::new(vec![
+            container_with("c1", Some("10.200.0.5"), Some(labels("tenant-a", "user-a"))),
+            container_with("c2", Some("10.200.0.6"), Some(labels("tenant-b", "user-b"))),
+        ]);
+        let resolver = Arc::new(ConnectionAttributionResolver::with_lookup(
+            lookup, NETWORK, PREFIX,
+        ));
+        let ip_a: IpAddr = "10.200.0.5".parse().unwrap();
+        let ip_b: IpAddr = "10.200.0.6".parse().unwrap();
+
+        let mut tasks = Vec::new();
+        for index in 0..20 {
+            let resolver = Arc::clone(&resolver);
+            let ip = if index % 2 == 0 { ip_a } else { ip_b };
+            tasks.push(tokio::spawn(
+                async move { (ip, resolver.resolve(ip).await) },
+            ));
+        }
+
+        for task in tasks {
+            let (ip, outcome) = task.await.expect("resolve task must not panic");
+            let expected = if ip == ip_a {
+                ConnectionAttribution::Attributed {
+                    tenant_id: TenantId::new("tenant-a").unwrap(),
+                    user_id: UserId::new("user-a").unwrap(),
+                }
+            } else {
+                ConnectionAttribution::Attributed {
+                    tenant_id: TenantId::new("tenant-b").unwrap(),
+                    user_id: UserId::new("user-b").unwrap(),
+                }
+            };
+            assert_eq!(outcome, expected);
+        }
     }
 
     #[tokio::test]
