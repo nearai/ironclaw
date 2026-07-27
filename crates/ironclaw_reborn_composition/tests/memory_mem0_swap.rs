@@ -2,10 +2,11 @@
 //!
 //! Drives the exact build-time pipeline composition runs at startup —
 //! `[memory]` config → `resolve_memory_binding_policy` →
-//! `build_memory_service_resolver` (the config-driven factory, which constructs
-//! the mem0 provider over its transport and registers it) → `MemoryServiceResolver`
-//! → `resolve_document_store` → a write/search routed through the resolved
-//! provider — and shows that, with `memory.document_store.v1` bound to the mem0
+//! `resolve_memory_provider` (the config-driven factory, which constructs
+//! the mem0 provider over its transport, registers it, and loads mem0's
+//! manifest bundle) → `MemoryServiceResolver` → `resolve_provider` → a
+//! write/search routed through the resolved
+//! provider — and shows that, with the memory binding pointed at the mem0
 //! extension id (plus the production admin override an unverified third party
 //! requires), the resolver yields the **mem0** provider and the calls reach the
 //! mem0 transport, not the native filesystem store.
@@ -29,7 +30,7 @@ use ironclaw_memory_mem0::{
 };
 use ironclaw_reborn_composition::{
     Mem0ConnectionConfig, MemoryProviderDeps, RebornCompositionProfile,
-    build_memory_service_resolver, resolve_memory_binding_policy,
+    resolve_memory_binding_policy, resolve_memory_provider,
 };
 use ironclaw_reborn_config::{MemoryAdminOverride, MemorySection};
 use serde_json::json;
@@ -70,7 +71,7 @@ fn write_request(target: &str, content: &str) -> MemoryServiceWriteRequest {
     }
 }
 
-/// `[memory]` config binding the document-store profile to mem0, plus the
+/// `[memory]` config binding memory to mem0, plus the
 /// production admin override an unverified third-party provider requires.
 fn mem0_section() -> MemorySection {
     MemorySection {
@@ -95,7 +96,7 @@ fn deps_over_mock(transport: Arc<MockMem0Transport>) -> MemoryProviderDeps {
 }
 
 #[tokio::test]
-async fn config_binding_swaps_document_store_to_mem0_through_the_factory() {
+async fn config_binding_swaps_the_memory_provider_to_mem0_through_the_factory() {
     let transport = Arc::new(MockMem0Transport::always_ok(json!({
         "results": [
             { "id": "m-1", "memory": "swapped hit", "metadata": { "target": "notes/a.md" } }
@@ -107,13 +108,45 @@ async fn config_binding_swaps_document_store_to_mem0_through_the_factory() {
     let policy =
         resolve_memory_binding_policy(Some(&mem0_section()), RebornCompositionProfile::Production)
             .expect("mem0 binding resolves with the production override");
-    let resolver =
-        build_memory_service_resolver(Some(policy), &deps_over_mock(Arc::clone(&transport)));
+    let resolved = resolve_memory_provider(Some(policy), &deps_over_mock(Arc::clone(&transport)))
+        .expect("the bound mem0 provider resolves");
 
-    // The document-store profile now resolves to the mem0 provider, NOT native.
-    let provider = resolver
-        .resolve_document_store(filesystem(), None)
-        .expect("document-store binding must resolve to the mem0 provider");
+    // The bound provider's manifest is the single source of truth: binding
+    // mem0 registers MEM0's package (its four stable ironclaw.memory.* tools)
+    // and its honest lifecycle — the long-term retrieval lane and profile
+    // reads only.
+    let package = resolved
+        .package
+        .as_ref()
+        .expect("binding mem0 must register mem0's package");
+    assert_eq!(package.manifest.id.as_str(), MEM0_MEMORY_EXTENSION_ID);
+    use ironclaw_host_api::MemoryLifecycleHook;
+    assert!(
+        resolved
+            .lifecycle
+            .declares(MemoryLifecycleHook::ReadLongTerm)
+    );
+    assert!(
+        resolved
+            .lifecycle
+            .declares(MemoryLifecycleHook::ProfileRead)
+    );
+    assert!(
+        !resolved
+            .lifecycle
+            .declares(MemoryLifecycleHook::ReadShortTerm)
+    );
+    assert!(
+        !resolved
+            .lifecycle
+            .declares(MemoryLifecycleHook::RecordInteraction)
+    );
+
+    // The memory binding now resolves to the mem0 provider, NOT native.
+    let provider = resolved
+        .resolver
+        .resolve_provider(filesystem(), None)
+        .expect("memory binding must resolve to the mem0 provider");
 
     let write = provider
         .write(invocation(), write_request("notes/a.md", "swap me"))
@@ -153,21 +186,27 @@ async fn mem0_binding_without_connection_or_transport_fails_closed() {
     let policy =
         resolve_memory_binding_policy(Some(&mem0_section()), RebornCompositionProfile::Production)
             .expect("policy resolves");
-    let resolver = build_memory_service_resolver(
+    let resolved = resolve_memory_provider(
         Some(policy),
         &MemoryProviderDeps::for_third_party(Mem0ConnectionConfig::default()),
-    );
+    )
+    .expect("an unbuildable binding still resolves (to nothing)");
     assert!(
-        resolver
-            .resolve_document_store(filesystem(), None)
+        resolved
+            .resolver
+            .resolve_provider(filesystem(), None)
             .is_none()
     );
+    // Fail closed all the way: no package is registered (the model sees NO
+    // memory tools) and no lifecycle hook is ever called.
+    assert!(resolved.package.is_none());
+    assert!(resolved.lifecycle.lifecycle.is_empty());
 }
 
 #[tokio::test]
 async fn mem0_binding_with_a_local_connection_and_no_key_registers_a_provider() {
     // No transport override: the factory builds the real reqwest-backed provider
-    // from the connection config and registers it, so the document-store profile
+    // from the connection config and registers it, so the memory binding
     // resolves to mem0. This is the default self-hosted mem0 OSS deployment — a
     // localhost base URL and NO API key (the server runs with AUTH_DISABLED=true).
     let policy =
@@ -178,12 +217,18 @@ async fn mem0_binding_with_a_local_connection_and_no_key_registers_a_provider() 
         api_key: None,
         app_id: None,
     });
-    let resolver = build_memory_service_resolver(Some(policy), &deps);
+    let resolved =
+        resolve_memory_provider(Some(policy), &deps).expect("a local mem0 connection resolves");
     assert!(
-        resolver
-            .resolve_document_store(filesystem(), None)
+        resolved
+            .resolver
+            .resolve_provider(filesystem(), None)
             .is_some(),
         "a local mem0 connection (no key) must register a provider for the binding"
+    );
+    assert!(
+        resolved.package.is_some(),
+        "a constructible mem0 binding registers mem0's tool package"
     );
 }
 
@@ -216,11 +261,12 @@ async fn local_dev_swaps_to_mem0_without_an_override() {
     let policy = resolve_memory_binding_policy(Some(&section), RebornCompositionProfile::LocalDev)
         .expect("local-dev allows the third-party binding without an override");
     let transport = Arc::new(MockMem0Transport::always_ok(json!({ "id": "m-1" })));
-    let resolver =
-        build_memory_service_resolver(Some(policy), &deps_over_mock(Arc::clone(&transport)));
+    let resolved = resolve_memory_provider(Some(policy), &deps_over_mock(Arc::clone(&transport)))
+        .expect("local-dev mem0 binding resolves");
 
-    let provider = resolver
-        .resolve_document_store(filesystem(), None)
+    let provider = resolved
+        .resolver
+        .resolve_provider(filesystem(), None)
         .expect("local-dev mem0 binding resolves to the mem0 provider");
     provider
         .write(invocation(), write_request("notes/b.md", "dev swap"))

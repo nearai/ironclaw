@@ -60,6 +60,13 @@ impl RebornIntegrationGroup {
         Self::builder().builtin_tools().await
     }
 
+    /// Group with the core built-in tools but NO memory package registered —
+    /// the `Disabled` memory-binding shape: zero `ironclaw.memory.*` tools
+    /// reach the model's tool surface.
+    pub async fn builtin_tools_without_memory() -> HarnessResult<Self> {
+        Self::builder().builtin_tools_without_memory().await
+    }
+
     /// Group with extension-lifecycle tools
     /// (extension_search/install/remove). Auto-approve is enabled;
     /// registry credentials are seeded.
@@ -288,6 +295,19 @@ impl RebornIntegrationGroupBuilder {
     pub async fn builtin_tools(self) -> HarnessResult<RebornIntegrationGroup> {
         let host_runtime =
             super::super::harness::profiles::core_builtin::core_builtin_tools_default().await?;
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.build_with_capability(capability).await
+    }
+
+    /// Build a core built-in tools group whose runtime registry carries NO
+    /// memory package — the `Disabled` memory-binding shape. See
+    /// [`RebornIntegrationGroup::builtin_tools_without_memory`].
+    pub async fn builtin_tools_without_memory(self) -> HarnessResult<RebornIntegrationGroup> {
+        let host_runtime = super::super::harness::profiles::core_builtin::core_builtin_tools(
+            super::super::harness::profiles::core_builtin::CoreBuiltinOptions::default()
+                .without_memory_package(),
+        )
+        .await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.build_with_capability(capability).await
     }

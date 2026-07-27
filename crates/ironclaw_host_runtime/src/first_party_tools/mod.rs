@@ -84,29 +84,32 @@ pub const BUILTIN_FIRST_PARTY_PROVIDER: &str = "builtin";
 /// host-bundled, always-on first-party lane as `builtin` (not the
 /// catalog/lifecycle extension lane), so its model-facing memory tools are
 /// unconditionally available — preserving the former `builtin.memory_*`
-/// behavior. Provider-swapping stays on the document-store profile binding.
+/// behavior. Provider-swapping stays on the compose-time memory binding.
 ///
 /// Aliases the canonical id owned by [`crate::memory_native_extension`] (which
-/// also owns the bundled v2 manifest + the registrable package builder), so the
+/// also owns the bundled manifests + the registrable package builders), so the
 /// surface/trust seams here and the binding layer share one identity string.
 pub const NATIVE_MEMORY_FIRST_PARTY_PROVIDER: &str =
     crate::memory_native_extension::NATIVE_MEMORY_EXTENSION_ID;
 
 /// The registry-lane provider allowlist once activated extension dispatch
 /// resolves from the extension host's active snapshot: only the always-on
-/// registry-lane packages — the synthetic built-in package and the
-/// `ironclaw.memory` native memory package — keep resolving through the
-/// registry. Neither is ever published in the extension host's active
-/// snapshot, so omitting one here makes its capabilities unresolvable
+/// registry-lane packages — the synthetic built-in package and the BOUND
+/// memory provider's package — keep resolving through the registry. None of
+/// them is ever published in the extension host's active snapshot, so
+/// omitting one here makes its capabilities unresolvable
 /// (`UnknownCapability`) in every composition that installs an extension
-/// host.
+/// host. Every bundled memory provider id is listed (only the bound one has
+/// a registered package, so the others stay inert).
 pub(crate) fn builtin_provider_allowlist() -> std::collections::BTreeSet<ExtensionId> {
     let mut allowlist = std::collections::BTreeSet::new();
     if let Ok(builtin) = ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER) {
         allowlist.insert(builtin);
     }
-    if let Ok(memory) = ExtensionId::new(NATIVE_MEMORY_FIRST_PARTY_PROVIDER) {
-        allowlist.insert(memory);
+    for provider in crate::memory_native_extension::MEMORY_PROVIDER_PACKAGE_IDS {
+        if let Ok(memory) = ExtensionId::new(*provider) {
+            allowlist.insert(memory);
+        }
     }
     allowlist
 }

@@ -12,24 +12,31 @@
 //! [`MemoryServiceResolver`] stays provider-agnostic and only stores the
 //! `Arc<dyn MemoryService>` instances this factory builds.
 //!
-//! [`build_memory_service_resolver`] is the build-time wiring used at startup:
-//! resolve policy → build resolver → for a third-party document-store binding,
-//! build the provider here and register it into the resolver. Production
-//! third-party bindings stay fail-closed/override-gated by the upstream
-//! [`MemoryBindingPolicy`]; this factory never relaxes that — it only constructs
-//! a provider for a binding the policy already permitted.
+//! [`resolve_memory_provider`] is the build-time wiring used at startup:
+//! resolve policy → build + register a bound third-party provider → load the
+//! BOUND provider's manifest bundle (its registrable package + declared
+//! lifecycle). Production third-party bindings stay fail-closed/override-gated
+//! by the upstream [`MemoryBindingPolicy`]; this factory never relaxes that —
+//! it only constructs a provider for a binding the policy already permitted.
 
 use std::sync::Arc;
 
+use ironclaw_extensions::ExtensionPackage;
 use ironclaw_filesystem::RootFilesystem;
+use ironclaw_host_api::{MemoryDescriptor, MemoryLifecycleHook};
+use ironclaw_host_runtime::MemoryBackedUserProfileSource;
 use ironclaw_host_runtime::memory_binding::{MemoryBindingPolicy, MemoryProviderBinding};
+use ironclaw_host_runtime::memory_context::ProductionMemoryPromptContextService;
+use ironclaw_host_runtime::memory_native_extension as memory_extension;
 use ironclaw_host_runtime::memory_provider::MemoryServiceResolver;
+use ironclaw_loop_host::HostUserProfileSource;
 use ironclaw_memory::{MemoryService, PromptWriteSafetyEventSink};
 #[cfg(feature = "memory-mem0")]
 use ironclaw_memory_mem0::{
     MEM0_MEMORY_EXTENSION_ID, Mem0Config, Mem0HttpTransport, Mem0MemoryService, Mem0Transport,
 };
 use ironclaw_memory_native::NativeMemoryService;
+use ironclaw_turns::run_profile::MemoryPromptContextService;
 #[cfg(feature = "memory-mem0")]
 use secrecy::ExposeSecret;
 use secrecy::SecretString;
@@ -110,7 +117,7 @@ impl MemoryProviderDeps {
     }
 }
 
-/// Build the document-store provider for a resolved [`MemoryProviderBinding`],
+/// Build the provider for a resolved [`MemoryProviderBinding`],
 /// or `None` (fail-closed).
 ///
 /// - `Native` → the host-bundled [`NativeMemoryService`] over `deps.filesystem`
@@ -121,7 +128,7 @@ impl MemoryProviderDeps {
 ///   its connection config over its real transport (or an injected mock). An
 ///   unknown id, or missing/invalid mem0 connection settings, yield `None`.
 /// - `Disabled` → `None`.
-pub fn create_document_store_provider(
+pub fn create_provider(
     binding: &MemoryProviderBinding,
     deps: &MemoryProviderDeps,
 ) -> Option<Arc<dyn MemoryService>> {
@@ -148,13 +155,13 @@ fn create_third_party_provider(
         return create_mem0_provider(deps);
     }
     // No provider is registered for this third-party id — or the `memory-mem0`
-    // feature is not compiled in — so the document-store binding fails closed.
+    // feature is not compiled in — so the memory binding fails closed.
     #[cfg(not(feature = "memory-mem0"))]
     let _ = deps;
     tracing::warn!(
         target: LOG_TARGET,
         extension_id,
-        "no memory provider is registered for this third-party extension id (or the `memory-mem0` feature is not compiled in); the document-store binding fails closed"
+        "no memory provider is registered for this third-party extension id (or the `memory-mem0` feature is not compiled in); the memory binding fails closed"
     );
     None
 }
@@ -201,37 +208,160 @@ fn create_mem0_provider(deps: &MemoryProviderDeps) -> Option<Arc<dyn MemoryServi
     }
 }
 
-/// Build the memory resolver from the (optional) binding policy and register the
-/// third-party document-store provider the policy binds, if any.
+/// The fully resolved memory provider for this runtime's lifetime.
 ///
-/// At startup: config → policy → (here) factory builds the provider → registered
-/// in the resolver → `resolve_document_store` returns it. Native is resolved
-/// per-invocation by the resolver, so it is not built here. Fail-closed: a
-/// permitted third-party binding whose provider cannot be built (missing creds /
-/// rejected URL) is left unregistered, so `resolve_document_store` returns `None`
-/// rather than silently using native.
-pub fn build_memory_service_resolver(
+/// The **bound provider's manifest is the single source of truth** for the
+/// memory surface: `package` is that provider's registrable always-on package
+/// (its `[[tools]]` are what the model sees; `None` ⇒ NO memory tools are
+/// registered at all), and `lifecycle` is the hook set its `[memory]` section
+/// declares (empty ⇒ the host never initiates a memory call). `resolver` is
+/// what the registered tools build their `MemoryService` through at dispatch.
+#[derive(Clone)]
+pub struct ResolvedMemoryProvider {
+    pub resolver: MemoryServiceResolver,
+    pub package: Option<ExtensionPackage>,
+    pub lifecycle: MemoryDescriptor,
+}
+
+impl ResolvedMemoryProvider {
+    fn unbound(resolver: MemoryServiceResolver) -> Self {
+        Self {
+            resolver,
+            package: None,
+            lifecycle: MemoryDescriptor::default(),
+        }
+    }
+}
+
+/// Resolve the bound memory provider from the (optional) binding policy: build
+/// and register a third-party provider instance when one is bound, and load
+/// the BOUND provider's manifest bundle (package + declared lifecycle).
+///
+/// At startup: config → policy → (here) factory builds the provider →
+/// registered in the resolver → `resolve_provider` returns it. Native is
+/// resolved per-invocation by the resolver, so only its bundle is loaded here.
+/// Fail-closed: a disabled binding, an unknown third-party id, or a permitted
+/// third-party binding whose provider cannot be built (missing creds /
+/// rejected URL) yields NO package and an EMPTY lifecycle — no memory tools
+/// are advertised and no lifecycle hook is ever called, rather than
+/// advertising tools that fail at call time.
+pub fn resolve_memory_provider(
     policy: Option<MemoryBindingPolicy>,
     deps: &MemoryProviderDeps,
-) -> MemoryServiceResolver {
-    let resolver = MemoryServiceResolver::from_optional_policy(policy.clone());
-
-    // `None` policy = native default; nothing third-party to register.
-    let Some(policy) = policy else {
-        return resolver;
-    };
-
-    match policy.binding() {
-        binding @ MemoryProviderBinding::ThirdParty { extension_id } => {
-            match create_document_store_provider(binding, deps) {
-                Some(provider) => resolver
-                    .with_third_party_document_store_provider(extension_id.as_str(), provider),
-                // create_* already logged why; fail closed.
-                None => resolver,
+) -> Result<ResolvedMemoryProvider, crate::RebornBuildError> {
+    let binding = policy
+        .as_ref()
+        .map(|policy| policy.binding().clone())
+        .unwrap_or_default();
+    let resolver = MemoryServiceResolver::from_optional_policy(policy);
+    match binding {
+        MemoryProviderBinding::Native => {
+            let bundle = memory_extension::native_memory_provider_bundle().map_err(|error| {
+                crate::RebornBuildError::InvalidConfig {
+                    reason: format!("native memory provider package is invalid: {error}"),
+                }
+            })?;
+            Ok(ResolvedMemoryProvider {
+                resolver,
+                package: Some(bundle.package),
+                lifecycle: bundle.lifecycle,
+            })
+        }
+        MemoryProviderBinding::Disabled => Ok(ResolvedMemoryProvider::unbound(resolver)),
+        MemoryProviderBinding::ThirdParty { extension_id } => {
+            let provider = create_provider(
+                &MemoryProviderBinding::ThirdParty {
+                    extension_id: extension_id.clone(),
+                },
+                deps,
+            );
+            match provider {
+                Some(provider)
+                    if extension_id.as_str() == memory_extension::MEM0_MEMORY_EXTENSION_ID =>
+                {
+                    let bundle =
+                        memory_extension::mem0_memory_provider_bundle().map_err(|error| {
+                            crate::RebornBuildError::InvalidConfig {
+                                reason: format!("mem0 memory provider package is invalid: {error}"),
+                            }
+                        })?;
+                    Ok(ResolvedMemoryProvider {
+                        resolver: resolver
+                            .with_third_party_provider(extension_id.as_str(), provider),
+                        package: Some(bundle.package),
+                        lifecycle: bundle.lifecycle,
+                    })
+                }
+                // No provider instance (create_* already logged why), or a
+                // provider for an id with no bundled manifest: fail closed —
+                // no tools registered, no lifecycle hooks called.
+                _ => Ok(ResolvedMemoryProvider::unbound(resolver)),
             }
         }
-        // Native / Disabled → the resolver already handles these.
-        _ => resolver,
+    }
+}
+
+/// Adapter implementing the loop-host profile trait over
+/// [`MemoryBackedUserProfileSource`]. Lives here (not in `ironclaw_host_runtime`)
+/// because `ironclaw_loop_host` owns the trait and already depends on
+/// `ironclaw_host_runtime` — composition is the layer that can see both.
+pub(crate) struct MemoryBackedUserProfileSourceAdapter(pub(crate) MemoryBackedUserProfileSource);
+
+#[async_trait::async_trait]
+impl HostUserProfileSource for MemoryBackedUserProfileSourceAdapter {
+    async fn resolve_user_profile(
+        &self,
+        run_context: &ironclaw_turns::run_profile::LoopRunContext,
+    ) -> Option<ironclaw_turns::run_profile::UserProfileContext> {
+        self.0.resolve_user_profile(run_context).await
+    }
+}
+
+/// The three host consumers of the bound memory provider, derived from the
+/// provider and its DECLARED lifecycle set.
+///
+/// - `memory_context_service` — the prompt-context adapter (itself queries
+///   only the declared retrieval lanes; `None` when no provider is bound).
+/// - `after_turn_memory_writer` — `None` unless `record_interaction` is
+///   declared, so the after-turn seam is skipped entirely.
+/// - `user_profile_source` — `None` unless `profile_read` is declared; the
+///   caller substitutes the empty source.
+///
+/// One derivation, shared by runtime assembly and the integration harness, so
+/// the lifecycle gating cannot fork between production and its tests.
+pub struct MemoryLifecycleConsumers {
+    pub memory_context_service: Option<Arc<dyn MemoryPromptContextService>>,
+    pub after_turn_memory_writer: Option<Arc<dyn MemoryService>>,
+    pub user_profile_source: Option<Arc<dyn HostUserProfileSource>>,
+}
+
+/// Derive the host-side memory consumers from the resolved provider + its
+/// declared lifecycle. An undeclared hook is never wired, so it is never
+/// called (F3/F8).
+pub fn memory_lifecycle_consumers(
+    provider: Option<Arc<dyn MemoryService>>,
+    lifecycle: &MemoryDescriptor,
+) -> MemoryLifecycleConsumers {
+    let memory_context_service = provider.clone().map(|provider| {
+        Arc::new(ProductionMemoryPromptContextService::new(
+            provider,
+            lifecycle.clone(),
+        )) as Arc<dyn MemoryPromptContextService>
+    });
+    let after_turn_memory_writer = provider
+        .clone()
+        .filter(|_| lifecycle.declares(MemoryLifecycleHook::RecordInteraction));
+    let user_profile_source = provider
+        .filter(|_| lifecycle.declares(MemoryLifecycleHook::ProfileRead))
+        .map(|provider| {
+            Arc::new(MemoryBackedUserProfileSourceAdapter(
+                MemoryBackedUserProfileSource::new(provider),
+            )) as Arc<dyn HostUserProfileSource>
+        });
+    MemoryLifecycleConsumers {
+        memory_context_service,
+        after_turn_memory_writer,
+        user_profile_source,
     }
 }
 
@@ -257,19 +387,19 @@ mod tests {
             #[cfg(feature = "memory-mem0")]
             mem0_transport_override: None,
         };
-        assert!(create_document_store_provider(&MemoryProviderBinding::Native, &deps).is_some());
+        assert!(create_provider(&MemoryProviderBinding::Native, &deps).is_some());
     }
 
     #[test]
     fn native_binding_without_a_filesystem_fails_closed() {
         let deps = MemoryProviderDeps::for_third_party(Mem0ConnectionConfig::default());
-        assert!(create_document_store_provider(&MemoryProviderBinding::Native, &deps).is_none());
+        assert!(create_provider(&MemoryProviderBinding::Native, &deps).is_none());
     }
 
     #[test]
     fn disabled_binding_is_none() {
         let deps = MemoryProviderDeps::for_third_party(Mem0ConnectionConfig::default());
-        assert!(create_document_store_provider(&MemoryProviderBinding::Disabled, &deps).is_none());
+        assert!(create_provider(&MemoryProviderBinding::Disabled, &deps).is_none());
     }
 
     #[cfg(feature = "memory-mem0")]
@@ -278,7 +408,7 @@ mod tests {
         // The mem0 id is recognized, but with no base URL / API key and no
         // injected transport there is nothing to build → None (fail-closed).
         let deps = MemoryProviderDeps::for_third_party(Mem0ConnectionConfig::default());
-        assert!(create_document_store_provider(&mem0_binding(), &deps).is_none());
+        assert!(create_provider(&mem0_binding(), &deps).is_none());
     }
 
     #[cfg(feature = "memory-mem0")]
@@ -289,7 +419,7 @@ mod tests {
             api_key: Some(SecretString::from("m0-key".to_string())),
             app_id: None,
         });
-        assert!(create_document_store_provider(&mem0_binding(), &deps).is_none());
+        assert!(create_provider(&mem0_binding(), &deps).is_none());
     }
 
     #[cfg(feature = "memory-mem0")]
@@ -301,7 +431,7 @@ mod tests {
             api_key: Some(SecretString::from("m0-key".to_string())),
             app_id: Some("ironclaw-test".to_string()),
         });
-        assert!(create_document_store_provider(&mem0_binding(), &deps).is_some());
+        assert!(create_provider(&mem0_binding(), &deps).is_some());
     }
 
     #[cfg(feature = "memory-mem0")]
@@ -315,7 +445,7 @@ mod tests {
             api_key: None,
             app_id: None,
         });
-        assert!(create_document_store_provider(&mem0_binding(), &deps).is_some());
+        assert!(create_provider(&mem0_binding(), &deps).is_some());
     }
 
     #[test]
@@ -324,6 +454,88 @@ mod tests {
         let binding = MemoryProviderBinding::ThirdParty {
             extension_id: ExtensionId::new("acme.honcho").unwrap(),
         };
-        assert!(create_document_store_provider(&binding, &deps).is_none());
+        assert!(create_provider(&binding, &deps).is_none());
+    }
+
+    struct InertMemoryService;
+    impl MemoryService for InertMemoryService {}
+
+    fn inert_provider() -> Arc<dyn MemoryService> {
+        Arc::new(InertMemoryService)
+    }
+
+    /// F3/F8 regression at the production wiring seam: a lifecycle hook the
+    /// bound provider's manifest does not declare is never WIRED — the
+    /// after-turn writer and profile source exist only when their hooks are
+    /// declared, and no provider wires nothing at all. (The context adapter
+    /// is wired whenever a provider exists; it gates its two retrieval lanes
+    /// internally — covered by the host-runtime caller tests.)
+    #[test]
+    fn lifecycle_consumers_wire_only_declared_hooks() {
+        let unbound = memory_lifecycle_consumers(None, &MemoryDescriptor::default());
+        assert!(unbound.memory_context_service.is_none());
+        assert!(unbound.after_turn_memory_writer.is_none());
+        assert!(unbound.user_profile_source.is_none());
+
+        let empty =
+            memory_lifecycle_consumers(Some(inert_provider()), &MemoryDescriptor::default());
+        assert!(
+            empty.memory_context_service.is_some(),
+            "the context adapter self-gates its lanes"
+        );
+        assert!(empty.after_turn_memory_writer.is_none());
+        assert!(empty.user_profile_source.is_none());
+
+        let full = memory_lifecycle_consumers(
+            Some(inert_provider()),
+            &MemoryDescriptor {
+                lifecycle: ironclaw_host_api::MemoryLifecycleHook::ALL.to_vec(),
+            },
+        );
+        assert!(full.memory_context_service.is_some());
+        assert!(full.after_turn_memory_writer.is_some());
+        assert!(full.user_profile_source.is_some());
+    }
+
+    /// Binding-shape regression for the resolved provider: `Disabled` and an
+    /// unknown third party register NO package and an EMPTY lifecycle (no
+    /// tools advertised, no hooks called); native registers its package with
+    /// the full declared lifecycle.
+    #[test]
+    fn resolve_memory_provider_native_binds_package_and_lifecycle() {
+        let deps = MemoryProviderDeps::for_third_party(Mem0ConnectionConfig::default());
+        let native = resolve_memory_provider(None, &deps).expect("native default resolves");
+        let package = native.package.expect("native registers its package");
+        assert_eq!(package.manifest.id.as_str(), "ironclaw.memory");
+        assert!(!native.lifecycle.lifecycle.is_empty());
+
+        let policy = MemoryBindingPolicy::resolve(
+            ironclaw_host_runtime::memory_binding::MemoryBindingInput {
+                provider: Some("memory.disabled".to_string()),
+                ..ironclaw_host_runtime::memory_binding::MemoryBindingInput::native_default(
+                    ironclaw_host_runtime::memory_binding::MemoryDeploymentProfile::LocalDev,
+                )
+            },
+        )
+        .expect("disabled policy resolves");
+        let disabled = resolve_memory_provider(Some(policy), &deps).expect("disabled resolves");
+        assert!(
+            disabled.package.is_none(),
+            "Disabled registers NO memory tools"
+        );
+        assert!(disabled.lifecycle.lifecycle.is_empty());
+
+        let policy = MemoryBindingPolicy::resolve(
+            ironclaw_host_runtime::memory_binding::MemoryBindingInput {
+                provider: Some("acme.honcho".to_string()),
+                ..ironclaw_host_runtime::memory_binding::MemoryBindingInput::native_default(
+                    ironclaw_host_runtime::memory_binding::MemoryDeploymentProfile::LocalDev,
+                )
+            },
+        )
+        .expect("third-party policy resolves");
+        let unknown = resolve_memory_provider(Some(policy), &deps).expect("unknown resolves");
+        assert!(unknown.package.is_none());
+        assert!(unknown.lifecycle.lifecycle.is_empty());
     }
 }

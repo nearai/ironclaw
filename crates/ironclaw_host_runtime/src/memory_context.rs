@@ -18,7 +18,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{CorrelationId, InvocationId, ResourceScope};
+use ironclaw_host_api::{
+    CorrelationId, InvocationId, MemoryDescriptor, MemoryLifecycleHook, ResourceScope,
+};
 use ironclaw_memory::{
     MemoryContextProfileId, MemoryInvocation, MemoryService, MemoryServiceContextRequest,
     MemoryServiceContextSnippet, MemoryServiceError, MemoryServiceErrorKind,
@@ -43,12 +45,19 @@ const MAX_MEMORY_CONTEXT_SNIPPET_BYTES: usize = 512;
 /// Production adapter that loads memory snippets through IronClaw memory.
 pub struct ProductionMemoryPromptContextService {
     memory_service: Arc<dyn MemoryService>,
+    /// The bound provider's declared lifecycle hooks. A retrieval lane the
+    /// manifest does not declare is NEVER queried — it contributes nothing.
+    lifecycle: MemoryDescriptor,
 }
 
 impl ProductionMemoryPromptContextService {
-    /// Create a new production adapter wrapping the bound memory provider.
-    pub fn new(memory_service: Arc<dyn MemoryService>) -> Self {
-        Self { memory_service }
+    /// Create a new production adapter wrapping the bound memory provider and
+    /// the lifecycle set its manifest declares.
+    pub fn new(memory_service: Arc<dyn MemoryService>, lifecycle: MemoryDescriptor) -> Self {
+        Self {
+            memory_service,
+            lifecycle,
+        }
     }
 }
 
@@ -72,11 +81,19 @@ impl MemoryPromptContextService for ProductionMemoryPromptContextService {
         let context_profile_id = MemoryContextProfileId::new(request.context_profile_id.as_str())
             .map_err(map_memory_service_error)?;
 
-        // Query both provider retrieval lanes concurrently with the SAME
-        // host-derived invocation (active thread included): lane semantics —
-        // what each lane includes or excludes — belong to the provider's lane
-        // method, not to scope shape. A lane the provider does not implement
-        // reports `unavailable` and degrades to empty in `admit_lane`.
+        // Query only the retrieval lanes the provider's manifest DECLARES —
+        // an undeclared lifecycle hook is never called (it contributes
+        // nothing, and the provider sees no query). Declared lanes are
+        // queried concurrently with the SAME host-derived invocation (active
+        // thread included): lane semantics — what each lane includes or
+        // excludes — belong to the provider's lane method, not to scope
+        // shape. A declared-but-unimplemented lane reports `unavailable` and
+        // degrades to empty in `admit_lane`.
+        let query_long = self.lifecycle.declares(MemoryLifecycleHook::ReadLongTerm);
+        let query_short = self.lifecycle.declares(MemoryLifecycleHook::ReadShortTerm);
+        if !query_long && !query_short {
+            return Ok(Vec::new());
+        }
         let invocation = invocation_for_context_request(&request);
         let expected = ExpectedScope::from_scope(&invocation.scope);
         let lane_request = MemoryServiceContextRequest {
@@ -85,13 +102,35 @@ impl MemoryPromptContextService for ProductionMemoryPromptContextService {
             context_profile_id,
         };
         let (long_term, short_term) = tokio::join!(
-            self.memory_service
-                .read_long_term(invocation.clone(), lane_request.clone()),
-            self.memory_service
-                .read_short_term(invocation, lane_request),
+            async {
+                if query_long {
+                    Some(
+                        self.memory_service
+                            .read_long_term(invocation.clone(), lane_request.clone())
+                            .await,
+                    )
+                } else {
+                    None
+                }
+            },
+            async {
+                if query_short {
+                    Some(
+                        self.memory_service
+                            .read_short_term(invocation.clone(), lane_request.clone())
+                            .await,
+                    )
+                } else {
+                    None
+                }
+            },
         );
-        let short_term = admit_lane(&expected, short_term, request.max_snippets, "short_term");
-        let long_term = admit_lane(&expected, long_term, request.max_snippets, "long_term");
+        let short_term = short_term
+            .map(|lane| admit_lane(&expected, lane, request.max_snippets, "short_term"))
+            .unwrap_or_default();
+        let long_term = long_term
+            .map(|lane| admit_lane(&expected, lane, request.max_snippets, "long_term"))
+            .unwrap_or_default();
 
         // Concatenate short-term before long-term so active-thread memory keeps
         // priority under the shared count + aggregate byte budget. The prompt

@@ -439,6 +439,7 @@ impl RebornIntegrationGroup {
             planned_default_iteration_limit: None,
             real_gate_dispatch_services: false,
             channel_connection: None,
+            bound_memory: None,
         }
     }
 
@@ -740,6 +741,17 @@ pub struct RebornIntegrationGroupBuilder {
     /// Set by `extension_lifecycle()` before `into_group`; `None` for every
     /// other constructor.
     channel_connection: Option<Arc<ChannelConnectionTestBundle>>,
+    /// E-MEMORY: a bound memory provider + the lifecycle set its manifest
+    /// declares. When set, `into_group` derives the three memory consumers
+    /// (prompt-context service, after-turn writer, profile source) through
+    /// the PRODUCTION decision helper
+    /// (`ironclaw_reborn_composition::memory_lifecycle_consumers`), so the
+    /// integration tier drives the same lifecycle gating runtime assembly
+    /// wires. Default `None` (no memory consumers, today's behavior).
+    bound_memory: Option<(
+        Arc<dyn ironclaw_memory::MemoryService>,
+        ironclaw_host_api::MemoryDescriptor,
+    )>,
 }
 
 impl RebornIntegrationGroupBuilder {
@@ -997,6 +1009,15 @@ impl RebornIntegrationGroupBuilder {
         // struct value exists before `build_default_planned_runtime` takes it
         // by value.
         let milestone_sink_for_assertions = Arc::clone(&milestone_sink);
+        // E-MEMORY: derive the memory consumers through the production
+        // decision helper so an undeclared lifecycle hook is never wired here
+        // either — the same gate `build_reborn_runtime` applies.
+        let memory_consumers = self.bound_memory.as_ref().map(|(provider, lifecycle)| {
+            ironclaw_reborn_composition::memory_lifecycle_consumers(
+                Some(Arc::clone(provider)),
+                lifecycle,
+            )
+        });
         let parts = DefaultPlannedRuntimeParts {
             turn_state: turn_state_for_runtime,
             thread_service: group_thread_harness.service.clone() as Arc<dyn SessionThreadService>,
@@ -1066,13 +1087,21 @@ impl RebornIntegrationGroupBuilder {
             // back to `EmptyUserProfileSource`. Built as a local (not inline) so
             // the SAME `Arc` is also stashed on `GroupSharedStorage` for a
             // profile-round-trip test to read directly.
-            user_profile_source: Arc::clone(&user_profile_source),
-            // E-MEMORY: group tests do not yet replay the production memory
-            // context/after-turn writer lanes; wiring_parity.rs carries the
-            // explicit divergence while focused memory tests cover the runtime
-            // path directly.
-            memory_context_service: None,
-            after_turn_memory_writer: None,
+            user_profile_source: memory_consumers
+                .as_ref()
+                .and_then(|consumers| consumers.user_profile_source.clone())
+                .unwrap_or_else(|| Arc::clone(&user_profile_source)),
+            // E-MEMORY: derived through the PRODUCTION lifecycle-gating helper
+            // when a bound memory provider is opted in
+            // (`with_bound_memory_provider`); `None` for every other group, so
+            // existing tests are behavior-identical. wiring_parity.rs carries
+            // the explicit divergence for the un-opted default.
+            memory_context_service: memory_consumers
+                .as_ref()
+                .and_then(|consumers| consumers.memory_context_service.clone()),
+            after_turn_memory_writer: memory_consumers
+                .as_ref()
+                .and_then(|consumers| consumers.after_turn_memory_writer.clone()),
             model_policy_guard: None,
             // C-BUDGET: production `build_default_budget_accountant` (Some only
             // for `budget_accounting()` groups; `None` otherwise, so all existing

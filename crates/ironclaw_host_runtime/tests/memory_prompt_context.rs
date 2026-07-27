@@ -9,7 +9,9 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{
+    AgentId, MemoryDescriptor, MemoryLifecycleHook, ProjectId, TenantId, ThreadId, UserId,
+};
 use ironclaw_memory::{
     MemoryInvocation, MemoryService, MemoryServiceContextRequest, MemoryServiceContextSnippet,
     MemoryServiceError,
@@ -146,8 +148,23 @@ fn test_request(
     }
 }
 
+/// A service over a provider declaring BOTH retrieval lanes (the native
+/// shape); lane-gating tests use [`make_service_with_lifecycle`] instead.
 fn make_service(memory_service: Arc<MockMemoryService>) -> ProductionMemoryPromptContextService {
-    ProductionMemoryPromptContextService::new(memory_service)
+    make_service_with_lifecycle(
+        memory_service,
+        vec![
+            MemoryLifecycleHook::ReadLongTerm,
+            MemoryLifecycleHook::ReadShortTerm,
+        ],
+    )
+}
+
+fn make_service_with_lifecycle(
+    memory_service: Arc<MockMemoryService>,
+    lifecycle: Vec<MemoryLifecycleHook>,
+) -> ProductionMemoryPromptContextService {
+    ProductionMemoryPromptContextService::new(memory_service, MemoryDescriptor { lifecycle })
 }
 
 /// A raw provider candidate scoped to `(tenant-a, user-x)` with no agent/project,
@@ -369,6 +386,61 @@ async fn load_memory_snippets_fetches_both_short_term_and_long_term_lanes() {
         "short-term lane is concatenated first"
     );
     assert_eq!(snippets[1].snippet_ref, expected_ref("notes/long-term.md"));
+}
+
+/// F3/F8 regression at the retrieval seam: a lifecycle hook the provider's
+/// manifest does not declare is NEVER called — the undeclared lane
+/// contributes nothing AND is not queried.
+#[tokio::test]
+async fn undeclared_short_term_lane_is_not_queried() {
+    let memory_service = Arc::new(MockMemoryService::with_lane_snippets(
+        vec![raw_snippet("threads/thread-1/scratch.md", "short note")],
+        vec![raw_snippet("notes/long-term.md", "long note")],
+    ));
+    let service = make_service_with_lifecycle(
+        memory_service.clone(),
+        vec![MemoryLifecycleHook::ReadLongTerm],
+    );
+
+    let snippets = service
+        .load_memory_snippets(test_request("tenant-a", "user-x", None, None, 10))
+        .await
+        .unwrap();
+
+    let lanes: Vec<Lane> = memory_service
+        .captured()
+        .iter()
+        .map(|(lane, ..)| *lane)
+        .collect();
+    assert_eq!(
+        lanes,
+        vec![Lane::LongTerm],
+        "only the declared lane may be queried"
+    );
+    assert_eq!(snippets.len(), 1);
+    assert_eq!(snippets[0].snippet_ref, expected_ref("notes/long-term.md"));
+}
+
+/// A provider declaring NO retrieval lanes is never queried at all: the
+/// memory block is empty and the provider sees zero lane calls.
+#[tokio::test]
+async fn empty_lifecycle_issues_no_retrieval_queries() {
+    let memory_service = Arc::new(MockMemoryService::with_snippets(vec![raw_snippet(
+        "notes/a.md",
+        "must not surface",
+    )]));
+    let service = make_service_with_lifecycle(memory_service.clone(), Vec::new());
+
+    let snippets = service
+        .load_memory_snippets(test_request("tenant-a", "user-x", None, None, 10))
+        .await
+        .unwrap();
+
+    assert!(snippets.is_empty());
+    assert!(
+        memory_service.captured().is_empty(),
+        "an empty lifecycle must issue no provider retrieval calls"
+    );
 }
 
 #[tokio::test]

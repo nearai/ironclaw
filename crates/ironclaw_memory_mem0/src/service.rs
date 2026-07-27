@@ -26,10 +26,10 @@
 //! | `profile_set`      | read-merge-write a `kind=profile` memory       | good     |
 //! | `profile_read`     | latest `kind=profile` memory bytes             | loose    |
 //!
-//! ## `infer=false` (verbatim) document-store mapping
+//! ## `infer=false` (verbatim) document-tool mapping
 //!
 //! mem0's `add` defaults to running an LLM to *extract facts* from the message
-//! (e.g. "I love pizza" → "Likes pizza"). For a **document store** that must
+//! (e.g. "I love pizza" → "Likes pizza"). For document tools that must
 //! round-trip exactly — `read` reconstructs a document from the memories tagged
 //! with a `target`, and `profile_set`/`profile_read` round-trip a structured JSON
 //! blob — that rewrite is lossy. Every add this provider issues therefore sets
@@ -99,7 +99,7 @@ impl Mem0MemoryService {
             "messages": [{ "role": "user", "content": content }],
             "user_id": namespace,
             "metadata": metadata,
-            // Document-store semantics: store the content verbatim. `infer=false`
+            // Document-tool semantics: store the content verbatim. `infer=false`
             // disables mem0's LLM fact-extraction so `read`/`profile_read` round-trip
             // the exact bytes and the all-local deployment needs only an embedder.
             "infer": false,

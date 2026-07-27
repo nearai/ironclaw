@@ -25,7 +25,7 @@ use super::{input_error, operation_error};
 
 // The memory extension rides the always-on first-party lane (like `builtin`),
 // as the `ironclaw.memory` extension (backed by the native provider by default,
-// swappable via the document-store binding). The model-facing tool names derive
+// swappable via the compose-time memory binding). The model-facing tool names derive
 // from these ids (`.` -> `__`): `ironclaw__memory__{read,write,search,tree}`.
 pub const MEMORY_SEARCH_CAPABILITY_ID: &str = "ironclaw.memory.search";
 pub const MEMORY_WRITE_CAPABILITY_ID: &str = "ironclaw.memory.write";
@@ -139,12 +139,12 @@ impl MemoryCapabilityState {
                 as Arc<dyn PromptWriteSafetyEventSink>
         });
         // Single construction point: the resolver builds the bound provider over
-        // this request's filesystem, or returns `None` (document store disabled
+        // this request's filesystem, or returns `None` (memory disabled
         // or bound to an unimplemented third party) → fail closed with a
         // model-visible error instead of silently using native.
         let Some(service) = self
             .resolver
-            .resolve_document_store(Arc::clone(&filesystem), prompt_write_safety_event_sink)
+            .resolve_provider(Arc::clone(&filesystem), prompt_write_safety_event_sink)
         else {
             return Err(binding_unavailable_error());
         };
@@ -166,7 +166,7 @@ impl MemoryCapabilityState {
     }
 }
 
-/// Fail-closed error when the document-store binding is disabled or bound to a
+/// Fail-closed error when the memory binding is disabled or bound to a
 /// provider that is not constructable here (e.g. an unimplemented third party).
 ///
 /// Host-authored fixed text — no binding/extension id is interpolated, so the
@@ -618,7 +618,7 @@ mod tests {
         // Drive the real caller (dispatch -> service_for -> resolver) with a
         // resolver whose document store is disabled (no test-override service),
         // proving it fails closed instead of silently building native.
-        let state = MemoryCapabilityState::with_resolver(document_store_resolver(
+        let state = MemoryCapabilityState::with_resolver(provider_resolver(
             MEMORY_DISABLED_BINDING_SENTINEL,
         ));
         let request = memory_request(
@@ -641,7 +641,7 @@ mod tests {
 
     #[tokio::test]
     async fn third_party_binding_fails_closed_at_dispatch() {
-        let state = MemoryCapabilityState::with_resolver(document_store_resolver("acme.honcho"));
+        let state = MemoryCapabilityState::with_resolver(provider_resolver("acme.honcho"));
         let request = memory_request(MEMORY_READ_CAPABILITY_ID, json!({"path": "notes/alpha.md"}));
 
         let err = dispatch(&state, &request)
@@ -661,11 +661,8 @@ mod tests {
         // (or any third-party) binding transparently swaps the service behind the
         // same `ironclaw.memory.*` tools, through the real resolver path.
         let provider = Arc::new(RecordingMemoryService::default());
-        let resolver = document_store_resolver("acme.honcho")
-            .with_third_party_document_store_provider(
-                "acme.honcho",
-                provider.clone() as Arc<dyn MemoryService>,
-            );
+        let resolver = provider_resolver("acme.honcho")
+            .with_third_party_provider("acme.honcho", provider.clone() as Arc<dyn MemoryService>);
         let state = MemoryCapabilityState::with_resolver(resolver);
         let request = memory_request(
             MEMORY_SEARCH_CAPABILITY_ID,
@@ -690,10 +687,10 @@ mod tests {
         );
     }
 
-    /// A resolver whose document-store profile is bound to `extension_id`
+    /// A resolver whose memory binding is bound to `extension_id`
     /// (e.g. `memory.disabled` or a third party), for driving fail-closed
     /// dispatch through the real resolver path.
-    fn document_store_resolver(extension_id: &str) -> MemoryServiceResolver {
+    fn provider_resolver(extension_id: &str) -> MemoryServiceResolver {
         use crate::memory_binding::{
             MemoryBindingInput, MemoryBindingPolicy, MemoryDeploymentProfile,
         };

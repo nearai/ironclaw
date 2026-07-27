@@ -73,7 +73,7 @@ impl MemoryLifecycleHook {
 /// declared tools only and is never called on any host-initiated hook.
 /// Parsing/validation is fail-closed: unknown fields and unknown lifecycle
 /// tokens are rejected.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MemoryDescriptor {
     /// Host-initiated lifecycle hooks this provider participates in. Any
