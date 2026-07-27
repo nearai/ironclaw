@@ -1,6 +1,7 @@
 """Typed inventory for harvested provider and representative product journeys."""
 
 import json
+import os
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TypeVar
@@ -126,10 +127,31 @@ def _provider_journey_cases() -> tuple[ProviderJourneyCase, ...]:
 PROVIDER_JOURNEY_CASES = _provider_journey_cases()
 
 
-def _provider_journey_runs() -> tuple[
-    tuple[ProviderJourneyCase, ...],
-    tuple[str, ...],
-]:
+JOURNEY_ORDER_ENV = "IRONCLAW_JOURNEY_ORDER"
+
+
+def journey_order_is_reversed() -> bool:
+    """Whether this process runs the provider journeys back to front.
+
+    Workstream 3 of #6524 owes a reversed-order proof: a journey must pass
+    after every other journey has already mutated the shared provider worlds,
+    not only in the order the suite happens to declare. Reversing is the
+    cheapest arrangement that puts every case somewhere it has never run.
+    """
+    return os.environ.get(JOURNEY_ORDER_ENV, "").strip().lower() == "reverse"
+
+
+def provider_journey_runs(
+    *,
+    reverse: bool = False,
+) -> tuple[tuple[ProviderJourneyCase, ...], tuple[str, ...]]:
+    """Journey runs and their ids, forward or reversed.
+
+    Takes `reverse` explicitly rather than reading the environment so the
+    ordering itself is testable without mutating process state — a reversed
+    lane that silently ran forward would look exactly like a passing lane, and
+    would quietly retire the proof it was added to provide.
+    """
     runs = []
     ids = []
     for case in PROVIDER_JOURNEY_CASES:
@@ -138,10 +160,15 @@ def _provider_journey_runs() -> tuple[
         if case.repeat_after_reset:
             runs.append(case)
             ids.append(f"{case.case_id}-isolated-repeat")
+    if reverse:
+        runs.reverse()
+        ids.reverse()
     return tuple(runs), tuple(ids)
 
 
-PROVIDER_JOURNEY_RUNS, PROVIDER_JOURNEY_RUN_IDS = _provider_journey_runs()
+PROVIDER_JOURNEY_RUNS, PROVIDER_JOURNEY_RUN_IDS = provider_journey_runs(
+    reverse=journey_order_is_reversed()
+)
 
 PRODUCT_JOURNEY_CASES = (
     ProductJourneyCase(

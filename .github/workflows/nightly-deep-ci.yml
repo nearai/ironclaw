@@ -82,6 +82,10 @@ jobs:
     uses: ./.github/workflows/reborn-e2e.yml
     with:
       ref: ${{ github.sha }}
+      # Workstream 3 of #6524: the reversed replay is the arm that catches
+      # state leaking between journeys, which only shows up when a case runs
+      # somewhere it never has. Too slow to repeat per PR, cheap once a night.
+      reversed_journey_order: true
 
 # Failure reporting: nightly-watchdog.yml checks this workflow's latest
 # scheduled run from outside and posts failures to Slack. An in-run alert
