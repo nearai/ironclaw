@@ -1210,3 +1210,15 @@ async fn write_raw_profile(service: &NativeMemoryService, content: &str) {
         .await
         .expect("raw profile document writes");
 }
+
+// ---------------------------------------------------------------------------
+// Shared provider contract suite (lifecycle-capabilities rework)
+// ---------------------------------------------------------------------------
+// Native declares the FULL lifecycle (both retrieval lanes + interaction
+// recording), so it wires the full suite: scope isolation across
+// tenant/user/agent/project, lane disjointness (F4), and the
+// record_interaction round trip (F5). Each contract gets a fresh service over
+// a fresh in-memory backing.
+ironclaw_memory::memory_service_contract_full!(native_provider, || {
+    NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None)
+});

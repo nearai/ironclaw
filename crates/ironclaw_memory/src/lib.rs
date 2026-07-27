@@ -15,6 +15,10 @@ mod metadata;
 mod path;
 mod safety;
 mod service;
+/// Provider-level contract suite every `MemoryService` impl wires; see the
+/// module docs. Test-only (zero bytes in production builds).
+#[cfg(any(test, feature = "test-support"))]
+pub mod service_contract_tests;
 
 pub use context::MemoryContext;
 pub use events::{
