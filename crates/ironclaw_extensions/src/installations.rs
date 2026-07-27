@@ -2606,11 +2606,14 @@ impl ExtensionInstallationStore {
     /// absent from v2 by joining each legacy installation with its legacy
     /// manifest. A legacy installation without its manifest could never have
     /// operated and fails the import loudly; an orphaned legacy manifest row
-    /// (a v1 crash artifact with nothing installed) is left in place and
-    /// never becomes v2 state.
+    /// with no installation is the legacy flow's durable removal-cleanup
+    /// marker and imports as a cleanup-pending tombstone so the interrupted
+    /// removal stays retryable after the migration.
     async fn bootstrap_v2_from_compatibility_rows(&self) -> Result<(), ExtensionInstallationError> {
+        let mut installed_extensions = BTreeSet::new();
         let legacy_installations = self.query_installations(&Filter::All).await?;
         for installation in legacy_installations {
+            installed_extensions.insert(installation.extension_id().clone());
             if self
                 .load_v2_installation_record(installation.installation_id())
                 .await?
@@ -2629,6 +2632,21 @@ impl ExtensionInstallationStore {
             };
             self.put_v2_installation(&installation, Some(&manifest))
                 .await?;
+        }
+        let legacy_manifest_rows =
+            query_all(&self.filesystem, &self.manifests_root()?, &Filter::All).await?;
+        for row in legacy_manifest_rows {
+            let manifest = self.parse_manifest_entry(row.entry, &row.path)?;
+            if installed_extensions.contains(manifest.extension_id()) {
+                continue;
+            }
+            if self
+                .load_v2_records_by_extension(manifest.extension_id())
+                .await?
+                .is_empty()
+            {
+                self.persist_removal_tombstone(manifest).await?;
+            }
         }
         Ok(())
     }
@@ -2689,12 +2707,70 @@ impl ExtensionInstallationStore {
                 self.load_installation_entry(&core.installation_id).await?
             {
                 self.put_v2_installation(&installation, None).await?;
+                continue;
+            }
+            // A missing compatibility snapshot is NOT proof of removal:
+            // successful v2 writes deliberately tolerate failed projection
+            // writes, so a live record can legitimately have no snapshot.
+            // The child rows are the authority. Surviving active membership
+            // (or a legacy tenant owner) means the record was live — clear
+            // the lease over the children as they stand. Zero active members
+            // can only mean a final removal already tombstoned every child,
+            // so only then does the record roll forward to removed.
+            let has_live_owner = core.legacy_tenant_owner
+                || self
+                    .query_v2_memberships(&core.installation_id)
+                    .await?
+                    .iter()
+                    .any(V2MembershipRecord::is_active);
+            if has_live_owner {
+                self.clear_v2_lease(&core.installation_id).await?;
             } else {
                 self.finish_v2_installation_removal(&core.installation_id, Utc::now())
                     .await?;
             }
         }
         Ok(())
+    }
+
+    /// Release a dangling lease without touching any other state, leaving the
+    /// record live over its child rows as they stand. Startup lease recovery
+    /// uses this when no compatibility snapshot exists to roll back to.
+    async fn clear_v2_lease(
+        &self,
+        installation_id: &ExtensionInstallationId,
+    ) -> Result<(), ExtensionInstallationError> {
+        let path = self.v2_scoped_path(&self.v2_installation_path(installation_id)?)?;
+        let installation_id = installation_id.clone();
+        cas_update(
+            self.scoped_filesystem.as_ref(),
+            &ResourceScope::system(),
+            &path,
+            decode_v2_installation_body,
+            entry_for_v2_installation,
+            move |current: Option<V2InstallationRecord>| {
+                let installation_id = installation_id.clone();
+                async move {
+                    let Some(mut record) = current else {
+                        return Err(ExtensionInstallationError::InstallationNotFound {
+                            installation_id,
+                        });
+                    };
+                    if record.installation_id != installation_id {
+                        return Err(invalid_installation_error(
+                            "v2 installation body identity did not match its key",
+                        ));
+                    }
+                    if record.lease.is_some() {
+                        record.lease = None;
+                        record.updated_at = Utc::now();
+                    }
+                    Ok(CasApply::new(record, ()))
+                }
+            },
+        )
+        .await
+        .map_err(|error| map_extension_state_cas_error(error, "installation"))
     }
 
     async fn repair_compatibility_views(&self) -> Result<(), ExtensionInstallationError> {
@@ -2707,9 +2783,12 @@ impl ExtensionInstallationStore {
         for row in installation_rows {
             let core = parse_v2_installation_entry(row.entry, &row.path)?;
             if core.lease.is_some() && !core.is_removed() {
-                return Err(invalid_installation_error(
-                    "v2 installation lease repair did not converge",
-                ));
+                // A lease observed here was taken by a live peer between the
+                // recovery pass and this one. Failing the whole store open
+                // over one mid-mutation record would trade correctness for
+                // availability; skip it — the holder releases it, or the
+                // next startup recovers it.
+                continue;
             }
             if core.is_removed() {
                 if let Some((_, version)) =
@@ -2821,6 +2900,15 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
                     if let Some(record) = current.as_ref()
                         && !record.is_removed()
                     {
+                        // A leased record is a peer's in-flight mutation, not
+                        // an orphan: surface the retryable class so the
+                        // caller waits it out instead of treating a live
+                        // extension as cleanup debris.
+                        if record.lease.is_some() {
+                            return Err(ExtensionInstallationError::MembershipMutationInProgress {
+                                installation_id: record.installation_id.clone(),
+                            });
+                        }
                         return Err(ExtensionInstallationError::InvalidInstallation {
                             reason: format!("extension {extension_id} still has installations"),
                         });
@@ -3091,27 +3179,21 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
         }
         self.finish_v2_installation_removal(installation_id, now)
             .await?;
-        if let Some((installation, version)) = self.load_installation_entry(installation_id).await?
-        {
+        // The legacy manifest projection deliberately stays: the tombstone is
+        // cleanup-pending and its definition remains authoritative until
+        // `delete_manifest` marks convergence and retires both.
+        if let Some((_, version)) = self.load_installation_entry(installation_id).await? {
             self.delete_installation_row(installation_id, version)
                 .await
                 .map_err(SaveRowError::into_installation_error)?;
-            if let Some((_, version)) = self
-                .load_manifest_entry(installation.extension_id())
-                .await?
-            {
-                self.delete_manifest_row(installation.extension_id(), version)
-                    .await
-                    .map_err(SaveRowError::into_installation_error)?;
-            }
         }
         Ok(())
     }
 
-    /// With the merged record the definition is retired by
-    /// `delete_installation` itself; this method remains as the idempotent
-    /// verifier its callers treat it as — it errors while the definition is
-    /// still live and otherwise converges the legacy manifest projection.
+    /// The definition is tombstoned by `delete_installation`; this method is
+    /// the convergence marker — it errors while the definition is still live,
+    /// clears the cleanup-pending state, and retires the legacy manifest
+    /// projection.
     async fn delete_manifest(
         &self,
         extension_id: &ExtensionId,

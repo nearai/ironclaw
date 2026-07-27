@@ -148,9 +148,11 @@ it is never lifecycle authority. Old and new binaries must not write the
 same installation root concurrently: deploys must quiesce old writers before
 the new binary starts. Same-version processes may share the root, but
 startup recovery assumes no concurrent mid-transition writer: a process that
-boots while another holds a lease may transiently restore it, and the
-writers reconverge through lease re-acquisition and retries rather than
-losing the removal. Once a v2 writer has run, rollback requires a data
+boots while another holds a lease may transiently restore it (only when a
+compatibility snapshot exists; otherwise recovery just clears the lease
+over the surviving child rows), and the writers reconverge through lease
+re-acquisition and retries rather than losing the removal. Startup skips a
+lease taken by a live peer mid-boot rather than failing the store open. Once a v2 writer has run, rollback requires a data
 backup or a binary that understands v2; starting an aggregate-only writer
 would create divergent state.
 

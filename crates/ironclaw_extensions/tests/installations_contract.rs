@@ -1924,3 +1924,186 @@ async fn removal_tombstone_keeps_manifest_authoritative_until_convergence() {
             .is_none()
     );
 }
+
+/// Review finding: an orphaned legacy manifest row with no installation row is
+/// the legacy flow's durable removal-cleanup marker. Bootstrap must import it
+/// as a cleanup-pending tombstone so the interrupted removal stays retryable
+/// (and imports stay blocked) after the migration, exactly as it was before.
+#[tokio::test]
+async fn bootstrap_imports_orphan_legacy_manifest_as_cleanup_pending_tombstone() {
+    let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+    let root = VirtualPath::new("/system/extensions/.installations/orphan-manifest").unwrap();
+    let store = ExtensionInstallationStore::load_at(
+        Arc::clone(&filesystem),
+        root.clone(),
+        HostPortCatalog::empty(),
+        contracts(),
+    )
+    .await
+    .unwrap();
+    let installed = normalized_installation("sha256:abc");
+    store
+        .upsert_manifest_and_installation(manifest("sha256:abc"), installed.clone())
+        .await
+        .unwrap();
+    store
+        .delete_installation(installed.installation_id())
+        .await
+        .unwrap();
+    drop(store);
+
+    // Reduce the root to the exact legacy-crash shape: an orphan legacy
+    // manifest row with no v2 authority record behind it.
+    let v2_rows = filesystem
+        .query(
+            &VirtualPath::new(format!("{}/v2/installations", root.as_str())).unwrap(),
+            &Filter::All,
+            Page::first(10),
+        )
+        .await
+        .unwrap();
+    assert_eq!(v2_rows.len(), 1);
+    filesystem.delete(&v2_rows[0].path).await.unwrap();
+    assert_eq!(
+        filesystem
+            .query(
+                &VirtualPath::new(format!("{}/manifests", root.as_str())).unwrap(),
+                &Filter::All,
+                Page::first(10),
+            )
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "the orphan legacy manifest row is the migration input"
+    );
+
+    let migrated = ExtensionInstallationStore::load_at(
+        Arc::clone(&filesystem),
+        root.clone(),
+        HostPortCatalog::empty(),
+        contracts(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        migrated
+            .get_manifest(installed.extension_id())
+            .await
+            .unwrap()
+            .is_some(),
+        "the orphan legacy manifest imports as an authoritative cleanup tombstone"
+    );
+    assert!(
+        migrated
+            .get_installation(installed.installation_id())
+            .await
+            .unwrap()
+            .is_none(),
+        "the imported tombstone is not a live installation"
+    );
+    migrated
+        .delete_manifest(installed.extension_id())
+        .await
+        .unwrap();
+    assert!(
+        migrated
+            .get_manifest(installed.extension_id())
+            .await
+            .unwrap()
+            .is_none(),
+        "convergence retires the imported tombstone"
+    );
+}
+
+/// Review finding: a missing compatibility row is not proof of removal —
+/// successful v2 writes deliberately tolerate failed projection writes. A
+/// record caught with a dangling lease and no compatibility snapshot must
+/// converge by clearing the lease over its surviving children, never by
+/// tombstoning live state.
+#[tokio::test]
+async fn interrupted_update_without_compatibility_snapshot_stays_live_on_reopen() {
+    let backend = Arc::new(
+        FaultInjecting::new(InMemoryBackend::new())
+            .with_fault(
+                Fault::on(FilesystemOperation::WriteFile)
+                    .path("no-snapshot/installations/")
+                    .nth(1)
+                    .backend("suppress the compatibility projection at install"),
+            )
+            .with_fault(
+                Fault::on(FilesystemOperation::WriteFile)
+                    .path("/v2/health/")
+                    .nth(2)
+                    .backend("interrupt the aggregate update forward pass"),
+            )
+            .with_fault(
+                Fault::on(FilesystemOperation::WriteFile)
+                    .path("/v2/installations/")
+                    .nth(3)
+                    .backend("interrupt the aggregate update rollback at its record commit"),
+            ),
+    );
+    let filesystem: Arc<dyn RootFilesystem> = backend;
+    let root = VirtualPath::new("/system/extensions/.installations/no-snapshot").unwrap();
+    let store = ExtensionInstallationStore::load_at(
+        Arc::clone(&filesystem),
+        root.clone(),
+        HostPortCatalog::empty(),
+        contracts(),
+    )
+    .await
+    .unwrap();
+    let installed = normalized_installation("sha256:abc");
+    store
+        .upsert_manifest_and_installation(manifest("sha256:abc"), installed.clone())
+        .await
+        .expect("install succeeds despite the suppressed projection write");
+    assert!(
+        filesystem
+            .query(
+                &VirtualPath::new(format!("{}/installations", root.as_str())).unwrap(),
+                &Filter::All,
+                Page::first(10),
+            )
+            .await
+            .unwrap()
+            .is_empty(),
+        "the compatibility snapshot is genuinely absent"
+    );
+
+    let updated = installed.clone().with_owner(
+        InstallationOwner::users(BTreeSet::from([
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+        ]))
+        .unwrap(),
+    );
+    store
+        .upsert_installation(updated)
+        .await
+        .expect_err("the injected faults interrupt the update and its rollback");
+    drop(store);
+
+    let reopened = ExtensionInstallationStore::load_at(
+        Arc::clone(&filesystem),
+        root.clone(),
+        HostPortCatalog::empty(),
+        contracts(),
+    )
+    .await
+    .expect("startup converges the dangling lease");
+    let survivor = reopened
+        .get_installation(installed.installation_id())
+        .await
+        .unwrap()
+        .expect("live state survives: a missing snapshot must not tombstone the record");
+    assert!(
+        survivor
+            .owner()
+            .members()
+            .expect("member-owned installation")
+            .contains(&UserId::new("alice").unwrap()),
+        "the prior member survives lease recovery"
+    );
+}
