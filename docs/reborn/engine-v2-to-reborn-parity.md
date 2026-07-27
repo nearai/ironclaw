@@ -43,7 +43,9 @@ engine v2 and are intentionally reshaped or deferred in Reborn.
 
 Legend: **Covered** = Reborn has an equivalent contract, crate, and test
 evidence; **Partial** = an equivalent exists but with a scoped delta noted;
-**Gap** = no direct equivalent.
+**Not covered** = a typed contract/plan exists but no production execution
+backend is wired for it; **Gap** = no direct equivalent, and none is needed
+(safe to drop or reintroduce later as a new slice).
 
 | Engine v2 capability | Reborn equivalent | Contract doc | Crate(s) | Test evidence | Status |
 | --- | --- | --- | --- | --- | --- |
@@ -69,7 +71,7 @@ evidence; **Partial** = an equivalent exists but with a scoped delta noted;
 | **Events + Projections** — `ThreadEvent`, `EventKind` (18 variants), event sourcing from day one; `types/event.rs` | Explicit boundary between realtime delivery, durable audit/history, transcript milestones, and derived projections; durable event store | `contracts/events.md`, `contracts/events-projections.md` | `ironclaw_events`, `ironclaw_event_projections`, `ironclaw_event_streams`, `ironclaw_reborn_event_store` | `crates/ironclaw_reborn_event_store/tests/durable_event_store_contract.rs`, `.../filesystem_event_log_contract.rs`, `.../coalescing_sink_contract.rs`, `crates/ironclaw_runner/tests/loop_milestone_event_projection.rs` | Covered |
 | **`LlmBackend` trait** — `complete(messages, actions, config)`; host wraps `LlmProvider` | Host-managed model requests / tool-capable model gateway; provider-safe tool projection (dotted `CapabilityId` ↔ provider names) | `contracts/host-api.md`, `contracts/runtime-workflows.md` | `ironclaw_llm`, `ironclaw_runner` (model routes/gateway) | `crates/ironclaw_runner/tests/model_routes.rs`, `crates/ironclaw_runner/tests/llm_gateway.rs` | Covered |
 | **`Store` trait** — 20-method Thread/Step/Event/Project/Doc/Lease/Mission CRUD; host wraps `Database` (PG + libSQL) | Durable stores over the scoped-filesystem substrate + PostgreSQL/libSQL, with backend-parity readiness diagnostics | `contracts/storage-placement.md`, `contracts/turn-persistence.md`, `contracts/run-state.md` | `ironclaw_run_state`, `ironclaw_reborn_event_store`, `ironclaw_memory_native`, `ironclaw_conversations` | `crates/ironclaw_reborn_composition/tests/postgres_substrate.rs`, `.../libsql_substrate.rs`, `crates/ironclaw_conversations/tests/conversation_state_store_contract.rs` | Covered |
-| **`WorkspaceReader` trait** — read-side workspace access; `traits/workspace.rs`, `workspace/` mounts (`MountBackend`, `ProjectMounts`) | Scoped filesystem substrate + memory read side; per-project mounts realized by the process sandbox bind-mount path | `contracts/filesystem.md`, `contracts/memory.md` | `ironclaw_filesystem`, `ironclaw_memory` | `crates/ironclaw_reborn_composition/tests/libsql_substrate.rs`, `tests/reborn_trace_file_tools_parity.rs` | Covered |
+| **`WorkspaceReader` trait** — read-side workspace access; `traits/workspace.rs`, `workspace/` mounts (`MountBackend`, `ProjectMounts`) | Scoped filesystem substrate + memory read side; per-project scoping realized by the `RootFilesystem` mount catalog (`CompositeRootFilesystem`/`ScopedFilesystem`), independent of the (Not covered) process-sandbox execution backend | `contracts/filesystem.md`, `contracts/memory.md` | `ironclaw_filesystem`, `ironclaw_memory` | `crates/ironclaw_reborn_composition/tests/libsql_substrate.rs`, `tests/reborn_trace_file_tools_parity.rs` | Covered |
 | **ConversationManager / ConversationSurface** — routes UI messages to threads; `runtime/conversation.rs` | Conversation binding: inbound routing to the correct run/thread with scope isolation | `contracts/conversation-binding.md`, `contracts/communication-delivery-resolution.md` | `ironclaw_conversations`, `ironclaw_outbound` | `tests/reborn_direct_chat_user_scope_isolation_parity.rs`, `tests/reborn_outbound_reply_target_scope_isolation_parity.rs`, `crates/ironclaw_conversations/tests/inbound_contract.rs` | Covered |
 | **Context builder + compaction** — `executor/context.rs`, `executor/compaction.rs` (context assembly, compaction near model limit) | Loop context strategies and prompt envelope assembly | `contracts/turns-agent-loop.md` | `ironclaw_agent_loop` (`strategies/context.rs`), `ironclaw_prompt_envelope` | `crates/ironclaw_agent_loop/src/executor/tests.rs`, `crates/ironclaw_reborn_composition/src/runtime/tests/default_system_prompt.rs` | Covered |
 | **ThreadTree / sub-agents** — parent-child relationships; `runtime/tree.rs` | Subagent spawn through capability authorization/dispatch, wired into the runtime | `contracts/agent-loop-protocol.md` (`spawn_subagent`) | `ironclaw_agent_loop`, `ironclaw_reborn_composition` | `tests/reborn_subagent_spawn_e2e.rs`, `crates/ironclaw_reborn_composition/tests/subagent_runtime_wiring.rs` | Covered |
@@ -171,15 +173,18 @@ The only items that are not **Covered** are:
   backend is wired, so effects that engine v2 routed through a per-project
   Docker container currently have no Reborn execution path at all.
 
-These correspond to entries in the "Notable Gaps Before Reborn Can Replace
-Legacy" section of
-`docs/internal/2026-06-26-legacy-vs-reborn-feature-comparison.md` (Automation
-production readiness; Model/provider feature parity) and to the residual epics
-noted in `docs/reborn/production-cutover-readiness-closeout.md` (#4539
-approvals parity, #3029 migration). Critically, **none of these gaps are
-engine-v2-specific**: they are Reborn-vs-legacy-product deltas that exist
-independently of whether engine v2 is present, because engine v2 is gated off
-and no shipping path depends on it.
+The unified learning-mission automation gap corresponds to the "Automation
+production readiness" and "Model/provider feature parity" entries in the
+"Notable Gaps Before Reborn Can Replace Legacy" section of
+`docs/internal/2026-06-26-legacy-vs-reborn-feature-comparison.md`, and to the
+residual epics noted in `docs/reborn/production-cutover-readiness-closeout.md`
+(#4539 approvals parity, #3029 migration). The per-project Docker sandbox gap
+has no separate tracked follow-up ticket today; `FEATURE_PARITY.md` carries
+the same "plan validation only, no execution backend" status as the row
+above. Critically, **none of these gaps are engine-v2-specific**: they are
+Reborn-vs-legacy-product deltas that exist independently of whether engine v2
+is present, because engine v2 is gated off and no shipping path depends on
+it.
 
 ## Conclusion
 
