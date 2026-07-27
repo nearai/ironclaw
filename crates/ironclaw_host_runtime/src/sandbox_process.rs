@@ -30,7 +30,9 @@ use crate::{
 };
 
 mod broker;
+mod ca;
 mod container_identity;
+mod credential_firewall;
 mod key_codec;
 mod mounts;
 mod scope_key;

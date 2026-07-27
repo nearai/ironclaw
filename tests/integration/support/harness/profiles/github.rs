@@ -7,7 +7,6 @@ use ironclaw_host_api::{
     CapabilityId, CredentialStageError, MountPermissions, RuntimeKind, SecretHandle, UserId,
 };
 use ironclaw_host_runtime::{READ_FILE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID};
-use ironclaw_network::NetworkHttpEgress;
 
 use super::super::super::github as github_support;
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
@@ -54,9 +53,13 @@ pub(crate) fn file_and_github_auth_tools_profile() -> HarnessResult<ToolsProfile
     // post-resume dispatch would attempt a live network call.
     let github_fixture_response =
         br#"{"id":1,"full_name":"octocat/hello-world","private":false}"#.to_vec();
-    let network_egress: Arc<dyn NetworkHttpEgress> = Arc::new(
-        RecordingNetworkHttpEgress::with_body(github_fixture_response),
-    );
+    // Recording (not just dyn) so the handle is retained: scenarios need to
+    // script statuses onto this lane and read back the captured requests, and
+    // `with_network_http_egress_for_test` alone wires the transport without
+    // keeping anything to observe it through.
+    let network_egress = Arc::new(RecordingNetworkHttpEgress::with_body(
+        github_fixture_response,
+    ));
     Ok(ToolsProfile {
         capability_ids: vec![
             CapabilityId::new(WRITE_FILE_CAPABILITY_ID)?,
@@ -68,7 +71,7 @@ pub(crate) fn file_and_github_auth_tools_profile() -> HarnessResult<ToolsProfile
             workspace_mounts(MountPermissions::read_write_list_delete())?,
             None,
         )
-        .with_network_http_egress_for_test(network_egress)
+        .with_recording_network_egress(network_egress)
         .with_activated_bundled_extension(github_support::extension_package()?),
         network_policy_override: Some(wildcard_test_policy()),
         provider_trust_override: Some(bundled_extension_provider_trust()?),

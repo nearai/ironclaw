@@ -29,7 +29,7 @@
 //! `CapabilityOutcome` variants held, via the vocabulary in
 //! [`ironclaw_host_api::result_meta`]:
 //!
-//! - the failure recovery class ([`CapabilityFailureKind`]) → [`FailureKind`] on
+//! - the failure recovery class ([`FailureKind`]) carried unchanged onto
 //!   [`ToolVerdict::RecoverableFailure`], plus its structured `detail`
 //!   ([`CapabilityFailureDetail`]) as a redacted [`ModelFailureDiagnostic`] on
 //!   the same verdict (the model-visible correction hint): `InvalidInput` schema
@@ -72,8 +72,8 @@ use ironclaw_host_api::{
 
 use super::content_digest::ContentDigest;
 use super::host::{
-    CapabilityApprovalResume, CapabilityAuthResume, CapabilityDeniedReasonKind,
-    CapabilityFailureKind, CapabilityProgress, CapabilityResumeToken, LoopProcessRef,
+    CapabilityApprovalResume, CapabilityAuthResume, CapabilityDeniedReasonKind, CapabilityProgress,
+    CapabilityResumeToken, LoopProcessRef,
 };
 use super::model_observation::{
     CapabilityFailureDetail, CapabilityInputIssue, ModelVisibleToolObservation,
@@ -163,7 +163,7 @@ pub fn completed(
 /// AND the redacted structured diagnostic ride the verdict, so the model-visible
 /// correction hint crosses without the loop reading host storage.
 pub fn failed(
-    error_kind: CapabilityFailureKind,
+    error_kind: FailureKind,
     safe_summary: String,
     detail: Option<CapabilityFailureDetail>,
 ) -> Resolution {
@@ -180,11 +180,10 @@ pub fn failed(
             output_digest: None,
         },
         verdict: match model_failure_diagnostic(detail) {
-            Some(diagnostic) => ToolVerdict::recoverable_failure_with_diagnostic(
-                failure_kind_of(error_kind),
-                diagnostic,
-            ),
-            None => ToolVerdict::recoverable_failure(failure_kind_of(error_kind)),
+            Some(diagnostic) => {
+                ToolVerdict::recoverable_failure_with_diagnostic(error_kind, diagnostic)
+            }
+            None => ToolVerdict::recoverable_failure(error_kind),
         },
         summary: safe_summary_or_placeholder(safe_summary),
         progress: ResultProgress::default(),
@@ -515,13 +514,6 @@ fn result_progress_of(progress: CapabilityProgress) -> ResultProgress {
     }
 }
 
-/// Map the loop's [`CapabilityFailureKind`] onto host_api's [`FailureKind`] by its
-/// stable tag — the two vocabularies share the same closed set plus an open
-/// `Unknown`, so every value crosses losslessly.
-fn failure_kind_of(kind: CapabilityFailureKind) -> FailureKind {
-    FailureKind::from_tag(kind.as_str())
-}
-
 /// The #5838 first-look inline CONTENT preview and its continuation metadata from
 /// a loop tool observation, when present.
 ///
@@ -750,7 +742,7 @@ mod tests {
             Row {
                 label: "failed",
                 resolution: failed(
-                    CapabilityFailureKind::InvalidInput,
+                    FailureKind::InputEncode,
                     "tool input rejected".to_string(),
                     None,
                 ),
@@ -946,34 +938,6 @@ mod tests {
         }
     }
 
-    /// A `failed` result's recovery classification rides
-    /// `ToolVerdict::RecoverableFailure`.
-    #[test]
-    fn failed_carries_its_error_kind_on_the_verdict() {
-        for (loop_kind, expected) in [
-            (CapabilityFailureKind::Network, FailureKind::Network),
-            (
-                CapabilityFailureKind::InvalidInput,
-                FailureKind::InvalidInput,
-            ),
-            (
-                CapabilityFailureKind::unknown("quota_exceeded").unwrap(),
-                FailureKind::unknown("quota_exceeded").unwrap(),
-            ),
-        ] {
-            match failed(loop_kind, "tool failed".to_string(), None) {
-                Resolution::Done(done) => {
-                    assert_eq!(
-                        done.verdict,
-                        ToolVerdict::recoverable_failure(expected.clone()),
-                        "the recovery class must ride the verdict"
-                    );
-                }
-                other => panic!("expected Done, got {other:?}"),
-            }
-        }
-    }
-
     /// A `failed` result's structured `InvalidInput` diagnostic round-trips its
     /// schema issues (path, code, expected/received) onto the verdict.
     #[test]
@@ -988,7 +952,7 @@ mod tests {
             }],
         });
         match failed(
-            CapabilityFailureKind::InvalidInput,
+            FailureKind::InputEncode,
             "tool input rejected".to_string(),
             detail,
         ) {
@@ -1017,7 +981,7 @@ mod tests {
     #[test]
     fn failed_free_text_diagnostic_round_trips_and_redacts() {
         match failed(
-            CapabilityFailureKind::Backend,
+            FailureKind::Backend,
             "tool failed".to_string(),
             Some(CapabilityFailureDetail::Diagnostic {
                 text: "backend returned an error".to_string(),
@@ -1035,7 +999,7 @@ mod tests {
         // A free-text diagnostic carrying a host path is redacted to the
         // placeholder — the raw path never crosses the boundary.
         match failed(
-            CapabilityFailureKind::Backend,
+            FailureKind::Backend,
             "tool failed".to_string(),
             Some(CapabilityFailureDetail::Diagnostic {
                 text: "failed reading /etc/passwd".to_string(),
@@ -1053,7 +1017,7 @@ mod tests {
 
         // A secret-shaped `received` value is dropped (not carried raw).
         match failed(
-            CapabilityFailureKind::InvalidInput,
+            FailureKind::InputEncode,
             "tool input rejected".to_string(),
             Some(CapabilityFailureDetail::InvalidInput {
                 issues: vec![CapabilityInputIssue {

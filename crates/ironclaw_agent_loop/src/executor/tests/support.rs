@@ -30,11 +30,11 @@ use crate::{
     family::{ComponentDigest, ComponentIdentity, LoopFamily, LoopFamilyId},
     state::{CheckpointKind, GateStrategyState, LoopExecutionState, StopStrategyState},
     strategies::{
-        CapabilityErrorClass, CapabilityErrorSummary, CapabilityFilter, CapabilityStrategy,
-        ContextStrategy, DefaultBudgetStrategy, DefaultCompactionStrategy, GateHandlingStrategy,
-        GateOutcome, GateSummary, InputDrainStrategy, ModelErrorSummary, RecoveryOutcome,
-        RecoveryStrategy, ReplyAdmissionOutcome, ReplyAdmissionStrategy, RetryAlteration,
-        RetryScope, StopConditionStrategy, StopKind, StopOutcome, TurnSummary,
+        CapabilityErrorSummary, CapabilityFilter, CapabilityStrategy, ContextStrategy,
+        DefaultBudgetStrategy, DefaultCompactionStrategy, GateHandlingStrategy, GateOutcome,
+        GateSummary, InputDrainStrategy, ModelErrorSummary, RecoveryOutcome, RecoveryStrategy,
+        ReplyAdmissionOutcome, ReplyAdmissionStrategy, RetryAlteration, RetryScope,
+        StopConditionStrategy, StopKind, StopOutcome, TurnSummary,
     },
 };
 
@@ -543,7 +543,7 @@ impl RecoveryStrategy for RetryPolicyDeniedRecoveryStrategy {
         state: &LoopExecutionState,
         err: &CapabilityErrorSummary,
     ) -> RecoveryOutcome {
-        if err.class == CapabilityErrorClass::PolicyDenied {
+        if err.kind == ironclaw_host_api::FailureKind::PolicyDenied {
             return RecoveryOutcome::Retry {
                 recovery: state.recovery_state.clone(),
                 scope: RetryScope::Call,

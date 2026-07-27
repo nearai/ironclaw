@@ -961,6 +961,121 @@ async fn gateway_preserves_invalid_output_from_provider_tool_validation() {
     assert!(capabilities.registered.lock().unwrap().is_empty());
 }
 
+/// Regression (#6684 review, caller pin): a malformed model-supplied
+/// `spawn_subagent` call is rejected by the capability port as
+/// `InvalidInvocation` — at validation time, and (for inputs the port only
+/// decodes on registration) at registration time. Both rejections must reach
+/// the loop as a **model-visible** `InvalidOutput`, which the loop's recovery
+/// strategy turns into `RetryAlteration::RepairInvalidModelOutput`, never as a
+/// run-ending host fault.
+///
+/// This drives the real caller (`LlmProviderModelGateway::stream_model_with_capabilities`
+/// → `complete_model_request` → `tool_response_to_host`) rather than
+/// `map_provider_tool_output_error` directly, per `.claude/rules/testing.md`
+/// ("Test Through the Caller"): the gateway derives the classifier's input from
+/// the provider response and two separate loops call it.
+///
+/// The rest of the chain is pinned downstream: `HostManagedModelErrorKind::InvalidOutput`
+/// → `AgentLoopHostErrorKind::InvalidOutput` (`ironclaw_loop_host`), →
+/// `ModelErrorClass::InvalidOutput` (`ironclaw_agent_loop` `executor::mapping`
+/// tests), → `RetryAlteration::RepairInvalidModelOutput`
+/// (`model_invalid_output_retries_then_observes_once_before_abort` in
+/// `ironclaw_agent_loop` `strategies::recovery`). Those seams are `pub(crate)`
+/// / `pub(super)` in their own crates, so this crate asserts at the gateway
+/// boundary — the nearest reachable seam.
+#[tokio::test]
+async fn malformed_spawn_subagent_input_is_model_repairable_through_the_gateway() {
+    for (stage, port) in [
+        (
+            "validation",
+            GatewayCapabilityPort::with_spawn_subagent_surface()
+                .with_provider_tool_validation_error(AgentLoopHostErrorKind::InvalidInvocation),
+        ),
+        (
+            "registration",
+            GatewayCapabilityPort::with_spawn_subagent_surface()
+                .with_provider_tool_registration_error(AgentLoopHostErrorKind::InvalidInvocation),
+        ),
+    ] {
+        // Malformed spawn input: the required `mission` field is absent.
+        let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
+            id: "call_1".to_string(),
+            name: "builtin__spawn_subagent".to_string(),
+            arguments: serde_json::json!({"flavor": "explorer"}),
+            reasoning: None,
+            signature: None,
+            arguments_parse_error: None,
+        }]));
+        let gateway = LlmProviderModelGateway::with_provider_identity(
+            STATIC_PROVIDER_ID,
+            Arc::clone(&provider),
+            LlmModelProfilePolicy::new()
+                .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+        );
+        let capabilities = Arc::new(port);
+
+        let error = gateway
+            .stream_model_with_capabilities(
+                model_request(interactive_model()),
+                capabilities.clone(),
+            )
+            .await
+            .expect_err("malformed spawn input must not produce a successful response");
+
+        assert_eq!(
+            error.kind,
+            HostManagedModelErrorKind::InvalidOutput,
+            "{stage}-stage rejection must reach the loop as model-repairable invalid output"
+        );
+        assert!(
+            capabilities.registered.lock().unwrap().is_empty(),
+            "{stage}-stage rejection must not register a capability call"
+        );
+        // The rejection is not an arguments-parse/oversized error, so the
+        // gateway's in-gateway repair retry must NOT fire: the error is handed
+        // to the loop, which owns the invalid-output repair budget.
+        assert_eq!(
+            provider.tool_requests.lock().unwrap().len(),
+            1,
+            "{stage}-stage rejection must surface to the loop, not trigger a second provider call"
+        );
+    }
+
+    // Control: the same armed registration error with a WELL-FORMED payload
+    // must not reject. Without this, the assertions above would pass on a port
+    // double that rejects unconditionally — proving error routing, not that the
+    // missing `mission` field is what triggers the rejection.
+    let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
+        id: "call_1".to_string(),
+        name: "builtin__spawn_subagent".to_string(),
+        arguments: serde_json::json!({"flavor": "explorer", "mission": "survey the repo"}),
+        reasoning: None,
+        signature: None,
+        arguments_parse_error: None,
+    }]));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        Arc::clone(&provider),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(
+        GatewayCapabilityPort::with_spawn_subagent_surface()
+            .with_provider_tool_registration_error(AgentLoopHostErrorKind::InvalidInvocation),
+    );
+
+    gateway
+        .stream_model_with_capabilities(model_request(interactive_model()), capabilities.clone())
+        .await
+        .expect("a well-formed spawn payload must register even with the error armed");
+
+    assert_eq!(
+        capabilities.registered.lock().unwrap().len(),
+        1,
+        "a well-formed spawn payload must reach registration"
+    );
+}
+
 fn repair_request_messages(
     tool_requests: &[ToolCompletionRequest],
 ) -> &[ironclaw_llm::ChatMessage] {
@@ -4145,6 +4260,10 @@ struct GatewayCapabilityPort {
     resolvable_definitions: Vec<ProviderToolDefinition>,
     registered: Mutex<Vec<ProviderToolCall>>,
     validation_error: Option<AgentLoopHostErrorKind>,
+    /// Rejection injected at the *registration* stage only, so the gateway's
+    /// second provider-tool loop is genuinely reached (setting
+    /// `validation_error` would short-circuit in the earlier validation loop).
+    registration_error: Option<AgentLoopHostErrorKind>,
 }
 
 impl GatewayCapabilityPort {
@@ -4165,6 +4284,32 @@ impl GatewayCapabilityPort {
             definitions,
             registered: Mutex::new(Vec::new()),
             validation_error: None,
+            registration_error: None,
+        }
+    }
+
+    /// The `builtin.spawn_subagent` surface, so a malformed model-supplied
+    /// spawn input can be driven through the real gateway path.
+    fn with_spawn_subagent_surface() -> Self {
+        let definitions = vec![ProviderToolDefinition {
+            capability_id: CapabilityId::new("builtin.spawn_subagent").unwrap(),
+            name: provider_name("builtin__spawn_subagent"),
+            description: "Spawn a subagent".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "mission": { "type": "string" },
+                    "flavor": { "type": "string" }
+                },
+                "required": ["mission"]
+            }),
+        }];
+        Self {
+            resolvable_definitions: definitions.clone(),
+            definitions,
+            registered: Mutex::new(Vec::new()),
+            validation_error: None,
+            registration_error: None,
         }
     }
 
@@ -4222,11 +4367,17 @@ impl GatewayCapabilityPort {
             definitions,
             registered: Mutex::new(Vec::new()),
             validation_error: None,
+            registration_error: None,
         }
     }
 
     fn with_provider_tool_validation_error(mut self, kind: AgentLoopHostErrorKind) -> Self {
         self.validation_error = Some(kind);
+        self
+    }
+
+    fn with_provider_tool_registration_error(mut self, kind: AgentLoopHostErrorKind) -> Self {
+        self.registration_error = Some(kind);
         self
     }
 
@@ -4318,6 +4469,19 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
         ironclaw_turns::run_profile::AgentLoopHostError,
     > {
         let tool_call = request.tool_call;
+        // Reject at registration only when the payload is actually malformed —
+        // the injected error is armed, but the *missing field* is what fires it.
+        // An unconditional rejection here would prove error routing while
+        // saying nothing about the malformed input the test is named for.
+        if let Some(kind) = self
+            .registration_error
+            .filter(|_| tool_call.arguments.get("mission").is_none())
+        {
+            return Err(ironclaw_turns::run_profile::AgentLoopHostError::new(
+                kind,
+                "invalid spawn_subagent input: missing field mission",
+            ));
+        }
         self.validate_provider_tool_call(&tool_call)?;
         let definition = self
             .definition_for(tool_call.name.as_str())
