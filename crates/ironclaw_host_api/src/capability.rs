@@ -162,6 +162,30 @@ impl OriginGateMatrix {
             automation: OriginGatePolicy::Forbidden,
         }
     }
+
+    /// Clamp a REQUESTED matrix for a memory-provider tool: `Ungated` is a
+    /// reviewed host grant, not a manifest request. `loop_run` keeps `Ungated`
+    /// only when `id` is in the reviewed
+    /// [`UNGATED_LOOP_RUN_CAPABILITIES`] allowlist; any other `Ungated` cell —
+    /// including `product`/`automation`, which have no reviewed Ungated
+    /// allowlist at all — falls to [`OriginGatePolicy::GatedUnlessGranted`].
+    /// Every non-`Ungated` policy passes through unchanged, so a provider can
+    /// only ever request LESS gating than it gets, never less than the host
+    /// grants.
+    pub fn clamp_requested_for_memory_tool(mut self, id: &str) -> Self {
+        if self.loop_run == OriginGatePolicy::Ungated
+            && !UNGATED_LOOP_RUN_CAPABILITIES.contains(&id)
+        {
+            self.loop_run = OriginGatePolicy::GatedUnlessGranted;
+        }
+        if self.product == OriginGatePolicy::Ungated {
+            self.product = OriginGatePolicy::GatedUnlessGranted;
+        }
+        if self.automation == OriginGatePolicy::Ungated {
+            self.automation = OriginGatePolicy::GatedUnlessGranted;
+        }
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -376,6 +400,45 @@ mod origin_gate_wire_tests {
         assert_eq!(gated.loop_run, OriginGatePolicy::GatedUnlessGranted);
         assert_eq!(gated.product, OriginGatePolicy::Forbidden);
         assert_eq!(gated.automation, OriginGatePolicy::Forbidden);
+    }
+
+    /// A memory provider's requested matrix is clamped: off-allowlist
+    /// `Ungated` (a write tool, or any Product/Automation cell) falls to
+    /// `GatedUnlessGranted`; non-`Ungated` requests pass through unchanged.
+    #[test]
+    fn clamp_requested_for_memory_tool_downgrades_off_allowlist_ungated() {
+        let clamped = OriginGateMatrix {
+            loop_run: OriginGatePolicy::Ungated,
+            product: OriginGatePolicy::Ungated,
+            automation: OriginGatePolicy::Ungated,
+        }
+        .clamp_requested_for_memory_tool("ironclaw.memory.write");
+        assert_eq!(clamped.loop_run, OriginGatePolicy::GatedUnlessGranted);
+        assert_eq!(clamped.product, OriginGatePolicy::GatedUnlessGranted);
+        assert_eq!(clamped.automation, OriginGatePolicy::GatedUnlessGranted);
+    }
+
+    /// The reviewed allowlist still grants `Ungated` loop_run to the read-only
+    /// memory tools, and declared non-`Ungated` cells are never rewritten.
+    #[test]
+    fn clamp_requested_for_memory_tool_keeps_allowlisted_and_gated_cells() {
+        let kept = OriginGateMatrix {
+            loop_run: OriginGatePolicy::Ungated,
+            product: OriginGatePolicy::Forbidden,
+            automation: OriginGatePolicy::Forbidden,
+        }
+        .clamp_requested_for_memory_tool("ironclaw.memory.search");
+        assert_eq!(kept.loop_run, OriginGatePolicy::Ungated);
+        assert_eq!(kept.product, OriginGatePolicy::Forbidden);
+        assert_eq!(kept.automation, OriginGatePolicy::Forbidden);
+
+        let gated = OriginGateMatrix {
+            loop_run: OriginGatePolicy::GatedUnlessGranted,
+            product: OriginGatePolicy::Forbidden,
+            automation: OriginGatePolicy::Forbidden,
+        }
+        .clamp_requested_for_memory_tool("ironclaw.memory.write");
+        assert_eq!(gated.loop_run, OriginGatePolicy::GatedUnlessGranted);
     }
 
     /// `OriginGatePolicy` is a wire-stable enum: every variant must serialize to

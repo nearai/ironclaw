@@ -375,6 +375,13 @@ pub(crate) fn parse_v3(
 
     // Normalize tools (or the synthesized MCP connection template) into the
     // internal capability model, reusing the v2 validated construction path.
+    // A `[memory]`-declaring manifest (host-bundled only — checked above) may
+    // declare tools under the reserved stable memory namespace, with its
+    // requested gating clamped below.
+    let memory_tool_namespace = raw
+        .memory
+        .is_some()
+        .then_some(ironclaw_host_api::MEMORY_TOOL_ID_NAMESPACE);
     let mut referenced_vendors: BTreeMap<VendorId, ()> = BTreeMap::new();
     let mut capabilities = Vec::new();
     let mut mcp_template_credentials = None;
@@ -419,7 +426,7 @@ pub(crate) fn parse_v3(
             origin_gate_matrix: mcp.origin_gate_matrix.clone(),
         };
         capabilities.push(
-            CapabilityDeclV2::from_raw(raw_capability, &id, host_port_catalog).map_err(
+            CapabilityDeclV2::from_raw(raw_capability, &id, host_port_catalog, None).map_err(
                 |error| ManifestV3Error::Invalid {
                     reason: error.to_string(),
                 },
@@ -503,12 +510,27 @@ pub(crate) fn parse_v3(
                 origin_gate_matrix: tool.origin_gate_matrix,
             },
         };
+        // Requested, not granted: a memory provider's declared tool gating is
+        // clamped by the host — `ungated` survives only where the reviewed
+        // allowlist grants it, exactly as host trust policy already clamps
+        // `trust = "first_party_requested"`.
+        let mut raw_capability = raw_capability;
+        if memory_tool_namespace.is_some()
+            && let Some(matrix) = raw_capability.origin_gate_matrix.take()
+        {
+            raw_capability.origin_gate_matrix =
+                Some(matrix.clamp_requested_for_memory_tool(&raw_capability.id));
+        }
         capabilities.push(
-            CapabilityDeclV2::from_raw(raw_capability, &id, host_port_catalog).map_err(
-                |error| ManifestV3Error::Invalid {
-                    reason: error.to_string(),
-                },
-            )?,
+            CapabilityDeclV2::from_raw(
+                raw_capability,
+                &id,
+                host_port_catalog,
+                memory_tool_namespace,
+            )
+            .map_err(|error| ManifestV3Error::Invalid {
+                reason: error.to_string(),
+            })?,
         );
     }
 

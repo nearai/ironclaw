@@ -14,8 +14,9 @@ use ironclaw_extensions::{
 };
 use ironclaw_host_api::{
     CapabilitySurfaceKind, ConversationModel, EffectKind, HOST_RUNTIME_HTTP_EGRESS_PORT_ID,
-    HostPortCatalog, HostPortCatalogEntry, HostPortId, MemoryLifecycleHook, PermissionMode,
-    RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource, VendorAuthRecipe,
+    HostPortCatalog, HostPortCatalogEntry, HostPortId, MemoryLifecycleHook, OriginGatePolicy,
+    PermissionMode, RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource,
+    VendorAuthRecipe,
 };
 
 const ACME_MANIFEST: &str =
@@ -979,4 +980,110 @@ fn memory_surface_with_absent_lifecycle_is_tools_only() {
 fn memory_surface_rejects_an_unknown_lifecycle_token() {
     let toml = MEMORY_PROVIDER_MANIFEST.replace(FULL_LIFECYCLE_LINE, r#"lifecycle = ["on_boot"]"#);
     parse_v3(&toml).expect_err("an unknown lifecycle token must fail closed");
+}
+
+/// A memory-tool declaration under the reserved stable namespace, requesting
+/// gating the host must clamp: `ungated` on a write-effect tool that is NOT in
+/// the reviewed Ungated allowlist, plus an `ungated` product cell.
+const RESERVED_NAMESPACE_WRITE_TOOL: &str = r#"
+[[tools]]
+id = "ironclaw.memory.write"
+description = "Write persistent memory documents."
+effects = ["read_filesystem", "write_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "ungated", automation = "forbidden" }
+input_schema_ref = "schemas/memory/document-write.input.v1.json"
+"#;
+
+const RESERVED_NAMESPACE_SEARCH_TOOL: &str = r#"
+[[tools]]
+id = "ironclaw.memory.search"
+description = "Search persistent memory documents."
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/memory/search.input.v1.json"
+"#;
+
+/// A `[memory]`-declaring manifest may declare tools under the reserved stable
+/// `ironclaw.memory.*` namespace even when its own extension id differs, so
+/// swapping the bound backend does not rename the model's tools. Trust-safe:
+/// `[memory]` requires a first_party runtime, which requires a host-bundled
+/// source.
+#[test]
+fn memory_provider_declares_tools_under_the_reserved_namespace() {
+    let toml = format!("{MEMORY_PROVIDER_MANIFEST}{RESERVED_NAMESPACE_SEARCH_TOOL}");
+    let record = parse_v3(&toml).expect("a [memory] manifest may declare reserved-namespace tools");
+    let ids: Vec<&str> = record
+        .manifest()
+        .capabilities
+        .iter()
+        .map(|capability| capability.id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["ironclaw.memory.search"]);
+}
+
+/// Without a `[memory]` surface the reserved namespace stays closed: the
+/// ordinary provider-prefix rule rejects a foreign `ironclaw.memory.*` id.
+#[test]
+fn reserved_memory_namespace_requires_a_memory_surface() {
+    let toml = format!(
+        "{}{RESERVED_NAMESPACE_SEARCH_TOOL}",
+        MEMORY_PROVIDER_MANIFEST.replace(&format!("[memory]\n{FULL_LIFECYCLE_LINE}\n"), "")
+    );
+    let error = parse_v3(&toml)
+        .expect_err("a non-memory manifest must not declare reserved-namespace tools");
+    assert!(error.contains("provider-prefixed"), "{error}");
+}
+
+/// Requested tool gating is requested, not granted: `ungated` is a reviewed
+/// host allowlist decision, so a memory provider requesting `ungated` on a
+/// write tool (off-allowlist) — or on the product column — is clamped to
+/// `gated_unless_granted`. Declared non-`ungated` cells pass through.
+#[test]
+fn memory_tool_requesting_ungated_write_is_clamped() {
+    let toml = format!("{MEMORY_PROVIDER_MANIFEST}{RESERVED_NAMESPACE_WRITE_TOOL}");
+    let record = parse_v3(&toml).expect("the clamped manifest still parses");
+    let write = record
+        .manifest()
+        .capabilities
+        .iter()
+        .find(|capability| capability.id.as_str() == "ironclaw.memory.write")
+        .expect("write tool declared");
+    let matrix = write
+        .origin_gate_matrix
+        .as_ref()
+        .expect("write tool carries a matrix");
+    assert_eq!(
+        matrix.loop_run,
+        OriginGatePolicy::GatedUnlessGranted,
+        "off-allowlist ungated loop_run must be clamped"
+    );
+    assert_eq!(
+        matrix.product,
+        OriginGatePolicy::GatedUnlessGranted,
+        "ungated product must be clamped (no reviewed product allowlist)"
+    );
+    assert_eq!(matrix.automation, OriginGatePolicy::Forbidden);
+}
+
+/// The reviewed Ungated allowlist still applies: an allowlisted read-only
+/// memory tool keeps its requested `ungated` loop_run.
+#[test]
+fn allowlisted_memory_read_tool_keeps_ungated_loop_run() {
+    let toml = format!("{MEMORY_PROVIDER_MANIFEST}{RESERVED_NAMESPACE_SEARCH_TOOL}");
+    let record = parse_v3(&toml).expect("manifest parses");
+    let search = record
+        .manifest()
+        .capabilities
+        .iter()
+        .find(|capability| capability.id.as_str() == "ironclaw.memory.search")
+        .expect("search tool declared");
+    let matrix = search
+        .origin_gate_matrix
+        .as_ref()
+        .expect("search tool carries a matrix");
+    assert_eq!(matrix.loop_run, OriginGatePolicy::Ungated);
 }

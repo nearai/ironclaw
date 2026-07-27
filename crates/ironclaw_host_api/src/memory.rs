@@ -14,6 +14,15 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Reserved capability-id namespace for the always-on memory adapter tools.
+///
+/// A `[memory]`-declaring manifest may declare its tools under
+/// `ironclaw.memory.*` even when its own extension id differs, so swapping the
+/// bound backend never renames the model's memory tools. Trust-safe: `[memory]`
+/// requires a first_party runtime, which requires a host-bundled manifest
+/// source, so no installable extension can squat the namespace.
+pub const MEMORY_TOOL_ID_NAMESPACE: &str = "ironclaw.memory";
+
 /// A host-initiated memory lifecycle hook a provider participates in.
 ///
 /// Declared in `[memory].lifecycle`. The host calls only declared hooks:

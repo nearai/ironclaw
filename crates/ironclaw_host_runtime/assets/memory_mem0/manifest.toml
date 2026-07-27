@@ -2,7 +2,7 @@ schema_version = "reborn.extension_manifest.v3"
 id = "mem0.local.memory"
 name = "mem0 Memory"
 version = "0.1.0"
-description = "Self-hosted mem0 OSS backend for the always-on memory adapter (issue #5264). A compose-time [memory] binding can select this provider in place of the native filesystem backend; the ironclaw.memory.* tools and the host-managed retrieve-before / record-after lifecycle are unchanged and route to mem0. This manifest declares the mem0 provider identity only — it carries no tools of its own (the memory tool surface is the adapter's). mem0 is off by default and compiled only under the `memory-mem0` feature; it requires a self-hosted mem0 base URL (never the hosted cloud) supplied through the `[memory]` config, and fails closed otherwise."
+description = "Self-hosted mem0 OSS backend for the always-on memory adapter (issue #5264). A compose-time [memory] binding can select this provider in place of the native filesystem backend. This manifest is the single source of truth for mem0's memory surface: the [[tools]] below (declared under the stable ironclaw.memory.* ids so a backend swap never renames the model's tools) and the [memory].lifecycle hooks the host may call. mem0 is off by default and compiled only under the `memory-mem0` feature; it requires a self-hosted mem0 base URL (never the hosted cloud) supplied through the `[memory]` config, and fails closed otherwise."
 trust = "first_party_requested"
 
 [runtime]
@@ -18,3 +18,55 @@ service = "mem0_memory_provider"
 # calls them.
 [memory]
 lifecycle = ["read_long_term", "profile_read"]
+
+# mem0's model tool surface, declared under the reserved stable
+# ironclaw.memory.* namespace so the model's memory tools keep their names
+# when the backend swaps. Same schemas and gating posture as the native
+# provider: reads are Ungated for LoopRun via the reviewed
+# UNGATED_LOOP_RUN_CAPABILITIES allowlist, the write stays
+# gated_unless_granted, Product/Automation are deny-by-default. mem0 maps
+# these onto discrete memories (write is append-only; patch/replace surface a
+# recoverable unsupported error at dispatch).
+[[tools]]
+id = "ironclaw.memory.read"
+description = "Read a Reborn persistent memory document in the current tenant/user/agent/project scope."
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/memory/document-read.input.v1.json"
+output_schema_ref = "schemas/memory/document-read.output.v1.json"
+prompt_doc_ref = "prompts/memory-native/read.md"
+
+[[tools]]
+id = "ironclaw.memory.write"
+description = "Write or append Reborn persistent memory documents in the current tenant/user/agent/project scope. For structured user facts (timezone, locale, location), use builtin.profile_set instead."
+effects = ["read_filesystem", "write_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/memory/document-write.input.v1.json"
+output_schema_ref = "schemas/memory/document-write.output.v1.json"
+prompt_doc_ref = "prompts/memory-native/write.md"
+
+[[tools]]
+id = "ironclaw.memory.search"
+description = "Search only Reborn internal persistent memory in the current tenant/user/agent/project scope; this does not search connected app or extension data."
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/memory/search.input.v1.json"
+output_schema_ref = "schemas/memory/search.output.v1.json"
+prompt_doc_ref = "prompts/memory-native/search.md"
+
+[[tools]]
+id = "ironclaw.memory.tree"
+description = "List Reborn persistent memory documents as a compact tree."
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/memory/tree.input.v1.json"
+output_schema_ref = "schemas/memory/tree.output.v1.json"
+prompt_doc_ref = "prompts/memory-native/tree.md"

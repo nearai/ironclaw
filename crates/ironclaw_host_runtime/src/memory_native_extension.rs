@@ -201,9 +201,28 @@ mod tests {
             }
             other => panic!("expected first_party runtime, got {other:?}"),
         }
-        // Backend-only: mem0 declares the [memory] surface but no tools of its
-        // own (the memory tool surface is the adapter's).
-        assert!(record.manifest().capabilities.is_empty());
+        // mem0's manifest is the source of truth for its own tool surface:
+        // the four document tools, declared under the reserved stable
+        // `ironclaw.memory.*` ids so a backend swap never renames the
+        // model's tools.
+        let ids: Vec<&str> = record
+            .manifest()
+            .capabilities
+            .iter()
+            .map(|capability| capability.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                MEMORY_READ_CAPABILITY_ID,
+                MEMORY_WRITE_CAPABILITY_ID,
+                MEMORY_SEARCH_CAPABILITY_ID,
+                MEMORY_TREE_CAPABILITY_ID,
+            ]
+        );
+        for capability in &record.manifest().capabilities {
+            assert_eq!(capability.visibility, CapabilityVisibility::Model);
+        }
         let memory = record
             .resolved()
             .memory

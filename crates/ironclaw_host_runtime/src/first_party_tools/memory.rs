@@ -704,4 +704,33 @@ mod tests {
         .expect("policy resolves");
         MemoryServiceResolver::from_policy(policy)
     }
+
+    /// A provider that overrides NOTHING: every tool-backed method stays at
+    /// the fail-closed trait default.
+    #[derive(Debug)]
+    struct UnimplementedMemoryService;
+    impl MemoryService for UnimplementedMemoryService {}
+
+    /// A manifest may declare a tool the bound provider cannot actually serve
+    /// (or a provider may regress an implementation). Dispatch must fail
+    /// closed with the model-visible operation error — never silently fall
+    /// back to another provider.
+    #[tokio::test]
+    async fn declared_tool_without_provider_support_fails_closed_at_dispatch() {
+        let state = MemoryCapabilityState::with_memory_service_for_test(Arc::new(
+            UnimplementedMemoryService,
+        ));
+        let request = memory_request(
+            MEMORY_SEARCH_CAPABILITY_ID,
+            json!({"query": "anything", "limit": 3}),
+        );
+
+        let err = dispatch(&state, &request)
+            .await
+            .expect_err("an unimplemented tool method must fail closed");
+        assert_eq!(
+            err.kind(),
+            Some(ironclaw_host_api::RuntimeDispatchErrorKind::OperationFailed)
+        );
+    }
 }
