@@ -3142,13 +3142,15 @@ async fn completed_lifecycle_activation_continuation_installs_the_extension() {
 #[tokio::test]
 async fn channel_pairing_completions_run_the_lifecycle_wrapped_continuation_dispatcher() {
     let dir = tempfile::tempdir().expect("tempdir");
+    let descriptor = pairing_account_setup_descriptor("pairing-fixture");
+    let expected_connection_requirement = descriptor.connection_requirement.clone();
     let services = build_runtime_substrate(
         crate::deployment::local_dev_build_input(
             "local-dev-pairing-continuation-owner",
             dir.path().join("local-dev"),
         )
         .with_bundled_first_party_for_test()
-        .with_account_setup_descriptors(vec![pairing_account_setup_descriptor("pairing-fixture")]),
+        .with_account_setup_descriptors(vec![descriptor]),
     )
     .await
     .expect("local-dev services build");
@@ -3164,6 +3166,11 @@ async fn channel_pairing_completions_run_the_lifecycle_wrapped_continuation_disp
             continue;
         };
         pairing_services_checked += 1;
+        assert_eq!(
+            pairing.connection_requirement(),
+            &expected_connection_requirement,
+            "{extension_id} pairing prompts must retain the manifest connection recipe",
+        );
         let dispatcher = pairing.continuation_dispatcher_for_test();
         if let Some(shared_dispatcher) = &shared_dispatcher {
             assert!(
@@ -3188,7 +3195,7 @@ fn pairing_account_setup_descriptor(
         extension_id: ExtensionId::new(extension_id).expect("extension id"),
         auth_requirement: ironclaw_host_api::RuntimeCredentialAuthRequirement {
             provider: VendorId::new(extension_id).expect("provider id"),
-            setup: RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
+            setup: RuntimeCredentialAccountSetup::Pairing,
             requester_extension: ExtensionId::new(extension_id).expect("requester extension id"),
             provider_scopes: Vec::new(),
         },

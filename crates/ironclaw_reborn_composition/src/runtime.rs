@@ -4367,7 +4367,11 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
     // external-channel delivery. OAuth/manual challenges delegate to
     // product-auth; host-issued pairing delegates to the canonical pairing
     // service and reuses its live code/deep-link/expiry presentation.
-    let auth_challenges = product_auth_challenge_provider(&services.product_auth);
+    let auth_challenges =
+        ironclaw_extension_host::run_delivery_ports::RecipeAuthChallengeProvider::compose(
+            product_auth_challenge_provider(&services.product_auth),
+            services.channel_pairing.clone(),
+        );
     let projection_services = if let Some(provider) = auth_challenges.clone() {
         projection_services.with_auth_challenges(provider)
     } else {
