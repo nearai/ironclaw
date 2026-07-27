@@ -30,7 +30,9 @@
 //! (`rg -n dispatch_with_host_remediation crates`).
 
 use ironclaw_host_api::RuntimeDispatchErrorKind;
-use ironclaw_host_api::{DispatchFailureDetail, HostRemediation, Resolution, SafeSummary};
+use ironclaw_host_api::{
+    DispatchFailureDetail, HostRemediation, ModelDiagnostic, Resolution, SafeSummary,
+};
 use ironclaw_host_runtime::FirstPartyCapabilityError;
 use ironclaw_reborn_config::HostRemediationText;
 use ironclaw_threads::{ToolResultReferenceEnvelope, ToolResultSafeSummary};
@@ -115,8 +117,9 @@ fn host_remediation_texts_survive_the_whole_path() {
             panic!("{entry:?}: must construct as HostRemediation, got: {error}")
         });
 
-        // (b) the REAL producer lands it on the trusted variant — not the
-        // untrusted-diagnostic fallback, which would silently degrade later.
+        // (b) the REAL producer lands it on the trusted variant. Falling back
+        // to Diagnostic would lose the host-authored provenance that permits
+        // operator instructions to persist intact.
         let error = FirstPartyCapabilityError::dispatch_with_host_remediation(
             RuntimeDispatchErrorKind::OperationFailed,
             None,
@@ -138,7 +141,7 @@ fn host_remediation_texts_survive_the_whole_path() {
             }
             other => panic!(
                 "{entry:?}: producer fell back to the untrusted channel ({other:?}) — \
-                 the text would degrade to the placeholder downstream"
+                 the text would lose host-authored provenance downstream"
             ),
         }
 
@@ -190,32 +193,40 @@ fn host_remediation_texts_name_their_operator_step() {
     }
 }
 
-/// LAYER 4: the trusted channel must stay NARROW. Untrusted capability output
-/// (a WASM tool's stderr, an MCP error body, a provider rejection) still
-/// collapses to the placeholder through the same production path.
+/// LAYER 4: the trusted channel stays NARROW while the untrusted diagnostic
+/// channel preserves bounded recovery context. Paths and payload syntax survive
+/// the host_api hop, but credential-shaped values fail closed to the fixed
+/// diagnostic fallback.
 ///
 /// This is what stops a future maintainer from "fixing" some other dropped-text
 /// bug by routing untrusted output through `HostRemediation`.
 #[test]
-fn untrusted_capability_output_still_collapses_to_the_placeholder() {
-    for untrusted in [
-        // A host path — the classic leak the SafeSummary contract exists for.
+fn untrusted_capability_output_uses_the_bounded_diagnostic_contract() {
+    for diagnostic in [
+        // Path-shaped context can be necessary for model recovery.
         "failed reading /etc/passwd",
-        // A token-shaped string in arbitrary tool output.
-        "provider rejected token sk-ant-abc123def456",
-        // A raw payload dump.
+        // Payload delimiters remain useful diagnostic syntax.
         "backend returned {\"error\": \"boom\"}",
     ] {
         let through_hop = text_through_host_api_hop(CapabilityFailureDetail::Diagnostic {
-            text: untrusted.to_string(),
+            text: diagnostic.to_string(),
         })
         .expect("the untrusted diagnostic arm is still present");
         assert_eq!(
-            through_hop,
-            placeholder(),
-            "untrusted capability output must still collapse to the placeholder: {untrusted}"
+            through_hop, diagnostic,
+            "safe recovery context must survive the diagnostic hop"
         );
     }
+
+    let through_hop = text_through_host_api_hop(CapabilityFailureDetail::Diagnostic {
+        text: "provider rejected token sk-ant-abc123def456".to_string(),
+    })
+    .expect("the untrusted diagnostic arm is still present");
+    assert_eq!(
+        through_hop,
+        ModelDiagnostic::unavailable().as_str(),
+        "credential-shaped values must fail closed at the typed boundary"
+    );
 }
 
 /// LAYER 4 (pair): credential VALUE shapes are rejected by the trusted
