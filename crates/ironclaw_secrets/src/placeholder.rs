@@ -109,7 +109,13 @@ impl CredentialPlaceholderToken {
         // arbitrarily long `icsbx_...` string from the sandbox would let
         // untrusted input drive unbounded hashing/cloning/map-insertion work
         // on the host.
-        if suffix.len() != CREDENTIAL_PLACEHOLDER_SUFFIX_LEN
+        // Counted in `char`s, not bytes: the error message below promises
+        // "characters", and while the charset check just below rejects any
+        // non-ASCII input anyway (so `.len()` and `.chars().count()` agree on
+        // every value this function ever accepts), the length check runs
+        // first and should measure what it claims to measure regardless of
+        // charset-check ordering.
+        if suffix.chars().count() != CREDENTIAL_PLACEHOLDER_SUFFIX_LEN
             || !suffix
                 .chars()
                 .all(|character| character.is_ascii_alphanumeric())
@@ -186,6 +192,22 @@ struct CredentialPlaceholderOwnerKey {
     provider_or_extension_id: ExtensionId,
 }
 
+/// Both maps `CredentialPlaceholderRegistry` keeps, under one lock.
+///
+/// `by_owner` and `by_token` are two views of the identical bookkeeping (one
+/// triple <-> one token), not two independent pieces of state — so they are
+/// kept in a single `Mutex` rather than one each. Two separate locks would
+/// let a concurrent `get_or_create` publish into `by_owner`, drop that guard,
+/// and be observed by another caller's early return *before* the matching
+/// `by_token` entry existed, so `resolve()` could answer `None` for a token
+/// `get_or_create` had already handed out. A single lock over both maps
+/// makes every publish atomic from an outside observer's perspective.
+#[derive(Debug, Default)]
+struct RegistryState {
+    by_owner: HashMap<CredentialPlaceholderOwnerKey, CredentialPlaceholderToken>,
+    by_token: HashMap<CredentialPlaceholderToken, CredentialPlaceholderOwner>,
+}
+
 /// Host-side registry mapping `(tenant, user, provider)` to a stable
 /// placeholder token, and back.
 ///
@@ -196,8 +218,7 @@ struct CredentialPlaceholderOwnerKey {
 /// [`InMemoryCredentialBroker::mint_on_first_use`] for the piece that does.
 #[derive(Debug, Default)]
 pub struct CredentialPlaceholderRegistry {
-    by_owner: Mutex<HashMap<CredentialPlaceholderOwnerKey, CredentialPlaceholderToken>>,
-    by_token: Mutex<HashMap<CredentialPlaceholderToken, CredentialPlaceholderOwner>>,
+    state: Mutex<RegistryState>,
 }
 
 impl CredentialPlaceholderRegistry {
@@ -221,31 +242,25 @@ impl CredentialPlaceholderRegistry {
             user_id: user_id.clone(),
             provider_or_extension_id: provider_id.clone(),
         };
-        let mut by_owner =
-            self.by_owner
+        let mut state =
+            self.state
                 .lock()
                 .map_err(|error| CredentialBrokerError::BrokerUnavailable {
                     reason: error.to_string(),
                 })?;
-        if let Some(existing) = by_owner.get(&key) {
+        if let Some(existing) = state.by_owner.get(&key) {
             return Ok(existing.clone());
         }
         let token = CredentialPlaceholderToken::generate();
-        by_owner.insert(key, token.clone());
-        drop(by_owner);
-        self.by_token
-            .lock()
-            .map_err(|error| CredentialBrokerError::BrokerUnavailable {
-                reason: error.to_string(),
-            })?
-            .insert(
-                token.clone(),
-                CredentialPlaceholderOwner {
-                    tenant_id: tenant_id.clone(),
-                    user_id: user_id.clone(),
-                    provider_or_extension_id: provider_id.clone(),
-                },
-            );
+        state.by_owner.insert(key, token.clone());
+        state.by_token.insert(
+            token.clone(),
+            CredentialPlaceholderOwner {
+                tenant_id: tenant_id.clone(),
+                user_id: user_id.clone(),
+                provider_or_extension_id: provider_id.clone(),
+            },
+        );
         Ok(token)
     }
 
@@ -254,16 +269,21 @@ impl CredentialPlaceholderRegistry {
     ///
     /// Backed by an exact-match `HashMap` (no prefix/substring scan), so this
     /// is O(1) and structurally cannot cross-match another user's token.
+    /// Because `by_owner` and `by_token` share one lock with `get_or_create`,
+    /// a token returned by `get_or_create` always resolves immediately — there
+    /// is no window where a freshly-minted token exists in one map but not
+    /// the other.
     pub fn resolve(
         &self,
         token: &CredentialPlaceholderToken,
     ) -> Result<Option<CredentialPlaceholderOwner>, CredentialBrokerError> {
         Ok(self
-            .by_token
+            .state
             .lock()
             .map_err(|error| CredentialBrokerError::BrokerUnavailable {
                 reason: error.to_string(),
             })?
+            .by_token
             .get(token)
             .cloned())
     }
@@ -289,9 +309,17 @@ pub(crate) struct JitMintKey {
 /// - **panic**: `Drop` still runs during unwind, so a panic mid-dispatch
 ///   revokes it too.
 ///
-/// A missed revoke path would leave a standing grant, so this type has no
-/// safe way to leak the session past its own lifetime: there is no `mem::forget`-safe
-/// accessor, and the only way to keep the session alive is to hold the lease.
+/// A missed revoke path would leave a standing grant, so dropping or
+/// explicitly revoking the lease is the only way this type releases its
+/// reference — there is no accessor that extends the session's life past the
+/// lease being dropped. That said, this is intent enforced by this type's
+/// API shape, not an unconditional guarantee: `std::mem::forget(lease)` is
+/// safe Rust, skips `Drop`, and would strand the reference exactly the way a
+/// forgotten `MutexGuard` would strand a lock. The backstop for that case
+/// (and for any other way a lease's `Drop` fails to run) is the session
+/// expiry cap `create_session` applies at mint time — 30 minutes by
+/// default — so even a stranded reference cannot hold the session live past
+/// that ceiling.
 pub struct CredentialSessionLease {
     broker: Arc<InMemoryCredentialBroker>,
     session_id: CredentialSessionId,
@@ -1287,6 +1315,32 @@ mod tests {
                 .is_none(),
             "no dangling sessions_by_placeholder entry may survive revoke"
         );
+    }
+
+    #[test]
+    fn registry_get_or_create_token_always_resolves_immediately() {
+        // Regression test: `get_or_create` used to publish into `by_owner`,
+        // drop that guard, and only then lock `by_token` separately. A
+        // concurrent call for the same triple in that window would take the
+        // early-return `by_owner` hit and hand out a token `resolve()` still
+        // answered `None` for — the registry's stated contract ("resolves a
+        // placeholder back to its owner") was only *eventually* true. Both
+        // maps now live behind one `Mutex<RegistryState>`, so every token
+        // `get_or_create` returns already resolves by the time the call
+        // returns, with no window at all.
+        let registry = CredentialPlaceholderRegistry::new();
+        let tenant = TenantId::new("tenant-a").unwrap();
+        let user = UserId::new("user-resolve-atomic").unwrap();
+        let provider = ExtensionId::new("google").unwrap();
+
+        let token = registry.get_or_create(&tenant, &user, &provider).unwrap();
+        let owner = registry
+            .resolve(&token)
+            .unwrap()
+            .expect("a token returned by get_or_create must resolve immediately");
+        assert_eq!(owner.tenant_id, tenant);
+        assert_eq!(owner.user_id, user);
+        assert_eq!(owner.provider_or_extension_id, provider);
     }
 
     #[test]
