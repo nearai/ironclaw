@@ -144,15 +144,15 @@ the legacy flow's durable cleanup tombstone and imports as a
 cleanup-pending tombstone record so the interrupted removal stays
 retryable. Startup then repairs both views from v2. The installation compatibility row is also the bounded
 rollback snapshot while a v2 record holds a lease; outside that transition
-it is never lifecycle authority. Old and new binaries must not write the
-same installation root concurrently: deploys must quiesce old writers before
-the new binary starts. Same-version processes may share the root, but
-startup recovery assumes no concurrent mid-transition writer: a process that
-boots while another holds a lease may transiently restore it (only when a
-compatibility snapshot exists; otherwise recovery just clears the lease
-over the surviving child rows), and the writers reconverge through lease
-re-acquisition and retries rather than losing the removal. Startup skips a
-lease taken by a live peer mid-boot rather than failing the store open. Once a v2 writer has run, rollback requires a data
+it is never lifecycle authority. **One live writer per installation root**
+is the deployment contract: deploys quiesce the old writer before the new
+binary starts (old and new binaries especially must never overlap), and
+startup recovery assumes any lease it finds was orphaned by a dead writer.
+Concurrent same-root writers are out of contract — the composition already
+serializes extension lifecycle behind a single process's operation lock,
+and cross-process coordination (lease fencing, epochs) is deliberately not
+built until a multi-writer topology actually exists. Startup still skips
+rather than fails on a lease that reappears between recovery passes. Once a v2 writer has run, rollback requires a data
 backup or a binary that understands v2; starting an aggregate-only writer
 would create divergent state.
 
