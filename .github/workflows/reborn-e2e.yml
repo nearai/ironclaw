@@ -9,10 +9,10 @@ on:
         type: string
       reversed_journey_order:
         description: >-
-          Also replay the provider journeys back to front, proving each one
-          passes after every other journey has mutated the shared provider
-          worlds. Off for pull requests (it doubles the slowest lane); the
-          nightly deep run turns it on.
+          Also replay the mutating provider journeys back to front in one
+          shared provider world, without resetting between cases. Off for pull
+          requests (it repeats the slowest lane); the nightly deep run turns it
+          on.
         required: false
         default: false
         type: boolean
@@ -242,7 +242,7 @@ jobs:
           IRONCLAW_JOURNEY_ORDER: reverse
         run: >-
           pytest
-          tests/e2e/scenarios/test_reborn_qa_trace_full_path.py
+          tests/e2e/scenarios/test_reborn_qa_trace_full_path.py::test_mutating_qa_journeys_replay_in_reverse_against_shared_provider_world
           -v
           --timeout=120
 

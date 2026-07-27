@@ -2,12 +2,12 @@
 
 import json
 import os
+import tomllib
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TypeVar
 from urllib.parse import urlparse
 
-import tomllib
 from journey_types import (
     CargoEvidence,
     JourneyCase,
@@ -131,12 +131,10 @@ JOURNEY_ORDER_ENV = "IRONCLAW_JOURNEY_ORDER"
 
 
 def journey_order_is_reversed() -> bool:
-    """Whether this process runs the provider journeys back to front.
+    """Whether CI explicitly selected the shared-world reverse proof.
 
-    Workstream 3 of #6524 owes a reversed-order proof: a journey must pass
-    after every other journey has already mutated the shared provider worlds,
-    not only in the order the suite happens to declare. Reversing is the
-    cheapest arrangement that puts every case somewhere it has never run.
+    The dedicated scenario owns ordering and provider lifecycle. This selector
+    makes that expensive lane fail closed if workflow wiring drops its intent.
     """
     return os.environ.get(JOURNEY_ORDER_ENV, "").strip().lower() == "reverse"
 
@@ -166,9 +164,25 @@ def provider_journey_runs(
     return tuple(runs), tuple(ids)
 
 
-PROVIDER_JOURNEY_RUNS, PROVIDER_JOURNEY_RUN_IDS = provider_journey_runs(
-    reverse=journey_order_is_reversed()
-)
+def shared_world_provider_journey_runs(
+    *,
+    reverse: bool = False,
+) -> tuple[tuple[ProviderJourneyCase, ...], tuple[str, ...]]:
+    """Mutating journeys to replay without provider resets between cases.
+
+    Isolation repeats belong to the ordinary runner: repeating them here would
+    deliberately collide with their own mutation rather than expose leakage
+    from a different journey.
+    """
+    runs = [case for case in PROVIDER_JOURNEY_CASES if case.mutable_provider_worlds]
+    if reverse:
+        runs.reverse()
+    return tuple(runs), tuple(case.case_id for case in runs)
+
+
+# The ordinary replay owns per-case isolation. Reversed ordering is reserved
+# for the dedicated shared-world scenario, where ordering can affect outcomes.
+PROVIDER_JOURNEY_RUNS, PROVIDER_JOURNEY_RUN_IDS = provider_journey_runs()
 
 PRODUCT_JOURNEY_CASES = (
     ProductJourneyCase(

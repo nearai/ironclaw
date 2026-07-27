@@ -3,10 +3,11 @@
 import ast
 import json
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
-import tomllib
+
 from journey_cases import (
     ALL_JOURNEY_CASES,
     JOURNEY_ORDER_ENV,
@@ -15,6 +16,7 @@ from journey_cases import (
     provider_journey_runs,
     required_delivery_targets,
     required_ingresses,
+    shared_world_provider_journey_runs,
     uncovered_surfaces,
 )
 from journey_types import (
@@ -367,16 +369,30 @@ def test_reversed_journey_order_runs_every_case_back_to_front():
     assert list(reversed_ids) != list(forward_ids)
 
 
+def test_shared_world_replay_reverses_each_mutating_journey_once():
+    """The shared lane excludes read-only cases and self-colliding repeats."""
+    forward_runs, forward_ids = shared_world_provider_journey_runs(reverse=False)
+    reversed_runs, reversed_ids = shared_world_provider_journey_runs(reverse=True)
+
+    assert forward_runs
+    assert all(case.mutable_provider_worlds for case in forward_runs)
+    assert len(forward_ids) == len(set(forward_ids))
+    assert list(reversed_ids) == list(reversed(forward_ids))
+    assert [case.case_id for case in reversed_runs] == [
+        case.case_id for case in reversed(forward_runs)
+    ]
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
-    (
+    [
         ("reverse", True),
         ("REVERSE", True),
         ("  reverse  ", True),
         ("forward", False),
         ("", False),
         (None, False),
-    ),
+    ],
 )
 def test_journey_order_env_selects_the_reversed_lane(monkeypatch, value, expected):
     """The lane switch is the part CI sets, so parse it deliberately.

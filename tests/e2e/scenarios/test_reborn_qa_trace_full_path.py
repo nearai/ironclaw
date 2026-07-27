@@ -25,7 +25,12 @@ from emulate_provider import (
     slack_post,
 )
 from helpers import EMULATE_GITHUB_BEARER, EMULATE_SLACK_BEARER
-from journey_cases import PROVIDER_JOURNEY_RUN_IDS, PROVIDER_JOURNEY_RUNS
+from journey_cases import (
+    PROVIDER_JOURNEY_RUN_IDS,
+    PROVIDER_JOURNEY_RUNS,
+    journey_order_is_reversed,
+    shared_world_provider_journey_runs,
+)
 from provider_capability_inventory import (
     EMULATE_SUPPORTED_TOOLS,
     capability_id_to_wire_name,
@@ -1354,26 +1359,33 @@ async def test_qa_journey_provider_leg_replays_through_emulate(
     journey_case,
 ):
     """Every harvested provider journey executes through standalone Reborn."""
+    await _replay_qa_journey_provider_leg(
+        reborn_qa_emulate_provider_server,
+        mock_llm_server,
+        journey_case,
+    )
+
+
+async def _replay_qa_journey_provider_leg(
+    provider_server,
+    mock_llm_server,
+    journey_case,
+) -> None:
+    """Replay one provider leg against the caller-selected provider lifecycle."""
     case = journey_case.case_id
-    server = reborn_qa_emulate_provider_server["base_url"]
+    server = provider_server["base_url"]
     trace_path = ROOT / journey_case.trace
-    if _raw_trace_uses_tool_prefix(
-        trace_path, "google-sheets__"
-    ):
+    if _raw_trace_uses_tool_prefix(trace_path, "google-sheets__"):
         async with httpx.AsyncClient(headers=google_headers(), timeout=15) as client:
-            emulate_google_url = reborn_qa_emulate_provider_server[
-                "emulate_google_url"
-            ]
+            emulate_google_url = provider_server["emulate_google_url"]
             response = await client.get(
                 f"{emulate_google_url}/v4/spreadsheets/sheet_reborn_abc"
             )
         if response.status_code == 404:
             pytest.skip("Emulate 0.7.0 does not expose the Google Sheets API")
-    if _raw_trace_uses_tool_prefix(
-        trace_path, "slack__"
-    ):
+    if _raw_trace_uses_tool_prefix(trace_path, "slack__"):
         async with httpx.AsyncClient(headers=slack_headers(), timeout=15) as client:
-            emulate_slack_url = reborn_qa_emulate_provider_server["emulate_slack_url"]
+            emulate_slack_url = provider_server["emulate_slack_url"]
             response = await client.get(f"{emulate_slack_url}/api/auth.test")
         if response.status_code == 404:
             pytest.skip("Emulate 0.7.0 does not expose Slack Web API GET routes")
@@ -1381,17 +1393,17 @@ async def test_qa_journey_provider_leg_replays_through_emulate(
         mock_llm_server,
         trace_path,
         provider_tools=PROVIDER_TOOL_NAMES,
-        slack_state=reborn_qa_emulate_provider_server["slack_state"],
+        slack_state=provider_server["slack_state"],
     )
     user_input = trace["steps"][0]["response"]["content"]
     expected_calls = _recorded_provider_calls(trace)
 
     await _assert_google_provider_baseline(
-        reborn_qa_emulate_provider_server["emulate_google_url"], case, trace
+        provider_server["emulate_google_url"], case, trace
     )
     await _assert_slack_provider_baseline(
-        reborn_qa_emulate_provider_server["emulate_slack_url"],
-        reborn_qa_emulate_provider_server["slack_state"],
+        provider_server["emulate_slack_url"],
+        provider_server["slack_state"],
         case,
         trace,
     )
@@ -1442,11 +1454,11 @@ async def test_qa_journey_provider_leg_replays_through_emulate(
             assert "channel_not_found" in assistant["content"]
 
     await _assert_google_provider_outcome(
-        reborn_qa_emulate_provider_server["emulate_google_url"], case, trace
+        provider_server["emulate_google_url"], case, trace
     )
     await _assert_slack_provider_outcome(
-        reborn_qa_emulate_provider_server["emulate_slack_url"],
-        reborn_qa_emulate_provider_server["slack_state"],
+        provider_server["emulate_slack_url"],
+        provider_server["slack_state"],
         trace,
     )
 
@@ -1457,6 +1469,50 @@ async def test_qa_journey_provider_leg_replays_through_emulate(
         "complete": True,
         "error": None,
     }
+
+
+async def test_mutating_qa_journeys_replay_in_reverse_against_shared_provider_world(
+    reborn_qa_emulate_runtime,
+    resettable_emulate_provider_world,
+    mock_llm_server,
+):
+    """Reverse mutating journeys while preserving every prior provider effect."""
+    # CI sets the switch explicitly. Failing closed prevents a workflow edit
+    # from silently turning this expensive proof into another forward replay.
+    assert journey_order_is_reversed(), (
+        "shared-world reverse replay requires IRONCLAW_JOURNEY_ORDER=reverse"
+    )
+    journeys, _ = shared_world_provider_journey_runs(reverse=True)
+    mutable_services = {
+        str(world) for case in journeys for world in case.mutable_provider_worlds
+    }
+    reset_services = mutable_services - {"slack"}
+    try:
+        for journey_case in journeys:
+            await _replay_qa_journey_provider_leg(
+                reborn_qa_emulate_runtime,
+                mock_llm_server,
+                journey_case,
+            )
+    finally:
+        # Cleanup belongs after the sequence: doing any of it inside the loop
+        # would restore isolation and make reversed order unable to expose
+        # cross-journey state leakage.
+        try:
+            if "slack" in mutable_services:
+                for journey_case in journeys:
+                    if any(
+                        str(world) == "slack"
+                        for world in journey_case.mutable_provider_worlds
+                    ):
+                        await _cleanup_slack_provider_mutations(
+                            reborn_qa_emulate_runtime["emulate_slack_url"],
+                            reborn_qa_emulate_runtime["slack_state"],
+                            journey_case.case_id,
+                        )
+        finally:
+            if reset_services:
+                await resettable_emulate_provider_world.reset(reset_services)
 
 
 @pytest.mark.parametrize(
