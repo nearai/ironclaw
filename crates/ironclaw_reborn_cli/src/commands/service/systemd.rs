@@ -856,6 +856,10 @@ mod tests {
         let working_dir_index = unit.find("WorkingDirectory=").unwrap();
         let exec_start_index = unit.find("ExecStart=").unwrap();
         assert!(working_dir_index < exec_start_index);
+
+        let percent_unit = unit_content(&sample_invocation(), Path::new("/home/%u/reborn"))
+            .expect("valid percent-containing working directory");
+        assert!(percent_unit.contains("WorkingDirectory=/home/%%u/reborn\n"));
     }
 
     #[test]
