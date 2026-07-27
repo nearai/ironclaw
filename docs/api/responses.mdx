@@ -60,8 +60,12 @@ You have two options:
     curl -X POST https://your-host/api/webchat/v2/admin/users \
       -H "Authorization: Bearer $ADMIN_TOKEN" \
       -H "Content-Type: application/json" \
-      -d '{"email":"alice@example.com"}'
+      -d '{"email":"alice@example.com","display_name":"Alice","role":"member"}'
     ```
+
+    `role` is required — one of `owner`, `admin`, or `member`. `owner` and `admin` clear
+    the admin authorization boundary; `member` does not. `email` and `display_name` are
+    optional.
 
     The token is top-level; the user's identity is nested under `user`:
 

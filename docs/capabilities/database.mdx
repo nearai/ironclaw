@@ -52,6 +52,32 @@ The `pgvector` image is used so embeddings-backed search works. See
 
 </Step>
 
+<Step title="Switch to a profile that accepts a database">
+
+Do this **before** you add the `[storage]` block. Only three profiles wire it:
+`hosted-single-tenant`, `production`, and `migration-dry-run`. Under any other profile a
+`[storage]` block is a startup failure, not a warning:
+
+```
+config file section(s) [storage] are parsed but not wired in this runtime slice
+```
+
+```toml
+[boot]
+profile = "hosted-single-tenant"
+```
+
+Use `production` for a multi-user deployment. See
+[Configuration](/capabilities/configuration#profiles).
+
+<Warning>
+`hosted-single-tenant-volume` does **not** accept `[storage]`, despite the name. It is a
+volume-backed variant of local embedded storage, not a PostgreSQL profile. Pairing it with
+a `[storage]` block leaves the instance unable to start.
+</Warning>
+
+</Step>
+
 <Step title="Point IronClaw at it">
 
 Put the URL in the environment and name the variable in your configuration:
@@ -72,20 +98,6 @@ pool_max_size         = 2
 The URL is environment-only. `config.toml` may name the variable that holds it, but must
 never contain the URL itself — it carries the database password.
 </Warning>
-
-</Step>
-
-<Step title="Use a served profile">
-
-PostgreSQL pairs with a profile that expects it:
-
-```toml
-[boot]
-profile = "hosted-single-tenant"
-```
-
-Use `hosted-single-tenant-volume` for volume-backed storage, or `production` for a
-multi-user deployment. See [Configuration](/capabilities/configuration#profiles).
 
 </Step>
 

@@ -20,8 +20,12 @@ Check where you stand, then turn it on:
 
 ```bash
 ironclaw traces status
-ironclaw traces opt-in
+ironclaw traces opt-in --endpoint https://traces.example.com/v1/traces
 ```
+
+`--endpoint` is required — there is no default ingestion service. Use the URL given to you
+by whoever runs the collection you're contributing to. The bearer token is read from
+`IRONCLAW_TRACE_SUBMIT_TOKEN`; override the variable name with `--bearer-token-env`.
 
 To turn it off again:
 
@@ -43,19 +47,25 @@ Preview first. `preview` builds the redacted envelope from a recorded trace file
 can see exactly what would be sent:
 
 ```bash
-ironclaw traces preview <trace-file>
+ironclaw traces preview --recorded-trace ./trace.json
 ```
+
+The file is a recorded trace produced by `IRONCLAW_RECORD_TRACE`. Add `--output <path>` to
+write the envelope to a file instead of stdout, or `--enqueue` to preview and queue in one
+step.
 
 Once you're satisfied, submit it directly or queue it for the next flush:
 
 <CodeGroup>
 
 ```bash Submit now
-ironclaw traces submit
+ironclaw traces submit \
+  --envelope ./envelope.json \
+  --endpoint https://traces.example.com/v1/traces
 ```
 
 ```bash Queue for later
-ironclaw traces enqueue
+ironclaw traces enqueue --envelope ./envelope.json
 ironclaw traces flush-queue
 ```
 
@@ -106,8 +116,10 @@ Operators can enroll an entire deployment with an invite link, so every user wit
 personal enrollment inherits it. This requires shell access to the instance host.
 
 ```bash
-ironclaw traces enroll-instance <invite-link>
+ironclaw traces enroll-instance --invite 'https://traces.example.com#your-invite-code'
 ```
+
+The invite accepts either `https://<host>#<code>` or `<code>@<host>`.
 
 Each inherited user is attributed through a salted per-user pseudonym rather than their
 real identity.
@@ -130,9 +142,12 @@ enrollment, not just your own participation. Use `--user-scope` to exclude a sin
 A second, separate opt-in publishes a community profile alongside your contributions:
 
 ```bash
-ironclaw traces profile set
+ironclaw traces profile set --handle your-handle --bio "Short description"
 ironclaw traces profile withdraw
 ```
+
+`--handle` is required: 3–32 characters of ASCII letters, digits, `-`, or `_`. `--bio` is
+optional and capped at 280 bytes.
 
 `ironclaw traces profile token` mints a short-lived token for the Trace Commons web
 profile page.
@@ -142,7 +157,9 @@ profile page.
 ## Checking the Service
 
 ```bash
-ironclaw traces ingest-health <url>
+ironclaw traces ingest-health --endpoint https://traces.example.com
 ```
+
+Accepts the base URL, the `/health` URL, or the `/v1/traces` URL.
 
 Reports whether an ingestion service is reachable and healthy.

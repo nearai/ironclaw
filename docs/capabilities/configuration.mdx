@@ -161,8 +161,8 @@ ironclaw profile list
 | --- | --- |
 | `local-dev` | Default. Single user on your own machine |
 | `local-dev-yolo` | Local development with host filesystem access; `serve` requires `--confirm-host-access` |
-| `hosted-single-tenant` | One tenant served over the network |
-| `hosted-single-tenant-volume` | As above, with volume-backed storage |
+| `hosted-single-tenant` | One tenant served over the network, backed by PostgreSQL |
+| `hosted-single-tenant-volume` | One tenant served over the network, keeping local embedded storage on a persistent volume. Does not accept `[storage]` |
 | `production` | Multi-user production deployment |
 | `migration-dry-run` | Migration rehearsal |
 
@@ -192,8 +192,12 @@ profile = "local-dev"
 default_owner = "reborn-cli"
 ```
 
-`identity.tenant`, `default_agent`, and `default_project` are reserved. IronClaw rejects
-them rather than silently ignoring them.
+`identity.tenant` and `identity.default_agent` are optional overrides for the tenant and
+agent ids the runtime operates under. Leave them unset unless you know you need a
+different scope — a stale value here silently moves your work into another identity scope.
+
+`identity.default_project` is consumed by `serve` but not by `run` or `repl`; those two
+subcommands fail on startup rather than silently dropping it.
 
 </Accordion>
 
