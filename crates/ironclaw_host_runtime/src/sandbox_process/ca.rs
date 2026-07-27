@@ -20,7 +20,7 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Mutex, MutexGuard},
     time::{Duration, Instant},
 };
 
@@ -61,12 +61,26 @@ pub(crate) const DEFAULT_MAX_CACHE_ENTRIES: usize = 256;
 /// A leaf certificate issued for exactly one host: PEM cert + PEM private
 /// key, both the *leaf's* material only. The root private key never
 /// appears in either field.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[allow(dead_code)] // consumed by W6; not wired yet
 pub(crate) struct LeafCertificate {
     pub(crate) host: String,
     pub(crate) cert_pem: String,
     pub(crate) key_pem: String,
+}
+
+impl std::fmt::Debug for LeafCertificate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Deliberately omit `key_pem`: it is the leaf's private key material
+        // and must never persist in logs or panic output, even though (unlike
+        // the root key) it is a bounded, short-lived, container-scoped
+        // artifact this design otherwise accepts.
+        formatter
+            .debug_struct("LeafCertificate")
+            .field("host", &self.host)
+            .field("cert_pem", &self.cert_pem)
+            .finish_non_exhaustive()
+    }
 }
 
 /// [`SandboxCertificateAuthority::issue_leaf_for_host`]'s result. Exposes
@@ -81,7 +95,11 @@ pub(crate) struct IssuedLeaf {
 }
 
 struct CachedLeaf {
-    leaf: Arc<LeafCertificate>,
+    // Not `Arc`-wrapped: nothing here shares this pointer between callers —
+    // `cached_leaf` immediately dereferences and clones the value out, and
+    // the fresh-issuance path already clones before inserting. Plain
+    // ownership avoids indirection that solves no aliasing problem.
+    leaf: LeafCertificate,
     inserted_at: Instant,
 }
 
@@ -188,21 +206,37 @@ impl SandboxCertificateAuthority {
         &self,
         host: &str,
     ) -> Result<IssuedLeaf, RuntimeProcessError> {
-        if host.trim().is_empty() {
+        // Normalize once, at the boundary: DNS names are case-insensitive
+        // and an intercepted CONNECT's SNI/host can carry incidental
+        // whitespace. Trimming only the emptiness *check* while minting and
+        // caching on the untrimmed, original-case string (the prior
+        // behavior) would bake padding into the SAN/CN and let case
+        // variants of the same host multiply cache entries — on a
+        // bounded, oldest-first-eviction cache, that lets a peer choosing
+        // SNI case variants evict unrelated live entries. Every downstream
+        // use (cache key, SAN, CN) shares this one canonical form.
+        let host = host.trim().to_ascii_lowercase();
+        if host.is_empty() {
             return Err(RuntimeProcessError::ExecutionFailed(
                 "sandbox CA: host must not be empty".to_string(),
             ));
         }
+        // `rcgen` accepts arbitrary ASCII strings as a DNS SAN — it does not
+        // itself reject control characters, wildcards, or oversized input.
+        // A network-controlled CONNECT host reaches this call, so the CA
+        // must validate it is a plausible DNS name before spending a key
+        // generation and signing pass on it.
+        validate_dns_host(&host)?;
         let now = Instant::now();
-        if let Some(certificate) = self.cached_leaf(host, now) {
+        if let Some(certificate) = self.cached_leaf(&host, now) {
             return Ok(IssuedLeaf {
                 certificate,
                 cache_hit: true,
             });
         }
 
-        let leaf = self.mint_leaf(host)?;
-        self.insert_and_evict(host.to_string(), leaf.clone(), now);
+        let leaf = self.mint_leaf(&host)?;
+        self.insert_and_evict(host, leaf.clone(), now);
         Ok(IssuedLeaf {
             certificate: leaf,
             cache_hit: false,
@@ -223,7 +257,7 @@ impl SandboxCertificateAuthority {
             cache.remove(host);
             return None;
         }
-        Some((*entry.leaf).clone())
+        Some(entry.leaf.clone())
     }
 
     fn mint_leaf(&self, host: &str) -> Result<LeafCertificate, RuntimeProcessError> {
@@ -264,7 +298,7 @@ impl SandboxCertificateAuthority {
         cache.insert(
             host,
             CachedLeaf {
-                leaf: Arc::new(leaf),
+                leaf,
                 inserted_at: now,
             },
         );
@@ -303,9 +337,53 @@ fn ca_range_error(field: &str) -> RuntimeProcessError {
     ))
 }
 
+/// Bound on total DNS name length (RFC 1035 §3.1): 253 visible characters
+/// (255 octets on the wire, minus the length-prefix and root-label bytes).
+const MAX_DNS_HOST_LEN: usize = 253;
+
+/// Bound on one DNS label's length (RFC 1035 §3.1).
+const MAX_DNS_LABEL_LEN: usize = 63;
+
+/// Rejects hosts `rcgen` itself would accept as a DNS SAN but that are not
+/// plausible DNS names: oversized input, wildcards, and anything outside
+/// `[a-z0-9-.]` (which excludes control characters and other non-ASCII or
+/// non-hostname bytes). `host` is expected to already be trimmed and
+/// lowercased by the caller. This is deliberately a plausibility filter, not
+/// full RFC 1035 label-syntax enforcement (e.g. leading/trailing hyphens
+/// within a label) — the goal is bounding what a network-controlled CONNECT
+/// host can force this CA to mint a certificate for, not general-purpose DNS
+/// validation.
+fn validate_dns_host(host: &str) -> Result<(), RuntimeProcessError> {
+    if host.len() > MAX_DNS_HOST_LEN {
+        return Err(RuntimeProcessError::ExecutionFailed(format!(
+            "sandbox CA: host exceeds the maximum DNS name length of {MAX_DNS_HOST_LEN}"
+        )));
+    }
+    if host.contains('*') {
+        return Err(RuntimeProcessError::ExecutionFailed(
+            "sandbox CA: wildcard hosts are not permitted".to_string(),
+        ));
+    }
+    let is_valid_char = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'.';
+    if !host.bytes().all(is_valid_char) {
+        return Err(RuntimeProcessError::ExecutionFailed(
+            "sandbox CA: host contains characters outside the DNS hostname charset".to_string(),
+        ));
+    }
+    for label in host.split('.') {
+        if label.is_empty() || label.len() > MAX_DNS_LABEL_LEN {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "sandbox CA: host contains an empty or oversized DNS label".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use x509_parser::prelude::*;
 
     fn parse<'a>(pem: &'a str) -> X509Certificate<'a> {
@@ -488,6 +566,168 @@ mod tests {
     }
 
     #[test]
+    fn whitespace_only_host_is_rejected() {
+        let ca = SandboxCertificateAuthority::generate().unwrap();
+
+        let error = ca.issue_leaf_for_host("   ").unwrap_err();
+
+        assert!(format!("{error}").contains("host must not be empty"));
+    }
+
+    #[test]
+    fn host_lookup_is_case_insensitive_and_ignores_padding() {
+        let ca = SandboxCertificateAuthority::generate().unwrap();
+
+        let first = ca.issue_leaf_for_host("api.example.com").unwrap();
+        assert!(!first.cache_hit);
+
+        // A case variant and a padded variant of the same host must both
+        // hit the cache entry the canonical form created, not mint (and
+        // cache) their own separate entries.
+        let case_variant = ca.issue_leaf_for_host("API.Example.COM").unwrap();
+        assert!(
+            case_variant.cache_hit,
+            "case variants of an already-cached host must be a cache hit"
+        );
+
+        let padded_variant = ca.issue_leaf_for_host("  api.example.com  ").unwrap();
+        assert!(
+            padded_variant.cache_hit,
+            "padded variants of an already-cached host must be a cache hit"
+        );
+
+        assert_eq!(ca.cached_entry_count(), 1);
+    }
+
+    #[test]
+    fn padded_host_input_produces_an_unpadded_san() {
+        let ca = SandboxCertificateAuthority::generate().unwrap();
+        let issued = ca.issue_leaf_for_host("  api.example.com  ").unwrap();
+
+        let leaf = parse(&issued.certificate.cert_pem);
+
+        assert_eq!(dns_sans(&leaf), vec!["api.example.com".to_string()]);
+        assert_eq!(issued.certificate.host, "api.example.com");
+    }
+
+    #[test]
+    fn malformed_host_fails_issuance_without_caching() {
+        let ca = SandboxCertificateAuthority::generate().unwrap();
+
+        // `rcgen` itself does not reject a control character in a DNS SAN
+        // (confirmed: without `validate_dns_host` this mints a certificate
+        // for it), so the CA's own boundary validation must reject it.
+        let error = ca.issue_leaf_for_host("bad\u{0}host.example.com");
+
+        assert!(
+            error.is_err(),
+            "a control-character host must fail issuance"
+        );
+        assert_eq!(
+            ca.cached_entry_count(),
+            0,
+            "a failed issuance must not leave a cache entry behind"
+        );
+    }
+
+    #[test]
+    fn wildcard_host_is_rejected() {
+        let ca = SandboxCertificateAuthority::generate().unwrap();
+
+        let error = ca.issue_leaf_for_host("*.example.com").unwrap_err();
+
+        assert!(format!("{error}").contains("wildcard"));
+        assert_eq!(ca.cached_entry_count(), 0);
+    }
+
+    #[test]
+    fn oversized_host_is_rejected() {
+        let ca = SandboxCertificateAuthority::generate().unwrap();
+        let oversized_host = format!("{}.example.com", "a".repeat(300));
+
+        let error = ca.issue_leaf_for_host(&oversized_host);
+
+        assert!(
+            error.is_err(),
+            "a host over the DNS length bound must fail issuance"
+        );
+        assert_eq!(ca.cached_entry_count(), 0);
+    }
+
+    #[test]
+    fn oversized_leaf_ttl_fails_issuance_without_caching() {
+        // `time::Duration` (used for cert validity) is bounded well below
+        // `u64::MAX` seconds; a `std::time::Duration` this large must fail
+        // the `CertValidityDuration::try_from` conversion in `mint_leaf`
+        // rather than panicking or wrapping.
+        let ca = SandboxCertificateAuthority::generate_with(
+            Duration::from_secs(u64::MAX),
+            DEFAULT_MAX_CACHE_ENTRIES,
+        )
+        .unwrap();
+
+        let error = ca.issue_leaf_for_host("api.example.com");
+
+        assert!(
+            error.is_err(),
+            "an out-of-range leaf TTL must fail issuance"
+        );
+        assert_eq!(
+            ca.cached_entry_count(),
+            0,
+            "a failed issuance must not leave a cache entry behind"
+        );
+    }
+
+    #[test]
+    fn root_certificate_has_ca_and_key_cert_sign_constraints() {
+        let ca = SandboxCertificateAuthority::generate().unwrap();
+        let root = parse(ca.root_certificate_pem());
+
+        let basic_constraints = root
+            .basic_constraints()
+            .expect("basic constraints extension parses")
+            .expect("root has a basic constraints extension");
+        assert!(basic_constraints.value.ca, "root must be a CA certificate");
+
+        let key_usage = root
+            .key_usage()
+            .expect("key usage extension parses")
+            .expect("root has a key usage extension");
+        assert!(
+            key_usage.value.key_cert_sign(),
+            "root must be allowed to sign certificates"
+        );
+    }
+
+    #[test]
+    fn leaf_certificate_is_not_a_ca_and_has_server_auth_usage() {
+        let ca = SandboxCertificateAuthority::generate().unwrap();
+        let issued = ca.issue_leaf_for_host("api.example.com").unwrap();
+        let leaf = parse(&issued.certificate.cert_pem);
+
+        // A leaf must never itself be usable as an intermediate/CA cert.
+        if let Some(basic_constraints) = leaf
+            .basic_constraints()
+            .expect("basic constraints extension parses")
+        {
+            assert!(
+                !basic_constraints.value.ca,
+                "a leaf certificate must not carry CA:true"
+            );
+        }
+
+        let extended_key_usage = leaf
+            .extended_key_usage()
+            .expect("extended key usage extension parses")
+            .expect("leaf has an extended key usage extension");
+        assert!(
+            extended_key_usage.value.server_auth,
+            "leaf must be usable for TLS server authentication"
+        );
+    }
+
+    #[test]
     fn root_certificate_pem_never_contains_key_material() {
         let ca = SandboxCertificateAuthority::generate().unwrap();
         let root_pem = ca.root_certificate_pem();
@@ -517,5 +757,69 @@ mod tests {
                 .contains(&issued.certificate.key_pem)
         );
         assert_ne!(issued.certificate.key_pem, ca.root_certificate_pem());
+    }
+
+    #[test]
+    fn leaf_certificate_debug_output_never_contains_private_key_material() {
+        let ca = SandboxCertificateAuthority::generate().unwrap();
+        let issued = ca.issue_leaf_for_host("api.example.com").unwrap();
+
+        // Regression: `LeafCertificate`/`IssuedLeaf`'s `Debug` must redact
+        // `key_pem` the same way the CA's own `Debug` redacts `issuer`/
+        // `cache` — formatting either type must never persist a leaf
+        // private key in logs or panic output.
+        let debug_leaf = format!("{:?}", issued.certificate);
+        let debug_issued = format!("{issued:?}");
+
+        assert!(!debug_leaf.contains("PRIVATE KEY"));
+        assert!(!debug_leaf.contains(&issued.certificate.key_pem));
+        assert!(!debug_issued.contains("PRIVATE KEY"));
+        assert!(!debug_issued.contains(&issued.certificate.key_pem));
+    }
+
+    #[test]
+    fn concurrent_issuance_for_same_and_different_hosts_stays_correct() {
+        let ca = Arc::new(SandboxCertificateAuthority::generate().unwrap());
+        let mut handles = Vec::new();
+
+        // 4 threads race on the same host, 4 threads each mint a distinct
+        // host — a real contention exercise of the cache's Mutex, not the
+        // sequential single-thread pattern the rest of this module uses.
+        for _ in 0..4 {
+            let ca = Arc::clone(&ca);
+            handles.push(std::thread::spawn(move || {
+                ca.issue_leaf_for_host("shared.example.com").unwrap()
+            }));
+        }
+        for i in 0..4 {
+            let ca = Arc::clone(&ca);
+            handles.push(std::thread::spawn(move || {
+                ca.issue_leaf_for_host(&format!("distinct-{i}.example.com"))
+                    .unwrap()
+            }));
+        }
+
+        let results: Vec<IssuedLeaf> = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("issuance thread must not panic"))
+            .collect();
+
+        // Every distinct-host result must carry that host's own SAN — no
+        // cross-host mixing under concurrent cache writes.
+        for (i, result) in results.iter().skip(4).enumerate() {
+            assert_eq!(result.certificate.host, format!("distinct-{i}.example.com"));
+        }
+
+        // All four racers on the shared host must agree on the *content*
+        // that ultimately lives in the cache: whichever thread's mint won,
+        // a subsequent lookup for that host must return exactly that cert.
+        let settled = ca.issue_leaf_for_host("shared.example.com").unwrap();
+        assert!(settled.cache_hit);
+        assert!(
+            results[..4]
+                .iter()
+                .any(|result| result.certificate.cert_pem == settled.certificate.cert_pem),
+            "the cached cert must match one of the racing issuances"
+        );
     }
 }

@@ -13,9 +13,10 @@
 //! explicitly guards against).
 //!
 //! **Why staged ahead of time, keyed by `(tenant_id, user_id)`.** The
-//! consumer of this chokepoint is the shared egress proxy (see
-//! `super::attribution`): it is invoked per-TCP-connection and can resolve a
-//! peer IP to a `{tenant, user}` (via `ConnectionAttributionResolver`), but
+//! consumer of this chokepoint is the shared egress proxy (its
+//! connection-attribution resolver is W6 work, not built yet): it is
+//! invoked per-TCP-connection and can resolve a peer IP to a
+//! `{tenant, user}` (via `ConnectionAttributionResolver`), but
 //! it has no way to recover which *invocation* opened that connection —
 //! invocation identity simply is not present in anything the proxy can
 //! observe from a TCP peer address. So the chokepoint cannot be a
@@ -35,9 +36,9 @@
 //!
 //! **W8 is the chokepoint; W6 (proxy TLS termination) is the consumer, not
 //! built yet.** Nothing in this crate calls into
-//! [`SandboxCredentialFirewall`] today — it ships unwired, same as
-//! `super::attribution`, until the proxy is wired to call it (profile-gated
-//! rollout per the design doc's PR strategy).
+//! [`SandboxCredentialFirewall`] today — it ships unwired, same as the
+//! proxy's connection-attribution resolver, until the proxy is wired to
+//! call it (profile-gated rollout per the design doc's PR strategy).
 
 use std::{
     collections::HashMap,
@@ -80,12 +81,28 @@ impl StagingKey {
 /// expires on its own even if nothing ever calls [`SandboxCredentialFirewall::revoke`]
 /// — and now, structurally, even if the [`StagedObligationLease`] that owns
 /// it is never dropped (`std::mem::forget`); see [`MAX_GRANT_TTL`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[allow(dead_code)] // consumed by W6 (proxy TLS termination + credential injection); not wired yet
 pub(crate) struct StagedCredentialObligation {
     pub(crate) secret_handle: SecretHandle,
     pub(crate) allowed_targets: Vec<CredentialTargetPolicy>,
     expires_at: Instant,
+}
+
+impl std::fmt::Debug for StagedCredentialObligation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Deliberately omit `secret_handle`: repository policy is to never
+        // let a secret-handle identifier reach logs/panic output
+        // unredacted, and this type's derived `Debug` would otherwise flow
+        // through both `SandboxCredentialDecision::Grant` and the
+        // firewall's own (also redacted) `Debug`. `allowed_targets` is
+        // target metadata, not secret material, so it is safe to print.
+        formatter
+            .debug_struct("StagedCredentialObligation")
+            .field("allowed_targets", &self.allowed_targets)
+            .field("expires_at", &self.expires_at)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Outer TTL backstop (D4). Per the design doc, the intended caller-supplied
@@ -140,7 +157,7 @@ pub(crate) enum SandboxCredentialDecision {
     /// One or more staged obligations are currently live for this
     /// connection's `(tenant_id, user_id)` — never empty (an empty set
     /// decays to `NoGrant`, see `authorize`). The per-user sandbox
-    /// concurrency ceiling is >1 (`sandbox_quota.rs`), so this is the normal
+    /// concurrency ceiling (`ironclaw_host_api::resource::SandboxQuota`) is >1, so this is the normal
     /// case, not a race: each concurrent invocation stages its own
     /// obligation for possibly a different provider/binding, and all of
     /// them stay live simultaneously.
@@ -169,34 +186,26 @@ pub(crate) enum SandboxCredentialDecision {
 /// at the caller: deny the connection outright, never forward it — even
 /// bare. Distinct from [`SandboxCredentialDecision::NoGrant`], which is safe
 /// to forward.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[allow(dead_code)] // consumed by W6; not wired yet
 pub(crate) enum SandboxCredentialFirewallError {
     /// The connection's peer could not be attributed to a `(tenant_id,
     /// user_id)` (attribution failure — duplicate IP, malformed labels, a
-    /// Docker query error; see `super::attribution`'s own fail-closed
-    /// cases). There is no principal to authorize a lookup for.
+    /// Docker query error; see the future W6 proxy's connection-attribution
+    /// resolver for its own fail-closed cases). There is no principal to
+    /// authorize a lookup for.
+    #[error(
+        "sandbox credential firewall: connection denied — peer could not be attributed to a tenant/user"
+    )]
     AttributionFailed,
     /// The lookup did not complete before its deadline. Per §3.4, a timed
     /// out callback into policy is treated exactly like a denial — never as
     /// an implicit pass-through.
+    #[error(
+        "sandbox credential firewall: connection denied — obligation lookup exceeded its deadline"
+    )]
     LookupTimedOut,
 }
-
-impl std::fmt::Display for SandboxCredentialFirewallError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::AttributionFailed => formatter.write_str(
-                "sandbox credential firewall: connection denied — peer could not be attributed to a tenant/user",
-            ),
-            Self::LookupTimedOut => formatter.write_str(
-                "sandbox credential firewall: connection denied — obligation lookup exceeded its deadline",
-            ),
-        }
-    }
-}
-
-impl std::error::Error for SandboxCredentialFirewallError {}
 
 /// The obligation-staging chokepoint itself. Concrete struct, no trait: this
 /// crate has exactly one implementation and one process-local store; see the
@@ -204,7 +213,7 @@ impl std::error::Error for SandboxCredentialFirewallError {}
 /// already rejected.
 ///
 /// **Refcounted-set staging (not a single slot).** The per-user sandbox
-/// concurrency ceiling (`sandbox_quota.rs`) is >1: several invocations for
+/// concurrency ceiling (`ironclaw_host_api::resource::SandboxQuota`) is >1: several invocations for
 /// the same `(tenant_id, user_id)` legitimately run at once, each staging
 /// its own obligation. `stage()` therefore *adds* an entry under a unique id
 /// rather than replacing whatever the key currently holds, and
@@ -218,7 +227,7 @@ impl std::error::Error for SandboxCredentialFirewallError {}
 /// entire key unconditionally: with concurrency >1 that let an invocation
 /// which finished first silently delete a still-live sibling invocation's
 /// grant, just by dropping its own lease.
-#[derive(Debug, Default)]
+#[derive(Default)]
 #[allow(dead_code)] // consumed by W6; not wired yet
 pub(crate) struct SandboxCredentialFirewall {
     /// Eviction policy (bounded-resources rule,
@@ -234,7 +243,7 @@ pub(crate) struct SandboxCredentialFirewall {
     /// per-user sandbox concurrency ceiling, so the only failure mode
     /// without lazy removal is a slow leak from callers who stage once and
     /// never return — not an unbounded-growth attack surface.
-    staged: Mutex<HashMap<StagingKey, HashMap<u64, StagedCredentialObligation>>>,
+    staged: Mutex<HashMap<StagingKey, HashMap<StagedEntryId, StagedCredentialObligation>>>,
     /// Monotonic source of each entry's id. A plain `u64` counter (not a
     /// random nonce): uniqueness only needs to hold within this one
     /// process's lifetime — the same scope `staged` itself lives in — and a
@@ -243,6 +252,30 @@ pub(crate) struct SandboxCredentialFirewall {
     /// only job is producing distinct values; the `staged` mutex is what
     /// actually orders the insert each id guards.
     next_entry_id: AtomicU64,
+}
+
+/// Identifies one entry within a staging key's set. Only
+/// [`SandboxCredentialFirewall::stage`] constructs one (via
+/// `next_entry_id`), and only [`SandboxCredentialFirewall::revoke`] — private
+/// to this module, reachable solely through [`StagedObligationLease`]'s
+/// `Drop`/`revoke` — consumes one. Wrapping the counter closes the gap a bare
+/// `u64` would leave: nothing in this crate could otherwise construct an
+/// arbitrary id and revoke an entry it does not own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct StagedEntryId(u64);
+
+impl std::fmt::Debug for SandboxCredentialFirewall {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Deliberately omit `staged`'s contents: it keys tenant/user
+        // identity (compliance-sensitive, even though `StagedCredentialObligation`'s
+        // own `Debug` already redacts the secret handle within it). Expose
+        // only an aggregate count, mirroring `SandboxCertificateAuthority`'s
+        // manual `Debug` in `ca.rs`.
+        formatter
+            .debug_struct("SandboxCredentialFirewall")
+            .field("staged_keys", &self.lock().len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl SandboxCredentialFirewall {
@@ -272,7 +305,7 @@ impl SandboxCredentialFirewall {
         user_id: &UserId,
         obligation: StagedCredentialObligation,
     ) -> StagedObligationLease {
-        let entry_id = self.next_entry_id.fetch_add(1, Ordering::Relaxed);
+        let entry_id = StagedEntryId(self.next_entry_id.fetch_add(1, Ordering::Relaxed));
         self.lock()
             .entry(StagingKey::new(tenant_id, user_id))
             .or_default()
@@ -295,8 +328,13 @@ impl SandboxCredentialFirewall {
     /// nothing is staged for the key, or if `entry_id` is not (or no longer)
     /// present in it (already revoked, or reclaimed by `authorize` after
     /// expiry).
-    #[allow(dead_code)] // consumed by W6; not wired yet
-    pub(crate) fn revoke(&self, tenant_id: &TenantId, user_id: &UserId, entry_id: u64) {
+    ///
+    /// Private, not `pub(crate)`: [`StagedEntryId`] is only constructible by
+    /// [`Self::stage`], and only [`StagedObligationLease`] (defined in this
+    /// same module, so it can still reach a private method) is meant to call
+    /// this — keeping it out of the crate-visible surface means no other
+    /// code in this crate can revoke an entry it never staged.
+    fn revoke(&self, tenant_id: &TenantId, user_id: &UserId, entry_id: StagedEntryId) {
         let key = StagingKey::new(tenant_id, user_id);
         let mut staged = self.lock();
         if let Some(entries) = staged.get_mut(&key) {
@@ -312,10 +350,11 @@ impl SandboxCredentialFirewall {
     /// `identity` is the proxy's already-resolved attribution outcome for
     /// this connection — `None` means attribution failed (duplicate IP,
     /// malformed labels, a Docker query error, ...); this method does not
-    /// perform attribution itself, `super::attribution` owns that. `deadline`
-    /// bounds the whole call: if it has already passed by the time this
-    /// runs, the lookup is treated as timed out — CONNECTION-DENIAL, never
-    /// forwarded — exactly like a hung callback into policy per §3.4.
+    /// perform attribution itself — the future W6 proxy's
+    /// connection-attribution resolver owns that. `deadline` bounds the
+    /// whole call: if it has already passed by the time this runs, the
+    /// lookup is treated as timed out — CONNECTION-DENIAL, never forwarded
+    /// — exactly like a hung callback into policy per §3.4.
     ///
     /// Returns every currently-live obligation for this `(tenant_id,
     /// user_id)` as one [`SandboxCredentialDecision::Grant`] — see that
@@ -333,9 +372,18 @@ impl SandboxCredentialFirewall {
             return Err(SandboxCredentialFirewallError::LookupTimedOut);
         }
 
-        let now = Instant::now();
         let key = StagingKey::new(tenant_id, user_id);
         let mut staged = self.lock();
+        // Re-check after acquiring the lock: the doc above promises the
+        // deadline bounds the *whole call*, but lock acquisition itself can
+        // block under contention — without this check, a caller stalled on
+        // `self.lock()` past `deadline` could still fall through to a
+        // `Grant`/`NoGrant` decision instead of the required
+        // CONNECTION-DENIAL.
+        if Instant::now() >= deadline {
+            return Err(SandboxCredentialFirewallError::LookupTimedOut);
+        }
+        let now = Instant::now();
         let Some(entries) = staged.get_mut(&key) else {
             return Ok(SandboxCredentialDecision::NoGrant);
         };
@@ -355,8 +403,10 @@ impl SandboxCredentialFirewall {
 
     fn lock(
         &self,
-    ) -> std::sync::MutexGuard<'_, HashMap<StagingKey, HashMap<u64, StagedCredentialObligation>>>
-    {
+    ) -> std::sync::MutexGuard<
+        '_,
+        HashMap<StagingKey, HashMap<StagedEntryId, StagedCredentialObligation>>,
+    > {
         self.staged
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
@@ -407,7 +457,7 @@ pub(crate) struct StagedObligationLease {
     /// own* entry — never the whole key, and never a sibling entry that a
     /// concurrent or later `stage()` call for the same `(tenant_id,
     /// user_id)` added alongside it.
-    entry_id: u64,
+    entry_id: StagedEntryId,
     revoked: bool,
 }
 
@@ -438,6 +488,8 @@ impl Drop for StagedObligationLease {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_host_api::NetworkMethod;
+    use ironclaw_secrets::CredentialPathPolicy;
 
     const FAR_FUTURE: Duration = Duration::from_secs(3600);
 
@@ -570,11 +622,12 @@ mod tests {
             ),
         );
         // The obligation's `expires_at` is `Instant::now() + 0` at staging
-        // time; by the time this runs, some (possibly zero-width but
-        // monotonic) time has elapsed. To make the assertion deterministic
-        // rather than relying on real elapsed wall-clock time, drive the
-        // same expiry check `authorize` uses directly against a deadline
-        // guaranteed to be after staging.
+        // time. Sleeping 2ms guarantees `authorize`'s own `now` (captured
+        // when it runs, below) is strictly past `expires_at` regardless of
+        // clock resolution, so the obligation is deterministically expired
+        // by the time `authorize` checks it — independent of the `deadline`
+        // argument, which is a far-future value precisely so this test
+        // isolates obligation expiry from lookup-deadline expiry.
         std::thread::sleep(Duration::from_millis(2));
 
         let decision = firewall
@@ -714,7 +767,7 @@ mod tests {
 
     /// Staging twice for the same `(tenant_id, user_id)` key adds a second
     /// live entry — it does NOT replace the first. The per-user sandbox
-    /// concurrency ceiling is >1 (`sandbox_quota.rs`), so two invocations
+    /// concurrency ceiling (`ironclaw_host_api::resource::SandboxQuota`) is >1, so two invocations
     /// staging for the same principal at once is the normal path, and both
     /// obligations must stay live until each is independently revoked.
     ///
@@ -750,14 +803,15 @@ mod tests {
     /// invocation has restaged the same `(tenant_id, user_id)` must not
     /// revoke the newer invocation's still-live grant.
     ///
-    /// `restaging_the_same_key_replaces_the_previous_obligation` above cannot
-    /// catch this: both `_lease_old` and `_lease_new` are bound with `_`
-    /// prefixes and never explicitly dropped, so they fall at scope end in
-    /// reverse declaration order (`_lease_new` first, then `_lease_old`) —
-    /// the stale lease's drop-time revoke becomes a no-op remove against an
-    /// already-empty map, which passes whether or not the compare-and-delete
-    /// fix exists. This test forces the actual hazard order: drop the older
-    /// lease *first*, while the newer lease (and its grant) is still alive.
+    /// `staging_the_same_key_twice_keeps_both_obligations_live` above cannot
+    /// catch this: each lease already owns its own entry in the refcounted
+    /// set, so `_lease_old` and `_lease_new` falling out of scope in reverse
+    /// declaration order just removes each one's own entry — a harmless,
+    /// order-independent outcome that would pass whether or not per-entry
+    /// isolation actually holds. This test forces the actual hazard order:
+    /// drop the older lease *first*, while the newer lease (and its grant)
+    /// is still alive, to prove one lease's revoke never reaches into a
+    /// sibling's still-live entry.
     #[test]
     fn dropping_a_stale_lease_does_not_revoke_a_newer_grant_for_the_same_key() {
         let firewall = Arc::new(SandboxCredentialFirewall::new());
@@ -954,7 +1008,7 @@ mod tests {
     }
 
     /// N-safety: with the per-user sandbox concurrency ceiling now >1
-    /// (`sandbox_quota.rs`), 4 concurrent invocations staging for the same
+    /// (`ironclaw_host_api::resource::SandboxQuota`), 4 concurrent invocations staging for the same
     /// `(tenant_id, user_id)` is the normal case. Dropping their leases in a
     /// SHUFFLED order (neither LIFO nor FIFO — the order most likely to
     /// defeat an implementation that only happens to work for stack- or
@@ -1103,6 +1157,103 @@ mod tests {
             &tenant_a,
             &user_a,
             &[handle("token-1"), handle("token-2")],
+        );
+    }
+
+    /// The firewall stops at "here is everything currently entitled" and
+    /// leaves target matching to the future proxy caller (see
+    /// `SandboxCredentialDecision::Grant`'s doc) — but that only works if
+    /// non-empty `allowed_targets` actually survive `stage`/`authorize`
+    /// unchanged. Every other test in this module stages an empty policy
+    /// vector; this one pins that real policies round-trip intact.
+    #[test]
+    fn non_empty_target_policies_survive_stage_and_authorize_unchanged() {
+        let firewall = Arc::new(SandboxCredentialFirewall::new());
+        let tenant_a = tenant("tenant-a");
+        let user_a = user("user-a");
+        let policies = vec![
+            CredentialTargetPolicy {
+                scheme: "https".to_string(),
+                host: "api.example.com".to_string(),
+                port: Some(443),
+                path: CredentialPathPolicy::Prefix("/v1".to_string()),
+                methods: vec![NetworkMethod::Get],
+            },
+            CredentialTargetPolicy {
+                scheme: "https".to_string(),
+                host: "upload.example.com".to_string(),
+                port: None,
+                path: CredentialPathPolicy::Exact("/upload".to_string()),
+                methods: vec![NetworkMethod::Post],
+            },
+        ];
+        let _lease = firewall.stage(
+            &tenant_a,
+            &user_a,
+            StagedCredentialObligation::new(handle("github-token"), policies.clone(), FAR_FUTURE),
+        );
+
+        let decision = firewall
+            .authorize(Some((&tenant_a, &user_a)), far_future_deadline())
+            .expect("attributed lookup within deadline must not error");
+
+        match decision {
+            SandboxCredentialDecision::Grant(obligations) => {
+                assert_eq!(obligations.len(), 1);
+                assert_eq!(
+                    obligations[0].allowed_targets, policies,
+                    "allowed_targets must round-trip through stage/authorize unchanged"
+                );
+            }
+            SandboxCredentialDecision::NoGrant => panic!("expected a grant"),
+        }
+    }
+
+    /// Real contention exercise (not this module's usual single-thread
+    /// pattern): several threads staging, authorizing, and revoking
+    /// concurrently for the same `(tenant_id, user_id)` must still leave
+    /// each entry's lifecycle isolated from its siblings' — the property
+    /// the shuffled-drop-order test above pins sequentially, exercised here
+    /// under real thread interleaving.
+    #[test]
+    fn concurrent_stage_authorize_and_revoke_preserve_per_entry_isolation() {
+        let firewall = Arc::new(SandboxCredentialFirewall::new());
+        let tenant_a = tenant("tenant-a");
+        let user_a = user("user-a");
+
+        let mut handles = Vec::new();
+        for i in 0..8 {
+            let firewall = Arc::clone(&firewall);
+            let tenant_a = tenant_a.clone();
+            let user_a = user_a.clone();
+            handles.push(std::thread::spawn(move || {
+                let lease = firewall.stage(
+                    &tenant_a,
+                    &user_a,
+                    StagedCredentialObligation::new(
+                        handle(&format!("token-{i}")),
+                        allow_all_targets(),
+                        FAR_FUTURE,
+                    ),
+                );
+                // Concurrent reads while siblings are still staging/revoking.
+                let _ = firewall.authorize(Some((&tenant_a, &user_a)), far_future_deadline());
+                lease.revoke();
+            }));
+        }
+
+        for handle in handles {
+            handle.join().expect("worker thread must not panic");
+        }
+
+        // Every entry revoked its own lease; none should be left staged.
+        let decision = firewall
+            .authorize(Some((&tenant_a, &user_a)), far_future_deadline())
+            .expect("attributed lookup within deadline must not error");
+        assert_eq!(
+            decision,
+            SandboxCredentialDecision::NoGrant,
+            "all 8 concurrently staged-and-revoked entries must be gone"
         );
     }
 }
