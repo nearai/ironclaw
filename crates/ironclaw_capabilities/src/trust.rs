@@ -31,8 +31,8 @@ pub(crate) enum TrustEvaluationError {
 
 impl TrustEvaluationError {
     /// Whether this failure is the "capability not in the registry" case, which
-    /// the host maps to `RuntimeFailureKind::MissingRuntime`; every other variant
-    /// maps to `RuntimeFailureKind::Authorization` (behavior-preserving).
+    /// the host maps to `FailureKind::MissingRuntime`; every other variant
+    /// maps to `FailureKind::Authorization` (behavior-preserving).
     pub(crate) fn is_unknown_capability(self) -> bool {
         matches!(self, Self::UnknownCapability)
     }

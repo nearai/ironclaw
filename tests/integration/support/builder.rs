@@ -351,6 +351,14 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Every capability dispatch returns a caller-shaped port error
+    /// (`InvalidInvocation`). #6284: such errors surface model-visibly and the
+    /// run continues; only genuine host faults still end it.
+    pub fn with_recoverable_port_error_for_test(mut self) -> Self {
+        self.capability = RebornCapabilityBackend::RecoverablePortErrorEcho;
+        self
+    }
+
     /// Replace the default echo with a deterministic no-progress echo. This is
     /// a test seam; the same canonical stop strategy and runtime wiring run.
     pub fn with_no_progress_echo_for_test(mut self) -> Self {
@@ -1770,7 +1778,9 @@ impl RebornIntegrationHarness {
         }
         let harness = match &self._shared.capability {
             GroupCapability::HostRuntime(arc) => arc,
-            GroupCapability::Recording | GroupCapability::RecordingNoProgress => {
+            GroupCapability::Recording
+            | GroupCapability::RecordingNoProgress
+            | GroupCapability::RecordingRecoverablePortError => {
                 return Err(
                     "no host-runtime capability backend to seed a github credential account".into(),
                 );
@@ -1837,7 +1847,9 @@ impl RebornIntegrationHarness {
     ) -> HarnessResult<()> {
         let harness = match &self._shared.capability {
             GroupCapability::HostRuntime(arc) => arc,
-            GroupCapability::Recording | GroupCapability::RecordingNoProgress => {
+            GroupCapability::Recording
+            | GroupCapability::RecordingNoProgress
+            | GroupCapability::RecordingRecoverablePortError => {
                 return Err(
                     "no host-runtime capability backend to seed a credential account".into(),
                 );
@@ -1864,7 +1876,9 @@ impl RebornIntegrationHarness {
     pub async fn revoke_capability_credential_accounts(&self, provider: &str) -> HarnessResult<()> {
         let harness = match &self._shared.capability {
             GroupCapability::HostRuntime(arc) => arc,
-            GroupCapability::Recording | GroupCapability::RecordingNoProgress => {
+            GroupCapability::Recording
+            | GroupCapability::RecordingNoProgress
+            | GroupCapability::RecordingRecoverablePortError => {
                 return Err(
                     "no host-runtime capability backend to revoke credential accounts".into(),
                 );
