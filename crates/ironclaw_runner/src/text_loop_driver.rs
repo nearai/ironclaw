@@ -258,8 +258,15 @@ fn loop_failure_kind_name(kind: LoopFailureKind) -> &'static str {
         LoopFailureKind::InterruptedUnexpectedly => "interrupted_unexpectedly",
         LoopFailureKind::NoProgressDetected => "no_progress_detected",
         LoopFailureKind::PolicyDenied => "policy_denied",
-        // LoopFailureKind is `#[non_exhaustive]`; fail closed if a new variant
-        // lands in `ironclaw_turns` ahead of this matcher being updated.
+        LoopFailureKind::CompactionUnavailable => "compaction_unavailable",
+        // LoopFailureKind is `#[non_exhaustive]`; the wildcard is forced, not a
+        // choice. It must stay a fail-closed backstop for a variant that lands
+        // in `ironclaw_turns` before this matcher is updated — NOT a resting
+        // place for known variants. `every_loop_failure_kind_maps_to_its_own
+        // _category` below is what keeps it empty; `CompactionUnavailable` sat
+        // here undetected and reported a resource condition as `driver_bug`,
+        // which is non-auto-retriable and tells the user to contact support
+        // about an internal error that never happened.
         _ => "driver_bug",
     }
 }
@@ -267,6 +274,67 @@ fn loop_failure_kind_name(kind: LoopFailureKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every `LoopFailureKind` must map to its own category — never to the
+    /// `_ => "driver_bug"` backstop.
+    ///
+    /// `LoopFailureKind` is `#[non_exhaustive]`, so the wildcard is forced and
+    /// the compiler cannot catch a variant that falls through it. This test is
+    /// the substitute. It found `CompactionUnavailable` sitting in the
+    /// backstop: a resource condition was reported as `driver_bug`, which is
+    /// NOT auto-retriable (`retry_disposition::is_auto_retriable_category`)
+    /// while `compaction_unavailable` is — so an auto-recoverable run died and
+    /// told the user to contact support about an internal error that never
+    /// happened.
+    ///
+    /// The assertion compares against the kind's OWN `as_str()` rather than a
+    /// second literal list, so this cannot drift into the same duplication it
+    /// exists to police. A new variant in `ironclaw_turns` must be added to the
+    /// list below AND to `loop_failure_kind_name`; the compiler will not tell
+    /// you, this will.
+    #[test]
+    fn every_loop_failure_kind_maps_to_its_own_category() {
+        let kinds = [
+            LoopFailureKind::ModelError,
+            LoopFailureKind::ContextBuildFailed,
+            LoopFailureKind::CapabilityProtocolError,
+            LoopFailureKind::IterationLimit,
+            LoopFailureKind::InvalidModelOutput,
+            LoopFailureKind::CheckpointRejected,
+            LoopFailureKind::CheckpointUnavailable,
+            LoopFailureKind::TranscriptWriteFailed,
+            LoopFailureKind::DriverBug,
+            LoopFailureKind::InterruptedUnexpectedly,
+            LoopFailureKind::NoProgressDetected,
+            LoopFailureKind::PolicyDenied,
+            LoopFailureKind::CompactionUnavailable,
+        ];
+        for kind in kinds {
+            assert_eq!(
+                loop_failure_kind_name(kind),
+                kind.as_str(),
+                "{kind:?} does not map to its own category — it is falling \
+                 through the `_ => \"driver_bug\"` backstop, which reports a \
+                 real failure as an internal bug and changes its retry lane"
+            );
+        }
+    }
+
+    /// The backstop must remain reachable only by a genuinely unknown variant.
+    /// If this ever fails, a known kind has been removed from the matcher.
+    #[test]
+    fn only_driver_bug_itself_maps_to_the_driver_bug_category() {
+        assert_eq!(
+            loop_failure_kind_name(LoopFailureKind::DriverBug),
+            "driver_bug"
+        );
+        assert_eq!(
+            loop_failure_kind_name(LoopFailureKind::CompactionUnavailable),
+            "compaction_unavailable",
+            "a compaction outage is a retriable resource condition, not a bug \
+             in our driver"
+        );
+    }
     use crate::failure_categories::{
         MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
         MODEL_CREDITS_EXHAUSTED_REASON_KIND,
