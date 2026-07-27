@@ -67,9 +67,11 @@ fn workspace_root() -> PathBuf {
 /// Blank out comment spans so prose about the retired vocabulary stays legal
 /// while code that names it does not, preserving line numbers for reporting.
 ///
-/// Handles `//` line comments and `/* … */` block comments (including the
-/// `/** … */` doc form), because the module contract above promises comments
-/// are exempt — a promise the earlier line-only version did not keep.
+/// Handles `//` line comments and `/* … */` block comments, including the
+/// `/** … */` doc form and **nested** blocks (Rust permits `/* /* … */ … */`),
+/// because the module contract above promises comments are exempt — a promise
+/// the earlier line-only version did not keep. Covered by `strip_comments_*`
+/// tests below.
 ///
 /// Deliberately conservative about string literals: a `//` or `/*` inside one
 /// blanks the rest of that span, which can only ever *hide* a hit, never
@@ -80,12 +82,21 @@ fn strip_comments(source: &str) -> String {
     let bytes = source.as_bytes();
     let mut out = String::with_capacity(source.len());
     let mut index = 0usize;
-    let mut in_block = false;
+    // Depth, not a bool: Rust block comments nest (`/* /* … */ still comment */`),
+    // so a bool would exit at the first `*/` and scan the tail as code.
+    let mut depth = 0usize;
     while index < bytes.len() {
         let byte = bytes[index];
-        if in_block {
+        if depth > 0 {
+            if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
+                depth += 1;
+                out.push(' ');
+                out.push(' ');
+                index += 2;
+                continue;
+            }
             if byte == b'*' && bytes.get(index + 1) == Some(&b'/') {
-                in_block = false;
+                depth -= 1;
                 out.push(' ');
                 out.push(' ');
                 index += 2;
@@ -97,7 +108,7 @@ fn strip_comments(source: &str) -> String {
             continue;
         }
         if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
-            in_block = true;
+            depth = 1;
             out.push(' ');
             out.push(' ');
             index += 2;
@@ -214,4 +225,70 @@ fn the_surviving_failure_vocabulary_stays_closed() {
          projections match exhaustively so a new variant fails to compile until \
          it is classified. That compile error is the recoverability review."
     );
+}
+
+/// The comment contract is a promise this gate makes to every file it scans,
+/// so it gets its own coverage rather than being trusted. A guardrail whose
+/// exemption rule is untested is a guardrail that silently changes meaning.
+#[cfg(test)]
+mod strip_comments_tests {
+    use super::strip_comments;
+
+    fn scans_as_code(source: &str, term: &str) -> bool {
+        strip_comments(source).contains(term)
+    }
+
+    #[test]
+    fn line_comments_are_exempt_but_trailing_code_is_not() {
+        assert!(!scans_as_code(
+            "// CapabilityFailureKind was retired\nfn ok() {}",
+            "CapabilityFailureKind"
+        ));
+        // Code BEFORE a trailing comment still scans.
+        assert!(scans_as_code(
+            "use CapabilityErrorClass; // retired\n",
+            "CapabilityErrorClass"
+        ));
+    }
+
+    #[test]
+    fn block_and_doc_comments_are_exempt_across_lines() {
+        assert!(!scans_as_code(
+            "/*\n RuntimeFailureKind lived here\n across lines\n*/\nfn ok() {}",
+            "RuntimeFailureKind"
+        ));
+        assert!(!scans_as_code(
+            "/** doc block naming CapabilityFailureKind */\nfn ok() {}",
+            "CapabilityFailureKind"
+        ));
+    }
+
+    #[test]
+    fn nested_block_comments_do_not_end_early() {
+        // Rust block comments nest. A bool-based stripper would close at the
+        // inner `*/` and scan `RuntimeFailureKind` as live code.
+        assert!(!scans_as_code(
+            "/* outer /* inner */ RuntimeFailureKind still commented */\nfn ok() {}",
+            "RuntimeFailureKind"
+        ));
+    }
+
+    #[test]
+    fn code_after_a_closed_block_still_scans() {
+        assert!(scans_as_code(
+            "/* retired: CapabilityFailureKind */ pub enum CapabilityErrorClass {}",
+            "CapabilityErrorClass"
+        ));
+    }
+
+    #[test]
+    fn line_numbers_survive_stripping() {
+        // Hits are reported by line, so blanking must preserve newlines.
+        let stripped = strip_comments("/* one\ntwo\nthree */\npub enum CapabilityErrorClass {}");
+        let line = stripped
+            .lines()
+            .position(|line| line.contains("CapabilityErrorClass"))
+            .expect("term survives on its own line");
+        assert_eq!(line, 3, "the term is on source line 4 (0-indexed 3)");
+    }
 }

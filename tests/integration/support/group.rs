@@ -318,8 +318,9 @@ pub(crate) enum GroupCapability {
     Recording,
     /// Recording echo whose results deliberately report `NoChange`.
     RecordingNoProgress,
-    /// Recording echo whose port returns a caller-shaped `Unauthorized` error
-    /// instead of a resolution (#6284 capability-stage contract).
+    /// Recording echo whose port returns a caller-shaped `InvalidInvocation`
+    /// error instead of a resolution, projecting to `FailureKind::InputEncode`
+    /// (#6284 capability-stage contract).
     RecordingRecoverablePortError,
     /// Real first-party or MCP host runtime, shared across all threads.
     /// All approval/auto-approve/credential/memory state is common because the
