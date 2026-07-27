@@ -850,6 +850,41 @@ mod tests {
     }
 
     #[test]
+    fn redact_all_secrets_masks_sandbox_credential_placeholder_without_dropping_context() {
+        // Detection of `icsbx_` placeholders is covered elsewhere; this pins
+        // that *redaction* actually removes the token value from
+        // model-visible output while the surrounding diagnostic context
+        // (path, status code) survives — a redaction that nuked the whole
+        // string would "pass" a detection-only test while destroying the
+        // output's diagnostic value.
+        let detector = LeakDetector::new();
+        // Realistic shape: registry-generated placeholders are `icsbx_` plus
+        // exactly 32 lowercase hex characters (a simple-form UUID).
+        let token = "icsbx_0123456789abcdef0123456789abcdef";
+        let content = format!("auth failed at /workspace/config using {token} (HTTP 401)");
+
+        let (redacted, changed) = detector.redact_all_secrets(&content);
+
+        assert!(
+            changed,
+            "a placeholder was present, so redaction must report a change"
+        );
+        assert!(
+            !redacted.contains(token),
+            "placeholder token must be redacted: {redacted}"
+        );
+        assert!(
+            redacted.contains("/workspace/config"),
+            "path must survive: {redacted}"
+        );
+        assert!(
+            redacted.contains("HTTP 401"),
+            "status code must survive: {redacted}"
+        );
+        assert!(redacted.contains("[REDACTED]"));
+    }
+
+    #[test]
     fn redact_all_secrets_leaves_clean_text_untouched() {
         let detector = LeakDetector::new();
         let content = "read_file failed at /workspace/x (HTTP 404)";
