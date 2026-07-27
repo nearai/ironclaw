@@ -1044,23 +1044,7 @@ async fn malformed_spawn_subagent_input_is_model_repairable_through_the_gateway(
     // Control: the same armed errors with a WELL-FORMED payload must not
     // reject — at BOTH stages. Without this, either double could reject
     // unconditionally and every assertion above would still pass, proving
-    // error routing rather than malformed-input handling. Without this, the assertions above would pass on a port
-    // double that rejects unconditionally — proving error routing, not that the
-    // missing `mission` field is what triggers the rejection.
-    let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
-        id: "call_1".to_string(),
-        name: "builtin__spawn_subagent".to_string(),
-        arguments: serde_json::json!({"flavor": "explorer", "mission": "survey the repo"}),
-        reasoning: None,
-        signature: None,
-        arguments_parse_error: None,
-    }]));
-    let gateway = LlmProviderModelGateway::with_provider_identity(
-        STATIC_PROVIDER_ID,
-        Arc::clone(&provider),
-        LlmModelProfilePolicy::new()
-            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
-    );
+    // error routing rather than malformed-input handling.
     for (stage, port) in [
         (
             "validation",
