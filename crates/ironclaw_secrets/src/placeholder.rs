@@ -610,5 +610,5 @@ fn bind_placeholder_to_session(
 }
 
 #[cfg(test)]
-#[path = "placeholder_tests.rs"]
+#[path = "placeholder/tests.rs"]
 mod tests;
