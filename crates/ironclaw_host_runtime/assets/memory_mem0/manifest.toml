@@ -10,8 +10,11 @@ kind = "first_party"
 service = "mem0_memory_provider"
 
 # The [memory] surface marks this extension a backend for the host memory
-# adapter. mem0 backs the same operation families as the native provider; the
-# compose-time [memory] binding selects exactly one provider (native by default,
-# mem0 when explicitly bound + configured).
+# adapter; the compose-time [memory] binding selects exactly one provider
+# (native by default, mem0 when explicitly bound + configured). The lifecycle
+# set is honest: mem0 implements the long-term retrieval lane and profile
+# reads. It has no thread partitioning (no short-term lane) and does not
+# record interactions, so those hooks are not declared and the host never
+# calls them.
 [memory]
-operations = ["document_store", "context_retrieval", "interaction_log"]
+lifecycle = ["read_long_term", "profile_read"]

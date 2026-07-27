@@ -15,11 +15,13 @@ kind = "first_party"
 service = "native_memory_provider"
 
 # The [memory] surface marks this extension a backend for the host memory
-# adapter and declares the operation families it supports. document_store is
-# the model tool surface; context_retrieval / interaction_log gate the
-# host-managed retrieve-before / record-after lifecycle.
+# adapter. The [[tools]] array below is the provider's model tool surface;
+# `lifecycle` declares the host-initiated hooks this provider participates in
+# (an undeclared hook is never called). The native provider implements the
+# full set: both retrieve-before-run lanes, after-turn interaction recording,
+# and loop-start profile reads.
 [memory]
-operations = ["document_store", "context_retrieval", "interaction_log"]
+lifecycle = ["read_long_term", "read_short_term", "record_interaction", "profile_read"]
 
 # read/write model tools + native-only search/tree conveniences. All four are
 # routed to the bound MemoryService by the host; their input/output schemas are

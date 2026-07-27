@@ -209,6 +209,14 @@ mod tests {
             .memory
             .as_ref()
             .expect("mem0 manifest declares the [memory] surface");
-        assert!(memory.backs(ironclaw_host_api::MemoryOperationKind::DocumentStore));
+        // The lifecycle declaration is honest (F5): mem0 implements the
+        // long-term retrieval lane and profile reads, has no thread
+        // partitioning (no short-term lane), and does not record
+        // interactions — undeclared hooks are never called by the host.
+        use ironclaw_host_api::MemoryLifecycleHook;
+        assert!(memory.declares(MemoryLifecycleHook::ReadLongTerm));
+        assert!(memory.declares(MemoryLifecycleHook::ProfileRead));
+        assert!(!memory.declares(MemoryLifecycleHook::ReadShortTerm));
+        assert!(!memory.declares(MemoryLifecycleHook::RecordInteraction));
     }
 }

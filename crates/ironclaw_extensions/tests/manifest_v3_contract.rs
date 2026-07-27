@@ -14,7 +14,7 @@ use ironclaw_extensions::{
 };
 use ironclaw_host_api::{
     CapabilitySurfaceKind, ConversationModel, EffectKind, HOST_RUNTIME_HTTP_EGRESS_PORT_ID,
-    HostPortCatalog, HostPortCatalogEntry, HostPortId, PermissionMode,
+    HostPortCatalog, HostPortCatalogEntry, HostPortId, MemoryLifecycleHook, PermissionMode,
     RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource, VendorAuthRecipe,
 };
 
@@ -866,12 +866,12 @@ fn resolved_contract_round_trips_through_serde() {
 }
 
 // ---------------------------------------------------------------------------
-// [memory] surface validation (#3537)
+// [memory] surface validation (#3537, lifecycle-capability contract)
 // ---------------------------------------------------------------------------
 
-/// Minimal well-formed `[memory]` manifest (the mem0-style provider-only
-/// shape: no tools, first_party runtime). Each rejection test perturbs one
-/// axis of this baseline.
+/// Minimal well-formed `[memory]` manifest (a provider-only shape: no tools,
+/// first_party runtime, the full lifecycle set). Each test perturbs one axis
+/// of this baseline.
 const MEMORY_PROVIDER_MANIFEST: &str = r#"
 schema_version = "reborn.extension_manifest.v3"
 id = "acme.memory"
@@ -885,18 +885,31 @@ kind = "first_party"
 service = "acme_memory_provider"
 
 [memory]
-operations = ["document_store"]
+lifecycle = ["read_long_term", "read_short_term", "record_interaction", "profile_read"]
 "#;
 
+const FULL_LIFECYCLE_LINE: &str =
+    r#"lifecycle = ["read_long_term", "read_short_term", "record_interaction", "profile_read"]"#;
+
 #[test]
-fn memory_provider_manifest_baseline_parses() {
+fn memory_provider_manifest_baseline_parses_with_full_lifecycle() {
     let record = parse_v3(MEMORY_PROVIDER_MANIFEST).expect("memory provider manifest parses");
     let memory = record
         .resolved()
         .memory
         .as_ref()
         .expect("resolved manifest carries the [memory] descriptor");
-    assert!(!memory.operations.is_empty());
+    for hook in [
+        MemoryLifecycleHook::ReadLongTerm,
+        MemoryLifecycleHook::ReadShortTerm,
+        MemoryLifecycleHook::RecordInteraction,
+        MemoryLifecycleHook::ProfileRead,
+    ] {
+        assert!(
+            memory.declares(hook),
+            "baseline manifest must declare {hook:?}"
+        );
+    }
 }
 
 #[test]
@@ -912,26 +925,58 @@ fn memory_surface_on_non_first_party_runtime_fails_closed() {
     );
 }
 
+/// F2 regression: a provider truthfully declaring only the hooks it
+/// implements is a legal manifest. Undeclared hooks resolve as not declared.
 #[test]
-fn memory_surface_with_empty_operations_fails_closed() {
-    let toml =
-        MEMORY_PROVIDER_MANIFEST.replace("operations = [\"document_store\"]", "operations = []");
-    let error = parse_v3(&toml).expect_err("[memory] with no operations must fail closed");
-    assert!(
-        error.contains("[memory]") && error.contains("must not be empty"),
-        "{error}"
+fn memory_surface_accepts_a_lifecycle_subset() {
+    let toml = MEMORY_PROVIDER_MANIFEST.replace(
+        FULL_LIFECYCLE_LINE,
+        r#"lifecycle = ["read_long_term", "record_interaction"]"#,
     );
+    let record = parse_v3(&toml).expect("a lifecycle subset must parse");
+    let memory = record
+        .resolved()
+        .memory
+        .as_ref()
+        .expect("resolved manifest carries the [memory] descriptor");
+    assert!(memory.declares(MemoryLifecycleHook::ReadLongTerm));
+    assert!(memory.declares(MemoryLifecycleHook::RecordInteraction));
+    assert!(!memory.declares(MemoryLifecycleHook::ReadShortTerm));
+    assert!(!memory.declares(MemoryLifecycleHook::ProfileRead));
 }
 
+/// A `[memory]` section with an empty lifecycle is a tools-only memory
+/// backend: it contributes its declared tools and participates in no
+/// host-initiated hook.
 #[test]
-fn memory_surface_without_document_store_fails_closed() {
-    let toml = MEMORY_PROVIDER_MANIFEST.replace(
-        "operations = [\"document_store\"]",
-        "operations = [\"context_retrieval\"]",
-    );
-    let error = parse_v3(&toml).expect_err("[memory] without document_store must fail closed");
-    assert!(
-        error.contains("[memory]") && error.contains("document_store"),
-        "{error}"
-    );
+fn memory_surface_with_empty_lifecycle_is_tools_only() {
+    let toml = MEMORY_PROVIDER_MANIFEST.replace(FULL_LIFECYCLE_LINE, "lifecycle = []");
+    let record = parse_v3(&toml).expect("[memory] with an empty lifecycle must parse");
+    let memory = record
+        .resolved()
+        .memory
+        .as_ref()
+        .expect("resolved manifest carries the [memory] descriptor");
+    assert!(memory.lifecycle.is_empty());
+}
+
+/// `lifecycle` may be absent entirely — equivalent to an empty declaration.
+#[test]
+fn memory_surface_with_absent_lifecycle_is_tools_only() {
+    let toml = MEMORY_PROVIDER_MANIFEST.replace(FULL_LIFECYCLE_LINE, "");
+    let record = parse_v3(&toml).expect("[memory] with no lifecycle key must parse");
+    let memory = record
+        .resolved()
+        .memory
+        .as_ref()
+        .expect("resolved manifest carries the [memory] descriptor");
+    assert!(memory.lifecycle.is_empty());
+}
+
+/// Unknown lifecycle tokens fail closed: the vocabulary is exactly
+/// `read_long_term | read_short_term | record_interaction | profile_read`.
+#[test]
+fn memory_surface_rejects_an_unknown_lifecycle_token() {
+    let toml = MEMORY_PROVIDER_MANIFEST.replace(FULL_LIFECYCLE_LINE, r#"lifecycle = ["on_boot"]"#);
+    parse_v3(&toml).expect_err("an unknown lifecycle token must fail closed");
 }
