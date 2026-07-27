@@ -26,7 +26,7 @@ pub(super) enum RebornCapabilityBackend {
     /// used to drive the production no-progress detector deterministically.
     NoProgressEcho,
     /// Echo-shaped capability whose port returns a caller-shaped
-    /// `AgentLoopHostError` (`Unauthorized`) instead of a resolution. Drives
+    /// `AgentLoopHostError` (`InvalidInvocation`) instead of a resolution. Drives
     /// the #6284 capability-stage contract: a port error the model can act on
     /// surfaces as a tool error and the run continues, rather than ending it.
     RecoverablePortErrorEcho,

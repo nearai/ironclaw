@@ -351,16 +351,16 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
-    /// Replace the default echo with a deterministic no-progress echo. This is
-    /// a test seam; the same canonical stop strategy and runtime wiring run.
     /// Every capability dispatch returns a caller-shaped port error
-    /// (`InvalidInvocation`). #6284: such errors surface model-visibly and the run
-    /// continues; only genuine host faults still end it.
+    /// (`InvalidInvocation`). #6284: such errors surface model-visibly and the
+    /// run continues; only genuine host faults still end it.
     pub fn with_recoverable_port_error_for_test(mut self) -> Self {
         self.capability = RebornCapabilityBackend::RecoverablePortErrorEcho;
         self
     }
 
+    /// Replace the default echo with a deterministic no-progress echo. This is
+    /// a test seam; the same canonical stop strategy and runtime wiring run.
     pub fn with_no_progress_echo_for_test(mut self) -> Self {
         self.capability = RebornCapabilityBackend::NoProgressEcho;
         self

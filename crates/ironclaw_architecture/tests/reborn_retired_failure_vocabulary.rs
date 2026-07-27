@@ -64,28 +64,70 @@ fn workspace_root() -> PathBuf {
     path
 }
 
-/// Strip line comments so prose about the retired vocabulary stays legal while
-/// code that names it does not. Deliberately conservative: a `//` inside a
-/// string literal ends the line early, which can only ever *hide* a hit on
-/// that line, never invent one. String literals naming these types would be
+/// Blank out comment spans so prose about the retired vocabulary stays legal
+/// while code that names it does not, preserving line numbers for reporting.
+///
+/// Handles `//` line comments and `/* … */` block comments (including the
+/// `/** … */` doc form), because the module contract above promises comments
+/// are exempt — a promise the earlier line-only version did not keep.
+///
+/// Deliberately conservative about string literals: a `//` or `/*` inside one
+/// blanks the rest of that span, which can only ever *hide* a hit, never
+/// invent one. A retired type name inside a string literal would be
 /// stringly-typed handling of the exact domain this collapse made typed, so
-/// the blind spot is not one worth widening the parser for.
-fn code_only(line: &str) -> &str {
-    let trimmed = line.trim_start();
-    if trimmed.starts_with("//") || trimmed.starts_with('*') || trimmed.starts_with("#!") {
-        return "";
+/// the blind spot is not worth a real parser.
+fn strip_comments(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut out = String::with_capacity(source.len());
+    let mut index = 0usize;
+    let mut in_block = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_block {
+            if byte == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                in_block = false;
+                out.push(' ');
+                out.push(' ');
+                index += 2;
+                continue;
+            }
+            // Keep newlines so reported line numbers stay accurate.
+            out.push(if byte == b'\n' { '\n' } else { ' ' });
+            index += 1;
+            continue;
+        }
+        if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
+            in_block = true;
+            out.push(' ');
+            out.push(' ');
+            index += 2;
+            continue;
+        }
+        if byte == b'/' && bytes.get(index + 1) == Some(&b'/') {
+            while index < bytes.len() && bytes[index] != b'\n' {
+                out.push(' ');
+                index += 1;
+            }
+            continue;
+        }
+        out.push(byte as char);
+        index += 1;
     }
-    match line.find("//") {
-        Some(index) => &line[..index],
-        None => line,
-    }
+    out
 }
 
-fn scan_dir(root: &Path, dir: &Path, hits: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
+/// Scan one directory tree, failing loudly on anything unreadable.
+///
+/// A gate that silently skips a path it cannot read is a gate that passes
+/// vacuously — the failure mode this whole PR exists to remove, so it would be
+/// perverse to ship it here. Every IO error propagates with its path.
+fn scan_dir(root: &Path, dir: &Path, hits: &mut Vec<String>) -> std::io::Result<()> {
+    let entries = std::fs::read_dir(dir)
+        .map_err(|error| std::io::Error::other(format!("read_dir {}: {error}", dir.display())))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            std::io::Error::other(format!("entry under {}: {error}", dir.display()))
+        })?;
         let path = entry.path();
         let name = entry.file_name();
         let name = name.to_string_lossy();
@@ -93,7 +135,7 @@ fn scan_dir(root: &Path, dir: &Path, hits: &mut Vec<String>) {
             if name == "target" || name == "node_modules" || name == ".git" {
                 continue;
             }
-            scan_dir(root, &path, hits);
+            scan_dir(root, &path, hits)?;
             continue;
         }
         if !name.ends_with(".rs") {
@@ -108,29 +150,28 @@ fn scan_dir(root: &Path, dir: &Path, hits: &mut Vec<String>) {
         if relative.ends_with("reborn_retired_failure_vocabulary.rs") {
             continue;
         }
-        let Ok(contents) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        for (number, line) in contents.lines().enumerate() {
-            let code = code_only(line);
-            if code.is_empty() {
+        let contents = std::fs::read_to_string(&path)
+            .map_err(|error| std::io::Error::other(format!("read {relative}: {error}")))?;
+        for (number, line) in strip_comments(&contents).lines().enumerate() {
+            if line.trim().is_empty() {
                 continue;
             }
             for term in RETIRED_TYPES.iter().chain(RETIRED_MAPPERS) {
-                if code.contains(term) {
+                if line.contains(term) {
                     hits.push(format!("{relative}:{}: `{term}`", number + 1));
                 }
             }
         }
     }
+    Ok(())
 }
 
 #[test]
 fn reborn_code_never_redeclares_the_failure_vocabulary() {
     let root = workspace_root();
     let mut hits = Vec::new();
-    scan_dir(&root, &root.join("crates"), &mut hits);
-    scan_dir(&root, &root.join("tests"), &mut hits);
+    scan_dir(&root, &root.join("crates"), &mut hits).expect("scan crates/");
+    scan_dir(&root, &root.join("tests"), &mut hits).expect("scan tests/");
     hits.sort();
     hits.dedup();
     assert!(
@@ -154,7 +195,7 @@ fn the_surviving_failure_vocabulary_stays_closed() {
         .unwrap_or_else(|error| panic!("read {}: {error}", result_meta.display()));
     // Same rule as the scan above: prose explaining the retired open set is
     // worth keeping, so only code is policed.
-    let contents: String = raw.lines().map(code_only).collect::<Vec<_>>().join("\n");
+    let contents = strip_comments(&raw);
 
     assert!(
         contents.contains("Unclassified"),
