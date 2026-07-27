@@ -1,9 +1,3 @@
-//! Extension-host assembly kept behind one composition builder.
-//!
-//! The generic extension host is created while the production substrate is
-//! built. Once the run-world services exist, this builder completes the
-//! channel-host half and registers its extension-specific runtime projections.
-
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -25,11 +19,6 @@ use crate::factory::RebornRuntimeStores;
 use crate::input::ChannelExtensionBinding;
 use crate::outbound::MutableOutboundDeliveryTargetRegistry;
 
-/// Inputs for the backend half of extension-host assembly.
-///
-/// The composition root resolves policy and storage first, then hands this
-/// capability-shaped bundle to the builder. No deployment profile is encoded
-/// in the type.
 pub(crate) struct BackendExtensionHostAssemblyInput {
     pub(crate) binder: ExtensionLaneToolBinder,
     pub(crate) native_factories: Vec<Arc<dyn ironclaw_extension_host::NativeExtensionFactory>>,
@@ -45,8 +34,6 @@ pub(crate) struct BackendExtensionHostAssemblyInput {
     pub(crate) outbound_state: Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
 }
 
-/// Generic host, ingress, and delivery services produced before the run world
-/// exists.
 pub(crate) struct BackendExtensionHostAssembly {
     pub(crate) generic_host: Arc<ironclaw_extension_host::ExtensionHost>,
     pub(crate) resolver: Arc<ironclaw_extension_host::SnapshotToolResolver>,
@@ -60,126 +47,116 @@ pub(crate) struct BackendExtensionHostAssembly {
         Arc<ironclaw_extension_host::channel_egress::BridgedChannelEgressCredentials>,
 }
 
-/// Builds the backend-owned generic extension host, ingress router, and
-/// delivery resolver as one coherent assembly.
-pub(crate) struct BackendExtensionHostAssemblyBuilder {
+pub(crate) async fn build_backend_extension_host(
     input: BackendExtensionHostAssemblyInput,
-}
+) -> Result<BackendExtensionHostAssembly, RebornBuildError> {
+    let BackendExtensionHostAssemblyInput {
+        binder,
+        native_factories,
+        channel_bindings,
+        installation_store,
+        admin_configuration_resolver,
+        resource_governor,
+        reserved_capability_ids,
+        host_runtime_http_egress,
+        channel_egress_scope,
+        deployment_channels,
+        filesystem,
+        outbound_state,
+    } = input;
 
-impl BackendExtensionHostAssemblyBuilder {
-    pub(crate) fn new(input: BackendExtensionHostAssemblyInput) -> Self {
-        Self { input }
-    }
+    let channel_egress_credentials = Arc::new(
+        ironclaw_extension_host::channel_egress::ChannelConfigEgressCredentials::new(Arc::clone(
+            &admin_configuration_resolver,
+        )),
+    );
+    #[cfg(feature = "test-support")]
+    let channel_egress_credentials = Arc::new(
+        ironclaw_extension_host::channel_egress::BridgedChannelEgressCredentials::new(
+            channel_egress_credentials,
+        ),
+    );
+    #[cfg(feature = "test-support")]
+    let channel_egress_credential_bridges = Arc::clone(&channel_egress_credentials);
 
-    pub(crate) async fn build(self) -> Result<BackendExtensionHostAssembly, RebornBuildError> {
-        let BackendExtensionHostAssemblyInput {
+    let channel_egress_transport = host_runtime_http_egress.map(|port| {
+        Arc::new(
+            ironclaw_extension_host::channel_egress::HostRuntimeChannelEgressTransport::new(
+                port,
+                channel_egress_credentials,
+                channel_egress_scope.clone(),
+            ),
+        ) as Arc<dyn ironclaw_extension_host::egress::ChannelEgressTransport>
+    });
+    let boot_installations = ironclaw_extension_host::boot_installation_records(
+        &installation_store,
+        Some(&admin_configuration_resolver),
+    )
+    .await
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("extension boot installation records could not be built: {error}"),
+    })?;
+    let generic = ironclaw_extension_host::build_generic_extension_host(
+        ironclaw_extension_host::GenericExtensionHostParams {
             binder,
             native_factories,
-            channel_bindings,
-            installation_store,
-            admin_configuration_resolver,
-            resource_governor,
-            reserved_capability_ids,
-            host_runtime_http_egress,
-            channel_egress_scope,
-            deployment_channels,
+            channel_adapters: channel_bindings
+                .iter()
+                .map(|binding| (binding.extension_id.clone(), Arc::clone(&binding.adapter)))
+                .collect(),
+            installation_store: Arc::clone(&installation_store),
+            boot_installations,
+            governor: resource_governor,
+            assembly: ExtensionHostAssemblyConfig::new(
+                reserved_capability_ids,
+                ironclaw_extension_host::extension_ingress::reserved_fixed_ingress_routes(),
+                std::time::Duration::from_secs(30),
+            ),
+            channel_egress_transport: channel_egress_transport.clone(),
+        },
+    )
+    .await;
+    let ingress = ironclaw_extension_host::extension_ingress::build_extension_ingress(
+        generic.host.snapshot_watch(),
+        Arc::clone(&deployment_channels),
+        Arc::new(ironclaw_extension_host::FilesystemReplyContextStore::new(
             filesystem,
-            outbound_state,
-        } = self.input;
+            channel_egress_scope.tenant_id.clone(),
+            channel_egress_scope.user_id.clone(),
+        )),
+    );
+    let (delivery_coordinator, channel_delivery_resolver) = match channel_egress_transport {
+        Some(transport) => {
+            let resolver: Arc<dyn ironclaw_product::ChannelDeliveryResolver> = Arc::new(
+                ironclaw_extension_host::SnapshotChannelDeliveryResolver::new(
+                    generic.host.snapshot_watch(),
+                    transport,
+                )
+                .with_deployment_channels(deployment_channels),
+            );
+            let coordinator = Arc::new(ironclaw_product::DeliveryCoordinator::new(
+                outbound_state,
+                Arc::clone(&resolver),
+                Arc::new(ironclaw_extension_host::IngressReplyContextSource::new(
+                    Arc::clone(&ingress.reply_context),
+                )),
+                ironclaw_product::DeliveryRetryPolicy::default(),
+            ));
+            (Some(coordinator), Some(resolver))
+        }
+        None => (None, None),
+    };
 
-        let channel_egress_credentials = Arc::new(
-            ironclaw_extension_host::channel_egress::ChannelConfigEgressCredentials::new(
-                Arc::clone(&admin_configuration_resolver),
-            ),
-        );
+    Ok(BackendExtensionHostAssembly {
+        generic_host: generic.host,
+        resolver: generic.resolver,
+        ingress,
+        installation_store,
+        delivery_coordinator,
+        channel_delivery_resolver,
         #[cfg(feature = "test-support")]
-        let channel_egress_credentials = Arc::new(
-            ironclaw_extension_host::channel_egress::BridgedChannelEgressCredentials::new(
-                channel_egress_credentials,
-            ),
-        );
-        #[cfg(feature = "test-support")]
-        let channel_egress_credential_bridges = Arc::clone(&channel_egress_credentials);
-
-        let channel_egress_transport = host_runtime_http_egress.map(|port| {
-            Arc::new(
-                ironclaw_extension_host::channel_egress::HostRuntimeChannelEgressTransport::new(
-                    port,
-                    channel_egress_credentials,
-                    channel_egress_scope.clone(),
-                ),
-            ) as Arc<dyn ironclaw_extension_host::egress::ChannelEgressTransport>
-        });
-        let boot_installations = ironclaw_extension_host::boot_installation_records(
-            &installation_store,
-            Some(&admin_configuration_resolver),
-        )
-        .await
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("extension boot installation records could not be built: {error}"),
-        })?;
-        let generic = ironclaw_extension_host::build_generic_extension_host(
-            ironclaw_extension_host::GenericExtensionHostParams {
-                binder,
-                native_factories,
-                channel_adapters: channel_bindings
-                    .iter()
-                    .map(|binding| (binding.extension_id.clone(), Arc::clone(&binding.adapter)))
-                    .collect(),
-                installation_store: Arc::clone(&installation_store),
-                boot_installations,
-                governor: resource_governor,
-                assembly: ExtensionHostAssemblyConfig::new(
-                    reserved_capability_ids,
-                    ironclaw_extension_host::extension_ingress::reserved_fixed_ingress_routes(),
-                    std::time::Duration::from_secs(30),
-                ),
-                channel_egress_transport: channel_egress_transport.clone(),
-            },
-        )
-        .await;
-        let ingress = ironclaw_extension_host::extension_ingress::build_extension_ingress(
-            generic.host.snapshot_watch(),
-            Arc::clone(&deployment_channels),
-            Arc::new(ironclaw_extension_host::FilesystemReplyContextStore::new(
-                filesystem,
-                channel_egress_scope.tenant_id.clone(),
-                channel_egress_scope.user_id.clone(),
-            )),
-        );
-        let (delivery_coordinator, channel_delivery_resolver) = match channel_egress_transport {
-            Some(transport) => {
-                let resolver: Arc<dyn ironclaw_product::ChannelDeliveryResolver> = Arc::new(
-                    ironclaw_extension_host::SnapshotChannelDeliveryResolver::new(
-                        generic.host.snapshot_watch(),
-                        transport,
-                    )
-                    .with_deployment_channels(deployment_channels),
-                );
-                let coordinator = Arc::new(ironclaw_product::DeliveryCoordinator::new(
-                    outbound_state,
-                    Arc::clone(&resolver),
-                    Arc::new(ironclaw_extension_host::IngressReplyContextSource::new(
-                        Arc::clone(&ingress.reply_context),
-                    )),
-                    ironclaw_product::DeliveryRetryPolicy::default(),
-                ));
-                (Some(coordinator), Some(resolver))
-            }
-            None => (None, None),
-        };
-
-        Ok(BackendExtensionHostAssembly {
-            generic_host: generic.host,
-            resolver: generic.resolver,
-            ingress,
-            installation_store,
-            delivery_coordinator,
-            channel_delivery_resolver,
-            #[cfg(feature = "test-support")]
-            channel_egress_credential_bridges,
-        })
-    }
+        channel_egress_credential_bridges,
+    })
 }
 
 pub(crate) struct BackendChannelPairingAssemblyInput {
@@ -200,156 +177,142 @@ pub(crate) struct BackendChannelPairingAssemblyInput {
         Arc<std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionService>>>,
 }
 
-pub(crate) struct BackendChannelPairingAssemblyBuilder {
+pub(crate) async fn build_backend_channel_pairing(
     input: BackendChannelPairingAssemblyInput,
-}
+) -> Result<Arc<ironclaw_extension_host::channel_pairing::ChannelPairingRegistry>, RebornBuildError>
+{
+    use ironclaw_extension_host::channel_host::{
+        ChannelWorkflowStateFactory, FilesystemChannelWorkflowStateFactory,
+        default_channel_workflow_storage_roots,
+    };
+    use ironclaw_extension_host::channel_pairing::{
+        ChannelPairingRegistry, ChannelPairingService, ChannelPairingServiceParts,
+        FilesystemChannelPairingStore,
+    };
 
-impl BackendChannelPairingAssemblyBuilder {
-    pub(crate) fn new(input: BackendChannelPairingAssemblyInput) -> Self {
-        Self { input }
-    }
+    let BackendChannelPairingAssemblyInput {
+        descriptors,
+        account_setups,
+        filesystem,
+        scope,
+        installation_store,
+        admin_configuration_resolver,
+        continuation,
+        identity_store,
+        dm_targets,
+        credential_cleanup,
+        account_status_reader,
+        disconnect_slot,
+    } = input;
+    let registry = Arc::new(ChannelPairingRegistry::default());
 
-    pub(crate) async fn build(
-        self,
-    ) -> Result<
-        Arc<ironclaw_extension_host::channel_pairing::ChannelPairingRegistry>,
-        RebornBuildError,
-    > {
-        use ironclaw_extension_host::channel_host::{
-            ChannelWorkflowStateFactory, FilesystemChannelWorkflowStateFactory,
-            default_channel_workflow_storage_roots,
-        };
-        use ironclaw_extension_host::channel_pairing::{
-            ChannelPairingRegistry, ChannelPairingService, ChannelPairingServiceParts,
-            FilesystemChannelPairingStore,
-        };
-
-        let BackendChannelPairingAssemblyInput {
-            descriptors,
-            account_setups,
-            filesystem,
-            scope,
-            installation_store,
-            admin_configuration_resolver,
-            continuation,
-            identity_store,
-            dm_targets,
-            credential_cleanup,
-            account_status_reader,
-            disconnect_slot,
-        } = self.input;
-        let registry = Arc::new(ChannelPairingRegistry::default());
-
-        for descriptor in &descriptors {
-            if !account_setups.declare(descriptor.clone()) {
-                return Err(RebornBuildError::InvalidConfig {
-                    reason: format!(
-                        "duplicate account-setup descriptor for extension `{}`",
-                        descriptor.extension_id.as_str()
-                    ),
-                });
-            }
-            if descriptor.connection_requirement.strategy
-                != ironclaw_product::RebornChannelConnectStrategy::WebGeneratedCode
-            {
-                continue;
-            }
-
-            let extension_id = descriptor.extension_id.clone();
-            let pairing_store = Arc::new(FilesystemChannelPairingStore::new(
-                Arc::clone(&filesystem),
-                scope.tenant_id.clone(),
-                scope.user_id.clone(),
-                extension_id.clone(),
-            ));
-            let installation = Arc::new(
-                ironclaw_extension_host::channel_pairing::StoredPairingInstallationSource::new(
-                    Arc::clone(&installation_store),
-                    extension_id.clone(),
+    for descriptor in &descriptors {
+        if !account_setups.declare(descriptor.clone()) {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: format!(
+                    "duplicate account-setup descriptor for extension `{}`",
+                    descriptor.extension_id.as_str()
                 ),
-            );
-            let template_values = Arc::new(
-                ironclaw_extension_host::channel_pairing::ChannelConfigPairingTemplateValues::new(
-                    Arc::clone(&admin_configuration_resolver),
-                    extension_id.clone(),
-                    descriptor.pairing_deep_link_template.as_deref(),
-                ),
-            );
-            let workflow_state_service =
-                FilesystemChannelWorkflowStateFactory::new(Arc::clone(&filesystem));
-            let workflow_roots =
-                default_channel_workflow_storage_roots(&scope.tenant_id, extension_id.as_str())
-                    .map_err(|reason| RebornBuildError::InvalidConfig { reason })?;
-            let workflow_state = workflow_state_service
-                .build(&workflow_roots, scope.clone())
-                .await
-                .map_err(|error| RebornBuildError::InvalidConfig {
-                    reason: error.to_string(),
-                })?;
-            let agent_id = match scope.agent_id.clone() {
-                Some(agent_id) => agent_id,
-                None => ironclaw_host_api::AgentId::new("reborn").map_err(|error| {
-                    RebornBuildError::InvalidConfig {
-                        reason: format!("fallback channel pairing agent id is invalid: {error}"),
-                    }
-                })?,
-            };
-            let service = Arc::new(ChannelPairingService::new(ChannelPairingServiceParts {
-                tenant_id: scope.tenant_id.clone(),
-                agent_id,
-                project_id: scope.project_id.clone(),
-                extension_id: descriptor.extension_id.clone(),
-                connection_notices: descriptor.connection_notices.clone(),
-                deep_link_template: descriptor.pairing_deep_link_template.clone(),
-                inbound_code_prefixes: descriptor.inbound_code_prefixes.clone(),
-                store: pairing_store,
-                installation,
-                template_values,
-                identity_bind: Arc::clone(&identity_store)
-                    as Arc<dyn ironclaw_host_api::RebornUserIdentityBindingStore>,
-                identity_lookup: Arc::clone(&identity_store)
-                    as Arc<dyn ironclaw_host_api::RebornUserIdentityLookup>,
-                identity_delete: Arc::clone(&identity_store)
-                    as Arc<dyn ironclaw_host_api::RebornUserIdentityBindingDeleteStore>,
-                continuation: Arc::clone(&continuation),
-                conversation_actor_pairings: Arc::clone(&workflow_state.conversations)
-                    as Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
-                dm_targets: Arc::clone(&dm_targets),
-            }));
-            if !account_setups.connect(
-                &descriptor.extension_id,
-                Arc::clone(&service) as Arc<dyn ironclaw_product::AccountConnectionStatusSource>,
-            ) {
-                return Err(RebornBuildError::InvalidConfig {
-                    reason: format!(
-                        "account-setup status source for `{}` was already connected",
-                        descriptor.extension_id.as_str()
-                    ),
-                });
-            }
-            registry.register(service);
+            });
+        }
+        if descriptor.connection_requirement.strategy
+            != ironclaw_product::RebornChannelConnectStrategy::WebGeneratedCode
+        {
+            continue;
         }
 
-        let _ = disconnect_slot.set(Arc::new(
-            ironclaw_extension_host::channel_connection::GenericChannelConnectionService::new(
-                scope.tenant_id,
-                Vec::new(),
-                Some(installation_store),
-                Arc::clone(&identity_store) as Arc<dyn ironclaw_host_api::RebornUserIdentityLookup>,
-                identity_store as Arc<dyn ironclaw_host_api::RebornUserIdentityBindingDeleteStore>,
-                Some(credential_cleanup),
-                Some(account_status_reader),
-                Some(dm_targets),
-                Some(Arc::clone(&registry)),
-            ),
+        let extension_id = descriptor.extension_id.clone();
+        let pairing_store = Arc::new(FilesystemChannelPairingStore::new(
+            Arc::clone(&filesystem),
+            scope.tenant_id.clone(),
+            scope.user_id.clone(),
+            extension_id.clone(),
         ));
-
-        Ok(registry)
+        let installation = Arc::new(
+            ironclaw_extension_host::channel_pairing::StoredPairingInstallationSource::new(
+                Arc::clone(&installation_store),
+                extension_id.clone(),
+            ),
+        );
+        let template_values = Arc::new(
+            ironclaw_extension_host::channel_pairing::ChannelConfigPairingTemplateValues::new(
+                Arc::clone(&admin_configuration_resolver),
+                extension_id.clone(),
+                descriptor.pairing_deep_link_template.as_deref(),
+            ),
+        );
+        let workflow_state_service =
+            FilesystemChannelWorkflowStateFactory::new(Arc::clone(&filesystem));
+        let workflow_roots =
+            default_channel_workflow_storage_roots(&scope.tenant_id, extension_id.as_str())
+                .map_err(|reason| RebornBuildError::InvalidConfig { reason })?;
+        let workflow_state = workflow_state_service
+            .build(&workflow_roots, scope.clone())
+            .await
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: error.to_string(),
+            })?;
+        let agent_id = match scope.agent_id.clone() {
+            Some(agent_id) => agent_id,
+            None => ironclaw_host_api::AgentId::new("reborn").map_err(|error| {
+                RebornBuildError::InvalidConfig {
+                    reason: format!("fallback channel pairing agent id is invalid: {error}"),
+                }
+            })?,
+        };
+        let service = Arc::new(ChannelPairingService::new(ChannelPairingServiceParts {
+            tenant_id: scope.tenant_id.clone(),
+            agent_id,
+            project_id: scope.project_id.clone(),
+            extension_id: descriptor.extension_id.clone(),
+            connection_notices: descriptor.connection_notices.clone(),
+            deep_link_template: descriptor.pairing_deep_link_template.clone(),
+            inbound_code_prefixes: descriptor.inbound_code_prefixes.clone(),
+            store: pairing_store,
+            installation,
+            template_values,
+            identity_bind: Arc::clone(&identity_store)
+                as Arc<dyn ironclaw_host_api::RebornUserIdentityBindingStore>,
+            identity_lookup: Arc::clone(&identity_store)
+                as Arc<dyn ironclaw_host_api::RebornUserIdentityLookup>,
+            identity_delete: Arc::clone(&identity_store)
+                as Arc<dyn ironclaw_host_api::RebornUserIdentityBindingDeleteStore>,
+            continuation: Arc::clone(&continuation),
+            conversation_actor_pairings: Arc::clone(&workflow_state.conversations)
+                as Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
+            dm_targets: Arc::clone(&dm_targets),
+        }));
+        if !account_setups.connect(
+            &descriptor.extension_id,
+            Arc::clone(&service) as Arc<dyn ironclaw_product::AccountConnectionStatusSource>,
+        ) {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: format!(
+                    "account-setup status source for `{}` was already connected",
+                    descriptor.extension_id.as_str()
+                ),
+            });
+        }
+        registry.register(service);
     }
+
+    let _ = disconnect_slot.set(Arc::new(
+        ironclaw_extension_host::channel_connection::GenericChannelConnectionService::new(
+            scope.tenant_id,
+            Vec::new(),
+            Some(installation_store),
+            Arc::clone(&identity_store) as Arc<dyn ironclaw_host_api::RebornUserIdentityLookup>,
+            identity_store as Arc<dyn ironclaw_host_api::RebornUserIdentityBindingDeleteStore>,
+            Some(credential_cleanup),
+            Some(account_status_reader),
+            Some(dm_targets),
+            Some(Arc::clone(&registry)),
+        ),
+    ));
+
+    Ok(registry)
 }
 
-/// Run-world services and identity bound into the per-extension channel
-/// workflows.
 pub(crate) struct ChannelHostAssemblyWiring {
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) turn_coordinator: Arc<dyn TurnCoordinator>,
@@ -362,8 +325,6 @@ pub(crate) struct ChannelHostAssemblyWiring {
     pub(crate) run_delivery_settings: RunDeliverySettings,
 }
 
-/// Remaining runtime inputs needed after the turn and projection services have
-/// been composed.
 pub(crate) struct RuntimeExtensionHostAssemblyWiring<'a> {
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) turn_coordinator: Arc<dyn TurnCoordinator>,
@@ -376,10 +337,6 @@ pub(crate) struct RuntimeExtensionHostAssemblyWiring<'a> {
     pub(crate) local_runtime: Option<&'a RebornRuntimeStores>,
 }
 
-/// Concrete composition builder for the extension host's run-world half.
-///
-/// This is deliberately not a trait: composition has one production assembly
-/// and the builder exists to keep its dependency graph explicit and localized.
 pub(crate) struct ExtensionHostAssemblyBuilder<'a> {
     source: ChannelHostAssemblySource,
     services: Option<&'a RebornRuntimeStores>,
@@ -423,8 +380,6 @@ impl<'a> ExtensionHostAssemblyBuilder<'a> {
         })
     }
 
-    /// Start the generic channel host reconcile loop. `None` means this
-    /// composition has no generic host or ingress registry.
     pub(crate) fn start_channel_host(
         &self,
         wiring: ChannelHostAssemblyWiring,
@@ -492,9 +447,6 @@ impl<'a> ExtensionHostAssemblyBuilder<'a> {
         }))
     }
 
-    /// Complete extension-host assembly after the run-world services exist:
-    /// start reconciliation, attach binding extras, and publish generic
-    /// outbound-delivery targets.
     pub(crate) async fn build_runtime(
         &self,
         wiring: RuntimeExtensionHostAssemblyWiring<'_>,

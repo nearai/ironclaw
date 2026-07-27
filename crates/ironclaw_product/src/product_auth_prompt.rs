@@ -1,41 +1,35 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use ironclaw_auth::{
     AuthChallenge, AuthFlowOwnerScope, AuthGateRef, AuthProductError, RebornProductAuthServices,
     TurnGateAuthFlowQuery, TurnRunRef,
 };
 use ironclaw_host_api::{RuntimeCredentialAuthRequirement, UserId};
-use ironclaw_product::{
-    AuthChallengeProvider, AuthChallengeView, AuthPromptChallengeKind, BlockedAuthFlowCanceller,
-};
 use ironclaw_turns::{TurnRunId, TurnScope};
 
-struct ProductAuthChallengeAdapter {
-    product_auth: Arc<RebornProductAuthServices>,
-}
+use crate::{
+    AuthChallengeProvider, AuthChallengeView, AuthPromptChallengeKind, BlockedAuthFlowCanceller,
+};
 
 pub fn product_auth_challenge_provider(
     product_auth: &Arc<RebornProductAuthServices>,
 ) -> Option<Arc<dyn AuthChallengeProvider>> {
-    product_auth.flow_record_source().map(|_| {
-        Arc::new(ProductAuthChallengeAdapter {
-            product_auth: Arc::clone(product_auth),
-        }) as Arc<dyn AuthChallengeProvider>
-    })
+    product_auth
+        .flow_record_source()
+        .map(|_| Arc::clone(product_auth) as Arc<dyn AuthChallengeProvider>)
 }
 
 pub fn blocked_auth_flow_canceller(
     product_auth: &Arc<RebornProductAuthServices>,
 ) -> Option<Arc<dyn BlockedAuthFlowCanceller>> {
-    product_auth.flow_record_source().map(|_| {
-        Arc::new(ProductAuthChallengeAdapter {
-            product_auth: Arc::clone(product_auth),
-        }) as Arc<dyn BlockedAuthFlowCanceller>
-    })
+    product_auth
+        .flow_record_source()
+        .map(|_| Arc::clone(product_auth) as Arc<dyn BlockedAuthFlowCanceller>)
 }
 
-#[async_trait::async_trait]
-impl AuthChallengeProvider for ProductAuthChallengeAdapter {
+#[async_trait]
+impl AuthChallengeProvider for RebornProductAuthServices {
     async fn challenge_for_gate(
         &self,
         scope: &TurnScope,
@@ -48,11 +42,11 @@ impl AuthChallengeProvider for ProductAuthChallengeAdapter {
             tracing::debug!(%error, "invalid gate_ref in auth challenge lookup");
             AuthProductError::BackendUnavailable
         })?;
-        let Some(source) = self.product_auth.flow_record_source() else {
+        let Some(source) = self.flow_record_source() else {
             return Ok(None);
         };
-        let flow_manager = self.product_auth.flow_manager();
-        if let Some(driver) = self.product_auth.oauth_gate_driver()
+        let flow_manager = self.flow_manager();
+        if let Some(driver) = self.oauth_gate_driver()
             && let Some(flow) = driver
                 .challenge_for_blocked_gate(ironclaw_auth::OAuthGateChallengeRequest {
                     flow_manager: &flow_manager,
@@ -97,8 +91,8 @@ impl AuthChallengeProvider for ProductAuthChallengeAdapter {
     }
 }
 
-#[async_trait::async_trait]
-impl BlockedAuthFlowCanceller for ProductAuthChallengeAdapter {
+#[async_trait]
+impl BlockedAuthFlowCanceller for RebornProductAuthServices {
     async fn cancel_blocked_auth_flow(
         &self,
         scope: &TurnScope,
@@ -106,8 +100,7 @@ impl BlockedAuthFlowCanceller for ProductAuthChallengeAdapter {
         run_id: TurnRunId,
         gate_ref: &str,
     ) -> Result<(), AuthProductError> {
-        self.product_auth
-            .cancel_blocked_auth_flow(scope, owner_user_id, run_id, gate_ref)
+        self.cancel_blocked_auth_flow(scope, owner_user_id, run_id, gate_ref)
             .await
     }
 }

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::hash::Hasher;
 use std::io::ErrorKind;
@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use ironclaw_filesystem::{
     CasExpectation, DiskFilesystem, Entry, FileType, FilesystemError, RootFilesystem,
 };
-use ironclaw_host_api::{HostPath, VirtualPath};
+use ironclaw_host_api::{HostPath, UserId, VirtualPath};
 use ironclaw_loop_host::SkillFilePath;
 use ironclaw_skills::{ManagedSkillSource, SkillSummary};
 use serde::{Deserialize, Serialize};
@@ -30,6 +30,94 @@ const BUNDLED_MARKER_OWNER: &str = "ironclaw_reborn_composition_bundled_skill";
 const BUNDLED_INSTALL_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 const BUNDLED_INSTALL_LOCK_RETRY: Duration = Duration::from_millis(25);
 const SYSTEM_SKILLS_ROOT: &str = "/projects/system/skills";
+pub const LEGACY_SKILLS_BACKFILL_MARKER: &str = ".legacy-skills-backfilled";
+const LEGACY_SKILLS_BACKFILL_MAX_DEPTH: usize = 64;
+
+/// Copies the legacy standalone skill tree into each supported user-scoped
+/// location once. Existing scoped entries win and symlinks are never followed.
+pub fn backfill_legacy_user_skills(
+    storage_root: &Path,
+    owner_user_id: &UserId,
+) -> Result<(), RebornBuildError> {
+    let legacy_root = storage_root.join("skills");
+    if !legacy_root.is_dir() {
+        return Ok(());
+    }
+    for tenant_id in ["default", "reborn-cli"] {
+        backfill_legacy_user_skills_for_tenant(
+            &legacy_root,
+            storage_root,
+            tenant_id,
+            owner_user_id,
+        )?;
+    }
+    Ok(())
+}
+
+fn backfill_legacy_user_skills_for_tenant(
+    legacy_root: &Path,
+    storage_root: &Path,
+    tenant_id: &str,
+    owner_user_id: &UserId,
+) -> Result<(), RebornBuildError> {
+    let scoped_root = storage_root
+        .join("tenants")
+        .join(tenant_id)
+        .join("users")
+        .join(owner_user_id.as_str())
+        .join("skills");
+    let marker = scoped_root.join(LEGACY_SKILLS_BACKFILL_MARKER);
+    if marker.exists() {
+        return Ok(());
+    }
+
+    fs::create_dir_all(&scoped_root).map_err(invalid_config)?;
+    for entry in fs::read_dir(legacy_root).map_err(invalid_config)? {
+        let entry = entry.map_err(invalid_config)?;
+        let destination = scoped_root.join(entry.file_name());
+        if !destination.exists() {
+            copy_legacy_skill_entry(&entry.path(), &destination)?;
+        }
+    }
+    fs::write(marker, b"").map_err(invalid_config)
+}
+
+fn copy_legacy_skill_entry(source: &Path, destination: &Path) -> Result<(), RebornBuildError> {
+    let mut pending = VecDeque::from([(source.to_path_buf(), destination.to_path_buf(), 0usize)]);
+    while let Some((source, destination, depth)) = pending.pop_front() {
+        if depth > LEGACY_SKILLS_BACKFILL_MAX_DEPTH {
+            return Err(invalid_config(format!(
+                "legacy skill entry '{}' exceeds max copy depth {}",
+                source.display(),
+                LEGACY_SKILLS_BACKFILL_MAX_DEPTH
+            )));
+        }
+
+        let metadata = fs::symlink_metadata(&source).map_err(invalid_config)?;
+        if metadata.file_type().is_symlink() {
+            tracing::warn!(
+                path = %source.display(),
+                "Skipping symlinked legacy skill entry during backfill"
+            );
+        } else if metadata.is_dir() {
+            fs::create_dir_all(&destination).map_err(invalid_config)?;
+            for entry in fs::read_dir(&source).map_err(invalid_config)? {
+                let entry = entry.map_err(invalid_config)?;
+                pending.push_back((
+                    entry.path(),
+                    destination.join(entry.file_name()),
+                    depth.saturating_add(1),
+                ));
+            }
+        } else {
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent).map_err(invalid_config)?;
+            }
+            fs::copy(source, destination).map_err(invalid_config)?;
+        }
+    }
+    Ok(())
+}
 
 #[derive(Debug, Deserialize)]
 struct EmbeddedRebornSkillSummary {

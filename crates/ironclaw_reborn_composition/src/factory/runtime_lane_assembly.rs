@@ -18,28 +18,6 @@ pub(super) fn default_host_http_egress() -> Result<
     })
 }
 
-/// Test-support pass-through so a `#[cfg]`-gated injected
-/// `Arc<dyn NetworkHttpEgress>` (there is no blanket `NetworkHttpEgress` impl on
-/// `Arc<dyn …>`) satisfies the generic `try_with_host_http_egress_with_body_store`
-/// bound. Consumes `RebornHostBindings::network_http_egress_for_test`, letting a
-/// unit/integration test drive hosted-MCP discovery and any host HTTP egress
-/// over a fake transport instead of the real network. Restores the consumer
-/// dropped in commit 975bcd2ce ("Unify reborn runtime assembly"), which
-/// collapsed the two build paths and left the injected egress unread.
-#[cfg(any(test, feature = "test-support"))]
-pub(super) struct TestNetworkHttpEgress(pub(super) Arc<dyn ironclaw_network::NetworkHttpEgress>);
-
-#[cfg(any(test, feature = "test-support"))]
-#[async_trait::async_trait]
-impl ironclaw_network::NetworkHttpEgress for TestNetworkHttpEgress {
-    async fn execute(
-        &self,
-        request: ironclaw_network::NetworkHttpRequest,
-    ) -> Result<ironclaw_network::NetworkHttpResponse, ironclaw_network::NetworkHttpError> {
-        self.0.execute(request).await
-    }
-}
-
 pub(super) fn apply_post_edit_check_from_env<F, G, S, R>(
     services: HostRuntimeServices<F, G, S, R>,
 ) -> Result<HostRuntimeServices<F, G, S, R>, RebornBuildError>

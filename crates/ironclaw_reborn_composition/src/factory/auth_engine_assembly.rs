@@ -14,16 +14,6 @@ pub(super) struct OAuthProviderComposition {
     pub(super) gate_driver: Option<Arc<OAuthGateFlowDriver>>,
 }
 
-/// One resolvable value for a deployment client-credential handle.
-#[derive(Clone)]
-enum ClientCredentialValue {
-    Static(SecretString),
-}
-
-/// Deferred handle source over administrator configuration
-/// (`[admin_configuration]`): the resolver is built after the auth
-/// engine, so the engine holds this slot and resolves handles through it at
-/// request time.
 #[derive(Clone, Default)]
 pub(super) struct AdminConfigurationCredentialSlot {
     inner: Arc<std::sync::OnceLock<Arc<ComposedExtensionAdminConfigurationResolver>>>,
@@ -48,20 +38,15 @@ impl fmt::Debug for AdminConfigurationCredentialSlot {
     }
 }
 
-/// Handle-keyed deployment client-credential data. Recipes name their
-/// `client_credentials` handles; composition registers values for those
-/// handles from environment/config and falls back to the operator channel
-/// configuration surface for handles saved at runtime.
 #[derive(Clone, Default)]
 struct CompositionClientCredentials {
-    values: BTreeMap<String, ClientCredentialValue>,
+    values: BTreeMap<String, SecretString>,
     admin_configuration: Option<AdminConfigurationCredentialSlot>,
 }
 
 impl CompositionClientCredentials {
     fn register_static(&mut self, handle: impl Into<String>, value: SecretString) {
-        self.values
-            .insert(handle.into(), ClientCredentialValue::Static(value));
+        self.values.insert(handle.into(), value);
     }
 
     fn with_admin_configuration(&mut self, slot: AdminConfigurationCredentialSlot) {
@@ -69,9 +54,8 @@ impl CompositionClientCredentials {
     }
 
     async fn resolve_handle(&self, handle: &str) -> Result<Option<SecretString>, AuthProductError> {
-        match self.values.get(handle) {
-            Some(ClientCredentialValue::Static(value)) => return Ok(Some(value.clone())),
-            None => {}
+        if let Some(value) = self.values.get(handle) {
+            return Ok(Some(value.clone()));
         }
         let Some(service) = self
             .admin_configuration
@@ -550,66 +534,6 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
     }
 }
 
-struct ProductContinuationFromAuth {
-    inner: Arc<dyn RebornAuthContinuationDispatcher>,
-}
-
-impl ProductContinuationFromAuth {
-    fn new(inner: Arc<dyn RebornAuthContinuationDispatcher>) -> Self {
-        Self { inner }
-    }
-}
-
-#[async_trait::async_trait]
-impl ironclaw_product::ProductAuthContinuationDispatcher for ProductContinuationFromAuth {
-    async fn dispatch_auth_continuation(
-        &self,
-        event: ironclaw_auth::AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        self.inner.dispatch_auth_continuation(event).await
-    }
-
-    async fn dispatch_canceled_auth_continuation(
-        &self,
-        event: ironclaw_auth::AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        self.inner.dispatch_canceled_auth_continuation(event).await
-    }
-}
-
-pub(crate) fn product_auth_continuation_dispatcher(
-    inner: Arc<dyn RebornAuthContinuationDispatcher>,
-) -> Arc<dyn ironclaw_product::ProductAuthContinuationDispatcher> {
-    Arc::new(ProductContinuationFromAuth::new(inner))
-}
-
-pub(super) struct AuthContinuationFromProduct {
-    inner: Arc<dyn ironclaw_product::ProductAuthContinuationDispatcher>,
-}
-
-impl AuthContinuationFromProduct {
-    pub(super) fn new(inner: Arc<dyn ironclaw_product::ProductAuthContinuationDispatcher>) -> Self {
-        Self { inner }
-    }
-}
-
-#[async_trait::async_trait]
-impl RebornAuthContinuationDispatcher for AuthContinuationFromProduct {
-    async fn dispatch_auth_continuation(
-        &self,
-        event: ironclaw_auth::AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        self.inner.dispatch_auth_continuation(event).await
-    }
-
-    async fn dispatch_canceled_auth_continuation(
-        &self,
-        event: ironclaw_auth::AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        self.inner.dispatch_canceled_auth_continuation(event).await
-    }
-}
-
 pub(crate) fn auth_continuation_dispatcher(
     turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
     blocked_auth_snapshot_source: Option<
@@ -646,14 +570,7 @@ pub(super) struct ProductAuthServicesCompositionInput {
     pub(super) nearai_mcp_host_managed_scope: Option<AuthProductScope>,
     pub(super) credential_account_visibility_policy:
         Option<Arc<dyn ironclaw_auth::RuntimeCredentialAccountVisibilityPolicy>>,
-    /// Durable auth-flow record projection wired for the builder's OWN durable
-    /// product-auth service (filesystem-backed standalone / production-shaped
-    /// path). `None` when a caller supplied its own product-auth bundle — that
-    /// path intentionally leaves the WebUI auth interaction surface unavailable
-    /// (see `runtime/tests/auth_interaction.rs`
-    /// `..._are_unavailable_without_flow_record_source`). Restores wiring dropped
-    /// in commit 975bcd2ce ("Unify reborn runtime assembly"), which collapsed the
-    /// old two-branch builder and lost the standalone `.with_flow_record_source`.
+    /// Durable auth-flow records for composition-owned product auth.
     pub(super) flow_record_source: Option<Arc<dyn ironclaw_auth::AuthFlowRecordSource>>,
 }
 
@@ -683,8 +600,6 @@ pub(super) fn compose_product_auth_services(
         None if builder_owned_durable_auth => ports.with_current_provider_client(),
         None => ports,
     };
-    // Returned alongside the core so the caller can wrap it with the
-    // lifecycle readiness reconciliation once the lifecycle facade exists.
     let base_continuation =
         auth_continuation_dispatcher(turn_coordinator, blocked_auth_snapshot_source);
     let mut services = ports.into_services(Arc::clone(&base_continuation), secret_store);

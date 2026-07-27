@@ -834,12 +834,12 @@ pub(crate) async fn open_standalone_root_filesystem_for_test(
     storage_root: &Path,
 ) -> Result<Arc<dyn RootFilesystem>, RebornBuildError> {
     let workspace_root = storage_root.join("workspace");
-    let bundle = FilesystemAssemblyBuilder::new(
+    let bundle = build_filesystem(
         storage_root,
         &workspace_root,
+        None,
         DurableStorageInput::EmbeddedLibsql,
     )
-    .build()
     .await?;
     Ok(bundle.filesystem)
 }
@@ -861,12 +861,12 @@ pub(crate) async fn open_standalone_extension_installation_store_for_test(
     storage_root: &Path,
 ) -> Result<Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>, RebornBuildError> {
     let workspace_root = storage_root.join("workspace");
-    let bundle = FilesystemAssemblyBuilder::new(
+    let bundle = build_filesystem(
         storage_root,
         &workspace_root,
+        None,
         DurableStorageInput::EmbeddedLibsql,
     )
-    .build()
     .await?;
     let filesystem: Arc<dyn RootFilesystem> = bundle.filesystem;
     let state_path = ExtensionInstallationStore::default_state_path().map_err(|error| {
@@ -913,7 +913,7 @@ pub(crate) async fn open_standalone_approval_request_store_for_test(
 
 /// W6-COLD-SPOTS: fresh `CommunicationPreferenceRepository` reopen, mirrors
 /// [`open_standalone_approval_request_store_for_test`]. Reuses
-/// [`crate::outbound_store_assembly::OutboundStoreAssemblyBuilder`] — the same
+/// [`crate::outbound_store_assembly::build_outbound_stores`] — the same
 /// composition-owned construction the
 /// production `build_runtime_stores` path uses — so the reopen path
 /// never drifts from production and needs no `disallowed_methods` exception.
@@ -925,8 +925,7 @@ pub(crate) async fn open_standalone_outbound_preferences_store_for_test(
     let mut composite = CompositeRootFilesystem::new();
     mount_default_database_roots(storage_root, &mut composite).await?;
     Ok(
-        crate::outbound_store_assembly::OutboundStoreAssemblyBuilder::new(Arc::new(composite))
-            .build()
+        crate::outbound_store_assembly::build_outbound_stores(Arc::new(composite))
             .outbound_preferences,
     )
 }

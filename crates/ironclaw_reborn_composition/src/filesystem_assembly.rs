@@ -37,60 +37,34 @@ pub(crate) enum DurableStorageInput {
 }
 
 /// Builds the storage substrate selected by already-resolved configuration.
-///
-/// The builder owns concrete filesystem/database initialization. Callers own
-/// profile selection and pass only the resulting roots and durable-storage
-/// choice.
-pub(crate) struct FilesystemAssemblyBuilder<'a> {
-    storage_root: &'a Path,
-    workspace_root: &'a Path,
-    host_home_root: Option<&'a HostHomeRoot>,
+pub(crate) async fn build_filesystem(
+    storage_root: &Path,
+    workspace_root: &Path,
+    host_home_root: Option<&HostHomeRoot>,
     durable_storage: DurableStorageInput,
-}
-
-impl<'a> FilesystemAssemblyBuilder<'a> {
-    pub(crate) fn new(
-        storage_root: &'a Path,
-        workspace_root: &'a Path,
-        durable_storage: DurableStorageInput,
-    ) -> Self {
-        Self {
-            storage_root,
-            workspace_root,
-            host_home_root: None,
-            durable_storage,
+) -> Result<FilesystemAssembly, RebornBuildError> {
+    let disk = Arc::new(host_disk_filesystem(
+        storage_root,
+        workspace_root,
+        host_home_root,
+    )?);
+    let mut composite = CompositeRootFilesystem::new();
+    let durable_backend = match durable_storage {
+        DurableStorageInput::Postgres(pool) => {
+            let database = Arc::new(PostgresRootFilesystem::new(pool.clone()));
+            database.run_migrations().await?;
+            mount_database_roots(&mut composite, database)?;
+            DurableBackend::Postgres(pool)
         }
-    }
-
-    pub(crate) fn with_host_home_root(mut self, host_home_root: Option<&'a HostHomeRoot>) -> Self {
-        self.host_home_root = host_home_root;
-        self
-    }
-
-    pub(crate) async fn build(self) -> Result<FilesystemAssembly, RebornBuildError> {
-        let disk = Arc::new(host_disk_filesystem(
-            self.storage_root,
-            self.workspace_root,
-            self.host_home_root,
-        )?);
-        let mut composite = CompositeRootFilesystem::new();
-        let durable_backend = match self.durable_storage {
-            DurableStorageInput::Postgres(pool) => {
-                let database = Arc::new(PostgresRootFilesystem::new(pool.clone()));
-                database.run_migrations().await?;
-                mount_database_roots(&mut composite, database)?;
-                DurableBackend::Postgres(pool)
-            }
-            DurableStorageInput::EmbeddedLibsql => {
-                build_default_database_roots(self.storage_root, &mut composite).await?
-            }
-        };
-        mount_host_disk_roots(&mut composite, disk)?;
-        Ok(FilesystemAssembly {
-            filesystem: Arc::new(composite),
-            durable_backend,
-        })
-    }
+        DurableStorageInput::EmbeddedLibsql => {
+            build_default_database_roots(storage_root, &mut composite).await?
+        }
+    };
+    mount_host_disk_roots(&mut composite, disk)?;
+    Ok(FilesystemAssembly {
+        filesystem: Arc::new(composite),
+        durable_backend,
+    })
 }
 
 /// Open the compatibility-path embedded database without mounting it.

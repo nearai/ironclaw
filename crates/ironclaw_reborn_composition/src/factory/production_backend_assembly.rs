@@ -246,10 +246,6 @@ where
         }
     };
     let services = apply_production_runtime_process_binding(services, process_binding);
-    // Wire the operator post-edit check in production too (off unless
-    // IRONCLAW_POST_EDIT_CHECK is set). It runs isolated in the tenant sandbox
-    // per the runtime process binding applied above; the resolver routes it to
-    // the tenant-sandbox process port rather than the provider host.
     let services = match PostEditCheckConfig::from_env() {
         Ok(Some(config)) => services.with_post_edit_check(config),
         Ok(None) => services,
@@ -308,9 +304,6 @@ pub(super) async fn build_backend_production(
     context: RebornProductionBuildContext,
     stores: ProductionStoreBundle,
     trigger_repository: Arc<dyn TriggerRepository>,
-    // Leader lock for the background credential keepalive worker. The worker
-    // uses this to elect one process per tick as the sweep leader. `None`
-    // pool → always-leader (libsql / single-process). Stays private.
     leader_lock: ironclaw_auth::CredentialRefreshLeaderLock,
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
     let RebornProductionBuildContext {
@@ -341,29 +334,12 @@ pub(super) async fn build_backend_production(
         #[cfg(any(test, feature = "test-support"))]
         trust_fixture_extensions_for_test,
     } = context;
-    // Select the non-validating local-testing host runtime for a standalone
-    // deployment. The pre-`975bcd2ce` dedicated standalone builder always used
-    // `host_runtime_for_local_testing()`; the unified path keyed only on a wired
-    // local host process port (`local_process_port.is_some()`), which is `None`
-    // whenever the standalone deployment uses a non-`LocalHost` process backend
-    // (e.g. an injected `TenantSandbox` port — the multi-user-safe default). That
-    // wrongly routed such standalone builds through `host_runtime_for_production`,
-    // whose `validate_production_wiring` rejects the `LocalSingleUser` deployment
-    // mode. Key the choice on the deployment mode too: a `LocalSingleUser` policy
-    // is exactly the shape production validation would reject, so it must use the
-    // local-testing runtime regardless of process backend. (Production
-    // deployments never resolve to `LocalSingleUser` — see
-    // `.claude/rules/safety-and-sandbox.md`.)
     let deployment_is_local_single_user = matches!(
         production_wiring.runtime_policy.deployment,
         DeploymentMode::LocalSingleUser
     );
     let uses_local_host_runtime = local_process_port.is_some() || deployment_is_local_single_user;
-    // The reserved host-bundled id set consulted during filesystem catalog
-    // load and by the upload-import path, sourced from the injected bundles.
     let first_party_reserved_ids = first_party_reserved_extension_ids(&first_party_bundles);
-    // Computed before `oauth_provider_configs` is consumed by
-    // `compose_provider_client` below — see `google_oauth_configured`.
     let google_oauth_configured = google_oauth_configured(&oauth_provider_configs);
     let google_provider = VendorId::new(ironclaw_auth::GOOGLE_PROVIDER_ID).map_err(|error| {
         RebornBuildError::InvalidConfig {
@@ -475,7 +451,7 @@ pub(super) async fn build_backend_production(
         Arc::clone(&capability_policy),
         approval_settings_provider,
     );
-    let outbound_stores = OutboundStoreAssemblyBuilder::new(Arc::clone(&stores.filesystem)).build();
+    let outbound_stores = build_outbound_stores(Arc::clone(&stores.filesystem));
     let outbound_delivery_targets = host_owned_outbound_delivery_target_registry()?;
     let skill_auto_activate_learned = Arc::new(AtomicBool::new(true));
     let process_backend = production_wiring.runtime_policy.process_backend;
@@ -492,8 +468,6 @@ pub(super) async fn build_backend_production(
         Arc::clone(&turn_state_filesystem),
         turn_state_store_limits,
     ));
-    // Rebindable source-turn-state slot for the trigger delivery-target
-    // service — same repoint seam as the sibling snapshot slot below.
     #[cfg(any(test, feature = "test-support"))]
     let trigger_source_turn_state_store: Arc<
         std::sync::RwLock<Arc<dyn ironclaw_turns::TurnStateStore>>,
@@ -535,20 +509,11 @@ pub(super) async fn build_backend_production(
     .await?;
     let event_log = Arc::clone(&event_stores.events);
     let audit_log = Arc::clone(&event_stores.audit);
-    // Admin per-user secret provisioner over the raw production root and the
-    // SAME crypto the runtime's own secret store uses, so material written for
-    // a target user decrypts under that user's own store (mirrors the local
-    // substrate's `admin_secret_provisioner`; see `admin_secrets.rs`).
     let admin_secret_provisioner: Arc<dyn crate::admin_secrets::AdminSecretProvisioner> =
         Arc::new(crate::admin_secrets::FilesystemAdminSecretProvisioner::new(
             Arc::clone(&stores.filesystem),
             Arc::clone(&stores.secret_credentials.crypto),
         ));
-    // Projects persist over the production scoped filesystem (tenant supplied
-    // per call; the scope carries only the control-plane owner/agent identity),
-    // exactly as the local substrate builds them — see the local runtime stores'
-    // project repository. Production is always durable, so there is no
-    // in-memory fallback arm here.
     let project_agent_id = ironclaw_host_api::AgentId::new("reborn-projects").map_err(|error| {
         RebornBuildError::InvalidConfig {
             reason: format!("invalid project agent id: {error}"),
@@ -562,23 +527,12 @@ pub(super) async fn build_backend_production(
         ));
     let project_service: Arc<dyn ProjectService> =
         Arc::new(RebornProjectService::new(project_repository));
-    // Trigger conversation services over the production scoped filesystem —
-    // the substrate-agnostic trigger poller (`runtime.rs`) sources the
-    // materializer/submitter/pairing roles from here for production profiles,
-    // exactly as the local substrate serves them from its own conversation
-    // services. Built eagerly (production is always durable); the underlying
-    // `InboundTurnError` cause is preserved in the mapped build error.
     let trigger_conversation_services =
         RebornFilesystemConversationServices::new(Arc::clone(&stores.scoped_filesystem))
             .await
             .map_err(|error| RebornBuildError::InvalidConfig {
                 reason: format!("trigger conversation services unavailable: {error}"),
             })?;
-    // Same store-backed lookup the WebUI automations panel builds from the
-    // runtime's turn-state snapshot source (#5886). Read through a rebindable
-    // source so a test-support harness can repoint the trigger subsystem at its
-    // own turn store; production installs this runtime's own store and never
-    // repoints it.
     let trigger_source_turn_state: Arc<
         std::sync::RwLock<Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>>,
     > = Arc::new(std::sync::RwLock::new(
@@ -623,16 +577,9 @@ pub(super) async fn build_backend_production(
     .with_resource_governor(Arc::clone(&resource_governor))
     .with_production_reborn_event_stores(event_stores)
     .with_turn_run_wake_notifier_dyn(production_wiring.turn_run_wake_notifier);
-    // Honor an injected test egress (hosted-MCP discovery / DM provisioning over
-    // a fake transport) when present; otherwise the real policy egress. Restores
-    // the consumer dropped in commit 975bcd2ce — without it every standalone test
-    // reaches the real network. `TestNetworkHttpEgress` adapts the injected
-    // `Arc<dyn NetworkHttpEgress>` to the generic method bound.
     #[cfg(any(test, feature = "test-support"))]
     let services = match network_http_egress_for_test {
-        Some(test_egress) => {
-            services.try_with_host_http_egress(TestNetworkHttpEgress(test_egress))?
-        }
+        Some(test_egress) => services.try_with_host_http_egress(test_egress)?,
         None => services.try_with_host_http_egress(default_host_http_egress()?)?,
     };
     #[cfg(not(any(test, feature = "test-support")))]
@@ -657,26 +604,14 @@ pub(super) async fn build_backend_production(
         services,
         production_wiring.runtime_process_binding,
     );
-    // Wire the operator post-edit check in production too (off unless
-    // IRONCLAW_POST_EDIT_CHECK is set); it runs isolated in the tenant sandbox
-    // per the process binding applied above.
     let services = apply_post_edit_check_from_env(services)?;
     let security_audit_sink = services.security_audit_sink();
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
         Arc::new(services.turn_coordinator_for_production()?);
-    // B1: track the durable FilesystemAuthProductServices so the engine
-    // keepalive sweep can enumerate candidates across all owners. When a
-    // caller pre-supplies product_auth_ports, we do not create a durable
-    // instance here, so the candidate source is None (sweep finds no
-    // candidates, which is safe for override/test callers).
     let credential_refresh_candidate_source: Option<
         Arc<dyn ironclaw_auth::KeepaliveCandidateSource>,
     >;
-    // The durable auth-flow record projection this builder wires for its own
-    // durable service (`None` arm). Left `None` for a caller-supplied bundle so
-    // that path's WebUI auth interaction surface stays explicitly unavailable
-    // (restores wiring dropped in commit 975bcd2ce).
     let product_auth_flow_record_source: Option<Arc<dyn ironclaw_auth::AuthFlowRecordSource>>;
     let product_auth_ports = match product_auth_ports {
         Some(ports) => {
@@ -703,28 +638,14 @@ pub(super) async fn build_backend_production(
             )
         }
     };
-    // The sweep resolves per-vendor idle lifetimes through the same recipe
-    // data the auth engine executes; capture it before `provider_composition`
-    // moves into `compose_product_auth_services`.
     let keepalive_recipes = provider_composition
         .engine
         .as_ref()
         .map(|engine| Arc::clone(engine.recipes()));
-    // Two-phase product auth: the CORE is composed here so its
-    // dispatcher-independent services (credential selection/refresh, cleanup)
-    // can feed extension management, and the final services Arc is minted
-    // below with `lifecycle_auth_continuation_dispatcher` wrapped around the
-    // base dispatcher — extension-card OAuth (LifecycleActivation
-    // continuations) reconciles readiness before the fan-out.
     let (product_auth_core, base_auth_continuation) =
         compose_product_auth_services(ProductAuthServicesCompositionInput {
             ports: product_auth_ports,
             turn_coordinator: turn_coordinator.clone(),
-            // Blocked-auth fan-out over this builder's own durable turn-state
-            // store: a completed connect resumes every run the same owner has
-            // parked on the same provider, matching the standalone builder. The
-            // blanket `TurnRunSnapshotSource` impl covers the generic
-            // filesystem store directly.
             blocked_auth_snapshot_source: Some(Arc::clone(&turn_state)
                 as Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>),
             provider_composition,
@@ -737,15 +658,8 @@ pub(super) async fn build_backend_production(
             credential_account_visibility_policy,
             flow_record_source: product_auth_flow_record_source,
         })?;
-    // Dispatcher-independent view sharing every inner service (including the
-    // continuation-dispatch inflight set) with the final wrapped Arc below.
     let product_auth_dependencies = Arc::new(product_auth_core.clone());
     let product_auth_ready = true;
-    // Wire ProductAuthAccount runtime credential resolver before
-    // host_runtime_for_production so WASM extensions whose manifest declares a
-    // ProductAuthAccount runtime credential source resolve through
-    // CredentialAccountService. Unconditional in production: product_auth_services
-    // always exists (durable filesystem fallback from #4234).
     let mut services = services.with_runtime_credential_account_resolver(Arc::new(
         ProductAuthRuntimeCredentialResolver::new_with_refresh(
             product_auth_dependencies.runtime_credential_account_selection_service(),
@@ -753,10 +667,6 @@ pub(super) async fn build_backend_production(
         ),
     ));
     services = attach_wasm_runtime(services)?;
-    // Install every binary-assembled first-party capability handler (GSuite,
-    // web tooling) through the generic registrar seam (extension-runtime DEL-7).
-    // Composition owns the loop and the shared context; the concrete executors
-    // live in the assembling binary.
     let first_party_registrar_context = FirstPartyRegistrarContext {
         credential_account_service: product_auth_dependencies.credential_account_service(),
         credential_account_record_source: product_auth_dependencies
@@ -824,14 +734,8 @@ pub(super) async fn build_backend_production(
             reason: format!("first-party extension catalog could not be loaded: {error}"),
         })?,
     );
-    // Carry the reserved first-party id set onto the composed catalog so the
-    // upload-import path can reject reserved ids without re-deriving the
-    // inventory.
     available_extensions =
         available_extensions.with_reserved_bundled_ids(first_party_reserved_ids.clone());
-    // Manifest-derived account-setup declarations (#6520): every catalog
-    // package's `[account_setup]` projection joins the binary-injected extras
-    // from the deployment seam. Duplicates fail loudly at `declare()` below.
     let admin_configuration_uses = available_extensions.admin_configuration_uses();
     let mut admin_configuration_consumers = std::collections::BTreeMap::new();
     for usage in &admin_configuration_uses {
@@ -985,9 +889,6 @@ pub(super) async fn build_backend_production(
     )
     .await?;
     nearai_mcp_bootstrap_outcome.log_completion();
-    // Read-side service for manifest-declared administrator configuration.
-    // Production reads and writes both use the canonical Admin Configuration
-    // service; installation membership carries no deployment-owned values.
     let admin_configuration_resolver = Arc::new(
         ChannelConfigService::new(
             extension_management.installation_store_handle(),
@@ -1004,11 +905,6 @@ pub(super) async fn build_backend_production(
     );
     extension_management.attach_channel_config(&admin_configuration_resolver);
     admin_configuration_credential_slot.fill(Arc::clone(&admin_configuration_resolver));
-    // Mint the FINAL product-auth services with the lifecycle-activation
-    // continuation composed over the base dispatcher: extension-card OAuth
-    // completions re-enter the canonical lifecycle command (readiness
-    // reconciliation) before the provider-blocked-run fan-out, instead of
-    // being durably fenced un-activated.
     let lifecycle_continuation_facade: Arc<dyn ironclaw_product::LifecycleProductService> =
         Arc::new(
             ironclaw_extension_host::ExtensionHostLifecycleProductService::new(Arc::clone(
@@ -1021,26 +917,17 @@ pub(super) async fn build_backend_production(
                 product_auth_dependencies.runtime_credential_account_selection_service(),
             ),
         );
-    let base_product_continuation: Arc<dyn ironclaw_product::ProductAuthContinuationDispatcher> =
-        product_auth_continuation_dispatcher(base_auth_continuation);
     let lifecycle_wrapped_product_continuation =
         ironclaw_product::lifecycle_auth_continuation_dispatcher(
             lifecycle_continuation_facade,
-            base_product_continuation,
+            base_auth_continuation,
         );
-    let lifecycle_wrapped_auth_continuation: Arc<dyn RebornAuthContinuationDispatcher> = Arc::new(
-        AuthContinuationFromProduct::new(Arc::clone(&lifecycle_wrapped_product_continuation)),
-    );
+    let lifecycle_wrapped_auth_continuation: Arc<dyn RebornAuthContinuationDispatcher> =
+        Arc::clone(&lifecycle_wrapped_product_continuation);
     let product_auth_services = Arc::new(
         product_auth_core
             .with_continuation_dispatcher(Arc::clone(&lifecycle_wrapped_auth_continuation)),
     );
-    // Bundle the keepalive sweep deps so they are wired all-or-nothing. The
-    // candidate source is present only when this path built a durable instance
-    // (no caller-supplied product_auth_ports); recipes are present only when
-    // the auth engine was composed; the leader lock and refresh port are
-    // always available here. The refresh port holds the WRAPPED services so a
-    // refresh-driven flow reconcile runs the same lifecycle continuation.
     let credential_refresh_worker = match (credential_refresh_candidate_source, keepalive_recipes) {
         (Some(candidate_source), Some(recipes)) => CredentialRefreshWorkerReady::Ready {
             candidate_source,
@@ -1067,9 +954,6 @@ pub(super) async fn build_backend_production(
     );
     let runtime_http_egress = Some(product_auth_runtime_ports.runtime_http_egress());
     let host_runtime_http_egress = services.host_runtime_http_egress_port();
-    // The first-party capability handlers were installed above through the
-    // binary-supplied `first_party_registrars` loop (extension-runtime DEL-7);
-    // composition names no concrete first-party executor here.
     insert_extension_lifecycle_handlers(
         &mut first_party_registry,
         Arc::clone(&extension_management),
@@ -1164,7 +1048,7 @@ pub(super) async fn build_backend_production(
             .collect();
         let generic_installation_store = extension_management.installation_store_handle();
         let backend_extension_host =
-            BackendExtensionHostAssemblyBuilder::new(BackendExtensionHostAssemblyInput {
+            build_backend_extension_host(BackendExtensionHostAssemblyInput {
                 binder: services.extension_lane_tool_binder(),
                 native_factories: native_extension_factories,
                 channel_bindings: channel_extension_bindings.clone(),
@@ -1180,7 +1064,6 @@ pub(super) async fn build_backend_production(
                 outbound_state: Arc::clone(&outbound_stores.outbound_state)
                     as Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
             })
-            .build()
             .await?;
         let pairing_installation_store = Arc::clone(&backend_extension_host.installation_store);
         extension_management.attach_generic_host(Arc::clone(&backend_extension_host.generic_host));
@@ -1189,7 +1072,7 @@ pub(super) async fn build_backend_production(
         }
         services.set_extension_tool_resolver(backend_extension_host.resolver);
         let channel_pairing_registry_built =
-            BackendChannelPairingAssemblyBuilder::new(BackendChannelPairingAssemblyInput {
+            build_backend_channel_pairing(BackendChannelPairingAssemblyInput {
                 descriptors: account_setup_descriptors,
                 account_setups,
                 filesystem: Arc::clone(&fold_filesystem),
@@ -1209,7 +1092,6 @@ pub(super) async fn build_backend_production(
                     >,
                 disconnect_slot: Arc::clone(&channel_disconnect_slot),
             })
-            .build()
             .await?;
         channel_pairing_registry = Some(Arc::clone(&channel_pairing_registry_built));
         ChannelHostWiring {
@@ -1301,9 +1183,6 @@ pub(super) async fn build_backend_production(
         secret_store,
         #[cfg(test)]
         standalone_wasm_runtime_credential_provider_captured,
-        // `Ready` only when this path built a durable candidate source (i.e. no
-        // caller-supplied product_auth_ports override); `Absent` otherwise. The
-        // leader lock is always available on this production path.
         credential_refresh_worker,
         channel_extension_bindings,
         deployment_channels,
@@ -1316,11 +1195,6 @@ pub(super) async fn build_backend_production(
     })
 }
 
-/// Common tail of the libsql/postgres production build paths. After each
-/// backend assembles its unified `CompositeRootFilesystem`, trigger repository,
-/// event-store config, and refresh leader lock, this single-sources the
-/// resource-governor + `ProductionStoreBundle` + backend build so the two paths
-/// cannot drift on the store-assembly recipe.
 async fn finish_production_backend(
     context: RebornProductionBuildContext,
     filesystem: Arc<CompositeRootFilesystem>,
@@ -1387,10 +1261,6 @@ pub(super) async fn build_postgres_production(
     ensure_postgres_resource_governor_authority_for_build(
         process_local_resource_governor_singleton,
     )?;
-    // A4: Clone the pool before it is moved into PostgresTriggerRepository so we
-    // can thread it to the credential keepalive worker as a leader-lock for
-    // sweep serialization.
-    // This clone stays PRIVATE — it is never exposed through any public facade.
     let pool_for_refresh_lock = pool.clone();
     let database_filesystem = Arc::new(PostgresRootFilesystem::new(pool.clone()));
     database_filesystem.run_migrations().await?;

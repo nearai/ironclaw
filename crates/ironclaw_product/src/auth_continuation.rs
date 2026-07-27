@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+pub use ironclaw_auth::RebornAuthContinuationDispatcher as ProductAuthContinuationDispatcher;
 use ironclaw_auth::{AuthContinuationEvent, AuthContinuationRef, AuthProductError};
 use ironclaw_turns::{
     GateRef, GateResumeDisposition, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
@@ -24,23 +25,6 @@ use crate::{
     LifecycleProductAction, LifecycleProductContext, LifecycleProductService,
     LifecycleProductSurfaceContext, ProductSurfaceFailure,
 };
-
-/// Product-surface boundary for completing a durable auth continuation.
-///
-/// Implementations are idempotent on `flow_id`: the auth engine provides
-/// at-least-once delivery until the durable continuation fence is stamped.
-#[async_trait]
-pub trait ProductAuthContinuationDispatcher: Send + Sync {
-    async fn dispatch_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError>;
-
-    async fn dispatch_canceled_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError>;
-}
 
 struct LifecycleAuthContinuationDispatcher {
     lifecycle: Arc<dyn LifecycleProductService>,
@@ -246,23 +230,6 @@ impl ProductAuthTurnGateResumeDispatcher {
 
 #[async_trait]
 impl ProductAuthContinuationDispatcher for ProductAuthTurnGateResumeDispatcher {
-    async fn dispatch_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        ProductAuthTurnGateResumeDispatcher::dispatch_auth_continuation(self, event).await
-    }
-
-    async fn dispatch_canceled_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        ProductAuthTurnGateResumeDispatcher::dispatch_canceled_auth_continuation(self, event).await
-    }
-}
-
-#[async_trait]
-impl ironclaw_auth::RebornAuthContinuationDispatcher for ProductAuthTurnGateResumeDispatcher {
     async fn dispatch_auth_continuation(
         &self,
         event: AuthContinuationEvent,

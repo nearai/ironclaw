@@ -110,7 +110,7 @@ pub async fn build_lifecycle_test_services(
     .with_runtime_credential_account_resolver(credential_resolver);
     host_services = match network_http_egress {
         Some(egress) => host_services
-            .try_with_host_http_egress(TestNetworkHttpEgress(egress))
+            .try_with_host_http_egress(egress)
             .expect("test HTTP egress wires"),
         None => host_services,
     };
@@ -455,18 +455,6 @@ impl RuntimeCredentialAccountResolver for TestProductAuthRuntimeCredentialResolv
             scope: account.scope.resource,
             handle,
         })
-    }
-}
-
-struct TestNetworkHttpEgress(Arc<dyn ironclaw_network::NetworkHttpEgress>);
-
-#[async_trait]
-impl ironclaw_network::NetworkHttpEgress for TestNetworkHttpEgress {
-    async fn execute(
-        &self,
-        request: ironclaw_network::NetworkHttpRequest,
-    ) -> Result<ironclaw_network::NetworkHttpResponse, ironclaw_network::NetworkHttpError> {
-        self.0.execute(request).await
     }
 }
 

@@ -44,13 +44,16 @@ where
     let authorizer = build_trigger_fire_authorizer(authorizer_config, access_checker, tenant_id)?;
     let pairing_service: Arc<dyn ironclaw_conversations::ConversationActorPairingService> =
         Arc::new(conversation_services.clone());
-    let (materializer, trusted_submitter) = build_from_conversation_services(
+    let materializer = Arc::new(ConversationContentRefMaterializer::new(
+        conversation_services.clone(),
+        Arc::clone(&thread_service),
+        default_agent_id,
+        authorizer,
+    ));
+    let trusted_submitter = ironclaw_conversations::trusted_trigger_fire_submitter(
         conversation_services.clone(),
         conversation_services,
         turn_coordinator,
-        thread_service,
-        default_agent_id,
-        authorizer,
     );
     let services = TriggerPollerServices {
         materializer,
@@ -108,35 +111,6 @@ fn build_trigger_fire_authorizer(
             })
             .ok_or_else(trigger_poller_authorization_required_error),
     }
-}
-
-fn build_from_conversation_services<B, S>(
-    binding_service: B,
-    session_thread_service: S,
-    turn_coordinator: Arc<dyn TurnCoordinator>,
-    thread_service: Arc<dyn SessionThreadService>,
-    default_agent_id: AgentId,
-    authorizer: Arc<dyn crate::automation::trigger_poller_trusted_submit::TriggerFireAuthorizer>,
-) -> (
-    Arc<dyn ironclaw_triggers::TriggerPromptMaterializer>,
-    Arc<dyn ironclaw_triggers::TrustedTriggerFireSubmitter>,
-)
-where
-    B: ironclaw_conversations::ConversationBindingService + Clone + 'static,
-    S: ironclaw_conversations::SessionThreadService + 'static,
-{
-    let materializer = Arc::new(ConversationContentRefMaterializer::new(
-        binding_service.clone(),
-        Arc::clone(&thread_service),
-        default_agent_id,
-        authorizer,
-    ));
-    let trusted_submitter = ironclaw_conversations::trusted_trigger_fire_submitter(
-        binding_service,
-        session_thread_service,
-        turn_coordinator,
-    );
-    (materializer, trusted_submitter)
 }
 
 pub(crate) fn build_trigger_active_run_lookup(

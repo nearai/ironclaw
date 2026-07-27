@@ -17,20 +17,20 @@ use crate::builtin_capability_policy::builtin_capability_policy;
 use crate::capability_authorization::{StoreApprovalSettingsProvider, capability_authorizer};
 use crate::deployment::TrafficPolicy;
 use crate::extension_host_assembly::{
-    BackendChannelPairingAssemblyBuilder, BackendChannelPairingAssemblyInput,
-    BackendExtensionHostAssemblyBuilder, BackendExtensionHostAssemblyInput,
+    BackendChannelPairingAssemblyInput, BackendExtensionHostAssemblyInput,
+    build_backend_channel_pairing, build_backend_extension_host,
 };
 #[cfg(any(test, feature = "test-support"))]
 use crate::filesystem_assembly::build_default_database_roots;
 #[cfg(test)]
 use crate::filesystem_assembly::mount_descriptor;
 use crate::filesystem_assembly::{
-    DurableBackend, DurableStorageInput, FilesystemAssemblyBuilder,
-    open_standalone_libsql_database, production_database_root_filesystem, standalone_db_path,
+    DurableBackend, DurableStorageInput, build_filesystem, open_standalone_libsql_database,
+    production_database_root_filesystem, standalone_db_path,
 };
 #[cfg(test)]
 use crate::host_access_assembly::validate_workspace_skill_isolation;
-use crate::host_access_assembly::{HostAccessAssemblyBuilder, WorkspaceFilesystems};
+use crate::host_access_assembly::{WorkspaceFilesystems, build_host_access};
 use crate::input::{
     LibsqlConnectionConfig, OAuthDcrCallbackConfig, OAuthProviderBackendConfig, PostgresPoolSource,
     RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput,
@@ -43,13 +43,13 @@ use crate::outbound::outbound_preferences_capability::{
 use crate::outbound::{
     outbound_delivery_synthetic_provider, outbound_delivery_target_set_operator_tool_info,
 };
-use crate::outbound_store_assembly::OutboundStoreAssemblyBuilder;
+use crate::outbound_store_assembly::build_outbound_stores;
 use crate::runtime_input::RebornRuntimeIdentity;
 use crate::runtime_mounts::{
     ambient_workspace_mount_view, memory_mount_view, scoped_skill_context_mount_view,
     skill_management_mount_view, workspace_mount_view,
 };
-use crate::standalone_bootstrap_assembly::HostBootstrapAssemblyBuilder;
+use crate::standalone_bootstrap_assembly::bootstrap_standalone_host;
 #[cfg(test)]
 use crate::standalone_bootstrap_assembly::{
     LEGACY_SKILLS_BACKFILL_MARKER, backfill_legacy_user_skills,
@@ -191,9 +191,8 @@ mod auth_engine_assembly;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use auth_engine_assembly::auth_continuation_dispatcher;
 use auth_engine_assembly::{
-    AdminConfigurationCredentialSlot, AuthContinuationFromProduct,
-    ProductAuthRuntimeCredentialResolver, ProductAuthServicesCompositionInput,
-    compose_product_auth_services, compose_provider_client, product_auth_continuation_dispatcher,
+    AdminConfigurationCredentialSlot, ProductAuthRuntimeCredentialResolver,
+    ProductAuthServicesCompositionInput, compose_product_auth_services, compose_provider_client,
 };
 mod trigger_creation_assembly;
 #[cfg(any(test, feature = "test-support"))]
@@ -203,11 +202,9 @@ use trigger_creation_assembly::TriggerCreatorPairingHook;
 use trigger_creation_assembly::{
     pair_trigger_creator, validate_trigger_delivery_target_against_registry,
 };
-mod runtime_lane_assembly;
-#[cfg(any(test, feature = "test-support"))]
-use runtime_lane_assembly::TestNetworkHttpEgress;
 mod production_backend_assembly;
 mod production_build_assembly;
+mod runtime_lane_assembly;
 #[cfg(test)]
 use production_backend_assembly::ensure_libsql_resource_governor_authority_for_build;
 use production_backend_assembly::{

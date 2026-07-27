@@ -7,10 +7,7 @@ pub(super) async fn build_production_shaped(
         deployment,
         storage,
         production_trust_policy,
-        // The notifier field on `RebornHostBindings` is kept for backward
-        // compatibility with test callers that pre-mint one, but the
-        // production-shaped build now mints its own notifier internally so the
-        // coordinator and scheduler always share the exact same channel.
+        // Compatibility input; the build mints one shared scheduler channel.
         turn_run_wake_notifier: _,
         runtime_process_binding,
         product_auth_ports,
@@ -26,9 +23,6 @@ pub(super) async fn build_production_shaped(
         memory_provider_connection,
         ..
     } = input;
-    // The declarative DATA now lives on the deployment (Phase A). Clone the
-    // fields this build path consumes by value; `deployment` stays in scope for
-    // its substrate/traffic/readiness axes below.
     let owner_id = deployment.owner_id.clone();
     let local_runtime_identity = deployment.local_runtime_identity.clone();
     let runtime_policy = deployment.runtime_policy.clone();
@@ -39,12 +33,7 @@ pub(super) async fn build_production_shaped(
     let turn_state_store_limits = deployment.turn_state_store_limits;
     let first_party_bundles = deployment.first_party_bundles.clone();
     let traffic_policy = deployment.traffic();
-    // Build the single memory provider resolver for this runtime (issue #3537):
-    // the memory tools and the standalone profile source build their
-    // `MemoryService` through it. For a standalone workspace, bound mem0 memory to
-    // this workspace (issue #5264) so memories from one standalone root never leak
-    // into another sharing the same mem0 server; production keeps `app_id` from
-    // config. An explicitly-configured `app_id` always wins.
+    // Scope an implicit mem0 app id to the standalone storage root.
     let memory_service_resolver = {
         let mut memory_provider_connection = memory_provider_connection;
         if memory_provider_connection.app_id.is_none()
@@ -60,24 +49,46 @@ pub(super) async fn build_production_shaped(
             &crate::MemoryProviderDeps::for_third_party(memory_provider_connection),
         )
     };
-    // Label for logging/errors; behaviour reads `deployment`'s axes.
     let profile = deployment.profile();
     let wiring_config = production_config(
         deployment.required_runtime_backends.clone(),
         deployment.require_runtime_http_egress,
         deployment.require_wasm_credentials,
     );
-    // The built-in first-party trust policy is composed here, at BUILD time,
-    // from the binary-injected neutral bundle set (extension-runtime DEL-7) when
-    // the caller did not pre-supply one — construction time (input.rs) predates
-    // bundle injection. Same grants as the inventory-driven builder, sourced
-    // from injected data instead of a direct `ironclaw_first_party_extensions`
-    // call.
+    // Build default trust from the injected first-party inventory.
     let production_trust_policy = match production_trust_policy {
         Some(policy) => Some(policy),
         None => Some(Arc::new(production_first_party_trust_policy(
             &first_party_bundles,
         )?)),
+    };
+    let build_context = |production_wiring, scheduler_wake_wiring| RebornProductionBuildContext {
+        profile,
+        wiring_config,
+        production_wiring,
+        local_process_port: None,
+        product_auth_ports,
+        oauth_provider_configs,
+        oauth_dcr_callback,
+        owner_id,
+        local_runtime_identity,
+        turn_state_store_limits,
+        memory_resolver: memory_service_resolver,
+        scheduler_wake_wiring,
+        account_setup_descriptors,
+        nearai_mcp_bootstrap_config,
+        native_extension_factories,
+        channel_extension_bindings,
+        first_party_bundles,
+        first_party_registrars,
+        credential_account_visibility_policy,
+        workspace_filesystems: None,
+        standalone_storage_root: None,
+        default_system_prompt_path: None,
+        #[cfg(any(test, feature = "test-support"))]
+        network_http_egress_for_test,
+        #[cfg(any(test, feature = "test-support"))]
+        trust_fixture_extensions_for_test,
     };
     match storage {
         RebornStorageInput::Disabled => Err(RebornBuildError::InvalidConfig {
@@ -100,34 +111,7 @@ pub(super) async fn build_production_shaped(
                 scheduler_wake_wiring.notifier(),
                 runtime_process_binding,
             )?;
-            let context = RebornProductionBuildContext {
-                profile,
-                wiring_config,
-                production_wiring,
-                local_process_port: None,
-                product_auth_ports,
-                oauth_provider_configs,
-                oauth_dcr_callback,
-                owner_id,
-                local_runtime_identity,
-                turn_state_store_limits,
-                memory_resolver: memory_service_resolver.clone(),
-                scheduler_wake_wiring,
-                account_setup_descriptors,
-                nearai_mcp_bootstrap_config,
-                native_extension_factories,
-                channel_extension_bindings,
-                first_party_bundles,
-                first_party_registrars,
-                credential_account_visibility_policy,
-                workspace_filesystems: None,
-                standalone_storage_root: None,
-                default_system_prompt_path: None,
-                #[cfg(any(test, feature = "test-support"))]
-                network_http_egress_for_test: network_http_egress_for_test.clone(),
-                #[cfg(any(test, feature = "test-support"))]
-                trust_fixture_extensions_for_test,
-            };
+            let context = build_context(production_wiring, scheduler_wake_wiring);
             build_local_storage_production_shaped(
                 context,
                 LocalStorageProductionInput {
@@ -150,7 +134,6 @@ pub(super) async fn build_production_shaped(
             secret_master_key,
             process_local_resource_governor_singleton,
         } => {
-            // Phase B: open (or accept the test-supplied) pool at build time.
             let pool = open_postgres_pool_from_source(pool_source)?;
             let scheduler_wake_wiring = ironclaw_runner::runtime::SchedulerWakeWiring::channel();
             let runtime_policy_for_local_process = runtime_policy.clone();
@@ -161,34 +144,7 @@ pub(super) async fn build_production_shaped(
                 scheduler_wake_wiring.notifier(),
                 runtime_process_binding,
             )?;
-            let context = RebornProductionBuildContext {
-                profile,
-                wiring_config,
-                production_wiring,
-                local_process_port: None,
-                product_auth_ports,
-                oauth_provider_configs,
-                oauth_dcr_callback,
-                owner_id,
-                local_runtime_identity,
-                turn_state_store_limits,
-                memory_resolver: memory_service_resolver.clone(),
-                scheduler_wake_wiring,
-                account_setup_descriptors,
-                nearai_mcp_bootstrap_config,
-                native_extension_factories,
-                channel_extension_bindings,
-                first_party_bundles,
-                first_party_registrars,
-                credential_account_visibility_policy,
-                workspace_filesystems: None,
-                standalone_storage_root: None,
-                default_system_prompt_path: None,
-                #[cfg(any(test, feature = "test-support"))]
-                network_http_egress_for_test: network_http_egress_for_test.clone(),
-                #[cfg(any(test, feature = "test-support"))]
-                trust_fixture_extensions_for_test,
-            };
+            let context = build_context(production_wiring, scheduler_wake_wiring);
             build_local_storage_production_shaped(
                 context,
                 LocalStorageProductionInput {
@@ -211,13 +167,6 @@ pub(super) async fn build_production_shaped(
             secret_master_key,
             process_local_resource_governor_singleton,
         } => {
-            // Mint the scheduler wake wiring here, before building the coordinator, so:
-            // 1. The notifier can satisfy `HostRuntimeServices.with_turn_run_wake_notifier_dyn`
-            //    (required by `validate_production_wiring` / `turn_coordinator_for_production`).
-            // 2. The wiring is threaded through `RebornRuntimeStores` →
-            //    `DefaultPlannedRuntimeParts.scheduler_wake_wiring` so the
-            //    `build_default_planned_runtime` scheduler loop consumes the exact same channel,
-            //    ensuring the coordinator's notifier and the scheduler share a live queue.
             let scheduler_wake_wiring = ironclaw_runner::runtime::SchedulerWakeWiring::channel();
             let production_wiring = production_wiring(
                 traffic_policy,
@@ -227,40 +176,11 @@ pub(super) async fn build_production_shaped(
                 runtime_process_binding,
             )?;
             let secret_master_key = resolve_secret_master_key(secret_master_key).await?;
-            // Phase B: prefer the test-supplied handle; otherwise open the
-            // database from the declarative connection config at build time.
             let db = match prebuilt_db {
                 Some(db) => db,
                 None => open_libsql_database_from_connection(&connection).await?,
             };
-            let context = RebornProductionBuildContext {
-                profile,
-                wiring_config,
-                production_wiring,
-                local_process_port: None,
-                product_auth_ports,
-                oauth_provider_configs,
-                oauth_dcr_callback,
-                owner_id,
-                local_runtime_identity,
-                turn_state_store_limits,
-                memory_resolver: memory_service_resolver.clone(),
-                scheduler_wake_wiring,
-                account_setup_descriptors,
-                nearai_mcp_bootstrap_config,
-                native_extension_factories,
-                channel_extension_bindings,
-                first_party_bundles,
-                first_party_registrars,
-                credential_account_visibility_policy,
-                workspace_filesystems: None,
-                standalone_storage_root: None,
-                default_system_prompt_path: None,
-                #[cfg(any(test, feature = "test-support"))]
-                network_http_egress_for_test: network_http_egress_for_test.clone(),
-                #[cfg(any(test, feature = "test-support"))]
-                trust_fixture_extensions_for_test,
-            };
+            let context = build_context(production_wiring, scheduler_wake_wiring);
             build_libsql_production(
                 context,
                 db,
@@ -276,15 +196,7 @@ pub(super) async fn build_production_shaped(
             secret_master_key,
             process_local_resource_governor_singleton,
         } => {
-            // Phase B: open (or accept the test-supplied) pool at build time.
             let pool = open_postgres_pool_from_source(pool_source)?;
-            // Mint the scheduler wake wiring here, before building the coordinator, so:
-            // 1. The notifier can satisfy `HostRuntimeServices.with_turn_run_wake_notifier_dyn`
-            //    (required by `validate_production_wiring` / `turn_coordinator_for_production`).
-            // 2. The wiring is threaded through `RebornRuntimeStores` →
-            //    `DefaultPlannedRuntimeParts.scheduler_wake_wiring` so the
-            //    `build_default_planned_runtime` scheduler loop consumes the exact same channel,
-            //    ensuring the coordinator's notifier and the scheduler share a live queue.
             let scheduler_wake_wiring = ironclaw_runner::runtime::SchedulerWakeWiring::channel();
             let production_wiring = production_wiring(
                 traffic_policy,
@@ -294,34 +206,7 @@ pub(super) async fn build_production_shaped(
                 runtime_process_binding,
             )?;
             let secret_master_key = resolve_secret_master_key(secret_master_key).await?;
-            let context = RebornProductionBuildContext {
-                profile,
-                wiring_config,
-                production_wiring,
-                local_process_port: None,
-                product_auth_ports,
-                oauth_provider_configs,
-                oauth_dcr_callback,
-                owner_id,
-                local_runtime_identity,
-                turn_state_store_limits,
-                memory_resolver: memory_service_resolver.clone(),
-                scheduler_wake_wiring,
-                account_setup_descriptors,
-                nearai_mcp_bootstrap_config,
-                native_extension_factories,
-                channel_extension_bindings,
-                first_party_bundles,
-                first_party_registrars,
-                credential_account_visibility_policy,
-                workspace_filesystems: None,
-                standalone_storage_root: None,
-                default_system_prompt_path: None,
-                #[cfg(any(test, feature = "test-support"))]
-                network_http_egress_for_test: network_http_egress_for_test.clone(),
-                #[cfg(any(test, feature = "test-support"))]
-                trust_fixture_extensions_for_test,
-            };
+            let context = build_context(production_wiring, scheduler_wake_wiring);
             build_postgres_production(
                 context,
                 pool,
@@ -341,9 +226,6 @@ async fn resolve_secret_master_key(
         .ok_or(RebornBuildError::MissingSecretMasterKey)
 }
 
-/// Local-storage bring-up inputs for [`build_local_storage_production_shaped`],
-/// bundled so the builder keeps a two-argument shape (`context` + these) rather
-/// than a positional-argument sprawl.
 struct LocalStorageProductionInput {
     root: PathBuf,
     workspace_root: Option<PathBuf>,
@@ -367,13 +249,12 @@ async fn build_local_storage_production_shaped(
         runtime_policy_for_local_process,
         postgres_resource_governor_singleton,
     } = input;
-    let host_access = HostAccessAssemblyBuilder::new(
+    let host_access = build_host_access(
         root,
         workspace_root,
         host_home_root,
         runtime_policy_for_local_process,
-    )
-    .build()?;
+    )?;
     let root = &host_access.storage_root;
     let workspace_root = &host_access.workspace_root;
     let host_home_root = host_access.host_home_root.as_ref();
@@ -381,15 +262,10 @@ async fn build_local_storage_production_shaped(
         UserId::new(context.owner_id.clone()).map_err(|error| RebornBuildError::InvalidConfig {
             reason: error.to_string(),
         })?;
-    let bootstrap = HostBootstrapAssemblyBuilder::new(root, &owner_user_id)
-        .build()
-        .await?;
+    let default_system_prompt_path = bootstrap_standalone_host(root, &owner_user_id).await?;
 
     let filesystem_bundle =
-        FilesystemAssemblyBuilder::new(root, workspace_root, storage_backend_input)
-            .with_host_home_root(host_home_root)
-            .build()
-            .await?;
+        build_filesystem(root, workspace_root, host_home_root, storage_backend_input).await?;
     let trigger_repository =
         trigger_repository_for_durable_backend(&filesystem_bundle.durable_backend).await?;
     let refresh_lock_pool = match &filesystem_bundle.durable_backend {
@@ -410,7 +286,7 @@ async fn build_local_storage_production_shaped(
         Some(host_access.build_workspace_filesystems(Arc::clone(&filesystem))?);
     context.local_process_port = host_access.process_port;
     context.standalone_storage_root = Some(root.clone());
-    context.default_system_prompt_path = Some(bootstrap.default_system_prompt_path);
+    context.default_system_prompt_path = Some(default_system_prompt_path);
     let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
     let (_secret_store, crypto) = build_secret_store(
         root,
@@ -460,12 +336,7 @@ pub(super) struct RebornProductionBuildContext {
     pub(super) owner_id: String,
     pub(super) local_runtime_identity: Option<RebornLocalRuntimeIdentity>,
     pub(super) turn_state_store_limits: ironclaw_turns::TurnStateStoreLimits,
-    /// Memory provider resolver (issue #3537), carried so the standalone profile
-    /// source and the memory tools build providers through one resolver.
     pub(super) memory_resolver: MemoryServiceResolver,
-    /// The pre-minted scheduler wake wiring to carry to `RebornRuntimeStores` so
-    /// `build_reborn_runtime` can hand it to `build_default_planned_runtime` via
-    /// `DefaultPlannedRuntimeParts.scheduler_wake_wiring`.
     pub(super) scheduler_wake_wiring: ironclaw_runner::runtime::SchedulerWakeWiring,
     pub(super) account_setup_descriptors: Vec<ironclaw_product::ExtensionAccountSetupDescriptor>,
     pub(super) nearai_mcp_bootstrap_config:
@@ -473,27 +344,16 @@ pub(super) struct RebornProductionBuildContext {
     pub(super) native_extension_factories:
         Vec<Arc<dyn ironclaw_extension_host::NativeExtensionFactory>>,
     pub(super) channel_extension_bindings: Vec<crate::input::ChannelExtensionBinding>,
-    /// Binary-injected neutral first-party bundle set (extension-runtime DEL-7):
-    /// feeds the available-extension catalog, vendor auth recipes, and the
-    /// reserved host-bundled id set.
     pub(super) first_party_bundles: Vec<ironclaw_extension_host::FirstPartyPackageBundle>,
-    /// Binary-injected first-party capability handler registrars (GSuite,
-    /// web tooling).
     pub(super) first_party_registrars:
         Vec<Arc<dyn ironclaw_extension_host::FirstPartyHandlerRegistrar>>,
-    /// Injected credential-account visibility policy (see the build-input field).
     pub(super) credential_account_visibility_policy:
         Option<Arc<dyn ironclaw_auth::RuntimeCredentialAccountVisibilityPolicy>>,
     pub(super) workspace_filesystems: Option<WorkspaceFilesystems>,
     pub(super) standalone_storage_root: Option<PathBuf>,
     pub(super) default_system_prompt_path: Option<PathBuf>,
-    /// Test-support host HTTP egress override (see `TestNetworkHttpEgress`).
-    /// Carried from `RebornHostBindings::network_http_egress_for_test` so the
-    /// unified production-shaped build honors an injected fake transport.
     #[cfg(any(test, feature = "test-support"))]
     pub(super) network_http_egress_for_test: Option<Arc<dyn ironclaw_network::NetworkHttpEgress>>,
-    /// Test-support only: allow trusted fixture packages copied into
-    /// `/system/extensions` to validate as host-bundled.
     #[cfg(any(test, feature = "test-support"))]
     pub(super) trust_fixture_extensions_for_test: bool,
 }

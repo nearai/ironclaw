@@ -296,7 +296,7 @@ impl DeploymentConfig {
         }
     }
 
-    /// Standalone standaloneelopment on a single-user machine.
+    /// Standalone deployment on a single-user machine.
     pub fn standalone() -> Self {
         Self {
             profile: RebornCompositionProfile::Standalone,
@@ -333,7 +333,7 @@ impl DeploymentConfig {
         }
     }
 
-    /// Trusted-laptop standaloneelopment with minimal approvals. Requires the
+    /// Trusted-laptop deployment with minimal approvals. Requires the
     /// operator's explicit host-access confirmation; without it the resolver
     /// fails closed with [`ResolveError::YoloRequiresDisclosure`].
     pub fn standalone_unrestricted(confirm_host_access: bool) -> Self {
@@ -713,7 +713,7 @@ pub fn hosted_single_tenant_volume_runtime_policy() -> Result<EffectiveRuntimePo
         })
 }
 
-/// Resolved policy for trusted single-user standaloneelopment with inherited
+/// Resolved policy for trusted single-user deployment with inherited
 /// host environment access.
 pub fn standalone_unrestricted_runtime_policy(
     confirm_host_access: bool,

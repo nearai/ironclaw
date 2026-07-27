@@ -107,9 +107,6 @@ use ironclaw_turns::run_profile::{MemoryPromptContextService, UserProfileContext
 
 use self::latency::{trace_runtime_latency_error, trace_runtime_latency_ok};
 use self::runtime_turn_scheduler::RuntimeTurnScheduler;
-pub use crate::auth_interaction_assembly::{
-    blocked_auth_flow_canceller, product_auth_challenge_provider,
-};
 use crate::builtin_capability_policy::{BuiltinCapabilityPolicy, builtin_capability_policy};
 use crate::deployment::{DeploymentConfig, TrafficPolicy};
 use crate::factory::{
@@ -143,6 +140,7 @@ use ironclaw_extension_host::channel_pairing::ChannelPairingConsumeOutcome;
 use ironclaw_extension_host::channel_pairing::ChannelPairingRegistry;
 use ironclaw_extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
 use ironclaw_product::projection::{RebornProjectionServices, build_reborn_projection_services};
+pub use ironclaw_product::{blocked_auth_flow_canceller, product_auth_challenge_provider};
 use ironclaw_secrets::SecretStorePort;
 use ironclaw_skills::ScopedSkillManagementPort;
 

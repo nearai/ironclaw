@@ -52,6 +52,7 @@ mod ledger;
 mod lifecycle;
 mod outbound_delivery;
 mod policy;
+mod product_auth_prompt;
 mod product_surface_inbound;
 mod project_create_capability;
 pub mod projection;
@@ -59,6 +60,7 @@ mod reborn_services;
 mod run_delivery;
 mod workflow;
 
+pub use product_auth_prompt::{blocked_auth_flow_canceller, product_auth_challenge_provider};
 pub use project_create_capability::{PROJECT_CREATE_CAPABILITY_ID, project_create_capability};
 
 pub use action::{

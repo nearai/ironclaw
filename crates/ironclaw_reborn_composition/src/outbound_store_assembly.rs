@@ -15,26 +15,18 @@ pub(crate) struct OutboundStoreAssembly {
 }
 
 /// Builds the outbound persistence graph over the composition-owned filesystem.
-pub(crate) struct OutboundStoreAssemblyBuilder {
+pub(crate) fn build_outbound_stores(
     filesystem: Arc<CompositeRootFilesystem>,
-}
-
-impl OutboundStoreAssemblyBuilder {
-    pub(crate) fn new(filesystem: Arc<CompositeRootFilesystem>) -> Self {
-        Self { filesystem }
-    }
-
-    pub(crate) fn build(self) -> OutboundStoreAssembly {
-        // Every outbound role is an Arc clone of this allocation, so
-        // preferences and delivery state cannot drift across backing trees.
-        #[allow(clippy::disallowed_methods)]
-        let store: Arc<OutboundStateStore<CompositeRootFilesystem>> =
-            Arc::new(OutboundStateStore::new(crate::wrap_scoped(self.filesystem)));
-        OutboundStoreAssembly {
-            outbound_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
-            outbound_state: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
-            delivered_gate_routes: Arc::clone(&store) as Arc<dyn DeliveredGateRouteStore>,
-            triggered_run_delivery: store as Arc<dyn TriggeredRunDeliveryStore>,
-        }
+) -> OutboundStoreAssembly {
+    // Every outbound role is an Arc clone of this allocation, so preferences
+    // and delivery state cannot drift across backing trees.
+    #[allow(clippy::disallowed_methods)]
+    let store: Arc<OutboundStateStore<CompositeRootFilesystem>> =
+        Arc::new(OutboundStateStore::new(crate::wrap_scoped(filesystem)));
+    OutboundStoreAssembly {
+        outbound_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
+        outbound_state: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
+        delivered_gate_routes: Arc::clone(&store) as Arc<dyn DeliveredGateRouteStore>,
+        triggered_run_delivery: store as Arc<dyn TriggeredRunDeliveryStore>,
     }
 }

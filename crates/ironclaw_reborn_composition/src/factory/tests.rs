@@ -720,12 +720,12 @@ async fn standalone_default_product_auth_preserves_manual_token_across_rebuilds(
         .expect("manual-token account should survive standalone rebuild");
     assert_eq!(rebuilt_account.access_secret.as_ref(), Some(&access_secret));
 
-    let rebuilt_filesystem = FilesystemAssemblyBuilder::new(
+    let rebuilt_filesystem = build_filesystem(
         &standalone_root,
         &standalone_root.join("workspace"),
+        None,
         DurableStorageInput::EmbeddedLibsql,
     )
-    .build()
     .await
     .expect("standalone filesystem rebuild")
     .filesystem;

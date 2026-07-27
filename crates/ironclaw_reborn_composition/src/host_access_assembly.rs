@@ -91,83 +91,56 @@ impl HostAccessAssembly {
     }
 }
 
-/// Builds host filesystem/process access from already-resolved policy data.
-///
-/// The policy resolver decides whether host access is permitted. This builder
-/// materializes only the selected aliases and process port, so no profile name
-/// is embedded in the execution path.
-pub(crate) struct HostAccessAssemblyBuilder {
+/// Materializes host filesystem/process access from resolved policy data.
+pub(crate) fn build_host_access(
     storage_root: PathBuf,
     workspace_root: Option<PathBuf>,
     host_home_root: Option<PathBuf>,
     runtime_policy: Option<EffectiveRuntimePolicy>,
-}
+) -> Result<HostAccessAssembly, RebornBuildError> {
+    initialize_directory(&storage_root, "storage root")?;
+    initialize_directory(
+        &storage_root.join("system/extensions"),
+        "system extensions root",
+    )?;
+    let workspace_root = workspace_root.unwrap_or_else(|| storage_root.join("workspace"));
+    initialize_directory(&workspace_root, "workspace root")?;
 
-impl HostAccessAssemblyBuilder {
-    pub(crate) fn new(
-        storage_root: PathBuf,
-        workspace_root: Option<PathBuf>,
-        host_home_root: Option<PathBuf>,
-        runtime_policy: Option<EffectiveRuntimePolicy>,
-    ) -> Self {
-        Self {
-            storage_root,
-            workspace_root,
-            host_home_root,
-            runtime_policy,
+    let storage_root = canonicalize_path(&storage_root, "storage root")?;
+    let workspace_root = canonicalize_path(&workspace_root, "workspace root")?;
+    validate_workspace_skill_isolation(&storage_root, &workspace_root)?;
+
+    let include_host_home = runtime_policy.as_ref().is_some_and(|policy| {
+        policy.filesystem_backend == FilesystemBackendKind::HostWorkspaceAndHome
+    });
+    let host_home_root = match (include_host_home, host_home_root) {
+        (true, Some(path)) => Some(HostHomeRoot::new(canonicalize_host_home_root(&path)?, path)),
+        (true, None) => {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: "host home access requires a confirmed host home root".to_string(),
+            });
         }
-    }
-
-    pub(crate) fn build(self) -> Result<HostAccessAssembly, RebornBuildError> {
-        initialize_directory(&self.storage_root, "storage root")?;
-        initialize_directory(
-            &self.storage_root.join("system/extensions"),
-            "system extensions root",
-        )?;
-        let workspace_root = self
-            .workspace_root
-            .unwrap_or_else(|| self.storage_root.join("workspace"));
-        initialize_directory(&workspace_root, "workspace root")?;
-
-        let storage_root = canonicalize_path(&self.storage_root, "storage root")?;
-        let workspace_root = canonicalize_path(&workspace_root, "workspace root")?;
-        validate_workspace_skill_isolation(&storage_root, &workspace_root)?;
-
-        let include_host_home = self.runtime_policy.as_ref().is_some_and(|policy| {
-            policy.filesystem_backend == FilesystemBackendKind::HostWorkspaceAndHome
-        });
-        let host_home_root = match (include_host_home, self.host_home_root) {
-            (true, Some(path)) => {
-                Some(HostHomeRoot::new(canonicalize_host_home_root(&path)?, path))
-            }
-            (true, None) => {
-                return Err(RebornBuildError::InvalidConfig {
-                    reason: "host home access requires a confirmed host home root".to_string(),
-                });
-            }
-            (false, Some(_)) => {
-                return Err(RebornBuildError::InvalidConfig {
-                    reason:
-                        "confirmed host home root was supplied but the resolved runtime policy \
+        (false, Some(_)) => {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: "confirmed host home root was supplied but the resolved runtime policy \
                              does not allow host home access"
-                            .to_string(),
-                });
-            }
-            (false, None) => None,
-        };
-        let process_port = process_port_for_policy(
-            self.runtime_policy.as_ref(),
-            &workspace_root,
-            host_home_root.as_ref(),
-        );
+                    .to_string(),
+            });
+        }
+        (false, None) => None,
+    };
+    let process_port = process_port_for_policy(
+        runtime_policy.as_ref(),
+        &workspace_root,
+        host_home_root.as_ref(),
+    );
 
-        Ok(HostAccessAssembly {
-            storage_root,
-            workspace_root,
-            host_home_root,
-            process_port,
-        })
-    }
+    Ok(HostAccessAssembly {
+        storage_root,
+        workspace_root,
+        host_home_root,
+        process_port,
+    })
 }
 
 fn initialize_directory(path: &Path, label: &str) -> Result<(), RebornBuildError> {

@@ -32,15 +32,7 @@ impl RegistryPersistentApprovalGranteeResolver {
     }
 }
 
-/// Shared standalone `DefaultApprovalInteractionService` wiring recipe. Used by both
-/// `build_reborn_runtime` and `test_support::standalone_approval_interaction_service_for_test`
-/// so the two never drift (W5-WEBUI-API-2 follow-up). `audit_sink` is `None` from the
-/// test accessor: production wires one for audit-log observability only, not
-/// correctness the test needs. Propagates policy/resolver construction failures
-/// instead of collapsing them to `None`. Thin wrapper over
-/// `build_approval_interaction_service_with_turn_run_source` using
-/// `local_runtime.turn_state` as the turn-run snapshot source — production
-/// behavior is unchanged by the seam below.
+/// Builds the production approval interaction service.
 pub(crate) fn build_approval_interaction_service(
     runtime: &RebornRuntimeStores,
     builtin_capability_policy: Arc<BuiltinCapabilityPolicy>,
@@ -56,16 +48,7 @@ pub(crate) fn build_approval_interaction_service(
     )
 }
 
-/// Identical to [`build_approval_interaction_service`]
-/// except the approval turn-run locator reads `turn_run_source` instead of
-/// always deriving it from `local_runtime.turn_state`. Lets a caller whose
-/// real runs live in a DIFFERENT `TurnStateStore` composition (e.g.
-/// `RebornIntegrationGroup`'s own `build_default_planned_runtime`, whose runs
-/// are invisible to this crate's `local_runtime.turn_state`) substitute its
-/// own store. `build_approval_interaction_service` is the
-/// production entry point and is a thin wrapper over this function with
-/// `local_runtime.turn_state` as the source, so production behavior is
-/// unchanged.
+/// Testable assembly seam with an injected turn-run snapshot source.
 pub(crate) fn build_approval_interaction_service_with_turn_run_source(
     runtime: &RebornRuntimeStores,
     builtin_capability_policy: Arc<BuiltinCapabilityPolicy>,
@@ -120,10 +103,6 @@ pub(crate) fn build_approval_interaction_service_with_turn_run_source(
 }
 
 pub(super) struct SnapshotApprovalTurnRunLocator {
-    /// A trait object (not a concrete row-store type) so a
-    /// caller can substitute a different turn-state store's snapshot view —
-    /// see `turn_run_snapshot::TurnRunSnapshotSource` and
-    /// `build_approval_interaction_service_with_turn_run_source`.
     turn_state: Arc<dyn TurnRunSnapshotSource>,
 }
 
@@ -149,14 +128,7 @@ pub(super) struct ApprovalRequestGateEvidence {
     pub(super) approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>,
 }
 
-/// Test-only constructor for [`ApprovalRequestGateEvidence`].
-///
-/// Mirrors the production wiring in `build_local_runtime` (runtime.rs ~line 2799)
-/// where `ApprovalRequestGateEvidence` is constructed inline and passed to
-/// `loop_exit_evidence.with_approval_gate_evidence`. Exists so `test_support.rs`
-/// can build the real evidence type without needing the struct or its field to be
-/// `pub(crate)`. For tests only — gated behind `test-support`, ships zero bytes
-/// in production binaries.
+/// Test-only constructor mirroring the production loop-exit evidence store.
 #[cfg(feature = "test-support")]
 pub(crate) fn build_approval_gate_evidence_for_test(
     approval_requests: std::sync::Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>,
