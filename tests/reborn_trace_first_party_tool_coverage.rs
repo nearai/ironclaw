@@ -78,6 +78,23 @@ const REBORN_FIRST_PARTY_E2E_COVERED_CAPABILITIES: &[&str] = &[
 
 const SKILL_NAME: &str = "reborn-skill-e2e";
 
+static TRACE_COMMONS_BASE_DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+
+fn setup_trace_commons_base_dir() -> &'static tempfile::TempDir {
+    TRACE_COMMONS_BASE_DIR.get_or_init(|| {
+        let dir = tempfile::tempdir().expect("tempdir for IRONCLAW_BASE_DIR");
+        let _env_guard = ironclaw_common::env_helpers::lock_env();
+        // SAFETY: OnceLock serializes this one write before either Trace Commons test
+        // reads the process-wide base directory.
+        unsafe {
+            std::env::set_var("IRONCLAW_BASE_DIR", dir.path());
+        }
+        // ponytail: process isolation is enough while only these tests read this state;
+        // inject an explicit path into the harness if that boundary grows.
+        dir
+    })
+}
+
 fn host_runtime_tool_wait() -> HarnessWaitConfig {
     HarnessWaitConfig {
         timeout: Duration::from_secs(10),
@@ -543,6 +560,12 @@ async fn reborn_trace_trigger_management_first_party_tools_parity() {
 
 #[tokio::test]
 async fn reborn_trace_trace_commons_first_party_tools_parity() {
+    let base_dir = setup_trace_commons_base_dir();
+    assert_eq!(
+        ironclaw_common::paths::ironclaw_base_dir(),
+        base_dir.path(),
+        "Trace Commons coverage must not read developer state"
+    );
     let onboard = CapabilityId::new(TRACE_COMMONS_ONBOARD_CAPABILITY_ID).expect("capability id");
     let status = CapabilityId::new(TRACE_COMMONS_STATUS_CAPABILITY_ID).expect("capability id");
     let credits = CapabilityId::new(TRACE_COMMONS_CREDITS_CAPABILITY_ID).expect("capability id");
@@ -716,6 +739,7 @@ async fn reborn_trace_trace_commons_first_party_tools_parity() {
 
 #[tokio::test]
 async fn reborn_trace_trace_commons_pilot_tools_are_model_visible() {
+    let _base_dir = setup_trace_commons_base_dir();
     let onboard = CapabilityId::new(TRACE_COMMONS_ONBOARD_CAPABILITY_ID).expect("capability id");
     let status = CapabilityId::new(TRACE_COMMONS_STATUS_CAPABILITY_ID).expect("capability id");
     let credits = CapabilityId::new(TRACE_COMMONS_CREDITS_CAPABILITY_ID).expect("capability id");
