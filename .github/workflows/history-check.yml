@@ -27,10 +27,14 @@ jobs:
     name: Shares history with main
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          # pull_request defaults to GitHub's synthetic merge commit, which
+          # always has main as an ancestor and would make this check vacuous.
+          ref: ${{ github.event.pull_request.head.sha }}
           # Required: the default shallow clone has no ancestry to compare.
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Require a common ancestor with main
         run: |
