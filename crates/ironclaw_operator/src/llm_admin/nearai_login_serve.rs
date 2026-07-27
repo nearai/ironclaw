@@ -116,7 +116,7 @@ pub fn nearai_callback_descriptor() -> Result<IngressRouteDescriptor, HostApiErr
         websocket_origin: WebSocketOriginPolicy::NotApplicable,
         streaming: StreamingMode::None,
         audit: AuditTraceClass::PublicCallback,
-        effect_path: AllowedEffectPath::ProductWorkflow,
+        effect_path: AllowedEffectPath::ProductSurface,
     })?;
     IngressRouteDescriptor::new(
         "webui.v2.nearai_login_callback".to_string(),
@@ -187,7 +187,7 @@ mod tests {
                 if schemes.as_slice() == [IngressAuthScheme::OAuthState]
         ));
         assert_eq!(policy.scope_source(), IngressScopeSource::HostResolved);
-        assert_eq!(policy.effect_path(), &AllowedEffectPath::ProductWorkflow);
+        assert_eq!(policy.effect_path(), &AllowedEffectPath::ProductSurface);
     }
 
     #[tokio::test]

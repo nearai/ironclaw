@@ -3481,7 +3481,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             forbidden: vec![
                 "ironclaw_authorization",
                 "ironclaw_approvals",
-                "ironclaw_capabilities",
                 "ironclaw_host_runtime",
                 "ironclaw_secrets",
                 "ironclaw_network",
@@ -3652,7 +3651,7 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         crate_name: "ironclaw_auth",
         dependency_name: "ironclaw_turns",
         introduced: "2026-07-23",
-        removes_in: "plan:docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md#auth-turn-gate-host-api-port",
+        removes_in: "follow-up: neutral auth/turn gate host API port",
         reason: "product-auth owns the recipe-driven blocked-gate OAuth flow driver while it still receives TurnScope/TurnRunId from the turn gate prompt seam",
     },
 ];

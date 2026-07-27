@@ -104,7 +104,7 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
         project_service: Arc::clone(&runtime_surfaces.project_service),
         thread_service: Arc::new(ironclaw_threads::InMemorySessionThreadService::default()),
         trajectory_observer: None,
-        outbound_preferences_facade: None,
+        outbound_preferences_service: None,
         outbound_delivery_target_set_requires_approval: false,
         approval_settings: Arc::new(
             crate::profile_approval_authorization::EmptyApprovalSettingsProvider,

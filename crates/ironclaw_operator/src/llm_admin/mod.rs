@@ -6,7 +6,6 @@ pub mod llm_reload;
 pub mod nearai_login_serve;
 pub mod nearai_mcp;
 pub mod provider_admin;
-pub mod provider_admin_product_command;
 pub mod provider_repo;
 pub mod resolved_llm;
 
@@ -21,6 +20,5 @@ pub use llm_config_service::{LlmReloadTrigger, RebornLlmConfigService};
 pub use llm_key_store::{LlmKeyStore, LlmKeyStoreError};
 pub use llm_reload::RebornLlmReloadAdapter;
 pub use provider_admin::{RebornProviderAdmin, RebornProviderAdminError};
-pub use provider_admin_product_command::RebornProviderAdminProductCommandService;
 pub use provider_repo::{ProviderRepo, ProviderRepoError};
 pub use resolved_llm::{RebornProviderFactory, ResolvedRebornLlm};

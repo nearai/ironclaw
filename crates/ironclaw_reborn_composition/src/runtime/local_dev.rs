@@ -6,7 +6,6 @@ use std::{
 use chrono::Utc;
 use uuid::Uuid;
 
-use ironclaw_authorization::CapabilityLeaseStorePort;
 use ironclaw_host_api::{
     CapabilityId, EffectKind, ExecutionContext, ExtensionId, InvocationId, MountView,
     ResourceScope, RuntimeKind, TrustClass, UserId,
@@ -20,10 +19,9 @@ use ironclaw_loop_host::{
     LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
     loop_driver_execution_extension_id,
 };
-use ironclaw_product::{OutboundPreferencesProductFacade, ProjectService};
+use ironclaw_product::{OutboundPreferencesProductService, ProjectService};
 use ironclaw_runner::thread_scope::ThreadScopeResolver;
 
-use ironclaw_run_state::ApprovalRequestStorePort;
 use ironclaw_threads::{
     AppendCapabilityDisplayPreviewRequest, CapabilityDisplayPreviewEnvelope,
     CapabilityDisplayPreviewEnvelopeInput, CapabilityDisplayPreviewStatus, SessionThreadService,
@@ -50,6 +48,7 @@ use crate::profile_approval_authorization::ApprovalSettingsProvider;
 use crate::runtime::ComposedSelectableSkillContextSource;
 use ironclaw_product::projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore};
 
+pub(crate) mod extension_surface;
 mod external_tool_capability;
 mod outbound_delivery;
 mod project_create;
@@ -61,11 +60,11 @@ mod skill_activation;
 mod surface_disclosure;
 mod synthetic_capability;
 
-use super::extension_surface::{ExtensionCapabilitySurface, ExtensionCapabilitySurfaceSource};
 #[cfg(test)]
 pub(crate) use crate::outbound::{
     OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
 };
+use extension_surface::{ExtensionCapabilitySurface, ExtensionCapabilitySurfaceSource};
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use project_create::PROJECT_CREATE_CAPABILITY_ID;
 use refreshing_capability_port::{
@@ -100,15 +99,17 @@ pub(super) fn capability_wiring(
     model_gateway: Arc<dyn HostManagedModelGateway>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     skill_activation_source: Option<Arc<ComposedSelectableSkillContextSource>>,
-    outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
+    outbound_preferences_service: Option<Arc<dyn OutboundPreferencesProductService>>,
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
 ) -> Option<CapabilityPortWiring> {
     let runtime = services.host_runtime.clone();
     let workspace_mounts = services.workspace_mounts.clone();
     let memory_mounts = services.memory_mounts.clone();
     let system_extensions_lifecycle_mounts = services.system_extensions_lifecycle_mounts.clone();
-    let approval_requests: Arc<dyn ApprovalRequestStorePort> = services.approval_requests.clone();
-    let capability_leases: Arc<dyn CapabilityLeaseStorePort> = services.capability_leases.clone();
+    let approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStorePort> =
+        services.approval_requests.clone();
+    let capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStorePort> =
+        services.capability_leases.clone();
     let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort> =
         services.tool_permission_overrides.clone();
     let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort> =
@@ -124,11 +125,10 @@ pub(super) fn capability_wiring(
         policy.as_ref(),
         &[EffectKind::ExternalWrite],
     );
-    let extension_surface_source = ExtensionCapabilitySurfaceSource::new(Some(
-        super::approval_surface_lifecycle_facade(services),
-    ));
+    let extension_surface_source =
+        ExtensionCapabilitySurfaceSource::new(Some(services.extension_management.clone()));
     // First-class project creation reuses the same access-controlled
-    // `ProjectService` facade the WebUI v2 surface wires (composition owns the
+    // `ProjectService` service the WebUI v2 surface wires (composition owns the
     // service, never the raw repository), so an agent-created project is a real
     // entity that appears in the Projects list.
     let project_service: Arc<dyn ProjectService> = Arc::clone(&services.project_service);
@@ -179,7 +179,7 @@ pub(super) fn capability_wiring(
             project_service,
             thread_service,
             trajectory_observer,
-            outbound_preferences_facade,
+            outbound_preferences_service,
             outbound_delivery_target_set_requires_approval,
             approval_settings,
             approval_requests,
@@ -213,11 +213,11 @@ struct RefreshingLoopCapabilityPortFactory {
     project_service: Arc<dyn ProjectService>,
     thread_service: Arc<dyn SessionThreadService>,
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
-    outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
+    outbound_preferences_service: Option<Arc<dyn OutboundPreferencesProductService>>,
     outbound_delivery_target_set_requires_approval: bool,
     approval_settings: Arc<dyn ApprovalSettingsProvider>,
-    approval_requests: Arc<dyn ApprovalRequestStorePort>,
-    capability_leases: Arc<dyn CapabilityLeaseStorePort>,
+    approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>,
+    capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStorePort>,
     /// Durable model-visible gate-record store; one instance per runtime, shared
     /// by reference into every port this factory builds.
     gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort>,
@@ -261,7 +261,7 @@ impl LoopCapabilityPortFactory for RefreshingLoopCapabilityPortFactory {
             // refreshing helper builds) and the result hook (on `StagedCapabilityIo`),
             // so the two callbacks correlate by `call_id` for one tool call.
             trajectory_observer: self.trajectory_observer.clone(),
-            outbound_preferences_facade: self.outbound_preferences_facade.clone(),
+            outbound_preferences_service: self.outbound_preferences_service.clone(),
             outbound_delivery_target_set_requires_approval: self
                 .outbound_delivery_target_set_requires_approval,
             approval_settings: Arc::clone(&self.approval_settings),

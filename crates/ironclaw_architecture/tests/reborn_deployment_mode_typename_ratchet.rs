@@ -1,6 +1,6 @@
 //! Anti-slippage ratchet for the deployment-mode-name axis, the broader
 //! companion to [`reborn_localdev_typename_ratchet`] (§4.4 / §10 of
-//! `docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`).
+//! `docs/reborn/contracts/runtime-profiles.md`).
 //!
 //! §4.4 mandates one enforcement test: **"no public type name contains
 //! `Local`/`LocalDev`/`Hosted`/`Enterprise`"** — a deployment mode is a
@@ -99,9 +99,6 @@ const FROZEN_OTHER_MODE_TYPES: &[&str] = &[
     "HostedMcpDiscoveredToolAnnotations",
     "HostedMcpDiscoveryEgress",
     "HostedMcpDiscoveryError",
-    // Activation-transaction outcome of a hosted-MCP discovery run — the same
-    // Bucket-3 domain-name class as its `HostedMcpDiscovery*` siblings.
-    "HostedMcpDiscoveryOutcome",
     "HostedMcpEndpoint",
     // --- Local* (non-LocalDev): the `local_trigger_access` module has been
     //     folded to a config value — fire-time trigger access is now the
@@ -113,9 +110,11 @@ const FROZEN_OTHER_MODE_TYPES: &[&str] = &[
     //   JUSTIFIED (Bucket-3 by meaning): "hook-local id" — an identifier local to
     //     one hook, a genuine domain concept, not a deployment tier.
     "HookLocalId",
-    //   Former RebornLocal* / ConfiguredInvocationServicesResolver entries: cleared
-    //     by deployment-neutral renames after their implementations became
-    //     policy-data-driven rather than local-only.
+    //   RebornLocal* composition family — local-dev-as-type mode names in the
+    //     composition surface; shrinks with Slice B (deployment mode becomes a
+    //     `DeploymentConfig` value):
+    "RebornLocalExtensionManagementPort",
+    "RebornLocalRuntimeIdentity",
     //   mid-name LocalDev entries: none — cleared by the DeploymentConfig
     //     refactor (Slice B); the sibling ratchet's empty allowlist plus
     //     `contains_mode_term` here keep new ones out.

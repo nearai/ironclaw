@@ -82,7 +82,7 @@ cargo clippy --all --tests --examples --all-features -- -D warnings             
 
 Run the Reborn integration or E2E harness when the change crosses turns,
 capabilities, authorization, approvals, persistence, runtime lanes, networking,
-secrets, product workflow, or user-visible transport.
+secrets, product orchestration, or user-visible transport.
 
 ## Scope discipline
 

@@ -8,6 +8,9 @@
 //! (surface disclosure, external tools, StaleSurface refresh, the shared
 //! `StagedCapabilityIo`) is automatically exercised by the harness too.
 
+#[cfg(feature = "test-support")]
+pub use ironclaw_extension_host::test_support::ExtensionManagementTestHandle;
+
 /// Typed bundle of the parts the harness controls, passed by value through
 /// the `test_support` -> `runtime` -> `runtime::local_dev` forwarding chain
 /// so no layer needs `#[allow(clippy::too_many_arguments)]`. Mirrors
@@ -53,14 +56,12 @@ pub struct RefreshingCapabilityPortTestParts {
     /// (`local_dev.rs` `create_capability_port`).
     pub thread_service: std::sync::Arc<dyn ironclaw_threads::SessionThreadService>,
     /// Opaque handle built by
-    /// [`build_extension_management_for_test`]. Wraps the
-    /// crate-private (`pub(crate)`) `ExtensionManagementPort` so it
-    /// never appears in this (public, `test-support`-gated) struct's field
-    /// types; mirrors `skill_activation_source` above. Active-extension
-    /// registry (installed/activated extensions like `github`, `gmail`, MCP
-    /// servers) whose capabilities and provider trust get folded into the
-    /// visible-capability grants on every refresh — mirrors production
-    /// `capability_wiring`'s
+    /// [`build_extension_management_for_test`]. Wraps the extension-host
+    /// local management port; mirrors `skill_activation_source` above.
+    /// Active-extension registry (installed/activated extensions like
+    /// `github`, `gmail`, MCP servers) whose capabilities and provider trust
+    /// get folded into the visible-capability grants on every refresh —
+    /// mirrors production `capability_wiring`'s
     /// `ExtensionCapabilitySurfaceSource::new(runtime_surfaces.extension_management.clone())`
     /// (`runtime/local_dev.rs:132-133`). `None` (the default a harness gets by
     /// simply omitting extension setup) reproduces the no-op surface this
@@ -69,8 +70,8 @@ pub struct RefreshingCapabilityPortTestParts {
     /// activates them AND passes the resulting handle here.
     pub extension_management: Option<ExtensionManagementTestHandle>,
     pub trajectory_observer: Option<std::sync::Arc<dyn crate::RebornTrajectoryObserver>>,
-    pub outbound_preferences_facade:
-        Option<std::sync::Arc<dyn ironclaw_product::OutboundPreferencesProductFacade>>,
+    pub outbound_preferences_service:
+        Option<std::sync::Arc<dyn ironclaw_product::OutboundPreferencesProductService>>,
     pub outbound_delivery_target_set_requires_approval: bool,
     /// Per-tool approval-setting overrides; wrapped into the same
     /// `StoreApprovalSettingsProvider` production wires (`local_dev.rs:1002`).
@@ -108,32 +109,6 @@ pub struct RefreshingCapabilityPortTestParts {
     pub additional_capability_grants: Vec<ironclaw_host_api::CapabilityGrant>,
 }
 
-/// Opaque handle (harness-port-seam P1 Change 3) carrying the crate-private
-/// `ExtensionManagementPort`. Hides the type from the
-/// integration-test crate, which cannot name it (it is only `pub(crate)`
-/// inside `ironclaw_reborn_composition`); the private type is recovered
-/// internally via [`ExtensionManagementTestHandle::extension_management`]
-/// when forwarding to the production factory. Mirrors `SkillActivationTestSource`.
-#[cfg(feature = "test-support")]
-pub struct ExtensionManagementTestHandle {
-    readiness_source: std::sync::Arc<crate::extension_host::lifecycle::LifecycleFacade>,
-}
-
-#[cfg(feature = "test-support")]
-impl ExtensionManagementTestHandle {
-    /// Crate-internal accessor for the caller-scoped readiness facade. Kept
-    /// `pub(crate)` (never `pub`) so the crate-private
-    /// `LifecycleFacade` type never appears in this crate's public
-    /// API; only `runtime::local_dev`'s test-support constructor (which
-    /// already names the type) may call this. For tests only -- gated behind
-    /// `test-support`, ships zero bytes in production builds.
-    pub(crate) fn readiness_source(
-        &self,
-    ) -> std::sync::Arc<crate::extension_host::lifecycle::LifecycleFacade> {
-        self.readiness_source.clone()
-    }
-}
-
 /// Reads the same `runtime_surfaces.extension_management` handle production's
 /// `capability_wiring` reads (`runtime/local_dev.rs:132-133`) off a built
 /// `RebornRuntimeStores`, for wiring
@@ -149,21 +124,8 @@ impl ExtensionManagementTestHandle {
 pub fn build_extension_management_for_test(
     runtime: &crate::RebornRuntime,
 ) -> Option<ExtensionManagementTestHandle> {
-    let mut facade =
-        crate::extension_host::lifecycle::LifecycleFacade::new(runtime.skill_management.clone())
-            .with_extension_management(runtime.extension_management.clone())
-            .with_admin_configuration_resolver(runtime.admin_configuration_resolver.clone())
-            .with_runtime_credential_accounts(
-                runtime
-                    .product_auth
-                    .runtime_credential_account_selection_service(),
-            );
-    if let Some(egress) = runtime.runtime_http_egress.as_ref() {
-        facade = facade.with_runtime_http_egress(egress.clone());
-    }
-    Some(ExtensionManagementTestHandle {
-        readiness_source: std::sync::Arc::new(facade),
-    })
+    let extension_management = runtime.extension_management.clone();
+    Some(ExtensionManagementTestHandle::new(extension_management))
 }
 
 /// Test-support entry point that drives the real

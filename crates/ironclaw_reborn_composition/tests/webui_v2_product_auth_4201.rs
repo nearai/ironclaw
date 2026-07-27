@@ -4,7 +4,7 @@
 //!
 //! These tests drive the HTTP routes end-to-end through `webui_v2_app` so the
 //! caller path (auth layer + body limit + rate limit + handler +
-//! `RebornProductAuthServices`) is exercised, not just the facade helpers.
+//! `RebornProductAuthServices`) is exercised, not just the service helpers.
 
 // arch-exempt: large_file, product-auth route contracts stay in one caller-level suite until the WebUI route split lands, plan #5985
 

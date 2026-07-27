@@ -15,8 +15,8 @@ use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, Trust
 pub struct ChannelHostAssemblyTestWiring {
     pub thread_service: Arc<dyn SessionThreadService>,
     pub turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
-    pub identity: crate::extension_host::channel_host::ChannelHostIdentity,
-    pub run_delivery_events: Arc<ironclaw_product::RunDeliveryEventRouter>,
+    pub identity: ironclaw_extension_host::channel_host::ChannelHostIdentity,
+    pub run_delivery_settings: ironclaw_product::RunDeliverySettings,
 }
 
 #[allow(
@@ -88,7 +88,9 @@ impl RebornRuntimeStores {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn outbound_state_for_test(&self) -> &Arc<dyn OutboundStateStorePort> {
+    pub(crate) fn outbound_state_for_test(
+        &self,
+    ) -> &Arc<dyn ironclaw_outbound::OutboundStateStorePort> {
         &self.outbound_state
     }
 
@@ -119,7 +121,7 @@ impl RebornRuntimeStores {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn channel_disconnect_slot_for_test(
         &self,
-    ) -> &Arc<std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionFacade>>> {
+    ) -> &Arc<std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionService>>> {
         &self.channel_disconnect_slot
     }
 
@@ -182,7 +184,7 @@ impl RebornRuntimeStores {
     }
 
     /// The shared scoped secret store backing this composition.
-    pub(crate) fn secret_store(&self) -> Arc<dyn SecretStorePort> {
+    pub(crate) fn secret_store(&self) -> Arc<dyn ironclaw_secrets::SecretStorePort> {
         Arc::clone(&self.secret_store)
     }
     /// The composed generic channel ingress (router + per-extension
@@ -190,7 +192,7 @@ impl RebornRuntimeStores {
     /// extension host (extension-runtime P4).
     pub(crate) fn extension_ingress_parts(
         &self,
-    ) -> Option<crate::extension_host::extension_ingress::ExtensionIngressParts> {
+    ) -> Option<ironclaw_extension_host::extension_ingress::ExtensionIngressParts> {
         self.extension_ingress.clone()
     }
 
@@ -276,12 +278,14 @@ impl RebornRuntimeStores {
             .await
             .map_err(|error| error.to_string())?;
         let paired_user = match outcome {
-            ironclaw_product::ChannelPairingConsumeOutcome::Paired { user_id }
-            | ironclaw_product::ChannelPairingConsumeOutcome::AlreadyPairedSameUser { user_id } => {
-                Some(user_id)
+            ironclaw_extension_host::channel_pairing::ChannelPairingConsumeOutcome::Paired {
+                user_id,
             }
-            ironclaw_product::ChannelPairingConsumeOutcome::AlreadyBoundToOtherUser
-            | ironclaw_product::ChannelPairingConsumeOutcome::ExpiredOrUnknown => None,
+            | ironclaw_extension_host::channel_pairing::ChannelPairingConsumeOutcome::AlreadyPairedSameUser {
+                user_id,
+            } => Some(user_id),
+            ironclaw_extension_host::channel_pairing::ChannelPairingConsumeOutcome::AlreadyBoundToOtherUser
+            | ironclaw_extension_host::channel_pairing::ChannelPairingConsumeOutcome::ExpiredOrUnknown => None,
         };
         if let Some(user_id) = paired_user.as_ref() {
             let (turn_coordinator, turn_state, tenant_id) = turn_world;
@@ -289,9 +293,8 @@ impl RebornRuntimeStores {
                 turn_coordinator,
                 Some(turn_state as Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>),
             );
-            let continuation = product_auth_continuation_dispatcher(continuation);
             service
-                .finish_pending_for_user_with_for_test(user_id, tenant_id, continuation)
+                .dispatch_pairing_completion_with_for_test(user_id, tenant_id, continuation)
                 .await
                 .map_err(|error| error.to_string())?;
         }
@@ -300,7 +303,7 @@ impl RebornRuntimeStores {
 
     /// The caller's pairing connection state through the composed generic
     /// pairing service — tests only. Mirrors the production `pairing/status`
-    /// route handler and the channel-connection facade read.
+    /// route handler and the channel-connection service read.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn pairing_connected_for_test(
         &self,
@@ -323,6 +326,19 @@ impl RebornRuntimeStores {
         self.delivery_coordinator.clone()
     }
 
+    /// The generic `[channel.config]` configure port (extension-runtime
+    /// §6.4): the production surface the WebUI setup service and the
+    /// lifecycle configure action route operator channel config through.
+    /// `None` without a local-dev runtime.
+    pub(crate) fn channel_config_service(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_product::ChannelConfigProductService>> {
+        let service = self.channel_config_service.clone();
+        Some(Arc::new(
+            ironclaw_extension_host::RebornChannelConfigProductService::new(service),
+        ))
+    }
+
     /// Test-support flavor of [`Self::start_channel_host_assembly`]: the
     /// integration harness supplies its own run-world services (thread
     /// service, turn coordinator, identity) because the harness's runs
@@ -334,7 +350,7 @@ impl RebornRuntimeStores {
     pub(crate) fn start_channel_host_assembly_for_test(
         &self,
         wiring: ChannelHostAssemblyTestWiring,
-    ) -> Option<Arc<crate::extension_host::channel_host::GenericChannelHostAssembly>> {
+    ) -> Option<Arc<ironclaw_extension_host::channel_host::GenericChannelHostAssembly>> {
         self.start_channel_host_assembly(ChannelHostAssemblyWiring {
             thread_service: wiring.thread_service,
             turn_coordinator: wiring.turn_coordinator,
@@ -344,14 +360,14 @@ impl RebornRuntimeStores {
             approval_context: None,
             blocked_auth_prompts: None,
             auth_flow_cancel: None,
-            run_delivery_events: wiring.run_delivery_events,
+            run_delivery_settings: wiring.run_delivery_settings,
         })
     }
 
     /// Test-support access to the shared scoped secret store backing the
     /// composed runtime.
     #[cfg(feature = "test-support")]
-    pub(crate) fn secret_store_for_test(&self) -> Arc<dyn SecretStorePort> {
+    pub(crate) fn secret_store_for_test(&self) -> Arc<dyn ironclaw_secrets::SecretStorePort> {
         Arc::clone(&self.secret_store)
     }
 
@@ -416,12 +432,12 @@ impl RebornRuntimeStores {
     /// not wire up local-dev extension management.
     ///
     /// Mirrors the `installation_store` that `build_local_runtime` wires into
-    /// `ExtensionManagementPort`. For tests only — zero bytes
+    /// `RebornLocalExtensionManagementPort`. For tests only — zero bytes
     /// shipped in production builds.
     #[cfg(feature = "test-support")]
     pub(crate) fn extension_installation_store_for_test(
         &self,
-    ) -> Option<Arc<dyn ExtensionInstallationStorePort>> {
+    ) -> Option<Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>> {
         Some(self.extension_management.installation_store_for_test())
     }
 
@@ -604,7 +620,7 @@ impl RebornRuntimeStores {
         &self,
         package: &ironclaw_extensions::ExtensionPackage,
         resolved: Option<&ironclaw_extensions::ResolvedExtensionManifest>,
-    ) -> Option<Result<(), ironclaw_product::ProductWorkflowError>> {
+    ) -> Option<Result<(), ironclaw_product::ProductSurfaceFailure>> {
         let extension_management = &self.extension_management;
         Some(
             extension_management
@@ -628,14 +644,14 @@ impl RebornRuntimeStores {
             return false;
         };
         bridges.register(Arc::new(
-            crate::extension_host::channel_egress::StaticChannelEgressCredentials::new(entries),
+            ironclaw_extension_host::channel_egress::StaticChannelEgressCredentials::new(entries),
         ));
         true
     }
 
     /// The delivery coordinator's outbound stores — the SAME instances the
     /// factory handed the coordinator (`outbound_state`), the gate-route
-    /// recorder (`delivered_gate_routes`), and the preference facade
+    /// recorder (`delivered_gate_routes`), and the preference service
     /// (`outbound_preferences`). Integration proofs build generic
     /// run-delivery components over these so observer and coordinator share
     /// one delivery ledger. `None` without a local-dev runtime.
@@ -665,7 +681,7 @@ impl RebornRuntimeStores {
     pub(crate) async fn local_dev_active_extension_authority_for_test(
         &self,
         grantee: &ExtensionId,
-    ) -> Option<Result<ActiveExtensionAuthorityForTest, ironclaw_product::ProductWorkflowError>>
+    ) -> Option<Result<ActiveExtensionAuthorityForTest, ironclaw_product::ProductSurfaceFailure>>
     {
         let extension_management = &self.extension_management;
         Some(active_extension_authority_for_test(extension_management, grantee).await)
@@ -680,9 +696,9 @@ pub struct ActiveExtensionAuthorityForTest {
 
 #[cfg(feature = "test-support")]
 pub(crate) async fn active_extension_authority_for_test(
-    extension_management: &ExtensionManagementPort,
+    extension_management: &RebornLocalExtensionManagementPort,
     grantee: &ExtensionId,
-) -> Result<ActiveExtensionAuthorityForTest, ironclaw_product::ProductWorkflowError> {
+) -> Result<ActiveExtensionAuthorityForTest, ironclaw_product::ProductSurfaceFailure> {
     let active_capabilities = extension_management
         .active_model_visible_capabilities()
         .await?;
@@ -733,7 +749,7 @@ pub(crate) async fn active_extension_authority_for_test(
 
 #[cfg(feature = "test-support")]
 fn active_extension_grant_constraints_for_test(
-    capability: &crate::extension_host::extension_lifecycle::ActiveExtensionCapability,
+    capability: &ironclaw_extension_host::ActiveExtensionCapability,
 ) -> GrantConstraints {
     GrantConstraints {
         allowed_effects: capability.effects.clone(),
@@ -756,12 +772,12 @@ fn active_extension_grant_constraints_for_test(
 
 #[cfg(feature = "test-support")]
 fn active_extension_network_policy_for_test(
-    capability: &crate::extension_host::extension_lifecycle::ActiveExtensionCapability,
+    capability: &ironclaw_extension_host::ActiveExtensionCapability,
 ) -> NetworkPolicy {
     // Delegate to the production manifest-egress policy builder (gsuite +
     // web-access declare their egress in their manifests now — no per-provider
     // special-case, and no first-party dependency in this test-support seam).
-    crate::runtime::extension_surface::extension_network_policy(capability)
+    crate::runtime::local_dev::extension_surface::extension_network_policy(capability)
 }
 
 /// Bundle returned by [`RebornRuntimeStores::local_dev_attachment_test_support_for_test`]
@@ -807,7 +823,7 @@ pub(crate) async fn mount_default_local_dev_database_roots(
 /// Test-only (T5 restart-survival seam): open a FRESH local-dev root
 /// filesystem at an existing `storage_root`, for reconstructing the generic
 /// channel-identity store the way production boot does
-/// (`build_runtime_substrate` → `ChannelIdentityStore::new` over the
+/// (`build_runtime_substrate` → `FilesystemChannelIdentityStore::new` over the
 /// composed root). `libsql`-only: the `LocalDefault` non-libsql
 /// arm mounts a fresh `InMemoryBackend`, which could only ever report
 /// absence. Tests only; zero bytes in production.
@@ -827,7 +843,7 @@ pub(crate) async fn open_local_dev_root_filesystem_for_test(
 }
 
 /// Test-only (E-DURABLE seam): open a FRESH, independent
-/// [`ExtensionInstallationStorePort`] at an existing local-dev `storage_root`,
+/// [`ExtensionInstallationStore`] at an existing local-dev `storage_root`,
 /// paralleling how `assert_reply_persists_after_reopen` opens a fresh libsql
 /// handle rather than reusing the live one. Reuses the production
 /// [`build_local_runtime_root_filesystem`] mounts and
@@ -841,7 +857,7 @@ pub(crate) async fn open_local_dev_root_filesystem_for_test(
 #[cfg(feature = "test-support")]
 pub(crate) async fn open_local_dev_extension_installation_store_for_test(
     storage_root: &Path,
-) -> Result<Arc<dyn ExtensionInstallationStorePort>, RebornBuildError> {
+) -> Result<Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>, RebornBuildError> {
     let workspace_root = storage_root.join("workspace");
     let bundle = build_local_runtime_root_filesystem(
         storage_root,
@@ -876,7 +892,7 @@ pub(crate) async fn open_local_dev_extension_installation_store_for_test(
 }
 
 /// Test-only (C-DURABLE seam): open a FRESH, independent
-/// [`ironclaw_run_state::ApprovalRequestStorePort`] at an existing local-dev
+/// [`ironclaw_run_state::ApprovalRequestStore`] at an existing local-dev
 /// `storage_root`, paralleling [`open_local_dev_extension_installation_store_for_test`]
 /// (same on-disk root; a sibling capability store). Reuses
 /// [`mount_default_local_dev_database_roots`] + the production [`crate::wrap_scoped`]
@@ -909,9 +925,9 @@ pub(crate) async fn open_local_dev_outbound_preferences_store_for_test(
 }
 
 /// Test-only (W5-WEBUI-API-1 seam): open FRESH, independent
-/// [`ironclaw_approvals::ToolPermissionOverrideStorePort`] /
-/// [`ironclaw_approvals::AutoApproveSettingStorePort`] /
-/// [`ironclaw_approvals::PersistentApprovalPolicyStorePort`] handles at an
+/// [`ironclaw_approvals::ToolPermissionOverrideStore`] /
+/// [`ironclaw_approvals::AutoApproveSettingStore`] /
+/// [`ironclaw_approvals::PersistentApprovalPolicyStore`] handles at an
 /// existing local-dev `storage_root`, paralleling
 /// [`open_local_dev_approval_request_store_for_test`] (same on-disk root;
 /// sibling capability stores). Reuses [`mount_default_local_dev_database_roots`]

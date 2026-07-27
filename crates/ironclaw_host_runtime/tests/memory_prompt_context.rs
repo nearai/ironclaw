@@ -1,7 +1,7 @@
 //! Production adapter tests for [`ProductionMemoryPromptContextService`].
 //!
 //! These tests drive the loop-facing caller and assert that it delegates to the
-//! memory service facade with host-derived scope, and — crucially — that the
+//! memory service with host-derived scope, and — crucially — that the
 //! host, not the provider, owns reference hashing, sanitization, untrusted-
 //! envelope wrapping, and the per-snippet + aggregate model-visible budgets. The
 //! provider only supplies raw scope/path components and raw text.

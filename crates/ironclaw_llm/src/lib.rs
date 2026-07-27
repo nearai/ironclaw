@@ -1,5 +1,5 @@
 //! LLM integration for the agent.
-// arch-exempt: large_file, provider facade remains centralized pending crate split, plan #6175
+// arch-exempt: large_file, provider service remains centralized pending crate split, plan #6175
 //!
 //! Supports multiple backends:
 //! - **NEAR AI** (default): Session token or API key auth via Chat Completions API
@@ -42,6 +42,7 @@ pub mod runtime;
 pub mod session;
 pub mod smart_routing;
 mod token_refreshing;
+pub mod trace_binding;
 // arch-exempt: scaffolding, Phase A helpers awaiting first per-provider caller, plan #4522
 // Remove the allow once any production call site references these items.
 #[allow(dead_code)]

@@ -66,8 +66,8 @@ pub enum ExtensionActivationTransactionResult {
     Activated(Box<ExtensionPackage>),
 }
 
-/// Outcome of the hosted-MCP discovery step within an activation.
-pub enum HostedMcpDiscoveryOutcome {
+/// Outcome of the MCP discovery step within an activation.
+pub enum McpDiscoveryOutcome {
     /// Discovery produced a bounded catalog; the package carries the discovered
     /// tools and is the candidate for publication after the authority recheck.
     /// Boxed to keep the enum small (the package dwarfs the rejection payload).
@@ -137,7 +137,7 @@ pub trait ExtensionActivationOperations: Send + Sync {
         max_tools: u32,
         scope: ResourceScope,
         runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
-    ) -> Result<HostedMcpDiscoveryOutcome, Self::Error>;
+    ) -> Result<McpDiscoveryOutcome, Self::Error>;
 
     fn package_is_published(&self, extension_id: &ExtensionId, package: &ExtensionPackage) -> bool;
 
@@ -246,8 +246,8 @@ where
         )
         .await?
     {
-        HostedMcpDiscoveryOutcome::Discovered(package) => *package,
-        HostedMcpDiscoveryOutcome::CredentialsRejected(missing) => {
+        McpDiscoveryOutcome::Discovered(package) => *package,
+        McpDiscoveryOutcome::CredentialsRejected(missing) => {
             // The provider rejected the staged credentials mid-discovery.
             // Nothing was published, so route the caller back through
             // credential setup / OAuth — the same outcome as a pre-discovery
@@ -876,14 +876,14 @@ mod tests {
             _max_tools: u32,
             _scope: ResourceScope,
             _runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
-        ) -> Result<HostedMcpDiscoveryOutcome, Self::Error> {
+        ) -> Result<McpDiscoveryOutcome, Self::Error> {
             match &self.discovery {
-                DiscoveryScript::Success => Ok(HostedMcpDiscoveryOutcome::Discovered(Box::new(
-                    package.clone(),
-                ))),
+                DiscoveryScript::Success => {
+                    Ok(McpDiscoveryOutcome::Discovered(Box::new(package.clone())))
+                }
                 DiscoveryScript::Failure => Err("scripted discovery failure".to_string()),
                 DiscoveryScript::CredentialsRejected(requirements) => Ok(
-                    HostedMcpDiscoveryOutcome::CredentialsRejected(requirements.clone()),
+                    McpDiscoveryOutcome::CredentialsRejected(requirements.clone()),
                 ),
                 DiscoveryScript::Pending(entered) => {
                     entered.notify_one();

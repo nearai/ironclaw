@@ -18,17 +18,17 @@ use crate::{
     ManualTokenSetupRequest, NewAuthFlow, OAuthAuthorizationUrl, OAuthCallbackClaimRequest,
     OAuthCallbackFailureInput, OAuthCallbackInput, OAuthProviderCallbackRequest,
     OAuthProviderExchangeContext, OAuthProviderIdentity, OpaqueStateHash, PkceVerifierHash,
-    ProviderBackedCredentialAccountService, ProviderCallbackOutcome, SecretCleanupReport,
-    SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest, SecretSubmitResult, Timestamp,
-    TurnGateAuthFlowQuery, TurnRunRef, scope_matches,
+    ProviderBackedCredentialAccountService, ProviderCallbackOutcome, SecretCleanupAction,
+    SecretCleanupReport, SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest,
+    SecretSubmitResult, Timestamp, TurnGateAuthFlowQuery, TurnRunRef, scope_matches,
 };
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_events::{SecurityAuditEvent, SecurityAuditSink, SecurityBoundary, SecurityDecision};
+use ironclaw_host_api::ExtensionId;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
-use ironclaw_host_api::ExtensionId;
 use ironclaw_turns::{TurnRunId, TurnScope};
 
 use crate::product_auth::credentials::manual_token_flow::{
@@ -1783,6 +1783,34 @@ impl RebornProductAuthServices {
                 "failed to terminalize auth flow after terminal lifecycle activation failure"
             );
             return Err(AuthProductError::BackendUnavailable);
+        }
+        if let AuthContinuationRef::LifecycleActivation { package_ref } = &completed.continuation {
+            let extension_id =
+                ExtensionId::new(package_ref.as_str().to_string()).map_err(|error| {
+                    tracing::warn!(
+                        flow_id = %completed.id,
+                        package_ref = %package_ref.as_str(),
+                        %error,
+                        "failed to derive extension id for lifecycle activation cleanup"
+                    );
+                    AuthProductError::BackendUnavailable
+                })?;
+            self.cleanup_credentials_for_lifecycle(SecretCleanupRequest {
+                scope: completed.scope.clone(),
+                extension_id,
+                provider: Some(completed.provider.clone()),
+                lifecycle_package: Some(package_ref.clone()),
+                action: SecretCleanupAction::Uninstall,
+            })
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    flow_id = %completed.id,
+                    error_code = ?error.code,
+                    "failed to clean up credential after terminal lifecycle activation failure"
+                );
+                AuthProductError::BackendUnavailable
+            })?;
         }
         Ok(())
     }

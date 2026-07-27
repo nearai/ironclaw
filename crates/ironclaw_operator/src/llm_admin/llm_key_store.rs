@@ -4,7 +4,7 @@
 //! `api_key_env` *name* and the config selection only carries names — inline
 //! secret values are rejected. When the webui2 settings surface lets an
 //! operator paste an actual key, the value lands here instead: encrypted in the
-//! scoped [`SecretStorePort`] under a fixed per-provider handle, and injected into
+//! scoped [`SecretStore`] under a fixed per-provider handle, and injected into
 //! the resolved `LlmConfig` at provider-build / reload time.
 //!
 //! LLM configuration is operator-wide (a single instance config, not per-user),
@@ -16,18 +16,18 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use ironclaw_host_api::{ResourceScope, SecretHandle};
-use ironclaw_secrets::{SecretMaterial, SecretStoreError, SecretStorePort};
+use ironclaw_secrets::{SecretMaterial, SecretStoreError};
 use thiserror::Error;
 
-/// Thin, operator-scoped wrapper over the shared [`SecretStorePort`] for LLM keys.
+/// Thin, operator-scoped wrapper over the shared [`SecretStore`] for LLM keys.
 #[derive(Clone)]
 pub struct LlmKeyStore {
-    store: Arc<dyn SecretStorePort>,
+    store: Arc<dyn ironclaw_secrets::SecretStorePort>,
 }
 
 impl LlmKeyStore {
     /// Wrap the instance's shared secret store.
-    pub fn new(store: Arc<dyn SecretStorePort>) -> Self {
+    pub fn new(store: Arc<dyn ironclaw_secrets::SecretStorePort>) -> Self {
         Self { store }
     }
 
@@ -150,7 +150,7 @@ pub enum LlmKeyStoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_secrets::{SecretStore, SecretStorePort};
+    use ironclaw_secrets::{SecretStore, SecretStorePort as _};
 
     fn store() -> LlmKeyStore {
         LlmKeyStore::new(Arc::new(SecretStore::ephemeral()))

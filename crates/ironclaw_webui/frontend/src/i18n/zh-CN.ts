@@ -1209,6 +1209,7 @@ registerPack("zh-CN", {
   "common.deleteChat": "删除对话",
   "chat.deleteFailed": "无法删除此对话。",
   "chat.deleteBusy": "对话正在运行时无法删除。请先停止它，然后重试。",
+  "chat.cancelFailed": "无法停止此任务。它可能仍在运行，请重试。",
   "command.placeholder": "在此输入指令或进行查找...",
   "routine.searchPlaceholder": "搜寻常驻例程的名称、触发条件、或者任务行为",
   "routine.unavailable": "暂不支持例程操作",
@@ -1363,6 +1364,10 @@ registerPack("zh-CN", {
 
 registerPack("zh-CN", {
   "app.checkingSession": "正在检查会话...",
+  "app.loadingPage": "正在加载页面...",
+  "app.pageLoadFailedTitle": "无法加载此页面",
+  "app.pageLoadFailedDescription": "可能有新版本可用，或连接已中断。请重新加载页面后重试。",
+  "app.reloadPage": "重新加载页面",
   "app.sessionCheckFailedTitle": "无法验证你的会话",
   "app.sessionCheckFailedDescription":
     "目前无法验证你的会话。你的登录信息仍已保存，请稍后重试。",

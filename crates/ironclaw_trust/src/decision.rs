@@ -43,23 +43,6 @@ impl EffectiveTrustClass {
         }
     }
 
-    /// First-party privilege. Constructible only from inside the trust crate;
-    /// outside callers must receive this via policy evaluation.
-    #[allow(dead_code)]
-    pub(crate) fn first_party() -> Self {
-        Self {
-            inner: TrustClass::FirstParty,
-        }
-    }
-
-    /// System privilege. Constructible only from inside the trust crate.
-    #[allow(dead_code)]
-    pub(crate) fn system() -> Self {
-        Self {
-            inner: TrustClass::System,
-        }
-    }
-
     /// Underlying host_api class for audit, wire output, or permission-mode
     /// comparisons. Read-only — does not allow privilege construction.
     pub fn class(&self) -> TrustClass {
@@ -95,6 +78,20 @@ impl EffectiveTrustClass {
             TrustClass::UserTrusted => 1,
             TrustClass::FirstParty | TrustClass::System => 2,
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn effective_first_party_for_test() -> EffectiveTrustClass {
+    EffectiveTrustClass {
+        inner: TrustClass::FirstParty,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn effective_system_for_test() -> EffectiveTrustClass {
+    EffectiveTrustClass {
+        inner: TrustClass::System,
     }
 }
 

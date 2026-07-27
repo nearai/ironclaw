@@ -13,6 +13,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use ironclaw_llm::LlmError;
+use ironclaw_llm::trace_binding::{ObservedToolResult, resolve_trace_result_bindings};
 use ironclaw_llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role, ToolCall,
     ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
@@ -505,29 +506,31 @@ impl TraceLlm {
             .find(|m| matches!(m.role, Role::User))
             .map(|m| m.content.clone());
 
-        let mut step = {
-            let mut steps = self.steps.lock().unwrap();
-            if steps.is_empty() {
-                return Err(LlmError::RequestFailed {
-                    provider: self.model_name.clone(),
-                    reason: format!(
-                        "TraceLlm exhausted: served {} call(s), no steps left",
-                        self.calls_served.load(Ordering::Relaxed)
-                    ),
-                });
-            }
+        let mut steps = self.steps.lock().unwrap();
+        if steps.is_empty() {
+            return Err(LlmError::RequestFailed {
+                provider: self.model_name.clone(),
+                reason: format!(
+                    "TraceLlm exhausted: served {} call(s), no steps left",
+                    self.calls_served.load(Ordering::Relaxed)
+                ),
+            });
+        }
 
+        // Select and clone a step, but leave it queued until every binding
+        // resolves so a corrected retry can replay the same response.
+        let selected_index = {
             // (1) Head fast path: head matches (or has no hint at all).
             let head_matches = step_matches(&steps[0], last_user_content.as_deref());
             if head_matches {
-                steps.pop_front().expect("checked non-empty above")
+                0
             } else {
                 // (2) Hint scan: look for the first step whose hint substring
                 //     is present in the current last user message.
                 let scan_pos = (1..steps.len())
                     .find(|&i| step_matches(&steps[i], last_user_content.as_deref()));
                 if let Some(idx) = scan_pos {
-                    steps.remove(idx).expect("scan position is valid")
+                    idx
                 } else {
                     // (3) Legacy fallback: nothing matches. Return the head
                     //     and warn — preserves the "warn but continue" contract
@@ -541,10 +544,14 @@ impl TraceLlm {
                             last_user_content.as_deref(),
                         );
                     }
-                    steps.pop_front().expect("checked non-empty above")
+                    0
                 }
             }
         };
+        let mut step = steps
+            .get(selected_index)
+            .cloned()
+            .expect("selected trace step remains queued");
 
         // Soft-validate min_message_count on the chosen step.
         if let Some(ref hint) = step.request_hint
@@ -564,16 +571,48 @@ impl TraceLlm {
             ref mut tool_calls, ..
         } = step.response
         {
+            let observed = Self::extract_observed_tool_results(messages);
             let vars = Self::extract_tool_result_vars(messages);
-            if !vars.is_empty() {
-                for tc in tool_calls.iter_mut() {
+            for tc in tool_calls.iter_mut() {
+                resolve_trace_result_bindings(&mut tc.arguments, &observed).map_err(|error| {
+                    LlmError::RequestFailed {
+                        provider: "trace".to_string(),
+                        reason: error.to_string(),
+                    }
+                })?;
+                if !vars.is_empty() {
                     Self::substitute_templates(&mut tc.arguments, &vars);
                 }
             }
         }
 
+        steps
+            .remove(selected_index)
+            .expect("selected trace step remains queued");
+        drop(steps);
         self.calls_served.fetch_add(1, Ordering::Relaxed);
         Ok(step)
+    }
+
+    fn extract_observed_tool_results(messages: &[ChatMessage]) -> Vec<ObservedToolResult> {
+        messages
+            .iter()
+            .filter_map(|message| {
+                if message.role != Role::Tool {
+                    return None;
+                }
+                let tool_call_id = message.tool_call_id.clone()?;
+                let content = Self::unwrap_tool_output(&message.content);
+                let parsed = serde_json::from_str(content.as_ref()).ok().or_else(|| {
+                    coerce_python_repr_to_json(content.as_ref())
+                        .and_then(|json| serde_json::from_str(&json).ok())
+                })?;
+                Some(ObservedToolResult {
+                    tool_call_id,
+                    content: parsed,
+                })
+            })
+            .collect()
     }
 
     /// Build a map of `"key.field" -> resolved_value` from tool result

@@ -12,21 +12,21 @@
 use std::sync::Arc;
 
 use ironclaw_host_api::{ResourceScope, SecretHandle};
-use ironclaw_secrets::{SecretMaterial, SecretStoreError, SecretStorePort};
+use ironclaw_secrets::{SecretMaterial, SecretStoreError};
 use thiserror::Error;
 
 const HANDLE: &str = "google_oauth_client_secret";
 
-/// Thin, operator-scoped wrapper over the shared [`SecretStorePort`] for the
+/// Thin, operator-scoped wrapper over the shared [`SecretStore`] for the
 /// Google OAuth client secret.
 #[derive(Clone)]
 pub struct GoogleOauthSecretStore {
-    store: Arc<dyn SecretStorePort>,
+    store: Arc<dyn ironclaw_secrets::SecretStorePort>,
 }
 
 impl GoogleOauthSecretStore {
     /// Wrap the instance's shared secret store.
-    pub fn new(store: Arc<dyn SecretStorePort>) -> Self {
+    pub fn new(store: Arc<dyn ironclaw_secrets::SecretStorePort>) -> Self {
         Self { store }
     }
 

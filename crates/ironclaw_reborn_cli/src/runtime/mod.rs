@@ -5,16 +5,16 @@ use std::time::Duration;
 use std::{future::Future, thread};
 
 use anyhow::Context;
+use ironclaw_extension_host::FirstPartyPackageBundle;
 use ironclaw_operator::OperatorLogLayer;
 use ironclaw_operator::llm_admin::nearai_mcp::nearai_mcp_bootstrap_config_from_env;
 use ironclaw_reborn_composition::TriggerFireAccessPolicy;
 use ironclaw_reborn_composition::host_api::{AgentId, TenantId, UserId};
 use ironclaw_reborn_composition::hosted_single_tenant_runtime_policy;
 use ironclaw_reborn_composition::{
-    FirstPartyPackageBundle, KeepaliveSweepSettings, OAuthClientConfig, PollSettings,
-    RebornCompositionProfile, RebornHostBindings, RebornRuntimeIdentity, RebornRuntimeInput,
-    RebornRuntimeProfileOptions, TurnRunnerSettings, build_reborn_runtime,
-    local_runtime_build_input_with_options,
+    KeepaliveSweepSettings, OAuthClientConfig, PollSettings, RebornCompositionProfile,
+    RebornHostBindings, RebornRuntimeIdentity, RebornRuntimeInput, RebornRuntimeProfileOptions,
+    TurnRunnerSettings, build_reborn_runtime, local_runtime_build_input_with_options,
 };
 use ironclaw_reborn_config::{
     REBORN_PROFILE_ENV, RebornBootConfig, RebornProfile, seed_default_config_file_if_missing,

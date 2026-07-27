@@ -554,7 +554,7 @@ pub enum AuditTraceClass {
 pub enum AllowedEffectPath {
     NoEffect,
     ProjectionOnly,
-    ProductWorkflow,
+    ProductSurface,
     TurnCoordinator,
     HostPort { id: HostPortId },
     CapabilityHost { capability_id: CapabilityId },
@@ -736,7 +736,7 @@ mod tests {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         }
     }
 
@@ -856,7 +856,7 @@ mod tests {
     #[test]
     fn public_route_scope_cannot_enter_effectful_paths() {
         let effectful_paths = [
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
             AllowedEffectPath::TurnCoordinator,
             AllowedEffectPath::HostPort {
                 id: HostPortId::new("host.storage.sql_transaction.first_party")
@@ -900,7 +900,7 @@ mod tests {
             (
                 ListenerClass::LocalGateway,
                 vec![IngressAuthScheme::Oidc],
-                AllowedEffectPath::ProductWorkflow,
+                AllowedEffectPath::ProductSurface,
                 "local gateway",
             ),
             (

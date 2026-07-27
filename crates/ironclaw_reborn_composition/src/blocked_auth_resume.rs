@@ -14,7 +14,7 @@
 //!
 //! Ordering matters: the decorator runs at continuation-dispatch time, which
 //! is strictly after `complete_oauth_callback` committed the credential
-//! account, so resumed install/tool runs re-checking readiness find their
+//! account, so resumed runs re-running `extension_activate` find their
 //! requirements satisfied. Fan-out is idempotent per (flow, run), and an
 //! incomplete sweep returns an error so the durable continuation remains
 //! undispatched and a re-drive (flow reconcile / lifecycle cleanup) retries
@@ -165,7 +165,7 @@ impl BlockedAuthResumeFanout {
                 reply_target_binding_ref: run.reply_target_binding_ref.clone(),
                 idempotency_key,
                 // No credential_ref: the resumed run re-runs its capability
-                // (the blocked install or extension tool), which re-checks requirement
+                // (extension_activate), which re-checks requirement
                 // satisfaction against the now-existing credential account —
                 // the same self-correcting shape the pairing redeem relied on.
                 precondition: ResumeTurnPrecondition::BlockedAuthGate,

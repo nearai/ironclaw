@@ -4,7 +4,7 @@ use chrono::{Duration, Utc};
 use ironclaw_host_api::VirtualPath;
 use ironclaw_product::{
     ActionFingerprintKey, IdempotencyDecision, IdempotencyLedger, ProductInboundAction,
-    ProductWorkflowError, SourceBindingKey,
+    ProductSurfaceFailure, SourceBindingKey,
 };
 use ironclaw_product::{
     AdapterInstallationId, ExternalActorRef, ExternalEventId, ProductAdapterId, ProductInboundAck,
@@ -27,7 +27,7 @@ pub fn fingerprint_for_actor(suffix: &str, actor_id: &str) -> ActionFingerprintK
 
 pub fn custom_root(suffix: &str) -> VirtualPath {
     VirtualPath::new(format!(
-        "/engine/product_workflow/idempotency/test_roots/{suffix}"
+        "/engine/product_surface/idempotency/test_roots/{suffix}"
     ))
     .expect("valid custom ledger root")
 }
@@ -79,7 +79,7 @@ pub async fn assert_in_flight_action_blocks_until_lease_expires(
         .begin_or_replay(fingerprint.clone(), received_at + Duration::seconds(5))
         .await
         .expect_err("fresh reservation should block");
-    assert!(matches!(blocked, ProductWorkflowError::Transient { .. }));
+    assert!(matches!(blocked, ProductSurfaceFailure::Transient { .. }));
 
     let reclaimed = ledger
         .begin_or_replay(fingerprint, received_at + Duration::seconds(11))
@@ -130,7 +130,7 @@ pub async fn assert_duplicate_reservation_contention_serializes(
         .count();
     let blocked_count = results
         .iter()
-        .filter(|result| matches!(result, Err(ProductWorkflowError::Transient { .. })))
+        .filter(|result| matches!(result, Err(ProductSurfaceFailure::Transient { .. })))
         .count();
 
     assert_eq!(new_count, 1);
@@ -167,7 +167,7 @@ pub async fn assert_superseded_reservation_cannot_settle(
         .expect_err("superseded action must not settle");
     assert!(matches!(
         stale_error,
-        ProductWorkflowError::Transient { .. }
+        ProductSurfaceFailure::Transient { .. }
     ));
 
     replacement.settle(ProductInboundAck::NoOp);
@@ -189,7 +189,7 @@ pub async fn assert_settle_missing_reservation_returns_transient(
         .settle(action)
         .await
         .expect_err("missing reservation must not settle");
-    assert!(matches!(error, ProductWorkflowError::Transient { .. }));
+    assert!(matches!(error, ProductSurfaceFailure::Transient { .. }));
 }
 
 pub async fn assert_custom_root_isolated_from_default_root(

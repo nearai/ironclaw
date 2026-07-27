@@ -37,7 +37,7 @@ use ironclaw_auth::{
     CredentialAccountLabel, CredentialAccountListPage, CredentialAccountListRequest,
     CredentialAccountProjection, CredentialAccountSelectionRequest, CredentialAccountStatus,
     CredentialAccountUpdateBinding, CredentialRecoveryProjection, CredentialRecoveryRequest,
-    CredentialRefreshReport, CredentialRefreshRequest, OAuthAuthorizationCode,
+    CredentialRefreshReport, CredentialRefreshRequest, LifecyclePackageRef, OAuthAuthorizationCode,
     OAuthAuthorizationUrl, OAuthCallbackState, OAuthCallbackStateKind,
     OAuthProviderCallbackRequest, OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret,
     ProviderScope, SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest, Timestamp,
@@ -347,15 +347,29 @@ impl ProductAuthRouteState {
     }
 
     #[cfg(test)]
-    fn with_test_installed_extension_lookup(mut self) -> Self {
-        self.installed_extension_lookup = Some(Arc::new(InstalledExtensionLookup::Scripted {
-            extension_id: ExtensionId::new("vendorco-tools").expect("test extension id"), // safety: cfg(test)-only static fixture.
-            requirement_name: "vendorco_oauth".to_string(),
-            requirement: InstalledExtensionOAuthRequirement {
+    fn with_test_installed_extension_lookup(self) -> Self {
+        self.with_test_installed_extension_lookup_for(
+            ExtensionId::new("vendorco-tools").expect("test extension id"),
+            "vendorco_oauth",
+            InstalledExtensionOAuthRequirement {
                 provider: "vendorco".to_string(),
                 account_label: "vendorco-tools vendorco".to_string(),
                 scopes: vec!["items:read".to_string()],
             },
+        )
+    }
+
+    #[cfg(test)]
+    fn with_test_installed_extension_lookup_for(
+        mut self,
+        extension_id: ExtensionId,
+        requirement_name: impl Into<String>,
+        requirement: InstalledExtensionOAuthRequirement,
+    ) -> Self {
+        self.installed_extension_lookup = Some(Arc::new(InstalledExtensionLookup::Scripted {
+            extension_id,
+            requirement_name: requirement_name.into(),
+            requirement,
         }));
         self
     }
@@ -743,7 +757,7 @@ pub(super) fn protected_mutation_policy() -> IngressPolicy {
         websocket_origin: WebSocketOriginPolicy::NotApplicable,
         streaming: StreamingMode::None,
         audit: AuditTraceClass::UserAction,
-        effect_path: AllowedEffectPath::ProductWorkflow,
+        effect_path: AllowedEffectPath::ProductSurface,
     })
     .expect("product-auth OAuth start policy must validate") // safety: LocalGateway + bearer + AuthenticatedCaller is the same authenticated local product workflow shape used by WebUI mutations.
 }
@@ -766,7 +780,7 @@ pub(super) fn flow_status_policy() -> IngressPolicy {
         websocket_origin: WebSocketOriginPolicy::NotApplicable,
         streaming: StreamingMode::None,
         audit: AuditTraceClass::UserAction,
-        effect_path: AllowedEffectPath::ProductWorkflow,
+        effect_path: AllowedEffectPath::ProductSurface,
     })
     .expect("product-auth OAuth flow-status policy must validate") // safety: same authenticated LocalGateway shape as the OAuth start mutation, but NoBody + read-only per-caller poll cadence.
 }
@@ -790,7 +804,7 @@ pub(super) fn flow_reconcile_policy() -> IngressPolicy {
         websocket_origin: WebSocketOriginPolicy::NotApplicable,
         streaming: StreamingMode::None,
         audit: AuditTraceClass::UserAction,
-        effect_path: AllowedEffectPath::ProductWorkflow,
+        effect_path: AllowedEffectPath::ProductSurface,
     })
     .expect("product-auth OAuth flow-reconcile policy must validate") // safety: authenticated LocalGateway command with no body and a bounded per-caller poll cadence.
 }
@@ -814,7 +828,7 @@ pub(super) fn accounts_refresh_policy() -> IngressPolicy {
         websocket_origin: WebSocketOriginPolicy::NotApplicable,
         streaming: StreamingMode::None,
         audit: AuditTraceClass::UserAction,
-        effect_path: AllowedEffectPath::ProductWorkflow,
+        effect_path: AllowedEffectPath::ProductSurface,
     })
     .expect("product-auth accounts refresh policy must validate") // safety: same shape as protected_mutation_policy but with tighter rate cap to guard against fan-out to provider refresh calls.
 }
@@ -836,7 +850,7 @@ pub(super) fn callback_policy() -> IngressPolicy {
         websocket_origin: WebSocketOriginPolicy::NotApplicable,
         streaming: StreamingMode::None,
         audit: AuditTraceClass::PublicCallback,
-        effect_path: AllowedEffectPath::ProductWorkflow,
+        effect_path: AllowedEffectPath::ProductSurface,
     })
     .expect("product-auth OAuth callback policy must validate") // safety: OAuthCallback + OAuthState + HostResolved is the host callback shape; handler/service validation enforces state before product effects.
 }

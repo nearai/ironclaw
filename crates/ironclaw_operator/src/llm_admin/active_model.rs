@@ -1,7 +1,7 @@
 //! Live active-model reader backing default-model run cost pricing.
 //!
 //! A WebChat v2 run submitted without an explicit `model` carries no
-//! `resolved_model_route`, so the product facade has no model id to price its
+//! `resolved_model_route`, so the product service has no model id to price its
 //! captured token usage against. [`ProviderActiveModelReader`] closes that gap
 //! by reading the runtime's hot-swappable primary provider handle: for a
 //! default (unrouted) run, the provider's `active_model_name()` is exactly the

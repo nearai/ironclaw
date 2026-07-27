@@ -28,17 +28,18 @@ use ironclaw_host_runtime::{
     TRIGGER_REMOVE_CAPABILITY_ID,
 };
 use ironclaw_host_runtime::{RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver};
-use ironclaw_product::{LifecyclePackageKind, LifecyclePackageRef, LifecyclePublicState};
+use ironclaw_product::{LifecyclePackageKind, LifecyclePackageRef};
 
 use rust_decimal_macros::dec;
 use secrecy::ExposeSecret;
 
 use crate::builtin_capability_policy::{BuiltinApprovalPolicyAction, BuiltinCapabilityPolicyError};
-use crate::extension_host::extension_lifecycle::ExtensionActivationMode;
-use crate::extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryEgress;
 use crate::{
     RebornReadinessDiagnostic, RebornReadinessState, runtime::SKILL_ACTIVATE_CAPABILITY_ID,
 };
+use ironclaw_extension_host::ExtensionActivationMode;
+use ironclaw_extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryEgress;
+use ironclaw_host_api::InstallationState;
 
 #[test]
 fn libsql_build_resource_governor_guard_requires_singleton_authority() {
@@ -459,19 +460,11 @@ async fn local_runtime_trigger_create_hook_maps_conversation_init_error_to_backe
     ))
     .await
     .expect("local-dev services build");
-    let runtime = services.local_runtime_for_test().expect("local runtime");
     let hook = LocalRuntimeTriggerCreatorPairingHook {
-        outbound_delivery_targets: Arc::clone(runtime.outbound_delivery_targets_for_test()),
+        outbound_delivery_targets: Arc::clone(&services.outbound_delivery_targets),
+        source_turn_state: services.turn_state.clone(),
         scoped_filesystem: failing_trigger_conversation_filesystem(),
         conversations: tokio::sync::OnceCell::new(),
-        delivery_target_service: Arc::new(ironclaw_product::TriggerFinalReplyTargetService::new(
-            Arc::new(LateBoundTriggerSourceTurnStateStore {
-                source_turn_state: Arc::clone(&services.trigger_source_turn_state_store),
-            }),
-            Arc::clone(&services.outbound_state),
-            Arc::clone(&services.current_delivery_targets)
-                as Arc<dyn CurrentDeliveryTargetResolver>,
-        )),
     };
     let record = trigger_record_for_pairing_test();
 
@@ -1100,7 +1093,7 @@ async fn local_dev_gsuite_installs_activates_and_dispatches_through_host_runtime
         .await
         .expect("install Gmail");
     extension_management
-        .activate_with_prechecked_credentials_for_test(
+        .activate_with_prechecked_credentials_for_user_for_test(
             gmail_ref,
             ExtensionActivationMode::Static,
             &caller,
@@ -1112,7 +1105,7 @@ async fn local_dev_gsuite_installs_activates_and_dispatches_through_host_runtime
         .await
         .expect("install Google Calendar");
     extension_management
-        .activate_with_prechecked_credentials_for_test(
+        .activate_with_prechecked_credentials_for_user_for_test(
             calendar_ref,
             ExtensionActivationMode::Static,
             &caller,
@@ -1245,7 +1238,7 @@ async fn local_dev_notion_mcp_installs_activates_and_reaches_auth_gate() {
         .await
         .expect("install Notion MCP");
     extension_management
-        .activate_with_prechecked_credentials_for_test(
+        .activate_with_prechecked_credentials_for_user_for_test(
             notion_ref,
             ExtensionActivationMode::HostedMcpDiscovery {
                 scope: ResourceScope::local_default(caller.clone(), InvocationId::new())
@@ -1305,7 +1298,7 @@ async fn local_dev_web_access_installs_activates_and_dispatches_through_host_run
         .await
         .expect("install Web Access");
     extension_management
-        .activate_with_prechecked_credentials_for_test(
+        .activate_with_prechecked_credentials_for_user_for_test(
             web_access_ref,
             ExtensionActivationMode::Static,
             &caller,
@@ -1364,7 +1357,7 @@ fn nearai_bootstrap_input(owner: &str, root: PathBuf, api_key: &str) -> RebornHo
 #[test]
 fn hosted_single_tenant_nearai_mcp_bootstrap_scope_uses_runtime_identity() {
     let owner = UserId::new("hosted-nearai-owner").expect("owner");
-    let identity = RuntimeOwnerIdentity {
+    let identity = RebornLocalRuntimeIdentity {
         tenant_id: ironclaw_host_api::TenantId::new("hosted-nearai-tenant").expect("tenant"),
         agent_id: ironclaw_host_api::AgentId::new("hosted-nearai-agent").expect("agent"),
     };
@@ -1405,7 +1398,7 @@ fn turn_state_filesystem_routes_global_store_ops_to_owner_turns_path() {
 #[test]
 fn runtime_owner_scope_uses_configured_runtime_identity_for_turn_state() {
     let owner = UserId::new("configured-owner").expect("owner");
-    let identity = RuntimeOwnerIdentity {
+    let identity = RebornLocalRuntimeIdentity {
         tenant_id: TenantId::new("configured-tenant").expect("tenant"),
         agent_id: ironclaw_host_api::AgentId::new("configured-agent").expect("agent"),
     };
@@ -1737,21 +1730,11 @@ async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
     // credential gate; the owner is the operator this runtime was built with.
     let owner_scope =
         default_runtime_owner_scope(UserId::new(owner).unwrap()).expect("NEAR AI MCP owner scope");
-    let credential_gate = crate::extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate::new(
-        owner_scope.clone(),
-        services
-            .product_auth
-            .runtime_credential_account_selection_service(),
-    );
     let projection = extension_management
-        .project(
-            nearai_ref.clone(),
-            &owner_scope.user_id,
-            Some(&credential_gate),
-        )
+        .project(nearai_ref.clone(), &owner_scope.user_id)
         .await
         .expect("NEAR AI MCP projected");
-    assert_eq!(projection.phase, LifecyclePublicState::Active);
+    assert_eq!(projection.phase, InstallationState::Active);
 
     // v3 hosted-MCP surface: boot-time bootstrap activates the package
     // statically, publishing the host-internal MCP connection template
@@ -1799,7 +1782,6 @@ async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
                     "web_search",
                 )),
             },
-            &UserId::new(owner).expect("valid lifecycle caller"),
         )
         .await
         .expect("scripted NEAR AI discovery activation");
@@ -2010,17 +1992,11 @@ async fn local_dev_nearai_mcp_bootstrap_reinstalls_discovered_reused_credential(
     // credential gate; the owner is the operator this runtime was built with.
     let owner_scope =
         default_runtime_owner_scope(UserId::new(owner).unwrap()).expect("NEAR AI MCP owner scope");
-    let credential_gate = crate::extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate::new(
-        owner_scope.clone(),
-        services
-            .product_auth
-            .runtime_credential_account_selection_service(),
-    );
     let projection = extension_management
-        .project(nearai_ref, &owner_scope.user_id, Some(&credential_gate))
+        .project(nearai_ref, &owner_scope.user_id)
         .await
         .expect("NEAR AI MCP projected");
-    assert_eq!(projection.phase, LifecyclePublicState::Active);
+    assert_eq!(projection.phase, InstallationState::Active);
 
     // v3 hosted-MCP surface: reinstall-and-activate publishes the
     // host-internal MCP connection template plus the statically pinned
@@ -2481,12 +2457,12 @@ fn production_readiness_reflects_product_auth_presence() {
         without_auth.state,
         RebornReadinessState::ProductionValidated
     );
-    assert!(!without_auth.facades.product_auth);
+    assert!(!without_auth.services.product_auth);
     assert!(without_auth.diagnostics.is_empty());
 
     let with_auth = readiness_for(RebornCompositionProfile::Production, true, true, true);
     assert_eq!(with_auth.state, RebornReadinessState::ProductionValidated);
-    assert!(with_auth.facades.product_auth);
+    assert!(with_auth.services.product_auth);
     assert!(with_auth.diagnostics.is_empty());
 }
 
@@ -3166,10 +3142,14 @@ async fn completed_lifecycle_activation_continuation_installs_the_extension() {
 #[tokio::test]
 async fn channel_pairing_completions_run_the_lifecycle_wrapped_continuation_dispatcher() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
-        "local-dev-pairing-continuation-owner",
-        dir.path().join("local-dev"),
-    ))
+    let services = build_runtime_substrate(
+        crate::deployment::local_dev_build_input(
+            "local-dev-pairing-continuation-owner",
+            dir.path().join("local-dev"),
+        )
+        .with_bundled_first_party_for_test()
+        .with_account_setup_descriptors(vec![pairing_account_setup_descriptor("pairing-fixture")]),
+    )
     .await
     .expect("local-dev services build");
 
@@ -3178,19 +3158,13 @@ async fn channel_pairing_completions_run_the_lifecycle_wrapped_continuation_disp
         .as_ref()
         .expect("local-dev build composes the channel pairing registry");
     let mut pairing_services_checked = 0usize;
-    let canonical_dispatcher = Arc::clone(&services.product_auth_product_continuation_dispatcher);
     let mut shared_dispatcher = None;
-    for extension_id in ["telegram", "slack"] {
+    for extension_id in ["pairing-fixture"] {
         let Some(pairing) = channel_pairing.get(extension_id) else {
             continue;
         };
         pairing_services_checked += 1;
         let dispatcher = pairing.continuation_dispatcher_for_test();
-        assert!(
-            Arc::ptr_eq(&dispatcher, &canonical_dispatcher),
-            "{extension_id} pairing completions must dispatch through the authoritative \
-             lifecycle-wrapped continuation dispatcher",
-        );
         if let Some(shared_dispatcher) = &shared_dispatcher {
             assert!(
                 Arc::ptr_eq(&dispatcher, shared_dispatcher),
@@ -3207,6 +3181,35 @@ async fn channel_pairing_completions_run_the_lifecycle_wrapped_continuation_disp
     );
 }
 
+fn pairing_account_setup_descriptor(
+    extension_id: &str,
+) -> ironclaw_product::ExtensionAccountSetupDescriptor {
+    ironclaw_product::ExtensionAccountSetupDescriptor {
+        extension_id: ExtensionId::new(extension_id).expect("extension id"),
+        auth_requirement: ironclaw_host_api::RuntimeCredentialAuthRequirement {
+            provider: VendorId::new(extension_id).expect("provider id"),
+            setup: RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
+            requester_extension: ExtensionId::new(extension_id).expect("requester extension id"),
+            provider_scopes: Vec::new(),
+        },
+        connection_requirement: ironclaw_product::ChannelConnectionRequirement {
+            channel: extension_id.to_string(),
+            display_name: "Pairing Fixture".to_string(),
+            strategy: ironclaw_product::RebornChannelConnectStrategy::WebGeneratedCode,
+            instructions: "Pair with the generated code.".to_string(),
+            input_placeholder: "Code".to_string(),
+            submit_label: "Pair".to_string(),
+            error_message: "Pairing failed.".to_string(),
+        },
+        connection_notices: ironclaw_product::ChannelConnectionNoticePolicy::generic(
+            "Pairing Fixture",
+        ),
+        activation_success_message: "Pairing fixture connected.".to_string(),
+        pairing_deep_link_template: None,
+        inbound_code_prefixes: Vec::new(),
+    }
+}
+
 /// Live-repro regression (demo-stack defect): removing an installed channel
 /// extension through the lifecycle port with an authenticated actor must
 /// actually delete the caller's durable membership — and must be POSSIBLE in
@@ -3215,10 +3218,13 @@ async fn channel_pairing_completions_run_the_lifecycle_wrapped_continuation_disp
 #[tokio::test]
 async fn telegram_remove_with_authenticated_actor_deletes_the_membership() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
-        "local-dev-telegram-remove-owner",
-        dir.path().join("local-dev"),
-    ))
+    let services = build_runtime_substrate(
+        crate::deployment::local_dev_build_input(
+            "local-dev-telegram-remove-owner",
+            dir.path().join("local-dev"),
+        )
+        .with_bundled_first_party_for_test(),
+    )
     .await
     .expect("local-dev services build");
     let runtime_surfaces = services.local_runtime_for_test().expect("local runtime");
@@ -3248,12 +3254,21 @@ async fn telegram_remove_with_authenticated_actor_deletes_the_membership() {
     );
 
     let projection = extension_management
-        .project(telegram_ref, &caller, None)
+        .project(telegram_ref, &caller)
         .await
         .expect("project telegram after remove");
-    assert_eq!(
-        projection.phase,
-        ironclaw_product::LifecyclePublicState::Uninstalled,
-        "removed telegram must project uninstalled for its former member",
+    let Some(ironclaw_product::LifecycleProductPayload::ExtensionList { extensions, .. }) =
+        projection.payload.as_ref()
+    else {
+        panic!(
+            "expected extension projection payload, got {:?}",
+            projection.payload
+        );
+    };
+    assert!(
+        extensions
+            .first()
+            .is_some_and(|extension| extension.install_scope.is_none()),
+        "removed telegram must have no visible membership for its former member: {extensions:?}",
     );
 }

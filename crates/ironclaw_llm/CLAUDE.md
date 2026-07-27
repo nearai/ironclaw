@@ -286,3 +286,6 @@ Providers in this crate import it as `use ironclaw_common::llm_costs as costs;`
 ## Trace Recording
 
 Set `IRONCLAW_RECORD_TRACE=1` to enable live trace recording via `RecordingLlm`. Traces are JSON files containing: memory snapshot, HTTP exchanges from tools, and LLM steps (user inputs, text responses, tool call responses). Replay these in E2E tests via `TraceLlm`. Configure output path with `IRONCLAW_TRACE_OUTPUT` (default: `trace_{timestamp}.json`).
+
+Arguments derived from an earlier tool result use an exact `$trace_result`
+marker with the original `tool_call_id` and an RFC 6901 JSON Pointer.

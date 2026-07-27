@@ -10,7 +10,7 @@ use ironclaw_host_api::{
     RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, SecretHandle, TenantId,
     ThreadId, UserId, VendorId,
 };
-use ironclaw_secrets::{SecretStore, SecretStorePort};
+use ironclaw_secrets::{SecretStore, SecretStorePort as _};
 
 use super::*;
 
@@ -1724,7 +1724,7 @@ async fn resolver_uses_most_recent_account_across_multiple_reusable_logins() {
 
 fn resolver_with_refresh_and_store(
     accounts: Arc<InMemoryAuthProductServices>,
-    secret_store: Arc<dyn SecretStorePort>,
+    secret_store: Arc<dyn ironclaw_secrets::SecretStorePort>,
 ) -> ProductAuthRuntimeCredentialResolver {
     ProductAuthRuntimeCredentialResolver::new_with_refresh(
         Arc::new(

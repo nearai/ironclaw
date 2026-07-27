@@ -1208,6 +1208,7 @@ registerPack("ja", {
   "common.pinned": "固定",
   "common.deleteChat": "チャットを削除",
   "chat.deleteFailed": "この会話を削除できませんでした。",
+  "chat.cancelFailed": "この実行を停止できませんでした。まだ実行中の可能性があります。もう一度お試しください。",
   "chat.deleteBusy": "実行中の会話は削除できません。先に停止してから、もう一度お試しください。",
   "command.placeholder": "コマンドを入力するか検索...",
   "routine.searchPlaceholder": "ルーチン名、トリガー、またはアクションを検索",
@@ -1363,6 +1364,11 @@ registerPack("ja", {
 
 registerPack("ja", {
   "app.checkingSession": "セッションを確認中...",
+  "app.loadingPage": "ページを読み込み中...",
+  "app.pageLoadFailedTitle": "このページを読み込めませんでした",
+  "app.pageLoadFailedDescription":
+    "新しいバージョンが利用可能になったか、接続が中断された可能性があります。ページを再読み込みして、もう一度お試しください。",
+  "app.reloadPage": "ページを再読み込み",
   "app.sessionCheckFailedTitle": "セッションを確認できませんでした",
   "app.sessionCheckFailedDescription":
     "現在セッションを確認できません。サインイン情報は引き続き保持されています。しばらくしてからもう一度お試しください。",

@@ -21,22 +21,7 @@ pub(crate) use crate::automation::trigger_poller_trusted_submit::ConversationCon
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use crate::automation::trigger_poller_trusted_submit::TenantScopedTrustedTriggerFireAuthorizer;
 use crate::runtime_input::TriggerPollerSettings;
-use ironclaw_triggers::TriggerFire;
-use ironclaw_turns::{TurnRunId, TurnScope};
-
-/// Composition-owned hook invoked by the trigger poller after a successful
-/// fire submission has been durably settled in trigger storage. The
-/// composition root wires a channel-host implementation or a no-op.
-///
-/// The poller invokes this hook from a detached task after the accepted fire
-/// appears as settled, so hook latency cannot delay settlement and delivery
-/// cannot precede the persisted run/thread mapping.
-#[async_trait::async_trait]
-pub trait PostSubmitDeliveryHook: Send + Sync {
-    /// Called with the original trigger fire, the submitted run id, and the
-    /// turn scope the run was submitted under.
-    async fn on_trigger_submitted(&self, fire: TriggerFire, run_id: TurnRunId, scope: TurnScope);
-}
+pub use ironclaw_extension_host::channel_triggered_delivery::PostSubmitDeliveryHook;
 
 mod active_run_lookup;
 pub(crate) use active_run_lookup::SnapshotActiveRunLookup;

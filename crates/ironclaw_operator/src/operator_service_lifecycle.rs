@@ -1,5 +1,4 @@
-// arch-exempt: large_file, operator service backend awaits composition helper extraction, plan #4471
-//! Local OS service lifecycle backend for the Reborn operator facade.
+//! Local OS service lifecycle backend for the Reborn operator service.
 //!
 //! This is the concrete implementation behind
 //! `POST /api/webchat/v2/operator/service`. It intentionally accepts only the

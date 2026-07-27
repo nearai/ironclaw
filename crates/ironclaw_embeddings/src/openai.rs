@@ -20,44 +20,6 @@ pub(crate) struct OpenAiEmbeddings {
 }
 
 impl OpenAiEmbeddings {
-    /// Create a new OpenAI embedding provider with the default model.
-    ///
-    /// Uses text-embedding-3-small which has 1536 dimensions.
-    #[allow(dead_code)]
-    pub(crate) fn new(api_key: impl Into<String>) -> Self {
-        Self {
-            client: reqwest::Client::new(),
-            api_key: api_key.into(),
-            model: "text-embedding-3-small".to_string(),
-            dimension: 1536,
-            base_url: OPENAI_API_BASE_URL.to_string(),
-        }
-    }
-
-    /// Use text-embedding-ada-002 model.
-    #[allow(dead_code)]
-    pub(crate) fn ada_002(api_key: impl Into<String>) -> Self {
-        Self {
-            client: reqwest::Client::new(),
-            api_key: api_key.into(),
-            model: "text-embedding-ada-002".to_string(),
-            dimension: 1536,
-            base_url: OPENAI_API_BASE_URL.to_string(),
-        }
-    }
-
-    /// Use text-embedding-3-large model.
-    #[allow(dead_code)]
-    pub(crate) fn large(api_key: impl Into<String>) -> Self {
-        Self {
-            client: reqwest::Client::new(),
-            api_key: api_key.into(),
-            model: "text-embedding-3-large".to_string(),
-            dimension: 3072,
-            base_url: OPENAI_API_BASE_URL.to_string(),
-        }
-    }
-
     /// Use a custom model with specified dimension.
     pub(crate) fn with_model(
         api_key: impl Into<String>,
@@ -203,12 +165,12 @@ mod tests {
 
     #[test]
     fn test_openai_embeddings_config() {
-        let provider = OpenAiEmbeddings::new("test-key");
+        let provider = OpenAiEmbeddings::with_model("test-key", "text-embedding-3-small", 1536);
         assert_eq!(provider.dimension(), 1536);
         assert_eq!(provider.model_name(), "text-embedding-3-small");
         assert_eq!(provider.base_url, OPENAI_API_BASE_URL);
 
-        let provider = OpenAiEmbeddings::large("test-key");
+        let provider = OpenAiEmbeddings::with_model("test-key", "text-embedding-3-large", 3072);
         assert_eq!(provider.dimension(), 3072);
         assert_eq!(provider.model_name(), "text-embedding-3-large");
         assert_eq!(provider.base_url, OPENAI_API_BASE_URL);
@@ -216,27 +178,29 @@ mod tests {
 
     #[test]
     fn test_openai_with_base_url_valid() {
-        let provider =
-            OpenAiEmbeddings::new("test-key").with_base_url("https://custom.example.com");
+        let provider = OpenAiEmbeddings::with_model("test-key", "text-embedding-3-small", 1536)
+            .with_base_url("https://custom.example.com");
         assert_eq!(provider.base_url, "https://custom.example.com");
     }
 
     #[test]
     fn test_openai_with_base_url_strips_trailing_slashes() {
-        let provider =
-            OpenAiEmbeddings::new("test-key").with_base_url("https://custom.example.com///");
+        let provider = OpenAiEmbeddings::with_model("test-key", "text-embedding-3-small", 1536)
+            .with_base_url("https://custom.example.com///");
         assert_eq!(provider.base_url, "https://custom.example.com");
     }
 
     #[test]
     fn test_openai_with_base_url_http_scheme() {
-        let provider = OpenAiEmbeddings::new("test-key").with_base_url("http://localhost:8080");
+        let provider = OpenAiEmbeddings::with_model("test-key", "text-embedding-3-small", 1536)
+            .with_base_url("http://localhost:8080");
         assert_eq!(provider.base_url, "http://localhost:8080");
     }
 
     #[test]
     fn test_openai_with_base_url_schemeless_prepends_https() {
-        let provider = OpenAiEmbeddings::new("test-key").with_base_url("custom.example.com/v1");
+        let provider = OpenAiEmbeddings::with_model("test-key", "text-embedding-3-small", 1536)
+            .with_base_url("custom.example.com/v1");
         assert_eq!(provider.base_url, "https://custom.example.com/v1");
     }
 }

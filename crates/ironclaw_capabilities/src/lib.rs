@@ -5,18 +5,28 @@
 //! neutral runtime dispatch without depending on concrete runtime crates.
 #![warn(unreachable_pub)]
 
+mod dispatch;
 mod error;
 mod helpers;
 mod host;
 mod obligations;
 mod ports;
 mod process_authorization;
+mod registry;
 mod replay_payload;
 mod requests;
 mod trust;
 
+pub use dispatch::{
+    BoundCapabilityAdapter, ChainToolResolver, ResolvedCapability, RuntimeAdapterResult,
+    RuntimeDispatcher, ToolResolver,
+};
 pub use error::{CapabilityInvocationError, ResumeContextMismatchKind};
 pub use host::CapabilityHost;
+pub use ironclaw_host_api::{
+    Authorized, CapabilityDispatchRequest, CapabilityDispatchResult, CapabilityDispatcher,
+    CapabilityDisplayOutputPreview, DispatchError, DispatchFailureDetail, RuntimeDispatchErrorKind,
+};
 pub use obligations::{
     CapabilityObligationAbortRequest, CapabilityObligationCompletionRequest,
     CapabilityObligationError, CapabilityObligationFailureKind, CapabilityObligationHandler,
@@ -27,6 +37,7 @@ pub use process_authorization::{
     ProcessAuthorizationRemintError, ProcessAuthorizationRemintPort,
     process_authorization_remint_port,
 };
+pub use registry::{CapabilityDispatchRegistry, CapabilityRegistrationError};
 pub use replay_payload::{
     ReplayPayload, ReplayPayloadStore, ReplayPayloadStoreError, ReplayPayloadStorePort,
 };

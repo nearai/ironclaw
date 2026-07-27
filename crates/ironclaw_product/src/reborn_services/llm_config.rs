@@ -6,7 +6,7 @@
 //! list models). The concrete implementation lives in the composition root
 //! (`ironclaw_reborn_composition`), which owns the provider catalog overlay,
 //! the operator-scoped secret store, the config-file writer, and the live
-//! provider-reload handle. Keeping the port here lets the facade stay the
+//! provider-reload handle. Keeping the port here lets the service stay the
 //! single stable surface the route handlers depend on.
 //!
 //! Wire-safety: inbound API-key values are typed as [`SecretString`] so they
@@ -34,7 +34,7 @@ pub const LLM_CONFIG_VIEW: RebornViewDescriptor = RebornViewDescriptor {
 /// A WebChat v2 run submitted without an explicit `model` carries no
 /// `resolved_model_route`, so its captured `model_usage` has no model id to
 /// price against and [`RebornGetRunStateResponse::cost`] would be `None` even
-/// though a real model ran. This port lets the facade price such a
+/// though a real model ran. This port lets the service price such a
 /// default-model run against the live provider's active model — which, for a
 /// default (unrouted) run, is exactly the model that ran.
 ///
@@ -307,7 +307,7 @@ pub struct LlmModelsResult {
     pub message: String,
 }
 
-/// Port-level error surface. The facade maps this to the sanitized
+/// Port-level error surface. The service maps this to the sanitized
 /// `ProductSurfaceError` taxonomy; no backend strings, paths, or secrets cross
 /// the boundary beyond the user-safe `reason` on `InvalidRequest`.
 #[derive(Debug, Clone)]

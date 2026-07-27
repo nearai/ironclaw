@@ -1208,6 +1208,7 @@ registerPack("de", {
   "common.pinned": "Angeheftet",
   "common.deleteChat": "Chat löschen",
   "chat.deleteFailed": "Diese Unterhaltung konnte nicht gelöscht werden.",
+  "chat.cancelFailed": "Dieser Lauf konnte nicht gestoppt werden. Er läuft möglicherweise noch. Versuchen Sie es erneut.",
   "chat.deleteBusy": "Eine laufende Unterhaltung kann nicht gelöscht werden. Stoppe sie zuerst und versuche es dann erneut.",
   "command.placeholder": "Geben Sie einen Befehl oder eine Suche ein ...",
   "routine.searchPlaceholder": "Routinename, Trigger oder Aktion suchen",
@@ -1363,6 +1364,11 @@ registerPack("de", {
 
 registerPack("de", {
   "app.checkingSession": "Sitzung wird geprüft...",
+  "app.loadingPage": "Seite wird geladen...",
+  "app.pageLoadFailedTitle": "Diese Seite konnte nicht geladen werden",
+  "app.pageLoadFailedDescription":
+    "Möglicherweise ist eine neue Version verfügbar oder die Verbindung wurde unterbrochen. Laden Sie die Seite neu, um es erneut zu versuchen.",
+  "app.reloadPage": "Seite neu laden",
   "app.sessionCheckFailedTitle": "Sitzung konnte nicht überprüft werden",
   "app.sessionCheckFailedDescription":
     "Ihre Sitzung konnte gerade nicht überprüft werden. Ihre Anmeldung bleibt gespeichert. Versuchen Sie es in Kürze erneut.",

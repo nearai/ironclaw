@@ -7,7 +7,7 @@
 //!
 //! The three surfaces that disagreed in issue #6091 are each read through
 //! their REAL implementation:
-//! - **connection state**: the production `GenericChannelConnectionFacade`
+//! - **connection state**: the production `GenericChannelConnectionService`
 //!   (extension-runtime §6.4) over the durable channel-identity store (what
 //!   the Extensions page merges via `caller_channel_connections`), plus the
 //!   binding store itself as durable evidence;
@@ -26,7 +26,7 @@
 //! Uses the group's generic channel-connection bundle
 //! (`ironclaw_reborn_composition::test_support`), whose connect drives the
 //! production OAuth-callback identity-binding hook
-//! (`bind_channel_identities_for_callback`) and whose facade is late-bound
+//! (`bind_channel_identities_for_callback`) and whose service is late-bound
 //! into the same cleanup slot `extension_remove` dispatches to.
 //!
 //! Divergences from the retired per-vendor (slack-host-beta) expression of
@@ -98,18 +98,24 @@ fn proven_slack_identity() -> Result<OAuthProviderIdentity, String> {
     .map_err(|error| format!("proven slack identity: {error}"))
 }
 
-/// Seed Slack's tenant-owned connection-scoping values through the composed
-/// administrator configuration service. Product callers can perform this
-/// mutation only through the operator-authorized Admin Configuration API; the
-/// direct seam used here is compiled for integration test support only.
+/// Configure slack's `[channel.config]` connection-scoping values through
+/// the PRODUCTION configure port (`ChannelConfigService` via
+/// `RebornServices::channel_config_service`) — the §6.5 configure step the
+/// generic identity bind fails closed without. Requires the extension to be
+/// installed, so this runs after every (re)install.
 async fn configure_slack_connection_scoping(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let services = g
         .capability_harness()
         .and_then(|harness| harness.reborn_services_for_test())
         .ok_or("extension_lifecycle group must expose its RebornServices bundle")?;
-    services
-        .configure_admin_group_for_test(
-            "extension.slack",
+    let channel_config = services
+        .channel_config_service()
+        .ok_or("composed runtime must expose the channel-config configure port")?;
+    let slack_id = ironclaw_host_api::ExtensionId::new("slack")
+        .map_err(|error| format!("slack extension id: {error}"))?;
+    channel_config
+        .save_values(
+            &slack_id,
             vec![
                 ("slack_bot_token".to_string(), SLACK_BOT_TOKEN.to_string()),
                 (
@@ -336,7 +342,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     remover
         .assert_tool_invoked("builtin.extension_remove")
         .await?;
-    // Every surface flips together: connection facade…
+    // Every surface flips together: connection service…
     if slack.caller_channel_connected("slack", &actor).await? {
         return Err("slack still reports connected after extension_remove; \
              removal did not run the per-caller channel disconnect (issue #6091 shape)"

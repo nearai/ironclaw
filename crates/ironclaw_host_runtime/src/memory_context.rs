@@ -2,12 +2,10 @@
 //!
 //! This adapter bridges the memory service into the agent loop context pipeline.
 //! It derives the host-resolved memory invocation scope from the request's
-//! [`TurnScope`] and [`TurnActor`], then makes two scoped reads — long-term
-//! (general) and short-term (this thread) — through [`MemoryService`]. The memory
-//! service owns the per-snippet safety (untrusted envelope + size cap + scope
-//! check) so it returns prompt-safe snippets; the only host-side step is the
-//! loop's prompt-content denylist (a drop-filter) and the model-visible reference,
-//! both of which depend on loop-layer types and so stay here.
+//! [`TurnScope`] and [`TurnActor`], then makes two scoped reads: long-term
+//! (general) and short-term (this thread) through [`MemoryService`]. The memory
+//! service owns per-snippet safety, while the loop-facing adapter owns final
+//! model-context admission and aggregate prompt budget enforcement.
 
 use std::sync::Arc;
 
@@ -35,7 +33,7 @@ pub struct ProductionMemoryPromptContextService {
 
 impl ProductionMemoryPromptContextService {
     /// Create a new production adapter wrapping the configured memory service
-    /// facade. Native memory remains the default facade adapter in Phase 1.
+    /// service. Native memory remains the default service adapter in Phase 1.
     pub fn new(memory_service: Arc<dyn MemoryService>) -> Self {
         Self { memory_service }
     }

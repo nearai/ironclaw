@@ -4,8 +4,9 @@ use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccount, CredentialAccountStatus,
     CredentialAccountUpdateBinding,
 };
+use ironclaw_extension_host::ExtensionActivationMode;
 use ironclaw_host_api::{
-    ExtensionId, InvocationId, ProductSurfaceError, ProductSurfaceErrorCode,
+    ExtensionId, InstallationState, InvocationId, ProductSurfaceError, ProductSurfaceErrorCode,
     ProductSurfaceErrorKind, ResourceScope,
 };
 use ironclaw_operator::llm_admin::nearai_mcp::{
@@ -13,21 +14,19 @@ use ironclaw_operator::llm_admin::nearai_mcp::{
 };
 use ironclaw_product::{
     ExtensionCredentialSetupService, ExtensionCredentialSubmitRequest, LifecyclePackageKind,
-    LifecyclePackageRef, LifecycleProductPayload, LifecyclePublicState,
+    LifecyclePackageRef, LifecycleProductPayload,
 };
 
 use crate::RebornBuildError;
-use crate::extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
-use crate::extension_host::extension_lifecycle::{
-    ExtensionActivationMode, ExtensionManagementPort,
-};
-use crate::extension_host::webui_extension_credentials::ProductAuthExtensionCredentialSetup;
 use ironclaw_auth::RebornProductAuthServices;
+use ironclaw_extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
+use ironclaw_extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
+use ironclaw_extension_host::webui_extension_credentials::ProductAuthExtensionCredentialSetup;
 
 pub(crate) async fn bootstrap_nearai_mcp(
     config: Option<NearAiMcpBootstrapConfig>,
     product_auth: &Arc<RebornProductAuthServices>,
-    extension_management: &Arc<ExtensionManagementPort>,
+    extension_management: &Arc<RebornLocalExtensionManagementPort>,
     owner_scope: ResourceScope,
 ) -> Result<NearAiMcpBootstrapOutcome, RebornBuildError> {
     let Some(config) = config else {
@@ -55,16 +54,8 @@ pub(crate) async fn bootstrap_nearai_mcp(
         invocation_id: InvocationId::new(),
         ..owner_scope.without_thread_and_mission()
     };
-    let credential_gate = RuntimeExtensionActivationCredentialGate::new(
-        resource_scope.clone(),
-        product_auth.runtime_credential_account_selection_service(),
-    );
     let projection = extension_management
-        .project(
-            package_ref.clone(),
-            &owner_scope.user_id,
-            Some(&credential_gate),
-        )
+        .project(package_ref.clone(), &owner_scope.user_id)
         .await
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("NEAR AI MCP extension projection failed: {error}"),
@@ -80,7 +71,9 @@ pub(crate) async fn bootstrap_nearai_mcp(
     );
     if installed {
         match phase {
-            LifecyclePublicState::Active | LifecyclePublicState::SetupNeeded => {}
+            InstallationState::Active
+            | InstallationState::Installed
+            | InstallationState::Configured => {}
             other => {
                 tracing::debug!(
                     phase = ?other,
@@ -168,7 +161,12 @@ pub(crate) async fn bootstrap_nearai_mcp(
     // A not-installed (just installed above) or an installed-but-inactive
     // extension activates; an already-active one only reports its credential
     // outcome.
-    if !installed || phase == LifecyclePublicState::SetupNeeded {
+    if !installed
+        || matches!(
+            phase,
+            InstallationState::Installed | InstallationState::Configured
+        )
+    {
         extension_management
             .activate_with_credential_gate(
                 package_ref,

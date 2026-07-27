@@ -173,7 +173,7 @@ The target routing abstraction audit also found:
 - `CurrentDeliveryTarget` carries its owning extension id so replay/fanout can
   prove handler ownership without parsing provider-specific target strings.
 
-These changes follow `docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`:
+These changes follow the current host/product contracts:
 one shared contract type, fewer mirror DTOs, no one-implementation domain
 `dyn` shim, and product policy outside the composition crate.
 

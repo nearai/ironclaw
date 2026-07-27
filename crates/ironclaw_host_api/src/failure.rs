@@ -1,7 +1,7 @@
 //! Slice-C kernel vocabulary — the host-failure channel.
 //!
 //! Part of the capability-path result collapse described in
-//! `docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md` (§3,
+//! `docs/reborn/contracts/capability-access.md` (
 //! §5.3.2). It resolves the *infrastructure-error* half of §1.2's core footgun:
 //! today a recoverable `Ok(CapabilityOutcome::Failed)` and a run-terminating
 //! `Err(HostRuntimeError)` are "structurally identical — a footgun the
@@ -16,7 +16,7 @@
 //!
 //! `HostFailure` is introduced additively ahead of wiring (§9): nothing returns
 //! it yet. It is deliberately *not* the recoverable path — a lane-correctable or
-//! model-correctable error stays a recoverable outcome (`tools.md`), never a
+//! model-correctable error stays a recoverable outcome (`capability-access.md`), never a
 //! `HostFailure`.
 
 use serde::{Deserialize, Serialize};

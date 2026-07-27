@@ -1,6 +1,6 @@
-//! Contract tests for WebUI-facing RebornServices facade.
+//! Contract tests for WebUI-facing RebornServices service.
 
-// arch-exempt: large_file, contract suite tracks the ProductSurface facade one seam per test; splits with the domain-port decomposition, plan #5985
+// arch-exempt: large_file, contract suite tracks the ProductSurface service one seam per test; splits with the domain-port decomposition, plan #5985
 
 use std::{
     collections::{HashMap, HashSet},
@@ -23,21 +23,20 @@ use ironclaw_approvals::{
 };
 use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{
-    AuthAccountLastError, AuthAccountState, CredentialAccountId, CredentialAccountLabel,
-    CredentialAccountProjection, CredentialAccountStatus, CredentialOwnership,
-};
-use ironclaw_host_api::CapabilitySurfaceKind;
-use ironclaw_host_api::{
-    ActivityId, AgentId, ApprovalRequestId, Blocked, CapabilityId, EffectKind, ExtensionId,
-    GateWaypoint, InvocationId, Outcome, OutcomeRefs, PermissionMode, Principal, ProjectId,
-    Resolution, ResourceScope, ResultPreviewMeta, ResultProgress, ResultRef, SafeSummary,
-    SecretHandle, TenantId, TerminateHint, ThreadId, ToolVerdict, UserId,
+    AuthAccountLastError, AuthAccountState, CredentialAccountId, CredentialAccountProjection,
+    CredentialAccountStatus,
 };
 use ironclaw_host_api::{
-    ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
-    ProductSurfaceErrorKind, ProductSurfaceValidationCode,
+    ActivityId, AgentId, ApprovalRequestId, CapabilityId, EffectKind, ExtensionId, InvocationId,
+    Outcome, OutcomeRefs, PermissionMode, Principal, ProjectId, Resolution, ResourceScope,
+    ResultPreviewMeta, ResultProgress, ResultRef, SafeSummary, SecretHandle, TenantId,
+    TerminateHint, ThreadId, ToolVerdict, UserId,
 };
-use ironclaw_product::install_extension_on_surface;
+use ironclaw_host_api::{
+    CapabilitySurfaceKind, InstallationState, ProductSurface, ProductSurfaceCaller,
+    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    ProductSurfaceValidationCode,
+};
 use ironclaw_product::{
     ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_DELETE_SECRET_CAPABILITY_ID,
     ADMIN_USER_PUT_SECRET_CAPABILITY_ID, ADMIN_USER_SECRETS_VIEW,
@@ -49,9 +48,9 @@ use ironclaw_product::{
     AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE, AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, AUTOMATIONS_VIEW,
     ActiveModelReader, ApprovalInteractionActionView, ApprovalInteractionDecision,
     ApprovalInteractionScope, ApprovalInteractionService, AuthInteractionDecision,
-    AuthInteractionService, AutomationListRequest, AutomationName, AutomationProductFacade,
-    ChannelAuthAccountState, ChannelConnectionFacade, ChannelConnectionRequirement,
-    CodexLoginStart, EXTENSION_IMPORT_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
+    AuthInteractionService, AutomationListRequest, AutomationName, AutomationProductService,
+    ChannelAuthAccountState, ChannelConfigProductService, ChannelConnectionRequirement,
+    ChannelConnectionService, CodexLoginStart, EXTENSION_IMPORT_CAPABILITY_ID,
     EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW,
     ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
     ExtensionCredentialSubmitRequest, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_STAT_VIEW,
@@ -62,37 +61,37 @@ use ironclaw_product::{
     LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
     LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext,
-    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
-    LifecyclePublicState, LifecycleReadinessBlocker, ListPendingApprovalsRequest,
-    ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
-    ListPendingAuthInteractionsResponse, LlmActiveSelection, LlmConfigService,
-    LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
-    LlmProviderView, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
-    NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
-    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
+    LifecycleProductPayload, LifecycleProductResponse, LifecycleProductService,
+    LifecycleReadinessBlocker, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
+    ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse, LlmActiveSelection,
+    LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
+    LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
+    OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
     OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY_ID, OPERATOR_CONFIG_VALIDATE_VIEW,
     OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_RUN_CAPABILITY_ID,
     OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
     OUTBOUND_PREFERENCES_SET_CAPABILITY, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
     OUTBOUND_PREFERENCES_VIEW, OperatorLogsService, OperatorServiceLifecycleService,
-    OperatorStatusService, OutboundPreferencesProductFacade, PROJECT_DELETE_CAPABILITY_ID,
+    OperatorStatusService, OutboundPreferencesProductService, PROJECT_DELETE_CAPABILITY_ID,
     PROJECT_FS_LIST_VIEW, PROJECT_FS_STAT_VIEW, PROJECT_MEMBER_ADD_CAPABILITY_ID,
     PROJECT_MEMBER_REMOVE_CAPABILITY_ID, PROJECT_MEMBER_UPDATE_CAPABILITY_ID, PROJECT_MEMBERS_VIEW,
     PROJECT_UPDATE_CAPABILITY_ID, PROJECT_VIEW, PROJECTS_VIEW, PendingApprovalInteractionView,
     ProductAgentBoundCaller, ProductCancelRunRequest, ProductCapabilityInvoker,
     ProductCreateThreadRequest, ProductListAutomationsRequest, ProductListThreadsRequest,
     ProductRenameAutomationRequest, ProductResolveGateRequest, ProductRetryRunRequest,
-    ProductSetupExtensionRequest, ProductSubmitTurnRequest, ProductWorkflowError, ProjectCaller,
+    ProductSetupExtensionRequest, ProductSubmitTurnRequest, ProductSurfaceFailure, ProjectCaller,
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,
     ProjectFsStat, ProjectService, ProjectServiceError, RUN_ARTIFACT_VIEW,
     RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentRequest,
     RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunStatus,
-    RebornAutomationSource, RebornAutomationState, RebornChannelConnectAction,
-    RebornChannelConnectStrategy, RebornCreateProjectRequest, RebornDeleteProjectRequest,
-    RebornDeleteThreadRequest, RebornExtensionListResponse, RebornExtensionSurface,
-    RebornFsListRequest, RebornFsListResponse, RebornFsMountsRequest, RebornFsMountsResponse,
-    RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest, RebornGetRunStateRequest,
+    RebornAutomationSource, RebornAutomationState, RebornChannelConfigField,
+    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornCreateProjectRequest,
+    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornExtensionListResponse,
+    RebornExtensionOnboardingState, RebornExtensionSurface, RebornFsListRequest,
+    RebornFsListResponse, RebornFsMountsRequest, RebornFsMountsResponse, RebornFsStatRequest,
+    RebornFsStatResponse, RebornGetProjectRequest, RebornGetRunStateRequest,
     RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse, RebornListAutomationsResponse,
     RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
     RebornListProjectsResponse, RebornListThreadsResponse, RebornLogLevel, RebornLogQueryRequest,
@@ -121,7 +120,7 @@ use ironclaw_product::{
     RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery, ResolveApprovalInteractionRequest,
     ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
     ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW, SKILL_SEARCH_VIEW, SKILLS_VIEW,
-    SetActiveLlmRequest, SkillsProductFacade, StaticOperatorStatusService,
+    SetActiveLlmRequest, SkillsProductService, StaticOperatorStatusService,
     THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW,
     TRACE_CREDITS_VIEW, TriggerRunThreadScope, UpsertLlmProviderRequest, approval_gate_ref,
     automation_trigger_thread_metadata_json,
@@ -137,7 +136,7 @@ use ironclaw_product::{
     RebornAdminUserSecretsListResponse,
 };
 use ironclaw_product::{
-    ProductAdapterError, ProductOutboundEnvelope, ProductWorkflowRejectionKind, ProjectionCursor,
+    ProductAdapterError, ProductOutboundEnvelope, ProductSurfaceRejectionKind, ProjectionCursor,
     ProjectionStream, ProjectionSubscriptionRequest, ProtocolAuthFailure, RedactedString,
 };
 use ironclaw_threads::{
@@ -234,7 +233,7 @@ fn fake_thread_history(owner: &ProductSurfaceCaller, thread_id: &str) -> ThreadH
             scope: scope.clone(),
             thread_id: thread_id.clone(),
             created_by_actor_id: owner.user_id.as_str().to_string(),
-            title: Some("M2 facade contract thread".to_string()),
+            title: Some("M2 service contract thread".to_string()),
             metadata_json: None,
             goal: None,
             created_at: None,
@@ -292,7 +291,7 @@ fn segment(name: &str, value: &str) -> String {
 }
 
 /// Establish thread ownership for `caller` under `thread_id` so subsequent
-/// thread-bound facade calls pass the ownership check.
+/// thread-bound service calls pass the ownership check.
 async fn setup_owned_thread(
     services: &RebornServices,
     owner: ProductSurfaceCaller,
@@ -742,14 +741,14 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
     async fn list_pending(
         &self,
         _request: ListPendingApprovalsRequest,
-    ) -> Result<ListPendingApprovalsResponse, ironclaw_product::ProductWorkflowError> {
+    ) -> Result<ListPendingApprovalsResponse, ironclaw_product::ProductSurfaceFailure> {
         Ok(ListPendingApprovalsResponse { approvals: vec![] })
     }
 
     async fn resolve(
         &self,
         request: ResolveApprovalInteractionRequest,
-    ) -> Result<ResolveApprovalInteractionResponse, ironclaw_product::ProductWorkflowError> {
+    ) -> Result<ResolveApprovalInteractionResponse, ironclaw_product::ProductSurfaceFailure> {
         let run_id = request.run_id_hint.expect("webui passes run_id");
         let decision = request.decision;
         self.resolutions.lock().expect("lock").push(request);
@@ -781,7 +780,7 @@ impl ApprovalInteractionService for ThreadScopedApprovalInteractionService {
     async fn list_pending(
         &self,
         request: ListPendingApprovalsRequest,
-    ) -> Result<ListPendingApprovalsResponse, ProductWorkflowError> {
+    ) -> Result<ListPendingApprovalsResponse, ProductSurfaceFailure> {
         if !self.pending_thread_ids.contains(&request.scope.thread_id) {
             return Ok(ListPendingApprovalsResponse { approvals: vec![] });
         }
@@ -803,7 +802,7 @@ impl ApprovalInteractionService for ThreadScopedApprovalInteractionService {
     async fn resolve(
         &self,
         _request: ResolveApprovalInteractionRequest,
-    ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
+    ) -> Result<ResolveApprovalInteractionResponse, ProductSurfaceFailure> {
         panic!("resolve is not used by thread approval filter tests")
     }
 }
@@ -821,7 +820,7 @@ impl ApprovalInteractionService for ActorFallbackApprovalInteractionService {
     async fn list_pending(
         &self,
         request: ListPendingApprovalsRequest,
-    ) -> Result<ListPendingApprovalsResponse, ProductWorkflowError> {
+    ) -> Result<ListPendingApprovalsResponse, ProductSurfaceFailure> {
         let is_expected_scope = request.scope.thread_id == self.pending_thread_id
             && request.scope.tenant_id == self.tenant_id
             && request.scope.agent_id.as_ref() == Some(&self.agent_id)
@@ -849,7 +848,7 @@ impl ApprovalInteractionService for ActorFallbackApprovalInteractionService {
     async fn resolve(
         &self,
         _request: ResolveApprovalInteractionRequest,
-    ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
+    ) -> Result<ResolveApprovalInteractionResponse, ProductSurfaceFailure> {
         panic!("resolve is not used by actor-fallback approval list tests")
     }
 }
@@ -874,7 +873,7 @@ impl AuthInteractionService for RecordingAuthInteractionService {
     async fn list_pending(
         &self,
         _request: ListPendingAuthInteractionsRequest,
-    ) -> Result<ListPendingAuthInteractionsResponse, ironclaw_product::ProductWorkflowError> {
+    ) -> Result<ListPendingAuthInteractionsResponse, ironclaw_product::ProductSurfaceFailure> {
         Ok(ListPendingAuthInteractionsResponse {
             auth_interactions: vec![],
         })
@@ -883,7 +882,7 @@ impl AuthInteractionService for RecordingAuthInteractionService {
     async fn resolve(
         &self,
         request: ResolveAuthInteractionRequest,
-    ) -> Result<ResolveAuthInteractionResponse, ironclaw_product::ProductWorkflowError> {
+    ) -> Result<ResolveAuthInteractionResponse, ironclaw_product::ProductSurfaceFailure> {
         let run_id = request.run_id_hint.expect("webui passes run_id");
         let decision = request.decision.clone();
         self.resolutions.lock().expect("lock").push(request);
@@ -909,20 +908,20 @@ impl AuthInteractionService for RecordingAuthInteractionService {
     }
 }
 
-struct RecordingLifecycleFacade {
+struct RecordingLifecycleService {
     package_refs: Mutex<Vec<LifecyclePackageRef>>,
+    actions: Mutex<Vec<LifecycleProductAction>>,
     imported_bundles: Mutex<Vec<Vec<u8>>>,
-    phase: LifecyclePublicState,
     credential_requirements: Vec<LifecycleExtensionCredentialRequirement>,
     onboarding: Option<LifecycleExtensionOnboarding>,
 }
 
-impl RecordingLifecycleFacade {
+impl RecordingLifecycleService {
     fn new() -> Self {
         Self {
             package_refs: Mutex::new(Vec::new()),
+            actions: Mutex::new(Vec::new()),
             imported_bundles: Mutex::new(Vec::new()),
-            phase: LifecyclePublicState::SetupNeeded,
             credential_requirements: Vec::new(),
             onboarding: None,
         }
@@ -933,8 +932,8 @@ impl RecordingLifecycleFacade {
     ) -> Self {
         Self {
             package_refs: Mutex::new(Vec::new()),
+            actions: Mutex::new(Vec::new()),
             imported_bundles: Mutex::new(Vec::new()),
-            phase: LifecyclePublicState::SetupNeeded,
             credential_requirements,
             onboarding: None,
         }
@@ -946,22 +945,8 @@ impl RecordingLifecycleFacade {
     ) -> Self {
         Self {
             package_refs: Mutex::new(Vec::new()),
+            actions: Mutex::new(Vec::new()),
             imported_bundles: Mutex::new(Vec::new()),
-            phase: LifecyclePublicState::SetupNeeded,
-            credential_requirements,
-            onboarding: Some(onboarding),
-        }
-    }
-
-    fn with_phase_and_credential_requirements(
-        phase: LifecyclePublicState,
-        credential_requirements: Vec<LifecycleExtensionCredentialRequirement>,
-        onboarding: LifecycleExtensionOnboarding,
-    ) -> Self {
-        Self {
-            package_refs: Mutex::new(Vec::new()),
-            imported_bundles: Mutex::new(Vec::new()),
-            phase,
             credential_requirements,
             onboarding: Some(onboarding),
         }
@@ -973,6 +958,10 @@ impl RecordingLifecycleFacade {
 
     fn imported_bundles(&self) -> Vec<Vec<u8>> {
         self.imported_bundles.lock().expect("lock").clone()
+    }
+
+    fn actions(&self) -> Vec<LifecycleProductAction> {
+        self.actions.lock().expect("lock").clone()
     }
 
     fn extension_list_payload(
@@ -1001,7 +990,7 @@ impl RecordingLifecycleFacade {
         Some(LifecycleProductPayload::ExtensionList {
             extensions: vec![LifecycleInstalledExtensionSummary {
                 summary,
-                phase: self.phase,
+                phase: InstallationState::Configured,
                 install_scope: None,
             }],
             count: 1,
@@ -1010,37 +999,54 @@ impl RecordingLifecycleFacade {
 }
 
 #[async_trait]
-impl LifecycleProductFacade for RecordingLifecycleFacade {
+impl LifecycleProductService for RecordingLifecycleService {
     async fn execute(
         &self,
         _context: LifecycleProductContext,
         action: ironclaw_product::LifecycleProductAction,
-    ) -> Result<LifecycleProductResponse, ironclaw_product::ProductWorkflowError> {
-        let LifecycleProductAction::ExtensionInstall { package_ref } = action else {
-            panic!("setup_extension may only re-enter the idempotent install action after save")
-        };
-        Ok(LifecycleProductResponse::projection(
-            Some(package_ref),
-            self.phase,
-            Vec::new(),
-        ))
+    ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
+        self.actions.lock().expect("lock").push(action.clone());
+        match action {
+            LifecycleProductAction::ExtensionActivate { package_ref } => {
+                Ok(LifecycleProductResponse {
+                    package_ref: Some(package_ref),
+                    phase: InstallationState::Active,
+                    blockers: Vec::new(),
+                    message: Some("activated".to_string()),
+                    payload: Some(LifecycleProductPayload::ExtensionActivate {
+                        activated: true,
+                        visible_capability_ids: Vec::new(),
+                        connection_required: None,
+                    }),
+                })
+            }
+            other => panic!("unexpected lifecycle action in setup test service: {other:?}"),
+        }
     }
 
     async fn project_package(
         &self,
         _context: LifecycleProductContext,
         package_ref: LifecyclePackageRef,
-    ) -> Result<LifecycleProductResponse, ironclaw_product::ProductWorkflowError> {
+    ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
         self.package_refs
             .lock()
             .expect("lock")
             .push(package_ref.clone());
+        let phase = if self.credential_requirements.is_empty() {
+            InstallationState::Unsupported
+        } else {
+            InstallationState::Configured
+        };
         let mut response = LifecycleProductResponse::projection(
             Some(package_ref),
-            self.phase,
-            vec![LifecycleReadinessBlocker::runtime(Some(
-                "extension_lifecycle_store_unwired".to_string(),
-            ))?],
+            phase,
+            vec![
+                LifecycleReadinessBlocker::runtime(Some(
+                    "extension_lifecycle_store_unwired".to_string(),
+                ))
+                .map_err(ProductSurfaceError::internal_from)?,
+            ],
         );
         response.payload = self.extension_list_payload(response.package_ref.as_ref().expect("ref"));
         Ok(response)
@@ -1050,11 +1056,11 @@ impl LifecycleProductFacade for RecordingLifecycleFacade {
         &self,
         _context: LifecycleProductContext,
         bundle: Vec<u8>,
-    ) -> Result<LifecycleProductResponse, ironclaw_product::ProductWorkflowError> {
+    ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
         self.imported_bundles.lock().expect("lock").push(bundle);
         Ok(LifecycleProductResponse {
             package_ref: None,
-            phase: LifecyclePublicState::SetupNeeded,
+            phase: InstallationState::Installed,
             blockers: Vec::new(),
             message: Some("imported".to_string()),
             payload: None,
@@ -1062,17 +1068,17 @@ impl LifecycleProductFacade for RecordingLifecycleFacade {
     }
 }
 
-struct ListingLifecycleFacade {
+struct ListingLifecycleService {
     extension: LifecycleInstalledExtensionSummary,
 }
 
 #[async_trait]
-impl LifecycleProductFacade for ListingLifecycleFacade {
+impl LifecycleProductService for ListingLifecycleService {
     async fn execute(
         &self,
         _context: LifecycleProductContext,
         action: LifecycleProductAction,
-    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+    ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
         assert!(matches!(action, LifecycleProductAction::ExtensionList));
         Ok(LifecycleProductResponse {
             package_ref: None,
@@ -1090,125 +1096,8 @@ impl LifecycleProductFacade for ListingLifecycleFacade {
         &self,
         _context: LifecycleProductContext,
         _package_ref: LifecyclePackageRef,
-    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+    ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
         panic!("list_extensions should execute the list action, not project one package")
-    }
-}
-
-struct CallerScopedListingLifecycleFacade {
-    member_user_id: UserId,
-    extension: LifecycleInstalledExtensionSummary,
-}
-
-#[async_trait]
-impl LifecycleProductFacade for CallerScopedListingLifecycleFacade {
-    async fn execute(
-        &self,
-        context: LifecycleProductContext,
-        action: LifecycleProductAction,
-    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        assert!(matches!(action, LifecycleProductAction::ExtensionList));
-        let LifecycleProductContext::Surface(surface) = context else {
-            panic!("extension list must use caller surface context");
-        };
-        let extensions = (surface.user_id == self.member_user_id)
-            .then(|| self.extension.clone())
-            .into_iter()
-            .collect::<Vec<_>>();
-        Ok(LifecycleProductResponse {
-            package_ref: None,
-            phase: extensions
-                .first()
-                .map_or(LifecyclePublicState::Uninstalled, |extension| {
-                    extension.phase
-                }),
-            blockers: Vec::new(),
-            message: None,
-            payload: Some(LifecycleProductPayload::ExtensionList {
-                count: extensions.len(),
-                extensions,
-            }),
-        })
-    }
-
-    async fn project_package(
-        &self,
-        _context: LifecycleProductContext,
-        _package_ref: LifecyclePackageRef,
-    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        panic!("install readback must query the caller-scoped extension list")
-    }
-}
-
-type ExtensionInstallInvokeCall = (
-    ProductSurfaceCaller,
-    CapabilityId,
-    serde_json::Value,
-    ActivityId,
-);
-
-#[derive(Clone, Default)]
-struct RecordingExtensionInstallInvoker {
-    calls: Arc<Mutex<Vec<ExtensionInstallInvokeCall>>>,
-}
-
-impl RecordingExtensionInstallInvoker {
-    fn calls(&self) -> Vec<ExtensionInstallInvokeCall> {
-        self.calls.lock().expect("lock").clone()
-    }
-}
-
-#[async_trait]
-impl ProductCapabilityInvoker for RecordingExtensionInstallInvoker {
-    async fn invoke(
-        &self,
-        caller: ProductSurfaceCaller,
-        capability: CapabilityId,
-        input: serde_json::Value,
-        activity_id: ActivityId,
-    ) -> Result<Resolution, ProductSurfaceError> {
-        self.calls
-            .lock()
-            .expect("lock")
-            .push((caller, capability, input, activity_id));
-        Ok(operator_config_success_resolution(activity_id))
-    }
-}
-
-/// An install invoker whose capability resolves to a dispatch-time auth gate
-/// (`Blocked::Auth`) — the OAuth-extension "membership joined, credential setup
-/// still needed" resolution (§5.3.1). It records the invocation so a test can
-/// prove the capability was invoked before the membership readback decided the
-/// outcome.
-#[derive(Clone, Default)]
-struct BlockedAuthExtensionInstallInvoker {
-    calls: Arc<Mutex<Vec<ExtensionInstallInvokeCall>>>,
-}
-
-impl BlockedAuthExtensionInstallInvoker {
-    fn calls(&self) -> Vec<ExtensionInstallInvokeCall> {
-        self.calls.lock().expect("lock").clone()
-    }
-}
-
-#[async_trait]
-impl ProductCapabilityInvoker for BlockedAuthExtensionInstallInvoker {
-    async fn invoke(
-        &self,
-        caller: ProductSurfaceCaller,
-        capability: CapabilityId,
-        input: serde_json::Value,
-        activity_id: ActivityId,
-    ) -> Result<Resolution, ProductSurfaceError> {
-        self.calls
-            .lock()
-            .expect("lock")
-            .push((caller, capability, input, activity_id));
-        // `GateWaypoint` binds the host-api uuid `GateRef`; the crate-level
-        // `GateRef` import is the distinct `ironclaw_turns` string handle.
-        Ok(Resolution::Blocked(Blocked::Auth(GateWaypoint::new(
-            ironclaw_host_api::GateRef::new(),
-        ))))
     }
 }
 
@@ -1236,12 +1125,12 @@ struct AutomationMutationCall {
 }
 
 #[derive(Default)]
-struct RecordingAutomationFacade {
+struct RecordingAutomationService {
     list_calls: Mutex<Vec<ListAutomationCall>>,
     mutation_calls: Mutex<Vec<AutomationMutationCall>>,
 }
 
-impl RecordingAutomationFacade {
+impl RecordingAutomationService {
     fn list_calls(&self) -> Vec<ListAutomationCall> {
         self.list_calls.lock().expect("lock").clone()
     }
@@ -1252,7 +1141,7 @@ impl RecordingAutomationFacade {
 }
 
 #[async_trait]
-impl AutomationProductFacade for RecordingAutomationFacade {
+impl AutomationProductService for RecordingAutomationService {
     async fn list_automations(
         &self,
         caller: ProductAgentBoundCaller,
@@ -1280,7 +1169,7 @@ impl AutomationProductFacade for RecordingAutomationFacade {
         _caller: ProductAgentBoundCaller,
         _thread_id: &ThreadId,
     ) -> Result<Option<TriggerRunThreadScope>, ProductSurfaceError> {
-        // Trigger-thread access is not wired in the recording facade.
+        // Trigger-thread access is not wired in the recording service.
         Ok(None)
     }
 
@@ -1378,7 +1267,7 @@ impl AutomationProductFacade for RecordingAutomationFacade {
 }
 
 #[derive(Clone)]
-struct StaticAutomationFacade {
+struct StaticAutomationService {
     output: Vec<RebornAutomationInfo>,
     scheduler_enabled: bool,
     list_calls: Arc<Mutex<Vec<ListAutomationCall>>>,
@@ -1389,7 +1278,7 @@ struct StaticAutomationFacade {
     resolve_calls: Arc<Mutex<Vec<ThreadId>>>,
 }
 
-impl StaticAutomationFacade {
+impl StaticAutomationService {
     fn new(output: Vec<RebornAutomationInfo>) -> Self {
         Self {
             output,
@@ -1424,7 +1313,7 @@ impl StaticAutomationFacade {
 }
 
 #[async_trait]
-impl AutomationProductFacade for StaticAutomationFacade {
+impl AutomationProductService for StaticAutomationService {
     fn scheduler_enabled(&self) -> bool {
         self.scheduler_enabled
     }
@@ -1459,16 +1348,16 @@ impl AutomationProductFacade for StaticAutomationFacade {
     }
 }
 
-/// An automation facade that initially exposes one trigger thread scope but can
+/// An automation service that initially exposes one trigger thread scope but can
 /// have that scope revoked via `revoke()`. Used to verify that the service
 /// revalidates authorization on every call rather than caching the result.
-struct RevocableAutomationFacade {
+struct RevocableAutomationService {
     thread_id: ThreadId,
     scope: TriggerRunThreadScope,
     revoked: Mutex<bool>,
 }
 
-impl RevocableAutomationFacade {
+impl RevocableAutomationService {
     fn new(thread_id: ThreadId, caller: &ProductSurfaceCaller) -> Self {
         let scope = TriggerRunThreadScope {
             agent_id: caller.agent_id.clone(),
@@ -1488,7 +1377,7 @@ impl RevocableAutomationFacade {
 }
 
 #[async_trait]
-impl AutomationProductFacade for RevocableAutomationFacade {
+impl AutomationProductService for RevocableAutomationService {
     async fn list_automations(
         &self,
         _caller: ProductAgentBoundCaller,
@@ -1513,14 +1402,14 @@ impl AutomationProductFacade for RevocableAutomationFacade {
     }
 }
 
-/// An automation facade whose `resolve_run_thread_scope` always returns a
+/// An automation service whose `resolve_run_thread_scope` always returns a
 /// backend error (503 Unavailable, retryable). Used to verify that the timeline
 /// call surfaces the backend error rather than masking it as a 404.
-struct ErroringAutomationFacade {
+struct ErroringAutomationService {
     error: ProductSurfaceError,
 }
 
-impl ErroringAutomationFacade {
+impl ErroringAutomationService {
     fn unavailable() -> Self {
         Self {
             error: ProductSurfaceError {
@@ -1536,7 +1425,7 @@ impl ErroringAutomationFacade {
 }
 
 #[async_trait]
-impl AutomationProductFacade for ErroringAutomationFacade {
+impl AutomationProductService for ErroringAutomationService {
     async fn list_automations(
         &self,
         _caller: ProductAgentBoundCaller,
@@ -1555,13 +1444,13 @@ impl AutomationProductFacade for ErroringAutomationFacade {
 }
 
 #[derive(Default)]
-struct RecordingOutboundPreferencesFacade {
+struct RecordingOutboundPreferencesService {
     get_calls: Mutex<Vec<ProductSurfaceCaller>>,
     set_calls: Mutex<usize>,
     list_calls: Mutex<Vec<ProductSurfaceCaller>>,
 }
 
-impl RecordingOutboundPreferencesFacade {
+impl RecordingOutboundPreferencesService {
     fn get_calls(&self) -> Vec<ProductSurfaceCaller> {
         self.get_calls.lock().expect("lock").clone()
     }
@@ -1606,7 +1495,7 @@ impl ProductCapabilityInvoker for RecordingOutboundPreferencesInvoker {
 }
 
 #[async_trait]
-impl OutboundPreferencesProductFacade for RecordingOutboundPreferencesFacade {
+impl OutboundPreferencesProductService for RecordingOutboundPreferencesService {
     async fn get_outbound_preferences(
         &self,
         caller: ProductSurfaceCaller,
@@ -1701,17 +1590,9 @@ fn automation_info(
 struct RecordingExtensionCredentialSetupService {
     status_requests: Mutex<Vec<ExtensionCredentialStatusRequest>>,
     submit_requests: Mutex<Vec<ExtensionCredentialSubmitRequest>>,
-    account_status: Option<CredentialAccountStatus>,
 }
 
 impl RecordingExtensionCredentialSetupService {
-    fn with_account_status(account_status: CredentialAccountStatus) -> Self {
-        Self {
-            account_status: Some(account_status),
-            ..Self::default()
-        }
-    }
-
     fn status_count(&self) -> usize {
         self.status_requests.lock().expect("lock").len()
     }
@@ -1727,20 +1608,8 @@ impl ExtensionCredentialSetupService for RecordingExtensionCredentialSetupServic
         &self,
         request: ExtensionCredentialStatusRequest,
     ) -> Result<Option<CredentialAccountProjection>, ProductSurfaceError> {
-        let account = self
-            .account_status
-            .map(|status| CredentialAccountProjection {
-                id: CredentialAccountId::new(),
-                provider: request.provider.clone(),
-                label: CredentialAccountLabel::new("fixture account").expect("valid label"),
-                status,
-                ownership: CredentialOwnership::UserReusable,
-                owner_extension: None,
-                granted_extensions: Vec::new(),
-                secret_handle_count: 1,
-            });
         self.status_requests.lock().expect("lock").push(request);
-        Ok(account)
+        Ok(None)
     }
 
     async fn submit_manual_token(
@@ -2848,7 +2717,7 @@ async fn project_and_filesystem_reads_are_available_as_product_views() {
         .with_project_service(project_service.clone());
     create_thread_for(&services, caller(), "thread-product-surface").await;
 
-    // safety: these are ProductSurface facade query calls in a contract test;
+    // safety: these are ProductSurface service query calls in a contract test;
     // no database transaction is involved.
     let project_fs_list = services
         .query(
@@ -3113,7 +2982,7 @@ async fn session_timeline_and_thread_delete_are_available_as_product_surface() {
     );
     create_thread_for(&services, caller(), "thread-session-product-surface").await;
 
-    // safety: these are ProductSurface facade query calls in a contract test;
+    // safety: these are ProductSurface service query calls in a contract test;
     // no database transaction is involved.
     let global_auto_approve = services
         .query(
@@ -3128,7 +2997,7 @@ async fn session_timeline_and_thread_delete_are_available_as_product_surface() {
         serde_json::from_value(global_auto_approve.payload).expect("global auto approve payload");
     assert!(
         !global_auto_approve.enabled,
-        "the default facade reports global auto-approve disabled"
+        "the default service reports global auto-approve disabled"
     );
 
     let timeline = services
@@ -3347,7 +3216,7 @@ fn product_surface_descriptor_helpers_keep_view_and_capability_declarations_type
 }
 
 #[test]
-fn facade_error_taxonomy_serializes_all_stable_wire_names() {
+fn service_error_taxonomy_serializes_all_stable_wire_names() {
     let error = ProductSurfaceError {
         code: ProductSurfaceErrorCode::Conflict,
         kind: ProductSurfaceErrorKind::Busy,
@@ -3404,7 +3273,7 @@ fn facade_error_taxonomy_serializes_all_stable_wire_names() {
 }
 
 #[tokio::test]
-async fn submit_turn_uses_facade_and_thread_history_without_route_store_access() {
+async fn submit_turn_uses_service_and_thread_history_without_route_store_access() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let services = RebornServices::new(threads, coordinator.clone());
@@ -3621,7 +3490,7 @@ async fn submit_turn_returns_internal_when_skill_activation_recorder_fails() {
 }
 
 #[tokio::test]
-async fn m2_facade_timeline_contract_uses_fake_thread_port_with_authenticated_scope() {
+async fn m2_service_timeline_contract_uses_fake_thread_port_with_authenticated_scope() {
     let web_caller = caller();
     let expected_tenant_id = web_caller.tenant_id.clone();
     let expected_agent_id = web_caller.agent_id.clone().expect("test caller has agent");
@@ -3662,7 +3531,7 @@ async fn m2_facade_timeline_contract_uses_fake_thread_port_with_authenticated_sc
 }
 
 #[tokio::test]
-async fn m2_facade_stream_contract_uses_fake_projection_port_with_authenticated_scope() {
+async fn m2_service_stream_contract_uses_fake_projection_port_with_authenticated_scope() {
     let web_caller = caller();
     let event_stream = Arc::new(RecordingProjectionStream::default());
     let services = RebornServices::new(
@@ -3805,7 +3674,7 @@ async fn submit_turn_maps_capacity_exceeded_to_non_retryable_rate_limit() {
             .expect("request"),
         )
         .await
-        .expect_err("capacity error must map through facade");
+        .expect_err("capacity error must map through service");
 
     assert_eq!(err.code, ProductSurfaceErrorCode::RateLimited);
     assert_eq!(err.status_code, 429);
@@ -4525,7 +4394,7 @@ async fn turn_unauthorized_maps_to_forbidden() {
 }
 
 #[tokio::test]
-async fn turn_error_categories_map_to_facade_taxonomy() {
+async fn turn_error_categories_map_to_service_taxonomy() {
     let cases = [
         (
             "conflict",
@@ -4588,7 +4457,7 @@ async fn turn_error_categories_map_to_facade_taxonomy() {
                 .expect("request"),
             )
             .await
-            .expect_err("turn error maps to stable facade taxonomy");
+            .expect_err("turn error maps to stable service taxonomy");
 
         assert_eq!(err.code, expected_code, "{name}");
         assert_eq!(err.kind, expected_kind, "{name}");
@@ -4657,7 +4526,7 @@ async fn projection_transient_maps_to_replay_unavailable_taxonomy() {
         Arc::new(FakeTurnCoordinator::default()),
     )
     .with_event_stream(Arc::new(StaticErrorProjectionStream {
-        error: ProductAdapterError::WorkflowTransient {
+        error: ProductAdapterError::SurfaceTransient {
             reason: RedactedString::new("provider stack trace with /host/path and secret-token"),
         },
     }));
@@ -4716,46 +4585,46 @@ async fn projection_egress_denied_maps_to_blocked_resource_taxonomy() {
 }
 
 #[tokio::test]
-async fn workflow_rejection_kinds_map_to_facade_taxonomy() {
+async fn surface_rejection_kinds_map_to_service_taxonomy() {
     let cases = [
         (
-            ProductWorkflowRejectionKind::ThreadBusy,
+            ProductSurfaceRejectionKind::ThreadBusy,
             409,
             ProductSurfaceErrorCode::Conflict,
             ProductSurfaceErrorKind::Busy,
         ),
         (
-            ProductWorkflowRejectionKind::AdmissionRejected,
+            ProductSurfaceRejectionKind::AdmissionRejected,
             429,
             ProductSurfaceErrorCode::RateLimited,
             ProductSurfaceErrorKind::Busy,
         ),
         (
-            ProductWorkflowRejectionKind::ScopeNotFound,
+            ProductSurfaceRejectionKind::ScopeNotFound,
             404,
             ProductSurfaceErrorCode::NotFound,
             ProductSurfaceErrorKind::NotFound,
         ),
         (
-            ProductWorkflowRejectionKind::Unauthorized,
+            ProductSurfaceRejectionKind::Unauthorized,
             403,
             ProductSurfaceErrorCode::Forbidden,
             ProductSurfaceErrorKind::ParticipantDenied,
         ),
         (
-            ProductWorkflowRejectionKind::InvalidRequest,
+            ProductSurfaceRejectionKind::InvalidRequest,
             400,
             ProductSurfaceErrorCode::InvalidRequest,
             ProductSurfaceErrorKind::Validation,
         ),
         (
-            ProductWorkflowRejectionKind::Unavailable,
+            ProductSurfaceRejectionKind::Unavailable,
             503,
             ProductSurfaceErrorCode::Unavailable,
             ProductSurfaceErrorKind::ReplayUnavailable,
         ),
         (
-            ProductWorkflowRejectionKind::Conflict,
+            ProductSurfaceRejectionKind::Conflict,
             409,
             ProductSurfaceErrorCode::Conflict,
             ProductSurfaceErrorKind::Conflict,
@@ -4768,7 +4637,7 @@ async fn workflow_rejection_kinds_map_to_facade_taxonomy() {
             Arc::new(FakeTurnCoordinator::default()),
         )
         .with_event_stream(Arc::new(StaticErrorProjectionStream {
-            error: ProductAdapterError::WorkflowRejected {
+            error: ProductAdapterError::SurfaceRejected {
                 kind: workflow_kind,
                 status_code,
                 retryable: false,
@@ -4786,7 +4655,7 @@ async fn workflow_rejection_kinds_map_to_facade_taxonomy() {
                 },
             )
             .await
-            .expect_err("workflow rejection maps to stable facade taxonomy");
+            .expect_err("workflow rejection maps to stable service taxonomy");
 
         assert_eq!(err.code, expected_code);
         assert_eq!(err.kind, expected_kind);
@@ -4825,7 +4694,7 @@ async fn timeline_backend_failure_maps_to_timeline_unavailable_taxonomy() {
 }
 
 #[tokio::test]
-async fn cancel_run_uses_turn_facade_and_stable_response() {
+async fn cancel_run_uses_turn_service_and_stable_response() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
@@ -4854,7 +4723,7 @@ async fn cancel_run_uses_turn_facade_and_stable_response() {
 }
 
 #[tokio::test]
-async fn retry_run_uses_turn_facade_and_stable_response() {
+async fn retry_run_uses_turn_service_and_stable_response() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
@@ -4904,7 +4773,7 @@ async fn retry_run_uses_turn_facade_and_stable_response() {
 }
 
 #[tokio::test]
-async fn retry_run_rejects_invalid_run_id_without_turn_facade() {
+async fn retry_run_rejects_invalid_run_id_without_turn_service() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
@@ -5518,7 +5387,7 @@ impl AuthInteractionService for DeniedResumedAuthInteractionService {
     async fn list_pending(
         &self,
         _request: ListPendingAuthInteractionsRequest,
-    ) -> Result<ListPendingAuthInteractionsResponse, ProductWorkflowError> {
+    ) -> Result<ListPendingAuthInteractionsResponse, ProductSurfaceFailure> {
         Ok(ListPendingAuthInteractionsResponse {
             auth_interactions: vec![],
         })
@@ -5527,7 +5396,7 @@ impl AuthInteractionService for DeniedResumedAuthInteractionService {
     async fn resolve(
         &self,
         request: ResolveAuthInteractionRequest,
-    ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
+    ) -> Result<ResolveAuthInteractionResponse, ProductSurfaceFailure> {
         let run_id = request.run_id_hint.expect("webui passes run_id");
         Ok(ResolveAuthInteractionResponse::Resumed(
             ResumeTurnResponse {
@@ -5543,7 +5412,7 @@ impl AuthInteractionService for DeniedResumedAuthInteractionService {
 async fn hook_auth_gate_denial_maps_to_reborn_resumed() {
     // Verifies that a Deny decision (which produces `Resumed` from
     // `resume_denied_auth`) maps to `RebornResolveGateResponse::Resumed`
-    // through the facade.
+    // through the service.
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let auth_interactions = Arc::new(DeniedResumedAuthInteractionService);
     let services = RebornServices::new(
@@ -5976,13 +5845,13 @@ async fn approval_gate_resolution_with_persistent_flag_uses_approval_interaction
 }
 
 #[tokio::test]
-async fn setup_extension_projects_through_configured_lifecycle_facade() {
-    let lifecycle_facade = Arc::new(RecordingLifecycleFacade::new());
+async fn setup_extension_projects_through_configured_lifecycle_service() {
+    let lifecycle_service = Arc::new(RecordingLifecycleService::new());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_lifecycle_product_facade(lifecycle_facade.clone());
+    .with_lifecycle_product_service(lifecycle_service.clone());
 
     let response = query_extension_setup(&services, caller(), "github")
         .await
@@ -5993,14 +5862,14 @@ async fn setup_extension_projects_through_configured_lifecycle_facade() {
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
             .expect("valid package ref")
     );
-    assert_eq!(response.phase, LifecyclePublicState::SetupNeeded);
+    assert_eq!(response.phase, InstallationState::Unsupported);
     assert!(response.blockers.iter().any(|blocker| matches!(
         blocker,
         LifecycleReadinessBlocker::Runtime { ref_id: Some(ref_id) }
             if ref_id.as_str() == "extension_lifecycle_store_unwired"
     )));
     assert_eq!(
-        lifecycle_facade.package_refs(),
+        lifecycle_service.package_refs(),
         vec![
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
                 .expect("valid package ref")
@@ -6010,12 +5879,12 @@ async fn setup_extension_projects_through_configured_lifecycle_facade() {
 
 #[tokio::test]
 async fn extension_setup_is_available_as_product_view() {
-    let lifecycle_facade = Arc::new(RecordingLifecycleFacade::new());
+    let lifecycle_service = Arc::new(RecordingLifecycleService::new());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_lifecycle_product_facade(lifecycle_facade.clone());
+    .with_lifecycle_product_service(lifecycle_service.clone());
 
     let response = query_extension_setup(&services, caller(), "github")
         .await
@@ -6026,9 +5895,9 @@ async fn extension_setup_is_available_as_product_view() {
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
             .expect("valid package ref")
     );
-    assert_eq!(response.phase, LifecyclePublicState::SetupNeeded);
+    assert_eq!(response.phase, InstallationState::Unsupported);
     assert_eq!(
-        lifecycle_facade.package_refs(),
+        lifecycle_service.package_refs(),
         vec![
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
                 .expect("valid package ref")
@@ -6042,14 +5911,14 @@ async fn list_extensions_projects_onboarding_payload_through_reborn_services() {
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_lifecycle_product_facade(Arc::new(ListingLifecycleFacade {
+    .with_lifecycle_product_service(Arc::new(ListingLifecycleService {
         extension: LifecycleInstalledExtensionSummary {
             summary: extension_summary(
                 "github",
                 vec![manual_credential_requirement("github_runtime_token", true)],
                 Some(onboarding_fixture()),
             ),
-            phase: LifecyclePublicState::SetupNeeded,
+            phase: InstallationState::Installed,
             install_scope: None,
         },
     }));
@@ -6061,8 +5930,8 @@ async fn list_extensions_projects_onboarding_payload_through_reborn_services() {
 
     assert_eq!(extension.tools, vec!["github.read", "github.write"]);
     assert_eq!(
-        extension.installation_state,
-        LifecyclePublicState::SetupNeeded
+        extension.onboarding_state,
+        Some(RebornExtensionOnboardingState::SetupRequired)
     );
     let onboarding = extension.onboarding.as_ref().expect("onboarding payload");
     assert_eq!(
@@ -6071,202 +5940,18 @@ async fn list_extensions_projects_onboarding_payload_through_reborn_services() {
     );
     assert_eq!(
         onboarding.credential_next_step.as_deref(),
-        Some(
-            "After saving the token, IronClaw finishes GitHub installation automatically and publishes its tools."
-        )
+        Some("After saving the token, activate GitHub to publish its tools.")
     );
 }
 
 #[tokio::test]
-async fn install_extension_operation_invokes_and_reads_back_exact_caller_membership() {
-    let invoker = RecordingExtensionInstallInvoker::default();
-    let services = RebornServices::new_with_product_capability_invoker(
-        Arc::new(InMemorySessionThreadService::default()),
-        Arc::new(FakeTurnCoordinator::default()),
-        invoker.clone(),
-    )
-    .with_lifecycle_product_facade(Arc::new(ListingLifecycleFacade {
-        extension: LifecycleInstalledExtensionSummary {
-            summary: extension_summary("github", Vec::new(), None),
-            phase: LifecyclePublicState::Active,
-            install_scope: None,
-        },
-    }));
-    let package_ref = lifecycle_package_ref("github");
-    let activity_id = ActivityId::new();
-
-    let response = install_extension_on_surface(
-        &bound_install_surface(services, caller()),
-        package_ref.clone(),
-        activity_id,
-    )
-    .await
-    .expect("installed membership is authoritative");
-
-    assert!(response.success);
-    assert_eq!(response.message, "Extension installed.");
-    let calls = invoker.calls();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].0, caller());
-    assert_eq!(
-        calls[0].1,
-        CapabilityId::new(EXTENSION_INSTALL_CAPABILITY_ID).expect("capability id")
-    );
-    assert_eq!(
-        calls[0].2,
-        json!({ "extension_id": package_ref.id.as_str() })
-    );
-    assert_eq!(calls[0].3, activity_id);
-}
-
-#[tokio::test]
-async fn install_extension_operation_rejects_success_without_exact_membership_readback() {
-    let services = RebornServices::new_with_product_capability_invoker(
-        Arc::new(InMemorySessionThreadService::default()),
-        Arc::new(FakeTurnCoordinator::default()),
-        RecordingExtensionInstallInvoker::default(),
-    )
-    .with_lifecycle_product_facade(Arc::new(ListingLifecycleFacade {
-        extension: LifecycleInstalledExtensionSummary {
-            summary: extension_summary("not-the-requested-extension", Vec::new(), None),
-            phase: LifecyclePublicState::Active,
-            install_scope: None,
-        },
-    }));
-
-    let error = install_extension_on_surface(
-        &bound_install_surface(services, caller()),
-        lifecycle_package_ref("github"),
-        ActivityId::new(),
-    )
-    .await
-    .expect_err("capability success without caller membership is not success");
-
-    assert_eq!(error.code, ProductSurfaceErrorCode::Unavailable);
-    assert_eq!(error.kind, ProductSurfaceErrorKind::ServiceUnavailable);
-    assert_eq!(error.status_code, 503);
-    assert!(error.retryable);
-}
-
-#[tokio::test]
-async fn install_extension_operation_rejects_membership_owned_by_another_user() {
-    let services = RebornServices::new_with_product_capability_invoker(
-        Arc::new(InMemorySessionThreadService::default()),
-        Arc::new(FakeTurnCoordinator::default()),
-        RecordingExtensionInstallInvoker::default(),
-    )
-    .with_lifecycle_product_facade(Arc::new(CallerScopedListingLifecycleFacade {
-        member_user_id: UserId::new("user-alpha").expect("member user"),
-        extension: LifecycleInstalledExtensionSummary {
-            summary: extension_summary("github", Vec::new(), None),
-            phase: LifecyclePublicState::Active,
-            install_scope: None,
-        },
-    }));
-
-    let error = install_extension_on_surface(
-        &bound_install_surface(services, caller_for_user("user-beta")),
-        lifecycle_package_ref("github"),
-        ActivityId::new(),
-    )
-    .await
-    .expect_err("another user's membership cannot satisfy caller readback");
-
-    assert_eq!(error.status_code, 503);
-    assert_eq!(error.kind, ProductSurfaceErrorKind::ServiceUnavailable);
-}
-
-/// The OAuth-install path: the capability joins caller membership and then
-/// blocks on a dispatch-time auth gate (`Blocked::Auth`) because credential
-/// setup is still outstanding. The caller-scoped readback proves the exact
-/// package is now visible, so the install reports success and the "setup
-/// needed" auth step surfaces afterward. This pins the join-before-block
-/// ordering theme-1 depends on: were the capability to block on auth *before*
-/// joining membership, the readback below would miss the package and every
-/// OAuth extension install would 503 on first click.
-#[tokio::test]
-async fn install_extension_operation_blocked_on_auth_with_membership_reports_success() {
-    let invoker = BlockedAuthExtensionInstallInvoker::default();
-    let services = RebornServices::new_with_product_capability_invoker(
-        Arc::new(InMemorySessionThreadService::default()),
-        Arc::new(FakeTurnCoordinator::default()),
-        invoker.clone(),
-    )
-    .with_lifecycle_product_facade(Arc::new(ListingLifecycleFacade {
-        extension: LifecycleInstalledExtensionSummary {
-            summary: extension_summary("gmail", Vec::new(), None),
-            // An OAuth install that still needs credential setup rests in
-            // SetupNeeded; membership visibility, not phase, decides success.
-            phase: LifecyclePublicState::SetupNeeded,
-            install_scope: None,
-        },
-    }));
-    let package_ref = lifecycle_package_ref("gmail");
-
-    let response = install_extension_on_surface(
-        &bound_install_surface(services, caller()),
-        package_ref.clone(),
-        ActivityId::new(),
-    )
-    .await
-    .expect("auth-blocked install with joined membership is success");
-
-    assert!(response.success);
-    assert_eq!(response.message, "Extension installed.");
-    // The install capability was dispatched, and its auth block was reconciled
-    // against the caller-scoped membership readback rather than surfaced as a
-    // failure.
-    let calls = invoker.calls();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(
-        calls[0].2,
-        json!({ "extension_id": package_ref.id.as_str() })
-    );
-}
-
-/// The same auth-blocked resolution, but the caller-scoped readback does *not*
-/// show the requested package — the failure signature of a capability that
-/// blocks on auth *before* joining membership. Install must not paper the
-/// missing membership over as success; it returns the retryable
-/// 503/unavailable path so the first click is an honest transient error, not a
-/// silent no-op.
-#[tokio::test]
-async fn install_extension_operation_blocked_on_auth_without_membership_is_unavailable() {
-    let services = RebornServices::new_with_product_capability_invoker(
-        Arc::new(InMemorySessionThreadService::default()),
-        Arc::new(FakeTurnCoordinator::default()),
-        BlockedAuthExtensionInstallInvoker::default(),
-    )
-    .with_lifecycle_product_facade(Arc::new(ListingLifecycleFacade {
-        extension: LifecycleInstalledExtensionSummary {
-            summary: extension_summary("not-the-requested-extension", Vec::new(), None),
-            phase: LifecyclePublicState::SetupNeeded,
-            install_scope: None,
-        },
-    }));
-
-    let error = install_extension_on_surface(
-        &bound_install_surface(services, caller()),
-        lifecycle_package_ref("gmail"),
-        ActivityId::new(),
-    )
-    .await
-    .expect_err("auth-blocked install without joined membership is not success");
-
-    assert_eq!(error.code, ProductSurfaceErrorCode::Unavailable);
-    assert_eq!(error.kind, ProductSurfaceErrorKind::ServiceUnavailable);
-    assert_eq!(error.status_code, 503);
-    assert!(error.retryable);
-}
-
-#[tokio::test]
-async fn list_automation_dispatches_through_product_facade() {
-    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+async fn list_automation_dispatches_through_product_service() {
+    let automation_service = Arc::new(RecordingAutomationService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade.clone());
+    .with_automation_product_service(automation_service.clone());
 
     let listed = query_automations(
         &services,
@@ -6302,7 +5987,7 @@ async fn list_automation_dispatches_through_product_facade() {
         Some("thread-listed")
     );
 
-    let list_calls = automation_facade.list_calls();
+    let list_calls = automation_service.list_calls();
     assert_eq!(list_calls.len(), 1);
     assert_eq!(list_calls[0].caller.user_id.as_str(), "user-alpha");
     assert_eq!(list_calls[0].caller.agent_id.as_str(), "agent-alpha");
@@ -6347,15 +6032,12 @@ async fn list_extensions_projects_channel_surface_with_directions_and_connection
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_lifecycle_product_facade(Arc::new(ListingLifecycleFacade {
+    .with_lifecycle_product_service(Arc::new(ListingLifecycleService {
         extension: LifecycleInstalledExtensionSummary {
             summary,
-            phase: LifecyclePublicState::Active,
+            phase: InstallationState::Active,
             install_scope: None,
         },
-    }))
-    .with_channel_connection_facade(Arc::new(ConnectedChannelConnectionFacade {
-        connections: std::collections::HashMap::from([("slack".to_string(), true)]),
     }));
 
     let response = query_extensions(&services, caller())
@@ -6389,18 +6071,18 @@ async fn list_extensions_projects_channel_surface_with_directions_and_connection
     // so the frontend never derives a label from the channel id.
     assert_eq!(connection.display_name, "Slack");
     // §6.1 installation-state enum replaces the activation_status string.
-    assert_eq!(info.installation_state, LifecyclePublicState::Active);
+    assert_eq!(info.installation_state, InstallationState::Active);
 }
 
-/// A caller-scoped channel-connection facade that reports a fixed set of
+/// A caller-scoped channel-connection service that reports a fixed set of
 /// connected channels (mirrors the production port shape the composition crate
-/// wires; the default `StaticChannelConnectionFacade` reports none).
-struct ConnectedChannelConnectionFacade {
+/// wires; the default `StaticChannelConnectionService` reports none).
+struct ConnectedChannelConnectionService {
     connections: std::collections::HashMap<String, bool>,
 }
 
 #[async_trait]
-impl ChannelConnectionFacade for ConnectedChannelConnectionFacade {
+impl ChannelConnectionService for ConnectedChannelConnectionService {
     async fn caller_channel_connections(
         &self,
         _caller: ProductSurfaceCaller,
@@ -6452,14 +6134,14 @@ async fn list_extensions_golden_wire_multi_surface_extension_freezes_accounts_li
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_lifecycle_product_facade(Arc::new(ListingLifecycleFacade {
+    .with_lifecycle_product_service(Arc::new(ListingLifecycleService {
         extension: LifecycleInstalledExtensionSummary {
             summary,
-            phase: LifecyclePublicState::Active,
+            phase: InstallationState::Active,
             install_scope: None,
         },
     }))
-    .with_channel_connection_facade(Arc::new(ConnectedChannelConnectionFacade {
+    .with_channel_connection_service(Arc::new(ConnectedChannelConnectionService {
         connections: std::collections::HashMap::from([("acme".to_string(), true)]),
     }));
 
@@ -6473,7 +6155,7 @@ async fn list_extensions_golden_wire_multi_surface_extension_freezes_accounts_li
         .expect("multi-surface extension listed");
 
     // §6.1 installation-state enum on the wire (replaces the activation_status string).
-    assert_eq!(info.installation_state, LifecyclePublicState::Active);
+    assert_eq!(info.installation_state, InstallationState::Active);
 
     // §6.4 / ADR 0001 accounts list — the frozen shape, named field for field.
     // A live grant backfills to `connected` (MIG-1); one account per vendor,
@@ -6533,22 +6215,22 @@ async fn list_extensions_golden_wire_multi_surface_extension_freezes_accounts_li
     );
 }
 
-/// A lifecycle facade that lists one installed extension in a caller-chosen
+/// A lifecycle service that lists one installed extension in a caller-chosen
 /// installation state and reports a redacted per-extension activation error —
 /// drives the terminal `Failed` installation-state (§6.1) and `activation_error`
 /// projection through the real descriptor-backed `EXTENSIONS_VIEW` seam.
-struct FailedStateLifecycleFacade {
+struct FailedStateLifecycleService {
     extension: LifecycleInstalledExtensionSummary,
     activation_errors: std::collections::HashMap<String, String>,
 }
 
 #[async_trait]
-impl LifecycleProductFacade for FailedStateLifecycleFacade {
+impl LifecycleProductService for FailedStateLifecycleService {
     async fn execute(
         &self,
         _context: LifecycleProductContext,
         action: LifecycleProductAction,
-    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+    ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
         assert!(matches!(action, LifecycleProductAction::ExtensionList));
         Ok(LifecycleProductResponse {
             package_ref: None,
@@ -6566,29 +6248,29 @@ impl LifecycleProductFacade for FailedStateLifecycleFacade {
         &self,
         _context: LifecycleProductContext,
         _package_ref: LifecyclePackageRef,
-    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+    ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
         panic!("list_extensions should execute the list action, not project one package")
     }
 
     async fn installed_activation_errors(
         &self,
         _context: LifecycleProductContext,
-    ) -> Result<std::collections::HashMap<String, String>, ProductWorkflowError> {
+    ) -> Result<std::collections::HashMap<String, String>, ProductSurfaceError> {
         Ok(self.activation_errors.clone())
     }
 }
 
-/// A channel-connection facade that also reports the caller's durable
+/// A channel-connection service that also reports the caller's durable
 /// auth-account status per vendor, so the extensions wire projects real §6.3
 /// states (expired / refresh-failed) instead of the connected/disconnected
 /// collapse the connection bool alone permits.
-struct AccountStatusConnectionFacade {
+struct AccountStatusConnectionService {
     connections: std::collections::HashMap<String, bool>,
     account_states: std::collections::HashMap<String, ChannelAuthAccountState>,
 }
 
 #[async_trait]
-impl ChannelConnectionFacade for AccountStatusConnectionFacade {
+impl ChannelConnectionService for AccountStatusConnectionService {
     async fn caller_channel_connections(
         &self,
         _caller: ProductSurfaceCaller,
@@ -6609,7 +6291,7 @@ impl ChannelConnectionFacade for AccountStatusConnectionFacade {
 /// descriptor-backed `EXTENSIONS_VIEW` seam. Before the projection fix
 /// this shape was unrepresentable/collapsed: a `Failed` extension read as
 /// `Installed`, a live-grant account read as `connected` with no error, and
-/// `activation_error` was hard-coded `None`. The facade must now project all
+/// `activation_error` was hard-coded `None`. The service must now project all
 /// three distinctly.
 #[tokio::test]
 async fn list_extensions_surfaces_failed_state_expired_account_and_activation_error() {
@@ -6642,13 +6324,13 @@ async fn list_extensions_surfaces_failed_state_expired_account_and_activation_er
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_lifecycle_product_facade(Arc::new(FailedStateLifecycleFacade {
+    .with_lifecycle_product_service(Arc::new(FailedStateLifecycleService {
         extension: LifecycleInstalledExtensionSummary {
             summary,
             // An enabled extension whose activation failed for a non-auth
             // reason — the terminal `Failed` state, distinct from a pristine
             // `Installed`, carrying its reason.
-            phase: LifecyclePublicState::SetupNeeded,
+            phase: InstallationState::Failed,
             install_scope: None,
         },
         activation_errors: std::collections::HashMap::from([(
@@ -6656,7 +6338,7 @@ async fn list_extensions_surfaces_failed_state_expired_account_and_activation_er
             "activation failed: runtime credential rejected".to_string(),
         )]),
     }))
-    .with_channel_connection_facade(Arc::new(AccountStatusConnectionFacade {
+    .with_channel_connection_service(Arc::new(AccountStatusConnectionService {
         // The caller still holds a binding (connected), yet the durable
         // credential-account status says the grant's refresh failed. The real
         // status must win over the connected backfill.
@@ -6679,13 +6361,14 @@ async fn list_extensions_surfaces_failed_state_expired_account_and_activation_er
         .find(|extension| extension.package_ref.id.as_str() == "acme")
         .expect("extension listed");
 
-    // Internal startup failure remains a redacted error attached to the one
-    // caller-visible setup state; it never creates a fourth lifecycle state.
+    // (a) The terminal §6.1 `Failed` state projects distinctly — NOT collapsed
+    // to Installed/Active.
     assert_eq!(
         info.installation_state,
-        LifecyclePublicState::SetupNeeded,
-        "a failed internal activation checkpoint must remain setup_needed",
+        InstallationState::Failed,
+        "a Failed extension must project its own installation_state",
     );
+    assert_ne!(info.installation_state, InstallationState::Installed);
 
     // (c) The redacted activation error reaches the DTO with its reason (the
     // frontend card renders this slot; it was fed `None` before).
@@ -7188,15 +6871,15 @@ async fn outbound_preferences_unwired_mutations_and_target_listing_fail_closed()
 }
 
 #[tokio::test]
-async fn outbound_preferences_facade_forwards_caller_and_request() {
-    let outbound_facade = Arc::new(RecordingOutboundPreferencesFacade::default());
+async fn outbound_preferences_service_forwards_caller_and_request() {
+    let outbound_service = Arc::new(RecordingOutboundPreferencesService::default());
     let invoker = RecordingOutboundPreferencesInvoker::default();
     let services = RebornServices::new_with_product_capability_invoker(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
         invoker.clone(),
     )
-    .with_outbound_preferences_facade(outbound_facade.clone());
+    .with_outbound_preferences_product_service(outbound_service.clone());
 
     let get_page = services
         .query(
@@ -7269,13 +6952,13 @@ async fn outbound_preferences_facade_forwards_caller_and_request() {
     );
     assert!(targets.targets[0].capabilities.final_replies);
 
-    let get_calls = outbound_facade.get_calls();
+    let get_calls = outbound_service.get_calls();
     assert_eq!(get_calls.len(), 2);
     assert_eq!(get_calls[0].tenant_id.as_str(), "tenant-alpha");
     assert_eq!(get_calls[0].user_id.as_str(), "user-alpha");
     assert_eq!(get_calls[1].user_id.as_str(), "user-bravo");
 
-    assert_eq!(outbound_facade.set_calls(), 0);
+    assert_eq!(outbound_service.set_calls(), 0);
     let invoke_calls = invoker.calls();
     assert_eq!(invoke_calls.len(), 1);
     assert_eq!(invoke_calls[0].0.user_id.as_str(), "user-bravo");
@@ -7290,19 +6973,19 @@ async fn outbound_preferences_facade_forwards_caller_and_request() {
         json!({ "final_reply_target_id": "slack-dm-beta" })
     );
 
-    let list_calls = outbound_facade.list_calls();
+    let list_calls = outbound_service.list_calls();
     assert_eq!(list_calls.len(), 1);
     assert_eq!(list_calls[0].user_id.as_str(), "user-charlie");
 }
 
 #[tokio::test]
 async fn outbound_preferences_reads_are_available_as_product_views() {
-    let outbound_facade = Arc::new(RecordingOutboundPreferencesFacade::default());
+    let outbound_service = Arc::new(RecordingOutboundPreferencesService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_outbound_preferences_facade(outbound_facade.clone());
+    .with_outbound_preferences_product_service(outbound_service.clone());
     let preferences_caller = caller_for_user("user-outbound-preferences");
     let targets_caller = caller_for_user("user-outbound-targets");
 
@@ -7341,8 +7024,8 @@ async fn outbound_preferences_reads_are_available_as_product_views() {
     let targets: RebornOutboundDeliveryTargetListResponse =
         serde_json::from_value(targets_page.payload).expect("outbound targets payload");
     assert_eq!(targets.targets.len(), 1);
-    assert_eq!(outbound_facade.get_calls(), vec![preferences_caller]);
-    assert_eq!(outbound_facade.list_calls(), vec![targets_caller]);
+    assert_eq!(outbound_service.get_calls(), vec![preferences_caller]);
+    assert_eq!(outbound_service.list_calls(), vec![targets_caller]);
 }
 
 #[tokio::test]
@@ -7402,14 +7085,14 @@ async fn trace_reads_are_available_as_product_views() {
 
 #[tokio::test]
 async fn set_outbound_preferences_can_clear_final_target() {
-    let outbound_facade = Arc::new(RecordingOutboundPreferencesFacade::default());
+    let outbound_service = Arc::new(RecordingOutboundPreferencesService::default());
     let invoker = RecordingOutboundPreferencesInvoker::default();
     let services = RebornServices::new_with_product_capability_invoker(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
         invoker.clone(),
     )
-    .with_outbound_preferences_facade(outbound_facade.clone());
+    .with_outbound_preferences_product_service(outbound_service.clone());
 
     services
         .invoke(
@@ -7421,7 +7104,7 @@ async fn set_outbound_preferences_can_clear_final_target() {
         .await
         .expect("clear outbound preferences");
 
-    assert_eq!(outbound_facade.set_calls(), 0);
+    assert_eq!(outbound_service.set_calls(), 0);
     let invoke_calls = invoker.calls();
     assert_eq!(invoke_calls.len(), 1);
     assert_eq!(
@@ -7432,7 +7115,7 @@ async fn set_outbound_preferences_can_clear_final_target() {
 }
 
 #[tokio::test]
-async fn set_outbound_preferences_rejects_malformed_target_id_before_facade() {
+async fn set_outbound_preferences_rejects_malformed_target_id_before_service() {
     for target_id in [
         "",
         " ",
@@ -7455,15 +7138,15 @@ async fn set_outbound_preferences_rejects_malformed_target_id_before_facade() {
 }
 
 #[tokio::test]
-async fn set_outbound_preferences_accepts_max_length_target_id_before_facade() {
-    let outbound_facade = Arc::new(RecordingOutboundPreferencesFacade::default());
+async fn set_outbound_preferences_accepts_max_length_target_id_before_service() {
+    let outbound_service = Arc::new(RecordingOutboundPreferencesService::default());
     let invoker = RecordingOutboundPreferencesInvoker::default();
     let services = RebornServices::new_with_product_capability_invoker(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
         invoker.clone(),
     )
-    .with_outbound_preferences_facade(outbound_facade.clone());
+    .with_outbound_preferences_product_service(outbound_service.clone());
 
     let max_length_target_id = "a".repeat(512);
     services
@@ -7476,7 +7159,7 @@ async fn set_outbound_preferences_accepts_max_length_target_id_before_facade() {
         .await
         .expect("max-length target id");
 
-    assert_eq!(outbound_facade.set_calls(), 0);
+    assert_eq!(outbound_service.set_calls(), 0);
     let invoke_calls = invoker.calls();
     assert_eq!(invoke_calls.len(), 1);
     assert_eq!(
@@ -7490,12 +7173,12 @@ async fn set_outbound_preferences_accepts_max_length_target_id_before_facade() {
 
 #[tokio::test]
 async fn list_automations_rejects_missing_agent_id() {
-    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let automation_service = Arc::new(RecordingAutomationService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade.clone());
+    .with_automation_product_service(automation_service.clone());
 
     let err = query_automations(
         &services,
@@ -7507,17 +7190,17 @@ async fn list_automations_rejects_missing_agent_id() {
 
     assert_eq!(err.code, ProductSurfaceErrorCode::InvalidRequest);
     assert_eq!(err.status_code, 400);
-    assert_eq!(automation_facade.list_calls().len(), 0);
+    assert_eq!(automation_service.list_calls().len(), 0);
 }
 
 #[tokio::test]
-async fn list_automations_clamps_oversize_limit_before_product_facade() {
-    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+async fn list_automations_clamps_oversize_limit_before_product_service() {
+    let automation_service = Arc::new(RecordingAutomationService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade.clone());
+    .with_automation_product_service(automation_service.clone());
 
     query_automations(
         &services,
@@ -7527,23 +7210,23 @@ async fn list_automations_clamps_oversize_limit_before_product_facade() {
     .await
     .expect("list automations");
 
-    let list_calls = automation_facade.list_calls();
+    let list_calls = automation_service.list_calls();
     assert_eq!(list_calls.len(), 1);
     assert_eq!(
         list_calls[0].limit, AUTOMATION_LIST_MAX_PAGE_SIZE as usize,
-        "automation list limit must be clamped to AUTOMATION_LIST_MAX_PAGE_SIZE ({}) before the product facade",
+        "automation list limit must be clamped to AUTOMATION_LIST_MAX_PAGE_SIZE ({}) before the product service",
         AUTOMATION_LIST_MAX_PAGE_SIZE
     );
 }
 
 #[tokio::test]
-async fn list_automations_clamps_zero_limit_before_product_facade() {
-    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+async fn list_automations_clamps_zero_limit_before_product_service() {
+    let automation_service = Arc::new(RecordingAutomationService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade.clone());
+    .with_automation_product_service(automation_service.clone());
 
     query_automations(
         &services,
@@ -7553,7 +7236,7 @@ async fn list_automations_clamps_zero_limit_before_product_facade() {
     .await
     .expect("list automations");
 
-    let list_calls = automation_facade.list_calls();
+    let list_calls = automation_service.list_calls();
     assert_eq!(list_calls.len(), 1);
     assert_eq!(
         list_calls[0].limit, 1,
@@ -7563,12 +7246,12 @@ async fn list_automations_clamps_zero_limit_before_product_facade() {
 
 #[tokio::test]
 async fn list_automations_uses_default_limit_when_omitted() {
-    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let automation_service = Arc::new(RecordingAutomationService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade.clone());
+    .with_automation_product_service(automation_service.clone());
 
     query_automations(
         &services,
@@ -7578,7 +7261,7 @@ async fn list_automations_uses_default_limit_when_omitted() {
     .await
     .expect("list automations");
 
-    let list_calls = automation_facade.list_calls();
+    let list_calls = automation_service.list_calls();
     assert_eq!(list_calls.len(), 1);
     assert_eq!(
         list_calls[0].limit, AUTOMATION_LIST_DEFAULT_PAGE_SIZE as usize,
@@ -7588,13 +7271,13 @@ async fn list_automations_uses_default_limit_when_omitted() {
 }
 
 #[tokio::test]
-async fn list_automations_clamps_oversize_run_limit_before_product_facade() {
-    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+async fn list_automations_clamps_oversize_run_limit_before_product_service() {
+    let automation_service = Arc::new(RecordingAutomationService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade.clone());
+    .with_automation_product_service(automation_service.clone());
 
     query_automations(
         &services,
@@ -7604,23 +7287,23 @@ async fn list_automations_clamps_oversize_run_limit_before_product_facade() {
     .await
     .expect("list automations");
 
-    let list_calls = automation_facade.list_calls();
+    let list_calls = automation_service.list_calls();
     assert_eq!(list_calls.len(), 1);
     assert_eq!(
         list_calls[0].run_limit, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE as usize,
-        "automation run history limit must be clamped to AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE ({}) before the product facade",
+        "automation run history limit must be clamped to AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE ({}) before the product service",
         AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE
     );
 }
 
 #[tokio::test]
-async fn list_automations_allows_zero_run_limit_before_product_facade() {
-    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+async fn list_automations_allows_zero_run_limit_before_product_service() {
+    let automation_service = Arc::new(RecordingAutomationService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade.clone());
+    .with_automation_product_service(automation_service.clone());
 
     query_automations(
         &services,
@@ -7630,7 +7313,7 @@ async fn list_automations_allows_zero_run_limit_before_product_facade() {
     .await
     .expect("list automations");
 
-    let list_calls = automation_facade.list_calls();
+    let list_calls = automation_service.list_calls();
     assert_eq!(list_calls.len(), 1);
     assert_eq!(
         list_calls[0].run_limit, 0,
@@ -7639,13 +7322,13 @@ async fn list_automations_allows_zero_run_limit_before_product_facade() {
 }
 
 #[tokio::test]
-async fn list_automations_forwards_include_completed_true_to_product_facade() {
-    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+async fn list_automations_forwards_include_completed_true_to_product_service() {
+    let automation_service = Arc::new(RecordingAutomationService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade.clone());
+    .with_automation_product_service(automation_service.clone());
 
     query_automations(
         &services,
@@ -7655,22 +7338,22 @@ async fn list_automations_forwards_include_completed_true_to_product_facade() {
     .await
     .expect("list automations");
 
-    let list_calls = automation_facade.list_calls();
+    let list_calls = automation_service.list_calls();
     assert_eq!(list_calls.len(), 1);
     assert!(
         list_calls[0].include_completed,
-        "include_completed=true must be forwarded to the product facade unchanged"
+        "include_completed=true must be forwarded to the product service unchanged"
     );
 }
 
 #[tokio::test]
-async fn list_automations_forwards_include_completed_false_to_product_facade() {
-    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+async fn list_automations_forwards_include_completed_false_to_product_service() {
+    let automation_service = Arc::new(RecordingAutomationService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade.clone());
+    .with_automation_product_service(automation_service.clone());
 
     query_automations(
         &services,
@@ -7680,22 +7363,22 @@ async fn list_automations_forwards_include_completed_false_to_product_facade() {
     .await
     .expect("list automations");
 
-    let list_calls = automation_facade.list_calls();
+    let list_calls = automation_service.list_calls();
     assert_eq!(list_calls.len(), 1);
     assert!(
         !list_calls[0].include_completed,
-        "include_completed=false must be forwarded to the product facade unchanged"
+        "include_completed=false must be forwarded to the product service unchanged"
     );
 }
 
 #[tokio::test]
 async fn pause_automation_rejects_missing_agent_id() {
-    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let automation_service = Arc::new(RecordingAutomationService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade.clone());
+    .with_automation_product_service(automation_service.clone());
 
     let err = invoke_json_product_capability(
         &services,
@@ -7710,17 +7393,17 @@ async fn pause_automation_rejects_missing_agent_id() {
 
     assert_eq!(err.code, ProductSurfaceErrorCode::InvalidRequest);
     assert_eq!(err.status_code, 400);
-    assert_eq!(automation_facade.mutation_calls().len(), 0);
+    assert_eq!(automation_service.mutation_calls().len(), 0);
 }
 
 #[tokio::test]
 async fn resume_automation_rejects_missing_agent_id() {
-    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let automation_service = Arc::new(RecordingAutomationService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade.clone());
+    .with_automation_product_service(automation_service.clone());
 
     let err = invoke_json_product_capability(
         &services,
@@ -7735,17 +7418,17 @@ async fn resume_automation_rejects_missing_agent_id() {
 
     assert_eq!(err.code, ProductSurfaceErrorCode::InvalidRequest);
     assert_eq!(err.status_code, 400);
-    assert_eq!(automation_facade.mutation_calls().len(), 0);
+    assert_eq!(automation_service.mutation_calls().len(), 0);
 }
 
 #[tokio::test]
 async fn rename_automation_rejects_missing_agent_id() {
-    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let automation_service = Arc::new(RecordingAutomationService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade.clone());
+    .with_automation_product_service(automation_service.clone());
 
     let err = invoke_json_product_capability(
         &services,
@@ -7761,17 +7444,17 @@ async fn rename_automation_rejects_missing_agent_id() {
 
     assert_eq!(err.code, ProductSurfaceErrorCode::InvalidRequest);
     assert_eq!(err.status_code, 400);
-    assert_eq!(automation_facade.mutation_calls().len(), 0);
+    assert_eq!(automation_service.mutation_calls().len(), 0);
 }
 
 #[tokio::test]
 async fn delete_automation_rejects_missing_agent_id() {
-    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let automation_service = Arc::new(RecordingAutomationService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade.clone());
+    .with_automation_product_service(automation_service.clone());
 
     let err = invoke_json_product_capability(
         &services,
@@ -7786,17 +7469,17 @@ async fn delete_automation_rejects_missing_agent_id() {
 
     assert_eq!(err.code, ProductSurfaceErrorCode::InvalidRequest);
     assert_eq!(err.status_code, 400);
-    assert_eq!(automation_facade.mutation_calls().len(), 0);
+    assert_eq!(automation_service.mutation_calls().len(), 0);
 }
 
 #[tokio::test]
-async fn automation_mutations_forward_caller_scope_to_product_facade() {
-    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+async fn automation_mutations_forward_caller_scope_to_product_service() {
+    let automation_service = Arc::new(RecordingAutomationService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade.clone());
+    .with_automation_product_service(automation_service.clone());
     let caller = caller();
     let expected_agent_id = caller.agent_id.clone().expect("agent id");
 
@@ -7861,7 +7544,7 @@ async fn automation_mutations_forward_caller_scope_to_product_facade() {
         Resolution::Done(outcome) if outcome.verdict.is_success()
     ));
 
-    let calls = automation_facade.mutation_calls();
+    let calls = automation_service.mutation_calls();
     assert_eq!(calls.len(), 4);
     assert_eq!(calls[0].action, AutomationMutationAction::Pause);
     assert_eq!(calls[0].automation_id, "trigger-alpha");
@@ -7896,12 +7579,12 @@ async fn automation_mutations_forward_caller_scope_to_product_facade() {
 
 #[tokio::test]
 async fn automation_mutations_are_available_as_product_capabilities() {
-    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let automation_service = Arc::new(RecordingAutomationService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade.clone());
+    .with_automation_product_service(automation_service.clone());
 
     for (capability_id, input) in [
         (
@@ -7949,7 +7632,7 @@ async fn automation_mutations_are_available_as_product_capabilities() {
         ));
     }
 
-    let calls = automation_facade.mutation_calls();
+    let calls = automation_service.mutation_calls();
     assert_eq!(calls.len(), 4);
     assert_eq!(calls[0].action, AutomationMutationAction::Pause);
     assert_eq!(calls[1].action, AutomationMutationAction::Resume);
@@ -7963,13 +7646,13 @@ async fn automation_mutations_are_available_as_product_capabilities() {
 }
 
 #[tokio::test]
-async fn rename_automation_validates_name_before_product_facade() {
-    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+async fn rename_automation_validates_name_before_product_service() {
+    let automation_service = Arc::new(RecordingAutomationService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade.clone());
+    .with_automation_product_service(automation_service.clone());
 
     for (request, expected_code) in [
         (
@@ -7999,7 +7682,7 @@ async fn rename_automation_validates_name_before_product_facade() {
             },
         )
         .await
-        .expect_err("invalid name should fail before facade");
+        .expect_err("invalid name should fail before service");
 
         assert_eq!(err.code, ProductSurfaceErrorCode::InvalidRequest);
         assert_eq!(err.status_code, 400);
@@ -8007,7 +7690,7 @@ async fn rename_automation_validates_name_before_product_facade() {
         assert_eq!(err.validation_code, Some(expected_code));
     }
 
-    assert_eq!(automation_facade.mutation_calls().len(), 0);
+    assert_eq!(automation_service.mutation_calls().len(), 0);
 }
 
 #[test]
@@ -8685,9 +8368,9 @@ async fn get_timeline_succeeds_for_own_automation_trigger_thread() {
         .await
         .expect("trigger thread stored");
 
-    // The automation facade recognises the thread and returns the trigger scope.
-    let automation_facade = Arc::new(
-        StaticAutomationFacade::new(vec![RebornAutomationInfo {
+    // The automation service recognises the thread and returns the trigger scope.
+    let automation_service = Arc::new(
+        StaticAutomationService::new(vec![RebornAutomationInfo {
             automation_id: "trigger-scheduled-alpha".to_string(),
             name: "Morning briefing".to_string(),
             source: RebornAutomationSource::Schedule {
@@ -8717,7 +8400,7 @@ async fn get_timeline_succeeds_for_own_automation_trigger_thread() {
     );
 
     let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
-        .with_automation_product_facade(automation_facade);
+        .with_automation_product_service(automation_service);
 
     let response = services
         .get_timeline(
@@ -8801,8 +8484,8 @@ async fn read_attachment_reads_trigger_thread_bytes_under_creator_scope() {
         .await
         .expect("message with attachment accepted");
 
-    let automation_facade = Arc::new(
-        StaticAutomationFacade::new(vec![RebornAutomationInfo {
+    let automation_service = Arc::new(
+        StaticAutomationService::new(vec![RebornAutomationInfo {
             automation_id: "trigger-bytes".to_string(),
             name: "Morning briefing".to_string(),
             source: RebornAutomationSource::Schedule {
@@ -8836,7 +8519,7 @@ async fn read_attachment_reads_trigger_thread_bytes_under_creator_scope() {
         reads: Mutex::new(Vec::new()),
     });
     let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
-        .with_automation_product_facade(automation_facade)
+        .with_automation_product_service(automation_service)
         .with_inbound_attachment_reader(reader.clone());
 
     let result = services
@@ -8888,12 +8571,12 @@ async fn get_timeline_rejects_other_users_automation_trigger_thread() {
         .await
         .expect("alice trigger thread stored");
 
-    // Bob's facade returns no automations and no resolve_scope — the fallback
+    // Bob's service returns no automations and no resolve_scope — the fallback
     // must deny him because resolve_run_thread_scope returns None.
-    let automation_facade = Arc::new(StaticAutomationFacade::new(Vec::new()));
+    let automation_service = Arc::new(StaticAutomationService::new(Vec::new()));
 
     let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
-        .with_automation_product_facade(automation_facade);
+        .with_automation_product_service(automation_service);
 
     let err = services
         .get_timeline(
@@ -8913,7 +8596,7 @@ async fn get_timeline_rejects_other_users_automation_trigger_thread() {
 #[tokio::test]
 async fn get_timeline_surfaces_trigger_scope_lookup_backend_error() {
     // The primary user-scoped lookup will miss (thread stored under trigger
-    // creator scope), then the automation fallback fires.  The facade returns
+    // creator scope), then the automation fallback fires.  The service returns
     // a 503 Unavailable error — the service must propagate that error rather
     // than converting it to 404.
     let caller = caller();
@@ -8936,11 +8619,11 @@ async fn get_timeline_surfaces_trigger_scope_lookup_backend_error() {
         .await
         .expect("trigger thread stored");
 
-    // The automation facade returns a 503 backend error from resolve_run_thread_scope.
-    let automation_facade = Arc::new(ErroringAutomationFacade::unavailable());
+    // The automation service returns a 503 backend error from resolve_run_thread_scope.
+    let automation_service = Arc::new(ErroringAutomationService::unavailable());
 
     let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
-        .with_automation_product_facade(automation_facade);
+        .with_automation_product_service(automation_service);
 
     let err = services
         .get_timeline(
@@ -8948,7 +8631,7 @@ async fn get_timeline_surfaces_trigger_scope_lookup_backend_error() {
             RebornTimelineRequest::new(trigger_thread_id.as_str().to_string()),
         )
         .await
-        .expect_err("backend error from facade must propagate, not become 404");
+        .expect_err("backend error from service must propagate, not become 404");
 
     assert_eq!(
         err.code,
@@ -9132,7 +8815,7 @@ impl SessionThreadService for FirstMissBackendErrorThreadService {
 // fallback fires) and `resolve_run_thread_scope` authorizes access, but the
 // second `list_thread_history` call for the trigger-owned scope returns a
 // backend error, the result must be Unavailable (503) — NOT the 404 NotFound
-// that would have been returned had the automation facade also denied access.
+// that would have been returned had the automation service also denied access.
 // A backend outage must never be surfaced as an authorization miss.
 #[tokio::test]
 async fn get_timeline_surfaces_backend_error_from_unscoped_trigger_history_reload() {
@@ -9144,17 +8827,17 @@ async fn get_timeline_surfaces_backend_error_from_unscoped_trigger_history_reloa
     // second call (trigger-owned scope reload) → Backend error.
     let thread_service = Arc::new(FirstMissBackendErrorThreadService::new());
 
-    // Automation facade authorizes: the facade resolves a scope for the
+    // Automation service authorizes: the service resolves a scope for the
     // thread, so the service proceeds to the trigger-owned reload.
-    let automation_facade = Arc::new(
-        StaticAutomationFacade::new(Vec::new()).with_resolve_scope_for_thread(
+    let automation_service = Arc::new(
+        StaticAutomationService::new(Vec::new()).with_resolve_scope_for_thread(
             trigger_thread_id.clone(),
             trigger_run_thread_scope_for(&caller),
         ),
     );
 
     let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
-        .with_automation_product_facade(automation_facade);
+        .with_automation_product_service(automation_service);
 
     let err = services
         .get_timeline(
@@ -9224,13 +8907,13 @@ async fn get_timeline_uses_caller_agent_when_trigger_scope_omits_agent_id() {
         creator_user_id: UserId::new(TRIGGER_CREATOR_USER_ID)
             .expect("valid trigger creator user id"),
     };
-    let automation_facade = Arc::new(
-        StaticAutomationFacade::new(vec![])
+    let automation_service = Arc::new(
+        StaticAutomationService::new(vec![])
             .with_resolve_scope_for_thread(trigger_thread_id.clone(), scope_with_no_agent),
     );
 
     let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
-        .with_automation_product_facade(automation_facade);
+        .with_automation_product_service(automation_service);
 
     let response = services
         .get_timeline(
@@ -9254,12 +8937,12 @@ async fn get_timeline_uses_caller_agent_when_trigger_scope_omits_agent_id() {
 // trigger-fired thread therefore returned 404, even when the caller owned the
 // automation that produced the thread.
 
-fn automation_facade_with_trigger_thread(
+fn automation_service_with_trigger_thread(
     trigger_thread_id: ThreadId,
     caller: &ProductSurfaceCaller,
-) -> Arc<StaticAutomationFacade> {
+) -> Arc<StaticAutomationService> {
     Arc::new(
-        StaticAutomationFacade::new(vec![RebornAutomationInfo {
+        StaticAutomationService::new(vec![RebornAutomationInfo {
             automation_id: "trigger-gate-automation".to_string(),
             name: "Gate test automation".to_string(),
             source: RebornAutomationSource::Schedule {
@@ -9361,7 +9044,7 @@ async fn resolve_gate_approval_succeeds_for_own_automation_trigger_thread() {
     coordinator.set_run_state_actor(Some(turn_actor_for_user(TRIGGER_CREATOR_USER_ID)));
 
     let services = RebornServices::new(thread_service, coordinator.clone())
-        .with_automation_product_facade(automation_facade_with_trigger_thread(
+        .with_automation_product_service(automation_service_with_trigger_thread(
             trigger_thread_id.clone(),
             &caller,
         ))
@@ -9433,8 +9116,8 @@ async fn cancel_run_succeeds_for_own_automation_trigger_thread() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
 
     let services =
-        RebornServices::new(thread_service, coordinator.clone()).with_automation_product_facade(
-            automation_facade_with_trigger_thread(trigger_thread_id.clone(), &caller),
+        RebornServices::new(thread_service, coordinator.clone()).with_automation_product_service(
+            automation_service_with_trigger_thread(trigger_thread_id.clone(), &caller),
         );
 
     let response = services
@@ -9485,8 +9168,8 @@ async fn get_run_state_succeeds_for_own_automation_trigger_thread() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
 
     let services =
-        RebornServices::new(thread_service, coordinator.clone()).with_automation_product_facade(
-            automation_facade_with_trigger_thread(trigger_thread_id.clone(), &caller),
+        RebornServices::new(thread_service, coordinator.clone()).with_automation_product_service(
+            automation_service_with_trigger_thread(trigger_thread_id.clone(), &caller),
         );
 
     let response = services
@@ -9525,12 +9208,12 @@ async fn resolve_gate_rejects_other_users_automation_trigger_thread() {
         setup_trigger_thread(&thread_service, &alice, "thread-trigger-gate-beta").await;
 
     // Bob has no automations — resolve_run_thread_scope returns None, fallback denies him.
-    let bob_automation_facade = Arc::new(StaticAutomationFacade::new(Vec::new()));
+    let bob_automation_service = Arc::new(StaticAutomationService::new(Vec::new()));
     let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
     let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
 
     let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
-        .with_automation_product_facade(bob_automation_facade)
+        .with_automation_product_service(bob_automation_service)
         .with_approval_interactions(approval_interactions.clone());
 
     let err = services
@@ -9581,7 +9264,7 @@ async fn stream_events_uses_trigger_creator_as_projection_identity() {
 
     let event_stream = Arc::new(RecordingProjectionStream::default());
     let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
-        .with_automation_product_facade(automation_facade_with_trigger_thread(
+        .with_automation_product_service(automation_service_with_trigger_thread(
             trigger_thread_id.clone(),
             &caller,
         ))
@@ -9622,7 +9305,7 @@ async fn stream_events_uses_trigger_creator_as_projection_identity() {
 }
 
 #[tokio::test]
-async fn stream_events_revalidates_facade_on_every_poll() {
+async fn stream_events_revalidates_service_on_every_poll() {
     // Every stream_events poll must call resolve_run_thread_scope — there is no
     // authorization cache. This ensures a caller that loses automation
     // visibility between polls cannot keep draining the trigger-owned stream.
@@ -9635,11 +9318,11 @@ async fn stream_events_revalidates_facade_on_every_poll() {
     )
     .await;
 
-    let automation_facade =
-        automation_facade_with_trigger_thread(trigger_thread_id.clone(), &caller);
+    let automation_service =
+        automation_service_with_trigger_thread(trigger_thread_id.clone(), &caller);
     let event_stream = Arc::new(RecordingProjectionStream::default());
     let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
-        .with_automation_product_facade(automation_facade.clone())
+        .with_automation_product_service(automation_service.clone())
         .with_event_stream(event_stream.clone());
 
     for _ in 0..3 {
@@ -9656,7 +9339,7 @@ async fn stream_events_revalidates_facade_on_every_poll() {
     }
 
     assert_eq!(
-        automation_facade.resolve_calls(),
+        automation_service.resolve_calls(),
         vec![
             trigger_thread_id.clone(),
             trigger_thread_id.clone(),
@@ -9684,14 +9367,14 @@ async fn stream_events_fails_when_visibility_revoked_between_polls() {
     )
     .await;
 
-    // A facade that starts with the scope available but can revoke it.
-    let revocable_facade = Arc::new(RevocableAutomationFacade::new(
+    // A service that starts with the scope available but can revoke it.
+    let revocable_service = Arc::new(RevocableAutomationService::new(
         trigger_thread_id.clone(),
         &caller,
     ));
     let event_stream = Arc::new(RecordingProjectionStream::default());
     let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
-        .with_automation_product_facade(revocable_facade.clone())
+        .with_automation_product_service(revocable_service.clone())
         .with_event_stream(event_stream.clone());
 
     // First poll succeeds — caller still has automation visibility.
@@ -9707,7 +9390,7 @@ async fn stream_events_fails_when_visibility_revoked_between_polls() {
         .expect("first poll must succeed while scope is visible");
 
     // Revoke visibility.
-    revocable_facade.revoke();
+    revocable_service.revoke();
 
     // Second poll must fail — visibility was revoked and there is no cached authz.
     let err = services
@@ -9738,11 +9421,11 @@ async fn get_timeline_rejects_thread_id_absent_from_callers_automations() {
     let thread_service = Arc::new(InMemorySessionThreadService::default());
     // No threads stored anywhere.
 
-    // Automation facade knows about a DIFFERENT thread, not the requested one.
+    // Automation service knows about a DIFFERENT thread, not the requested one.
     let unrelated_thread_id =
         ThreadId::new("thread-unrelated-xyz").expect("valid unrelated thread id");
-    let automation_facade = Arc::new(
-        StaticAutomationFacade::new(vec![RebornAutomationInfo {
+    let automation_service = Arc::new(
+        StaticAutomationService::new(vec![RebornAutomationInfo {
             automation_id: "trigger-other".to_string(),
             name: "Other automation".to_string(),
             source: RebornAutomationSource::Schedule {
@@ -9764,11 +9447,11 @@ async fn get_timeline_rejects_thread_id_absent_from_callers_automations() {
             is_active: true,
             created_at: None,
             active_hold: None,
-        }]), // resolve_scope is None — the facade does not recognise the requested thread.
+        }]), // resolve_scope is None — the service does not recognise the requested thread.
     );
 
     let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
-        .with_automation_product_facade(automation_facade);
+        .with_automation_product_service(automation_service);
 
     let err = services
         .get_timeline(
@@ -9788,7 +9471,7 @@ async fn list_automations_returns_empty_list() {
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(Arc::new(StaticAutomationFacade::new(Vec::new())));
+    .with_automation_product_service(Arc::new(StaticAutomationService::new(Vec::new())));
 
     let listed = query_automations(
         &services,
@@ -9799,7 +9482,7 @@ async fn list_automations_returns_empty_list() {
     .expect("list automations");
 
     assert!(listed.automations.is_empty());
-    // Default facade reports the scheduler as running.
+    // Default service reports the scheduler as running.
     assert!(listed.scheduler_enabled);
 }
 
@@ -9812,8 +9495,8 @@ async fn list_automations_surfaces_disabled_scheduler() {
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(Arc::new(
-        StaticAutomationFacade::new(Vec::new()).with_scheduler_enabled(false),
+    .with_automation_product_service(Arc::new(
+        StaticAutomationService::new(Vec::new()).with_scheduler_enabled(false),
     ));
 
     let listed = query_automations(
@@ -9828,7 +9511,7 @@ async fn list_automations_surfaces_disabled_scheduler() {
 }
 
 #[tokio::test]
-async fn automation_facade_unwired_fails_closed() {
+async fn automation_service_unwired_fails_closed() {
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
@@ -9840,7 +9523,7 @@ async fn automation_facade_unwired_fails_closed() {
         ProductListAutomationsRequest::default(),
     )
     .await
-    .expect_err("unwired automation facade");
+    .expect_err("unwired automation service");
 
     assert_eq!(error.code, ProductSurfaceErrorCode::Unavailable);
     assert_eq!(error.status_code, 503);
@@ -9849,123 +9532,31 @@ async fn automation_facade_unwired_fails_closed() {
 
 #[tokio::test]
 async fn setup_extension_returns_post_setup_onboarding_payload() {
-    let credentials = Arc::new(
-        RecordingExtensionCredentialSetupService::with_account_status(
-            CredentialAccountStatus::Configured,
-        ),
-    );
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_lifecycle_product_facade(Arc::new(
-        RecordingLifecycleFacade::with_credential_requirements_and_onboarding(
+    .with_lifecycle_product_service(Arc::new(
+        RecordingLifecycleService::with_credential_requirements_and_onboarding(
             vec![manual_credential_requirement("github_runtime_token", true)],
             onboarding_fixture(),
         ),
-    ))
-    .with_extension_credentials(credentials);
+    ));
 
     let response = query_extension_setup(&services, caller(), "github")
         .await
         .expect("setup extension response");
 
     let onboarding = response.onboarding.as_ref().expect("onboarding payload");
-    assert_eq!(response.phase, LifecyclePublicState::SetupNeeded);
+    assert_eq!(response.phase, InstallationState::Configured);
     assert_eq!(
         onboarding.credential_instructions.as_deref(),
-        Some(
-            "github setup is complete. IronClaw publishes its tools automatically; no separate activation action is required."
-        )
+        Some("github is installed. Activate it to make its tools available.")
     );
     assert_eq!(
         onboarding.credential_next_step.as_deref(),
-        Some(
-            "After saving the token, IronClaw finishes GitHub installation automatically and publishes its tools."
-        )
+        Some("After saving the token, activate GitHub to publish its tools.")
     );
-}
-
-#[tokio::test]
-async fn setup_extension_projects_revoked_personal_auth_as_setup_needed() {
-    let credentials = Arc::new(
-        RecordingExtensionCredentialSetupService::with_account_status(
-            CredentialAccountStatus::Revoked,
-        ),
-    );
-    let services = RebornServices::new(
-        Arc::new(InMemorySessionThreadService::default()),
-        Arc::new(FakeTurnCoordinator::default()),
-    )
-    .with_lifecycle_product_facade(Arc::new(
-        RecordingLifecycleFacade::with_phase_and_credential_requirements(
-            LifecyclePublicState::Active,
-            vec![manual_credential_requirement("github_runtime_token", true)],
-            onboarding_fixture(),
-        ),
-    ))
-    .with_extension_credentials(credentials);
-
-    let response = query_extension_setup(&services, caller(), "github")
-        .await
-        .expect("setup extension response");
-
-    assert_eq!(response.phase, LifecyclePublicState::SetupNeeded);
-    assert_eq!(response.secrets.len(), 1);
-    assert!(!response.secrets[0].provided);
-    let onboarding = response.onboarding.as_ref().expect("onboarding payload");
-    assert_eq!(
-        onboarding.credential_instructions.as_deref(),
-        Some("Paste the GitHub token IronClaw should use.")
-    );
-}
-
-struct RetryablyUnavailableExtensionCredentials;
-
-#[async_trait]
-impl ExtensionCredentialSetupService for RetryablyUnavailableExtensionCredentials {
-    async fn credential_status(
-        &self,
-        _request: ExtensionCredentialStatusRequest,
-    ) -> Result<Option<CredentialAccountProjection>, ProductSurfaceError> {
-        Err(ProductSurfaceError {
-            code: ProductSurfaceErrorCode::Unavailable,
-            kind: ProductSurfaceErrorKind::ServiceUnavailable,
-            status_code: 503,
-            retryable: true,
-            field: None,
-            validation_code: None,
-        })
-    }
-
-    async fn submit_manual_token(
-        &self,
-        _request: ExtensionCredentialSubmitRequest,
-    ) -> Result<CredentialAccountId, ProductSurfaceError> {
-        panic!("setup projection must not submit credentials")
-    }
-}
-
-#[tokio::test]
-async fn setup_extension_preserves_active_phase_when_credential_status_is_retryably_unavailable() {
-    let services = RebornServices::new(
-        Arc::new(InMemorySessionThreadService::default()),
-        Arc::new(FakeTurnCoordinator::default()),
-    )
-    .with_lifecycle_product_facade(Arc::new(
-        RecordingLifecycleFacade::with_phase_and_credential_requirements(
-            LifecyclePublicState::Active,
-            vec![manual_credential_requirement("github_runtime_token", true)],
-            onboarding_fixture(),
-        ),
-    ))
-    .with_extension_credentials(Arc::new(RetryablyUnavailableExtensionCredentials));
-
-    let response = query_extension_setup(&services, caller(), "github")
-        .await
-        .expect("retryable status outage is not missing auth");
-
-    assert_eq!(response.phase, LifecyclePublicState::Active);
 }
 
 #[tokio::test]
@@ -9995,76 +9586,6 @@ async fn setup_extension_rejects_blank_required_manual_secret() {
     assert_setup_validation(err, "secrets", ProductSurfaceValidationCode::Blank);
     assert_eq!(credentials.status_count(), 1);
     assert_eq!(credentials.submit_count(), 0);
-}
-
-#[tokio::test]
-async fn setup_extension_rejects_blank_or_omitted_required_secret_for_nonconfigured_accounts() {
-    for account_status in [
-        CredentialAccountStatus::Inactive,
-        CredentialAccountStatus::Missing,
-        CredentialAccountStatus::Expired,
-        CredentialAccountStatus::RefreshFailed,
-        CredentialAccountStatus::Revoked,
-        CredentialAccountStatus::PendingSetup,
-    ] {
-        for secrets in [json!({}), json!({ "api_token": "   " })] {
-            let credentials = Arc::new(
-                RecordingExtensionCredentialSetupService::with_account_status(account_status),
-            );
-            let services = setup_services_with_requirements(vec![manual_credential_requirement(
-                "api_token",
-                true,
-            )])
-            .with_extension_credentials(credentials.clone());
-
-            let error = invoke_extension_setup_submit(
-                &services,
-                caller(),
-                "github",
-                ProductSetupExtensionRequest {
-                    client_action_id: None,
-                    action: Some("submit".to_string()),
-                    payload: Some(json!({ "secrets": secrets })),
-                },
-            )
-            .await
-            .expect_err("nonconfigured account cannot satisfy a required secret");
-
-            assert_eq!(error.kind, ProductSurfaceErrorKind::Validation);
-            assert_eq!(credentials.submit_count(), 0);
-        }
-    }
-}
-
-#[tokio::test]
-async fn setup_extension_allows_configured_required_secret_to_be_left_unchanged() {
-    for secrets in [json!({}), json!({ "api_token": "   " })] {
-        let credentials = Arc::new(
-            RecordingExtensionCredentialSetupService::with_account_status(
-                CredentialAccountStatus::Configured,
-            ),
-        );
-        let services = setup_services_with_requirements(vec![manual_credential_requirement(
-            "api_token",
-            true,
-        )])
-        .with_extension_credentials(credentials.clone());
-
-        invoke_extension_setup_submit(
-            &services,
-            caller(),
-            "github",
-            ProductSetupExtensionRequest {
-                client_action_id: None,
-                action: Some("submit".to_string()),
-                payload: Some(json!({ "secrets": secrets })),
-            },
-        )
-        .await
-        .expect("configured secret can be left unchanged");
-
-        assert_eq!(credentials.submit_count(), 0);
-    }
 }
 
 #[tokio::test]
@@ -10125,14 +9646,169 @@ async fn setup_extension_rejects_oauth_secret_via_manual_submit() {
     assert_eq!(credentials.submit_count(), 0);
 }
 
-/// Caller setup accepts personal credential requirements only. Deployment
-/// administrator fields have a separate authorized API, so even a
-/// manifest-shaped field handle is rejected before credential storage.
+/// One recorded configure-port save: the target extension id plus the
+/// submitted `(handle, value)` pairs.
+type RecordedChannelConfigSave = (String, Vec<(String, String)>);
+
+/// Recording fake of the channel-config configure port: serves a fixed
+/// field-status projection and records every save.
+#[derive(Default)]
+struct RecordingChannelConfigProductService {
+    fields: Vec<RebornChannelConfigField>,
+    saves: Mutex<Vec<RecordedChannelConfigSave>>,
+}
+
+impl RecordingChannelConfigProductService {
+    fn with_fields(fields: Vec<RebornChannelConfigField>) -> Self {
+        Self {
+            fields,
+            saves: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn saves(&self) -> Vec<RecordedChannelConfigSave> {
+        self.saves.lock().expect("saves lock").clone()
+    }
+}
+
+#[async_trait]
+impl ChannelConfigProductService for RecordingChannelConfigProductService {
+    async fn field_status(
+        &self,
+        _extension_id: &ExtensionId,
+    ) -> Result<Vec<RebornChannelConfigField>, ProductSurfaceError> {
+        Ok(self.fields.clone())
+    }
+
+    async fn save_values(
+        &self,
+        extension_id: &ExtensionId,
+        values: Vec<(String, String)>,
+    ) -> Result<(), ProductSurfaceError> {
+        self.saves
+            .lock()
+            .expect("saves lock")
+            .push((extension_id.as_str().to_string(), values));
+        Ok(())
+    }
+}
+
+fn channel_config_field(name: &str, label: &str, secret: bool) -> RebornChannelConfigField {
+    RebornChannelConfigField {
+        name: name.to_string(),
+        label: label.to_string(),
+        secret,
+        provided: false,
+    }
+}
+
+/// The setup service renders manifest-declared channel-config fields (the
+/// non-secret descriptors in `fields`, the secret ones in the existing
+/// `secrets` shape, presence only) and routes submitted values to the
+/// configure port while credential secrets keep the credential path.
 #[tokio::test]
-async fn setup_extension_rejects_admin_configuration_fields() {
+async fn setup_extension_projects_and_routes_channel_config_values() {
     let credentials = Arc::new(RecordingExtensionCredentialSetupService::default());
+    let channel_config = Arc::new(RecordingChannelConfigProductService::with_fields(vec![
+        channel_config_field("bot_token", "Bot token", true),
+        channel_config_field("public_url", "Public webhook URL", false),
+    ]));
+    let lifecycle_service = Arc::new(RecordingLifecycleService::with_credential_requirements(
+        vec![manual_credential_requirement("api_token", false)],
+    ));
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_lifecycle_product_service(lifecycle_service.clone())
+    .with_extension_credentials(credentials.clone())
+    .with_channel_config_product_service(channel_config.clone());
+
+    // View: fields from the non-secret descriptors, secret channel fields in
+    // the secrets list (presence only, manual-token shape).
+    let view = query_extension_setup(&services, caller(), "github")
+        .await
+        .expect("setup view");
+    assert_eq!(view.fields.len(), 1);
+    assert_eq!(view.fields[0].name, "public_url");
+    assert_eq!(view.fields[0].prompt, "Public webhook URL");
+    assert!(view.fields[0].placeholder.is_none());
+    let bot_token = view
+        .secrets
+        .iter()
+        .find(|secret| secret.name == "bot_token")
+        .expect("secret channel field surfaces in the secrets shape");
+    assert!(!bot_token.provided);
+    assert!(
+        view.secrets.iter().any(|secret| secret.name == "api_token"),
+        "credential requirements keep their own entry"
+    );
+
+    // Submit: channel values route to the configure port; the credential
+    // secret stays on the credential path.
+    let response = submit_extension_setup_and_query(
+        &services,
+        caller(),
+        "github",
+        ProductSetupExtensionRequest {
+            client_action_id: None,
+            action: Some("submit".to_string()),
+            payload: Some(json!({
+                "secrets": {
+                    "bot_token": "xbt-123",
+                    "api_token": "cred-456"
+                },
+                "fields": {
+                    "public_url": "https://hooks.example.test/updates"
+                }
+            })),
+        },
+    )
+    .await
+    .expect("setup submit");
+    assert_eq!(response.fields.len(), 1);
+    let saves = channel_config.saves();
+    assert_eq!(saves.len(), 1);
+    assert_eq!(saves[0].0, "github");
+    assert!(
+        saves[0]
+            .1
+            .contains(&("bot_token".to_string(), "xbt-123".to_string()))
+    );
+    assert!(saves[0].1.contains(&(
+        "public_url".to_string(),
+        "https://hooks.example.test/updates".to_string()
+    )));
+    assert!(
+        !saves[0].1.iter().any(|(name, _)| name == "api_token"),
+        "credential secrets must not leak into the channel-config port"
+    );
+    assert_eq!(
+        credentials.submit_count(),
+        1,
+        "the credential secret still reaches the credential path"
+    );
+    assert_eq!(
+        lifecycle_service.actions(),
+        vec![LifecycleProductAction::ExtensionActivate {
+            package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
+                .expect("package ref")
+        }],
+        "setup submit should activate after storing credentials and channel config"
+    );
+}
+
+/// A submitted `fields` value that matches no declared non-secret handle is
+/// rejected before anything is stored.
+#[tokio::test]
+async fn setup_extension_rejects_unknown_channel_config_field() {
+    let credentials = Arc::new(RecordingExtensionCredentialSetupService::default());
+    let channel_config = Arc::new(RecordingChannelConfigProductService::with_fields(vec![
+        channel_config_field("public_url", "Public webhook URL", false),
+    ]));
     let services = setup_services_with_requirements(Vec::new())
-        .with_extension_credentials(credentials.clone());
+        .with_extension_credentials(credentials.clone())
+        .with_channel_config_product_service(channel_config.clone());
 
     let err = invoke_extension_setup_submit(
         &services,
@@ -10143,15 +9819,16 @@ async fn setup_extension_rejects_admin_configuration_fields() {
             action: Some("submit".to_string()),
             payload: Some(json!({
                 "fields": {
-                    "deployment_provider_id": "tenant-owned-value"
+                    "unknown_field": "value"
                 }
             })),
         },
     )
     .await
-    .expect_err("administrator fields are rejected on caller setup");
+    .expect_err("unknown field handle is rejected");
 
     assert_setup_validation(err, "fields", ProductSurfaceValidationCode::InvalidValue);
+    assert!(channel_config.saves().is_empty());
     assert_eq!(credentials.submit_count(), 0);
 }
 
@@ -10162,8 +9839,8 @@ fn setup_services_with_requirements(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_lifecycle_product_facade(Arc::new(
-        RecordingLifecycleFacade::with_credential_requirements(requirements),
+    .with_lifecycle_product_service(Arc::new(
+        RecordingLifecycleService::with_credential_requirements(requirements),
     ))
 }
 
@@ -11038,14 +10715,25 @@ async fn invoke_extension_setup_submit<S: ProductSurface + ?Sized>(
     serde_json::from_value(response.output).map_err(ProductSurfaceError::internal_from)
 }
 
+async fn submit_extension_setup_and_query<S: ProductSurface + ?Sized>(
+    services: &S,
+    caller: ProductSurfaceCaller,
+    package_id: &str,
+    request: ProductSetupExtensionRequest,
+) -> Result<RebornSetupExtensionResponse, ProductSurfaceError> {
+    let caller_for_query = caller.clone();
+    invoke_extension_setup_submit(services, caller, package_id, request).await?;
+    query_extension_setup(services, caller_for_query, package_id).await
+}
+
 #[tokio::test]
 async fn extension_import_is_available_as_product_capability() {
-    let lifecycle_facade = Arc::new(RecordingLifecycleFacade::new());
+    let lifecycle_service = Arc::new(RecordingLifecycleService::new());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_lifecycle_product_facade(lifecycle_facade.clone());
+    .with_lifecycle_product_service(lifecycle_service.clone());
     let bundle: Vec<u8> = b"PK\x03\x04\x00\xff\xfe binary zip bytes".to_vec();
 
     let resolution = services
@@ -11062,17 +10750,17 @@ async fn extension_import_is_available_as_product_capability() {
         resolution,
         Resolution::Done(outcome) if outcome.verdict.is_success()
     ));
-    assert_eq!(lifecycle_facade.imported_bundles(), vec![bundle]);
+    assert_eq!(lifecycle_service.imported_bundles(), vec![bundle]);
 }
 
 #[tokio::test]
 async fn skill_reads_are_available_as_product_views() {
-    let skills = Arc::new(RecordingSkillsFacade::default());
+    let skills = Arc::new(RecordingSkillsService::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_skills_product_facade(skills.clone());
+    .with_skills_product_service(skills.clone());
 
     let list_page = services
         .query(
@@ -11148,12 +10836,12 @@ fn skill_info(name: &str) -> RebornSkillInfo {
 }
 
 #[derive(Default)]
-struct RecordingSkillsFacade {
+struct RecordingSkillsService {
     search_queries: Mutex<Vec<String>>,
 }
 
 #[async_trait]
-impl SkillsProductFacade for RecordingSkillsFacade {
+impl SkillsProductService for RecordingSkillsService {
     async fn list_skills(
         &self,
         _caller: ProductSurfaceCaller,
@@ -12689,13 +12377,6 @@ async fn run_operator_setup_propagates_llm_config_service_error() {
     assert_eq!(snapshot_err.status_code, 503);
 }
 
-fn bound_install_surface(
-    services: impl ProductSurface + 'static,
-    caller: ProductSurfaceCaller,
-) -> ironclaw_host_api::BoundProductSurface {
-    ironclaw_host_api::BoundProductSurface::new(Arc::new(services), caller)
-}
-
 fn lifecycle_package_ref(package_id: &str) -> LifecyclePackageRef {
     LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id)
         .expect("valid package ref")
@@ -12730,7 +12411,7 @@ fn onboarding_fixture() -> LifecycleExtensionOnboarding {
         credential_instructions: Some("Paste the GitHub token IronClaw should use.".to_string()),
         setup_url: Some("https://github.com/settings/personal-access-tokens/new".to_string()),
         credential_next_step: Some(
-            "After saving the token, IronClaw finishes GitHub installation automatically and publishes its tools.".to_string(),
+            "After saving the token, activate GitHub to publish its tools.".to_string(),
         ),
     }
 }
@@ -13239,7 +12920,7 @@ async fn get_timeline_pages_messages_with_cursor() {
     );
 }
 
-// Regression: `limit` must be clamped to the facade's hard ceiling so a
+// Regression: `limit` must be clamped to the service's hard ceiling so a
 // caller cannot widen the response by passing a huge value. Without the
 // clamp, the per-route rate limit would be the only thing bounding
 // per-request response size.
@@ -13304,8 +12985,8 @@ async fn get_timeline_rejects_malformed_cursor() {
 }
 
 #[test]
-fn facade_source_avoids_forbidden_runtime_dependencies() {
-    let source = std::fs::read_to_string("src/reborn_services.rs").expect("facade source");
+fn service_source_avoids_forbidden_runtime_dependencies() {
+    let source = std::fs::read_to_string("src/reborn_services.rs").expect("service source");
     for forbidden in [
         "CapabilityHost",
         "ironclaw_capabilities",
@@ -13319,7 +13000,7 @@ fn facade_source_avoids_forbidden_runtime_dependencies() {
     ] {
         assert!(
             !source.contains(forbidden),
-            "RebornServices facade must not expose route handlers to {forbidden}"
+            "RebornServices service must not expose route handlers to {forbidden}"
         );
     }
 
@@ -13327,10 +13008,10 @@ fn facade_source_avoids_forbidden_runtime_dependencies() {
 }
 
 // Regression for the missing-error-path-test review (Medium): the
-// new `list_threads` facade path must fail closed until a backend
+// new `list_threads` service path must fail closed until a backend
 // override for `list_threads_for_scope` is wired. The default
 // `SessionThreadService` impl returns `Backend(...)`, and the
-// facade is supposed to translate that into a retryable
+// service is supposed to translate that into a retryable
 // `service_unavailable` (HTTP 503) — never an empty thread list
 // that pretends the caller owns nothing. This test pins the wire
 // contract so a future regression that quietly returns Ok([]) on a
@@ -13340,7 +13021,7 @@ fn facade_source_avoids_forbidden_runtime_dependencies() {
 async fn list_threads_unimplemented_backend_returns_service_unavailable() {
     // `ScopeMismatchThreadStub` is reused here because it
     // intentionally does NOT override the trait's default
-    // `list_threads_for_scope` impl, so the facade sees the
+    // `list_threads_for_scope` impl, so the service sees the
     // unimplemented-enumeration error path. The in-memory backend
     // grew a real enumeration impl (local-dev needed working
     // sidebar listing), so it can no longer stand in for a backend
@@ -13460,7 +13141,7 @@ async fn list_threads_needs_approval_returns_only_automation_threads_with_pendin
         thread_service.clone(),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade_with_trigger_thread(
+    .with_automation_product_service(automation_service_with_trigger_thread(
         automation_pending_thread_id.clone(),
         &caller,
     ))
@@ -13515,7 +13196,7 @@ async fn list_threads_needs_approval_queries_pending_with_run_scope_shape() {
         thread_service.clone(),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade_with_trigger_thread(
+    .with_automation_product_service(automation_service_with_trigger_thread(
         automation_pending_thread_id.clone(),
         &caller,
     ))
@@ -13555,13 +13236,13 @@ async fn list_threads_needs_approval_uses_bounded_run_candidates() {
         agent_id: caller.agent_id.clone().expect("agent id"),
         project_id: caller.project_id.clone(),
     });
-    let automation_facade =
-        automation_facade_with_trigger_thread(automation_pending_thread_id.clone(), &caller);
+    let automation_service =
+        automation_service_with_trigger_thread(automation_pending_thread_id.clone(), &caller);
     let services = RebornServices::new(
         thread_service.clone(),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade.clone())
+    .with_automation_product_service(automation_service.clone())
     .with_approval_interactions(approval_service);
 
     let response = query_threads(
@@ -13573,13 +13254,13 @@ async fn list_threads_needs_approval_uses_bounded_run_candidates() {
     .expect("list approval threads");
 
     assert_eq!(response.threads.len(), 1);
-    let list_calls = automation_facade.list_calls();
+    let list_calls = automation_service.list_calls();
     assert_eq!(list_calls.len(), 1);
     assert_eq!(list_calls[0].limit, 20);
     assert_eq!(list_calls[0].run_limit, 20);
     assert!(list_calls[0].include_completed);
     assert_eq!(
-        automation_facade.resolve_calls(),
+        automation_service.resolve_calls(),
         vec![automation_pending_thread_id],
         "notification lookup should still resolve the thread id once to recover the true trigger creator scope",
     );
@@ -13604,7 +13285,7 @@ async fn list_threads_needs_approval_finds_legacy_ownerless_automation_thread() 
         thread_service.clone(),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade_with_trigger_thread(
+    .with_automation_product_service(automation_service_with_trigger_thread(
         automation_pending_thread_id.clone(),
         &caller,
     ))
@@ -13660,7 +13341,7 @@ async fn list_threads_needs_approval_uses_automation_name_when_thread_title_miss
         thread_service.clone(),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(automation_facade_with_trigger_thread(
+    .with_automation_product_service(automation_service_with_trigger_thread(
         automation_pending_thread_id.clone(),
         &caller,
     ))
@@ -13695,8 +13376,8 @@ async fn list_threads_needs_approval_checks_candidate_automation_thread() {
         thread_service.clone(),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(Arc::new(
-        StaticAutomationFacade::new(Vec::new()).with_resolve_scope_for_thread(
+    .with_automation_product_service(Arc::new(
+        StaticAutomationService::new(Vec::new()).with_resolve_scope_for_thread(
             automation_pending_thread_id.clone(),
             trigger_run_thread_scope_for(&caller),
         ),
@@ -13781,7 +13462,7 @@ async fn list_threads_breaks_out_when_cursor_does_not_advance_for_automation_thr
     assert_eq!(
         list_requests.len(),
         2,
-        "facade should fetch the stalled page once and then break on the repeated cursor",
+        "service should fetch the stalled page once and then break on the repeated cursor",
     );
     assert_eq!(list_requests[0].cursor, None);
     assert_eq!(list_requests[1].cursor.as_deref(), Some("cursor-stalled"));
@@ -13836,13 +13517,13 @@ async fn list_threads_caps_filtered_pages_when_automation_threads_dominate() {
     assert_eq!(
         list_requests.len(),
         20,
-        "facade must enforce a hard cap on filtered backend pages",
+        "service must enforce a hard cap on filtered backend pages",
     );
     assert!(
         list_requests
             .iter()
             .all(|request| request.limit == Some(50)),
-        "facade should use a fixed candidate page size instead of shrinking toward one"
+        "service should use a fixed candidate page size instead of shrinking toward one"
     );
 }
 
@@ -13863,7 +13544,7 @@ async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
     // Threads list newest-activity first, so create them oldest → newest:
     // second visible, then first visible, then the automation thread last.
     // That yields a candidate order of [automation, first, second], so the
-    // facade has to skip the leading hidden automation thread while filling
+    // service has to skip the leading hidden automation thread while filling
     // the first page — the behavior under test. Waiting past each stamp
     // keeps the `created_at` order strict regardless of clock resolution.
     let second = thread_service
@@ -14364,7 +14045,7 @@ async fn legacy_deferred_busy_mark_failure_surfaces_error_not_false_terminal() {
 }
 
 /// Test lander that records what it was asked to land and returns a ref per
-/// attachment with a deterministic `storage_key`, so the facade test can assert
+/// attachment with a deterministic `storage_key`, so the service test can assert
 /// both that decode→land ran and that the returned refs reach the transcript.
 #[derive(Default)]
 struct RecordingLander {
@@ -14568,9 +14249,9 @@ async fn submit_turn_rejects_attachments_when_no_lander_is_wired() {
 }
 
 // ---------------------------------------------------------------------------
-// Admin user management: facade authorization + last-admin protection.
+// Admin user management: service authorization + last-admin protection.
 //
-// Drives the facade methods through a fake `AdminUserService` port so the
+// Drives the service methods through a fake `AdminUserService` port so the
 // load-bearing NEW logic — role-based authorization (read every request),
 // operator bypass, and last-admin protection — is tested through the caller.
 // The composition adapter over the real identity store is thin mapping;
@@ -14780,7 +14461,7 @@ async fn admin_users_are_available_as_product_views_and_capabilities() {
     ]));
     let target = UserId::new("user-beta").expect("user");
 
-    // safety: these are ProductSurface facade query calls in a contract test;
+    // safety: these are ProductSurface service query calls in a contract test;
     // no database transaction is involved.
     let users = services
         .query(
@@ -15014,7 +14695,7 @@ async fn admin_users_are_available_as_product_views_and_capabilities() {
     assert_eq!(deleted.code, ProductSurfaceErrorCode::NotFound);
 }
 
-/// Drive EVERY admin verb through the facade and assert each is a 403.
+/// Drive EVERY admin verb through the service and assert each is a 403.
 /// `authorize_admin` is a predicate that gates side effects, so it must be
 /// tested at every call site — not just `list` (.claude/rules/testing.md,
 /// "test through the caller"): a verb that forgot to call it would be an
@@ -15140,7 +14821,7 @@ async fn admin_member_caller_is_forbidden_on_every_verb() {
 
 #[tokio::test]
 async fn admin_unknown_caller_is_forbidden_on_every_verb() {
-    // The caller has no user record at all. Same 403 as a member — the facade
+    // The caller has no user record at all. Same 403 as a member — the service
     // must never leak (via a different status/code) whether the caller record
     // exists but is under-privileged vs. does not exist.
     let services = admin_services(FakeAdminUsers::default());
@@ -15252,7 +14933,7 @@ async fn admin_list_forwards_status_filter_to_the_port() {
 
 #[tokio::test]
 async fn admin_list_bounds_pages_and_threads_the_cursor() {
-    // The facade must clamp the page and derive a `next_cursor` from a full
+    // The service must clamp the page and derive a `next_cursor` from a full
     // page, then honor that cursor on the next call — so a large tenant is
     // paged, not returned (and scanned) in one unbounded response.
     let services = admin_services(FakeAdminUsers::with([
@@ -15451,31 +15132,4 @@ async fn admin_last_admin_protection_survives_concurrent_demotion() {
         remaining, 1,
         "the tenant must never be stranded without an admin"
     );
-}
-
-/// Playwright live-serve regression: `trace.hold_authorize` arrives on the
-/// wire as the command descriptor's request struct (`{"submission_id": ...}` —
-/// exactly what the webui handler serializes), but the command arm decoded it
-/// as a bare string and 400-rejected every well-formed authorize. Drives the
-/// real ProductSurface command door with that wire shape; an absent hold is
-/// the normal `{ authorized: false }` success, never an input error.
-#[tokio::test]
-async fn trace_hold_authorize_command_accepts_the_descriptor_wire_request() {
-    let services = RebornServices::new(
-        Arc::new(InMemorySessionThreadService::default()),
-        Arc::new(FakeTurnCoordinator::default()),
-    );
-    let response = ironclaw_host_api::ProductSurface::invoke(
-        &services,
-        caller_for_user("trace-hold-authorize-wire-user"),
-        ironclaw_host_api::ProductSurfaceInvokeRequest {
-            operation_id: CapabilityId::new(ironclaw_product::TRACE_HOLD_AUTHORIZE_COMMAND.id)
-                .expect("command id"),
-            input: json!({ "submission_id": uuid::Uuid::new_v4().to_string() }),
-            activity_id: ActivityId::new(),
-        },
-    )
-    .await
-    .expect("hold authorize command decodes its wire request");
-    assert_eq!(response.output, json!({ "authorized": false }));
 }

@@ -21,7 +21,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use super::{filesystem::BlockingTurnStatePutFilesystem, product_workflow::resource_scope};
+use super::{filesystem::BlockingTurnStatePutFilesystem, product_surface::resource_scope};
 use ironclaw_approvals::{ApprovalResolver, AutoApproveSettingInput, DenyApproval, LeaseApproval};
 use ironclaw_auth::RebornProductAuthServices;
 use ironclaw_auth::{
@@ -185,15 +185,15 @@ impl HarnessCapabilityMode {
 
 /// Backing handles for the two synthetic `outbound_delivery_*` capabilities
 /// (C-SYNTH outbound seam). `Some` only for `outbound_target_tools()`. Bundles
-/// the injected facade double + the settings stores the production
+/// the injected service double + the settings stores the production
 /// `outbound_delivery_capabilities` wiring consumes, so the harness struct
 /// widens by ONE field instead of four. The auto-approve store and
 /// approval-request/lease stores are already held as sibling harness fields
 /// (`auto_approve_settings` / `approval_parts`) and re-used, not duplicated here.
 struct OutboundTargetToolsParts {
     /// Concrete double (not the trait object) so tests can read `set` calls back;
-    /// upcast to `Arc<dyn OutboundPreferencesProductFacade>` at wrap time.
-    facade: Arc<super::outbound_preferences::FakeOutboundPreferencesFacade>,
+    /// upcast to `Arc<dyn OutboundPreferencesProductService>` at wrap time.
+    service: Arc<super::outbound_preferences::FakeOutboundPreferencesService>,
     requires_approval: bool,
     tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>,
     persistent_approval_policies: Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStorePort>,
@@ -340,7 +340,7 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// SAME live trigger repository this harness's capability dispatch uses
     /// (Enabler B.3). `Some` only for `new_with_options`-built harnesses.
     /// Read via `trigger_repository_for_test` to wire
-    /// `RebornAutomationProductFacade` over the same repo a prior turn used.
+    /// `RebornAutomationProductService` over the same repo a prior turn used.
     trigger_repository: Option<Arc<dyn ironclaw_triggers::TriggerRepository>>,
     /// The full `RebornServices` bundle this harness's `new_with_options` built
     /// (`build_reborn_services`), retained so a group can build the REAL
@@ -643,7 +643,7 @@ impl HostRuntimeCapabilityHarness {
             seed_extension_credentials,
             skill_activation_tenant,
             system_skill_fixtures,
-            outbound_target_facade,
+            outbound_target_service,
             network_http_egress_for_test,
             activate_bundled_extensions_for_test,
             project_service_fault_injection,
@@ -807,7 +807,7 @@ impl HostRuntimeCapabilityHarness {
         let trigger_repository = services.local_dev_shared_trigger_repository_for_test();
         // W4-ASK-EACH-ONCE: capture the local-dev per-tool permission override
         // store unconditionally (mirrors `auto_approve_settings` above), not just
-        // for `outbound_target_tools()`'s narrower `Some((facade, ..))` arm below
+        // for `outbound_target_tools()`'s narrower `Some((service, ..))` arm below
         // -- any host-runtime-backed harness/group can now install a per-capability
         // `AskEachTime` override via `set_ask_each_time_override_for_test`.
         let tool_permission_overrides = services.local_dev_tool_permission_overrides_for_test();
@@ -815,12 +815,12 @@ impl HostRuntimeCapabilityHarness {
         // `tool_permission_overrides` above.
         let persistent_approval_policies =
             services.local_dev_persistent_approval_policies_for_test();
-        // C-SYNTH outbound: pair the injected facade double with the local-dev
+        // C-SYNTH outbound: pair the injected service double with the local-dev
         // settings stores production's `outbound_delivery_capabilities` consumes,
         // captured from `RebornServices` before the `host_runtime` move. Only
-        // `outbound_target_tools()` supplies the facade.
-        let outbound_target_tools = match outbound_target_facade {
-            Some((facade, requires_approval)) => {
+        // `outbound_target_tools()` supplies the service.
+        let outbound_target_tools = match outbound_target_service {
+            Some((service, requires_approval)) => {
                 let tool_permission_overrides = tool_permission_overrides
                     .clone()
                     .ok_or("outbound_target_tools requires a local-dev tool-override store")?;
@@ -828,7 +828,7 @@ impl HostRuntimeCapabilityHarness {
                     .clone()
                     .ok_or("outbound_target_tools requires a local-dev persistent-policy store")?;
                 Some(OutboundTargetToolsParts {
-                    facade,
+                    service,
                     requires_approval,
                     tool_permission_overrides,
                     persistent_approval_policies,
@@ -982,7 +982,7 @@ impl HostRuntimeCapabilityHarness {
     /// durable append would fail closed as `UnknownThread` ->
     /// `AgentLoopHostErrorKind::Unavailable` -> a terminal
     /// `HostUnavailable { stage: Capability }` for the whole run (see
-    /// `.claude/rules/agent-loop-capabilities.md`).
+    /// capability-access contract).
     ///
     /// Interior mutability (not a builder field) because that real thread
     /// service is only constructed in `group.rs`'s `into_group`, AFTER
@@ -1059,14 +1059,14 @@ impl HostRuntimeCapabilityHarness {
         &self,
         turn_store: Arc<ironclaw_turns::TurnStateRowStore<HarnessTurnBackend>>,
     ) -> HarnessResult<()> {
-        let services = self
+        let runtime = self
             .reborn_services_for_test()
-            .ok_or("trigger source delivery wiring requires composed Reborn services")?;
-        ironclaw_reborn_composition::test_support::set_local_dev_trigger_source_turn_state_for_test(
-            services,
+            .ok_or("trigger source turn-state wiring requires composed Reborn runtime")?;
+        ironclaw_reborn_composition::test_support::rebind_local_dev_trigger_source_turn_state_for_test(
+            runtime,
             turn_store,
-        )?;
-        Ok(())
+        )
+        .map_err(Into::into)
     }
 
     fn invocations(&self) -> Vec<LoopRequest> {
@@ -1342,15 +1342,15 @@ impl HostRuntimeCapabilityHarness {
         self.project_service.clone()
     }
 
-    /// C-SYNTH outbound: the injected facade double, for read-back that a
-    /// `target_set` actually reached the facade seam
+    /// C-SYNTH outbound: the injected service double, for read-back that a
+    /// `target_set` actually reached the service seam
     /// (`recorded_set_target_ids`). `Some` only for `outbound_target_tools()`.
-    pub(crate) fn outbound_preferences_facade_for_test(
+    pub(crate) fn outbound_preferences_service_for_test(
         &self,
-    ) -> Option<Arc<super::outbound_preferences::FakeOutboundPreferencesFacade>> {
+    ) -> Option<Arc<super::outbound_preferences::FakeOutboundPreferencesService>> {
         self.outbound_target_tools
             .as_ref()
-            .map(|parts| Arc::clone(&parts.facade))
+            .map(|parts| Arc::clone(&parts.service))
     }
 
     /// C-SYNTH outbound: persist a `Disabled` per-tool permission override for
@@ -1731,8 +1731,9 @@ impl HostRuntimeCapabilityHarness {
                     ironclaw_approvals::test_support::in_memory_backed_persistent_approval_policy_store(),
                 )
             });
-        let outbound_preferences_facade = self.outbound_target_tools.as_ref().map(|parts| {
-            Arc::clone(&parts.facade) as Arc<dyn ironclaw_product::OutboundPreferencesProductFacade>
+        let outbound_preferences_service = self.outbound_target_tools.as_ref().map(|parts| {
+            Arc::clone(&parts.service)
+                as Arc<dyn ironclaw_product::OutboundPreferencesProductService>
         });
         let outbound_delivery_target_set_requires_approval = self
             .outbound_target_tools
@@ -1893,7 +1894,7 @@ impl HostRuntimeCapabilityHarness {
                     services,
                 )
             }),
-            outbound_preferences_facade,
+            outbound_preferences_service,
             outbound_delivery_target_set_requires_approval,
             tool_permission_overrides,
             auto_approve_settings,
