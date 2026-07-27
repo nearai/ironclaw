@@ -1815,6 +1815,26 @@ impl RebornIntegrationHarness {
         label: &str,
         provider_scopes: &[&str],
     ) -> HarnessResult<()> {
+        self.seed_capability_credential_account_with_token(
+            provider,
+            label,
+            provider_scopes,
+            &format!("itest-{provider}-token"),
+        )
+        .await
+    }
+
+    /// [`Self::seed_capability_credential_account`] with caller-chosen token
+    /// material, so a later credential can be told apart from this one on the
+    /// wire. See `seed_credential_account_with_token` for why identical
+    /// material would make a re-auth assertion unable to fail.
+    pub async fn seed_capability_credential_account_with_token(
+        &self,
+        provider: &str,
+        label: &str,
+        provider_scopes: &[&str],
+        token: &str,
+    ) -> HarnessResult<()> {
         let harness = match &self._shared.capability {
             GroupCapability::HostRuntime(arc) => arc,
             GroupCapability::Recording | GroupCapability::RecordingNoProgress => {
@@ -1832,7 +1852,7 @@ impl RebornIntegrationHarness {
             .unwrap_or_else(|| self.binding.actor_user_id.clone());
         let scope = self.run_resource_scope_for_user(dispatch_user);
         harness
-            .seed_credential_account_with_material(&scope, provider, label, provider_scopes)
+            .seed_credential_account_with_token(&scope, provider, label, provider_scopes, token)
             .await
     }
 
