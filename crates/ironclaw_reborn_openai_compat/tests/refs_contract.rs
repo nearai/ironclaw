@@ -4,7 +4,7 @@ use ironclaw_reborn_openai_compat::{
     OpenAiCompatHttpError, OpenAiCompatIdempotencyKey, OpenAiCompatInternalRefs,
     OpenAiCompatProductActionRef, OpenAiCompatProjectionRef, OpenAiCompatPublicId,
     OpenAiCompatRefLookup, OpenAiCompatRefOperation, OpenAiCompatRefReservation,
-    OpenAiCompatRefReservationOutcome, OpenAiCompatRefStore, OpenAiCompatRequestFingerprint,
+    OpenAiCompatRefReservationOutcome, OpenAiCompatRefStorePort, OpenAiCompatRequestFingerprint,
     OpenAiCompatResourceBinding, OpenAiCompatRouteSurface, OpenAiCompatTurnRunRef,
     OpenAiResponseId,
 };
@@ -315,7 +315,7 @@ async fn generated_public_ref_does_not_embed_internal_refs() {
 }
 
 async fn reserve_created(
-    store: &dyn OpenAiCompatRefStore,
+    store: &dyn OpenAiCompatRefStorePort,
     owner: OpenAiCompatActorScope,
     surface: OpenAiCompatRouteSurface,
     request_fingerprint: OpenAiCompatRequestFingerprint,

@@ -39,7 +39,7 @@ const AMBIGUOUS_RUN_ID = Symbol("ambiguous-run-id");
 // prompt payloads may also arrive for a blocked turn, but the projection gate
 // item is the rebuildable source of the pending gate identity. The handler
 // therefore drives long-lived UI state off projection items — see
-// `ironclaw_product_adapters::outbound::ProductProjectionItem` for
+// `ironclaw_product::outbound::ProductProjectionItem` for
 // the item shapes.
 //
 // Items are externally-tagged enums so each entry carries exactly

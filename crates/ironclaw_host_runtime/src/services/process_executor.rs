@@ -271,7 +271,7 @@ mod tests {
         ResourceScope, ResourceUsage, RuntimeDispatchErrorKind, RuntimeLane, TenantId, ThreadId,
         UserId,
     };
-    use ironclaw_processes::{ProcessCancellationToken, ProcessStart, ProcessStore};
+    use ironclaw_processes::{ProcessCancellationToken, ProcessStart, ProcessStorePort};
     use serde_json::json;
 
     #[derive(Default)]
@@ -628,7 +628,7 @@ mod tests {
             .start(process_start_from_request(request))
             .await
             .unwrap();
-        let process_store: Arc<dyn ProcessStore> = store;
+        let process_store: Arc<dyn ProcessStorePort> = store;
         RuntimeDispatchProcessExecutor::new(
             dispatcher,
             ironclaw_capabilities::process_authorization_remint_port(process_store),

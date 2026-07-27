@@ -1,13 +1,13 @@
-//! W5-WEBUI-API-1: cold LIST over a real `RebornAutomationProductFacade`
+//! W5-WEBUI-API-1: cold LIST over a real `RebornAutomationProductService`
 //! wired from this group's shared, live trigger repository (Enabler B).
-//! Reuses the group's ONE repository so the facade's real visibility-filter/
+//! Reuses the group's ONE repository so the service's real visibility-filter/
 //! run-history-join logic is under test, not a hand-rolled double.
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
 use super::reborn_support::webui_mount::{get_json, mount_webui_v2_router, webui_caller_for};
 use axum::http::StatusCode;
-use ironclaw_product_workflow::RebornServices;
+use ironclaw_product::RebornServices;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -44,14 +44,14 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let trigger_repository = capability_harness
         .trigger_repository_for_test()
         .ok_or("triggers group harness missing a captured trigger repository")?;
-    let facade =
-        ironclaw_reborn_composition::test_support::local_dev_automation_product_facade_for_test(
+    let service =
+        ironclaw_reborn_composition::test_support::local_dev_automation_product_service_for_test(
             trigger_repository,
             Arc::clone(&g.shared.turn_store),
         );
 
     let services = RebornServices::new(h.thread_harness.service.clone(), h.coordinator.clone())
-        .with_automation_product_facade(facade);
+        .with_automation_product_service(service);
     // The production capability port resolves the execution user from the
     // run's binding owner (owner → actor → fallback), so trigger
     // creator_user_id is the binding subject — the default `webui_caller_for`

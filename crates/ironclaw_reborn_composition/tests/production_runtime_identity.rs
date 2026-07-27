@@ -36,10 +36,13 @@ use ironclaw_host_runtime::{
     TenantSandboxProcessPort,
 };
 use ironclaw_reborn_composition::{
-    ExternalSubjectId, ProviderKind, RebornBuildInput, RebornCompositionProfile,
+    ExternalSubjectId, ProviderKind, RebornCompositionProfile, RebornHostBindings,
     RebornRuntimeIdentity, RebornRuntimeInput, RebornRuntimeProcessBinding,
-    ResolveExternalIdentity, SurfaceKind, build_reborn_runtime, builtin_first_party_trust_policy,
+    ResolveExternalIdentity, SurfaceKind, build_reborn_runtime,
 };
+
+#[path = "support/first_party.rs"]
+mod first_party_support;
 
 // ─── minimal sandbox transport stub (production requires a process binding) ───
 
@@ -92,8 +95,8 @@ async fn production_runtime_wires_identity_resolver_and_isolates_tenants() {
             .expect("libsql db"),
     );
 
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::libsql(
+    let input = RebornRuntimeInput::from_build_input(
+        RebornHostBindings::libsql(
             RebornCompositionProfile::Production,
             "prod-identity-owner",
             db,
@@ -101,9 +104,7 @@ async fn production_runtime_wires_identity_resolver_and_isolates_tenants() {
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
-        .with_production_trust_policy(Arc::new(
-            builtin_first_party_trust_policy().expect("trust policy"),
-        ))
+        .with_first_party_bundles(first_party_support::test_first_party_bundles())
         .with_runtime_policy(EffectiveRuntimePolicy {
             deployment: DeploymentMode::HostedMultiTenant,
             requested_profile: RuntimeProfile::SecureDefault,
@@ -133,14 +134,11 @@ async fn production_runtime_wires_identity_resolver_and_isolates_tenants() {
     let tenant_a = TenantId::new("prod-identity-tenant-a").expect("tenant a");
     let tenant_b = TenantId::new("prod-identity-tenant-b").expect("tenant b");
 
-    // (1) THE WIRING. On a production build `local_runtime` is `None`; the
-    // accessor must fall back to the production store graph and hand back a
-    // resolver instead of `None`. This `expect` on the outer `Option` is the
-    // core regression — it panicked before the production fallback existed.
+    // (1) THE WIRING. On a production build the resolver rides the same core
+    // scoped substrate as local builds.
     let resolver = runtime
         .open_reborn_identity_resolver(&tenant_a)
         .await
-        .expect("production runtime must wire the identity resolver (#5013)")
         .expect("resolver opens over the production store graph");
 
     // (2) PERSISTENCE ROUND-TRIP over the production
@@ -176,15 +174,12 @@ async fn production_runtime_wires_identity_resolver_and_isolates_tenants() {
          tenant A's user (cross-tenant identity isolation)"
     );
 
-    // (4) ADMIN USER DIRECTORY WIRING (#5013). `RebornRuntime::reborn_user_directory`
-    // got the identical `None`→production-fallback fix as the resolver above, so it
-    // must be wired (return `Some`) on a production build and enumerate exactly the
-    // users SSO login persists — under the same per-call tenant partitioning. Tenant
-    // A's page contains `user_a` and never `user_b` (which was minted under tenant B);
-    // a leak here is a cross-tenant directory read, not a flake.
-    let directory = runtime
-        .reborn_user_directory_for_tests()
-        .expect("production runtime must wire the admin user directory (#5013)");
+    // (4) ADMIN USER DIRECTORY WIRING (#5013). The directory is a core runtime
+    // handle and enumerates exactly the users SSO login persists — under the
+    // same per-call tenant partitioning. Tenant A's page contains `user_a` and
+    // never `user_b` (which was minted under tenant B); a leak here is a
+    // cross-tenant directory read, not a flake.
+    let directory = runtime.reborn_user_directory_for_tests();
     let tenant_a_users = directory
         .list_users(&tenant_a, None, None, 10)
         .await

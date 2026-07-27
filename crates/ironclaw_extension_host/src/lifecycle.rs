@@ -8,8 +8,8 @@
 //!
 //! The host record carries only the working subset it can prove —
 //! `InstallationState::{Installed, Active, Failed}` plus a redacted
-//! `last_error`. Removal is the facade path (`remove_record` drops the row and
-//! the facade runs auth/credential cleanup); the host does not own a
+//! `last_error`. Removal is the service path (`remove_record` drops the row and
+//! the service runs auth/credential cleanup); the host does not own a
 //! multi-step removal pipeline.
 
 use std::collections::BTreeSet;
@@ -20,7 +20,9 @@ use async_trait::async_trait;
 use ironclaw_host_api::{CapabilityId, RestrictedEgress};
 use tokio::sync::Mutex;
 
-use crate::active::{ActiveExtension, ActiveSnapshot, Generation, SnapshotConflict};
+use crate::active::{
+    ActiveExtension, ActiveSnapshot, BoundExtension, Generation, SnapshotConflict,
+};
 use crate::entrypoint::{BindError, check_binding};
 use crate::loaders::{ExtensionLoader, LoadContext};
 use crate::state::InstallationState;
@@ -233,7 +235,7 @@ impl ExtensionHost {
                             .map(|channel| channel.egress.as_slice())
                             .unwrap_or(&[]),
                     );
-                    let ctx = ironclaw_product_adapters::ChannelContext {
+                    let ctx = ironclaw_product::ChannelContext {
                         extension_id: &record.extension_id,
                         installation_id: &record.installation_id,
                         config: &record.config,
@@ -292,7 +294,7 @@ impl ExtensionHost {
     }
 
     /// Drop an installation record. This is the live removal path: the
-    /// lifecycle facade unpublishes via [`Self::deactivate`], runs auth /
+    /// lifecycle service unpublishes via [`Self::deactivate`], runs auth /
     /// credential cleanup (`cleanup_for_lifecycle`), and drops the mirrored
     /// host record here.
     pub async fn remove_record(&self, extension_id: &str) -> Result<(), LifecycleError> {
@@ -380,10 +382,22 @@ impl ExtensionHost {
                 }));
             }
         }
+        let extension = Arc::new(
+            BoundExtension::new(
+                &resolved,
+                &record.installation_id,
+                bindings.tools.clone(),
+                bindings.channel.clone(),
+            )
+            .map_err(|error| BindError::Load {
+                reason: format!("extension runtime identity invalid: {error}"),
+            })?,
+        );
         Ok(ActiveExtension {
             extension_id: record.extension_id.clone(),
             installation_id: record.installation_id.clone(),
             resolved,
+            extension,
             tools: bindings.tools,
             channel: bindings.channel,
         })

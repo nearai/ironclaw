@@ -4,7 +4,7 @@
 
 ## Code Discovery — Query the Knowledge Graph First
 
-This repo can be indexed into a **codebase knowledge graph** (the `codebase-memory` MCP server) over `crates/`. For any *where-is / who-calls / how-does-data-flow / what-does-this-touch* question, **probe the graph before reaching for `Grep`** — text search cannot see cross-crate call chains, and this codebase's real cost is cross-crate (a feature crosses `product_workflow → composition → webui_v2 → runtime → frontend`).
+This repo can be indexed into a **codebase knowledge graph** (the `codebase-memory` MCP server) over `crates/`. For any *where-is / who-calls / how-does-data-flow / what-does-this-touch* question, **probe the graph before reaching for `Grep`** — text search cannot see cross-crate call chains. A WebUI feature normally crosses `webui → ProductSurface → product → composition → runtime`, with the frontend inside `ironclaw_webui`.
 
 **Where it lives:** `.codebase-memory/graph.db.zst` — a **git-ignored build artifact, not source**. One per environment, rebuilt from code. Never commit it.
 
@@ -27,12 +27,10 @@ This repo can be indexed into a **codebase knowledge graph** (the `codebase-memo
 
 ## Where to Build — the Reborn stack in `crates/`
 
-**All work lives in the Reborn stack under `crates/`.** The v1 `src/` monolith
-(package `ironclaw_legacy`) was deleted under Tier B
-(`docs/plans/2026-07-02-reborn-internal-module-refactor.md` §8) — there is no
-longer a v1 codebase to disambiguate from. A Reborn feature crosses
-`product_workflow → composition → webui_v2 → runtime/serve → frontend`; the
-binary entry point is `crates/ironclaw_reborn_cli` (binary name `ironclaw`).
+**All new work lives in the Reborn stack under `crates/`.** The legacy `src/`
+monolith and legacy crates are maintenance-only. A Reborn WebUI feature crosses
+`ironclaw_webui → ProductSurface → ironclaw_product → composition → runtime`;
+the binary entry point is `crates/ironclaw_reborn_cli` (binary name `ironclaw`).
 Start from the `reborn-feature` skill — it maps those layers so you wire a
 feature in one pass instead of layer-by-layer. The workspace root
 (`Cargo.toml`, package `ironclaw_reborn_integration_tests`) now hosts only the
@@ -162,25 +160,24 @@ All I/O is async with tokio. Use `Arc<T>` for shared state, `RwLock` for concurr
 
 ## Extracted Crates
 
-Safety logic lives in `crates/ironclaw_safety/`, skills in `crates/ironclaw_skills/`, multi-provider LLM integration in `crates/ironclaw_llm/`. **Import directly from the extracted crate** (e.g. `use ironclaw_safety::SafetyLayer`, `use ironclaw_skills::SkillRegistry`, `use ironclaw_llm::{LlmProvider, LlmError}`). These crates are the sole home of their types now that the v1 `src/` monolith (which formerly re-exported some of them) has been deleted under Tier B — always import from the owning crate.
+Safety logic lives in `crates/ironclaw_safety/`, skills in `crates/ironclaw_skills/`, multi-provider LLM integration in `crates/ironclaw_llm/`. **Import directly from the extracted crate** (e.g. `use ironclaw_safety::SafetyLayer`, `use ironclaw_skills::SkillRegistry`, `use ironclaw_llm::{LlmProvider, LlmError}`). These crates are the sole home of their types; always import from the owning crate.
 
 ## Project Structure
 
-All production code lives under `crates/` (the Reborn stack). The v1 `src/`
-monolith and the `ironclaw_gateway` / `ironclaw_tui` crates were deleted under
-Tier B. For where a symbol or subsystem lives, query the codebase knowledge
+Production code is split between the Reborn stack under `crates/` and
+maintenance-only legacy surfaces. For where a symbol or subsystem lives, query the codebase knowledge
 graph (see "Code Discovery" above) or read the relevant crate's `CLAUDE.md` /
 `AGENTS.md`; `crates/AGENTS.md` is the crate-level map. The reborn-feature
-flow crosses `product_workflow → composition → webui_v2 → runtime/serve →
-frontend` (binary `ironclaw` in `crates/ironclaw_reborn_cli`).
+flow is described in `.claude/skills/reborn-feature/SKILL.md` (binary
+`ironclaw` in `crates/ironclaw_reborn_cli`).
 
 ```
 crates/                     # all production code (see crates/AGENTS.md for the full map)
 ├── ironclaw_reborn_cli/    # binary entry point (binary name `ironclaw`)
 ├── ironclaw_reborn_composition/  # wires storage/runtime services by profile
-├── ironclaw_product_workflow/    # product-facing workflow surface
+├── ironclaw_product/             # product-facing orchestration and surface
 ├── ironclaw_runner/ ironclaw_turns/ ironclaw_agent_loop/  # turn runtime + agent loop
-├── ironclaw_webui/         # WebChat v2 SPA (frontend/) + serve wiring
+├── ironclaw_webui/         # WebChat v2 routes, SPA (frontend/) + serve wiring
 ├── ironclaw_filesystem/    # RootFilesystem mount catalog (persistence plane)
 ├── ironclaw_llm/ ironclaw_safety/ ironclaw_skills/  # extracted subsystems
 └── ...                     # domain crates (threads, secrets, oauth, triggers, …)
@@ -246,29 +243,22 @@ A Reborn channel is one capability surface of an **extension** (unified model):
 the manifest (`reborn.extension_manifest.v3`) declares `[channel]` (ingress
 verification recipe, `[channel.config]`, egress allowlist, presentation) beside
 the extension's tools and auth recipes, and the extension's `ChannelAdapter`
-(`crates/ironclaw_product_adapters`) implements inbound normalize / deliver /
+(`crates/ironclaw_host_api/src/product_adapter/channel_adapter.rs`) implements inbound normalize / deliver /
 activate / cleanup. Binaries supply adapters through
-`RebornBuildInput::with_channel_extension_bindings`
+`RebornHostBindings::with_channel_extension_bindings`
 (`crates/ironclaw_reborn_composition/src/input.rs`); composition wires the
 generic ingress router, pairing seam, identity bindings, and the host-owned
 delivery coordinator — never per-channel host code. Start from the
 `reborn-extension-surfaces` skill; the worked example is the Slack package
 (`crates/ironclaw_first_party_extensions/assets/slack/`).
 
-## Everything Goes Through Capability Dispatch
+## Capability dispatch
 
-**Core principle**: all actions originating from product/WebUI handlers,
-scheduled triggers, channels, or any other non-agent caller route through the
-**same capability/tool dispatch path** the agent loop uses — they do not reach
-around it to mutate stores directly. This gives every caller-initiated mutation
-the same audit trail, safety pipeline (param validation, redaction, output
-sanitization), and authorization/approval surface as agent-initiated tool
-calls.
-
-This invariant is enforced structurally in the product-workflow and
-composition crates and by `cargo test -p ironclaw_architecture` (dependency and
-composition boundaries), not by a grep-based pre-commit check. See
-`.claude/rules/tools.md`.
+Product/WebUI handlers, scheduled triggers, channels, and agent callers use
+the typed `ProductSurface` and capability contracts. They must not reach around
+authorization, approvals, resource accounting, host mediation, or the owning
+domain operation to mutate stores directly. The architecture tests and the
+owning contracts are the source of truth for this boundary.
 
 ## Workspace & Memory
 

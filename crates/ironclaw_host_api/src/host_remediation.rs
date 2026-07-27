@@ -248,7 +248,7 @@ mod tests {
     #[test]
     fn does_not_false_positive_on_long_host_identifiers() {
         for ok in [
-            "set IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI=<your redirect URL>",
+            "set IRONCLAW_REBORN_WEBUI_BASE_URL=<your public base URL>",
             "ironclaw config set google.client_id <id>.apps.googleusercontent.com",
             "https://console.cloud.google.com/apis/credentials?project=my-project-1234",
             "add `enabled = true` under the [telegram] section of config.toml",

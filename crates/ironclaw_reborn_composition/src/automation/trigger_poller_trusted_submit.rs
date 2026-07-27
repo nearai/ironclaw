@@ -7,7 +7,7 @@ use ironclaw_conversations::{
     ExternalEventId, InboundTurnError, ResolveConversationRequest,
 };
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
-use ironclaw_product_workflow::automation_trigger_thread_metadata_json;
+use ironclaw_product::automation_trigger_thread_metadata_json;
 use ironclaw_safety::{
     InjectionScanner, PromptSafetyRejection, Sanitizer, validate_trusted_trigger_prompt,
 };
@@ -96,14 +96,7 @@ pub(crate) trait TriggerFireAuthorizer: Send + Sync {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TriggerFireAuthError {
-    // arch-exempt: dead_code, Denied is reserved for real fire-time auth backend denials, plan #4436
-    #[allow(dead_code)]
     Denied { reason: String },
-    // Part of the fire-time authorization contract now so backend
-    // unavailability has stable retry semantics before the real access
-    // authorizer is wired. The tenant-scope placeholder does not construct it.
-    // arch-exempt: dead_code, Retryable is reserved for real fire-time auth backend failures, plan #4436
-    #[allow(dead_code)]
     Retryable { reason: String },
 }
 
@@ -486,7 +479,7 @@ mod tests {
         MessageIdempotencyStatus, ThreadAccessDecision, trusted_trigger_fire_submitter,
     };
     use ironclaw_host_api::{ProjectId, TenantId, ThreadId, UserId};
-    use ironclaw_product_workflow::AUTOMATION_TRIGGER_THREAD_SOURCE_TAG;
+    use ironclaw_product::AUTOMATION_TRIGGER_THREAD_SOURCE_TAG;
     use ironclaw_safety::{InjectionWarning, Severity};
     use ironclaw_threads::{
         AcceptedInboundMessage as CanonicalAcceptedInboundMessage,

@@ -205,7 +205,7 @@ pub(super) fn install_with_runner(
     };
     // Captured before the write: a pre-existing file at this path may
     // have been installed by this CLI's own prior run, or by the WebUI
-    // operator facade (`RebornLocalServiceLifecycle`) — both surfaces
+    // operator service (`RebornLocalServiceLifecycle`) — both surfaces
     // target the same unit name/path by design (see the module doc). The
     // write below atomically replaces it.
     let replaced_existing = previous.is_some();

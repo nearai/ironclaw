@@ -29,6 +29,7 @@ use ironclaw_host_runtime::{
     GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime,
     HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
+    NATIVE_MEMORY_FIRST_PARTY_PROVIDER, OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
     PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure,
     RuntimeCapabilityOutcome, RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort,
     SHELL_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
@@ -43,7 +44,7 @@ use ironclaw_host_runtime::{
     WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
     builtin_first_party_handlers_for_process_backend,
     builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
-    builtin_first_party_package_for_process_backend,
+    builtin_first_party_package_for_process_backend, native_memory_first_party_package,
 };
 #[cfg(feature = "test-support")]
 use ironclaw_host_runtime::{
@@ -54,7 +55,7 @@ use ironclaw_network::{
     NetworkResolver, NetworkTransportRequest, NetworkUsage, PolicyNetworkHttpEgress,
 };
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
-use ironclaw_secrets::FilesystemSecretStore;
+use ironclaw_secrets::SecretStore;
 use ironclaw_triggers::{
     ClaimDueFireRequest, ClearActiveFireRequest, FireAcceptedRequest, InMemoryTriggerRepository,
     MAX_TRIGGER_NAME_BYTES, MAX_TRIGGER_PROMPT_BYTES, MissingTriggerActiveRunLookup, TriggerError,
@@ -158,26 +159,36 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
         "builtin.http.save should steer GitHub repository API tasks toward the GitHub extension"
     );
 
-    let memory_write = package
+    // Memory tools now live in the always-on `ironclaw.memory` package,
+    // not the generic builtin package; assert their effects there.
+    let native_package = native_memory_first_party_package().unwrap();
+    let memory_write = native_package
         .capabilities
         .iter()
         .find(|descriptor| descriptor.id.as_str() == MEMORY_WRITE_CAPABILITY_ID)
         .expect("memory write manifest");
     assert_eq!(
         memory_write.effects,
-        vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem]
+        vec![
+            EffectKind::DispatchCapability,
+            EffectKind::ReadFilesystem,
+            EffectKind::WriteFilesystem
+        ]
     );
     for capability_id in [
         MEMORY_SEARCH_CAPABILITY_ID,
         MEMORY_READ_CAPABILITY_ID,
         MEMORY_TREE_CAPABILITY_ID,
     ] {
-        let descriptor = package
+        let descriptor = native_package
             .capabilities
             .iter()
             .find(|descriptor| descriptor.id.as_str() == capability_id)
             .expect("memory read-like manifest");
-        assert_eq!(descriptor.effects, vec![EffectKind::ReadFilesystem]);
+        assert_eq!(
+            descriptor.effects,
+            vec![EffectKind::DispatchCapability, EffectKind::ReadFilesystem]
+        );
     }
 
     let handlers =
@@ -259,7 +270,6 @@ async fn builtin_first_party_package_declares_behavior_neutral_origin_gate_matri
         ECHO_CAPABILITY_ID,
         JSON_CAPABILITY_ID,
         READ_FILE_CAPABILITY_ID,
-        MEMORY_SEARCH_CAPABILITY_ID,
         TRIGGER_LIST_CAPABILITY_ID,
         PROFILE_SET_CAPABILITY_ID,
     ] {
@@ -268,9 +278,9 @@ async fn builtin_first_party_package_declares_behavior_neutral_origin_gate_matri
     for gated in [
         WRITE_FILE_CAPABILITY_ID,
         HTTP_CAPABILITY_ID,
-        MEMORY_WRITE_CAPABILITY_ID,
         SKILL_INSTALL_CAPABILITY_ID,
         TRIGGER_CREATE_CAPABILITY_ID,
+        OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
     ] {
         assert_eq!(
             loop_run(gated),
@@ -278,6 +288,68 @@ async fn builtin_first_party_package_declares_behavior_neutral_origin_gate_matri
             "{gated}"
         );
     }
+}
+
+/// §5.3 S3 for the always-on `ironclaw.memory` package: every memory tool
+/// descriptor carries a declared `origin_gate_matrix` preserving the gating the
+/// tools had as `builtin.memory_*` members of the builtin package (read-like
+/// tools Ungated for `LoopRun` via the reviewed allowlist, `memory_write`
+/// GatedUnlessGranted, `Product`/`Automation` deny-by-default). A missing
+/// matrix is not "no gate" — the S4 authorize fold fails closed to Forbidden
+/// for every origin-stamped invocation, denying all model memory dispatch.
+#[tokio::test]
+async fn native_memory_package_declares_behavior_neutral_origin_gate_matrix() {
+    let package = native_memory_first_party_package().unwrap();
+    for descriptor in &package.capabilities {
+        let matrix = descriptor
+            .origin_gate_matrix
+            .as_ref()
+            .unwrap_or_else(|| panic!("{} must declare an origin_gate_matrix", descriptor.id));
+        assert_eq!(
+            matrix.product,
+            OriginGatePolicy::Forbidden,
+            "{} product must be deny-by-default",
+            descriptor.id
+        );
+        assert_eq!(
+            matrix.automation,
+            OriginGatePolicy::Forbidden,
+            "{} automation must be deny-by-default",
+            descriptor.id
+        );
+        let expected_loop_run = if UNGATED_LOOP_RUN_CAPABILITIES.contains(&descriptor.id.as_str()) {
+            OriginGatePolicy::Ungated
+        } else {
+            OriginGatePolicy::GatedUnlessGranted
+        };
+        assert_eq!(
+            matrix.loop_run, expected_loop_run,
+            "{} loop_run must match its allowlist membership",
+            descriptor.id
+        );
+    }
+
+    let loop_run = |id: &str| {
+        package
+            .capabilities
+            .iter()
+            .find(|descriptor| descriptor.id.as_str() == id)
+            .and_then(|descriptor| descriptor.origin_gate_matrix.as_ref())
+            .map(|matrix| matrix.loop_run)
+            .unwrap_or_else(|| panic!("{id} descriptor with matrix"))
+    };
+    for ungated in [
+        MEMORY_READ_CAPABILITY_ID,
+        MEMORY_SEARCH_CAPABILITY_ID,
+        MEMORY_TREE_CAPABILITY_ID,
+    ] {
+        assert_eq!(loop_run(ungated), OriginGatePolicy::Ungated, "{ungated}");
+    }
+    assert_eq!(
+        loop_run(MEMORY_WRITE_CAPABILITY_ID),
+        OriginGatePolicy::GatedUnlessGranted,
+        "{MEMORY_WRITE_CAPABILITY_ID}"
+    );
 }
 
 fn product_surface_builtin_capabilities() -> &'static [&'static str] {
@@ -432,7 +504,7 @@ async fn builtin_first_party_surface_lists_allowed_tools_in_registry_order() {
 async fn builtin_memory_search_surface_declares_internal_scope_boundary() {
     let runtime = runtime();
     let request = VisibleCapabilityRequest::new(
-        execution_context(all_builtin_capability_ids()),
+        execution_context(all_always_on_first_party_capability_ids()),
         SurfaceKind::new("agent_loop").unwrap(),
     )
     .with_policy(CapabilitySurfacePolicy::allow_all())
@@ -693,6 +765,79 @@ async fn builtin_trigger_create_stamps_caller_scope_and_persists_record() {
     assert_eq!(records[0].project_id, context.resource_scope.project_id);
 }
 
+/// Regression: a trigger-fired loop carries typed scheduled lineage all the
+/// way to the first-party capability boundary. Every model-visible mutation
+/// verb is denied there, while the same caller's ordinary interactive create
+/// and read-only list remain available.
+#[tokio::test]
+async fn scheduled_loop_origin_denies_every_trigger_mutation_at_handler_boundary() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let mut context = execution_context([
+        TRIGGER_CREATE_CAPABILITY_ID,
+        TRIGGER_LIST_CAPABILITY_ID,
+        TRIGGER_PAUSE_CAPABILITY_ID,
+        TRIGGER_RESUME_CAPABILITY_ID,
+        TRIGGER_REMOVE_CAPABILITY_ID,
+    ]);
+
+    let created = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "interactive control",
+            "prompt": "remain scheduled",
+            "schedule": { "kind": "once", "at": "2999-01-01T00:00:00", "timezone": "UTC" }
+        }),
+        context.clone(),
+    )
+    .await
+    .expect("ordinary interactive caller can create a trigger");
+    let trigger_id = created["trigger"]["trigger_id"]
+        .as_str()
+        .expect("created trigger id")
+        .to_string();
+
+    let run_id = ironclaw_host_api::RunId::new();
+    context.run_id = Some(run_id);
+    context.origin = Some(ironclaw_host_api::InvocationOrigin::ScheduledLoopRun(
+        run_id,
+    ));
+    for (capability_id, input) in [
+        (
+            TRIGGER_CREATE_CAPABILITY_ID,
+            json!({
+                "name": "forbidden child",
+                "prompt": "replicate",
+                "schedule": { "kind": "once", "at": "2999-01-02T00:00:00", "timezone": "UTC" }
+            }),
+        ),
+        (
+            TRIGGER_PAUSE_CAPABILITY_ID,
+            json!({"trigger_id": trigger_id}),
+        ),
+        (
+            TRIGGER_RESUME_CAPABILITY_ID,
+            json!({"trigger_id": trigger_id}),
+        ),
+        (
+            TRIGGER_REMOVE_CAPABILITY_ID,
+            json!({"trigger_id": trigger_id}),
+        ),
+    ] {
+        let error = invoke_with_context(&runtime, capability_id, input, context.clone())
+            .await
+            .expect_err("scheduled loop mutation must be denied");
+        assert_eq!(error, RuntimeFailureKind::PolicyDenied, "{capability_id}");
+    }
+
+    let listed = invoke_with_context(&runtime, TRIGGER_LIST_CAPABILITY_ID, json!({}), context)
+        .await
+        .expect("scheduled loop retains read-only trigger_list");
+    assert_eq!(listed["triggers"].as_array().map(Vec::len), Some(1));
+    assert_eq!(listed["triggers"][0]["state"], json!("scheduled"));
+}
+
 /// Per-trigger delivery routing: a model-supplied `delivery_target_id` is
 /// shape-validated, host-validated through the create hook, persisted on the
 /// record, and echoed in the model-facing output — so one automation's
@@ -741,6 +886,48 @@ async fn builtin_trigger_create_with_delivery_target_persists_it_when_host_valid
             .as_ref()
             .map(|target| target.as_str()),
         Some("slack:personal-dm:T123:user-a")
+    );
+}
+
+/// When the model omits `delivery_target_id`, the host hook still receives the
+/// trusted loop run id and may seal a source-derived target into the record.
+/// This is the authority path used for an automation created from an external
+/// conversation; prompt text never supplies the target.
+#[tokio::test]
+async fn builtin_trigger_create_can_inherit_delivery_target_from_trusted_run_context() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let inherited = "external:source-conversation";
+    let hook = Arc::new(SourceResolvingTriggerCreateHook::new(inherited));
+    let runtime = runtime_with_trigger_repository_and_create_hook(repository.clone(), hook.clone());
+    let mut context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+    let run_id = ironclaw_host_api::RunId::new();
+    context.run_id = Some(run_id);
+
+    let output = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Source-routed summary",
+            "prompt": "Summarize yesterday",
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(output["trigger"]["delivery_target_id"], json!(inherited));
+    assert_eq!(hook.seen_run_ids(), vec![Some(run_id)]);
+    let records = repository
+        .list_triggers(context.resource_scope.tenant_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        records[0]
+            .delivery_target
+            .as_ref()
+            .map(|target| target.as_str()),
+        Some(inherited)
     );
 }
 
@@ -2559,7 +2746,12 @@ async fn builtin_rejects_oversized_outputs_before_return() {
 async fn memory_capabilities_write_read_tree_and_search_native_reborn_memory() {
     let runtime = runtime_with_filesystem(InMemoryBackend::new());
     let context = execution_context_with_mounts(
-        all_builtin_capability_ids(),
+        [
+            MEMORY_WRITE_CAPABILITY_ID,
+            MEMORY_READ_CAPABILITY_ID,
+            MEMORY_TREE_CAPABILITY_ID,
+            MEMORY_SEARCH_CAPABILITY_ID,
+        ],
         memory_mounts(MountPermissions::read_write_list_delete()),
     );
 
@@ -8454,6 +8646,43 @@ struct DeliveryTargetValidatingTriggerCreateHook {
     validated: std::sync::Mutex<Vec<String>>,
 }
 
+struct SourceResolvingTriggerCreateHook {
+    target: String,
+    seen_run_ids: std::sync::Mutex<Vec<Option<ironclaw_host_api::RunId>>>,
+}
+
+impl SourceResolvingTriggerCreateHook {
+    fn new(target: &str) -> Self {
+        Self {
+            target: target.to_string(),
+            seen_run_ids: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn seen_run_ids(&self) -> Vec<Option<ironclaw_host_api::RunId>> {
+        self.seen_run_ids.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl TriggerCreateHook for SourceResolvingTriggerCreateHook {
+    async fn resolve_implicit_delivery_target(
+        &self,
+        _scope: &ironclaw_host_api::ResourceScope,
+        run_id: Option<ironclaw_host_api::RunId>,
+    ) -> Result<Option<ironclaw_triggers::TriggerDeliveryTargetId>, TriggerError> {
+        self.seen_run_ids.lock().unwrap().push(run_id);
+        Ok(Some(
+            ironclaw_triggers::TriggerDeliveryTargetId::new(self.target.clone())
+                .expect("fixture target id"),
+        ))
+    }
+
+    async fn after_trigger_persisted(&self, _record: &TriggerRecord) -> Result<(), TriggerError> {
+        Ok(())
+    }
+}
+
 impl DeliveryTargetValidatingTriggerCreateHook {
     fn accepting(target: &str) -> Self {
         Self {
@@ -9269,7 +9498,7 @@ where
         ironclaw_processes::ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()))
+    .with_secret_store(Arc::new(SecretStore::ephemeral()))
     .with_first_party_capabilities(Arc::new(
         builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
     ))
@@ -9283,6 +9512,12 @@ fn registry() -> ExtensionRegistry {
     let mut registry = ExtensionRegistry::new();
     registry
         .insert(builtin_first_party_package().unwrap())
+        .unwrap();
+    // Native memory rides the always-on lane alongside builtin; register its
+    // package so the `ironclaw.memory.*` capabilities are declared for
+    // dispatch + surface in these host-runtime tests (mirrors composition).
+    registry
+        .insert(native_memory_first_party_package().unwrap())
         .unwrap();
     registry
 }
@@ -9311,10 +9546,7 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
         TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
         PROFILE_SET_CAPABILITY_ID,
-        MEMORY_SEARCH_CAPABILITY_ID,
-        MEMORY_WRITE_CAPABILITY_ID,
-        MEMORY_READ_CAPABILITY_ID,
-        MEMORY_TREE_CAPABILITY_ID,
+        OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
         READ_FILE_CAPABILITY_ID,
         WRITE_FILE_CAPABILITY_ID,
         LIST_DIR_CAPABILITY_ID,
@@ -9332,6 +9564,17 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         TRIGGER_PAUSE_CAPABILITY_ID,
         TRIGGER_RESUME_CAPABILITY_ID,
     ]
+}
+
+fn all_always_on_first_party_capability_ids() -> Vec<&'static str> {
+    let mut ids = all_builtin_capability_ids();
+    ids.extend([
+        MEMORY_SEARCH_CAPABILITY_ID,
+        MEMORY_WRITE_CAPABILITY_ID,
+        MEMORY_READ_CAPABILITY_ID,
+        MEMORY_TREE_CAPABILITY_ID,
+    ]);
+    ids
 }
 
 fn mounted_filesystem(path: &Path, permissions: MountPermissions) -> (DiskFilesystem, MountView) {
@@ -9965,12 +10208,28 @@ fn trust_policy() -> HostTrustPolicy {
             builtin_effects(),
             None,
         ),
+        // Native memory rides the always-on lane alongside builtin and carries
+        // its own first-party trust entry (mirrors the composition trust policy).
+        AdminEntry::for_local_manifest(
+            PackageId::new(NATIVE_MEMORY_FIRST_PARTY_PROVIDER).unwrap(),
+            "/system/extensions/ironclaw.memory/manifest.toml".to_string(),
+            None,
+            HostTrustAssignment::first_party(),
+            builtin_effects(),
+            None,
+        ),
     ]))])
     .unwrap()
 }
 
 fn provider_trust() -> BTreeMap<ExtensionId, TrustDecision> {
-    BTreeMap::from([(provider_id(), trust_decision())])
+    BTreeMap::from([
+        (provider_id(), trust_decision()),
+        (
+            ExtensionId::new(NATIVE_MEMORY_FIRST_PARTY_PROVIDER).unwrap(),
+            trust_decision(),
+        ),
+    ])
 }
 
 fn trust_decision() -> TrustDecision {

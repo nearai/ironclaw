@@ -3,7 +3,7 @@ use ironclaw_host_api::{
     RuntimeHttpSaveTarget,
 };
 use ironclaw_network::{NetworkHttpEgress, NetworkHttpRequest};
-use ironclaw_secrets::SecretStore;
+use ironclaw_secrets::SecretStorePort;
 
 use super::{HostHttpEgressService, PipelineError, runtime_network_error, runtime_response};
 use crate::{
@@ -87,7 +87,7 @@ pub(super) async fn execute<N, S>(
 ) -> Result<RuntimeHttpEgressResponse, PipelineError>
 where
     N: NetworkHttpEgress + Send + Sync,
-    S: SecretStore + Send + Sync,
+    S: SecretStorePort + Send + Sync,
 {
     execute_inner(service, request, false, false).await
 }
@@ -98,7 +98,7 @@ pub(super) async fn execute_for_model_visible_output<N, S>(
 ) -> Result<RuntimeHttpEgressResponse, PipelineError>
 where
     N: NetworkHttpEgress + Send + Sync,
-    S: SecretStore + Send + Sync,
+    S: SecretStorePort + Send + Sync,
 {
     execute_inner(service, request, true, false).await
 }
@@ -113,7 +113,7 @@ pub(super) async fn execute_credential_exchange<N, S>(
 ) -> Result<RuntimeHttpEgressResponse, PipelineError>
 where
     N: NetworkHttpEgress + Send + Sync,
-    S: SecretStore + Send + Sync,
+    S: SecretStorePort + Send + Sync,
 {
     // Skipping response sanitization is only safe because exchange requests
     // carry no injected credentials for the sanitizer to redact. Enforce that
@@ -138,7 +138,7 @@ async fn execute_inner<N, S>(
 ) -> Result<RuntimeHttpEgressResponse, PipelineError>
 where
     N: NetworkHttpEgress + Send + Sync,
-    S: SecretStore + Send + Sync,
+    S: SecretStorePort + Send + Sync,
 {
     let latency_fields = http_egress_latency_fields(&request, allow_partial_response_body);
     let policy_started_at = latency_started_at();

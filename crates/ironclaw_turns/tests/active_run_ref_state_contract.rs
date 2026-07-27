@@ -5,9 +5,9 @@ use ironclaw_filesystem::{Fault, FaultInjecting, FilesystemOperation, InMemoryBa
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::test_support::scoped_turns_filesystem;
 use ironclaw_turns::{
-    AcceptedMessageRef, AllowAllTurnAdmissionPolicy, FilesystemTurnStateRowStore, IdempotencyKey,
-    InMemoryRunProfileResolver, ReplyTargetBindingRef, RunProfileRequest, SourceBindingRef,
-    TurnActiveRunRefState, TurnActor, TurnError, TurnRunId, TurnScope, TurnStateStore, TurnStatus,
+    AcceptedMessageRef, AllowAllTurnAdmissionPolicy, IdempotencyKey, InMemoryRunProfileResolver,
+    ReplyTargetBindingRef, RunProfileRequest, SourceBindingRef, TurnActiveRunRefState, TurnActor,
+    TurnError, TurnRunId, TurnScope, TurnStateRowStore, TurnStateStore, TurnStatus,
 };
 
 fn turn_scope(thread: &str) -> TurnScope {
@@ -121,7 +121,7 @@ async fn active_run_ref_state_propagates_non_scope_not_found_errors() {
     let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()).with_fault(
         Fault::on(FilesystemOperation::ReadFile).backend("injected turn-state read failure"),
     ));
-    let store = FilesystemTurnStateRowStore::new(scoped_turns_filesystem(backend));
+    let store = TurnStateRowStore::new(scoped_turns_filesystem(backend));
 
     let result = ironclaw_turns::active_run_ref_state(
         &store,

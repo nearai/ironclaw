@@ -160,6 +160,11 @@ where
                     // ToolCall does not carry loop turn-run identity either; only
                     // the first-party coding lane consumes `run_id` today.
                     run_id: None,
+                    // Legacy extension-host calls do not carry a sealed
+                    // invocation origin. They cannot claim scheduled-loop
+                    // lineage; origin-sensitive first-party policy therefore
+                    // sees `None` rather than a fabricated classification.
+                    origin: None,
                     estimate: call.resources.estimate,
                     mounts: call.resources.mounts,
                     resource_reservation: call.resources.reservation,

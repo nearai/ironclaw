@@ -1,6 +1,7 @@
 // @ts-nocheck
 import React from "react";
 import { useT } from "../../lib/i18n";
+import { toast } from "../../lib/toast";
 import {
   THREAD_STATE,
   clearThreadState,
@@ -20,6 +21,7 @@ import { SuggestionChips } from "./components/suggestion-chips";
 import { TypingIndicator } from "./components/typing-indicator";
 import { useChat } from "./hooks/useChat";
 import { channelConnectionDisplayName } from "../../lib/channel-connection-events";
+import { channelConnectionFromGate } from "./lib/gates";
 import { NEW_DRAFT_KEY } from "./lib/draft-store";
 import { buildRuntimeContext } from "./lib/runtime-context";
 import { buildScopedLogsPath } from "../logs/lib/logs-data";
@@ -52,6 +54,20 @@ function hasVisibleStreamingAssistantText(messages, activeRunId) {
     message.content.length > 0 &&
     (!activeRunId || message.turnRunId === activeRunId)
   );
+}
+
+function cancellationFailureDiagnostic(error) {
+  const status =
+    error &&
+    typeof error === "object" &&
+    Number.isInteger(error.status) &&
+    error.status >= 400 &&
+    error.status <= 599
+      ? error.status
+      : null;
+  return status === null
+    ? { category: "request_error" }
+    : { category: "http_error", status };
 }
 
 export function Chat({
@@ -89,8 +105,6 @@ export function Chat({
     loadMore,
     setSuggestions,
     submitAuthToken,
-    submitOnboardingPairing,
-    submitChannelConnectionPairing,
     startOnboardingOAuth,
     dismissOnboardingPairing,
   } = useChat(activeThreadId);
@@ -108,18 +122,15 @@ export function Chat({
     [gatewayStatus, activeThread]
   );
   const activeThreadHasGate = Boolean(activeThreadId) && Boolean(pendingGate);
-  // A channel-pairing gate is a `manual_token` auth gate that also carries a
-  // `connection` requirement (gates.ts normalizes it onto `pendingGate.connection`).
-  // Render the pairing card off the live gate — wired to a redeem submit and a
-  // run-cancel dismiss — instead of the plain token card. This is the generic
-  // proof-code channel-connect path; the durable-timeline `pendingOnboarding`
-  // panel is the separate, no-active-gate entry point below.
-  const channelConnectionGate =
-    pendingGate?.kind === "auth_required" &&
-    pendingGate?.challengeKind === "manual_token" &&
-    pendingGate?.connection
-      ? pendingGate.connection
-      : null;
+  // A channel connection gate is a host-issued PAIRING gate that carries the
+  // manifest-derived `connection` context (provider names never select
+  // presentation). Deriving it through the shared `channelConnectionFromGate`
+  // predicate keeps the composer affordance below and the pairing-card selector
+  // (further down) keyed off the SAME condition — a `manual_token` gate can
+  // never be shown the token-paste card while the composer promises pairing.
+  // Web-generated pairing completes externally through the rendered
+  // deep-link/QR flow.
+  const channelConnectionGate = channelConnectionFromGate(pendingGate);
   // Normalize the gate's connection context onto the onboarding-shaped prop the
   // pairing card renders from, so one card component serves both entry points.
   const gateConnectionOnboarding = channelConnectionGate
@@ -132,14 +143,8 @@ export function Chat({
         errorMessage: channelConnectionGate.errorMessage,
       }
     : null;
-  // A Telegram BlockedAuth pairing gate is a channel-connection gate too:
-  // the composer must say "finish pairing", not "resolve the approval".
-  const telegramPairingGate =
-    pendingGate?.kind === "auth_required" &&
-    pendingGate?.challengeKind === "pairing" &&
-    pendingGate?.provider === "telegram";
   const activeThreadHasChannelConnectionGate =
-    activeThreadHasGate && (Boolean(channelConnectionGate) || telegramPairingGate);
+    activeThreadHasGate && Boolean(channelConnectionGate);
   const activeThreadHasOnboarding =
     Boolean(activeThreadId) && Boolean(pendingOnboarding);
   const activeThreadIsProcessing = Boolean(activeThreadId) && isProcessing;
@@ -235,8 +240,18 @@ export function Chat({
   );
 
   const handleCancelRun = React.useCallback(
-    () => cancelRun("user_requested"),
-    [cancelRun]
+    async () => {
+      try {
+        await cancelRun("user_requested");
+      } catch (error) {
+        console.error(
+          "Failed to cancel active run",
+          cancellationFailureDiagnostic(error)
+        );
+        toast(t("chat.cancelFailed"), { tone: "error" });
+      }
+    },
+    [cancelRun, t]
   );
 
   /* Mirror the active thread's lifecycle into the per-thread state store
@@ -359,8 +374,11 @@ export function Chat({
             (
               <OnboardingPairingCard
                 onboarding={pendingOnboarding}
-                onSubmit={submitOnboardingPairing}
-                onConfigure={startOnboardingOAuth}
+                onConfigure={
+                  pendingOnboarding?.strategy === "oauth"
+                    ? startOnboardingOAuth
+                    : undefined
+                }
                 onCancel={dismissOnboardingPairing}
               />
             )}
@@ -375,36 +393,24 @@ export function Chat({
                   />
                 )
                 : pendingGate.challengeKind === "manual_token"
-                  ? (channelConnectionGate
-                    ? (
-                  <OnboardingPairingCard
-                    onboarding={gateConnectionOnboarding}
-                    onSubmit={submitChannelConnectionPairing}
-                    onCancel={handleCancelRun}
-                  />
-                )
-                    : (
+                  ? (
                   <AuthTokenCard
                     gate={pendingGate}
                     onSubmit={submitAuthToken}
                     onCancel={() =>
                       approve(pendingGate.requestId, "cancel", pendingGate.kind)}
                   />
-                ))
-                  : telegramPairingGate
+                )
+                  : channelConnectionGate
                   ? (
-                  // A live BlockedAuth pairing gate renders the same pairing
-                  // panel the Extensions card uses (dual-surface parity —
-                  // docs/reborn/contracts/telegram-v2.md "The in-chat gate").
-                  // Pairing completes over the Telegram webhook and the
-                  // continuation fanout resumes the run; there is nothing to
-                  // submit here, so only cancel is wired.
+                  // Same predicate as the composer affordance
+                  // (`channelConnectionGate`): a pairing gate carrying manifest
+                  // connection context. External completion uses the same
+                  // manifest-derived panel as the Extensions surface — there is
+                  // nothing to submit to IronClaw; the provider-side action
+                  // resumes the run.
                   <OnboardingPairingCard
-                    onboarding={{
-                      extensionName: pendingGate.provider,
-                      strategy: "web_generated_code",
-                      instructions: pendingGate.body || pendingGate.headline || "",
-                    }}
+                    onboarding={gateConnectionOnboarding}
                     onCancel={handleCancelRun}
                   />
                 )

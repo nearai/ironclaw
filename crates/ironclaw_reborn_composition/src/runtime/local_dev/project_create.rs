@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_host_api::{InvocationId, Resolution, UserId};
 use ironclaw_loop_host::{CapabilityResultWrite, DurablePersistence};
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ProjectCaller, ProjectService, ProjectServiceError, RebornCreateProjectRequest,
 };
 use ironclaw_turns::run_profile::{
@@ -191,7 +191,7 @@ fn project_service_outcome(error: ProjectServiceError) -> Result<Resolution, Age
         // Keep the safe summary fixed and host-authored — `field` is a
         // free-form `String` and could carry a forbidden delimiter/marker
         // that would remap this recoverable arm into a terminal
-        // `HostUnavailable` (see .claude/rules/agent-loop-capabilities.md,
+        // `HostUnavailable` (see the capability-access contract,
         // Invariant 2). The offending field name is the model's own input,
         // which it already has; it does not belong in the summary.
         ProjectServiceError::InvalidInput { .. } => (

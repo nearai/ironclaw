@@ -253,11 +253,10 @@ pub(super) fn google_calendar_bundle() -> PackageBundle {
                     .to_string(),
             ),
             setup_url: None,
-            credential_next_step: "After authorization completes, activate Google Calendar to \
-                publish its tools."
+            credential_next_step: "After authorization completes, IronClaw finishes Google \
+                Calendar installation automatically and publishes its tools."
                 .to_string(),
         }),
-        oauth_setup: None,
         trust_effects: Some(trust_effects()),
     }
 }
@@ -287,7 +286,6 @@ pub(super) fn google_docs_bundle() -> PackageBundle {
             ]
         ),
         onboarding: None,
-        oauth_setup: None,
         trust_effects: Some(trust_effects()),
     }
 }
@@ -318,7 +316,6 @@ pub(super) fn google_drive_bundle() -> PackageBundle {
             ]
         ),
         onboarding: None,
-        oauth_setup: None,
         trust_effects: Some(trust_effects()),
     }
 }
@@ -348,7 +345,6 @@ pub(super) fn google_sheets_bundle() -> PackageBundle {
             ]
         ),
         onboarding: None,
-        oauth_setup: None,
         trust_effects: Some(trust_effects()),
     }
 }
@@ -381,7 +377,6 @@ pub(super) fn google_slides_bundle() -> PackageBundle {
             ]
         ),
         onboarding: None,
-        oauth_setup: None,
         trust_effects: Some(trust_effects()),
     }
 }

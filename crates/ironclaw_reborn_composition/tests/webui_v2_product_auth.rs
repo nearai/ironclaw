@@ -21,20 +21,20 @@ use ironclaw_auth::{
     OAuthProviderRefresh, OAuthProviderRefreshRequest, ProviderScope, SecretCleanupService,
     SecretSubmitRequest, SecretSubmitResult,
 };
+use ironclaw_auth::{RebornAuthContinuationDispatcher, RebornProductAuthServices};
 use ironclaw_host_api::{
-    AgentId, InstallationState, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId,
-    UserId,
+    AgentId, InstallationState, InvocationId, ProductSurfaceCaller, ProductSurfaceError, ProjectId,
+    ResourceScope, SecretHandle, TenantId, UserId,
 };
-use ironclaw_product_workflow::{
-    EXTENSIONS_VIEW, LifecyclePackageKind, LifecyclePackageRef, ProductOperationRequest,
-    ProductOperationResponse, ProductSurface, RebornExtensionInfo, RebornExtensionListResponse,
-    RebornServicesError, RebornViewPage, RebornViewQuery, WebUiAuthenticatedCaller,
-    rejecting_reborn_services_error,
+use ironclaw_product::{
+    EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, LifecyclePackageKind, LifecyclePackageRef,
+    RebornExtensionCredentialSetup, RebornExtensionInfo, RebornExtensionListResponse,
+    RebornExtensionSetupSecret, RebornSetupExtensionResponse, rejecting_product_surface_error,
 };
-use ironclaw_reborn_composition::{
-    RebornAuthContinuationDispatcher, RebornProductAuthServices, RebornReadiness, RebornWebuiBundle,
+use ironclaw_webui::{
+    ProductAuthRouteState, WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig,
+    product_auth_route_mount, webui_v2_app,
 };
-use ironclaw_webui::{WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app};
 use serde_json::json;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -277,30 +277,80 @@ impl UnusedServices {
 }
 
 #[async_trait]
-impl ProductSurface for UnusedServices {
+impl ironclaw_host_api::ProductSurface for UnusedServices {
+    async fn invoke(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _request: ironclaw_host_api::ProductSurfaceInvokeRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceInvokeResponse, ProductSurfaceError> {
+        Err(rejecting_product_surface_error())
+    }
+
     async fn query(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-        query: RebornViewQuery,
-    ) -> Result<RebornViewPage, RebornServicesError> {
-        match query.view_id.as_str() {
-            id if id == EXTENSIONS_VIEW.id => Ok(RebornViewPage {
-                payload: serde_json::to_value(RebornExtensionListResponse {
-                    extensions: self.installed_extensions.clone(),
-                })
-                .expect("extension list payload"),
+        _caller: ProductSurfaceCaller,
+        request: ironclaw_host_api::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ProductSurfaceError> {
+        match request.view_id.as_str() {
+            id if id == EXTENSIONS_VIEW.id => Ok(ironclaw_host_api::ProductSurfaceQueryPage {
+                items: vec![
+                    serde_json::to_value(RebornExtensionListResponse {
+                        extensions: self.installed_extensions.clone(),
+                    })
+                    .expect("extension list payload"),
+                ],
                 next_cursor: None,
             }),
-            _ => Err(rejecting_reborn_services_error()),
+            id if id == EXTENSION_SETUP_VIEW.id => {
+                let package_id = request
+                    .input
+                    .get("package_id")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(ProductSurfaceError::internal)?;
+                let package_ref =
+                    LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id)
+                        .map_err(ProductSurfaceError::internal_from)?;
+                Ok(ironclaw_host_api::ProductSurfaceQueryPage {
+                    items: vec![
+                        serde_json::to_value(RebornSetupExtensionResponse {
+                            package_ref,
+                            phase: InstallationState::Installed,
+                            blockers: Vec::new(),
+                            payload: None,
+                            secrets: vec![RebornExtensionSetupSecret {
+                                name: "google_oauth".to_string(),
+                                provider: "google".to_string(),
+                                prompt: "Google account".to_string(),
+                                optional: false,
+                                provided: false,
+                                credential_ref: None,
+                                setup: RebornExtensionCredentialSetup::OAuth {
+                                    account_label: "work google".to_string(),
+                                    scopes: vec![
+                                        GOOGLE_GMAIL_READONLY_SCOPE.to_string(),
+                                        GOOGLE_CALENDAR_READONLY_SCOPE.to_string(),
+                                    ],
+                                    invocation_id: InvocationId::new().to_string(),
+                                },
+                            }],
+                            fields: Vec::new(),
+                            onboarding: None,
+                        })
+                        .expect("extension setup payload"),
+                    ],
+                    next_cursor: None,
+                })
+            }
+            _ => Err(rejecting_product_surface_error()),
         }
     }
 
-    async fn execute_command(
+    async fn stream_events(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: ProductOperationRequest,
-    ) -> Result<ProductOperationResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
+        _caller: ProductSurfaceCaller,
+        _request: ironclaw_host_api::ProductSurfaceStreamRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceStreamResponse, ProductSurfaceError> {
+        Err(rejecting_product_surface_error())
     }
 }
 
@@ -341,21 +391,27 @@ fn build_app_with_product_auth_service_config_and_extensions(
     product_auth: Arc<RebornProductAuthServices>,
     installed_package_ids: &[&str],
 ) -> axum::Router {
-    let bundle = RebornWebuiBundle {
-        api: Arc::new(UnusedServices::with_installed_extensions(
-            installed_package_ids,
-        )),
-        product_auth: Some(product_auth),
-        readiness: RebornReadiness::disabled(),
-    };
+    let product_surface = Arc::new(UnusedServices::with_installed_extensions(
+        installed_package_ids,
+    ));
+    let product_auth_mount = product_auth_route_mount(
+        ProductAuthRouteState::new(
+            product_auth,
+            TenantId::new(TENANT).expect("tenant"),
+            Some(AgentId::new(AGENT).expect("agent")),
+            Some(ProjectId::new(PROJECT).expect("project")),
+        )
+        .with_product_surface(product_surface.clone()),
+    );
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         Arc::new(OnlyValidToken),
         vec![HeaderValue::from_static("http://localhost:1234")],
     )
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
-    .with_default_project_id(ProjectId::new(PROJECT).expect("project"));
-    webui_v2_app(bundle, config).expect("webui v2 app")
+    .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
+    .with_split_route_mount(product_auth_mount);
+    webui_v2_app(product_surface, config).expect("webui v2 app")
 }
 
 /// Deployment client material for the synthetic test recipes, keyed by
@@ -440,7 +496,7 @@ fn vendor_test_engine(
             recipes: Arc::new(ironclaw_auth::StaticAuthRecipeResolver::new(vec![recipe])),
             client_credentials: Arc::new(StaticVendorClientCredentials),
             egress: Arc::new(PanicVendorEgress),
-            secret_store: Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral()),
+            secret_store: Arc::new(ironclaw_secrets::SecretStore::ephemeral()),
             callback_base: ironclaw_auth::EngineCallbackBase::new(
                 "http://127.0.0.1:3000/api/reborn/product-auth/oauth",
             )
@@ -592,9 +648,7 @@ async fn get_oauth_flow_status(
 fn google_oauth_start_body(extra_fields: serde_json::Value) -> serde_json::Value {
     let expires_at = (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339();
     let mut body = json!({
-        "provider": "google",
-        "account_label": "work google",
-        "scopes": [GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE],
+        "requirement": "google_oauth",
         "expires_at": expires_at,
         "invocation_id": InvocationId::new().to_string(),
     });
@@ -631,14 +685,7 @@ async fn post_extension_oauth_start(
 }
 
 async fn start_google_oauth_flow(app: &axum::Router) -> (serde_json::Value, String) {
-    let start_response = post_google_oauth_start(
-        app,
-        google_oauth_start_body(json!({
-            "session_id": "web-session-google",
-            "thread_id": "thread-auth-google"
-        })),
-    )
-    .await;
+    let start_response = post_google_oauth_start(app, google_oauth_start_body(json!({}))).await;
     assert_eq!(start_response.status(), StatusCode::OK);
     let start_body = read_body_string(start_response).await;
     let start_json: serde_json::Value = serde_json::from_str(&start_body).expect("start json");
@@ -818,11 +865,11 @@ async fn product_auth_google_oauth_start_fails_closed_without_config() {
 async fn product_auth_google_oauth_start_rejects_disallowed_scopes() {
     let (app, _) = build_app_with_google_oauth();
 
-    // A scope outside the recipe ceiling is rejected before any flow exists
-    // (an empty list is valid: it means the full recipe ceiling).
+    // The browser supplies only a manifest requirement key; unknown
+    // requirements are rejected before any flow exists.
     let response = post_google_oauth_start(
         &app,
-        google_oauth_start_body(json!({ "scopes": [DISALLOWED_GOOGLE_SCOPE] })),
+        google_oauth_start_body(json!({ "requirement": "missing_google_oauth" })),
     )
     .await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -1365,7 +1412,7 @@ async fn product_auth_google_oauth_start_builds_provider_authorization_url() {
     assert!(!body.contains("google-pkce"));
     let json: serde_json::Value = serde_json::from_str(&body).expect("start json");
     assert_eq!(json["provider"], "google");
-    assert_eq!(json["continuation"]["type"], "setup_only");
+    assert_eq!(json["continuation"]["type"], "lifecycle_activation");
     let authorization_url = json["authorization_url"]
         .as_str()
         .expect("authorization url");
@@ -1411,10 +1458,8 @@ async fn extension_oauth_start_rejects_package_missing_from_installed_inventory(
         &app,
         "google-calendar",
         json!({
-            "provider": "google",
-            "account_label": "work google",
+            "requirement": "google_oauth",
             "invocation_id": InvocationId::new().to_string(),
-            "scopes": [GOOGLE_CALENDAR_READONLY_SCOPE],
             "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
         }),
     )
@@ -1478,10 +1523,8 @@ async fn extension_oauth_start_for_installed_package_attaches_update_binding() {
         &app,
         "google-calendar",
         json!({
-            "provider": "google",
-            "account_label": "work google",
+            "requirement": "google_oauth",
             "invocation_id": invocation_id.to_string(),
-            "scopes": [GOOGLE_CALENDAR_READONLY_SCOPE],
             "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
         }),
     )
@@ -1504,12 +1547,13 @@ async fn extension_oauth_start_for_installed_package_attaches_update_binding() {
             .map(|binding| binding.account_id),
         Some(account.id)
     );
-    // Auth = OURS (owner decision): extension-card OAuth start creates
-    // SetupOnly flows — the retired LifecycleActivation continuation lane was
-    // excised; activation is frontend-driven after the callback completes
-    // (configure-modal `handleOauthConfigured`), pinned by
-    // `oauth_callback_with_lifecycle_activation_returns_ok_without_resume`.
-    assert_eq!(flow.continuation, AuthContinuationRef::SetupOnly);
+    assert_eq!(
+        flow.continuation,
+        AuthContinuationRef::LifecycleActivation {
+            package_ref: ironclaw_auth::LifecyclePackageRef::new("google-calendar")
+                .expect("package ref")
+        }
+    );
 }
 
 #[tokio::test]

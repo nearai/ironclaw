@@ -27,13 +27,12 @@ pub(super) fn bundle() -> PackageBundle {
                     .to_string(),
             ),
             setup_url: Some("https://github.com/settings/personal-access-tokens/new".to_string()),
-            credential_next_step: "After saving the token, activate GitHub to \
-                publish its tools."
+            credential_next_step: "After saving the token, IronClaw finishes GitHub installation \
+                automatically and publishes its tools."
                 .to_string(),
         }),
         // WASM tool package: trust comes from the extension registry, not an
         // admin local-manifest effect grant.
-        oauth_setup: None,
         trust_effects: None,
     }
 }

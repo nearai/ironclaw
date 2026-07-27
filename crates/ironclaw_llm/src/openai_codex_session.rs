@@ -128,8 +128,6 @@ struct DeviceTokenPollRequest {
 #[derive(Debug, Deserialize)]
 struct DeviceAuthCodeResponse {
     authorization_code: String,
-    #[allow(dead_code)]
-    code_challenge: String,
     code_verifier: String,
 }
 
@@ -141,9 +139,6 @@ struct TokenResponse {
     refresh_token: String,
     #[serde(default)]
     expires_in: u64,
-    #[serde(default)]
-    #[allow(dead_code)]
-    token_type: String,
 }
 
 /// A started device-code flow. Returned by

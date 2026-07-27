@@ -138,6 +138,11 @@ pub enum RunNotificationOrigin {
     LiveSourceRoute {
         source_route: SourceRouteContext,
     },
+    /// A live run whose final answer was explicitly routed to one host-sealed
+    /// target. The route is scoped to the run and revalidated at egress.
+    RunScopedTarget {
+        target: ReplyTargetBindingRef,
+    },
     Triggered {
         trigger: TriggerCommunicationContext,
     },
@@ -293,6 +298,13 @@ mod tests {
     fn run_notification_origin_round_trips_live_source_route() {
         assert_json_round_trip(RunNotificationOrigin::LiveSourceRoute {
             source_route: source_route_context(),
+        });
+    }
+
+    #[test]
+    fn run_notification_origin_round_trips_run_scoped_target() {
+        assert_json_round_trip(RunNotificationOrigin::RunScopedTarget {
+            target: reply_ref("reply:run-scoped"),
         });
     }
 

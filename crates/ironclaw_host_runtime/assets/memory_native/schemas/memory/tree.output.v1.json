@@ -1,0 +1,8 @@
+{
+  "type": "array",
+  "description": "Compact tree of memory documents and directories",
+  "items": {
+    "type": "string",
+    "description": "A memory document path, or a directory path with a trailing '/'"
+  }
+}

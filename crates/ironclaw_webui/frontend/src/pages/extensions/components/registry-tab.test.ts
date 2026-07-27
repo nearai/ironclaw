@@ -71,7 +71,7 @@ test("RegistryTab renders only real installed extensions with management actions
     display_name: "Google Runtime",
     runtime: "wasm",
     surfaces: [{ kind: "tool" }],
-    active: true,
+    installation_state: "active",
   };
   const registryOnlyInstalled = {
     package_ref: { kind: "extension", id: "calendar-registry-only" },
@@ -114,7 +114,6 @@ test("RegistryTab renders only real installed extensions with management actions
       },
     ],
     onInstall,
-    onActivate: () => {},
     onConfigure: () => {},
     onRemove: () => {},
     isBusy: false,
@@ -138,7 +137,7 @@ test("RegistryTab searches installed entries using registry metadata", () => {
     display_name: "Runtime Name",
     runtime: "wasm",
     surfaces: [{ kind: "tool" }],
-    active: true,
+    installation_state: "active",
   };
   const { ExtensionCard, rendered } = renderRegistryTab(
     {
@@ -158,7 +157,6 @@ test("RegistryTab searches installed entries using registry metadata", () => {
         },
       ],
       onInstall: () => {},
-      onActivate: () => {},
       onConfigure: () => {},
       onRemove: () => {},
       isBusy: false,

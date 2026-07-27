@@ -54,11 +54,17 @@ jobs:
                                # forwarded cap needs explicit pre-run headroom on top of it
           HARD_CAP=360         # GitHub-hosted runner max job minutes
           MIN_REQUIRED=$((GUARD_MIN + SETUP_HEADROOM))
-          # Anchor to the 6-space with:-entry indentation so a future job-level
-          # (4-space) timeout-minutes on the parse job can't be misread here.
-          # First match then quit — no `| head`, which under pipefail can turn a
-          # multi-match sed into a SIGPIPE (141) hard-fail.
-          forwarded=$(sed -nE '/^      timeout-minutes:[[:space:]]*[0-9]+/{s@^      timeout-minutes:[[:space:]]*([0-9]+).*@\1@p; q}' \
+          # nearai/benchmarks is private and nearai/ironclaw is public, so the
+          # bench job can no longer `uses:` the reusable workflow (a private
+          # repo's cross-repo reusable-workflow access can only ever be
+          # granted to OTHER private repos — never to a public caller). It
+          # instead dispatches `bench-pr-reusable.yml` directly via
+          # `gh workflow run ... -f "timeout-minutes=N"` in a run: step, so
+          # anchor on that `-f "timeout-minutes=` flag instead of the old
+          # `with:`-block indentation. First match then quit — no `| head`,
+          # which under pipefail can turn a multi-match sed into a SIGPIPE
+          # (141) hard-fail.
+          forwarded=$(sed -nE '/-f "timeout-minutes=[0-9]+"/{s@.*-f "timeout-minutes=([0-9]+)".*@\1@p; q}' \
             .github/workflows/nearai-bench.yml)
           echo "forwarded timeout-minutes=${forwarded:-<none>} (guard=${GUARD_MIN}, setup headroom=${SETUP_HEADROOM}, cap=${HARD_CAP})"
           if [ -z "$forwarded" ]; then

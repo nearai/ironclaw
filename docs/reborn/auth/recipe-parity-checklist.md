@@ -14,8 +14,8 @@ per-item line numbers and symbol names below are **main's**, retained for
 provenance — they are NOT live pointers on this branch. The structural map:
 
 1. **The shared OAuth engine moved.** On main the exchange lives in
-   `crates/ironclaw_reborn_composition/src/product_auth/oauth/oauth_provider_client.rs`
-   (`HostOAuthProviderSpec`, `scopes_for_exchange`, `ExchangeScopePolicy`). On the
+   `crates/ironclaw_auth/src/engine/`
+   (`AuthEngine`, `scopes_for_exchange`, `MissingScopeBehavior`). On the
    rollup it is the recipe-driven `AuthEngine` in **`crates/ironclaw_auth/src/engine/`**
    (`exchange.rs` + `mod.rs`), executing `ironclaw_host_api::OAuth2CodeRecipe` data.
    Scope extraction is `extract_token_response` and the exchange-scope policy enum is
@@ -201,7 +201,7 @@ have no manifest in this tree. Nothing to verify.
   (real production code path over the FS backend).
 - [x] **A2a · Projection honors `expires_at`.** BUILT + TESTED (folded — verbatim structure match).
   `AuthGateRecord::to_view(now)` returns not-live for a non-terminal flow past `expires_at`
-  (`crates/ironclaw_product_workflow/src/auth_interaction/types.rs`), and
+  (`crates/ironclaw_product/src/auth_interaction/types.rs`), and
   `DefaultAuthInteractionService::list_pending` passes `chrono::Utc::now()`. RFC 6819 §5.1.5.3.
   **Proven:** `auth_interaction_contract::list_pending_auth_omits_flow_past_its_expiry`.
 - [ ] **A2b · Background flow-expiry sweep** — DEFERRED FOLLOW-UP (bounded; not shipped here). A2a

@@ -1,4 +1,4 @@
-// arch-exempt: large_file, mechanical §4.3 store swap only — InMemory{CheckpointState,LoopCheckpoint}Store deleted; test helper added over FilesystemCheckpointStateStore<InMemoryBackend> (arch-simplification §4.3), plan #6168
+// arch-exempt: large_file, mechanical §4.3 store swap only — InMemory{CheckpointState,LoopCheckpoint}Store deleted; test helper added over CheckpointStateStore<InMemoryBackend> (arch-simplification §4.3), plan #6168
 use std::sync::Arc;
 
 use ironclaw_host_api::{AgentId, ApprovalRequestId, TenantId, ThreadId, UserId};
@@ -10,7 +10,7 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::test_support::in_memory_turn_state_store;
 use ironclaw_turns::{
-    CheckpointStateStore, GateRef, LoopBlocked, LoopBlockedKind, LoopCheckpointKind,
+    CheckpointStateStorePort, GateRef, LoopBlocked, LoopBlockedKind, LoopCheckpointKind,
     LoopCheckpointStateRef, LoopCheckpointStore, LoopCompleted, LoopCompletionKind, LoopExit,
     LoopFailed, LoopFailureKind, LoopGateRef, LoopMessageRef, LoopResultRef,
     PutCheckpointStateRequest, PutLoopCheckpointRequest, TurnActor, TurnCheckpointId, TurnError,
@@ -470,7 +470,7 @@ async fn completion_evidence_reads_thread_under_the_run_caller_owner() {
         ThreadId::new("thread").expect("valid"),
     );
     let caller = UserId::new("user-a").expect("user");
-    // Thread created under the CALLER's owner, as the product facade does.
+    // Thread created under the CALLER's owner, as the product service does.
     let caller_scope = ThreadScope {
         tenant_id: turn_scope.tenant_id.clone(),
         agent_id: turn_scope.agent_id.clone().expect("agent id"),

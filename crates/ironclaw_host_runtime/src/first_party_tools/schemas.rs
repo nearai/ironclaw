@@ -2,6 +2,35 @@ use serde_json::{Value, json};
 
 use crate::first_party_tools::time::UNIX_MILLIS_THRESHOLD;
 
+/// Input schemas for the native memory extension (`ironclaw.memory`),
+/// served inline by `surface.rs` the way builtin schemas are.
+///
+/// The bundled v3 manifest's asset schema files are the single source of truth:
+/// they are compiled in here and parsed, rather than materialized to the
+/// filesystem, because native memory rides the always-on lane. `document-{read,
+/// write}`, `search`, and `tree` each reference their own bundled schema file.
+pub(crate) fn resolve_native_memory_input_schema_ref(reference: &str) -> Option<Value> {
+    let raw = match reference {
+        "schemas/memory/document-read.input.v1.json" => {
+            include_str!("../../assets/memory_native/schemas/memory/document-read.input.v1.json")
+        }
+        "schemas/memory/document-write.input.v1.json" => {
+            include_str!("../../assets/memory_native/schemas/memory/document-write.input.v1.json")
+        }
+        "schemas/memory/search.input.v1.json" => {
+            include_str!("../../assets/memory_native/schemas/memory/search.input.v1.json")
+        }
+        "schemas/memory/tree.input.v1.json" => {
+            include_str!("../../assets/memory_native/schemas/memory/tree.input.v1.json")
+        }
+        _ => return None,
+    };
+    // silent-ok: these are compile-embedded assets validated by the
+    // `memory_native_schema_validation` test; a malformed schema fails that test
+    // and the build, so `.ok()` here cannot silently mask a real fault.
+    serde_json::from_str(raw).ok()
+}
+
 pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value> {
     Some(match reference {
         "schemas/builtin/echo.input.v1.json" => json!({
@@ -46,108 +75,26 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "additionalProperties": false
         }),
         "schemas/builtin/http.input.v1.json" => http_schema(false),
+        "schemas/builtin/outbound_delivery_target_route_current.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "target_id": {
+                    "type": "string",
+                    "description": "Opaque target id returned by builtin__outbound_delivery_targets_list."
+                }
+            },
+            "required": ["target_id"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/outbound_delivery_target_route_current.output.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "routed": { "type": "boolean", "const": true }
+            },
+            "required": ["routed"],
+            "additionalProperties": false
+        }),
         "schemas/builtin/http-save.input.v1.json" => http_schema(true),
-        "schemas/builtin/memory_search.input.v1.json" => json!({
-            "type": "object",
-            "description": "Searches only Reborn internal persistent memory. This does not search connected app or extension data.",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Preferred natural language search query for Reborn internal persistent memory"
-                },
-                "q": {
-                    "type": "string",
-                    "description": "Alias for query"
-                },
-                "text": {
-                    "type": "string",
-                    "description": "Alias for query"
-                },
-                "pattern": {
-                    "type": "string",
-                    "description": "Alias for query"
-                },
-                "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 20,
-                    "default": 5,
-                    "description": "Maximum number of memory results to return"
-                }
-            },
-            "required": ["query"],
-            "additionalProperties": false
-        }),
-        "schemas/builtin/memory_write.input.v1.json" => json!({
-            "type": "object",
-            "properties": {
-                "content": {
-                    "type": "string",
-                    "description": "Full content to write or append"
-                },
-                "target": {
-                    "type": "string",
-                    "description": "Where to write: 'memory' for MEMORY.md, 'daily_log' for today's log, 'heartbeat' for HEARTBEAT.md checklist, 'bootstrap' to clear BOOTSTRAP.md (content is ignored; the file is always cleared), or a relative memory document path.",
-                    "default": "daily_log"
-                },
-                "append": {
-                    "type": "boolean",
-                    "description": "Append to existing content when true; replace when false",
-                    "default": true
-                },
-                "metadata": {
-                    "type": "object",
-                    "description": "Optional document metadata such as skip_indexing or skip_versioning"
-                },
-                "old_string": {
-                    "type": "string",
-                    "description": "Exact text to replace; switches to patch mode"
-                },
-                "new_string": {
-                    "type": "string",
-                    "description": "Replacement text for patch mode"
-                },
-                "replace_all": {
-                    "type": "boolean",
-                    "description": "Replace every old_string occurrence in patch mode",
-                    "default": false
-                },
-                "timezone": {
-                    "type": "string",
-                    "description": "IANA timezone used only for daily_log target date resolution"
-                }
-            },
-            "additionalProperties": false
-        }),
-        "schemas/builtin/memory_read.input.v1.json" => json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Relative memory document path to read"
-                }
-            },
-            "required": ["path"],
-            "additionalProperties": false
-        }),
-        "schemas/builtin/memory_tree.input.v1.json" => json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Relative memory directory path to list; omit for the memory root",
-                    "default": ""
-                },
-                "depth": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 10,
-                    "default": 1,
-                    "description": "Maximum directory depth to include"
-                }
-            },
-            "additionalProperties": false
-        }),
         "schemas/builtin/shell.input.v1.json" => json!({
             "type": "object",
             "properties": {
@@ -434,7 +381,6 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "additionalProperties": false
         }),
         "schemas/builtin/extension_install.input.v1.json"
-        | "schemas/builtin/extension_activate.input.v1.json"
         | "schemas/builtin/extension_remove.input.v1.json" => json!({
             "type": "object",
             "properties": {
@@ -712,7 +658,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 },
                 "delivery_target_id": {
                     "type": "string",
-                    "description": "Optional per-trigger outbound delivery target id from builtin__outbound_delivery_targets_list. When set, the host delivers this trigger's final results to that target. Do not also put a send, post, or deliver-results step for that result in prompt. When omitted, the user's default outbound delivery target at fire time is used. Prefer setting this whenever the user names a destination for this trigger's results."
+                    "description": "Optional per-trigger outbound delivery target id from builtin__outbound_delivery_targets_list. When set, the host delivers this trigger's final results to that target. Do not also put a send, post, or deliver-results step for that result in prompt. When omitted, the host inherits the current source run's authorized delivery route when one exists; otherwise the user's default outbound delivery target at fire time is used. This is resolved from trusted run state, never prompt parsing. Prefer setting this whenever the user names a destination for this trigger's results."
                 },
                 "schedule": {
                     "description": "When and how often the trigger fires. This value is the schedule object itself. For recurring triggers use {\"kind\":\"cron\",\"expression\":\"0 14 * * 2\",\"timezone\":\"America/Los_Angeles\"}. For one-time triggers use {\"kind\":\"once\",\"at\":\"2026-06-23T14:00:00\",\"timezone\":\"America/Los_Angeles\"}. Do not pass {\"operation\":\"parse\",\"data\":...}.",

@@ -14,9 +14,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use ironclaw_extensions::ResolvedExtensionManifest;
 use ironclaw_host_api::{ChannelIngressDescriptor, ChannelIngressMethod, SecretHandle};
-use ironclaw_product_adapters::{
-    ChannelAdapter, InboundOutcome, NormalizedInboundMessage, VerifiedInbound,
-};
+use ironclaw_product::{ChannelAdapter, InboundOutcome, NormalizedInboundMessage, VerifiedInbound};
 
 use crate::active::ActiveExtension;
 use crate::deployment_channels::{DeploymentChannelBinding, DeploymentChannelRegistry};
@@ -98,7 +96,7 @@ pub struct ReplyContextKey {
     pub extension_id: String,
     pub installation_id: String,
     /// The conversation fingerprint
-    /// ([`ironclaw_product_adapters::ExternalConversationRef::conversation_fingerprint`]).
+    /// ([`ironclaw_product::ExternalConversationRef::conversation_fingerprint`]).
     pub conversation: String,
 }
 

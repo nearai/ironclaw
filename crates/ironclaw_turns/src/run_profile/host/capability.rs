@@ -353,8 +353,16 @@ pub struct AuthResumeApprovalIdentity {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityAuthResume {
     /// Encodes the original activity identity so the host can reuse the
-    /// matching execution context after auth completes.
-    pub resume_token: CapabilityResumeToken,
+    /// matching execution context after auth completes. A denied gate does not
+    /// re-dispatch, so its activity identity is already carried by
+    /// [`LoopRequest::activity_id`] and no resume token is required.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_token: Option<CapabilityResumeToken>,
+    /// A terminal user denial is carried through the same capability lifecycle
+    /// seam as a successful auth resume. The host terminalizes the blocked
+    /// invocation without dispatching the capability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<crate::GateResumeDisposition>,
     /// Present when the invocation previously passed a one-shot approval gate.
     /// The two sub-fields are always set together; see [`AuthResumeApprovalIdentity`].
     //
@@ -368,6 +376,27 @@ pub struct CapabilityAuthResume {
     // the loop checkpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prior_approval: Option<AuthResumeApprovalIdentity>,
+}
+
+impl CapabilityAuthResume {
+    pub fn resolved(
+        resume_token: CapabilityResumeToken,
+        prior_approval: Option<AuthResumeApprovalIdentity>,
+    ) -> Self {
+        Self {
+            resume_token: Some(resume_token),
+            disposition: None,
+            prior_approval,
+        }
+    }
+
+    pub fn denied() -> Self {
+        Self {
+            resume_token: None,
+            disposition: Some(crate::GateResumeDisposition::Denied),
+            prior_approval: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

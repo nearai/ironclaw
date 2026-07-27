@@ -535,7 +535,7 @@ where
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
     // 1. Goal store keyed by child TurnRunId.
-    let goal_store: Arc<dyn SubagentGoalStore> = match subagent.goal_store_backend {
+    let goal_store: Arc<dyn SubagentGoalStorePort> = match subagent.goal_store_backend {
         SubagentGoalStoreBackend::DbBacked => Arc::new(
             DbBackedSubagentGoalStore::from_turn_state_backend(&parts.turn_state)?,
         ),
@@ -748,7 +748,7 @@ struct SubagentTestHarness {
     coordinator: Arc<dyn TurnCoordinator>,
     turn_state: Arc<MemTurnStore>,
     thread_service: Arc<MemThreadService>,
-    goal_store: Arc<dyn SubagentGoalStore>,
+    goal_store: Arc<dyn SubagentGoalStorePort>,
     gateway: Arc<ScriptedGateway>,
     _worker: tokio::task::JoinHandle<()>,
 }

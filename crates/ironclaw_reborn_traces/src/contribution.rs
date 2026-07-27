@@ -47,7 +47,7 @@ pub const TRACE_REMOTE_REQUEST_TIMEOUT_ENV: &str = "IRONCLAW_TRACE_REMOTE_REQUES
 pub const TRACE_UPLOAD_CLAIM_MAX_RESPONSE_BYTES: usize = 64 * 1024;
 
 /// Default page size for an account-traces fetch when the caller passes no
-/// explicit limit. Bounds the initial WebUI/facade slice so `None` never
+/// explicit limit. Bounds the initial WebUI/service slice so `None` never
 /// requests unbounded history; full history is a future paginated flow.
 const ACCOUNT_TRACES_DEFAULT_LIMIT: usize = 200;
 /// Hard ceiling on the account-traces page size; larger requests are clamped so
@@ -5841,7 +5841,7 @@ impl std::fmt::Display for ContributionHttpError {
 impl std::error::Error for ContributionHttpError {}
 
 /// Direct-transport [`ContributionHttpSink`] for trusted non-agent surfaces
-/// (WebUI facades, CLI). Applies the same hardening as the other direct
+/// (WebUI services, CLI). Applies the same hardening as the other direct
 /// clients in this module: per-request pinned DNS resolution with
 /// private/internal-IP rejection (`resolve_trace_upload_claim_issuer_host`),
 /// no redirects, the request's own timeout, and a body read bounded DURING
@@ -7012,7 +7012,7 @@ pub async fn mint_account_login_link_via_sink(
 }
 
 /// Direct (non-agent) counterpart to [`mint_account_login_link_via_sink`]
-/// for WebUI facades and other trusted product surfaces: mints the one-time
+/// for WebUI services and other trusted product surfaces: mints the one-time
 /// login link through the [`DirectPinnedContributionSink`] (pinned DNS,
 /// private-IP filtering) instead of a host-egress sink.
 ///
@@ -7229,12 +7229,12 @@ pub async fn fetch_account_traces_via_sink(
 /// the crate-local hardened reqwest client (the direct/CLI path, no host-egress
 /// sink required).
 ///
-/// This is the facade-safe counterpart to [`fetch_account_traces_via_sink`]: it
+/// This is the service-safe counterpart to [`fetch_account_traces_via_sink`]: it
 /// uses the [`pinned_trace_commons_http_client`] (private-IP-filtered, pinned
 /// DNS resolution — the same hardening as the upload-claim issuer request), so
 /// a rebinding host cannot redirect this bearer-authenticated GET to an
 /// internal address, without coupling the caller to a host-egress
-/// `ContributionHttpSink`. Use this from WebUI facades and any non-agent
+/// `ContributionHttpSink`. Use this from WebUI services and any non-agent
 /// surface. Use [`fetch_account_traces_via_sink`] from the agent runtime where
 /// all egress must flow through `RuntimeHttpEgress`.
 ///
@@ -16746,7 +16746,7 @@ mod tests {
             );
         }
 
-        // ── direct (WebUI facade) variant ────────────────────────────────────
+        // ── direct (WebUI service) variant ────────────────────────────────────
         // Same enrollment, no sink: the hosted-WebUI path mints through the
         // pinned direct client. The link is delivered ONLY in the return value
         // (the authenticated HTTP response) — it must never be persisted to a

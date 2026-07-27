@@ -16,7 +16,7 @@ use ironclaw_host_api::{
     RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
     ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult,
 };
-use ironclaw_product_adapters::{
+use ironclaw_product::{
     ChannelAdapter, ChannelContext, ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope,
     VerifiedInbound,
 };
@@ -24,6 +24,36 @@ use ironclaw_product_adapters::{
 use crate::entrypoint::{BindContext, BindError, ExtensionBindings, ExtensionEntrypoint};
 use crate::lifecycle::{DrainController, EgressFactory, HookError};
 use crate::loaders::{ExtensionLoader, LoadContext, LoadedExtension};
+
+#[cfg(feature = "test-support")]
+pub mod first_party_registrars;
+
+/// Opaque test-support handle carrying the Reborn local extension-management
+/// port without forcing composition harness structs to define extension-host
+/// wrapper types locally.
+#[cfg(feature = "test-support")]
+pub struct ExtensionManagementTestHandle {
+    extension_management: Arc<crate::extension_lifecycle::RebornLocalExtensionManagementPort>,
+}
+
+#[cfg(feature = "test-support")]
+impl ExtensionManagementTestHandle {
+    /// Build a test-support handle over the local extension-management port.
+    pub fn new(
+        extension_management: Arc<crate::extension_lifecycle::RebornLocalExtensionManagementPort>,
+    ) -> Self {
+        Self {
+            extension_management,
+        }
+    }
+
+    /// Return the wrapped local extension-management port.
+    pub fn extension_management(
+        &self,
+    ) -> Arc<crate::extension_lifecycle::RebornLocalExtensionManagementPort> {
+        self.extension_management.clone()
+    }
+}
 
 const MCP_MANIFEST: &str = r#"
 schema_version = "reborn.extension_manifest.v3"
@@ -88,7 +118,9 @@ secret_handle = "acme_chat_signing_secret"
 signature_header = "X-Acme-Signature"
 signed_payload = [ { body = true } ]
 
-[channel.config]
+[admin_configuration]
+group_id = "acme.chat"
+display_name = "Acme Chat channel"
 fields = [ { handle = "acme_chat_signing_secret", label = "Signing secret", secret = true } ]
 
 [[channel.egress]]
@@ -142,7 +174,9 @@ secret_handle = "acme_signing_secret"
 signature_header = "X-Acme-Signature"
 signed_payload = [ { body = true } ]
 
-[channel.config]
+[admin_configuration]
+group_id = "acme.channel"
+display_name = "Acme channel"
 fields = [ { handle = "acme_signing_secret", label = "Signing secret", secret = true } ]
 
 [[channel.egress]]
@@ -187,7 +221,7 @@ fn resolve(toml: &str) -> ResolvedExtensionManifest {
     };
     ExtensionManifestRecord::from_toml(
         toml,
-        ManifestSource::InstalledLocal,
+        ManifestSource::HostBundled,
         &catalog(),
         None,
         &contracts,
@@ -210,6 +244,63 @@ pub fn channel_only_manifest() -> ResolvedExtensionManifest {
 /// A tool + channel + auth resolved manifest.
 pub fn tool_and_channel_manifest() -> ResolvedExtensionManifest {
     resolve(TOOL_AND_CHANNEL_MANIFEST)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn first_party_bundles_from_inventory() -> Vec<crate::FirstPartyPackageBundle> {
+    use crate::{FirstPartyPackageAsset, FirstPartyPackageBundle, FirstPartyPackageOnboarding};
+    use ironclaw_first_party_extensions::is_gsuite_extension_id;
+    use ironclaw_first_party_extensions::packages::{PackageAssetContent, bundled_packages};
+    use ironclaw_host_api::ExtensionId;
+
+    bundled_packages()
+        .into_iter()
+        .map(|bundle| {
+            let assets = bundle
+                .assets
+                .into_iter()
+                .map(|asset| {
+                    let PackageAssetContent::Bytes(bytes) = asset.content;
+                    FirstPartyPackageAsset {
+                        path: asset.path,
+                        bytes,
+                    }
+                })
+                .collect();
+            let search_aliases = if ExtensionId::new(bundle.id)
+                .map(|id| is_gsuite_extension_id(&id))
+                .unwrap_or(false)
+            {
+                [
+                    "google",
+                    "gsuite",
+                    "g suite",
+                    "workspace",
+                    "google workspace",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+            } else {
+                Vec::new()
+            };
+            FirstPartyPackageBundle {
+                id: bundle.id.to_string(),
+                display_name: bundle.display_name.to_string(),
+                manifest_toml: bundle.manifest_toml.into_owned(),
+                assets,
+                onboarding: bundle.onboarding.map(|copy| FirstPartyPackageOnboarding {
+                    instructions: copy.instructions,
+                    credential_instructions: copy.credential_instructions,
+                    setup_url: copy.setup_url,
+                    credential_next_step: copy.credential_next_step,
+                }),
+                oauth_setup: None,
+                trust_effects: bundle.trust_effects,
+                search_aliases,
+            }
+        })
+        .collect()
 }
 
 /// A no-op tool adapter.

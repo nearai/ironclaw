@@ -1,31 +1,15 @@
-//! Docker process sandbox process executor for IronClaw Reborn.
+//! Process sandbox plan types for IronClaw Reborn.
 //!
-//! This crate owns the dynamic process compatibility lane: a trusted host can
-//! execute a typed [`SandboxProcessPlan`] through [`ProcessExecutor`] while
-//! keeping host paths in executor configuration and secret material behind
-//! broker policy.
+//! This crate owns the typed [`SandboxProcessPlan`] contract: the runtime
+//! validates model-supplied plans through [`ValidatedSandboxProcessPlan`]
+//! before the host dispatches them under
+//! [`PROCESS_SANDBOX_CAPABILITY_ID`]. There is no production backend wired
+//! for that capability today (see host_runtime's `process_executor`); this
+//! crate only owns plan validation.
 
-mod approval;
-mod backend;
-mod broker;
-mod docker;
 mod plan;
 mod validation;
 
-pub use approval::{
-    SandboxApprovalCredential, SandboxApprovalMount, SandboxProcessApprovalSummary,
-};
-pub use backend::{
-    ProcessSandboxBackend, ProcessSandboxError, ProcessSandboxErrorKind, ProcessSandboxExecutor,
-    SandboxPhaseOutput, SandboxProcessOutput, SandboxProcessRequest, SandboxProcessResult,
-};
-pub use broker::{
-    BrokerHeaderRewrite, BrokerRewriteError, BrokerRewriteResult, SandboxBrokerPolicy,
-};
-pub use docker::{
-    DockerBrokerConfig, DockerProcessSandboxBackend, DockerProcessSandboxConfig,
-    SandboxProcessPhase,
-};
 pub use plan::{
     ProcessSandboxPlanError, SandboxCommandPlan, SandboxCredentialBinding, SandboxInstallPlan,
     SandboxMount, SandboxMounts, SandboxNetworkPlan, SandboxProcessPlan,
@@ -41,8 +25,5 @@ pub const DEFAULT_WORKSPACE_MOUNT: &str = "/workspace";
 pub const DEFAULT_TOOLS_MOUNT: &str = "/ironclaw/state/tools";
 pub const DEFAULT_CACHE_MOUNT: &str = "/ironclaw/state/cache";
 
-pub(crate) const DEFAULT_STDOUT_LIMIT: u64 = 1024 * 1024;
-pub(crate) const DEFAULT_STDERR_LIMIT: u64 = 256 * 1024;
-pub(crate) const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 pub(crate) const MAX_OUTPUT_LIMIT: u64 = 10 * 1024 * 1024;
 pub(crate) const MAX_TIMEOUT_MS: u64 = 300_000;

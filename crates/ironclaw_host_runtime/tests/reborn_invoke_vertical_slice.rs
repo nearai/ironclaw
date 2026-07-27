@@ -9,7 +9,7 @@ use std::sync::{
 
 use async_trait::async_trait;
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
-use ironclaw_dispatcher::{
+use ironclaw_capabilities::{
     BoundCapabilityAdapter, CapabilityDispatchRequest, ResolvedCapability, RuntimeAdapterResult,
     RuntimeDispatcher, ToolResolver,
 };
@@ -23,7 +23,7 @@ use ironclaw_host_runtime::{
 use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceGovernor, ResourceTally,
 };
-use ironclaw_run_state::{RunStateStore, RunStatus};
+use ironclaw_run_state::{RunStateStorePort, RunStatus};
 use ironclaw_trust::{
     AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy, TrustDecision,
 };

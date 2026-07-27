@@ -5,7 +5,7 @@
 //! the host to echo before normal ProductSurface admission. The host stamps
 //! trusted context outside this crate after verifying Slack request signatures.
 
-use ironclaw_product_adapters::{
+use ironclaw_host_api::product_adapter::{
     AdapterInstallationId, AttachmentRef, ChannelInboundClassification, ExternalActorRef,
     ExternalConversationRef, ExternalEventId, NormalizedInboundMessage, ParsedProductInbound,
     ProductAdapterError, ProductAttachmentDescriptor, ProductAttachmentKind, ProductInboundPayload,
@@ -114,7 +114,7 @@ pub fn parse_slack_event(
 /// channel-adapter contract: a URL-verification challenge, an ignored event,
 /// or one plain user message. Gate-resolution classification (`approve` /
 /// `deny gate:<ref>` / `auth deny <ref>`) is deliberately NOT applied here —
-/// the host sink reclassifies via [`classify_interaction_resolution`].
+/// the shared host sink applies the channel-neutral interaction grammar.
 #[derive(Debug)]
 pub enum SlackInboundEvent {
     UrlVerification { challenge: String },
@@ -252,7 +252,6 @@ pub fn classify_channel_interaction_resolution(
         _ => None,
     })
 }
-
 fn parse_app_mention(
     event_id: ExternalEventId,
     team_id: Option<&str>,
@@ -297,7 +296,8 @@ fn parse_message_event(
 /// Fixed user-message routing strategies in this first slice.
 /// `AppMention`: public channel, strip leading `@mention`, thread fallback to `ts`.
 /// `Dm`: direct-message channel required, keep text verbatim, no thread fallback.
-/// `ThreadReply`: channel thread reply, keep text verbatim, require `thread_ts`.
+/// `ThreadReply`: channel thread reply, strip an optional leading `@mention`,
+/// require `thread_ts`.
 #[derive(Debug, Clone, Copy)]
 enum SlackMessageKind {
     AppMention,
@@ -345,7 +345,7 @@ fn try_parse_user_message(
             ProductTriggerReason::DirectChat,
         ),
         SlackMessageKind::ThreadReply => (
-            raw_text.to_string(),
+            strip_leading_bot_mention(raw_text),
             event.thread_ts.as_deref(),
             ProductTriggerReason::ReplyToBot,
         ),
@@ -490,12 +490,12 @@ fn parse_interaction_resolution(
 ) -> Result<Option<ProductInboundPayload>, SlackPayloadParseError> {
     // Slack-specific normalization (mentions may wrap or sit inside the
     // pasted inline code) in front of the channel-neutral grammar owned by
-    // `ironclaw_product_adapters::interaction_commands` — one grammar for
+    // `ironclaw_host_api::product_adapter::interaction_commands` — one grammar for
     // every channel whose busy/prompt copy advertises these commands.
     let text = strip_leading_slack_mentions(text);
-    let text = ironclaw_product_adapters::strip_wrapping_inline_code(text);
+    let text = ironclaw_host_api::product_adapter::strip_wrapping_inline_code(text);
     let text = strip_leading_slack_mentions(text);
-    ironclaw_product_adapters::parse_interaction_resolution_text(text, source_trigger)
+    ironclaw_host_api::product_adapter::parse_interaction_resolution_text(text, source_trigger)
         .map_err(adapter_error_to_payload_error)
 }
 
@@ -720,8 +720,8 @@ struct SlackFile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_product_adapters::ProductInboundPayload;
-    use ironclaw_product_adapters::auth::mark_request_signature_verified;
+    use ironclaw_host_api::product_adapter::ProductInboundPayload;
+    use ironclaw_host_api::product_adapter::auth::mark_request_signature_verified;
 
     fn installation_id() -> AdapterInstallationId {
         AdapterInstallationId::new("slack_install_beta").expect("valid")
@@ -1119,7 +1119,9 @@ mod tests {
     fn unauthenticated_payload_is_rejected() {
         let err = parse_slack_event(
             br#"{"type":"event_callback","event_id":"EvNoAuth"}"#,
-            &ProtocolAuthEvidence::failed(ironclaw_product_adapters::ProtocolAuthFailure::Missing),
+            &ProtocolAuthEvidence::failed(
+                ironclaw_host_api::product_adapter::ProtocolAuthFailure::Missing,
+            ),
             &installation_id(),
         )
         .expect_err("missing verified evidence must fail");
@@ -1171,7 +1173,9 @@ mod tests {
     fn url_verification_auth_guard_rejects_unauthenticated() {
         let err = parse_slack_url_verification_challenge(
             br#"{"type":"url_verification","challenge":"tok"}"#,
-            &ProtocolAuthEvidence::failed(ironclaw_product_adapters::ProtocolAuthFailure::Missing),
+            &ProtocolAuthEvidence::failed(
+                ironclaw_host_api::product_adapter::ProtocolAuthFailure::Missing,
+            ),
         )
         .expect_err("unverified auth must fail");
         assert!(matches!(

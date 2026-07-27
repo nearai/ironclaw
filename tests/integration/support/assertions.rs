@@ -274,6 +274,33 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// Assert that one model-visible message contains every `needle` in the
+    /// supplied order. Other content may appear between needles.
+    pub async fn assert_model_message_content_in_order(
+        &self,
+        needles: &[&str],
+    ) -> HarnessResult<()> {
+        if needles.is_empty() {
+            return Err("ordered model-message assertion needs at least one needle".into());
+        }
+        let requests = self.scripted_llm.captured_requests();
+        'message: for message in requests.iter().flatten() {
+            let mut remaining = message.content.as_str();
+            for needle in needles {
+                let Some(position) = remaining.find(needle) else {
+                    continue 'message;
+                };
+                remaining = &remaining[position + needle.len()..];
+            }
+            return Ok(());
+        }
+        Err(format!(
+            "no model message content contained {needles:?} in order; captured {} request(s)",
+            requests.len()
+        )
+        .into())
+    }
+
     /// Assert the exact number of interactive, tool-capable calls observed by
     /// the recoverable-failure provider wrapper. Text-only system-inference
     /// calls used for compaction are intentionally excluded.

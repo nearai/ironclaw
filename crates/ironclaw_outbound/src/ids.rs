@@ -90,6 +90,34 @@ impl OutboundDeliveryId {
     pub fn as_uuid(self) -> Uuid {
         self.0
     }
+
+    /// Derive the stable idempotency identity for one policy-authorized
+    /// delivery fact. Attempt time is deliberately excluded: replaying the
+    /// same projection for the same actor/target must address the same durable
+    /// attempt, including after a process restart.
+    pub(crate) fn for_policy_request(
+        request: &crate::PrepareOutboundDeliveryRequest,
+    ) -> Result<Self, crate::OutboundError> {
+        #[derive(Serialize)]
+        struct PolicyDeliveryIdentity<'a> {
+            scope: &'a ironclaw_turns::TurnScope,
+            actor: &'a ironclaw_turns::TurnActor,
+            modality: crate::CommunicationModality,
+            candidate: &'a crate::OutboundPushCandidate,
+        }
+
+        const POLICY_DELIVERY_NAMESPACE: Uuid =
+            Uuid::from_u128(0x32bfed3f_94c7_5a74_89be_b38603aab29f);
+        let identity = PolicyDeliveryIdentity {
+            scope: &request.scope,
+            actor: &request.actor,
+            modality: request.modality,
+            candidate: &request.candidate,
+        };
+        let serialized =
+            serde_json::to_vec(&identity).map_err(|_| crate::OutboundError::Serialization)?;
+        Ok(Self(Uuid::new_v5(&POLICY_DELIVERY_NAMESPACE, &serialized)))
+    }
 }
 
 impl Default for OutboundDeliveryId {

@@ -28,18 +28,28 @@ test("activeRouteThreadIdFromPath ignores nested non-chat-thread routes", () => 
 
 test("routeSynchronizedThreadsState uses the route as the active thread source", () => {
   const deleteThread = () => {};
+  const loadMore = () => {};
   const threadsState = {
     activeThreadId: "stale-thread",
     threads: [{ id: "route-thread" }],
     isCreating: false,
+    hasMore: true,
+    isLoadingMore: false,
+    loadMoreError: new Error("page failed"),
+    loadMore,
     deleteThread,
   };
 
   const onChatRoute = routeSynchronizedThreadsState(threadsState, "/chat/route-thread");
   assert.equal(onChatRoute.activeThreadId, "route-thread");
   assert.equal(onChatRoute.threads, threadsState.threads);
+  assert.equal(onChatRoute.hasMore, true);
+  assert.equal(onChatRoute.isLoadingMore, false);
+  assert.equal(onChatRoute.loadMoreError, threadsState.loadMoreError);
+  assert.equal(onChatRoute.loadMore, loadMore);
   assert.equal(onChatRoute.deleteThread, deleteThread);
 
   const outsideChat = routeSynchronizedThreadsState(threadsState, "/automations");
   assert.equal(outsideChat.activeThreadId, null);
+  assert.equal(outsideChat.loadMore, loadMore);
 });

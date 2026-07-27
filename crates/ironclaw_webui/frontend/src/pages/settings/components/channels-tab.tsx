@@ -44,19 +44,15 @@ function ExtensionChannelCard({ channel = null, registryEntry }) {
     t("common.unknown");
   const desc = registryEntry?.description || channel?.description || "";
   const isInstalled = Boolean(channel);
-  const state = channel?.onboarding_state || "setup_required";
+  const state = channel?.installation_state || "setup_needed";
 
   const toneMap = {
-    ready: "positive",
-    auth_required: "warning",
-    pairing_required: "warning",
-    setup_required: "muted",
+    active: "positive",
+    setup_needed: "warning",
   };
   const labelMap = {
-    ready: t("channels.ready"),
-    auth_required: t("channels.authNeeded"),
-    pairing_required: t("channels.pairing"),
-    setup_required: t("channels.setup"),
+    active: t("channels.ready"),
+    setup_needed: t("channels.setup"),
   };
 
   return (
@@ -145,7 +141,7 @@ function deriveVisibleChannelGroups({
       packageId(channel),
       channel.display_name,
       channel.description,
-      channel.onboarding_state,
+      channel.installation_state,
     ])
   );
   const availableRegistry = channelRegistry

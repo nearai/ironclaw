@@ -20,7 +20,7 @@ path — remains closed by PRs 1–4.
 **Related issues:** #2809 (create-project misroutes to mission), #2369 (Projects as living spaces UX), #3796 (tenant-scoped groups + project ACLs), #3697 (project live turn milestones)
 
 > Scope note: `crates/ironclaw_engine` (engine v2) has its own legacy `Project`
-> type. This plan is about the **Reborn stack** (`ironclaw_product_workflow` →
+> type. This plan is about the **Reborn stack** (`ironclaw_product` →
 > `ironclaw_reborn_composition` → `ironclaw_webui_v2` → `ironclaw_webui_v2_static`),
 > which has **no** first-class Project entity today — only `project_id` as a
 > scope identifier on `ThreadScope`, `ProductAgentBoundCaller`, and
@@ -117,7 +117,7 @@ unchanged.
 1. **`crates/ironclaw_projects/`** (this PR) — entity + repo trait + error +
    `FilesystemProjectRepository` over `ScopedFilesystem` + contract tests.
    Register in workspace.
-2. **Port** — `ironclaw_product_workflow/src/reborn_services/projects.rs`:
+2. **Port** — `ironclaw_product/src/reborn_services/projects.rs`:
    `ProjectService` trait + sanitized DTOs + `ProjectServiceError`. Re-export.
 3. **Facade** — `RebornServicesApi`: `Option<Arc<dyn ProjectService>>` field +
    `with_project_service` builder + methods with default "unavailable" bodies +
@@ -125,7 +125,7 @@ unchanged.
 4. **Composition adapter** — `ironclaw_reborn_composition/src/project_service.rs`:
    `RebornProjectService` (repo + `resolve_access` gating). Construct repo in
    `factory.rs` next to `trigger_repository`; thread via `RebornRuntimeInput`;
-   attach in `build_webui_services`.
+   attach in the runtime-backed product surface.
 5. **HTTP** — `ironclaw_webui_v2`: route consts + patterns + descriptors +
    `webui_v2_routes()` + thin handlers + router mounting + contract-test rows.
 6. **Thread + automation binding** — `create_thread`/`submit_turn` stamp the

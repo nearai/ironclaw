@@ -302,12 +302,12 @@ async def test_reborn_legacy_attachment_size_limits_block_invalid_files(
             {
                 "name": "too-large.txt",
                 "mimeType": "text/plain",
-                "buffer": b"x" * (6 * 1024 * 1024),
+                "buffer": b"x" * (11 * 1024 * 1024),
             }
         ],
     )
     await expect(page.get_by_role("alert")).to_contain_text(
-        "max 5 MB per file", timeout=15000
+        "max 10 MB per file", timeout=15000
     )
     await expect(page.get_by_label("Remove attachment")).to_have_count(0, timeout=5000)
 

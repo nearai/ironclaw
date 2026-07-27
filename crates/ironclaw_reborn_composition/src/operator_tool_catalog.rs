@@ -3,9 +3,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_extensions::{InstallationOwner, SharedExtensionRegistry};
 use ironclaw_host_api::{EffectKind, ExtensionId, RuntimeKind, UserId};
-use ironclaw_product_workflow::{RebornOperatorToolCatalog, RebornOperatorToolInfo};
+use ironclaw_product::{RebornOperatorToolCatalog, RebornOperatorToolInfo};
 
-use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
+use ironclaw_extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
 
 #[derive(Clone)]
 pub(crate) struct ActiveRegistryOperatorToolCatalog {

@@ -103,12 +103,12 @@ where
             BindingResolutionPolicy::Trusted {
                 kind: TrustedInboundKind::Trigger,
                 ..
-            } => ironclaw_product_context::InboundClassification::TrustedTrigger,
+            } => ironclaw_turns::product_context::InboundClassification::TrustedTrigger,
             BindingResolutionPolicy::Trusted { .. } => {
-                ironclaw_product_context::InboundClassification::TrustedOther
+                ironclaw_turns::product_context::InboundClassification::TrustedOther
             }
             BindingResolutionPolicy::Untrusted => {
-                ironclaw_product_context::InboundClassification::Untrusted
+                ironclaw_turns::product_context::InboundClassification::Untrusted
             }
         };
         let surface_type = match &route_kind {
@@ -216,7 +216,7 @@ where
         &self,
         mut resolution: ConversationBindingResolution,
         accepted_message: AcceptedInboundMessage,
-        classification: ironclaw_product_context::InboundClassification,
+        classification: ironclaw_turns::product_context::InboundClassification,
         run_adapter: RunOriginAdapter,
         surface_type: Option<TurnSurfaceType>,
     ) -> Result<InboundTurnResponse, InboundTurnError> {
@@ -256,7 +256,7 @@ where
                 parent_run_id: None,
                 subagent_depth: 0,
                 spawn_tree_root_run_id: None,
-                product_context: Some(ironclaw_product_context::resolve_inbound(
+                product_context: Some(ironclaw_turns::product_context::resolve_inbound(
                     classification,
                     run_adapter,
                     surface_type,
@@ -717,7 +717,7 @@ mod tests {
 
     #[tokio::test]
     async fn trusted_inbound_with_owner_resolves_explicit_user_turn_scope() {
-        let (facade, _services, _coordinator) = trusted_inbound_service().await;
+        let (service, _services, _coordinator) = trusted_inbound_service().await;
         let creator = UserId::new("user-creator").expect("user id");
 
         let request = TrustedInboundTurnRequest::new(
@@ -728,7 +728,7 @@ mod tests {
             TrustedInboundKind::Trigger,
         );
 
-        let response = facade
+        let response = service
             .handle_inbound_turn_with_trusted_scope(request)
             .await
             .expect("trusted inbound turn succeeds");
@@ -746,7 +746,7 @@ mod tests {
 
     #[tokio::test]
     async fn trusted_inbound_does_not_backfill_owner_on_existing_direct_binding() {
-        let (facade, _services, _coordinator) = trusted_inbound_service().await;
+        let (service, _services, _coordinator) = trusted_inbound_service().await;
         let creator = UserId::new("user-creator").expect("user id");
 
         // First fire: no owner (legacy-shaped binding).
@@ -757,7 +757,7 @@ mod tests {
             None,
             TrustedInboundKind::Trigger,
         );
-        facade
+        service
             .handle_inbound_turn_with_trusted_scope(first)
             .await
             .expect("first trusted turn succeeds");
@@ -775,7 +775,7 @@ mod tests {
             Some(creator),
             TrustedInboundKind::Trigger,
         );
-        let response = facade
+        let response = service
             .handle_inbound_turn_with_trusted_scope(second)
             .await
             .expect("second trusted turn succeeds");
@@ -1136,7 +1136,7 @@ mod tests {
         }
     }
 
-    /// Returns `(facade, services, coordinator)` — a paired `InboundTurnService`
+    /// Returns `(service, services, coordinator)` — a paired `InboundTurnService`
     /// backed by `InMemoryConversationServices` with "alice" already paired so
     /// trusted binding resolution succeeds, plus the underlying services and
     /// coordinator for post-call inspection.
@@ -1160,9 +1160,9 @@ mod tests {
             )
             .await;
         let coordinator = Arc::new(RecordingTurnCoordinator::default());
-        let facade =
+        let service =
             InboundTurnService::new(services.clone(), services.clone(), coordinator.clone());
-        (facade, services, coordinator)
+        (service, services, coordinator)
     }
 
     fn tenant() -> TenantId {
@@ -1334,21 +1334,21 @@ mod tests {
             &self,
             _request: crate::ResolveConversationRequest,
         ) -> Result<ConversationBindingResolution, InboundTurnError> {
-            unimplemented!("not used by inbound facade tests")
+            unimplemented!("not used by inbound service tests")
         }
 
         async fn link_conversation_to_thread(
             &self,
             _request: LinkConversationRequest,
         ) -> Result<LinkedConversationBinding, InboundTurnError> {
-            unimplemented!("not used by inbound facade tests")
+            unimplemented!("not used by inbound service tests")
         }
 
         async fn validate_reply_target(
             &self,
             _request: ValidateReplyTargetRequest,
         ) -> Result<ReplyTargetBinding, InboundTurnError> {
-            unimplemented!("not used by inbound facade tests")
+            unimplemented!("not used by inbound service tests")
         }
     }
 
@@ -1390,28 +1390,28 @@ mod tests {
             &self,
             _request: ResumeTurnRequest,
         ) -> Result<ResumeTurnResponse, TurnError> {
-            unimplemented!("not used by inbound facade tests")
+            unimplemented!("not used by inbound service tests")
         }
 
         async fn retry_turn(
             &self,
             _request: RetryTurnRequest,
         ) -> Result<RetryTurnResponse, TurnError> {
-            unimplemented!("not used by inbound facade tests")
+            unimplemented!("not used by inbound service tests")
         }
 
         async fn cancel_run(
             &self,
             _request: CancelRunRequest,
         ) -> Result<CancelRunResponse, TurnError> {
-            unimplemented!("not used by inbound facade tests")
+            unimplemented!("not used by inbound service tests")
         }
 
         async fn get_run_state(
             &self,
             _request: GetRunStateRequest,
         ) -> Result<TurnRunState, TurnError> {
-            unimplemented!("not used by inbound facade tests")
+            unimplemented!("not used by inbound service tests")
         }
     }
 

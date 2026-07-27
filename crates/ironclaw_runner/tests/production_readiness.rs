@@ -97,7 +97,7 @@ fn production_readiness_rejects_in_memory_checkpoint_store() {
 
     assert_eq!(report.status, RebornLoopProductionStatus::NotReady);
     assert!(report.contains(
-        RebornLoopProductionComponent::CheckpointStateStore,
+        RebornLoopProductionComponent::CheckpointStateStorePort,
         RebornLoopProductionIssueKind::NonDurableImplementation
     ));
 }
@@ -120,7 +120,7 @@ fn production_readiness_rejects_non_durable_subagent_goal_store() {
 
     assert_eq!(report.status, RebornLoopProductionStatus::NotReady);
     assert!(report.contains(
-        RebornLoopProductionComponent::SubagentGoalStore,
+        RebornLoopProductionComponent::SubagentGoalStorePort,
         RebornLoopProductionIssueKind::NonDurableImplementation
     ));
 }

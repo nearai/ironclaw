@@ -607,6 +607,37 @@ fn default_patterns() -> Vec<LeakPattern> {
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
         },
+        // Sandbox credential placeholder (icsbx_<identifier>). The credential
+        // firewall injects these inert placeholders into the sandbox in place
+        // of real secrets; the egress proxy swaps them for the real credential
+        // at request time. A placeholder must never cross the trust boundary
+        // into model output, logs, or transcripts, so it is treated like any
+        // other secret.
+        //
+        // Deliberately NO `\b` word boundaries here: `_` is a word character,
+        // so a boundary assertion does not fire next to it, meaning a single
+        // leading or trailing character (`_icsbx_...`, `icsbx_..._x`) would
+        // otherwise slip past the one pattern standing between a placeholder
+        // and model output/logs. `icsbx_` plus 16+ alphanumerics is a
+        // distinctive shape that does not occur naturally, so a bare
+        // substring match carries no realistic false-positive risk — and
+        // over-matching here fails *safe*, whereas under-matching would not.
+        // Do not "helpfully" restore the word boundaries.
+        //
+        // The `icsbx_` literal here must stay in sync with
+        // `ironclaw_secrets::placeholder::CREDENTIAL_PLACEHOLDER_PREFIX`
+        // (crates/ironclaw_secrets/src/placeholder.rs), which is the actual
+        // owner of this prefix. `ironclaw_safety` deliberately does not take
+        // `ironclaw_secrets` as a normal dependency just to share one string
+        // constant — see `sandbox_credential_placeholder_prefix_matches_registry`
+        // below, a dev-dependency-only regression test that fails loudly if
+        // the two ever drift apart.
+        LeakPattern {
+            name: "sandbox_credential_placeholder".to_string(),
+            regex: Regex::new(r"icsbx_[A-Za-z0-9]{16,}").unwrap(), // safety: hardcoded literal
+            severity: LeakSeverity::Critical,
+            action: LeakAction::Block,
+        },
         // High entropy hex (potential secrets, warn only)
         // Uses word boundary since look-around isn't supported in the regex crate.
         // This catches standalone 64-char hex strings (like SHA256 hashes used as secrets).
@@ -807,6 +838,41 @@ mod tests {
             "aws access key must be redacted: {redacted}"
         );
         // Descriptive cause survives so the model can act on it.
+        assert!(
+            redacted.contains("/workspace/config"),
+            "path must survive: {redacted}"
+        );
+        assert!(
+            redacted.contains("HTTP 401"),
+            "status code must survive: {redacted}"
+        );
+        assert!(redacted.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redact_all_secrets_masks_sandbox_credential_placeholder_without_dropping_context() {
+        // Detection of `icsbx_` placeholders is covered elsewhere; this pins
+        // that *redaction* actually removes the token value from
+        // model-visible output while the surrounding diagnostic context
+        // (path, status code) survives — a redaction that nuked the whole
+        // string would "pass" a detection-only test while destroying the
+        // output's diagnostic value.
+        let detector = LeakDetector::new();
+        // Realistic shape: registry-generated placeholders are `icsbx_` plus
+        // exactly 32 lowercase hex characters (a simple-form UUID).
+        let token = "icsbx_0123456789abcdef0123456789abcdef";
+        let content = format!("auth failed at /workspace/config using {token} (HTTP 401)");
+
+        let (redacted, changed) = detector.redact_all_secrets(&content);
+
+        assert!(
+            changed,
+            "a placeholder was present, so redaction must report a change"
+        );
+        assert!(
+            !redacted.contains(token),
+            "placeholder token must be redacted: {redacted}"
+        );
         assert!(
             redacted.contains("/workspace/config"),
             "path must survive: {redacted}"
@@ -1178,6 +1244,178 @@ mod tests {
         assert!(
             detector.scan_and_clean(content).is_err(),
             "scan_and_clean should block Telegram token"
+        );
+    }
+
+    #[test]
+    fn test_detect_sandbox_credential_placeholder() {
+        let detector = LeakDetector::new();
+        let content = "found in ~/.git-credentials: icsbx_7f3a9b2c1d4e5f60";
+        let result = detector.scan(content);
+        assert!(result.should_block, "sandbox placeholder not detected");
+        assert!(
+            result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "sandbox_credential_placeholder")
+        );
+    }
+
+    #[test]
+    fn test_sandbox_credential_placeholder_short_suffix_passes() {
+        let detector = LeakDetector::new();
+        let content = "icsbx_ab";
+        let result = detector.scan(content);
+        assert!(
+            !result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "sandbox_credential_placeholder"),
+            "short suffix should not match placeholder pattern"
+        );
+    }
+
+    #[test]
+    fn test_sandbox_credential_placeholder_substring_of_longer_word_is_flagged() {
+        // Deliberately flipped from "should not match" to "should match":
+        // the pattern has no `\b` word boundaries (see the comment on the
+        // pattern definition), so a single leading/trailing character next
+        // to `icsbx_` no longer defeats detection. Over-matching here is the
+        // intended fail-safe behavior — a leaked placeholder embedded in a
+        // longer identifier must still be caught.
+        let detector = LeakDetector::new();
+        let content = "myicsbx_7f3a9b2c1d4e5f60prefix";
+        let result = detector.scan(content);
+        assert!(
+            result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "sandbox_credential_placeholder"),
+            "icsbx_ substring inside a longer word must still be flagged (fail-safe over-match)"
+        );
+    }
+
+    #[test]
+    fn test_sandbox_credential_placeholder_leading_underscore_is_flagged() {
+        // A single leading `_` used to defeat the old `\bicsbx_...\b`
+        // pattern outright, since `_` is a word character and `\b` does not
+        // fire next to it.
+        let detector = LeakDetector::new();
+        let content = "_icsbx_0123456789abcdef0123456789abcdef";
+        let result = detector.scan(content);
+        assert!(
+            result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "sandbox_credential_placeholder"),
+            "leading underscore must not defeat placeholder detection"
+        );
+    }
+
+    #[test]
+    fn test_sandbox_credential_placeholder_trailing_underscore_is_flagged() {
+        let detector = LeakDetector::new();
+        let content = "icsbx_0123456789abcdef0123456789abcdef_x";
+        let result = detector.scan(content);
+        assert!(
+            result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "sandbox_credential_placeholder"),
+            "trailing underscore must not defeat placeholder detection"
+        );
+    }
+
+    #[test]
+    fn test_sandbox_credential_placeholder_leading_letter_is_flagged() {
+        let detector = LeakDetector::new();
+        let content = "xicsbx_0123456789abcdef0123456789abcdef";
+        let result = detector.scan(content);
+        assert!(
+            result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "sandbox_credential_placeholder"),
+            "leading letter must not defeat placeholder detection"
+        );
+    }
+
+    #[test]
+    fn test_scan_and_clean_blocks_sandbox_credential_placeholder() {
+        let detector = LeakDetector::new();
+        let content = "icsbx_7f3a9b2c1d4e5f60";
+        assert!(
+            detector.scan_and_clean(content).is_err(),
+            "scan_and_clean should block sandbox credential placeholder"
+        );
+    }
+
+    #[test]
+    fn sandbox_credential_placeholder_prefix_matches_registry() {
+        // `ironclaw_safety` deliberately does not take `ironclaw_secrets` as a
+        // normal dependency just to share the "icsbx_" prefix constant (it
+        // stays a dependency-light substrate). This dev-dependency-only test
+        // is the regression net instead: if the prefix is ever rotated in
+        // `ironclaw_secrets::placeholder::CREDENTIAL_PLACEHOLDER_PREFIX`
+        // without updating the hardcoded regex literal above, this fails
+        // loudly instead of the leak detector silently going stale.
+        assert_eq!(
+            ironclaw_secrets::CREDENTIAL_PLACEHOLDER_PREFIX,
+            "icsbx_",
+            "leak_detector's sandbox_credential_placeholder regex hardcodes 'icsbx_'; \
+             update both if this constant ever changes"
+        );
+
+        // Pin the length half of the shared contract too, not just the
+        // prefix: the regex requires 16+ alphanumeric characters after the
+        // prefix (`{16,}`), so the registry's own required suffix length must
+        // never drop below that floor, or shorter-but-valid placeholders
+        // would silently stop matching.
+        const {
+            assert!(
+                ironclaw_secrets::CREDENTIAL_PLACEHOLDER_SUFFIX_LEN >= 16,
+                "leak_detector's sandbox_credential_placeholder regex requires 16+ alphanumeric \
+                 characters after the prefix; the registry's required suffix length must stay at \
+                 or above that floor"
+            );
+        }
+
+        // Better than asserting a bare number: construct a minimum-shaped
+        // token through the registry's own public API (not just a literal
+        // matching today's expected length) and assert the detector actually
+        // flags it. This pins behavior, not a number.
+        let minimum_shaped_token = ironclaw_secrets::CredentialPlaceholderToken::parse(format!(
+            "{}{}",
+            ironclaw_secrets::CREDENTIAL_PLACEHOLDER_PREFIX,
+            "a".repeat(ironclaw_secrets::CREDENTIAL_PLACEHOLDER_SUFFIX_LEN)
+        ))
+        .expect("a suffix of exactly CREDENTIAL_PLACEHOLDER_SUFFIX_LEN alphanumeric characters must be accepted by the registry's own public API");
+        let detector = LeakDetector::new();
+        let result = detector.scan(&format!("leaked token: {minimum_shaped_token}"));
+        assert!(
+            result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "sandbox_credential_placeholder"),
+            "a minimum-shaped, registry-accepted placeholder token must be caught by the leak detector"
+        );
+
+        // Shape a registry-issued token actually has: the fixed prefix plus a
+        // UUIDv4 `simple()` suffix (32 lowercase hex chars, no dashes) — see
+        // `CredentialPlaceholderToken::generate()` in ironclaw_secrets.
+        let token = format!(
+            "{}{}",
+            ironclaw_secrets::CREDENTIAL_PLACEHOLDER_PREFIX,
+            "0123456789abcdef0123456789abcdef"
+        );
+        let detector = LeakDetector::new();
+        let result = detector.scan(&format!("leaked token: {token}"));
+        assert!(
+            result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "sandbox_credential_placeholder"),
+            "a realistically-shaped registry-issued placeholder token must be caught"
         );
     }
 

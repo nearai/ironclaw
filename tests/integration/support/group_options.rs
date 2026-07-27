@@ -129,6 +129,16 @@ impl RebornIntegrationGroupBuilder {
         self
     }
 
+    /// Wire a raw trajectory observer into the group's ONE production
+    /// capability-port factory. Defaults `None`.
+    pub fn with_raw_trajectory_observer(
+        mut self,
+        observer: Arc<dyn ironclaw_reborn_composition::RebornTrajectoryObserver>,
+    ) -> Self {
+        self.trajectory_observer = Some(observer);
+        self
+    }
+
     /// Shorten the group's turn-state store lease TTL (default 90s,
     /// `TurnStateStoreLimits::default()`) for lease-expiry-under-a-
     /// wedged-tool coverage (see `tests/integration/lease_wedge.rs`).

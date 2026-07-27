@@ -109,6 +109,18 @@ Reducer rules:
 - product-facing capability activity projections expose only metadata-safe
   lifecycle facts; raw tool arguments, raw output, command strings, host paths,
   and provider payloads stay outside the projection contract
+- parented dispatcher lifecycle events (`dispatch_requested`, `runtime_selected`,
+  `dispatch_succeeded`, and `dispatch_failed`) represent nested capability
+  activity only. They update the child capability activity with its parent run
+  identity and must never create or update a run-status row; unparented
+  dispatcher and process lifecycle events retain their existing run projection
+  behavior. Snapshot and cursor-resume behavior is covered by
+  `runtime_snapshot_keeps_nested_dispatch_failure_out_of_run_status` and
+  `runtime_resume_keeps_late_nested_dispatch_failure_out_of_run_status` in
+  `crates/ironclaw_event_projections/tests/nested_dispatch_projection_contract.rs`,
+  plus `product_event_stream_snapshot_keeps_nested_dispatch_failure_out_of_run_status`
+  and `product_event_stream_cursor_resume_keeps_late_nested_failure_out_of_run_status`
+  in `crates/ironclaw_reborn_composition/src/projection/tests/nested_dispatch_stream.rs`.
 - capability activity rows are keyed by stable invocation/activity identity.
   The loop assigns this identity before capability dispatch, and gate
   checkpoints must persist it even when a producer blocks without a resume
@@ -133,10 +145,10 @@ Reducer rules:
   label, authorization URL, and expiry, when that context is needed to rebuild
   OAuth/manual-token affordances. Clients must not infer gate run identity from
   the latest active run or from tool name/order heuristics.
-  Product adapters may additionally emit rich `GatePrompt`/`AuthPrompt`
+  Channel adapters may additionally emit rich `GatePrompt`/`AuthPrompt`
   payloads for immediate UI affordances such as OAuth URLs or approval context,
   but those prompt payloads are enrichments. Approval request details remain
-  prompt-only unless a product adapter defines an explicit redaction contract;
+  prompt-only unless a channel adapter defines an explicit redaction contract;
   replay/rebase reconstruction must still work from the product gate row's own
   `run_id`, `gate_kind`, `gate_ref`, and any product-safe auth context. This is
   a product gate surface, not the generic lifecycle projection surface.
@@ -225,7 +237,7 @@ The outbound path is:
 durable event or projection fact
   -> outbound candidate selection through ironclaw_outbound::OutboundPolicyService
   -> ironclaw_outbound::OutboundPolicyService validation and delivery-attempt record
-  -> product adapter render and host transport send
+  -> channel adapter render and host transport send
 ```
 
 Rules:
@@ -376,4 +388,4 @@ Run status projections are projection-local read models. Model/reply milestone e
 - a reply-target validation port used before each external push candidate is turned into a delivery attempt;
 - outbound delivery attempt/status rows for support-visible retry/dead-letter workflows.
 
-This state is not canonical transcript or projection content. Rows store refs, cursors, status enums, timestamps, and sanitized failure kinds only. Product adapters still revalidate reply-target binding authorization before every external push, and delivery failure must not mutate canonical transcript/projection state or mark turns/runs failed. If reply-target authorization is revoked at delivery time, the outbound policy service records a sanitized `authorization_revoked` delivery failure and does not return a sendable target.
+This state is not canonical transcript or projection content. Channel adapters still revalidate reply-target binding authorization before every external push, and delivery failure must not mutate canonical transcript/projection state or mark turns/runs failed. If reply-target authorization is revoked at delivery time, the outbound policy service records a sanitized `authorization_revoked` delivery failure and does not return a sendable target.

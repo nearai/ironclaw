@@ -43,7 +43,7 @@ pub struct LoadedCheckpointPayload {
 /// cleanly split.
 ///
 /// `kind` is required so adapters that bridge to
-/// `CheckpointStateStore::put_checkpoint_state` can persist the correct kind
+/// `CheckpointStateStorePort::put_checkpoint_state` can persist the correct kind
 /// without having to guess. The subsequent `checkpoint(kind, state_ref)` call
 /// must use the same `kind`; the read-side `get_checkpoint_state` validates
 /// the staged kind against the metadata write's kind.
@@ -93,7 +93,7 @@ pub trait LoopCheckpointPort: Send + Sync {
     /// Stage a checkpoint payload's raw bytes and return an opaque
     /// [`LoopCheckpointStateRef`] that subsequent `checkpoint(...)` calls
     /// can reference. The default impl fails closed; concrete impls live in
-    /// `ironclaw_loop_host` and wrap the host's `CheckpointStateStore`.
+    /// `ironclaw_loop_host` and wrap the host's `CheckpointStateStorePort`.
     ///
     /// The executor's checkpoint helper calls this method before invoking
     /// `LoopCheckpointPort::checkpoint(...)` so the metadata write references

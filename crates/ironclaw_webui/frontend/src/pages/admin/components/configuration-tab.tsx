@@ -45,14 +45,37 @@ export function buildConfigurationSaveMutation(group, values, idempotencyKey) {
   };
 }
 
+function configurationValuesFromFields(fields) {
+  return Object.fromEntries(fields.map((field) => [
+    field.handle,
+    field.secret ? "" : field.value || "",
+  ]));
+}
+
+function mergeRefetchedConfigurationValues(fields, current, dirtyHandles) {
+  return Object.fromEntries(fields.map((field) => [
+    field.handle,
+    dirtyHandles.has(field.handle)
+      ? current[field.handle] || ""
+      : field.secret ? "" : field.value || "",
+  ]));
+}
+
 export function ConfigurationGroup({ group, state }) {
   const initialValues = React.useMemo(
-    () => Object.fromEntries(group.fields.map((field) => [field.handle, field.value || ""])),
-    [group],
+    () => configurationValuesFromFields(group.fields),
+    [group.fields],
   );
   const [values, setValues] = React.useState(initialValues);
   const [saved, setSaved] = React.useState(false);
-  React.useEffect(() => setValues(initialValues), [initialValues]);
+  const dirtyHandlesRef = React.useRef(new Set());
+  React.useEffect(() => {
+    setValues((current) => mergeRefetchedConfigurationValues(
+      group.fields,
+      current,
+      dirtyHandlesRef.current,
+    ));
+  }, [group.fields]);
   const isSaving = state.isSaving && state.savingGroupId === group.group_id;
 
   const submit = async (event) => {
@@ -65,12 +88,10 @@ export function ConfigurationGroup({ group, state }) {
       clientActionId(),
     );
     try {
-      await state.save(mutation);
+      const savedGroup = await state.save(mutation);
+      dirtyHandlesRef.current.clear();
       setSaved(true);
-      setValues((current) => Object.fromEntries(group.fields.map((field) => [
-        field.handle,
-        field.secret ? "" : current[field.handle] || "",
-      ])));
+      setValues(configurationValuesFromFields(savedGroup?.fields || group.fields));
     } catch (_) {
       // The mutation exposes a sanitized error below.
     }
@@ -119,6 +140,7 @@ export function ConfigurationGroup({ group, state }) {
                   spellCheck={false}
                   onChange={(event) => {
                     const value = event.currentTarget.value;
+                    dirtyHandlesRef.current.add(field.handle);
                     setSaved(false);
                     setValues((current) => ({ ...current, [field.handle]: value }));
                   }}

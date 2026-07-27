@@ -56,7 +56,7 @@ test("useChannels derives channels from the extension channel surface, not the r
     display_name: "Slack",
     runtime: "wasm",
     surfaces: channelSurfaces,
-    onboarding_state: "setup_required",
+    installation_state: "setup_needed",
   };
   const github = {
     package_ref: { id: "github" },

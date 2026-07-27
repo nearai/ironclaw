@@ -426,15 +426,6 @@ impl CredentialManager {
         }
     }
 
-    // Unused after `pub mod gemini_oauth` → `pub(crate) mod gemini_oauth`. Kept
-    // in place because the boundary-cleanup move is meant to be behavior-preserving;
-    // delete in a follow-up if there's no future caller.
-    #[allow(dead_code)]
-    pub(crate) async fn get_valid_access_token(&self) -> Result<String> {
-        let cred = self.get_valid_credential().await?;
-        Ok(cred.access_token)
-    }
-
     /// Force a token refresh regardless of the current token's expiry time.
     /// This is useful when the server returns 401 Unauthorized for a supposedly valid token.
     pub(crate) async fn force_refresh(&self) -> Result<OAuthCredential> {
@@ -948,16 +939,6 @@ impl GeminiOauthProvider {
         })
     }
 
-    /// Returns the latest response metadata from the last API call.
-    // Unused after module privatization; see `get_valid_access_token` above.
-    #[allow(dead_code)]
-    pub(crate) fn last_response_meta(&self) -> GeminiResponseMeta {
-        self.last_response_meta
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-    }
-
     /// Inject thought signatures into model functionCall parts in the active loop.
     /// This prevents 400 errors from Gemini 3.x preview APIs.
     /// Mirrors `ensureActiveLoopHasThoughtSignatures` from the official Gemini CLI.
@@ -1066,89 +1047,6 @@ impl GeminiOauthProvider {
             curated.push(turn);
         }
         curated
-    }
-
-    /// Count tokens for the given messages using the Gemini countTokens API.
-    // Unused after module privatization; see `get_valid_access_token` above.
-    #[allow(dead_code)]
-    pub(crate) async fn count_tokens(&self, messages: &[ChatMessage]) -> Result<u32, LlmError> {
-        let sigs = self
-            .thought_signatures
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        let req = Self::to_gemini_request(
-            messages,
-            None,
-            None,
-            None,
-            None,
-            None,
-            &self.config.model,
-            &sigs,
-        );
-        let contents = req
-            .get("contents")
-            .cloned()
-            .unwrap_or(serde_json::json!([]));
-
-        let credential = self
-            .cred_manager
-            .get_valid_credential()
-            .await
-            .map_err(|_e| LlmError::AuthFailed {
-                provider: "gemini_oauth".to_string(),
-            })?;
-
-        let (url, request_body) = if self.uses_cloud_code_api() {
-            let url = "https://cloudcode-pa.googleapis.com/v1internal:countTokens".to_string();
-            let mut req = serde_json::json!({
-                "request": {
-                    "model": format!("models/{}", self.config.model),
-                    "contents": contents,
-                }
-            });
-            if let Some(ref pid) = credential.project_id {
-                req["project"] = serde_json::Value::String(pid.clone());
-            }
-            (url, req)
-        } else {
-            let url = format!(
-                "https://generativelanguage.googleapis.com/v1beta/models/{}:countTokens",
-                self.config.model
-            );
-            (url, serde_json::json!({ "contents": contents }))
-        };
-
-        let response = self
-            .http_client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header(
-                "Authorization",
-                format!("Bearer {}", credential.access_token),
-            )
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| LlmError::RequestFailed {
-                provider: "gemini_oauth".to_string(),
-                reason: e.to_string(),
-            })?;
-
-        let body: serde_json::Value =
-            response.json().await.map_err(|e| LlmError::RequestFailed {
-                provider: "gemini_oauth".to_string(),
-                reason: format!("Failed to parse countTokens response: {}", e),
-            })?;
-
-        let total = body
-            .get("totalTokens")
-            .or_else(|| body.get("totalTokenCount"))
-            .and_then(|t| t.as_u64())
-            .unwrap_or(0) as u32;
-
-        Ok(total)
     }
 
     /// Determine whether to use Cloud Code API vs legacy generativelanguage API.

@@ -1005,7 +1005,7 @@ pub enum AuditStreamResume {
     Updates(AuditProjectionReplay),
 }
 
-/// Transport-agnostic facade for scoped Reborn projection replay.
+/// Transport-agnostic service for scoped Reborn projection replay.
 ///
 /// Product transports should enter through this manager rather than reaching
 /// directly into durable logs. The manager intentionally keeps runtime and

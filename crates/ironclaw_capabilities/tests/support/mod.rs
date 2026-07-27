@@ -287,7 +287,9 @@ impl CapabilityDispatcher for RecordingDispatcher {
         let request = ironclaw_host_api::dispatch_test_support::AuthorizedDispatchRecord {
             authenticated_actor_user_id: invocation.actor.user_id().cloned(),
             run_id: match &invocation.origin {
-                InvocationOrigin::LoopRun(run_id) if invocation.process_id.is_none() => {
+                InvocationOrigin::LoopRun(run_id) | InvocationOrigin::ScheduledLoopRun(run_id)
+                    if invocation.process_id.is_none() =>
+                {
                     Some(*run_id)
                 }
                 _ => None,

@@ -1,69 +1,30 @@
 schema_version = 1
 
-# A capability is "tested" only when a harvested journey or typed operation
-# case executes the real extension boundary and observes Emulate.
+# "tested" means the capability is claimed by some executable evidence tier —
+# a typed operation case, a journey_evidence entry, an integration_evidence
+# entry, or (for reads) a harvested journey that exercises it.
+#
+# It does NOT mean the capability is fully covered. Coverage is enforced per
+# capability x outcome class by test_provider_capability_inventory.py:
+# `external_write` capabilities may not rest on a harvested tool-call name,
+# and reads need both a success and an empty-result case. Whatever does not
+# meet those rules yet is listed in coverage_backlog below, with an owner.
 [classifications]
 tested = [
-  "github.get_authenticated_user",
-  "github.get_repo",
-  "github.list_releases",
-  "gmail.create_draft",
-  "gmail.get_message",
-  "gmail.list_messages",
-  "gmail.reply_to_message",
-  "gmail.send_message",
-  "gmail.trash_message",
-  "google-calendar.create_event",
-  "google-calendar.delete_event",
-  "google-calendar.list_calendars",
-  "google-calendar.list_events",
-  "google-docs.create_document",
-  "google-docs.insert_text",
-  "google-docs.read_content",
-  "google-drive.create_folder",
-  "google-drive.download_file",
-  "google-drive.get_file",
-  "google-drive.list_files",
-  "google-drive.update_file",
-  "google-drive.upload_file",
-  "google-sheets.append_values",
-  "google-sheets.create_spreadsheet",
-  "google-sheets.get_spreadsheet",
-  "google-sheets.read_values",
-  "google-sheets.rename_sheet",
-  "google-sheets.write_values",
-  "slack.get_conversation_history",
-  "slack.get_conversation_info",
-  "slack.get_thread_replies",
-  "slack.get_user_info",
-  "slack.list_conversations",
-  "slack.search_messages",
-  "slack.send_message",
-  "slack.whoami",
-]
-
-live_only = []
-unsupported = []
-
-[[waivers]]
-owner = "@serrrfirat"
-reason = "No full-path hermetic provider-operation case exists yet."
-issue = "#6524"
-review_condition = "Replace with tested, live_only, or unsupported classification before closing #6524."
-capabilities = [
   "github.add_issue_assignees",
   "github.add_issue_labels",
   "github.comment_issue",
   "github.create_branch",
+  "github.create_or_update_file",
   "github.create_issue",
   "github.create_issue_comment",
-  "github.create_or_update_file",
   "github.create_pr_review",
   "github.create_pull_request",
   "github.create_release",
   "github.create_repo",
   "github.delete_file",
   "github.fork_repo",
+  "github.get_authenticated_user",
   "github.get_combined_status",
   "github.get_file_content",
   "github.get_issue",
@@ -71,6 +32,7 @@ capabilities = [
   "github.get_pull_request",
   "github.get_pull_request_files",
   "github.get_pull_request_reviews",
+  "github.get_repo",
   "github.get_workflow_run_artifacts",
   "github.get_workflow_run_jobs",
   "github.get_workflow_runs",
@@ -81,6 +43,7 @@ capabilities = [
   "github.list_pull_request_comments",
   "github.list_pull_request_review_threads",
   "github.list_pull_requests",
+  "github.list_releases",
   "github.list_repos",
   "github.merge_pull_request",
   "github.remove_issue_assignees",
@@ -97,30 +60,55 @@ capabilities = [
   "github.unresolve_review_thread",
   "github.update_issue",
   "github.update_pull_request",
+  "gmail.create_draft",
+  "gmail.get_message",
+  "gmail.list_messages",
+  "gmail.reply_to_message",
+  "gmail.send_message",
+  "gmail.trash_message",
   "google-calendar.add_attendees",
+  "google-calendar.create_event",
+  "google-calendar.delete_event",
   "google-calendar.find_free_slots",
   "google-calendar.get_event",
+  "google-calendar.list_calendars",
+  "google-calendar.list_events",
   "google-calendar.set_reminder",
   "google-calendar.update_event",
   "google-docs.batch_update",
+  "google-docs.create_document",
   "google-docs.create_list",
   "google-docs.delete_content",
   "google-docs.format_paragraph",
   "google-docs.format_text",
   "google-docs.get_document",
+  "google-docs.insert_text",
   "google-docs.insert_table",
+  "google-docs.read_content",
   "google-docs.replace_text",
+  "google-drive.create_folder",
   "google-drive.delete_file",
+  "google-drive.download_file",
+  "google-drive.get_file",
+  "google-drive.list_files",
   "google-drive.list_permissions",
   "google-drive.list_shared_drives",
   "google-drive.remove_permission",
   "google-drive.share_file",
   "google-drive.trash_file",
+  "google-drive.update_file",
+  "google-drive.upload_file",
   "google-sheets.add_sheet",
+  "google-sheets.append_values",
   "google-sheets.batch_read_values",
   "google-sheets.clear_values",
+  "google-sheets.create_spreadsheet",
   "google-sheets.delete_sheet",
   "google-sheets.format_cells",
+  "google-sheets.get_spreadsheet",
+  "google-sheets.read_values",
+  "google-sheets.rename_sheet",
+  "google-sheets.write_values",
   "google-slides.batch_update",
   "google-slides.create_presentation",
   "google-slides.create_shape",
@@ -135,6 +123,161 @@ capabilities = [
   "google-slides.insert_text",
   "google-slides.replace_all_text",
   "google-slides.replace_shapes_with_image",
+  "nearai.web_search",
+  "slack.get_conversation_history",
+  "slack.get_conversation_info",
+  "slack.get_thread_replies",
+  "slack.get_user_info",
+  "slack.list_conversations",
+  "slack.search_messages",
+  "slack.send_message",
+  "slack.whoami",
+  "web-access.get_content",
+  "web-access.search",
+]
+
+live_only = []
+unsupported = []
+
+[[integration_evidence]]
+capability = "github.handle_webhook"
+target = "reborn_integration_tool_call"
+source = "tests/integration/tool_call.rs"
+test = "github_webhook_normalization_dispatches_through_bundled_wasm"
+
+[[integration_evidence]]
+capability = "nearai.web_search"
+target = "reborn_integration_mcp"
+source = "tests/integration/mcp.rs"
+test = "nearai_web_search_dispatches_through_bundled_hosted_mcp"
+
+[[integration_evidence]]
+capability = "web-access.get_content"
+target = "reborn_integration_web_access"
+source = "tests/integration/web_access.rs"
+test = "get_content_dispatches_through_scripted_exa_mcp"
+
+[[integration_evidence]]
+capability = "web-access.search"
+target = "reborn_integration_web_access"
+source = "tests/integration/web_access.rs"
+test = "web_search_dispatches_through_scripted_exa_mcp"
+
+# Journey evidence: the capability is asserted with provider-side readback
+# inside a harvested full-path journey rather than a typed operation case.
+# The named source, test, and assertion helper must all still exist.
+
+[[journey_evidence]]
+capability = "gmail.send_message"
+source = "tests/e2e/scenarios/test_reborn_qa_trace_full_path.py"
+test = "test_qa_journey_provider_leg_replays_through_emulate"
+assertion = "_assert_google_provider_outcome"
+
+[[journey_evidence]]
+capability = "google-docs.create_document"
+source = "tests/e2e/scenarios/test_reborn_qa_trace_full_path.py"
+test = "test_qa_journey_provider_leg_replays_through_emulate"
+assertion = "_assert_google_provider_outcome"
+
+[[journey_evidence]]
+capability = "google-docs.insert_text"
+source = "tests/e2e/scenarios/test_reborn_qa_trace_full_path.py"
+test = "test_qa_journey_provider_leg_replays_through_emulate"
+assertion = "_assert_google_provider_outcome"
+
+[[journey_evidence]]
+capability = "google-sheets.append_values"
+source = "tests/e2e/scenarios/test_reborn_qa_trace_full_path.py"
+test = "test_qa_journey_provider_leg_replays_through_emulate"
+assertion = "_assert_google_provider_outcome"
+
+[[journey_evidence]]
+capability = "google-sheets.create_spreadsheet"
+source = "tests/e2e/scenarios/test_reborn_qa_trace_full_path.py"
+test = "test_qa_journey_provider_leg_replays_through_emulate"
+assertion = "_assert_google_provider_outcome"
+
+[[journey_evidence]]
+capability = "slack.send_message"
+source = "tests/e2e/scenarios/test_reborn_qa_trace_full_path.py"
+test = "test_qa_journey_provider_leg_replays_through_emulate"
+assertion = "_assert_slack_provider_outcome"
+
+
+[[coverage_backlog]]
+rule = "read_requires_outcome_classes"
+owner = "@serrrfirat"
+reason = "Has a seeded success case but no empty-result case; the runtime is unproven to distinguish no results from a failed call."
+issue = "#6524"
+review_condition = "Add a ProviderOperationCase with outcome_class = empty."
+capabilities = [
+  "github.get_authenticated_user",
+  "github.get_combined_status",
+  "github.get_file_content",
+  "github.get_issue",
+  "github.get_job_logs",
+  "github.get_pull_request",
+  "github.get_pull_request_files",
+  "github.get_pull_request_reviews",
+  "github.get_repo",
+  "github.get_workflow_run_artifacts",
+  "github.get_workflow_run_jobs",
+  "github.get_workflow_runs",
+  "github.list_branches",
+  "github.list_issue_comments",
+  "github.list_issues",
+  "github.list_pull_request_comments",
+  "github.list_pull_request_review_threads",
+  "github.list_pull_requests",
+  "github.list_releases",
+  "github.list_repos",
+  "github.search_code",
+  "github.search_issues",
+  "github.search_issues_pull_requests",
+  "github.search_repositories",
+  "google-calendar.find_free_slots",
+  "google-calendar.get_event",
+  "google-calendar.list_calendars",
+  "google-docs.get_document",
+  "google-drive.get_file",
+  "google-drive.list_permissions",
+  "google-drive.list_shared_drives",
+  "google-sheets.batch_read_values",
+  "google-slides.get_presentation",
+  "google-slides.get_thumbnail",
+]
+
+[[coverage_backlog]]
+rule = "read_requires_outcome_classes"
+owner = "@serrrfirat"
+reason = "No typed operation case at all; evidence is a harvested tool-call name or a journey-specific branch, not a per-operation contract."
+issue = "#6524"
+review_condition = "Add seeded success and empty-result ProviderOperationCase entries."
+capabilities = [
+  "gmail.get_message",
+  "gmail.list_messages",
+  "google-calendar.list_events",
+  "google-docs.read_content",
+  "google-drive.download_file",
+  "google-drive.list_files",
+  "google-sheets.get_spreadsheet",
+  "slack.get_conversation_history",
+  "slack.get_conversation_info",
+  "slack.get_thread_replies",
+  "slack.get_user_info",
+  "slack.list_conversations",
+  "slack.search_messages",
+  "slack.whoami",
+]
+
+[[coverage_backlog]]
+rule = "read_requires_outcome_classes"
+owner = "@serrrfirat"
+reason = "Evidenced by a named Cargo integration test at a non-Emulate seam (local WASM, hosted MCP, Exa-backed web access), so there is no provider world in which to seed an empty result. integration_evidence names one executable test per capability and carries no outcome class, so it must not silently exempt these from the read rule."
+issue = "#6524"
+review_condition = "Make integration_evidence outcome-aware, or add a hermetic double for these seams, then require success and empty like every other read."
+capabilities = [
+  "github.handle_webhook",
   "nearai.web_search",
   "web-access.get_content",
   "web-access.search",

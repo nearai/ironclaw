@@ -157,6 +157,6 @@ async fn reborn_qa_slack_bug_prefix_message_runs_logging_action() {
 // per-installation routing lives on the `ChannelAdapter` contract:
 // `run_channel_adapter_conformance` (deliver drives the vendor server, every
 // part Sent), the `DeliveryCoordinator` suite in
-// `crates/ironclaw_product_workflow/tests/outbound_delivery_contract.rs`
+// `crates/ironclaw_product/tests/outbound_delivery_contract.rs`
 // (`coordinator_notice_is_source_routed_and_persists_before_egress` et al.),
 // and `tests/reborn_adapter_installation_scope_isolation_parity.rs`.

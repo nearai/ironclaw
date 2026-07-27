@@ -10,8 +10,11 @@
 
 use std::env;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+const PINNED_PNPM_PACKAGE: &str = "pnpm@11.7.0";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()); // safety: build script — Cargo always sets this
@@ -130,18 +133,22 @@ fn required_frontend_dist_files(dist_dir: &Path) -> [PathBuf; 3] {
     ]
 }
 
-fn run_command(command: &str, args: &[&str], cwd: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let status = Command::new(command).args(args).current_dir(cwd).status()?;
+fn run_command<S: AsRef<str>>(
+    command: &str,
+    args: &[S],
+    cwd: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let rendered = render_command(command, args);
+    let status = Command::new(command)
+        .args(args.iter().map(AsRef::as_ref))
+        .current_dir(cwd)
+        .status()?;
     if status.success() {
         return Ok(());
     }
 
     Err(std::io::Error::other(format!(
-        "`{}` failed in {} with status {status}",
-        std::iter::once(command)
-            .chain(args.iter().copied())
-            .collect::<Vec<_>>()
-            .join(" "),
+        "`{rendered}` failed in {} with status {status}",
         cwd.display(),
     ))
     .into())
@@ -151,7 +158,35 @@ fn run_pnpm(args: &[&str], cwd: &Path) -> Result<(), Box<dyn std::error::Error>>
     let mut corepack_args = Vec::with_capacity(args.len() + 1);
     corepack_args.push("pnpm");
     corepack_args.extend_from_slice(args);
-    run_command(corepack_command(), &corepack_args, cwd)
+    match run_command(corepack_command(), &corepack_args, cwd) {
+        Ok(()) => Ok(()),
+        Err(error) if is_not_found_error(error.as_ref()) => {
+            eprintln!(
+                "`{}` was not found; falling back to `npm exec --yes --package={}`",
+                corepack_command(),
+                PINNED_PNPM_PACKAGE,
+            );
+            let mut npm_args = Vec::with_capacity(args.len() + 5);
+            npm_args.push("exec".to_string());
+            npm_args.push("--yes".to_string());
+            npm_args.push(format!("--package={PINNED_PNPM_PACKAGE}"));
+            npm_args.push("--".to_string());
+            npm_args.push("pnpm".to_string());
+            npm_args.extend(args.iter().map(|arg| (*arg).to_string()));
+            run_command(npm_command(), &npm_args, cwd).map_err(|fallback_error| {
+                io::Error::other(format!(
+                    "failed to run pnpm through `{}` or `{}`. Install Corepack/pnpm \
+                     (`corepack enable pnpm`) or set SKIP_FRONTEND_BUILD=1 for a \
+                     backend-only Rust build. corepack error: {error}; npm fallback \
+                     error: {fallback_error}",
+                    corepack_command(),
+                    npm_command(),
+                ))
+                .into()
+            })
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn corepack_command() -> &'static str {
@@ -160,6 +195,23 @@ fn corepack_command() -> &'static str {
     } else {
         "corepack"
     }
+}
+
+fn npm_command() -> &'static str {
+    if cfg!(windows) { "npm.cmd" } else { "npm" }
+}
+
+fn is_not_found_error(error: &(dyn std::error::Error + 'static)) -> bool {
+    error
+        .downcast_ref::<io::Error>()
+        .is_some_and(|error| error.kind() == io::ErrorKind::NotFound)
+}
+
+fn render_command<S: AsRef<str>>(command: &str, args: &[S]) -> String {
+    std::iter::once(command)
+        .chain(args.iter().map(AsRef::as_ref))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn collect(

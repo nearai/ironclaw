@@ -38,7 +38,7 @@
 //! the *resolved* profile, so a tenant/org ceiling narrowing authority reaches
 //! them for free. They exist so no consumer past the composition edge branches
 //! on a deployment mode — §4.4 of
-//! `docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`.
+//! `docs/reborn/contracts/runtime-profiles.md`.
 //!
 //! ## Determinism and audit
 //!

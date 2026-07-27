@@ -3,7 +3,7 @@ name = "ironclaw_reborn_composition"
 version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true
-description = "Facade-shaped production composition root for IronClaw Reborn"
+description = "Composition-root production composition root for IronClaw Reborn"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/nearai/ironclaw"
@@ -14,6 +14,12 @@ publish = false
 layer = "app"
 
 [features]
+# Compile the mem0 third-party memory provider into the composed runtime.
+# Off by default (productionization, #5264) so default builds carry no mem0
+# code or its `reqwest`/`rustls` transport deps; an operator who binds memory
+# to mem0 builds with `--features memory-mem0`. mem0 stays runtime-off too
+# (the binding policy defaults to native).
+memory-mem0 = ["dep:ironclaw_memory_mem0"]
 # Expose test-only helpers (mock LLM gateway, budget runtime accessors)
 # so integration tests in this crate's `tests/` directory and downstream
 # crates can drive `build_reborn_runtime` with a stub model gateway
@@ -21,9 +27,12 @@ layer = "app"
 # budget pipeline end-to-end. Enable with `cargo test --features
 # test-support.
 test-support = [
+    "dep:ironclaw_first_party_extensions",
+    "ironclaw_extension_host/test-support",
+    "ironclaw_auth/test-support",
     "ironclaw_host_runtime/test-support",
     "ironclaw_outbound/test-support",
-    "ironclaw_product_workflow/test-support",
+    "ironclaw_product/test-support",
     "ironclaw_runner/test-support",
 ]
 [dependencies]
@@ -44,22 +53,28 @@ ironclaw_event_streams = { path = "../ironclaw_event_streams" }
 ironclaw_events = { path = "../ironclaw_events" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
-ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions" }
 ironclaw_hooks = { path = "../ironclaw_hooks" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_host_ingress = { path = "../ironclaw_host_ingress" }
 ironclaw_extension_host = { path = "../ironclaw_extension_host" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
 ironclaw_llm = { path = "../ironclaw_llm", default-features = false, features = ["registry-provider-factory"] }
 ironclaw_loop_host = { path = "../ironclaw_loop_host" }
 ironclaw_memory = { path = "../ironclaw_memory" }
 ironclaw_mcp = { path = "../ironclaw_mcp" }
+# Memory contract + provider crates. Composition is the layer that wires the
+# configured memory provider (issue #3537 / #5264): like `ironclaw_embeddings`'s
+# provider factory it may depend on every concrete provider crate — the native
+# (filesystem) provider and the mem0 (REST) provider — and builds whichever the
+# `[memory]` binding selects.
+ironclaw_memory_mem0 = { path = "../ironclaw_memory_mem0", optional = true }
+ironclaw_memory_native = { path = "../ironclaw_memory_native" }
 ironclaw_network = { path = "../ironclaw_network" }
 ironclaw_observability = { path = "../ironclaw_observability" }
+ironclaw_operator = { path = "../ironclaw_operator" }
 ironclaw_outbound = { path = "../ironclaw_outbound" }
 ironclaw_processes = { path = "../ironclaw_processes" }
-ironclaw_product_adapters = { path = "../ironclaw_product_adapters", features = ["host-auth-mint"] }
-ironclaw_product_adapter_registry = { path = "../ironclaw_product_adapter_registry" }
-ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
+ironclaw_product = { path = "../ironclaw_product", features = ["host-auth-mint"] }
 ironclaw_runner = { path = "../ironclaw_runner" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config" }
 ironclaw_reborn_identity = { path = "../ironclaw_reborn_identity" }
@@ -67,6 +82,7 @@ ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store" }
 ironclaw_reborn_openai_compat = { path = "../ironclaw_reborn_openai_compat" }
 ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces" }
 ironclaw_first_party_extension_ports = { path = "../ironclaw_first_party_extension_ports" }
+ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions", optional = true }
 ironclaw_resources = { path = "../ironclaw_resources" }
 ironclaw_run_state = { path = "../ironclaw_run_state" }
 ironclaw_runtime_policy = { path = "../ironclaw_runtime_policy" }
@@ -78,10 +94,7 @@ ironclaw_triggers = { path = "../ironclaw_triggers" }
 ironclaw_projects = { path = "../ironclaw_projects" }
 ironclaw_trust = { path = "../ironclaw_trust" }
 ironclaw_turns = { path = "../ironclaw_turns" }
-ironclaw_product_context = { path = "../ironclaw_product_context", version = "0.1.0" }
 nix = { version = "0.30", default-features = false, features = ["process"] }
-# Unpacking uploaded WASM-tool bundles for the WebUI "Install Tool" import flow.
-zip = { version = "8", default-features = false, features = ["deflate"] }
 # WebUI v2 route surface + static SPA bundle merged up into
 # `ironclaw_webui`; no longer a composition dependency.
 libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
@@ -112,6 +125,11 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 ironclaw_extension_host = { path = "../ironclaw_extension_host", features = ["test-support"] }
+# DEL-7: composition no longer links first-party extensions in production; the
+# binary injects them as neutral data. The dev-dependency stays so the crate's
+# own unit/integration tests (and the test-support inventory helper) can build
+# the catalog and trust policy without the binary.
+ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions" }
 async-trait = "0.1"
 chrono = "0.4"
 hmac = "0.13"
@@ -139,13 +157,15 @@ secrecy = { version = "0.10", features = ["serde"] }
 ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime", features = ["test-support"] }
+# mem0 provider with its mock transport: the provider-swap integration test
+# drives the config-driven factory over the in-memory `MockMem0Transport`.
+ironclaw_memory_mem0 = { path = "../ironclaw_memory_mem0", features = ["test-support"] }
 ironclaw_loop_host = { path = "../ironclaw_loop_host", features = ["test-support"] }
 ironclaw_conversations = { path = "../ironclaw_conversations" }
 ironclaw_reborn_composition = { path = ".", features = ["test-support"] }
 ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_turns = { path = "../ironclaw_turns", features = ["test-support"] }
-ironclaw_product_workflow = { path = "../ironclaw_product_workflow", features = ["test-support"] }
-ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
+ironclaw_product = { path = "../ironclaw_product", features = ["test-support"] }
 # The ported channel-host e2e suite drives the generic assembly with slack
 # fixtures; dev-dependency linkage of concrete extension crates is the
 # sanctioned test exception (DEL-7).
@@ -170,10 +190,6 @@ name = "production_runtime_automations"
 
 [[test]]
 name = "resource_governor_libsql_contract"
-
-[build-dependencies]
-ironclaw_skills = { path = "../ironclaw_skills" }
-serde_json = "1"
 
 [lints]
 workspace = true

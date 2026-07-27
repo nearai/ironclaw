@@ -102,7 +102,7 @@ Re-verify the module list: `grep -n 'ID,' crates/ironclaw_first_party_extensions
    normalized outcome; `deliver` render+send; idempotent `activate`/`cleanup`
    vendor wiring) — see the trait doc for the method contract. The binary
    supplies the adapter to composition through the
-   `RebornBuildInput::with_channel_extension_bindings` seam
+   `RebornHostBindings::with_channel_extension_bindings` seam
    (`crates/ironclaw_reborn_composition/src/input.rs`, `ChannelExtensionBinding`);
    composition iterates it by `extension_id` and never names a concrete crate.
 4. Conversation/actor binding is **data, not per-channel code**: the

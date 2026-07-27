@@ -5,12 +5,12 @@
 //! adapter's egress credential handle (the host resolves it to the bot
 //! token at request time).
 
-use ironclaw_product_adapters::{
+use ironclaw_host_api::ReplyTargetBindingRef;
+use ironclaw_host_api::product_adapter::{
     AuthPromptView, DeclaredEgressHost, EgressCredentialHandle, EgressHeader, EgressMethod,
     EgressPath, EgressRequest, ExternalConversationRef, FinalReplyView, GatePromptView,
     ProductOutboundTarget, ProgressKind, ProgressUpdateView,
 };
-use ironclaw_turns::ReplyTargetBindingRef;
 use thiserror::Error;
 
 use crate::payload::TELEGRAM_API_HOST;
@@ -240,7 +240,7 @@ pub fn render_auth_prompt(
 /// Render a `BlockedApproval` prompt as `sendMessage` requests. The copy
 /// advertises the in-chat reply because inbound genuinely parses it — the
 /// channel-neutral grammar in
-/// `ironclaw_product_adapters::interaction_commands`, the same one the
+/// `ironclaw_host_api::product_adapter::interaction_commands`, the same one the
 /// shared busy hint advertises. Keep copy and grammar in lockstep.
 pub fn render_gate_prompt(
     reply: &TelegramReplyTarget,
@@ -325,7 +325,7 @@ pub fn render_progress_typing(
 }
 
 /// Build a Telegram Bot API egress request via the
-/// `ironclaw_product_adapters::EgressRequest` builder. All Telegram
+/// `ironclaw_host_api::product_adapter::EgressRequest` builder. All Telegram
 /// outbound requests target `api.telegram.org`, are POST, and carry an
 /// `application/json` body.
 fn build_egress_request(
@@ -348,7 +348,7 @@ fn build_egress_request(
 mod tests {
     use super::*;
     use chrono::Utc;
-    use ironclaw_turns::TurnRunId;
+    use ironclaw_host_api::TurnRunId;
 
     fn handle() -> EgressCredentialHandle {
         EgressCredentialHandle::new("telegram_bot_token").expect("valid")

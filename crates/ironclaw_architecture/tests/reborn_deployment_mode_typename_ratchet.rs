@@ -1,6 +1,6 @@
 //! Anti-slippage ratchet for the deployment-mode-name axis, the broader
 //! companion to [`reborn_localdev_typename_ratchet`] (§4.4 / §10 of
-//! `docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`).
+//! `docs/reborn/contracts/runtime-profiles.md`).
 //!
 //! §4.4 mandates one enforcement test: **"no public type name contains
 //! `Local`/`LocalDev`/`Hosted`/`Enterprise`"** — a deployment mode is a
@@ -24,10 +24,10 @@
 //!   continue lowercase, so the word is not `Local`). The `LocalTriggerAccess*`
 //!   family is gone: §4.4 folded the `local_trigger_access` module into a
 //!   config value (the `TriggerFireAccessPolicy` on `RebornRuntimeInput`,
-//!   backed by config + the identity directory). The `RebornLocal*`
-//!   composition family is Slice-B mode-as-type debt. Shrinks as those land.
-//!   `LocalInvocationServicesResolver` awaits a rename (a design call — it
-//!   wires host OR sandbox ports).
+//!   backed by config + the identity directory). The former `RebornLocal*`
+//!   composition family and `LocalInvocationServicesResolver` were renamed to
+//!   deployment-neutral types after their implementations stopped being
+//!   local-only. New `Local*` debt still fails this ratchet.
 //!
 //! Scanner semantics (shared with the other §10 ratchets — see
 //! [`ratchet_support`]): comments/strings stripped before matching; covers
@@ -105,9 +105,6 @@ const FROZEN_OTHER_MODE_TYPES: &[&str] = &[
     //     `TriggerFireAccessPolicy` on `RebornRuntimeInput`, backed by config
     //     (static owner) and the identity directory (SSO membership), with no
     //     persisted store type (§4.4). The `LocalTriggerAccess*` family is gone.
-    // --- Local*: pending rename — its correct name is a design call (wires host
-    //     OR sandbox process ports, so "Local…" understates it).
-    "LocalInvocationServicesResolver",
     // --- mid-name matches the boundary-aware contains predicate also inventories
     //     (§4.4's rule is "contains", not "starts with") ---
     //   JUSTIFIED (Bucket-3 by meaning): "hook-local id" — an identifier local to
@@ -117,11 +114,7 @@ const FROZEN_OTHER_MODE_TYPES: &[&str] = &[
     //     composition surface; shrinks with Slice B (deployment mode becomes a
     //     `DeploymentConfig` value):
     "RebornLocalExtensionManagementPort",
-    "RebornLocalLifecycleFacade",
     "RebornLocalRuntimeIdentity",
-    "RebornLocalServiceLifecycle",
-    "RebornLocalSkillManagementError",
-    "RebornLocalSkillManagementPort",
     //   mid-name LocalDev entries: none — cleared by the DeploymentConfig
     //     refactor (Slice B); the sibling ratchet's empty allowlist plus
     //     `contains_mode_term` here keep new ones out.

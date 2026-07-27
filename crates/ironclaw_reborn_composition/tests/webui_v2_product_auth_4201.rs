@@ -4,7 +4,7 @@
 //!
 //! These tests drive the HTTP routes end-to-end through `webui_v2_app` so the
 //! caller path (auth layer + body limit + rate limit + handler +
-//! `RebornProductAuthServices`) is exercised, not just the facade helpers.
+//! `RebornProductAuthServices`) is exercised, not just the service helpers.
 
 // arch-exempt: large_file, product-auth route contracts stay in one caller-level suite until the WebUI route split lands, plan #5985
 
@@ -19,16 +19,16 @@ use ironclaw_auth::{
     NewCredentialAccount,
 };
 use ironclaw_auth::{AuthProviderId, CredentialAccountId, CredentialAccountService};
-use ironclaw_host_api::{AgentId, InvocationId, ProjectId, ResourceScope, TenantId, UserId};
-use ironclaw_product_workflow::{
-    ProductOperationRequest, ProductOperationResponse, ProductSurface, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornServicesError, RebornStreamEventsRequest,
-    RebornStreamEventsResponse, WebUiAuthenticatedCaller, rejecting_reborn_services_error,
+use ironclaw_auth::{RebornAuthContinuationDispatcher, RebornProductAuthServices};
+use ironclaw_host_api::{
+    AgentId, InvocationId, ProductSurfaceCaller, ProductSurfaceError, ProjectId, ResourceScope,
+    TenantId, UserId,
 };
-use ironclaw_reborn_composition::{
-    RebornAuthContinuationDispatcher, RebornProductAuthServices, RebornReadiness, RebornWebuiBundle,
+use ironclaw_product::rejecting_product_surface_error;
+use ironclaw_webui::{
+    ProductAuthRouteState, WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig,
+    product_auth_route_mount, webui_v2_app,
 };
-use ironclaw_webui::{WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -73,28 +73,29 @@ impl RebornAuthContinuationDispatcher for NoopAuthDispatcher {
 struct UnusedServices;
 
 #[async_trait]
-impl ProductSurface for UnusedServices {
-    async fn stream_events(
+impl ironclaw_host_api::ProductSurface for UnusedServices {
+    async fn invoke(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
+        _caller: ProductSurfaceCaller,
+        _request: ironclaw_host_api::ProductSurfaceInvokeRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceInvokeResponse, ProductSurfaceError> {
+        Err(rejecting_product_surface_error())
     }
 
-    async fn get_run_state(
+    async fn query(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornGetRunStateRequest,
-    ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
+        _caller: ProductSurfaceCaller,
+        _request: ironclaw_host_api::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ProductSurfaceError> {
+        Err(rejecting_product_surface_error())
     }
-    async fn execute_command(
+
+    async fn stream_events(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: ProductOperationRequest,
-    ) -> Result<ProductOperationResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
+        _caller: ProductSurfaceCaller,
+        _request: ironclaw_host_api::ProductSurfaceStreamRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceStreamResponse, ProductSurfaceError> {
+        Err(rejecting_product_surface_error())
     }
 }
 
@@ -109,19 +110,25 @@ fn build_fixture() -> AppFixture {
         shared.clone(),
         Arc::new(NoopAuthDispatcher::default()),
     ));
-    let bundle = RebornWebuiBundle {
-        api: Arc::new(UnusedServices),
-        product_auth: Some(product_auth),
-        readiness: RebornReadiness::disabled(),
-    };
+    let product_surface = Arc::new(UnusedServices);
+    let product_auth_mount = product_auth_route_mount(
+        ProductAuthRouteState::new(
+            product_auth,
+            TenantId::new(TENANT).expect("tenant"),
+            Some(AgentId::new(AGENT).expect("agent")),
+            Some(ProjectId::new(PROJECT).expect("project")),
+        )
+        .with_product_surface(product_surface.clone()),
+    );
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         Arc::new(OnlyValidToken),
         vec![HeaderValue::from_static("http://localhost:1234")],
     )
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
-    .with_default_project_id(ProjectId::new(PROJECT).expect("project"));
-    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+    .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
+    .with_split_route_mount(product_auth_mount);
+    let app = webui_v2_app(product_surface, config).expect("webui v2 app");
     AppFixture { app, shared }
 }
 
@@ -1016,7 +1023,7 @@ async fn follow_up_routes_require_invocation_id() {
 
 #[test]
 fn auth_prompt_view_serialises_optional_fields_when_present() {
-    use ironclaw_product_adapters::{AuthPromptChallengeKind, AuthPromptView};
+    use ironclaw_product::{AuthPromptChallengeKind, AuthPromptView};
     use ironclaw_turns::TurnRunId;
 
     let view = AuthPromptView {
@@ -1037,6 +1044,7 @@ fn auth_prompt_view_serialises_optional_fields_when_present() {
                 .with_timezone(&chrono::Utc),
         ),
         connection: None,
+        pairing: None,
     };
     let json = serde_json::to_value(&view).expect("serialise");
     assert_eq!(json["challenge_kind"], "oauth_url");
@@ -1058,7 +1066,7 @@ fn auth_prompt_view_serialises_optional_fields_when_present() {
 
 #[test]
 fn auth_prompt_view_omits_optional_fields_when_absent() {
-    use ironclaw_product_adapters::AuthPromptView;
+    use ironclaw_product::AuthPromptView;
     use ironclaw_turns::TurnRunId;
 
     let view = AuthPromptView {
@@ -1073,6 +1081,7 @@ fn auth_prompt_view_omits_optional_fields_when_absent() {
         authorization_url: None,
         expires_at: None,
         connection: None,
+        pairing: None,
     };
     let json = serde_json::to_value(&view).expect("serialise");
     assert!(
@@ -1108,7 +1117,7 @@ fn auth_prompt_view_omits_optional_fields_when_absent() {
 #[test]
 fn auth_prompt_view_deserialises_without_optional_fields() {
     // Simulate a legacy serialised row (no new fields) — must round-trip as None.
-    use ironclaw_product_adapters::AuthPromptView;
+    use ironclaw_product::AuthPromptView;
 
     let legacy_json = r#"{
         "turn_run_id": "11111111-1111-1111-1111-111111111111",
@@ -1133,7 +1142,7 @@ async fn challenge_for_gate_returns_oauth_url_view_for_seeded_flow() {
         AuthChallenge, AuthContinuationRef, AuthFlowKind, AuthFlowManager, AuthGateRef,
         InMemoryAuthProductServices, NewAuthFlow, OAuthAuthorizationUrl, TurnRunRef,
     };
-    use ironclaw_product_adapters::AuthPromptChallengeKind;
+    use ironclaw_product::AuthPromptChallengeKind;
     use std::sync::Arc;
 
     let shared = Arc::new(InMemoryAuthProductServices::new());
@@ -1181,7 +1190,8 @@ async fn challenge_for_gate_returns_oauth_url_view_for_seeded_flow() {
         .await
         .expect("create flow");
 
-    let provider = product_auth.as_auth_challenge_provider().expect("provider");
+    let provider = ironclaw_reborn_composition::product_auth_challenge_provider(&product_auth)
+        .expect("provider");
     // Build a TurnScope matching the flow's tenant/agent/project/thread.
     let turn_scope = TurnScope::new(
         TenantId::new(TENANT).expect("tenant"),
@@ -1248,7 +1258,7 @@ fn auth_challenge_provider_absent_when_no_flow_record_source() {
         Arc::new(NoopAuthDispatcher::default()),
     ));
     assert!(
-        product_auth.as_auth_challenge_provider().is_none(),
+        ironclaw_reborn_composition::product_auth_challenge_provider(&product_auth).is_none(),
         "no flow_record_source → no AuthChallengeProvider"
     );
 }
@@ -1313,7 +1323,8 @@ async fn challenge_for_gate_cancelled_flow_returns_none() {
         .await
         .expect("cancel flow");
 
-    let provider = product_auth.as_auth_challenge_provider().expect("provider");
+    let provider = ironclaw_reborn_composition::product_auth_challenge_provider(&product_auth)
+        .expect("provider");
     let turn_scope = TurnScope::new(
         TenantId::new(TENANT).expect("tenant"),
         Some(AgentId::new(AGENT).expect("agent")),
@@ -1385,7 +1396,8 @@ async fn challenge_for_gate_threadless_flow_returns_none_for_thread_scope() {
         .await
         .expect("create flow");
 
-    let provider = product_auth.as_auth_challenge_provider().expect("provider");
+    let provider = ironclaw_reborn_composition::product_auth_challenge_provider(&product_auth)
+        .expect("provider");
     let turn_scope = TurnScope::new(
         TenantId::new(TENANT).expect("tenant"),
         Some(AgentId::new(AGENT).expect("agent")),
@@ -1461,7 +1473,8 @@ async fn challenge_for_gate_wrong_tenant_returns_none() {
         .await
         .expect("create flow");
 
-    let provider = product_auth.as_auth_challenge_provider().expect("provider");
+    let provider = ironclaw_reborn_composition::product_auth_challenge_provider(&product_auth)
+        .expect("provider");
 
     // Query with a DIFFERENT tenant — must return None even with same gate_ref.
     let other_turn_scope = TurnScope::new(
@@ -1497,7 +1510,7 @@ async fn challenge_for_gate_returns_manual_token_view_for_seeded_flow() {
         TurnRunRef,
     };
     use ironclaw_host_api::ThreadId;
-    use ironclaw_product_adapters::AuthPromptChallengeKind;
+    use ironclaw_product::AuthPromptChallengeKind;
     use ironclaw_turns::{TurnRunId, TurnScope};
     use std::sync::Arc;
 
@@ -1539,7 +1552,8 @@ async fn challenge_for_gate_returns_manual_token_view_for_seeded_flow() {
         .await
         .expect("create flow");
 
-    let provider = product_auth.as_auth_challenge_provider().expect("provider");
+    let provider = ironclaw_reborn_composition::product_auth_challenge_provider(&product_auth)
+        .expect("provider");
     let turn_scope = TurnScope::new(
         TenantId::new(TENANT).expect("tenant"),
         Some(AgentId::new(AGENT).expect("agent")),
@@ -1577,7 +1591,7 @@ async fn challenge_for_gate_returns_other_kind_view_for_setup_required_flow() {
         InMemoryAuthProductServices, NewAuthFlow, TurnRunRef,
     };
     use ironclaw_host_api::ThreadId;
-    use ironclaw_product_adapters::AuthPromptChallengeKind;
+    use ironclaw_product::AuthPromptChallengeKind;
     use ironclaw_turns::{TurnRunId, TurnScope};
     use std::sync::Arc;
 
@@ -1617,7 +1631,8 @@ async fn challenge_for_gate_returns_other_kind_view_for_setup_required_flow() {
         .await
         .expect("create flow");
 
-    let provider = product_auth.as_auth_challenge_provider().expect("provider");
+    let provider = ironclaw_reborn_composition::product_auth_challenge_provider(&product_auth)
+        .expect("provider");
     let turn_scope = TurnScope::new(
         TenantId::new(TENANT).expect("tenant"),
         Some(AgentId::new(AGENT).expect("agent")),

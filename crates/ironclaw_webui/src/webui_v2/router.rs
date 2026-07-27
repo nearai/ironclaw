@@ -10,27 +10,27 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::routing::{delete, get, post, put};
-use ironclaw_product_workflow::ProductSurface;
+use ironclaw_host_api::{BoundProductSurface, ProductSurface, ProductSurfaceCaller};
 use serde::Serialize;
 
 use crate::webui_v2::descriptors::{
-    WEBUI_V2_PATTERN_ACTIVATE_EXTENSION, WEBUI_V2_PATTERN_ADMIN_USER,
-    WEBUI_V2_PATTERN_ADMIN_USER_ROLE, WEBUI_V2_PATTERN_ADMIN_USER_SECRET,
-    WEBUI_V2_PATTERN_ADMIN_USER_SECRETS, WEBUI_V2_PATTERN_ADMIN_USER_STATUS,
-    WEBUI_V2_PATTERN_ADMIN_USERS, WEBUI_V2_PATTERN_AUTOMATION_DETAIL,
-    WEBUI_V2_PATTERN_BROWSE_FS_DIR, WEBUI_V2_PATTERN_CANCEL_RUN,
-    WEBUI_V2_PATTERN_COMPLETE_NEARAI_WALLET_LOGIN, WEBUI_V2_PATTERN_CREATE_THREAD,
-    WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER, WEBUI_V2_PATTERN_DELETE_THREAD,
-    WEBUI_V2_PATTERN_GET_ATTACHMENT, WEBUI_V2_PATTERN_GET_LLM_CONFIG,
-    WEBUI_V2_PATTERN_GET_RUN_ARTIFACT, WEBUI_V2_PATTERN_GET_SESSION, WEBUI_V2_PATTERN_GET_TIMELINE,
-    WEBUI_V2_PATTERN_IMPORT_EXTENSION, WEBUI_V2_PATTERN_INSTALL_EXTENSION,
-    WEBUI_V2_PATTERN_INSTALL_SKILL, WEBUI_V2_PATTERN_LIST_AUTOMATIONS,
-    WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY, WEBUI_V2_PATTERN_LIST_EXTENSIONS,
-    WEBUI_V2_PATTERN_LIST_FS_MOUNTS, WEBUI_V2_PATTERN_LIST_LLM_MODELS,
-    WEBUI_V2_PATTERN_LIST_PROJECT_FILES, WEBUI_V2_PATTERN_LIST_PROJECTS,
-    WEBUI_V2_PATTERN_LIST_SKILLS, WEBUI_V2_PATTERN_LOGS, WEBUI_V2_PATTERN_OPERATOR_CONFIG,
-    WEBUI_V2_PATTERN_OPERATOR_CONFIG_KEY, WEBUI_V2_PATTERN_OPERATOR_CONFIG_VALIDATE,
-    WEBUI_V2_PATTERN_OPERATOR_DIAGNOSTICS, WEBUI_V2_PATTERN_OPERATOR_EXTENSION_CONFIGURATION,
+    WEBUI_V2_PATTERN_ADMIN_USER, WEBUI_V2_PATTERN_ADMIN_USER_ROLE,
+    WEBUI_V2_PATTERN_ADMIN_USER_SECRET, WEBUI_V2_PATTERN_ADMIN_USER_SECRETS,
+    WEBUI_V2_PATTERN_ADMIN_USER_STATUS, WEBUI_V2_PATTERN_ADMIN_USERS,
+    WEBUI_V2_PATTERN_AUTOMATION_DETAIL, WEBUI_V2_PATTERN_BROWSE_FS_DIR,
+    WEBUI_V2_PATTERN_CANCEL_RUN, WEBUI_V2_PATTERN_COMPLETE_NEARAI_WALLET_LOGIN,
+    WEBUI_V2_PATTERN_CREATE_THREAD, WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER,
+    WEBUI_V2_PATTERN_DELETE_THREAD, WEBUI_V2_PATTERN_GET_ATTACHMENT,
+    WEBUI_V2_PATTERN_GET_LLM_CONFIG, WEBUI_V2_PATTERN_GET_RUN_ARTIFACT,
+    WEBUI_V2_PATTERN_GET_SESSION, WEBUI_V2_PATTERN_GET_TIMELINE, WEBUI_V2_PATTERN_IMPORT_EXTENSION,
+    WEBUI_V2_PATTERN_INSTALL_EXTENSION, WEBUI_V2_PATTERN_INSTALL_SKILL,
+    WEBUI_V2_PATTERN_LIST_AUTOMATIONS, WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY,
+    WEBUI_V2_PATTERN_LIST_EXTENSIONS, WEBUI_V2_PATTERN_LIST_FS_MOUNTS,
+    WEBUI_V2_PATTERN_LIST_LLM_MODELS, WEBUI_V2_PATTERN_LIST_PROJECT_FILES,
+    WEBUI_V2_PATTERN_LIST_PROJECTS, WEBUI_V2_PATTERN_LIST_SKILLS, WEBUI_V2_PATTERN_LOGS,
+    WEBUI_V2_PATTERN_OPERATOR_CONFIG, WEBUI_V2_PATTERN_OPERATOR_CONFIG_KEY,
+    WEBUI_V2_PATTERN_OPERATOR_CONFIG_VALIDATE, WEBUI_V2_PATTERN_OPERATOR_DIAGNOSTICS,
+    WEBUI_V2_PATTERN_OPERATOR_EXTENSION_CONFIGURATION,
     WEBUI_V2_PATTERN_OPERATOR_EXTENSION_CONFIGURATION_GROUP, WEBUI_V2_PATTERN_OPERATOR_LOGS,
     WEBUI_V2_PATTERN_OPERATOR_SERVICE_LIFECYCLE, WEBUI_V2_PATTERN_OPERATOR_SETUP,
     WEBUI_V2_PATTERN_OPERATOR_STATUS, WEBUI_V2_PATTERN_OUTBOUND_DELIVERY_TARGETS,
@@ -83,7 +83,7 @@ impl WebUiV2RouteOptions {
 
 /// Shared state injected into every WebChat v2 handler.
 ///
-/// Handlers receive a single facade so they can never reach into the
+/// Handlers receive a single service so they can never reach into the
 /// dispatcher, run-state, or any runtime lane directly. The state also
 /// owns the [`SseCapacity`] gate that bounds concurrent SSE streams per
 /// `(tenant, user)`; cloning the state shares the same gate so all
@@ -130,13 +130,17 @@ impl WebUiV2State {
         &self.services
     }
 
+    pub fn bind_services(&self, caller: ProductSurfaceCaller) -> BoundProductSurface {
+        BoundProductSurface::new(Arc::clone(&self.services), caller)
+    }
+
     pub(crate) fn sse_capacity(&self) -> &Arc<SseCapacity> {
         &self.sse_capacity
     }
 }
 
 /// Build a [`Router`] mounting the WebChat v2 routes against the supplied
-/// facade. Path patterns match
+/// service. Path patterns match
 /// [`crate::webui_v2::descriptors::webui_v2_routes`] exactly; host composition is
 /// expected to apply its own auth / CORS / body-limit middleware in front
 /// of this router.
@@ -159,7 +163,7 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
             delete(handlers::delete_thread),
         )
         // Admin user-management. Authorization (operator token or admin/owner
-        // role) and last-admin protection are enforced in the facade, so these
+        // role) and last-admin protection are enforced in the service, so these
         // are mounted unconditionally — a non-admin caller gets 403.
         .route(
             WEBUI_V2_PATTERN_ADMIN_USERS,
@@ -327,10 +331,6 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
         .route(
             WEBUI_V2_PATTERN_INSTALL_EXTENSION,
             post(handlers::install_extension),
-        )
-        .route(
-            WEBUI_V2_PATTERN_ACTIVATE_EXTENSION,
-            post(handlers::activate_extension),
         )
         .route(
             WEBUI_V2_PATTERN_REMOVE_EXTENSION,

@@ -23,6 +23,30 @@ def github_headers(token: str = EMULATE_GITHUB_BEARER) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+async def google_json(
+    base_url: str,
+    method: str,
+    path: str,
+    *,
+    payload: dict | None = None,
+    params: dict | list[tuple[str, str | int]] | None = None,
+    expected_status: int = 200,
+) -> dict | list:
+    async with httpx.AsyncClient(headers=google_headers(), timeout=15) as client:
+        response = await client.request(
+            method,
+            f"{base_url}{path}",
+            json=payload,
+            params=params,
+        )
+    assert response.status_code == expected_status, (
+        f"Google {method} {path} returned {response.status_code}: {response.text}"
+    )
+    if not response.content:
+        return {}
+    return response.json()
+
+
 def gmail_header(message: dict, name: str) -> str | None:
     for header in message.get("payload", {}).get("headers", []):
         if header.get("name", "").lower() == name.lower():

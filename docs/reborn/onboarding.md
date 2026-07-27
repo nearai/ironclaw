@@ -39,16 +39,17 @@ Standalone Reborn local-dev startup detects `NEARAI_BASE_URL` plus
 `NEARAI_API_KEY` when both are present and valid. In that case the local-dev
 composition stores the API key through Reborn product-auth manual-token storage,
 installs the bundled `nearai` MCP extension if it has not been installed yet,
-and activates it so `nearai.web_search` is model-visible without a separate
+and reconciles it to `active` so `nearai.web_search` is model-visible without a separate
 extension setup step. Runtime credential resolution treats this account as a
 host-managed credential for the bundled `nearai` requester, so admitted WebUI
 SSO users in the same tenant/agent scope can call `nearai.web_search` without
 each storing a separate NEAR AI API key. If the host-managed credential is
 project-scoped, runtime use must be in that same project; a tenant/agent-level
 host credential covers project-scoped runtime calls in that tenant/agent. Other
-requesters, providers, and host identity scopes do not see it. Existing explicit
-disabled extension state is preserved; users can disable NEAR AI MCP after
-bootstrap and startup will not re-enable it.
+requesters, providers, and host identity scopes do not see it. Existing absence
+of caller membership is preserved unless bootstrap owns that caller-scoped
+installation. Users remove NEAR AI MCP to leave membership; startup does not
+reinterpret removal as a separate disabled state.
 
 Legacy IronClaw startup also uses the same env pair to bootstrap the persisted
 `nearai` MCP server config described in `.env.example`.

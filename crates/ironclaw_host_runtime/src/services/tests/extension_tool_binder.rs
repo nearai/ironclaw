@@ -30,10 +30,10 @@ fn first_party_test_package(service: &str, capability_id: &str) -> ExtensionPack
             host_api_surfaces: Vec::new(),
             capabilities: vec![ironclaw_extensions::CapabilityManifest {
                 id: CapabilityId::new(capability_id).unwrap(),
-                implements: Vec::new(),
                 description: "binder fixture capability".to_string(),
                 effects: vec![EffectKind::DispatchCapability],
                 network_targets: Vec::new(),
+                max_egress_bytes: None,
                 default_permission: PermissionMode::Allow,
                 visibility: ironclaw_extensions::CapabilityVisibility::Model,
                 input_schema_ref: ironclaw_host_api::CapabilityProfileSchemaRef::new(
@@ -88,8 +88,8 @@ fn binder_services(
 ) -> HostRuntimeServices<
     DiskFilesystem,
     InMemoryResourceGovernor,
-    ironclaw_processes::FilesystemProcessStore<ironclaw_filesystem::InMemoryBackend>,
-    ironclaw_processes::FilesystemProcessResultStore<ironclaw_filesystem::InMemoryBackend>,
+    ironclaw_processes::ProcessStore<ironclaw_filesystem::InMemoryBackend>,
+    ironclaw_processes::ProcessResultStore<ironclaw_filesystem::InMemoryBackend>,
 > {
     HostRuntimeServices::new(
         Arc::new(ExtensionRegistry::new()),
@@ -338,7 +338,7 @@ async fn binder_invokes_a_discovered_mcp_tool_through_the_tool_adapter() {
 
 #[tokio::test]
 async fn registry_resolver_allowlist_restricts_to_builtin_provider() {
-    use ironclaw_dispatcher::ToolResolver;
+    use ironclaw_capabilities::ToolResolver;
     use ironclaw_extensions::SharedExtensionRegistry;
 
     let mut registry = ExtensionRegistry::new();

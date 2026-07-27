@@ -1,6 +1,6 @@
-use ironclaw_product_adapters::{ProductAdapterError, ProductWorkflowRejectionKind};
-use ironclaw_product_adapters::{ProductRejection, ProductRejectionKind};
-use ironclaw_product_workflow::{RebornServicesError, RebornServicesErrorCode};
+use ironclaw_host_api::{ProductSurfaceError, ProductSurfaceErrorCode};
+use ironclaw_product::{ProductAdapterError, ProductSurfaceRejectionKind};
+use ironclaw_product::{ProductRejection, ProductRejectionKind};
 use serde::{Deserialize, Serialize};
 
 use crate::OpenAiCompatRefError;
@@ -149,19 +149,19 @@ impl OpenAiCompatHttpError {
     }
 
     pub fn from_workflow_rejection(
-        kind: ProductWorkflowRejectionKind,
+        kind: ProductSurfaceRejectionKind,
         status_code: u16,
         retryable: bool,
         param: Option<String>,
     ) -> Self {
         let error_kind = match kind {
-            ProductWorkflowRejectionKind::ThreadBusy
-            | ProductWorkflowRejectionKind::AdmissionRejected => OpenAiCompatErrorKind::RateLimited,
-            ProductWorkflowRejectionKind::ScopeNotFound => OpenAiCompatErrorKind::NotFound,
-            ProductWorkflowRejectionKind::Unauthorized => OpenAiCompatErrorKind::PermissionDenied,
-            ProductWorkflowRejectionKind::InvalidRequest => OpenAiCompatErrorKind::Validation,
-            ProductWorkflowRejectionKind::Unavailable => OpenAiCompatErrorKind::ServiceUnavailable,
-            ProductWorkflowRejectionKind::Conflict | ProductWorkflowRejectionKind::Ambiguous => {
+            ProductSurfaceRejectionKind::ThreadBusy
+            | ProductSurfaceRejectionKind::AdmissionRejected => OpenAiCompatErrorKind::RateLimited,
+            ProductSurfaceRejectionKind::ScopeNotFound => OpenAiCompatErrorKind::NotFound,
+            ProductSurfaceRejectionKind::Unauthorized => OpenAiCompatErrorKind::PermissionDenied,
+            ProductSurfaceRejectionKind::InvalidRequest => OpenAiCompatErrorKind::Validation,
+            ProductSurfaceRejectionKind::Unavailable => OpenAiCompatErrorKind::ServiceUnavailable,
+            ProductSurfaceRejectionKind::Conflict | ProductSurfaceRejectionKind::Ambiguous => {
                 OpenAiCompatErrorKind::Conflict
             }
         };
@@ -175,13 +175,13 @@ impl OpenAiCompatHttpError {
             ProductAdapterError::Authentication(_) => {
                 Self::from_kind(401, false, OpenAiCompatErrorKind::Authentication, None)
             }
-            ProductAdapterError::WorkflowRejected {
+            ProductAdapterError::SurfaceRejected {
                 kind,
                 status_code,
                 retryable,
                 ..
             } => Self::from_workflow_rejection(kind, status_code, retryable, None),
-            ProductAdapterError::WorkflowTransient { .. }
+            ProductAdapterError::SurfaceTransient { .. }
             | ProductAdapterError::EgressTransient { .. } => {
                 Self::from_kind(503, true, OpenAiCompatErrorKind::ServiceUnavailable, None)
             }
@@ -193,18 +193,19 @@ impl OpenAiCompatHttpError {
         }
     }
 
-    pub fn from_reborn_services_error(error: RebornServicesError) -> Self {
-        let kind = match error.code {
-            RebornServicesErrorCode::InvalidRequest => OpenAiCompatErrorKind::Validation,
-            RebornServicesErrorCode::Unauthenticated => OpenAiCompatErrorKind::Authentication,
-            RebornServicesErrorCode::Forbidden => OpenAiCompatErrorKind::PermissionDenied,
-            RebornServicesErrorCode::NotFound => OpenAiCompatErrorKind::NotFound,
-            RebornServicesErrorCode::Conflict => OpenAiCompatErrorKind::Conflict,
-            RebornServicesErrorCode::RateLimited => OpenAiCompatErrorKind::RateLimited,
-            RebornServicesErrorCode::Unavailable => OpenAiCompatErrorKind::ServiceUnavailable,
-            RebornServicesErrorCode::Internal => OpenAiCompatErrorKind::Internal,
+    pub fn from_product_surface_error(error: ProductSurfaceError) -> Self {
+        let parts = error.into_http_parts();
+        let kind = match parts.code {
+            ProductSurfaceErrorCode::InvalidRequest => OpenAiCompatErrorKind::Validation,
+            ProductSurfaceErrorCode::Unauthenticated => OpenAiCompatErrorKind::Authentication,
+            ProductSurfaceErrorCode::Forbidden => OpenAiCompatErrorKind::PermissionDenied,
+            ProductSurfaceErrorCode::NotFound => OpenAiCompatErrorKind::NotFound,
+            ProductSurfaceErrorCode::Conflict => OpenAiCompatErrorKind::Conflict,
+            ProductSurfaceErrorCode::RateLimited => OpenAiCompatErrorKind::RateLimited,
+            ProductSurfaceErrorCode::Unavailable => OpenAiCompatErrorKind::ServiceUnavailable,
+            ProductSurfaceErrorCode::Internal => OpenAiCompatErrorKind::Internal,
         };
-        Self::from_kind(error.status_code, error.retryable, kind, error.field)
+        Self::from_kind(parts.status_code, parts.retryable, kind, parts.field)
     }
 
     pub fn internal() -> Self {
@@ -230,9 +231,9 @@ impl From<ProductAdapterError> for OpenAiCompatHttpError {
     }
 }
 
-impl From<RebornServicesError> for OpenAiCompatHttpError {
-    fn from(error: RebornServicesError) -> Self {
-        Self::from_reborn_services_error(error)
+impl From<ProductSurfaceError> for OpenAiCompatHttpError {
+    fn from(error: ProductSurfaceError) -> Self {
+        Self::from_product_surface_error(error)
     }
 }
 
@@ -263,7 +264,7 @@ pub(crate) fn product_rejection_to_openai_error(
         }
         ProductRejectionKind::AccessDenied | ProductRejectionKind::PolicyDenied => {
             OpenAiCompatHttpError::from_workflow_rejection(
-                ProductWorkflowRejectionKind::Unauthorized,
+                ProductSurfaceRejectionKind::Unauthorized,
                 403,
                 false,
                 None,
@@ -280,7 +281,7 @@ pub(crate) fn product_rejection_to_openai_error(
         }
         ProductRejectionKind::AmbiguousResolution => {
             OpenAiCompatHttpError::from_workflow_rejection(
-                ProductWorkflowRejectionKind::Ambiguous,
+                ProductSurfaceRejectionKind::Ambiguous,
                 409,
                 false,
                 None,
@@ -289,7 +290,7 @@ pub(crate) fn product_rejection_to_openai_error(
         // The gate already resolved (approved/denied) — the resolution conflicts
         // with the now-settled state, so surface a 409 Conflict.
         ProductRejectionKind::StaleGate => OpenAiCompatHttpError::from_workflow_rejection(
-            ProductWorkflowRejectionKind::Conflict,
+            ProductSurfaceRejectionKind::Conflict,
             409,
             false,
             None,
@@ -475,7 +476,7 @@ fn contains_no_exposure_sentinel(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_product_adapters::{ProductRejection, ProductRejectionKind};
+    use ironclaw_product::{ProductRejection, ProductRejectionKind};
 
     use super::product_rejection_to_openai_error;
 

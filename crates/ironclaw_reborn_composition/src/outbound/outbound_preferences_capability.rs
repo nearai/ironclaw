@@ -9,16 +9,17 @@ use ironclaw_extensions::{
 };
 use ironclaw_host_api::{
     CapabilityId, CapabilityProfileSchemaRef, EffectKind, HostApiError, OriginGateMatrix,
-    PermissionMode, ResourceEstimate, ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind,
+    PermissionMode, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind, ResourceEstimate, ResourceProfile, ResourceUsage,
+    RuntimeDispatchErrorKind,
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
-use ironclaw_product_workflow::{
-    OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OutboundPreferencesProductFacade,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
-    WebUiAuthenticatedCaller,
+use ironclaw_product::{
+    OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OutboundPreferencesProductService,
+    RebornSetOutboundPreferencesRequest,
 };
 
 pub(crate) fn extend_builtin_first_party_package(
@@ -30,11 +31,11 @@ pub(crate) fn extend_builtin_first_party_package(
 
 pub(crate) fn insert_handler(
     registry: &mut FirstPartyCapabilityRegistry,
-    facade: Arc<dyn OutboundPreferencesProductFacade>,
+    service: Arc<dyn OutboundPreferencesProductService>,
 ) -> Result<(), HostApiError> {
     registry.insert_handler(
         CapabilityId::new(OUTBOUND_PREFERENCES_SET_CAPABILITY_ID)?,
-        Arc::new(SetOutboundPreferencesHandler { facade }),
+        Arc::new(SetOutboundPreferencesHandler { service }),
     );
     Ok(())
 }
@@ -42,7 +43,6 @@ pub(crate) fn insert_handler(
 fn manifest() -> Result<CapabilityManifest, ExtensionError> {
     Ok(CapabilityManifest {
         id: CapabilityId::new(OUTBOUND_PREFERENCES_SET_CAPABILITY_ID)?,
-        implements: Vec::new(),
         description: "Set or clear the authenticated user's final-reply outbound delivery target."
             .to_string(),
         effects: vec![EffectKind::ExternalWrite],
@@ -58,6 +58,7 @@ fn manifest() -> Result<CapabilityManifest, ExtensionError> {
         required_host_ports: Vec::new(),
         runtime_credentials: Vec::new(),
         network_targets: Vec::new(),
+        max_egress_bytes: None,
         resource_profile: Some(ResourceProfile {
             default_estimate: ResourceEstimate::default()
                 .set_wall_clock_ms(500)
@@ -69,7 +70,7 @@ fn manifest() -> Result<CapabilityManifest, ExtensionError> {
 }
 
 struct SetOutboundPreferencesHandler {
-    facade: Arc<dyn OutboundPreferencesProductFacade>,
+    service: Arc<dyn OutboundPreferencesProductService>,
 }
 
 #[async_trait]
@@ -84,7 +85,7 @@ impl FirstPartyCapabilityHandler for SetOutboundPreferencesHandler {
         let input: RebornSetOutboundPreferencesRequest = serde_json::from_value(request.input)
             .map_err(|_| dispatch_error(RuntimeDispatchErrorKind::InputEncode, started))?;
         let response = self
-            .facade
+            .service
             .set_outbound_preferences(caller, input)
             .await
             .map_err(|error| dispatch_error(map_services_error(error), started))?;
@@ -100,14 +101,14 @@ impl FirstPartyCapabilityHandler for SetOutboundPreferencesHandler {
 fn authenticated_caller(
     request: &FirstPartyCapabilityRequest,
     started: Instant,
-) -> Result<WebUiAuthenticatedCaller, FirstPartyCapabilityError> {
+) -> Result<ProductSurfaceCaller, FirstPartyCapabilityError> {
     if request.authenticated_actor_user_id.as_ref() != Some(&request.scope.user_id) {
         return Err(dispatch_error(
             RuntimeDispatchErrorKind::PolicyDenied,
             started,
         ));
     }
-    Ok(WebUiAuthenticatedCaller::new(
+    Ok(ProductSurfaceCaller::new(
         request.scope.tenant_id.clone(),
         request.scope.user_id.clone(),
         request.scope.agent_id.clone(),
@@ -129,18 +130,16 @@ fn ensure_declared(
     }
 }
 
-fn map_services_error(
-    error: ironclaw_product_workflow::RebornServicesError,
-) -> RuntimeDispatchErrorKind {
+fn map_services_error(error: ProductSurfaceError) -> RuntimeDispatchErrorKind {
     match (error.code, error.kind) {
-        (RebornServicesErrorCode::InvalidRequest, _) | (RebornServicesErrorCode::NotFound, _) => {
+        (ProductSurfaceErrorCode::InvalidRequest, _) | (ProductSurfaceErrorCode::NotFound, _) => {
             RuntimeDispatchErrorKind::InputEncode
         }
-        (RebornServicesErrorCode::Forbidden, _) => RuntimeDispatchErrorKind::PolicyDenied,
-        (RebornServicesErrorCode::Unavailable, RebornServicesErrorKind::ServiceUnavailable) => {
+        (ProductSurfaceErrorCode::Forbidden, _) => RuntimeDispatchErrorKind::PolicyDenied,
+        (ProductSurfaceErrorCode::Unavailable, ProductSurfaceErrorKind::ServiceUnavailable) => {
             RuntimeDispatchErrorKind::Backend
         }
-        (RebornServicesErrorCode::Conflict, _) => RuntimeDispatchErrorKind::OperationFailed,
+        (ProductSurfaceErrorCode::Conflict, _) => RuntimeDispatchErrorKind::OperationFailed,
         _ => RuntimeDispatchErrorKind::Backend,
     }
 }

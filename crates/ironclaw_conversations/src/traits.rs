@@ -6,7 +6,8 @@ use crate::{
     AcceptedInboundMessageReplay, AdapterInstallationId, AdapterKind, ConditionalUnpairOutcome,
     ConversationBindingResolution, ExpectedExternalActorOwner, ExternalActorBindingEpoch,
     ExternalActorRef, InboundTurnError, LinkConversationRequest, LinkedConversationBinding,
-    ReplyTargetBinding, ResolveConversationRequest, ValidateReplyTargetRequest,
+    ReplyTargetBinding, ResolveConversationRequest, ResolveStoredReplyTargetRequest,
+    StoredReplyTargetBinding, ValidateReplyTargetRequest,
 };
 
 #[async_trait]
@@ -48,6 +49,19 @@ pub trait ConversationBindingService: Send + Sync {
         &self,
         request: ValidateReplyTargetRequest,
     ) -> Result<ReplyTargetBinding, InboundTurnError>;
+
+    /// Revalidate a sealed reply target using only durable run authority.
+    /// Implementations must not reconstruct adapter or conversation metadata
+    /// from display strings.
+    async fn resolve_stored_reply_target(
+        &self,
+        request: ResolveStoredReplyTargetRequest,
+    ) -> Result<StoredReplyTargetBinding, InboundTurnError> {
+        Err(InboundTurnError::AccessDenied {
+            actor_id: request.actor_user_id.to_string(),
+            thread_id: request.current_thread_id.to_string(),
+        })
+    }
 }
 
 #[async_trait]

@@ -2,9 +2,9 @@
 //! prebound bindings per registry generation, with the dispatcher-era
 //! selection failures (missing backend, unknown provider, runtime mismatch)
 //! preserved as error bindings. These pins relocated here from the deleted
-//! `ironclaw_dispatcher` per-invocation-selection tests.
+//! `ironclaw_capabilities` per-invocation-selection tests.
 
-use ironclaw_dispatcher::{
+use ironclaw_capabilities::{
     BoundCapabilityAdapter, CapabilityDispatchRequest, RuntimeDispatcher, ToolResolver,
 };
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
@@ -131,6 +131,7 @@ fn authorized(request: CapabilityDispatchRequest) -> Authorized {
 fn wasm_capability_request(input: Value) -> Authorized {
     authorized(CapabilityDispatchRequest {
         run_id: None,
+        origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
         capability_id: CapabilityId::new("test-wasm.run").unwrap(),
         scope: sample_scope(),
         authenticated_actor_user_id: None,
@@ -228,6 +229,7 @@ async fn unconfigured_lane_fails_missing_backend_and_releases_prepared_reservati
     let err = dispatcher
         .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
+            origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
             capability_id: CapabilityId::new("test-wasm.run").unwrap(),
             scope,
             authenticated_actor_user_id: None,
@@ -347,6 +349,7 @@ async fn resolved_binding_survives_registry_swap_mid_flight() {
     let result = adapter
         .dispatch_json(CapabilityDispatchRequest {
             run_id: None,
+            origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
             capability_id: echo_id,
             scope: sample_scope(),
             estimate: ResourceEstimate {

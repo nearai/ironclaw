@@ -12,7 +12,7 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_host_api::{GateRecord, GateRef, ResourceScope};
 use ironclaw_observability::live_latency_started_at;
-use ironclaw_run_state::GateRecordStore;
+use ironclaw_run_state::GateRecordStorePort;
 use ironclaw_turns::{
     AgentLoopDriverError, AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, LoopBlocked,
     LoopBlockedKind, LoopExit, TurnStatus,
@@ -32,12 +32,20 @@ use tracing::{debug, error, warn};
 const AUTH_GATE_LOOP_REF_PREFIX: &str = "gate:auth-";
 
 use crate::{
+    after_turn_memory::AfterTurnMemoryRecorder,
     driver_registry::{DriverRegistry, LoopDriverRegistryKey},
     failure_categories::host_stage_unavailable_category,
     loop_exit_applier::LoopExitApplier,
     turn_runner::{HostFactory, sanitized_driver_failure, sanitized_failure},
     turn_scheduler::{TurnRunExecutor, TurnRunExecutorError},
 };
+
+/// Upper bound on the best-effort after-turn memory recording that the scheduler
+/// worker awaits inline. A slow or hung memory provider must not occupy the
+/// worker (and delay unrelated runs) beyond this; on timeout the recording is
+/// skipped (the run is already `Completed`). Generous because a network-backed
+/// provider performs a thread-history read plus a write.
+const AFTER_TURN_MEMORY_RECORD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 fn trace_executor_latency_ok(
     operation: &'static str,
@@ -133,7 +141,14 @@ pub struct RebornTurnRunExecutor {
     /// filesystem (they never raise a durable auth gate to render); every
     /// production composition wires the SAME `Arc` it wired into the capability
     /// port's `with_gate_record_store`, so an unwired production path is a bug.
-    gate_record_store: Option<Arc<dyn GateRecordStore>>,
+    gate_record_store: Option<Arc<dyn GateRecordStorePort>>,
+    /// After-turn interaction recorder (mem0 `add` seam). Optional; production
+    /// wires `None` pending #5013 — only compositions that resolve a memory
+    /// document-store provider attach it, and a `Completed` run finishes cleanly
+    /// without it (the same genuine optionality as `memory_context_service` on
+    /// `DefaultPlannedRuntimeParts`).
+    // arch-exempt: optional_arc, deferred production wiring, issue #5013
+    after_turn_memory_recorder: Option<Arc<AfterTurnMemoryRecorder>>,
 }
 
 impl RebornTurnRunExecutor {
@@ -141,14 +156,26 @@ impl RebornTurnRunExecutor {
         loop_exit_applier: Arc<LoopExitApplier>,
         driver_registry: Arc<DriverRegistry>,
         host_factory: Arc<dyn HostFactory>,
-        gate_record_store: Option<Arc<dyn GateRecordStore>>,
+        gate_record_store: Option<Arc<dyn GateRecordStorePort>>,
     ) -> Self {
         Self {
             loop_exit_applier,
             driver_registry,
             host_factory,
             gate_record_store,
+            after_turn_memory_recorder: None,
         }
+    }
+
+    /// Attach the after-turn memory recorder. Called by the runtime composition
+    /// only when a memory provider is resolved; tests construct one over a real
+    /// in-memory provider.
+    pub fn with_after_turn_memory_recorder(
+        mut self,
+        recorder: Arc<AfterTurnMemoryRecorder>,
+    ) -> Self {
+        self.after_turn_memory_recorder = Some(recorder);
+        self
     }
 }
 
@@ -415,6 +442,32 @@ impl RebornTurnRunExecutor {
                     status = ?state.status,
                     "loop exit applied successfully"
                 );
+                // After-turn memory recording (mem0 `add` seam): hand the
+                // just-finished exchange to the memory provider. This is a
+                // post-terminal, best-effort side effect — the run is ALREADY
+                // Completed, so the recorder never fails it (every error inside is
+                // `debug!`-only, never `info!`/`warn!`).
+                if state.status == TurnStatus::Completed
+                    && let Some(recorder) = self.after_turn_memory_recorder.as_ref()
+                {
+                    // Bound this best-effort post-terminal side effect so a slow or
+                    // hung memory provider can't occupy the scheduler worker and
+                    // delay unrelated runs.
+                    if tokio::time::timeout(
+                        AFTER_TURN_MEMORY_RECORD_TIMEOUT,
+                        recorder.record_completed_run(&state),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        // silent-ok: after-turn recording is best-effort post-completion;
+                        // a timeout must not fail or delay the already-completed run.
+                        debug!(
+                            run_id = ?run_id,
+                            "after-turn memory recording timed out; skipping (run already complete)"
+                        );
+                    }
+                }
                 Ok(())
             }
             Err(err) => {
@@ -1736,7 +1789,7 @@ mod tests {
     #[tokio::test]
     async fn auth_block_with_unsourceable_requirements_fails_the_exit() {
         use ironclaw_host_api::{GateRecord, GateRef, ResourceScope};
-        use ironclaw_run_state::{GateRecordStore, RunStateError};
+        use ironclaw_run_state::{GateRecordStorePort, RunStateError};
         use ironclaw_turns::{
             LoopBlocked, LoopBlockedKind, LoopCheckpointStateRef, LoopGateRef, TurnCheckpointId,
         };
@@ -1744,7 +1797,7 @@ mod tests {
         // A gate-record store that never yields the auth record (`Ok(None)`).
         struct MissingAuthGateRecordStore;
         #[async_trait]
-        impl GateRecordStore for MissingAuthGateRecordStore {
+        impl GateRecordStorePort for MissingAuthGateRecordStore {
             async fn save(
                 &self,
                 _scope: ResourceScope,

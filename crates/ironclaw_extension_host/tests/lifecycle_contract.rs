@@ -7,8 +7,8 @@
 //! duplicate capability/route conflicts (LIFE-14), and in-flight snapshot
 //! generation isolation (LIFE-15). The dormant multi-step removal machine and
 //! crash-resume restore were deleted with the honest-state-machine refactor;
-//! production removal is the facade path (`remove_record` + auth cleanup) and
-//! is covered through the composition facades.
+//! production removal is the service path (`remove_record` + auth cleanup) and
+//! is covered through the composition services.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -22,8 +22,8 @@ use ironclaw_extension_host::{
     ExtensionBindings, ExtensionHost, ExtensionHostDeps, InstallationRecord,
     InstallationRecordStore, InstallationState, LifecycleError, RehydratedInstallationRecordStore,
 };
-use ironclaw_host_api::ToolAdapter;
-use ironclaw_product_adapters::ChannelAdapter;
+use ironclaw_host_api::{InvocationOrigin, ProductKind, ToolAdapter};
+use ironclaw_product::ChannelAdapter;
 
 struct Harness {
     host: ExtensionHost,
@@ -312,7 +312,7 @@ async fn snapshot_watch_subscription_observes_every_publish() {
 
 #[tokio::test]
 async fn snapshot_resolver_serves_activated_tools_and_stops_after_deactivate() {
-    use ironclaw_dispatcher::ToolResolver;
+    use ironclaw_capabilities::ToolResolver;
     use ironclaw_host_api::CapabilityId;
 
     let channel = Arc::new(FakeChannelAdapter::default());
@@ -349,8 +349,9 @@ async fn snapshot_resolver_serves_activated_tools_and_stops_after_deactivate() {
     );
     let outcome = in_flight
         .adapter
-        .dispatch_json(ironclaw_dispatcher::CapabilityDispatchRequest {
+        .dispatch_json(ironclaw_capabilities::CapabilityDispatchRequest {
             run_id: None,
+            origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
             capability_id: ping.clone(),
             scope: sample_scope(),
             estimate: ironclaw_host_api::ResourceEstimate::default(),
@@ -367,7 +368,7 @@ async fn snapshot_resolver_serves_activated_tools_and_stops_after_deactivate() {
 
 #[tokio::test]
 async fn snapshot_resolver_maps_tool_auth_required_to_the_generic_gate() {
-    use ironclaw_dispatcher::ToolResolver;
+    use ironclaw_capabilities::ToolResolver;
     use ironclaw_host_api::{
         CapabilityId, DispatchError, SecretHandle, ToolAdapter, ToolCall, ToolError, ToolPorts,
         ToolResult,
@@ -410,8 +411,9 @@ async fn snapshot_resolver_maps_tool_auth_required_to_the_generic_gate() {
         .expect("resolves");
     let err = resolved
         .adapter
-        .dispatch_json(ironclaw_dispatcher::CapabilityDispatchRequest {
+        .dispatch_json(ironclaw_capabilities::CapabilityDispatchRequest {
             run_id: None,
+            origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
             capability_id: CapabilityId::new("acme.ping").unwrap(),
             scope: sample_scope(),
             estimate: ironclaw_host_api::ResourceEstimate::default(),

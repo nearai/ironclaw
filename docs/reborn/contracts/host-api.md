@@ -3,12 +3,8 @@
 **Status:** Draft v0 contract
 **Date:** 2026-04-24
 **Target crate:** `crates/ironclaw_host_api`
-**Source architecture docs:**
-
-- `docs/reborn/2026-04-24-host-api-invariants-and-authorization.md`
-- `docs/reborn/2026-04-24-os-like-architecture-design.md`
-- `docs/reborn/2026-04-24-self-contained-crate-roadmap.md`
-- `docs/reborn/2026-04-24-existing-code-reuse-map.md`
+**Source of truth:** this contract, `crates/ironclaw_host_api/CLAUDE.md`, and
+the architecture tests in `crates/ironclaw_architecture`.
 
 ---
 
@@ -27,6 +23,12 @@ It is not a runtime, policy engine, filesystem, budget ledger, or extension mana
 - resource estimates/usages
 - host-owned HTTP ingress descriptors
 - audit/event envelopes
+
+Concrete listener behavior and framework-specific router carriers are outside
+this contract crate. `ironclaw_host_ingress` defines the Axum route-mount
+carriers consumed by host assembly at the HTTP boundary:
+`PublicRouteMount`, `ProtectedRouteMount`, and `SplitRouteMount` in
+`crates/ironclaw_host_ingress/src/lib.rs`.
 
 The first implementation PR should create this crate before implementing `ironclaw_filesystem`, `ironclaw_resources`, `ironclaw_extensions`, `ironclaw_wasm`, or `ironclaw_dispatcher`.
 
@@ -1147,11 +1149,11 @@ Each `IngressRouteDescriptor` must carry a fully resolved `IngressPolicy`:
 - CORS and WebSocket Origin policy;
 - streaming mode;
 - audit/trace class;
-- allowed host-mediated effect path (`ProductWorkflow`, `TurnCoordinator`, `HostPort`, `CapabilityHost`, projection/no-effect).
+- allowed host-mediated effect path (`ProductSurface`, `TurnCoordinator`, `HostPort`, `CapabilityHost`, projection/no-effect).
 
 Actual enforcement lives in host composition. `ironclaw_host_api` must not import
 Axum, own route mounting, implement bearer/session/OIDC checks, apply policy
-engines, dispatch product workflow, or execute runtime effects.
+engines, dispatch product actions, or execute runtime effects.
 
 ---
 

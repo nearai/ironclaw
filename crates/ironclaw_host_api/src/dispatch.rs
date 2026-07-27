@@ -12,8 +12,8 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::{
-    Authorized, CapabilityId, ExtensionId, HostRemediation, MountView, ResourceEstimate,
-    ResourceReceipt, ResourceReservation, ResourceScope, ResourceUsage, RunId,
+    Authorized, CapabilityId, ExtensionId, HostRemediation, InvocationOrigin, MountView,
+    ResourceEstimate, ResourceReceipt, ResourceReservation, ResourceScope, ResourceUsage, RunId,
     RuntimeCredentialAuthRequirement, RuntimeKind, SecretHandle, UserId,
 };
 
@@ -27,6 +27,9 @@ pub struct CapabilityDispatchRequest {
     /// Loop turn-run identity forwarded from `ExecutionContext::run_id`.
     /// `None` for non-loop callers.
     pub run_id: Option<RunId>,
+    /// Authoritative invocation origin preserved from the sealed
+    /// [`Authorized`] witness for capability-boundary policy.
+    pub origin: InvocationOrigin,
     pub estimate: ResourceEstimate,
     pub mounts: Option<MountView>,
     pub resource_reservation: Option<ResourceReservation>,

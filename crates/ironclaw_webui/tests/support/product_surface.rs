@@ -4,60 +4,48 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{ActivityId, CapabilityId, Resolution};
-use ironclaw_product_workflow::{
-    ProductCapabilityInput, ProductOperationRequest, ProductOperationResponse, ProductSurface,
-    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornServicesError,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornStreamEventsSubscription,
-    RebornViewPage, RebornViewQuery, WebUiAuthenticatedCaller,
+use ironclaw_host_api::{
+    ActivityId, CapabilityId, ProductSurface, ProductSurfaceCaller, ProductSurfaceError, Resolution,
+};
+use ironclaw_product::{
+    RebornGetRunStateRequest, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornViewPage, RebornViewQuery,
 };
 
 type InvokeHandler = dyn Fn(
-        WebUiAuthenticatedCaller,
+        ProductSurfaceCaller,
         CapabilityId,
-        ProductCapabilityInput,
+        serde_json::Value,
         ActivityId,
-    ) -> Result<Resolution, RebornServicesError>
+    ) -> Result<Resolution, ProductSurfaceError>
     + Send
     + Sync;
-type QueryHandler = dyn Fn(WebUiAuthenticatedCaller, RebornViewQuery) -> Result<RebornViewPage, RebornServicesError>
-    + Send
-    + Sync;
-type CommandHandler = dyn Fn(
-        WebUiAuthenticatedCaller,
-        ProductOperationRequest,
-    ) -> Result<ProductOperationResponse, RebornServicesError>
+type QueryHandler = dyn Fn(ProductSurfaceCaller, RebornViewQuery) -> Result<RebornViewPage, ProductSurfaceError>
     + Send
     + Sync;
 type StreamHandler = dyn Fn(
-        WebUiAuthenticatedCaller,
+        ProductSurfaceCaller,
         RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsResponse, RebornServicesError>
+    ) -> Result<RebornStreamEventsResponse, ProductSurfaceError>
     + Send
     + Sync;
 
 #[derive(Debug, Clone)]
 pub struct InvokeCall {
-    pub caller: WebUiAuthenticatedCaller,
+    pub caller: ProductSurfaceCaller,
     pub capability: CapabilityId,
     pub activity_id: ActivityId,
 }
 
 #[derive(Debug, Clone)]
 pub struct QueryCall {
-    pub caller: WebUiAuthenticatedCaller,
+    pub caller: ProductSurfaceCaller,
     pub query: RebornViewQuery,
 }
 
 #[derive(Debug, Clone)]
-pub struct CommandCall {
-    pub caller: WebUiAuthenticatedCaller,
-    pub request: ProductOperationRequest,
-}
-
-#[derive(Debug, Clone)]
 pub struct StreamCall {
-    pub caller: WebUiAuthenticatedCaller,
+    pub caller: ProductSurfaceCaller,
     pub request: RebornStreamEventsRequest,
 }
 
@@ -65,14 +53,12 @@ pub struct StreamCall {
 pub struct ProgrammableProductSurface {
     invoke_calls: Mutex<Vec<InvokeCall>>,
     query_calls: Mutex<Vec<QueryCall>>,
-    command_calls: Mutex<Vec<CommandCall>>,
     stream_calls: Mutex<Vec<StreamCall>>,
-    run_state_calls: Mutex<Vec<(WebUiAuthenticatedCaller, RebornGetRunStateRequest)>>,
+    run_state_calls: Mutex<Vec<(ProductSurfaceCaller, RebornGetRunStateRequest)>>,
     invoke_handler: Mutex<Option<Box<InvokeHandler>>>,
     query_handler: Mutex<Option<Box<QueryHandler>>>,
-    command_handler: Mutex<Option<Box<CommandHandler>>>,
     stream_handler: Mutex<Option<Box<StreamHandler>>>,
-    stream_responses: Mutex<VecDeque<Result<RebornStreamEventsResponse, RebornServicesError>>>,
+    stream_responses: Mutex<VecDeque<Result<RebornStreamEventsResponse, ProductSurfaceError>>>,
     stall_stream_events: Mutex<bool>,
 }
 
@@ -80,11 +66,11 @@ impl ProgrammableProductSurface {
     pub fn set_invoke_handler(
         &self,
         handler: impl Fn(
-            WebUiAuthenticatedCaller,
+            ProductSurfaceCaller,
             CapabilityId,
-            ProductCapabilityInput,
+            serde_json::Value,
             ActivityId,
-        ) -> Result<Resolution, RebornServicesError>
+        ) -> Result<Resolution, ProductSurfaceError>
         + Send
         + Sync
         + 'static,
@@ -95,9 +81,9 @@ impl ProgrammableProductSurface {
     pub fn set_query_handler(
         &self,
         handler: impl Fn(
-            WebUiAuthenticatedCaller,
+            ProductSurfaceCaller,
             RebornViewQuery,
-        ) -> Result<RebornViewPage, RebornServicesError>
+        ) -> Result<RebornViewPage, ProductSurfaceError>
         + Send
         + Sync
         + 'static,
@@ -105,25 +91,12 @@ impl ProgrammableProductSurface {
         *self.query_handler.lock().expect("lock") = Some(Box::new(handler));
     }
 
-    pub fn set_command_handler(
-        &self,
-        handler: impl Fn(
-            WebUiAuthenticatedCaller,
-            ProductOperationRequest,
-        ) -> Result<ProductOperationResponse, RebornServicesError>
-        + Send
-        + Sync
-        + 'static,
-    ) {
-        *self.command_handler.lock().expect("lock") = Some(Box::new(handler));
-    }
-
     pub fn set_stream_handler(
         &self,
         handler: impl Fn(
-            WebUiAuthenticatedCaller,
+            ProductSurfaceCaller,
             RebornStreamEventsRequest,
-        ) -> Result<RebornStreamEventsResponse, RebornServicesError>
+        ) -> Result<RebornStreamEventsResponse, ProductSurfaceError>
         + Send
         + Sync
         + 'static,
@@ -133,7 +106,7 @@ impl ProgrammableProductSurface {
 
     pub fn enqueue_stream_response(
         &self,
-        response: Result<RebornStreamEventsResponse, RebornServicesError>,
+        response: Result<RebornStreamEventsResponse, ProductSurfaceError>,
     ) {
         self.stream_responses
             .lock()
@@ -153,16 +126,12 @@ impl ProgrammableProductSurface {
         self.query_calls.lock().expect("lock").clone()
     }
 
-    pub fn command_calls(&self) -> Vec<CommandCall> {
-        self.command_calls.lock().expect("lock").clone()
-    }
-
     pub fn stream_calls(&self) -> Vec<StreamCall> {
         self.stream_calls.lock().expect("lock").clone()
     }
 
-    fn unavailable() -> RebornServicesError {
-        RebornServicesError::internal_from("programmable product surface response not configured")
+    fn unavailable() -> ProductSurfaceError {
+        ProductSurfaceError::internal_from("programmable product surface response not configured")
     }
 }
 
@@ -170,90 +139,94 @@ impl ProgrammableProductSurface {
 impl ProductSurface for ProgrammableProductSurface {
     async fn invoke(
         &self,
-        caller: WebUiAuthenticatedCaller,
-        capability: CapabilityId,
-        input: ProductCapabilityInput,
-        activity_id: ActivityId,
-    ) -> Result<Resolution, RebornServicesError> {
+        caller: ProductSurfaceCaller,
+        request: ironclaw_host_api::ProductSurfaceInvokeRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceInvokeResponse, ProductSurfaceError> {
         self.invoke_calls.lock().expect("lock").push(InvokeCall {
             caller: caller.clone(),
-            capability: capability.clone(),
-            activity_id,
+            capability: request.operation_id.clone(),
+            activity_id: request.activity_id,
         });
         if let Some(handler) = self.invoke_handler.lock().expect("lock").as_ref() {
-            return handler(caller, capability, input, activity_id);
+            let output = handler(
+                caller,
+                request.operation_id,
+                request.input,
+                request.activity_id,
+            )?;
+            let output =
+                serde_json::to_value(output).map_err(ProductSurfaceError::internal_from)?;
+            return Ok(ironclaw_host_api::ProductSurfaceInvokeResponse { output });
         }
         Err(Self::unavailable())
     }
 
     async fn query(
         &self,
-        caller: WebUiAuthenticatedCaller,
-        query: RebornViewQuery,
-    ) -> Result<RebornViewPage, RebornServicesError> {
+        caller: ProductSurfaceCaller,
+        request: ironclaw_host_api::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ProductSurfaceError> {
+        let query = RebornViewQuery {
+            view_id: request.view_id,
+            params: request.input,
+            cursor: request.cursor,
+        };
         self.query_calls.lock().expect("lock").push(QueryCall {
             caller: caller.clone(),
             query: query.clone(),
         });
         if let Some(handler) = self.query_handler.lock().expect("lock").as_ref() {
-            return handler(caller, query);
+            let page = handler(caller, query)?;
+            return Ok(ironclaw_host_api::ProductSurfaceQueryPage {
+                items: vec![page.payload],
+                next_cursor: page.next_cursor,
+            });
         }
         Err(Self::unavailable())
     }
 
     async fn stream_events(
         &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
+        caller: ProductSurfaceCaller,
+        request: ironclaw_host_api::ProductSurfaceStreamRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceStreamResponse, ProductSurfaceError> {
+        let stream_request = RebornStreamEventsRequest {
+            thread_id: request.stream_id.ok_or_else(|| {
+                ProductSurfaceError::validation(
+                    "stream_id",
+                    ironclaw_host_api::ProductSurfaceValidationCode::MissingField,
+                )
+            })?,
+            after_cursor: request
+                .after_cursor
+                .map(ironclaw_product::ProjectionCursor::new)
+                .transpose()
+                .map_err(ProductSurfaceError::internal_from)?,
+        };
         self.stream_calls.lock().expect("lock").push(StreamCall {
             caller: caller.clone(),
-            request: request.clone(),
+            request: stream_request.clone(),
         });
         if *self.stall_stream_events.lock().expect("lock") {
             std::future::pending::<()>().await;
         }
-        if let Some(response) = self.stream_responses.lock().expect("lock").pop_front() {
-            return response;
-        }
-        if let Some(handler) = self.stream_handler.lock().expect("lock").as_ref() {
-            return handler(caller, request);
-        }
-        Ok(RebornStreamEventsResponse { events: Vec::new() })
-    }
-
-    async fn subscribe_events(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsSubscription, RebornServicesError> {
-        Err(Self::unavailable())
-    }
-
-    async fn get_run_state(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornGetRunStateRequest,
-    ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
-        self.run_state_calls
-            .lock()
-            .expect("lock")
-            .push((caller, request));
-        Err(Self::unavailable())
-    }
-
-    async fn execute_command(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: ProductOperationRequest,
-    ) -> Result<ProductOperationResponse, RebornServicesError> {
-        self.command_calls.lock().expect("lock").push(CommandCall {
-            caller: caller.clone(),
-            request: request.clone(),
-        });
-        if let Some(handler) = self.command_handler.lock().expect("lock").as_ref() {
-            return handler(caller, request);
-        }
-        Err(Self::unavailable())
+        let response =
+            if let Some(response) = self.stream_responses.lock().expect("lock").pop_front() {
+                response?
+            } else if let Some(handler) = self.stream_handler.lock().expect("lock").as_ref() {
+                handler(caller, stream_request)?
+            } else {
+                RebornStreamEventsResponse { events: Vec::new() }
+            };
+        let events = response
+            .events
+            .into_iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ProductSurfaceError::internal_from)?;
+        Ok(ironclaw_host_api::ProductSurfaceStreamResponse {
+            events,
+            next_cursor: None,
+        })
     }
 }

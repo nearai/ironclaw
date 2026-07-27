@@ -1,3 +1,4 @@
+// arch-exempt: large_file, targeted durable delivery state remains with the existing conversation store pending its planned split, plan #6175
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
@@ -21,7 +22,8 @@ use crate::{
     ConversationRouteKind, ExpectedExternalActorOwner, ExternalActorBindingEpoch, ExternalActorRef,
     ExternalConversationIdentity, ExternalConversationRef, InboundTurnError,
     LinkConversationRequest, LinkedConversationBinding, MessageIdempotencyStatus,
-    ReplyTargetBinding, ResolveConversationRequest, SessionThreadService, ThreadAccessDecision,
+    ReplyTargetBinding, ResolveConversationRequest, ResolveStoredReplyTargetRequest,
+    SessionThreadService, StoredReplyTargetAccess, StoredReplyTargetBinding, ThreadAccessDecision,
     ThreadMessageRecord, ValidateReplyTargetRequest,
 };
 
@@ -272,6 +274,52 @@ impl InMemoryConversationServices {
         };
         self.persist_state(old_state, snapshot).await?;
         Ok(ConditionalUnpairOutcome::Unpaired)
+    }
+
+    /// Remove every external actor pairing owned by `user_id` for one
+    /// adapter, optionally narrowed to a specific adapter installation.
+    ///
+    /// Channel lifecycle removal does not always retain the provider's actor
+    /// id, but it still has host-trusted tenant, adapter, installation, and
+    /// user scope. Keeping this bulk operation in the conversation store lets
+    /// removal revoke the same direct conversation routes as actor-specific
+    /// unpairing without parsing provider identity strings in composition.
+    pub async fn unpair_external_actors_owned_by(
+        &self,
+        tenant_id: &TenantId,
+        adapter_kind: &AdapterKind,
+        adapter_installation_id: Option<&AdapterInstallationId>,
+        user_id: &UserId,
+    ) -> Result<usize, InboundTurnError> {
+        let _mutation = self.mutation_lock.lock().await;
+        self.refresh_state_from_repository().await?;
+        let old_state = self.lock_state()?.clone();
+        let (snapshot, removed_count) = {
+            let mut state = self.lock_state()?;
+            let actor_keys = state
+                .pairings
+                .iter()
+                .filter(|(actor_key, paired_user_id)| {
+                    actor_key.tenant_id == *tenant_id
+                        && actor_key.adapter_kind == *adapter_kind
+                        && adapter_installation_id
+                            .is_none_or(|expected| actor_key.adapter_installation_id == *expected)
+                        && *paired_user_id == user_id
+                })
+                .map(|(actor_key, _)| actor_key.clone())
+                .collect::<Vec<_>>();
+            for actor_key in &actor_keys {
+                state.pairings.remove(actor_key);
+                state.pairing_epochs.remove(actor_key);
+                state.revoke_direct_bindings_for_actor(actor_key);
+            }
+            (state.clone(), actor_keys.len())
+        };
+        if removed_count == 0 {
+            return Ok(0);
+        }
+        self.persist_state(old_state, snapshot).await?;
+        Ok(removed_count)
     }
 
     pub async fn add_thread_participant(
@@ -605,6 +653,68 @@ impl ConversationBindingService for InMemoryConversationServices {
             adapter_kind: binding.adapter_kind,
             adapter_installation_id: binding.adapter_installation_id,
             external_conversation_ref: binding.external_conversation_ref,
+        })
+    }
+
+    async fn resolve_stored_reply_target(
+        &self,
+        request: ResolveStoredReplyTargetRequest,
+    ) -> Result<StoredReplyTargetBinding, InboundTurnError> {
+        let _mutation = self.mutation_lock.lock().await;
+        self.refresh_state_from_repository().await?;
+        let state = self.lock_state()?;
+        let Some(binding) = state
+            .reply_targets
+            .get(request.reply_target_binding_ref.as_str())
+            .cloned()
+        else {
+            return Err(InboundTurnError::ThreadNotFound {
+                thread_id: request.reply_target_binding_ref.as_str().to_string(),
+            });
+        };
+        if binding.tenant_id != request.tenant_id || binding.thread_id != request.current_thread_id
+        {
+            return Err(InboundTurnError::AccessDenied {
+                actor_id: request.actor_user_id.to_string(),
+                thread_id: binding.thread_id.to_string(),
+            });
+        }
+        state.ensure_participant(
+            &binding.tenant_id,
+            &request.actor_user_id,
+            &binding.thread_id,
+        )?;
+
+        let exact_origin_actor_is_current = state
+            .pairings
+            .get(&binding.route_access.owner_actor_key)
+            .is_some_and(|user_id| user_id == &request.actor_user_id);
+        let route_kind = if binding.route_access.shared {
+            ConversationRouteKind::Shared
+        } else {
+            ConversationRouteKind::Direct
+        };
+        let access_allowed = match request.access {
+            StoredReplyTargetAccess::OrdinaryReply => {
+                binding.route_access.shared || exact_origin_actor_is_current
+            }
+            StoredReplyTargetAccess::ExactOriginActor => exact_origin_actor_is_current,
+        };
+        if !access_allowed {
+            return Err(InboundTurnError::AccessDenied {
+                actor_id: request.actor_user_id.to_string(),
+                thread_id: binding.thread_id.to_string(),
+            });
+        }
+
+        Ok(StoredReplyTargetBinding {
+            tenant_id: binding.tenant_id,
+            actor_user_id: request.actor_user_id,
+            thread_id: binding.thread_id,
+            adapter_kind: binding.adapter_kind,
+            adapter_installation_id: binding.adapter_installation_id,
+            external_conversation_ref: binding.external_conversation_ref,
+            route_kind,
         })
     }
 }

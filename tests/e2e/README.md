@@ -59,6 +59,7 @@ Then Playwright drives a headless Chromium browser against the gateway, making D
 | `test_extensions.py` | Extensions tab: install, remove, configure, OAuth, auth card, activate |
 | `test_oauth_refresh.py` | Hosted Gmail/MCP OAuth refresh; the Gmail path refreshes through the proxy and reads seeded Gmail data from Emulate |
 | `test_emulate_reborn_provider_contracts.py` | Emulate provider contracts for Reborn-backed Google Gmail/Calendar/Drive reads, writes, missing resources, and account isolation; Slack QA 9/10 channel/thread/DM routing, strict-scope failures, profiles, mentions, and identity shapes; and GitHub identity, negative-result, repo/issue/PR/search/branch/git-object/release/fork/action-route surfaces |
+| `test_provider_fault_proxy.py` | Self-tests the transparent provider fault proxy, reusable status/transport/response profiles, safe request ledger, reset behavior, and commit-then-disconnect semantics |
 | `test_reborn_emulate_full_path.py` | Full-path IronClaw + Emulate coverage: install/auth extensions, drive scripted Gmail/Calendar/Drive/GitHub/Slack calls, assert provider-side state, and exercise GitHub→Slack, Calendar+Drive→Slack, Gmail→Slack, and Slack→Drive→Slack dispatch |
 
 ## Reborn coverage gate
@@ -84,28 +85,22 @@ in this gate.
 Emulate coverage is intentionally limited to provider APIs that match Reborn
 features already present in the codebase:
 
-- Google: Gmail, Calendar, and Drive seeded reads plus Gmail send, Calendar
-  event create/delete, and Drive upload/update/readback with two isolated users.
+- Google: Gmail, Calendar, Drive, Docs, Sheets, and Slides seeded reads plus
+  stateful message, event, file, document, spreadsheet, presentation, slide,
+  text, shape, and image mutations with isolated accounts where applicable.
 - Slack: auth, conversations, channel/thread/DM delivery, reactions, user
   lookup, membership, self-authored/last-sent identity, missing email/scope,
   mention encoding, two isolated DM targets, and exact-count readback.
 - GitHub: authenticated user, repo create/list/metadata, fork list/create,
   release create/latest/list, issue create/read/comment/list/search, PR
-  create/read/list/files/review/comment/merge, search, branch/ref mutation,
-  Git blob/tree/commit read/write, Actions workflow/run route readback, two
+  create/read/list/files/review/comment/merge, review-thread resolution,
+  contents create/read/delete, search, branch/ref mutation, Git
+  blob/tree/commit read/write, Actions workflow dispatch/readback/reruns, two
   repositories with distinct latest releases, and private-account isolation.
 
-Google Docs, Sheets, and Slides exist as first-party extension assets, but
-Emulate 0.7.0 does not expose those API families directly. Cover those with
-Drive metadata where useful, or a separate fake/provider fixture if the
-document API behavior itself is the contract under test.
-
-GitHub file-content tools use the `/contents` API, and workflow dispatch needs
-seeded workflow rows. Emulate 0.7.0 exposes Git blob/tree/commit/ref APIs and
-Actions workflow/run routes, but it does not expose `/contents` routes or a
-seed hook for workflows. The provider contract therefore covers the emulatable
-Git object mutation/readback path plus empty Actions route readback, not direct
-`/contents` file create/update/delete or workflow dispatch.
+These expanded APIs come from the immutable `serrrfirat/emulate` fork pinned by
+the Reborn E2E workflow; the unpinned local `emulate@0.7.0` fallback does not
+provide all of them.
 
 The direct provider-contract tests prove the emulator fixture layer. Full-path
 Reborn + Emulate tests should use `hosted_google_emulate_server` or a matching
@@ -113,27 +108,33 @@ provider fixture, install/auth the extension through IronClaw, drive
 `/api/chat/send` with the scripted mock LLM, and assert provider state through
 Emulate readback.
 
-Do not duplicate account binding, refresh/reconnect, malformed-provider,
-duplicate-inbound, or repeated-delivery contracts as provider-only fixtures.
-Those are caller/runtime properties and remain covered at their existing
-hermetic seams (`runtime_credentials`, `gsuite_core`,
-`github_wasm_runtime_contract`, `idempotent_replay`, trigger/outbound
-integration tests, and `test_v2_auth_oauth_matrix.py`). Emulate supplies the
-provider state for full-path flows; it is not an OAuth authority or a fault
-injection proxy.
+The full-path QA runtime routes provider traffic through the transparent fault
+proxy while keeping baseline and readback traffic direct to Emulate. Add common
+failure shapes to `PROVIDER_FAULT_PROFILES`, then apply them to a representative
+operation class in `PROVIDER_FAULT_CASES`; do not create the full Cartesian
+product. For ambiguous writes, assert the proxy's forwarded/responded evidence
+and direct provider mutation count so a lost acknowledgement cannot become a
+false success or a duplicate mutation.
+
+Do not duplicate account binding, refresh/reconnect, duplicate-inbound, or
+repeated-delivery contracts as provider-only fixtures. Those are
+caller/runtime properties and remain covered at their existing hermetic seams
+(`runtime_credentials`, `gsuite_core`, `github_wasm_runtime_contract`,
+`idempotent_replay`, trigger/outbound integration tests, and
+`test_v2_auth_oauth_matrix.py`). Malformed and transport failures cross the
+real caller path only for the representative operation-class matrix. Emulate
+supplies provider state for full-path flows; it is neither an OAuth authority
+nor the fault injector.
 
 ### Manual QA mapping
 
 The Emulate provider contracts map to the manual QA sheet only where Emulate
-can represent the backing provider API. Fully emulatable rows covered here:
-2A-2C, 3A/3D, 4A-4C/4E provider outputs, 5A-5B, 6A, 7A, and 8A/8D Slack
-delivery. Partially emulatable rows covered here: 2D-2F use Calendar/Drive/Gmail
-but not native Google Docs or live news; 4D uses GitHub release APIs and Slack
-delivery but not the model-authored routine; 5C-5D use Drive text plus Slack DM
-but not Google Docs; 6C-6E cover Gmail inputs and Drive-style write/readback but
-not Google Sheets; 7C-7E cover Slack inputs/delivery but not Google Sheets; 8B-8C
-need a separate fake HN/search endpoint. Telegram and Twitter/X rows 1A-1C are
-not covered by Emulate.
+can represent the backing provider API. Google Docs, Sheets, and Slides
+operations now execute through their native extension routes instead of
+Drive-style substitutes. Rows that also depend on model-authored routines or
+live news remain only partially hermetic; 8B-8C still need a separate fake
+HN/search endpoint. Telegram and Twitter/X rows 1A-1C are not covered by
+Emulate.
 
 ## Live Persona Failure Notes
 

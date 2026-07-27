@@ -17,9 +17,10 @@
 //! `harness/profiles/*.rs` domain's `capability_ids` — read from that
 //! domain's REAL `ToolsProfile`/harness constructor, never a hand-copied
 //! table — is a subset of production's real capability surface
-//! (`builtin_first_party_package()` + the github/bundled-extension
-//! manifest-derived id sets), modulo a skip-list of deliberately synthetic
-//! local-dev-only ids. See `production_capability_surface()`'s doc for one
+//! (`builtin_first_party_package()` + `native_memory_first_party_package()` +
+//! the github/bundled-extension manifest-derived id sets), modulo a skip-list
+//! of deliberately synthetic local-dev-only ids. See
+//! `production_capability_surface()`'s doc for one
 //! known, deliberately-excluded gap (the extension-lifecycle ids) that is
 //! visibility-blocked rather than papered over.
 
@@ -59,12 +60,14 @@ use reborn_support::planned_runtime_parts_shape::DefaultPlannedRuntimePartsShape
 /// below for the exact code path.
 const EXPECTED_PRODUCTION_SHAPE: DefaultPlannedRuntimePartsShape =
     DefaultPlannedRuntimePartsShape {
-        model_route_resolver: false, // :3406 hardcoded None
-        cancellation_factory: false, // :3407 hardcoded None
-        skill_context_source: true,  // :2917-2929 local_dev_filesystem_skill_context_source
-        attachment_read_port: true,  // :3372-3376 local_runtime.map(ProjectScopedAttachmentReader)
+        model_route_resolver: false,    // :3406 hardcoded None
+        cancellation_factory: false,    // :3407 hardcoded None
+        skill_context_source: true,     // :2917-2929 local_dev_filesystem_skill_context_source
+        attachment_read_port: true, // :3372-3376 local_runtime.map(ProjectScopedAttachmentReader)
         gate_record_store: true, // local_runtime.map(gate_record_store) — always Some when local_runtime present
         input_queue: false,      // hardcoded None
+        memory_context_service: true, // :3481-3494 local_runtime + native MemoryServiceResolver
+        after_turn_memory_writer: true, // :3500-3509 local_runtime + native MemoryServiceResolver
         model_policy_guard: false, // hardcoded None
         // :3027-3073 — scope: this constant models the NO-LLM local-dev
         // shape. When `model_gateway_override` is set (the harness's
@@ -116,6 +119,18 @@ const ALLOWED_DIVERGENCES: &[(&str, &str)] = &[
          production: always Some, no config gate (runtime.rs:3453)",
     ),
     (
+        "memory_context_service",
+        "harness: None in generic group runtime (group.rs); focused memory/runtime tests \
+         cover this lane directly; production: Some via local_runtime memory_service_resolver \
+         (runtime.rs:3481-3494)",
+    ),
+    (
+        "after_turn_memory_writer",
+        "harness: None in generic group runtime (group.rs); focused memory/runtime tests \
+         cover this lane directly; production: Some via local_runtime memory_service_resolver \
+         (runtime.rs:3500-3509)",
+    ),
+    (
         "communication_context_provider",
         "harness: None unless .communication_context_provider() was called (group.rs); \
          production: always Some whenever local_runtime is present (runtime.rs:3337-3357)",
@@ -138,6 +153,10 @@ fn mask(
         "attachment_read_port" => shape.attachment_read_port = from.attachment_read_port,
         "gate_record_store" => shape.gate_record_store = from.gate_record_store,
         "input_queue" => shape.input_queue = from.input_queue,
+        "memory_context_service" => shape.memory_context_service = from.memory_context_service,
+        "after_turn_memory_writer" => {
+            shape.after_turn_memory_writer = from.after_turn_memory_writer
+        }
         "model_policy_guard" => shape.model_policy_guard = from.model_policy_guard,
         "model_budget_accountant" => shape.model_budget_accountant = from.model_budget_accountant,
         "safety_context" => shape.safety_context = from.safety_context,
@@ -215,13 +234,13 @@ async fn local_dev_profile_still_builds() {
     let root = tempfile::tempdir().expect("tempdir");
     let policy = ironclaw_reborn_composition::local_dev_runtime_policy()
         .expect("local-dev runtime policy resolves");
-    let input = ironclaw_reborn_composition::RebornBuildInput::local_dev(
+    let input = ironclaw_reborn_composition::local_dev_build_input(
         "wiring-parity-smoke-owner",
         root.path().join("local-dev"),
     )
     .with_runtime_policy(policy);
     let runtime = ironclaw_reborn_composition::build_reborn_runtime(
-        ironclaw_reborn_composition::RebornRuntimeInput::from_services(input),
+        ironclaw_reborn_composition::RebornRuntimeInput::from_build_input(input),
     )
     .await
     .expect(
@@ -275,9 +294,10 @@ const SYNTHETIC_CAPABILITY_SKIP_LIST: &[(&str, &str)] = &[
     ),
 ];
 
-/// The production capability surface: `builtin_first_party_package()`'s
-/// declared capabilities, unioned with two independently production-derived
-/// sources — the github extension's real manifest-derived ids
+/// The production capability surface: the always-on first-party packages
+/// (`builtin_first_party_package()` and the sibling
+/// `native_memory_first_party_package()`), unioned with two independently
+/// production-derived sources — the github extension's real manifest-derived ids
 /// (`github_support::capability_ids()`) and every OTHER bundled extension's
 /// real manifest-derived ids
 /// (`extension_surface::bundled_extension_manifest_capability_ids()`) — both
@@ -286,7 +306,7 @@ const SYNTHETIC_CAPABILITY_SKIP_LIST: &[(&str, &str)] = &[
 /// production truth, not a second test-only source.
 ///
 /// **Deliberately NOT unioned**: `extension_surface::EXTENSION_LIFECYCLE_CAPABILITY_IDS`
-/// (the four `builtin.extension_search`/`_install`/`_activate`/`_remove` ids).
+/// (the three `builtin.extension_search`/`_install`/`_remove` ids).
 /// Their real values are defined in a production crate
 /// (`ironclaw_reborn_composition::extension_lifecycle_capabilities::EXTENSION_LIFECYCLE_CAPABILITY_IDS`),
 /// but as a `pub(crate)` constant with no public accessor — visibility-blocked
@@ -295,7 +315,7 @@ const SYNTHETIC_CAPABILITY_SKIP_LIST: &[(&str, &str)] = &[
 /// exactly the tautology this restructure removes (RHS built from the same
 /// hand-transcribed list LHS grants from). STOP/report, not paper over: see
 /// `profile_capability_ids_by_domain()`'s "extension" row, which excludes
-/// these 4 ids from the check it runs for the same reason, and the PR that
+/// these 3 ids from the check it runs for the same reason, and the PR that
 /// introduced this restructure (W5-WIRING-PARITY finding 1) for the tracked
 /// follow-up (export the list, or add a public accessor, from
 /// `ironclaw_reborn_composition`).
@@ -307,6 +327,14 @@ fn production_capability_surface() -> HashSet<String> {
         .iter()
         .map(|capability| capability.id.as_str().to_string())
         .collect();
+    surface.extend(
+        ironclaw_host_runtime::native_memory_first_party_package()
+            .expect("native memory first-party package parses")
+            .manifest
+            .capabilities
+            .iter()
+            .map(|capability| capability.id.as_str().to_string()),
+    );
     surface.extend(
         reborn_support::github::capability_ids()
             .expect("github extension manifest parses")
@@ -369,14 +397,13 @@ fn profile_capability_ids_by_domain() -> HarnessResult<Vec<(&'static str, Vec<St
                 .collect(),
         ),
         // extension_lifecycle_tools_profile() (harness/profiles/extension.rs)
-        // grants EXTENSION_LIFECYCLE_CAPABILITY_IDS (4 ids) plus
-        // BUNDLED_EXTENSION_CAPABILITY_IDS. The 4 lifecycle ids are filtered
-        // out BY NAME (order-independent): their real production values are
-        // visibility-blocked (see `production_capability_surface()`'s doc) —
-        // checking them against a surface that (correctly) no longer contains
-        // them would fail for a reason unrelated to real drift. The remaining
-        // ~130 bundled-extension ids ARE checked, against the manifest-derived
-        // (not hand-transcribed) surface.
+        // grants EXTENSION_LIFECYCLE_CAPABILITY_IDS plus the real GitHub
+        // package ids and the other manifest-derived bundled extension ids.
+        // The lifecycle ids are filtered out BY NAME (order-independent):
+        // their real production values are visibility-blocked (see
+        // `production_capability_surface()`'s doc), so checking them against a
+        // surface that correctly omits them would report unrelated drift.
+        // Every remaining manifest-derived capability id is checked.
         ("extension", {
             let capability_ids =
                 profiles::extension::extension_lifecycle_tools_profile()?.capability_ids;

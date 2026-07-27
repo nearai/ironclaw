@@ -11,12 +11,26 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     HostApiError,
-    dotted_id::{PrefixRule, VersionRule, validate_dotted_id},
+    dotted_id::{PrefixRule, validate_dotted_id},
 };
 
 /// Host-runtime mediated HTTP egress port for runtime lanes that delegate
 /// outbound HTTP through host policy, credential, and response-limit services.
 pub const HOST_RUNTIME_HTTP_EGRESS_PORT_ID: &str = "host.runtime.http_egress";
+
+/// First-party SQL/transaction storage port. HostBundled first-party only:
+/// reserved for first-party durable storage that runs through a host-scoped
+/// transaction surface rather than a raw pool handle. This is part of the future
+/// storage-port vocabulary, not a live backing today — the native memory provider
+/// is filesystem-backed and declares no host ports (see
+/// `native_memory_declares_no_host_ports`). Concrete adapters live in host/runtime
+/// service crates; this is the validation contract name only.
+pub const HOST_STORAGE_SQL_TRANSACTION_FIRST_PARTY_PORT_ID: &str =
+    "host.storage.sql_transaction.first_party";
+
+/// Host-mediated durable audit event port. Capabilities declare it when they
+/// emit redacted significant events into the host's durable audit log.
+pub const HOST_EVENTS_AUDIT_PORT_ID: &str = "host.events.audit";
 
 fn validate_dotted_host_port_id(value: &str) -> Result<(), HostApiError> {
     validate_dotted_id(
@@ -25,7 +39,6 @@ fn validate_dotted_host_port_id(value: &str) -> Result<(), HostApiError> {
         3,
         "must have at least host, domain, and service segments",
         PrefixRule::Required("host."),
-        VersionRule::Unversioned,
     )
 }
 

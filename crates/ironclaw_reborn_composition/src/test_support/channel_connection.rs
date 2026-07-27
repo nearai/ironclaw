@@ -1,14 +1,14 @@
 //! Generic channel-connection test support (C-SLACK-LIFECYCLE seam, issue
 //! #6105, re-expressed onto the unified extension runtime).
 //!
-//! Builds the REAL [`GenericChannelConnectionFacade`] (extension-runtime
-//! §6.4) over a composed `RebornServices`' own generic stores — the durable
+//! Builds the REAL [`GenericChannelConnectionService`] (extension-runtime
+//! §6.4) over a composed `RebornRuntime`'s own generic stores — the durable
 //! installation store, the filesystem channel-identity store, the DM-target
 //! store, and product-auth lifecycle cleanup — mirroring exactly the
-//! production wiring in `RebornRuntime::generic_channel_connection_facade`
-//! (`runtime.rs`). The built facade is late-bound into
-//! `RebornLocalRuntimeServices::channel_disconnect_slot`, the same
-//! slot `build_reborn_runtime` fills in production, so
+//! production wiring in `RebornRuntime::generic_channel_connection_service`
+//! (`runtime.rs`). The built service is late-bound into
+//! runtime `channel_disconnect_slot`, the same slot `build_reborn_runtime`
+//! fills in production, so
 //! `builtin.extension_remove` of a channel extension runs the REAL per-caller
 //! disconnect (revoke personal vendor credential → vendor cleanup → delete
 //! identity bindings) instead of skipping it on an empty slot.
@@ -31,18 +31,19 @@
 use std::sync::Arc;
 
 use ironclaw_auth::{AuthProductScope, AuthSurface, OAuthProviderIdentity};
-use ironclaw_host_api::{AgentId, InvocationId, ResourceScope, TenantId, UserId};
-use ironclaw_product_workflow::{ChannelConnectionFacade, WebUiAuthenticatedCaller};
+use ironclaw_host_api::{
+    AgentId, InvocationId, ProductSurfaceCaller, ResourceScope, TenantId, UserId,
+};
+use ironclaw_product::ChannelConnectionService;
 
-use crate::extension_host::channel_connection::{
-    ChannelAccountStatusReader, ChannelCredentialCleanup, GenericChannelConnectionFacade,
+use ironclaw_extension_host::channel_connection::{
+    ChannelAccountStatusReader, ChannelCredentialCleanup, GenericChannelConnectionService,
 };
-use crate::extension_host::channel_dm_provisioning::ChannelDmTargetProvisioning;
-use crate::extension_host::channel_identity::{
-    ChannelIdentityBindingConfig, ChannelIdentityPostBindFactory,
-    bind_channel_identities_for_callback,
+use ironclaw_extension_host::channel_dm_provisioning::ChannelDmTargetProvisioning;
+use ironclaw_extension_host::channel_identity_binding::{
+    ChannelIdentityBindingConfig, bind_channel_identities_for_callback,
 };
-use crate::provider_identity::RebornUserIdentityLookup;
+use ironclaw_host_api::{ChannelIdentityPostBindFactory, RebornUserIdentityLookup};
 
 /// Identity inputs for [`build_channel_connection_for_test`]. Plain strings
 /// so harness callers outside this crate don't need the id newtypes;
@@ -54,11 +55,11 @@ use crate::provider_identity::RebornUserIdentityLookup;
 /// the durable installation store.
 pub struct ChannelConnectionTestConfig {
     /// Tenant of the harness's dispatch-time callers (the group's
-    /// single-source product scope) — the facade ignores foreign tenants, so
+    /// single-source product scope) — the service ignores foreign tenants, so
     /// this must match the tenant extension-removal cleanup runs under.
     pub tenant_id: String,
     /// Agent stamped on the bundle's read-side callers (parity with the
-    /// WebUI caller shape; the facade keys connections by tenant + user).
+    /// WebUI caller shape; the service keys connections by tenant + user).
     pub agent_id: String,
 }
 
@@ -68,7 +69,7 @@ pub struct ChannelConnectionTestConfig {
 pub struct ChannelConnectionTestBundle {
     tenant_id: TenantId,
     agent_id: AgentId,
-    facade: Arc<dyn ChannelConnectionFacade>,
+    service: Arc<dyn ChannelConnectionService>,
     identity_binding: ChannelIdentityBindingConfig,
     identity_lookup: Arc<dyn RebornUserIdentityLookup>,
     /// The (tenant, user) scope the LIVE identity store was composed with —
@@ -78,82 +79,64 @@ pub struct ChannelConnectionTestBundle {
     identity_store_user_id: UserId,
 }
 
-/// Build the real generic channel-connection facade over `services`' own
-/// stores and fill the composition's late-binding facade slot. Mirrors
-/// `RebornRuntime::generic_channel_connection_facade` (facade construction)
+/// Build the real generic channel-connection service over `runtime`'s own
+/// stores and fill the composition's late-binding service slot. Mirrors
+/// `RebornRuntime::generic_channel_connection_service` (service construction)
 /// plus the `build_reborn_runtime` slot fill, and assembles the identity
 /// binding config like `RebornRuntime::channel_identity_binding_config`.
 ///
-/// Fails loud when the slot is already occupied — a second facade would not
+/// Fails loud when the slot is already occupied — a second service would not
 /// be the one extension-removal cleanup dispatches to, so a test composing
 /// twice must find out immediately.
 pub fn build_channel_connection_for_test(
-    services: &crate::RebornServices,
+    runtime: &crate::RebornRuntime,
     config: ChannelConnectionTestConfig,
 ) -> Result<ChannelConnectionTestBundle, String> {
-    let local_runtime = services
-        .local_runtime
-        .as_ref()
-        .ok_or("channel-connection test support requires a local-dev runtime")?;
     let tenant_id = TenantId::new(config.tenant_id).map_err(|error| error.to_string())?;
     let agent_id = AgentId::new(config.agent_id).map_err(|error| error.to_string())?;
-    let identity_store = local_runtime
-        .channel_identity_store
-        .clone()
-        .ok_or("channel-connection test support requires the channel identity store")?;
-    let installation_store = local_runtime
-        .extension_management
-        .as_ref()
-        .map(|management| management.installation_store_handle())
-        .ok_or("channel-connection test support requires extension management")?;
+    let identity_store = runtime.channel_identity_store.clone();
+    let installation_store = runtime.extension_management.installation_store_handle();
 
-    // Same construction as `RebornRuntime::generic_channel_connection_facade`:
+    // Same construction as `RebornRuntime::generic_channel_connection_service`:
     // generic discovery over the durable installation store, connected =
     // identity binding under the extension's installation prefix, disconnect
     // clears credentials, vendor residue, and bindings.
-    let credential_cleanup = services
-        .product_auth
-        .clone()
-        .map(|auth| auth as Arc<dyn ChannelCredentialCleanup>);
-    let account_status_reader = services
-        .product_auth
-        .clone()
-        .map(|auth| auth as Arc<dyn ChannelAccountStatusReader>);
-    let facade: Arc<dyn ChannelConnectionFacade> = Arc::new(GenericChannelConnectionFacade::new(
-        tenant_id.clone(),
-        Vec::new(),
-        Some(Arc::clone(&installation_store)),
-        Arc::clone(&identity_store) as Arc<dyn RebornUserIdentityLookup>,
-        Arc::clone(&identity_store)
-            as Arc<dyn crate::provider_identity::RebornUserIdentityBindingDeleteStore>,
-        credential_cleanup,
-        account_status_reader,
-        local_runtime.channel_dm_target_store.clone(),
-        None,
-    ));
-    if local_runtime
-        .channel_disconnect_slot
-        .set(Arc::clone(&facade))
-        .is_err()
-    {
-        return Err(
-            "channel connection facade slot is already occupied; extension-removal cleanup \
-             would dispatch to a different facade than this bundle"
-                .to_string(),
-        );
-    }
+    let credential_cleanup =
+        Some(Arc::clone(&runtime.product_auth) as Arc<dyn ChannelCredentialCleanup>);
+    let account_status_reader =
+        Some(Arc::clone(&runtime.product_auth) as Arc<dyn ChannelAccountStatusReader>);
+    let service: Arc<dyn ChannelConnectionService> =
+        Arc::new(GenericChannelConnectionService::new(
+            tenant_id.clone(),
+            Vec::new(),
+            Some(Arc::clone(&installation_store)),
+            Arc::clone(&identity_store) as Arc<dyn RebornUserIdentityLookup>,
+            Arc::clone(&identity_store)
+                as Arc<dyn ironclaw_host_api::RebornUserIdentityBindingDeleteStore>,
+            credential_cleanup,
+            account_status_reader,
+            Some(runtime.channel_dm_target_store.clone()),
+            runtime.channel_pairing.clone(),
+        ));
+    let disconnect_slot = &runtime.channel_facade_slot;
+    let service = match disconnect_slot.get() {
+        Some(existing) => Arc::clone(existing),
+        None => {
+            let _ = disconnect_slot.set(Arc::clone(&service));
+            service
+        }
+    };
 
     // Same assembly as `RebornRuntime::channel_identity_binding_config`: the
     // generic post-OAuth binding hook over the same installation + identity
     // stores, with DM-target provisioning when the composition can deliver.
-    let snapshot_updates = local_runtime
+    let snapshot_updates = runtime
         .extension_management
-        .as_ref()
-        .and_then(|management| management.generic_host())
+        .generic_host()
         .map(|host| host.snapshot_watch().subscribe());
     let post_bind_factory = match (
-        services.channel_delivery_resolver(),
-        local_runtime.channel_dm_target_store.clone(),
+        runtime.channel_delivery_resolver.clone(),
+        Some(runtime.channel_dm_target_store.clone()),
         snapshot_updates,
     ) {
         (Some(delivery), Some(store), Some(snapshot_updates)) => Some(Arc::new(
@@ -165,11 +148,11 @@ pub fn build_channel_connection_for_test(
     let identity_binding = ChannelIdentityBindingConfig {
         tenant_id: tenant_id.clone(),
         installation_store: Some(installation_store),
-        channel_config: local_runtime.channel_config.clone(),
+        channel_config: Some(runtime.channel_config_service.clone()),
         binding_store: Arc::clone(&identity_store)
-            as Arc<dyn crate::provider_identity::RebornUserIdentityBindingStore>,
+            as Arc<dyn ironclaw_host_api::RebornUserIdentityBindingStore>,
         rollback_store: Arc::clone(&identity_store)
-            as Arc<dyn crate::provider_identity::RebornUserIdentityBindingDeleteStore>,
+            as Arc<dyn ironclaw_host_api::RebornUserIdentityBindingDeleteStore>,
         post_bind_factory,
         overrides: Vec::new(),
     };
@@ -181,7 +164,7 @@ pub fn build_channel_connection_for_test(
     Ok(ChannelConnectionTestBundle {
         tenant_id,
         agent_id,
-        facade,
+        service,
         identity_binding,
         identity_lookup: identity_store,
         identity_store_tenant_id,
@@ -242,18 +225,18 @@ impl ChannelConnectionTestBundle {
         }
     }
 
-    /// The real facade — the same instance extension-removal cleanup
+    /// The real service — the same instance extension-removal cleanup
     /// dispatches to — for callers that need the full
-    /// [`ChannelConnectionFacade`] surface.
-    pub fn facade(&self) -> Arc<dyn ChannelConnectionFacade> {
-        Arc::clone(&self.facade)
+    /// [`ChannelConnectionService`] surface.
+    pub fn service(&self) -> Arc<dyn ChannelConnectionService> {
+        Arc::clone(&self.service)
     }
 
     /// Surface (a) of the extensions page: what `list_extensions` merges via
-    /// [`ChannelConnectionFacade::caller_channel_connections`]
-    /// (`ironclaw_product_workflow/src/reborn_services/extensions.rs`).
+    /// [`ChannelConnectionService::caller_channel_connections`]
+    /// (`ironclaw_product/src/reborn_services/extensions.rs`).
     /// Returns the entry for `extension_id`; an absent entry reads as `false`
-    /// — the generic facade discovers channel extensions from the durable
+    /// — the generic service discovers channel extensions from the durable
     /// installation store, so a removed (or never-installed) extension has no
     /// entry and is trivially not connected.
     pub async fn caller_channel_connected(
@@ -262,8 +245,8 @@ impl ChannelConnectionTestBundle {
         user_id: &UserId,
     ) -> Result<bool, String> {
         let connections = self
-            .facade
-            .caller_channel_connections(WebUiAuthenticatedCaller::new(
+            .service
+            .caller_channel_connections(ProductSurfaceCaller::new(
                 self.tenant_id.clone(),
                 user_id.clone(),
                 Some(self.agent_id.clone()),
@@ -299,7 +282,7 @@ impl ChannelConnectionTestBundle {
     /// independent of the live runtime's in-memory handles. This is the
     /// integration-tier approximation of a process restart: it proves the
     /// durable binding is reconstructible the way production reconstructs it
-    /// on boot (`build_reborn_services` →
+    /// on boot (`build_runtime` →
     /// `FilesystemChannelIdentityStore::new` over the composed local-dev
     /// root). Results come back in `user_ids` order; the single reopen means
     /// a positive probe and its non-vacuity control read the same
@@ -318,7 +301,7 @@ impl ChannelConnectionTestBundle {
             .await
             .map_err(|error| error.to_string())?;
         let store = Arc::new(
-            crate::extension_host::channel_identity_store::FilesystemChannelIdentityStore::new(
+            ironclaw_extension_host::FilesystemChannelIdentityStore::new(
                 filesystem,
                 self.identity_store_tenant_id.clone(),
                 self.identity_store_user_id.clone(),

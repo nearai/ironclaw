@@ -66,7 +66,7 @@ has_reborn_tests=true"
 
 assert_scope \
   "reborn product storage crate" \
-  "crates/ironclaw_product_workflow_storage/src/lib.rs" \
+  "crates/ironclaw_product_storage/src/lib.rs" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
@@ -162,14 +162,6 @@ tests/reborn_trace_first_party_tool_coverage.rs" \
 has_core_code=true
 has_legacy_tests=true
 has_reborn_tests=true"
-
-assert_scope \
-  "non-reborn channel source" \
-  "channels-src/telegram/src/lib.rs" \
-  "docs_only=false
-has_core_code=true
-has_legacy_tests=true
-has_reborn_tests=false"
 
 assert_scope \
   "shared manifest" \
@@ -290,8 +282,8 @@ has_legacy_tests=false
 has_reborn_tests=true"
 
 assert_scope \
-  "mixed non-reborn and reborn" \
-  "channels-src/telegram/src/lib.rs
+  "mixed tests and reborn" \
+  "tests/e2e/scenarios/test_live_flow.py
 crates/ironclaw_reborn_composition/src/lib.rs" \
   "docs_only=false
 has_core_code=true

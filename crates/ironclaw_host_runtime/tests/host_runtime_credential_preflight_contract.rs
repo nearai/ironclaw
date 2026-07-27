@@ -30,7 +30,7 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_resources::InMemoryResourceGovernor;
-use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore};
+use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStorePort};
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 use serde_json::json;
 use support::legacy_capability_fixture_to_v2;
@@ -170,12 +170,12 @@ fn local_manifest_trust_policy(
 #[tokio::test]
 async fn product_auth_account_credential_does_not_trip_preflight() {
     let fs = ironclaw_run_state::in_memory_backed_run_state_filesystem();
-    let run_state = Arc::new(ironclaw_run_state::FilesystemRunStateStore::new(
+    let run_state = Arc::new(ironclaw_run_state::RunStateStore::new(
         std::sync::Arc::clone(&fs),
     ));
-    let approval_requests = Arc::new(ironclaw_run_state::FilesystemApprovalRequestStore::new(fs));
+    let approval_requests = Arc::new(ironclaw_run_state::ApprovalRequestStore::new(fs));
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
-    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store = Arc::new(SecretStore::ephemeral());
     // Deliberately do NOT seed any secret under "google_oauth_token".
     // The secret store is empty. If the pre-flight incorrectly probes the
     // product-auth slot, it will return AuthRequired — which is the bug this
@@ -225,12 +225,12 @@ async fn product_auth_account_credential_does_not_trip_preflight() {
 #[tokio::test]
 async fn secret_handle_credential_absent_still_trips_preflight() {
     let fs = ironclaw_run_state::in_memory_backed_run_state_filesystem();
-    let run_state = Arc::new(ironclaw_run_state::FilesystemRunStateStore::new(
+    let run_state = Arc::new(ironclaw_run_state::RunStateStore::new(
         std::sync::Arc::clone(&fs),
     ));
-    let approval_requests = Arc::new(ironclaw_run_state::FilesystemApprovalRequestStore::new(fs));
+    let approval_requests = Arc::new(ironclaw_run_state::ApprovalRequestStore::new(fs));
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
-    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store = Arc::new(SecretStore::ephemeral());
     // No secret seeded — the SecretHandle pre-flight must fire.
 
     let services = HostRuntimeServices::new(
@@ -282,12 +282,12 @@ async fn secret_handle_credential_absent_still_trips_preflight() {
 #[tokio::test]
 async fn tenant_shared_secret_satisfies_credential_preflight() {
     let fs = ironclaw_run_state::in_memory_backed_run_state_filesystem();
-    let run_state = Arc::new(ironclaw_run_state::FilesystemRunStateStore::new(
+    let run_state = Arc::new(ironclaw_run_state::RunStateStore::new(
         std::sync::Arc::clone(&fs),
     ));
-    let approval_requests = Arc::new(ironclaw_run_state::FilesystemApprovalRequestStore::new(fs));
+    let approval_requests = Arc::new(ironclaw_run_state::ApprovalRequestStore::new(fs));
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
-    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store = Arc::new(SecretStore::ephemeral());
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_WITH_SECRET_HANDLE_MANIFEST)),
@@ -346,7 +346,7 @@ async fn tenant_shared_secret_satisfies_credential_preflight() {
 /// `InvocationId`) and swapping the `resource_scope` from one onto the other.
 #[tokio::test]
 async fn invoke_capability_forged_scope_fails_before_preflight() {
-    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store = Arc::new(SecretStore::ephemeral());
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_WITH_SECRET_HANDLE_MANIFEST)),
@@ -406,7 +406,7 @@ async fn invoke_capability_forged_scope_fails_before_preflight() {
 /// Same forged-scope test through the `spawn_capability` path.
 #[tokio::test]
 async fn spawn_capability_forged_scope_fails_before_preflight() {
-    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let secret_store = Arc::new(SecretStore::ephemeral());
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_WITH_SECRET_HANDLE_MANIFEST)),

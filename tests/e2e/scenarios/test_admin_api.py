@@ -1,7 +1,7 @@
 """Admin user-management E2E against the real ``ironclaw-reborn serve`` binary.
 
 Drives the WebChat v2 admin surface (`/api/webchat/v2/admin/*`, backed by
-`ironclaw_product_workflow::AdminUserService`) over HTTP against the standalone
+`ironclaw_product::AdminUserService`) over HTTP against the standalone
 Reborn binary — so unlike the crate-tier `admin_api_e2e.rs` (which composes the
 router in-process), this exercises serve.rs's real wiring: the operator
 env-bearer authenticator, and the signed-session-store token minter that must
@@ -666,7 +666,7 @@ async def test_delete_user_and_verify_gone(admin_client):
 
 
 async def test_admin_routes_require_auth(reborn_v2_server):
-    """No bearer -> the admin surface rejects before any facade work."""
+    """No bearer -> the admin surface rejects before any service work."""
     async with httpx.AsyncClient(base_url=reborn_v2_server, timeout=15) as anon:
         r = await anon.get(f"{ADMIN_BASE}/users")
     assert r.status_code == 401

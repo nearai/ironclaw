@@ -53,28 +53,40 @@ const ALLOWLIST: &[(&str, usize, ReparseCategory, &str)] = &[
         "one-time CAS migration compiles pre-resolved filesystem rows before the store opens",
     ),
     (
-        "crates/ironclaw_product_adapter_registry/src/lib.rs",
+        "crates/ironclaw_product/src/adapter_registry.rs",
         1,
         ReparseCategory::Compiler,
         "parse_product_adapter_manifest_record — the registry manifest compiler entry",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
+        "crates/ironclaw_extension_host/src/available_extensions.rs",
         3,
         ReparseCategory::BundledAsset,
         "bundled first-party package + filesystem-root catalog compile",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs",
-        3,
-        ReparseCategory::Compiler,
-        "install/activation-time compile of the installed manifest into its resolved record",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/extension_host/available_extension_import.rs",
+        "crates/ironclaw_extension_host/src/available_extension_import.rs",
         1,
         ReparseCategory::Compiler,
         "install-time compile of an imported (zip-uploaded) manifest into its resolved record",
+    ),
+    (
+        "crates/ironclaw_extension_host/src/lifecycle_restore.rs",
+        2,
+        ReparseCategory::Compiler,
+        "install/restore-time compile of the installed manifest into its resolved record",
+    ),
+    (
+        "crates/ironclaw_extension_host/src/product_lifecycle.rs",
+        1,
+        ReparseCategory::Compiler,
+        "activation-time compile of the installed manifest into its resolved record",
+    ),
+    (
+        "crates/ironclaw_host_runtime/src/memory_native_extension.rs",
+        1,
+        ReparseCategory::BundledAsset,
+        "native_memory_first_party_package — compiles the bundled ironclaw.memory manifest asset (include_str! of assets/memory_native/manifest.toml); a host-bundled descriptor has no installed resolved record to project from",
     ),
 ];
 

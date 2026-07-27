@@ -13,11 +13,11 @@
 //! only the LIVE envelope it wrapped — so the parsed inbound is now built
 //! directly. Coverage that exercised the retired trait's own `parse_inbound` /
 //! `render_outbound` moved to the `ChannelAdapter` conformance suite
-//! (`ironclaw_product_adapters::test_support::run_channel_adapter_conformance`);
+//! (`ironclaw_product::test_support::run_channel_adapter_conformance`);
 //! see that PR's DEL-5 notes.
 
 use chrono::Utc;
-use ironclaw_product_adapters::{
+use ironclaw_product::{
     AdapterInstallationId, ApprovalDecision, ApprovalResolutionPayload, AuthRequirement,
     AuthResolutionPayload, AuthResolutionResult, ExternalActorRef, ExternalConversationRef,
     ExternalEventId, ParsedProductInbound, ProductAdapterError, ProductAdapterId,

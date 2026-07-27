@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Build all WASM tools and channels from source.
+# Build WASM tools and channels that still have local source entries.
 #
-# Verifies that every tool/channel in the registry compiles against the
-# current WIT definitions. Used by CI and can be run locally.
+# Verifies local-source registry entries compile against the current WIT
+# definitions. Registry entries that only publish release artifacts are skipped.
 #
 # Prerequisites:
 #   rustup target add wasm32-wasip2
@@ -97,17 +97,25 @@ build_extension() {
         return 0
     fi
 
-    if ! source_dir=$(jq -r '.source.dir' "$manifest_path"); then
+    if ! source_dir=$(jq -r '.source.dir // empty' "$manifest_path"); then
         fail_build "$(basename "$manifest_path" .json)" "could not read source dir"
         return 0
     fi
-    if ! crate_name=$(jq -r '.source.crate_name' "$manifest_path"); then
+    if ! crate_name=$(jq -r '.source.crate_name // empty' "$manifest_path"); then
         fail_build "$(basename "$manifest_path" .json)" "could not read crate name"
         return 0
     fi
     local name
     name=$(basename "$manifest_path" .json)
 
+    if [ -z "$source_dir" ]; then
+        echo "  SKIP $name (registry entry has no local source)"
+        return 0
+    fi
+    if [ -z "$crate_name" ]; then
+        echo "  SKIP $name (registry entry has no local crate name)"
+        return 0
+    fi
     if [ ! -d "$source_dir" ]; then
         echo "  SKIP $name (source dir $source_dir not found)"
         return 0

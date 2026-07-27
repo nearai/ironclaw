@@ -4,7 +4,7 @@
 //!
 //! Per the issue #4116 acceptance criteria — "session use on a
 //! protected WebChat v2 route" — this test composes the full
-//! `webui_v2_app` (`ironclaw_reborn_composition`) with:
+//! `webui_v2_app` with:
 //!
 //! - the OAuth public router from `webui_v2_auth_router` (mints
 //!   sessions),
@@ -15,7 +15,7 @@
 //!
 //! The chain it locks: OAuth callback → SignedTokenSessionStore::create_session
 //! → one-time `login_ticket` exchange → SessionAuthenticator → v2
-//! route handler → facade call. A regression that loses any link
+//! route handler → service call. A regression that loses any link
 //! (e.g. store mismatch, bearer exchange drift, missing user_id
 //! stamp) would break exactly the path users hit when they sign in
 //! with Google.
@@ -32,13 +32,11 @@ use axum::extract::ConnectInfo;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use chrono::Duration as ChronoDuration;
 use http_body_util::BodyExt;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-use ironclaw_product_workflow::{
-    ProductOperationId, ProductOperationRequest, ProductOperationResponse, ProductSurface,
-    RebornCreateThreadResponse, RebornServicesError, WebUiAuthenticatedCaller,
-    WebUiCreateThreadRequest,
+use ironclaw_host_api::{
+    AgentId, ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProjectId, TenantId,
+    ThreadId, UserId,
 };
-use ironclaw_reborn_composition::{RebornReadiness, RebornWebuiBundle};
+use ironclaw_product::RebornCreateThreadResponse;
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use ironclaw_webui::{
     EmailUserDirectory, OAuthProvider, OAuthProviderName, OAuthRouterConfig, OAuthUserProfile,
@@ -54,7 +52,7 @@ const TENANT: &str = "tenant-a";
 const AGENT: &str = "agent-default";
 const PROJECT: &str = "project-default";
 
-// ─── stub facade ──────────────────────────────────────────────────────
+// ─── stub service ──────────────────────────────────────────────────────
 
 /// `ProductSurface` stub — only `create_thread` returns Ok with a
 /// fake thread (the protected route this test exercises). Every
@@ -64,20 +62,24 @@ const PROJECT: &str = "project-default";
 /// scope.
 #[derive(Default)]
 struct StubServices {
-    create_thread_callers: Mutex<Vec<WebUiAuthenticatedCaller>>,
+    create_thread_callers: Mutex<Vec<ProductSurfaceCaller>>,
 }
 
-impl StubServices {
-    async fn create_thread(
+#[async_trait]
+impl ProductSurface for StubServices {
+    async fn invoke(
         &self,
-        caller: WebUiAuthenticatedCaller,
-        _request: WebUiCreateThreadRequest,
-    ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
+        caller: ProductSurfaceCaller,
+        request: ironclaw_host_api::ProductSurfaceInvokeRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceInvokeResponse, ProductSurfaceError> {
+        if request.operation_id.as_str() != "thread.create" {
+            return Err(ProductSurfaceError::service_unavailable(false));
+        }
         self.create_thread_callers
             .lock()
             .expect("lock")
             .push(caller);
-        Ok(RebornCreateThreadResponse {
+        let output = serde_json::to_value(RebornCreateThreadResponse {
             thread: SessionThreadRecord {
                 thread_id: ThreadId::new("thread.fake").expect("thread"),
                 scope: ThreadScope {
@@ -95,28 +97,24 @@ impl StubServices {
                 updated_at: None,
             },
         })
+        .map_err(ProductSurfaceError::internal_from)?;
+        Ok(ironclaw_host_api::ProductSurfaceInvokeResponse { output })
     }
-}
 
-#[async_trait]
-impl ProductSurface for StubServices {
-    async fn execute_command(
+    async fn query(
         &self,
-        caller: WebUiAuthenticatedCaller,
-        request: ProductOperationRequest,
-    ) -> Result<ProductOperationResponse, RebornServicesError> {
-        let operation_id = ProductOperationId::parse(request.operation_id.as_str())
-            .ok_or_else(|| RebornServicesError::internal_from("unsupported product operation"))?;
-        match operation_id {
-            ProductOperationId::CreateThread => {
-                let request = serde_json::from_value(request.input)
-                    .map_err(RebornServicesError::internal_from)?;
-                ProductOperationResponse::json(self.create_thread(caller, request).await?)
-            }
-            _ => Err(RebornServicesError::internal_from(
-                "unsupported product operation",
-            )),
-        }
+        _caller: ProductSurfaceCaller,
+        _request: ironclaw_host_api::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ProductSurfaceError> {
+        Err(ProductSurfaceError::service_unavailable(false))
+    }
+
+    async fn stream_events(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _request: ironclaw_host_api::ProductSurfaceStreamRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceStreamResponse, ProductSurfaceError> {
+        Err(ProductSurfaceError::service_unavailable(false))
     }
 }
 
@@ -207,11 +205,6 @@ fn build_app() -> (
     );
 
     let services = Arc::new(StubServices::default());
-    let bundle = RebornWebuiBundle {
-        api: services.clone(),
-        product_auth: None,
-        readiness: RebornReadiness::disabled(),
-    };
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         bearer_authenticator,
@@ -220,7 +213,7 @@ fn build_app() -> (
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
     .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
     .with_public_route_mount(oauth_mount);
-    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+    let app = webui_v2_app(services.clone(), config).expect("webui v2 app");
     (app, services, session_store)
 }
 
@@ -309,7 +302,7 @@ async fn session_minted_via_oauth_callback_authenticates_protected_v2_route() {
     //    route". The stub `create_thread` records the caller so we
     //    can also assert the `UserId` resolved through
     //    `EmailUserDirectory` made it onto the
-    //    `WebUiAuthenticatedCaller` stamped by the bearer
+    //    `ProductSurfaceCaller` stamped by the bearer
     //    middleware.
     let create = app
         .clone()
@@ -330,7 +323,7 @@ async fn session_minted_via_oauth_callback_authenticates_protected_v2_route() {
         "OAuth-issued bearer must authenticate on the v2 surface",
     );
     let callers = services.create_thread_callers.lock().expect("lock").clone();
-    assert_eq!(callers.len(), 1, "facade reached exactly once");
+    assert_eq!(callers.len(), 1, "service reached exactly once");
     assert_eq!(callers[0].tenant_id.as_str(), TENANT);
     assert_eq!(callers[0].user_id.as_str(), "alice@example.com");
     assert_eq!(
@@ -386,7 +379,7 @@ async fn session_minted_via_oauth_callback_authenticates_protected_v2_route() {
     assert_eq!(
         services.create_thread_callers.lock().expect("lock").len(),
         1,
-        "facade must not be reached after revoke",
+        "service must not be reached after revoke",
     );
 }
 

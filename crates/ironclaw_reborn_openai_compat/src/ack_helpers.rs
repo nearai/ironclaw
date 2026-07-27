@@ -2,8 +2,8 @@ use crate::{
     OpenAiCompatHttpError, OpenAiCompatInternalRefs, OpenAiCompatProductActionRef,
     OpenAiCompatTurnRunRef,
 };
-use ironclaw_product_adapters::ProductInboundAck;
-use ironclaw_product_workflow::RebornSubmitTurnResponse;
+use ironclaw_product::ProductInboundAck;
+use ironclaw_product::RebornSubmitTurnResponse;
 
 pub(crate) fn internal_refs_from_ack(
     ack: &ProductInboundAck,
@@ -63,7 +63,7 @@ pub(crate) fn product_ack_from_reborn_submit(
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_product_adapters::ProductInboundAck;
+    use ironclaw_product::ProductInboundAck;
     use ironclaw_turns::AcceptedMessageRef;
 
     use super::internal_refs_from_ack;

@@ -14,8 +14,8 @@
 //! during rehydration.
 
 use ironclaw_host_api::{
-    ChannelDescriptor, EffectKind, ExtensionId, PermissionMode, RequestedTrustClass,
-    RuntimeCredentialAccountSetup, SecretHandle, VendorAuthRecipe, VendorId,
+    ChannelDescriptor, EffectKind, ExtensionId, MemoryDescriptor, PermissionMode,
+    RequestedTrustClass, RuntimeCredentialAccountSetup, SecretHandle, VendorAuthRecipe, VendorId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -48,6 +48,12 @@ pub struct ResolvedExtensionManifest {
     /// The declared channel surface (v3 `[channel]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<ChannelDescriptor>,
+    /// The declared memory-provider surface (v3 `[memory]`). Host-internal: the
+    /// compose-time memory-provider binding reads it to recognize a backend for
+    /// the host memory adapter. Never a product lifecycle surface (memory is
+    /// always-on and not installed/removed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemoryDescriptor>,
     /// Deployment-owned values required before users can use this extension.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub admin_configuration: Vec<ExtensionAdminConfigurationDescriptor>,
@@ -152,6 +158,7 @@ impl ResolvedExtensionManifest {
             mcp: None,
             tools: manifest.capabilities.clone(),
             channel: None,
+            memory: None,
             admin_configuration: Vec::new(),
             auth,
             host_apis: manifest

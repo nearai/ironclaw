@@ -22,14 +22,13 @@ ironclaw_attachments = { path = "../ironclaw_attachments", version = "0.1.0" }
 ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
-ironclaw_product_adapters = { path = "../ironclaw_product_adapters", version = "0.1.0" }
-ironclaw_product_workflow = { path = "../ironclaw_product_workflow", version = "0.1.0" }
+ironclaw_product = { path = "../ironclaw_product", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
 thiserror = "2"
 tracing = "0.1"
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
 
 async-stream = { version = "0.3" }
 axum = { version = "0.8" }
@@ -42,7 +41,7 @@ tokio = { version = "1", features = ["sync", "time"] }
 ironclaw_reborn_openai_compat = { path = "." }
 http = "1"
 http-body-util = "0.1"
-ironclaw_product_adapters = { path = "../ironclaw_product_adapters", features = ["test-support"] }
+ironclaw_product = { path = "../ironclaw_product", version = "0.1.0", features = ["test-support"] }
 ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
 tokio = { version = "1", features = ["macros", "rt", "time"] }

@@ -8,10 +8,11 @@ use ironclaw_loop_host::{
     HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
 };
 use ironclaw_outbound::{
-    DeliveryTargetCapabilities, OutboundDeliveryTargetId, OutboundDeliveryTargetScope,
+    DeliveryTargetCapabilities, OutboundDeliveryTargetId,
+    OutboundDeliveryTargetRegistrationOutcome, OutboundDeliveryTargetScope,
     OutboundDeliveryTargetSummary, OutboundError,
 };
-use ironclaw_product_workflow::RebornOutboundDeliveryTargetId;
+use ironclaw_product::RebornOutboundDeliveryTargetId;
 use ironclaw_threads::{LoadContextMessagesRequest, MessageKind, ThreadHistoryRequest};
 use ironclaw_turns::{
     ReplyTargetBindingRef, TurnStatus,
@@ -19,12 +20,11 @@ use ironclaw_turns::{
 };
 
 use crate::RebornCompositionProfile;
-use crate::input::RebornBuildInput;
 use crate::outbound::{
     OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
-    OutboundDeliveryTargetRegistrationOutcome,
 };
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
+use ironclaw_outbound::RunFinalReplyDestination;
 
 use super::build_reborn_runtime;
 
@@ -54,7 +54,9 @@ impl OutboundDeliveryTargetProvider for StaticOutboundDeliveryTargetProvider {
         Ok(vec![OutboundDeliveryTargetEntry {
             summary: self.summary.clone(),
             capabilities: self.capabilities.clone(),
-            reply_target_binding_ref: self.reply_target_binding_ref.clone(),
+            destination: RunFinalReplyDestination::External {
+                reply_target_binding_ref: self.reply_target_binding_ref.clone(),
+            },
             owner: OutboundDeliveryTargetOwner::for_scope(caller),
         }])
     }
@@ -186,8 +188,8 @@ async fn local_dev_runtime_selects_outbound_delivery_target_before_trigger_creat
     std::fs::create_dir_all(&host_home).expect("host home");
     let gateway = Arc::new(OutboundDeliveryTriggerGateway::default());
     let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway.clone();
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev_with_profile(
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input_with_profile(
             RebornCompositionProfile::LocalDevYolo,
             "runtime-outbound-trigger-owner",
             root.path().join("local-dev"),

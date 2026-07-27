@@ -11,7 +11,7 @@ use std::sync::Arc;
 use ironclaw_extensions::{AdminConfigurationGroupId, ExtensionAdminConfigurationDescriptor};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{ResourceScope, SecretHandle};
-use ironclaw_secrets::{SecretMaterial, SecretStore};
+use ironclaw_secrets::{SecretMaterial, SecretStorePort};
 use secrecy::ExposeSecret;
 use sha2::{Digest, Sha256};
 
@@ -88,7 +88,7 @@ pub enum AdminConfigurationServiceError {
 pub struct AdminConfigurationService<F, S>
 where
     F: RootFilesystem + ?Sized,
-    S: SecretStore + ?Sized,
+    S: SecretStorePort + ?Sized,
 {
     store: FilesystemAdminConfigurationStore<F>,
     secrets: Arc<S>,
@@ -98,7 +98,7 @@ where
 impl<F, S> AdminConfigurationService<F, S>
 where
     F: RootFilesystem + ?Sized,
-    S: SecretStore + ?Sized,
+    S: SecretStorePort + ?Sized,
 {
     pub fn new(
         store: FilesystemAdminConfigurationStore<F>,

@@ -9,12 +9,12 @@
 /// the integration harness prove capability-produced durable state survives a
 /// reopen, paralleling `assert_reply_persists_after_reopen`. Delegates to the
 /// production filesystem mounts + install-store load in `factory` so the reopen
-/// path never drifts from `build_reborn_services`. Tests only.
+/// path never drifts from `build_runtime_substrate`. Tests only.
 #[cfg(feature = "test-support")]
 pub async fn open_local_dev_extension_installation_store_for_test(
     storage_root: &std::path::Path,
 ) -> Result<
-    std::sync::Arc<dyn ironclaw_extensions::ExtensionInstallationStore>,
+    std::sync::Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>,
     crate::RebornBuildError,
 > {
     crate::factory::open_local_dev_extension_installation_store_for_test(storage_root).await
@@ -27,7 +27,8 @@ pub async fn open_local_dev_extension_installation_store_for_test(
 #[cfg(feature = "test-support")]
 pub async fn open_local_dev_approval_request_store_for_test(
     storage_root: &std::path::Path,
-) -> Result<std::sync::Arc<dyn ironclaw_run_state::ApprovalRequestStore>, crate::RebornBuildError> {
+) -> Result<std::sync::Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>, crate::RebornBuildError>
+{
     crate::factory::open_local_dev_approval_request_store_for_test(storage_root).await
 }
 
@@ -68,9 +69,9 @@ pub async fn open_local_dev_approval_settings_stores_for_test(
     storage_root: &std::path::Path,
 ) -> Result<
     (
-        std::sync::Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore>,
-        std::sync::Arc<dyn ironclaw_approvals::AutoApproveSettingStore>,
-        std::sync::Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore>,
+        std::sync::Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>,
+        std::sync::Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort>,
+        std::sync::Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStorePort>,
     ),
     crate::RebornBuildError,
 > {

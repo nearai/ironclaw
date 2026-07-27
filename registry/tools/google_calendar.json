@@ -11,11 +11,6 @@
     "scheduling",
     "events"
   ],
-  "source": {
-    "dir": "tools-src/google-calendar",
-    "capabilities": "google-calendar-tool.capabilities.json",
-    "crate_name": "google-calendar-tool"
-  },
   "artifacts": {
     "wasm32-wasip2": {
       "url": "https://github.com/nearai/ironclaw/releases/download/ironclaw-v0.22.0/tool-google-calendar-0.2.1-wasm32-wasip2.tar.gz",

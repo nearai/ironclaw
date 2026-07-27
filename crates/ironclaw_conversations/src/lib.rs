@@ -6,14 +6,14 @@
 //! asking the turn coordinator to parse raw channel payloads or store message
 //! content.
 //!
-//! Durable persistence is provided by [`FilesystemConversationStateStore`]
+//! Durable persistence is provided by [`ConversationStateStore`]
 //! over a [`ScopedFilesystem`](ironclaw_filesystem::ScopedFilesystem). The
 //! `RootFilesystem` choice (libSQL-backed, PostgreSQL-backed, in-memory, or
 //! local-disk) is made at the filesystem layer — the consumer-store level
 //! no longer carries per-backend impls.
 
+mod conversation_state_store;
 mod error;
-mod filesystem_store;
 mod ids;
 mod inbound;
 mod memory;
@@ -22,10 +22,8 @@ mod traits;
 mod trusted_trigger;
 mod types;
 
+pub use conversation_state_store::{ConversationStateStore, RebornFilesystemConversationServices};
 pub use error::InboundTurnError;
-pub use filesystem_store::{
-    FilesystemConversationStateStore, RebornFilesystemConversationServices,
-};
 pub use ids::{
     AdapterInstallationId, AdapterKind, ExternalActorRef, ExternalConversationIdentity,
     ExternalConversationRef, ExternalEventId, InboundMessageContentRef,
@@ -40,6 +38,7 @@ pub use types::{
     AcceptedInboundMessageReplay, ConditionalUnpairOutcome, ConversationBindingResolution,
     ConversationRouteKind, ExpectedExternalActorOwner, ExternalActorBindingEpoch,
     InboundTurnRequest, InboundTurnResponse, LinkConversationRequest, LinkedConversationBinding,
-    MessageIdempotencyStatus, ReplyTargetBinding, ResolveConversationRequest, ThreadAccessDecision,
-    ThreadMessageRecord, ValidateReplyTargetRequest,
+    MessageIdempotencyStatus, ReplyTargetBinding, ResolveConversationRequest,
+    ResolveStoredReplyTargetRequest, StoredReplyTargetAccess, StoredReplyTargetBinding,
+    ThreadAccessDecision, ThreadMessageRecord, ValidateReplyTargetRequest,
 };

@@ -8,7 +8,7 @@
   - `payload.rs` — Slack Events API payload parsing/DTO handling.
   - `render.rs` — Slack outbound rendering.
 - Read upstream contracts before changing adapter behavior:
-  - `crates/ironclaw_product_adapters/AGENTS.md`
+  - `crates/ironclaw_product/AGENTS.md`
 
 ## What This Crate Owns
 
@@ -25,7 +25,7 @@
 ## Validation
 
 - Fast local check: `cargo test -p ironclaw_slack_extension`
-- Run `cargo test -p ironclaw_product_adapters` when shared DTO assumptions change.
+- Run `cargo test -p ironclaw_product` when shared DTO assumptions change.
 - Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture`
 
 ## Agent Notes

@@ -10,7 +10,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_network::{NetworkHttpEgress, NetworkHttpError};
 use ironclaw_safety::LeakDetector;
-use ironclaw_secrets::SecretStore;
+use ironclaw_secrets::SecretStorePort;
 use std::{fmt, sync::Arc};
 
 use crate::obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionStore};
@@ -191,7 +191,7 @@ impl<N, S> HostHttpEgressService<N, S> {
 impl<N, S> RuntimeHttpEgress for HostHttpEgressService<N, S>
 where
     N: NetworkHttpEgress + Send + Sync,
-    S: SecretStore + Send + Sync,
+    S: SecretStorePort + Send + Sync,
 {
     async fn execute(
         &self,
@@ -218,7 +218,7 @@ where
 impl<N, S> ToolCallHttpEgress for HostHttpEgressService<N, S>
 where
     N: NetworkHttpEgress + Send + Sync,
-    S: SecretStore + Send + Sync,
+    S: SecretStorePort + Send + Sync,
 {
     async fn execute_for_model_visible_output(
         &self,

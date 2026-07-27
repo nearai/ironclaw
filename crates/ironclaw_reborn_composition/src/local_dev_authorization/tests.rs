@@ -5,12 +5,11 @@ use std::sync::{
 
 use ironclaw_approvals::{
     AutoApproveSettingInput, AutoApproveSettingKey, AutoApproveSettingRecord,
-    AutoApproveSettingStore, CapabilityPermissionOverrideInput, CapabilityPermissionOverrideKey,
-    CapabilityPermissionOverrideRecord, CapabilityPermissionOverrideStore,
-    CapabilityPermissionStoreError, FilesystemAutoApproveSettingStore,
-    FilesystemPersistentApprovalPolicyStore, FilesystemToolPermissionOverrideStore,
+    AutoApproveSettingStore, AutoApproveSettingStorePort as _, CapabilityPermissionOverrideInput,
+    CapabilityPermissionOverrideKey, CapabilityPermissionOverrideRecord,
+    CapabilityPermissionOverrideStorePort as _, CapabilityPermissionStoreError,
     PersistentApprovalPolicy, PersistentApprovalPolicyError, PersistentApprovalPolicyInput,
-    PersistentApprovalPolicyKey,
+    PersistentApprovalPolicyKey, PersistentApprovalPolicyStore, ToolPermissionOverrideStore,
     test_support::{
         in_memory_backed_auto_approve_setting_store,
         in_memory_backed_capability_permission_override_store,
@@ -41,14 +40,14 @@ struct CountingAutoApproveSettingStore {
 }
 
 struct CountingToolPermissionOverrideStore {
-    inner: FilesystemToolPermissionOverrideStore<InMemoryBackend>,
+    inner: ToolPermissionOverrideStore<InMemoryBackend>,
     gets: AtomicUsize,
     lists: AtomicUsize,
     delay: Duration,
 }
 
 struct CountingPersistentApprovalPolicyStore {
-    inner: FilesystemPersistentApprovalPolicyStore<InMemoryBackend>,
+    inner: PersistentApprovalPolicyStore<InMemoryBackend>,
     lookups: AtomicUsize,
     lists: AtomicUsize,
     delay: Duration,
@@ -115,7 +114,7 @@ impl CountingPersistentApprovalPolicyStore {
 }
 
 #[async_trait::async_trait]
-impl AutoApproveSettingStore for CountingAutoApproveSettingStore {
+impl ironclaw_approvals::AutoApproveSettingStorePort for CountingAutoApproveSettingStore {
     async fn set(
         &self,
         input: AutoApproveSettingInput,
@@ -151,7 +150,9 @@ impl AutoApproveSettingStore for CountingAutoApproveSettingStore {
 }
 
 #[async_trait::async_trait]
-impl CapabilityPermissionOverrideStore for CountingToolPermissionOverrideStore {
+impl ironclaw_approvals::CapabilityPermissionOverrideStorePort
+    for CountingToolPermissionOverrideStore
+{
     async fn set(
         &self,
         input: CapabilityPermissionOverrideInput,
@@ -191,7 +192,9 @@ impl CapabilityPermissionOverrideStore for CountingToolPermissionOverrideStore {
 }
 
 #[async_trait::async_trait]
-impl ironclaw_approvals::PersistentApprovalPolicyStore for CountingPersistentApprovalPolicyStore {
+impl ironclaw_approvals::PersistentApprovalPolicyStorePort
+    for CountingPersistentApprovalPolicyStore
+{
     async fn allow(
         &self,
         input: PersistentApprovalPolicyInput,
@@ -242,7 +245,9 @@ impl ironclaw_approvals::PersistentApprovalPolicyStore for CountingPersistentApp
 }
 
 #[async_trait::async_trait]
-impl CapabilityPermissionOverrideStore for ErroringToolPermissionOverrideStore {
+impl ironclaw_approvals::CapabilityPermissionOverrideStorePort
+    for ErroringToolPermissionOverrideStore
+{
     async fn set(
         &self,
         _input: CapabilityPermissionOverrideInput,
@@ -300,7 +305,7 @@ fn local_dev_shell_authorization_inputs_with_permission(
 }
 
 async fn enable_global_auto_approve(
-    store: &FilesystemAutoApproveSettingStore<InMemoryBackend>,
+    store: &AutoApproveSettingStore<InMemoryBackend>,
     user_id: &UserId,
 ) {
     let scope = ironclaw_host_api::ResourceScope::local_default(
@@ -319,7 +324,7 @@ async fn enable_global_auto_approve(
 }
 
 async fn seed_shell_tool_override(
-    store: &FilesystemToolPermissionOverrideStore<InMemoryBackend>,
+    store: &ToolPermissionOverrideStore<InMemoryBackend>,
     user_id: &UserId,
     state: ToolPermissionOverride,
 ) {
@@ -359,6 +364,7 @@ fn local_dev_shell_authorization_inputs(
         default_permission: PermissionMode::Allow,
         runtime_credentials: Vec::new(),
         network_targets: Vec::new(),
+        max_egress_bytes: None,
         resource_profile: None,
         origin_gate_matrix: None,
     };
@@ -411,6 +417,7 @@ async fn trace_commons_authorize_decision(
         default_permission: PermissionMode::Allow,
         runtime_credentials: Vec::new(),
         network_targets: Vec::new(),
+        max_egress_bytes: None,
         resource_profile: None,
         origin_gate_matrix: None,
     };

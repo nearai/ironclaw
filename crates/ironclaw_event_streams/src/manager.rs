@@ -6,7 +6,7 @@ use ironclaw_event_projections::{
 };
 use ironclaw_host_api::ThreadId;
 use ironclaw_outbound::{
-    OutboundError, OutboundPushCandidate, OutboundPushTargetRequest, OutboundStateStore,
+    OutboundError, OutboundPushCandidate, OutboundPushTargetRequest, OutboundStateStorePort,
 };
 use ironclaw_turns::TurnActor;
 use tokio::sync::{broadcast, mpsc};
@@ -33,7 +33,7 @@ pub struct EventStreamManager {
     admission_policy: Arc<dyn ProjectionStreamAdmissionPolicy>,
     update_source: Arc<dyn ProjectionUpdateSource>,
     redaction_validator: Arc<dyn ProjectionRedactionValidator>,
-    outbound_store: Arc<dyn OutboundStateStore>,
+    outbound_store: Arc<dyn OutboundStateStorePort>,
     validation_cache: ProjectionValidationCache,
 }
 
@@ -52,7 +52,7 @@ impl EventStreamManager {
         M: ProjectionStreamAdmissionPolicy + 'static,
         U: ProjectionUpdateSource + 'static,
         R: ProjectionRedactionValidator + 'static,
-        O: OutboundStateStore + 'static,
+        O: OutboundStateStorePort + 'static,
     {
         Self {
             projection,
@@ -71,7 +71,7 @@ impl EventStreamManager {
         admission_policy: Arc<dyn ProjectionStreamAdmissionPolicy>,
         update_source: Arc<dyn ProjectionUpdateSource>,
         redaction_validator: Arc<dyn ProjectionRedactionValidator>,
-        outbound_store: Arc<dyn OutboundStateStore>,
+        outbound_store: Arc<dyn OutboundStateStorePort>,
     ) -> Self {
         Self {
             projection,

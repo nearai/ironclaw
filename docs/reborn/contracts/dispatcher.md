@@ -21,7 +21,7 @@ ToolResolver + ResourceGovernor
 ```
 
 The dispatcher does not discover extensions, parse manifests, implement policy,
-open files directly, resolve secrets, or execute product workflows. Binding
+open files directly, resolve secrets, or execute product-surface orchestration. Binding
 construction happens before dispatch in resolver owners such as
 `ironclaw_host_runtime` and `ironclaw_extension_host`; the dispatcher consumes a
 sealed `Authorized` witness, resolves the prebound binding by capability id, and

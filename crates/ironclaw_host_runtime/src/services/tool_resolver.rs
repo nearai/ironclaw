@@ -13,7 +13,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use async_trait::async_trait;
-use ironclaw_dispatcher::{
+use ironclaw_capabilities::{
     BoundCapabilityAdapter, CapabilityDispatchRequest, ResolvedCapability, RuntimeAdapterResult,
     ToolResolver,
 };
@@ -239,6 +239,7 @@ where
                     scope: request.scope,
                     authenticated_actor_user_id: request.authenticated_actor_user_id,
                     run_id: request.run_id,
+                    origin: Some(request.origin),
                     estimate: request.estimate,
                     mounts: request.mounts,
                     resource_reservation: request.resource_reservation,

@@ -1,5 +1,5 @@
 //! Anti-slippage ratchet for the deployment-mode-as-type axis (§4.4 / §10 of
-//! `docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`).
+//! `docs/reborn/contracts/runtime-profiles.md`).
 //!
 //! §4.4's rule: **a deployment mode is a config value, never a type the kernel or
 //! a substrate names.** Today a whole `LocalDev*` shadow runtime encodes local-dev

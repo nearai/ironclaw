@@ -1,4 +1,4 @@
-// arch-exempt: large_file, mechanical lease-store test repoint to FilesystemCapabilityLeaseStore<InMemoryBackend> helper (arch-simplification §4.3), no new test logic, plan #6168
+// arch-exempt: large_file, mechanical lease-store test repoint to CapabilityLeaseStore<InMemoryBackend> helper (arch-simplification §4.3), no new test logic, plan #6168
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -178,13 +178,13 @@ async fn capability_host_uses_combined_store_for_atomic_approval_block() {
     ));
     assert_eq!(store.combined_calls(), 1);
     assert_eq!(store.separate_save_calls(), 0);
-    let run = RunStateStore::get(&store, &scope, invocation_id)
+    let run = RunStateStorePort::get(&store, &scope, invocation_id)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(run.status, RunStatus::BlockedApproval);
     let approval_id = run.approval_request_id.unwrap();
-    let approval = ApprovalRequestStore::get(&store, &scope, approval_id)
+    let approval = ApprovalRequestStorePort::get(&store, &scope, approval_id)
         .await
         .unwrap()
         .unwrap();
@@ -1487,7 +1487,7 @@ impl TrustAwareCapabilityDispatchAuthorizer for MismatchedApprovalRequestAuthori
 }
 
 struct HangingSaveApprovalRequestStore {
-    inner: ironclaw_run_state::FilesystemApprovalRequestStore<ironclaw_filesystem::InMemoryBackend>,
+    inner: ironclaw_run_state::ApprovalRequestStore<ironclaw_filesystem::InMemoryBackend>,
     save_started: std::sync::atomic::AtomicBool,
     save_started_notify: tokio::sync::Notify,
     release_save: tokio::sync::Notify,
@@ -1515,7 +1515,7 @@ impl HangingSaveApprovalRequestStore {
 }
 
 #[async_trait]
-impl ApprovalRequestStore for HangingSaveApprovalRequestStore {
+impl ApprovalRequestStorePort for HangingSaveApprovalRequestStore {
     async fn save_pending(
         &self,
         scope: ResourceScope,
@@ -1560,9 +1560,8 @@ impl ApprovalRequestStore for HangingSaveApprovalRequestStore {
 }
 
 struct RecordingCombinedRunStateApprovalStore {
-    runs: ironclaw_run_state::FilesystemRunStateStore<ironclaw_filesystem::InMemoryBackend>,
-    approvals:
-        ironclaw_run_state::FilesystemApprovalRequestStore<ironclaw_filesystem::InMemoryBackend>,
+    runs: ironclaw_run_state::RunStateStore<ironclaw_filesystem::InMemoryBackend>,
+    approvals: ironclaw_run_state::ApprovalRequestStore<ironclaw_filesystem::InMemoryBackend>,
     combined_calls: AtomicUsize,
     separate_save_calls: AtomicUsize,
 }
@@ -1587,7 +1586,7 @@ impl RecordingCombinedRunStateApprovalStore {
 }
 
 #[async_trait]
-impl RunStateStore for RecordingCombinedRunStateApprovalStore {
+impl RunStateStorePort for RecordingCombinedRunStateApprovalStore {
     async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError> {
         self.runs.start(start).await
     }
@@ -1646,7 +1645,7 @@ impl RunStateStore for RecordingCombinedRunStateApprovalStore {
 }
 
 #[async_trait]
-impl ApprovalRequestStore for RecordingCombinedRunStateApprovalStore {
+impl ApprovalRequestStorePort for RecordingCombinedRunStateApprovalStore {
     async fn save_pending(
         &self,
         scope: ResourceScope,
@@ -1697,7 +1696,7 @@ impl ApprovalRequestStore for RecordingCombinedRunStateApprovalStore {
 }
 
 #[async_trait]
-impl RunStateApprovalStore for RecordingCombinedRunStateApprovalStore {
+impl RunStateApprovalStorePort for RecordingCombinedRunStateApprovalStore {
     async fn save_pending_and_block_approval(
         &self,
         scope: ResourceScope,
@@ -1715,7 +1714,7 @@ impl RunStateApprovalStore for RecordingCombinedRunStateApprovalStore {
 }
 
 struct FailCompleteRunStateStore {
-    inner: ironclaw_run_state::FilesystemRunStateStore<ironclaw_filesystem::InMemoryBackend>,
+    inner: ironclaw_run_state::RunStateStore<ironclaw_filesystem::InMemoryBackend>,
 }
 
 impl FailCompleteRunStateStore {
@@ -1727,7 +1726,7 @@ impl FailCompleteRunStateStore {
 }
 
 #[async_trait]
-impl RunStateStore for FailCompleteRunStateStore {
+impl RunStateStorePort for FailCompleteRunStateStore {
     async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError> {
         self.inner.start(start).await
     }
@@ -1790,7 +1789,7 @@ impl RunStateStore for FailCompleteRunStateStore {
 }
 
 struct FailBlockApprovalRunStateStore {
-    inner: ironclaw_run_state::FilesystemRunStateStore<ironclaw_filesystem::InMemoryBackend>,
+    inner: ironclaw_run_state::RunStateStore<ironclaw_filesystem::InMemoryBackend>,
 }
 
 impl FailBlockApprovalRunStateStore {
@@ -1802,7 +1801,7 @@ impl FailBlockApprovalRunStateStore {
 }
 
 #[async_trait]
-impl RunStateStore for FailBlockApprovalRunStateStore {
+impl RunStateStorePort for FailBlockApprovalRunStateStore {
     async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError> {
         self.inner.start(start).await
     }
@@ -1862,10 +1861,10 @@ impl RunStateStore for FailBlockApprovalRunStateStore {
     }
 }
 
-/// Spy over `ironclaw_run_state::FilesystemApprovalRequestStore<ironclaw_filesystem::InMemoryBackend>`: records the `save_pending` id,
+/// Spy over `ironclaw_run_state::ApprovalRequestStore<ironclaw_filesystem::InMemoryBackend>`: records the `save_pending` id,
 /// since `run_state.fail()` clears `RunRecord.approval_request_id` (#5467).
 struct RecordingApprovalStore {
-    inner: ironclaw_run_state::FilesystemApprovalRequestStore<ironclaw_filesystem::InMemoryBackend>,
+    inner: ironclaw_run_state::ApprovalRequestStore<ironclaw_filesystem::InMemoryBackend>,
     last_saved_id: Mutex<Option<ApprovalRequestId>>,
 }
 
@@ -1886,7 +1885,7 @@ impl RecordingApprovalStore {
 }
 
 #[async_trait]
-impl ApprovalRequestStore for RecordingApprovalStore {
+impl ApprovalRequestStorePort for RecordingApprovalStore {
     async fn save_pending(
         &self,
         scope: ResourceScope,
@@ -1940,7 +1939,7 @@ impl ApprovalRequestStore for RecordingApprovalStore {
 }
 
 struct CompleteNotifyingRunStateStore {
-    inner: ironclaw_run_state::FilesystemRunStateStore<ironclaw_filesystem::InMemoryBackend>,
+    inner: ironclaw_run_state::RunStateStore<ironclaw_filesystem::InMemoryBackend>,
     complete_notify: Arc<tokio::sync::Notify>,
 }
 
@@ -1954,7 +1953,7 @@ impl CompleteNotifyingRunStateStore {
 }
 
 #[async_trait]
-impl RunStateStore for CompleteNotifyingRunStateStore {
+impl RunStateStorePort for CompleteNotifyingRunStateStore {
     async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError> {
         self.inner.start(start).await
     }
@@ -2017,7 +2016,7 @@ impl RunStateStore for CompleteNotifyingRunStateStore {
 }
 
 struct FailOnFailRunStateStore {
-    inner: ironclaw_run_state::FilesystemRunStateStore<ironclaw_filesystem::InMemoryBackend>,
+    inner: ironclaw_run_state::RunStateStore<ironclaw_filesystem::InMemoryBackend>,
 }
 
 impl FailOnFailRunStateStore {
@@ -2029,7 +2028,7 @@ impl FailOnFailRunStateStore {
 }
 
 #[async_trait]
-impl RunStateStore for FailOnFailRunStateStore {
+impl RunStateStorePort for FailOnFailRunStateStore {
     async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError> {
         self.inner.start(start).await
     }
@@ -2097,7 +2096,7 @@ impl RunStateStore for FailOnFailRunStateStore {
 // `CapabilityLeaseError::InactiveLease{Consumed}` for the loser. FaultInjecting
 // is neither a synchronization barrier nor able to produce that domain error.
 struct CoordinatedClaimConflictLeaseStore {
-    inner: FilesystemCapabilityLeaseStore<InMemoryBackend>,
+    inner: CapabilityLeaseStore<InMemoryBackend>,
     claim_calls: AtomicUsize,
     second_claim_started: tokio::sync::Notify,
     run_completed: Arc<tokio::sync::Notify>,
@@ -2115,7 +2114,7 @@ impl CoordinatedClaimConflictLeaseStore {
 }
 
 #[async_trait]
-impl CapabilityLeaseStore for CoordinatedClaimConflictLeaseStore {
+impl CapabilityLeaseStorePort for CoordinatedClaimConflictLeaseStore {
     async fn issue(&self, lease: CapabilityLease) -> Result<CapabilityLease, CapabilityLeaseError> {
         self.inner.issue(lease).await
     }
@@ -2202,7 +2201,7 @@ impl CapabilityLeaseStore for CoordinatedClaimConflictLeaseStore {
 // the documented FaultInjecting limitation ("can't fault only versioned writes";
 // ironclaw_filesystem/CLAUDE.md), not a domain-double.
 struct ConsumeFailingLeaseStore {
-    inner: FilesystemCapabilityLeaseStore<InMemoryBackend>,
+    inner: CapabilityLeaseStore<InMemoryBackend>,
 }
 
 impl ConsumeFailingLeaseStore {
@@ -2214,7 +2213,7 @@ impl ConsumeFailingLeaseStore {
 }
 
 #[async_trait]
-impl CapabilityLeaseStore for ConsumeFailingLeaseStore {
+impl CapabilityLeaseStorePort for ConsumeFailingLeaseStore {
     async fn issue(&self, lease: CapabilityLease) -> Result<CapabilityLease, CapabilityLeaseError> {
         self.inner.issue(lease).await
     }

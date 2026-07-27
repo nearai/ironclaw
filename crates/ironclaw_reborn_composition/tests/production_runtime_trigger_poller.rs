@@ -62,10 +62,12 @@ use ironclaw_loop_host::{
     HostManagedModelResponse,
 };
 use ironclaw_reborn_composition::{
-    RebornBuildInput, RebornCompositionProfile, RebornRuntimeIdentity, RebornRuntimeInput,
+    RebornCompositionProfile, RebornHostBindings, RebornRuntimeIdentity, RebornRuntimeInput,
     RebornRuntimeProcessBinding, TriggerPollerSettings, build_reborn_runtime,
-    builtin_first_party_trust_policy,
 };
+
+#[path = "support/first_party.rs"]
+mod first_party_support;
 use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerId, TriggerPollerWorkerConfig, TriggerRecord,
@@ -145,8 +147,8 @@ async fn build_production_runtime_with_poller(
             .expect("libsql db"),
     );
 
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::libsql(
+    let input = RebornRuntimeInput::from_build_input(
+        RebornHostBindings::libsql(
             RebornCompositionProfile::Production,
             USER,
             db,
@@ -154,9 +156,7 @@ async fn build_production_runtime_with_poller(
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
-        .with_production_trust_policy(Arc::new(
-            builtin_first_party_trust_policy().expect("trust policy"),
-        ))
+        .with_first_party_bundles(first_party_support::test_first_party_bundles())
         .with_runtime_policy(EffectiveRuntimePolicy {
             deployment: DeploymentMode::HostedMultiTenant,
             requested_profile: RuntimeProfile::SecureDefault,
@@ -202,16 +202,7 @@ async fn production_runtime_trigger_poller_fires_due_scheduled_trigger() {
 
     let runtime = build_production_runtime_with_poller(&dir, Arc::clone(&recording_gateway)).await;
 
-    // The production-shaped runtime exposes its trigger repository only through
-    // the test-support production accessor (`trigger_repository()` covers the
-    // local substrate, which production does not have).
-    assert!(
-        runtime.trigger_repository().is_none(),
-        "production runtime has no local-substrate trigger repository"
-    );
-    let repo = runtime
-        .production_trigger_repository_for_test()
-        .expect("production runtime exposes its store-graph trigger repository");
+    let repo = runtime.trigger_repository();
     let pairing = runtime
         .trigger_conversation_pairing()
         .expect("poller-enabled production runtime exposes conversation pairing service");

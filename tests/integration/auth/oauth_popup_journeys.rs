@@ -20,12 +20,10 @@ use chrono::{Duration, Utc};
 use common::{authorized_callback_request, hex64, new_flow_request, test_scope};
 use ironclaw_auth::{
     AuthErrorCode, AuthFlowStatus, AuthProviderId, AuthorizationCodeHash,
-    CredentialAccountListRequest, OpaqueStateHash, PkceVerifierHash,
+    CredentialAccountListRequest, OpaqueStateHash, PkceVerifierHash, RebornOAuthCallbackOutcome,
+    RebornOAuthCallbackRequest,
 };
-use ironclaw_reborn_composition::{
-    RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
-    test_support::build_oauth_product_auth_for_test,
-};
+use ironclaw_reborn_composition::test_support::build_oauth_product_auth_for_test;
 
 /// Extension-runtime P6 S3: a CHANNEL extension's OAuth connect must bind
 /// the proven vendor identity to the authenticated caller through the
@@ -33,8 +31,8 @@ use ironclaw_reborn_composition::{
 ///
 /// Real flow manager + durable account store + recipe engine with identity
 /// pointers over a scripted token exchange; a real installed v3 channel
-/// manifest in the durable installation store supplies the discovery and
-/// the `[channel.config]` scoping values. Two phases, one flow each:
+/// manifest in the durable installation store supplies discovery while its
+/// administrator schema supplies the scoping values. Two phases, one flow each:
 ///
 /// 1. Scoping mismatch — the workspace claim in the token body does not
 ///    match the configured scoping value: the callback FAILS, no
@@ -52,22 +50,31 @@ async fn oauth_connect_binds_channel_identity_through_the_generic_hook() {
         CredentialAccountLookupRequest, NewAuthFlow, OAuthAuthorizationCode, OAuthAuthorizationUrl,
         OAuthProviderCallbackRequest, PkceVerifierSecret, ProviderScope,
     };
-    use ironclaw_extensions::{
-        ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
-        ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestRef,
-        FilesystemExtensionInstallationStore, ManifestSource,
+    use ironclaw_extension_host::channel_identity_binding::ChannelIdentityBindingConfig;
+    use ironclaw_extension_host::{
+        AdminConfigurationIdempotencyKey, AdminConfigurationService,
+        AdminConfigurationSubmittedValue, ChannelConfigReactivation,
+        ChannelConfigReactivationError, ChannelConfigService, FilesystemAdminConfigurationStore,
     };
-    use ironclaw_filesystem::InMemoryBackend;
-    use ironclaw_host_api::{ExtensionId, VirtualPath};
+    use ironclaw_extensions::{
+        ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStore,
+        ExtensionInstallationStorePort, ExtensionManifestRecord, ExtensionManifestRef,
+        ManifestSource,
+    };
+    use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
+    use ironclaw_host_api::{
+        ExtensionId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
+        ResourceScope, SecretHandle, UserId, VirtualPath,
+    };
     use ironclaw_reborn_composition::{
-        ChannelIdentityBindingConfig, RebornUserIdentityBinding,
-        RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,
-        RebornUserIdentityBindingStore,
+        RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
+        RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
         test_support::{
             build_oauth_product_auth_with_identity_for_test,
             handle_oauth_callback_with_channel_identity_binding_for_test,
         },
     };
+    use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStorePort};
     use secrecy::SecretString;
 
     const VENDOR: &str = "test-oauth-provider";
@@ -116,6 +123,18 @@ async fn oauth_connect_binds_channel_identity_through_the_generic_hook() {
         }
     }
 
+    struct NoopReactivation;
+
+    #[async_trait::async_trait]
+    impl ChannelConfigReactivation for NoopReactivation {
+        async fn reactivate_if_active(
+            &self,
+            _extension_id: &ExtensionId,
+        ) -> Result<(), ChannelConfigReactivationError> {
+            Ok(())
+        }
+    }
+
     // A real installed v3 channel manifest: channel surface + [auth.{vendor}]
     // + non-secret scoping fields under the claim-suffix convention.
     let manifest = format!(
@@ -126,6 +145,16 @@ name = "AcmeChat"
 version = "0.1.0"
 description = "generic channel identity binding integration fixture"
 trust = "first_party_requested"
+
+[admin_configuration]
+group_id = "extension.acmechat"
+display_name = "AcmeChat deployment configuration"
+fields = [
+  {{ handle = "acmechat_webhook_secret", label = "Webhook secret", secret = true, required = false }},
+  {{ handle = "acmechat_team_id", label = "Workspace ID", secret = false, required = false }},
+  {{ handle = "acmechat_app_id", label = "App ID", secret = false, required = false }},
+  {{ handle = "acmechat_oauth_client_id", label = "OAuth client ID", secret = false, required = false }},
+]
 
 [runtime]
 kind = "first_party"
@@ -163,13 +192,6 @@ kind = "shared_secret_header"
 secret_handle = "acmechat_webhook_secret"
 header = "X-AcmeChat-Secret"
 
-[channel.config]
-fields = [
-  {{ handle = "acmechat_webhook_secret", label = "Webhook secret", secret = true }},
-  {{ handle = "acmechat_team_id", label = "Workspace ID", secret = false }},
-  {{ handle = "acmechat_app_id", label = "App ID", secret = false }},
-]
-
 [channel.presentation]
 supports_markdown = false
 supports_threads = false
@@ -192,7 +214,7 @@ app_id = "/app_id"
 "#
     );
     let installation_store = Arc::new(
-        FilesystemExtensionInstallationStore::load_at(
+        ExtensionInstallationStore::load_at(
             Arc::new(InMemoryBackend::new()),
             VirtualPath::new("/system/extensions/.installations/oauth-popup")
                 .expect("valid installation root"),
@@ -211,6 +233,7 @@ app_id = "/app_id"
         &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
     )
     .expect("fixture manifest parses");
+    let admin_descriptors = record.resolved().admin_configuration.clone();
     let extension_id = ExtensionId::new(EXTENSION_ID).expect("extension id");
     installation_store
         .upsert_manifest_and_installation(
@@ -218,7 +241,6 @@ app_id = "/app_id"
             ExtensionInstallation::new(
                 ExtensionInstallationId::new(INSTALLATION_ID.to_string()).expect("installation id"),
                 extension_id.clone(),
-                ExtensionActivationState::Installed,
                 ExtensionManifestRef::new(extension_id.clone(), None),
                 Vec::new(),
                 chrono::Utc::now(),
@@ -228,26 +250,71 @@ app_id = "/app_id"
         )
         .await
         .expect("persist install");
-    // Operator-configured connection scoping values ([channel.config]).
-    installation_store
-        .set_channel_config(
-            &extension_id,
+    let identity_store = Arc::new(RecordingIdentityStore::default());
+    let scope = test_scope();
+    let admin_scope = ResourceScope::local_default(
+        UserId::new("oauth-popup-admin").expect("admin user id"),
+        InvocationId::new(),
+    )
+    .expect("admin resource scope");
+    let admin_filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+    let admin_secrets: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
+    let admin = Arc::new(
+        AdminConfigurationService::new(
+            FilesystemAdminConfigurationStore::new(Arc::new(ScopedFilesystem::new(
+                admin_filesystem,
+                |_scope| {
+                    MountView::new(vec![MountGrant::new(
+                        MountAlias::new("/extension-admin-configuration")
+                            .expect("valid mount alias"),
+                        VirtualPath::new("/tenants/test/shared/admin-configuration")
+                            .expect("valid virtual path"),
+                        MountPermissions::read_write_list_delete(),
+                    )])
+                },
+            ))),
+            Arc::clone(&admin_secrets),
+            admin_descriptors,
+        )
+        .expect("admin configuration service"),
+    );
+    admin
+        .replace(
+            &admin_scope,
+            &ironclaw_extensions::AdminConfigurationGroupId::new("extension.acmechat")
+                .expect("admin group id"),
+            &AdminConfigurationIdempotencyKey::new("oauth-popup-channel-scope")
+                .expect("idempotency key"),
+            0,
             vec![
-                ("acmechat_team_id".to_string(), "T-team".to_string()),
-                ("acmechat_app_id".to_string(), "A-app".to_string()),
+                AdminConfigurationSubmittedValue {
+                    handle: SecretHandle::new("acmechat_team_id").expect("team handle"),
+                    value: SecretMaterial::from("T-team".to_string()),
+                },
+                AdminConfigurationSubmittedValue {
+                    handle: SecretHandle::new("acmechat_app_id").expect("app handle"),
+                    value: SecretMaterial::from("A-app".to_string()),
+                },
             ],
         )
         .await
-        .expect("store scoping values");
-
-    let identity_store = Arc::new(RecordingIdentityStore::default());
-    let scope = test_scope();
+        .expect("seed channel scoping admin configuration");
+    let channel_config = Arc::new(
+        ChannelConfigService::new(
+            Arc::clone(&installation_store) as Arc<dyn ExtensionInstallationStorePort>,
+            Arc::clone(&admin_secrets),
+            admin_scope.clone(),
+            Arc::new(NoopReactivation),
+        )
+        .with_admin_configuration(admin, admin_scope),
+    );
     let binding_config = ChannelIdentityBindingConfig::for_test(
         scope.resource.tenant_id.clone(),
-        Arc::clone(&installation_store) as Arc<dyn ExtensionInstallationStore>,
+        Arc::clone(&installation_store) as Arc<dyn ExtensionInstallationStorePort>,
         identity_store.clone(),
         identity_store.clone(),
-    );
+    )
+    .with_channel_config_for_test(channel_config);
     let provider = AuthProviderId::new(VENDOR).unwrap();
 
     let run_callback = |token_body: serde_json::Value, fill: u8| {

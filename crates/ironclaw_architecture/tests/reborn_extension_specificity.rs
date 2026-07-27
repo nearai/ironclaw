@@ -364,7 +364,7 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
         "Gemini OAuth scope host in the multi-provider LLM crate",
     ),
     (
-        "crates/ironclaw_reborn_identity/src/filesystem_store.rs",
+        "crates/ironclaw_reborn_identity/src/identity_store.rs",
         "slack",
         "credential-authority ProviderKind vocabulary (persisted identity keys), not the extensions vendor",
     ),
@@ -481,11 +481,6 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
          model-facing source of that hint stays tracked as lane-4 debt at \
          host_runtime/first_party_tools/http.rs; localized user copy must name the \
          provider/source it refers to",
-    ),
-    (
-        "crates/ironclaw_webui/frontend/src/pages/chat/lib/gates.ts",
-        "github",
-        "WebUI browser-login SSO provider button/route, not the extensions vendor",
     ),
     (
         "crates/ironclaw_webui/frontend/src/pages/login/components/oauth-provider-buttons.tsx",
@@ -1045,54 +1040,67 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_host_runtime/src/first_party_tools/http.rs",
         "github",
     ),
+    // Presentation-only brand casing: the auth-gate card's display-name table
+    // must key on the wire vendor id to function (the prior `git_hub` key
+    // never matched and rendered "Github"). Same class as the table's
+    // carved-out `nearai` row; behavior stays manifest-generic.
     (
-        "crates/ironclaw_product_adapter_registry/src/lib.rs",
+        "crates/ironclaw_webui/frontend/src/pages/chat/components/auth-oauth-card.tsx",
+        "github",
+    ),
+    ("crates/ironclaw_product/src/adapter_registry.rs", "github"),
+    ("crates/ironclaw_product/src/adapter_registry.rs", "slack"),
+    (
+        "crates/ironclaw_product/src/adapter_registry.rs",
+        "telegram",
+    ),
+    (
+        "crates/ironclaw_host_api/src/product_adapter/identity.rs",
+        "slack",
+    ),
+    (
+        "crates/ironclaw_host_api/src/product_adapter/identity.rs",
+        "telegram",
+    ),
+    // Moved pre-existing extension-host fixture debt; these entries should
+    // shrink as the old composition-hosted tests become manifest-driven.
+    ("crates/ironclaw_extension_host/Cargo.toml", "slack"),
+    (
+        "crates/ironclaw_host_api/src/product_adapter/outbound.rs",
         "github",
     ),
     (
-        "crates/ironclaw_product_adapter_registry/src/lib.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_product_adapter_registry/src/lib.rs",
-        "telegram",
-    ),
-    ("crates/ironclaw_product_adapters/src/identity.rs", "slack"),
-    (
-        "crates/ironclaw_product_adapters/src/identity.rs",
-        "telegram",
-    ),
-    ("crates/ironclaw_product_adapters/src/outbound.rs", "github"),
-    ("crates/ironclaw_product_adapters/src/outbound.rs", "google"),
-    ("crates/ironclaw_product_adapters/src/outbound.rs", "notion"),
-    ("crates/ironclaw_product_adapters/src/outbound.rs", "slack"),
-    (
-        "crates/ironclaw_product_adapters/src/outbound.rs",
-        "telegram",
-    ),
-    ("crates/ironclaw_product_workflow/Cargo.toml", "telegram"),
-    (
-        "crates/ironclaw_product_workflow/src/conversation_binding.rs",
-        "slack",
-    ),
-    ("crates/ironclaw_product_workflow/src/lib.rs", "telegram"),
-    (
-        "crates/ironclaw_product_workflow/src/reborn_services.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_product_workflow/src/reborn_services/llm_config.rs",
-        "github",
-    ),
-    (
-        "crates/ironclaw_product_workflow/src/reborn_services/llm_config.rs",
+        "crates/ironclaw_host_api/src/product_adapter/outbound.rs",
         "google",
     ),
     (
-        "crates/ironclaw_product_workflow/src/reborn_services/projects.rs",
+        "crates/ironclaw_host_api/src/product_adapter/outbound.rs",
+        "notion",
+    ),
+    (
+        "crates/ironclaw_host_api/src/product_adapter/outbound.rs",
+        "telegram",
+    ),
+    ("crates/ironclaw_product/Cargo.toml", "telegram"),
+    (
+        "crates/ironclaw_product/src/conversation_binding.rs",
+        "slack",
+    ),
+    ("crates/ironclaw_product/src/lib.rs", "telegram"),
+    ("crates/ironclaw_product/src/reborn_services.rs", "slack"),
+    (
+        "crates/ironclaw_product/src/reborn_services/llm_config.rs",
         "github",
     ),
-    ("crates/ironclaw_product_workflow/src/workflow.rs", "slack"),
+    (
+        "crates/ironclaw_product/src/reborn_services/llm_config.rs",
+        "google",
+    ),
+    (
+        "crates/ironclaw_product/src/reborn_services/projects.rs",
+        "github",
+    ),
+    ("crates/ironclaw_product/src/workflow.rs", "slack"),
     ("crates/ironclaw_host_api/src/dispatch.rs", "slack"),
     (
         "crates/ironclaw_host_runtime/src/first_party_tools/schemas.rs",
@@ -1121,36 +1129,51 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "google-calendar",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
+        "crates/ironclaw_extension_host/src/available_extensions.rs",
         "google",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/extension_host/gsuite.rs",
-        "google",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/projection/display_preview.rs",
+        "crates/ironclaw_product/src/projection/display_preview.rs",
         "web-access",
+    ),
+    // DEL-7: the manifest-egress policy builder's comment names the GSuite
+    // (Google API hosts) and web-access (Exa MCP) egress it no longer
+    // special-cases — the code routes purely on manifest-declared targets.
+    (
+        "crates/ironclaw_reborn_composition/src/runtime/local_dev/extension_surface.rs",
+        "google",
     ),
     (
         "crates/ironclaw_reborn_composition/src/runtime/local_dev/extension_surface.rs",
-        "web_access",
+        "web-access",
     ),
-    // lane-4: nearai-slice — the last catalog package (nearai_mcp) still assembled in composition because [mcp].server is patched from llm_admin config; DEFERRED — finish per the handoff (move static data to first_party_extensions::packages::nearai_mcp, inject the URL through the with_channel_extension_bindings-style seam)
+    // lane-4: nearai-slice — the last catalog package (nearai_mcp) is still
+    // patched from LLM-admin bootstrap config; it now lives with the generic
+    // available-extension catalog in ironclaw_extension_host.
     (
-        "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
+        "crates/ironclaw_extension_host/src/available_extensions.rs",
         "nearai-mcp",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
+        "crates/ironclaw_extension_host/src/available_extensions.rs",
         "nearai_mcp",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
+        "crates/ironclaw_extension_host/src/available_extensions.rs",
+        "nearaimcp",
+    ),
+    ("crates/ironclaw_extension_host/src/lib.rs", "nearai_mcp"),
+    ("crates/ironclaw_extension_host/src/lib.rs", "nearaimcp"),
+    (
+        "crates/ironclaw_extension_host/src/lifecycle_restore.rs",
+        "slack",
+    ),
+    (
+        "crates/ironclaw_extension_host/src/nearai_mcp.rs",
+        "nearai_mcp",
+    ),
+    (
+        "crates/ironclaw_extension_host/src/nearai_mcp.rs",
         "nearaimcp",
     ),
     (
@@ -1166,12 +1189,19 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "nearaimcp",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/lib.rs",
+        "crates/ironclaw_reborn_composition/src/deployment.rs",
         "nearai_mcp",
     ),
-    ("crates/ironclaw_reborn_composition/src/lib.rs", "nearaimcp"),
+    (
+        "crates/ironclaw_reborn_composition/src/deployment.rs",
+        "nearaimcp",
+    ),
     (
         "crates/ironclaw_reborn_composition/src/llm_admin/mod.rs",
+        "nearai_mcp",
+    ),
+    (
+        "crates/ironclaw_operator/src/llm_admin/mod.rs",
         "nearai_mcp",
     ),
     (
@@ -1183,7 +1213,15 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "nearaimcp",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/product_auth/api/auth.rs",
+        "crates/ironclaw_operator/src/llm_admin/nearai_mcp.rs",
+        "nearai_mcp",
+    ),
+    (
+        "crates/ironclaw_operator/src/llm_admin/nearai_mcp.rs",
+        "nearaimcp",
+    ),
+    (
+        "crates/ironclaw_auth/src/product_auth/api/auth.rs",
         "nearai_mcp",
     ),
     (
@@ -1192,22 +1230,9 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
     // lane-4: migration — one-time forward-migration call sites naming the v1 vocabulary they fold forward — correct-by-design (same pattern the retired-taxonomy gate sanctions); would become a SANCTIONED_PATHS carve if the sites move into a dedicated migration module
     ("crates/ironclaw_reborn_composition/src/factory.rs", "slack"),
-    // lane-4: web-access-mod — the web-access first-party handler assembly module + its registration — extension-specific host wiring pending a generic first-party-handler seam keyed by manifest service
     (
         "crates/ironclaw_reborn_composition/src/factory.rs",
-        "web_access",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/lib.rs",
-        "web_access",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/web_access.rs",
-        "web_access",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/web_access.rs",
-        "webaccess",
+        "nearaimcp",
     ),
     // lane-4: doc-str — incidental doc-comment / error-string / tool-description examples that NAME an extension but branch on nothing — the code routes by a manifest field (display_name/provider/effects); reword or leave (Ben's call)
     ("crates/ironclaw_filesystem/src/index.rs", "acme"),
@@ -1236,10 +1261,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "slack",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs",
-        "github",
-    ),
-    (
         "crates/ironclaw_reborn_composition/src/factory.rs",
         "google",
     ),
@@ -1252,37 +1273,27 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "google",
     ),
     ("crates/ironclaw_reborn_composition/src/lib.rs", "google"),
-    ("crates/ironclaw_reborn_composition/src/lib.rs", "slack"),
     (
-        "crates/ironclaw_reborn_composition/src/llm_admin/nearai_login_serve.rs",
+        "crates/ironclaw_operator/src/llm_admin/nearai_login_serve.rs",
         "github",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/llm_admin/nearai_login_serve.rs",
+        "crates/ironclaw_operator/src/llm_admin/nearai_login_serve.rs",
         "google",
     ),
+    ("crates/ironclaw_auth/src/product_auth/api/auth.rs", "slack"),
     (
-        "crates/ironclaw_product_workflow/src/reborn_services/outbound_delivery_capability_surface.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/product_auth/api/auth.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/product_auth/credentials/runtime_credentials.rs",
+        "crates/ironclaw_auth/src/product_auth/credentials/runtime_credentials.rs",
         "google",
     ),
+    ("crates/ironclaw_webui/src/product_auth/mod.rs", "slack"),
     (
-        "crates/ironclaw_reborn_composition/src/product_auth/serve/mod.rs",
+        "crates/ironclaw_product/src/reborn_services/outbound_delivery_capability_surface.rs",
         "slack",
     ),
+    ("crates/ironclaw_product/src/projection.rs", "slack"),
     (
-        "crates/ironclaw_reborn_composition/src/projection.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/projection/turn_events.rs",
+        "crates/ironclaw_product/src/projection/turn_events.rs",
         "slack",
     ),
     (
@@ -1311,18 +1322,20 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("crates/ironclaw_reborn_config/src/lib.rs", "google"),
     ("crates/ironclaw_reborn_config/src/lib.rs", "slack"),
     ("crates/ironclaw_reborn_config/src/lib.rs", "telegram"),
-    // lane-4: dev-dep — the sanctioned DEL-7 dev-dependency on the concrete slack crate (test linkage only); the scanner sees the crate name in Cargo.toml
+    // lane-4: dev-deps — sanctioned DEL-7 linkage of concrete channel crates
+    // for the production-shaped channel-host E2E suite; the scanner sees the
+    // crate names in Cargo.toml even though Rust test sources are excluded.
     ("crates/ironclaw_reborn_composition/Cargo.toml", "slack"),
     // lane-4: branch — the provider catalog names github_copilot (an LLM
     // provider id, not the github extension); degenericize with the catalog
-    // slice or carve under an LLM-provider path outside composition.
+    // slice.
     (
-        "crates/ironclaw_reborn_composition/src/llm_admin/provider_admin.rs",
+        "crates/ironclaw_operator/src/llm_admin/provider_admin.rs",
         "github",
     ),
     // lane-4: doc — NEAR AI login copy names its upstream SSO providers.
     (
-        "crates/ironclaw_reborn_composition/src/llm_admin/nearai_login_serve.rs",
+        "crates/ironclaw_operator/src/llm_admin/nearai_login_serve.rs",
         "github",
     ),
     // Sixth-fold debt: the second-channel host PR's frontend surface
@@ -1348,10 +1361,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
     (
         "crates/ironclaw_webui/frontend/src/lib/telegram-setup-api.ts",
-        "telegram",
-    ),
-    (
-        "crates/ironclaw_webui/frontend/src/pages/chat/chat.tsx",
         "telegram",
     ),
     ("crates/ironclaw_webui/frontend/src/i18n/ar.ts", "slack"),
@@ -1718,7 +1727,7 @@ fn term_collision_carve_outs_stay_documented_and_narrow() {
         .collect();
     for fragment in &carved_paths {
         assert!(
-            !fragment.contains("composition") && !fragment.contains("product_workflow"),
+            !fragment.contains("composition") && !fragment.contains("product_surface"),
             "carve-outs must never cover the product assembly/workflow crates — those are \
              debt, not collisions: {fragment}"
         );

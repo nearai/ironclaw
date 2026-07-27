@@ -2,7 +2,7 @@
 
 Issues: #4595, #4596, #4597, #4598
 
-PR #4608 added the WebUI v2 route shells and product-workflow DTOs for operator status, logs, and service lifecycle. The remaining work is to wire concrete backend behavior behind those stable surfaces.
+PR #4608 added the WebUI v2 route shells and ProductSurface DTOs for operator status, logs, and service lifecycle. The remaining work is to wire concrete backend behavior behind those stable surfaces.
 
 ## Operator status (#4595)
 
@@ -10,8 +10,8 @@ PR #4608 added the WebUI v2 route shells and product-workflow DTOs for operator 
 
 The WebUI route must consume the descriptor-backed ProductSurface query view
 `operator_status`; the legacy `get_operator_status` facade method is a
-compatibility wrapper over that same query path while `RebornServicesApi`
-shrinks toward §5.2.
+compatibility wrapper over that same query path; the ProductSurface read
+surface remains the canonical API.
 
 Required payload shape, nested under the `operator_status` field of the root
 `RebornOperatorCommandPlaneResponse`:
@@ -35,8 +35,8 @@ implementing a separate diagnostic command plane.
 
 The WebUI route must consume the descriptor-backed ProductSurface query view
 `operator_diagnostics`; the legacy `get_operator_diagnostics` facade method is
-a compatibility wrapper over that same query path while `RebornServicesApi`
-shrinks toward §5.2.
+a compatibility wrapper over that same query path; the ProductSurface read
+surface remains the canonical API.
 
 Required behavior:
 

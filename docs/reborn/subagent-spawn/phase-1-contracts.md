@@ -1992,7 +1992,7 @@ pub trait SubagentGoalStore: Send + Sync {
 /// Production goal store. Backs `SubagentGoalStore` with a scoped filesystem
 /// mount owned by runner/composition wiring, so a child goal survives process
 /// restart without a bespoke in-process cache.
-pub struct FilesystemSubagentGoalStore<F> {
+pub struct SubagentGoalStore<F> {
     // Concrete scoped filesystem handle supplied by the implementer.
 }
 ```
@@ -2058,7 +2058,7 @@ In `subagent/goal_store.rs` `#[cfg(test)] mod tests`:
 4. **`put_rejects_duplicate_key`** — `put_goal` twice for the same `run_id` → second
    call `Err(DuplicateKey { .. })`.
 
-5. **`filesystem_store_keys_goals_by_scope_and_run_id`** — write the same
+5. **`goal_store_keys_goals_by_scope_and_run_id`** — write the same
    `TurnRunId` under distinct owner scopes and assert lookups are isolated by
    scope and run id.
 
@@ -2067,7 +2067,7 @@ In `subagent/goal_store.rs` `#[cfg(test)] mod tests`:
    assert the goal is still readable.
 
 7. **`goal_store_is_send_sync`** — `fn assert_send_sync<T: Send + Sync>(){}`;
-   `assert_send_sync::<Arc<dyn SubagentGoalStore>>()` — Phase 2 shares it via
+   `assert_send_sync::<Arc<dyn SubagentGoalStorePort>>()` — Phase 2 shares it via
    `Arc`.
 
 Shared `SubagentGoalStore` contract tests must run against:

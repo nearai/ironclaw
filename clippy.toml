@@ -8,5 +8,5 @@ too-many-arguments-threshold = 7    # default: 7 (keep default, avoids new viola
 type-complexity-threshold = 250     # default: 250 (keep default, avoids new violations)
 
 [[disallowed-methods]]
-path = "ironclaw_outbound::FilesystemOutboundStateStore::new"
+path = "ironclaw_outbound::OutboundStateStore::new"
 reason = "outbound stores are composition-owned: take handles from RebornLocalRuntimeServices (built once in ironclaw_reborn_composition::factory). A second store over a different mount silently splits reads from writes (see docs/plans/2026-05-29-trigger-loop-delivery-resolution-implementation.md carry-forward)."

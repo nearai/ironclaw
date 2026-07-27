@@ -1,0 +1,18 @@
+{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^/]",
+      "description": "Relative memory document path to read; must not be blank, absolute (no leading '/'), contain '..' traversal, or use backslash separators. The host filesystem additionally resolves the path within the scoped /memory mount.",
+      "not": {
+        "pattern": "(^\\s*$)|(^/)|(\\.\\.)|(\\\\)"
+      }
+    }
+  },
+  "required": [
+    "path"
+  ],
+  "additionalProperties": false
+}

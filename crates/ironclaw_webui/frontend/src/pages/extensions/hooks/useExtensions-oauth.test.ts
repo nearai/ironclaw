@@ -14,6 +14,10 @@ function flushAsyncWork() {
 }
 
 function useExtensionsOauthSourceForTest() {
+  const extensionActions = readFileSync(
+    new URL("../lib/extension-actions.ts", import.meta.url),
+    "utf8",
+  ).replaceAll("export function ", "function ");
   const source = readFileSync(new URL("./useExtensions.ts", import.meta.url), "utf8");
   const lines = [];
   let skippingImport = false;
@@ -28,8 +32,18 @@ function useExtensionsOauthSourceForTest() {
     }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${productAuthOAuthEventsSource()}\n${lines.join("\n")}\nglobalThis.__testExports = { useOauthSetup, useSetupSubmit };`;
+  return `${extensionActions}\n${productAuthOAuthEventsSource()}\n${lines.join("\n")}\nglobalThis.__testExports = { extensionListItemIsConfigured, useOauthSetup, useSetupSubmit };`;
 }
+
+test("OAuth completion uses the canonical three-state lifecycle predicate", () => {
+  const context = { globalThis: {} };
+  vm.runInNewContext(useExtensionsOauthSourceForTest(), context);
+  const { extensionListItemIsConfigured } = context.globalThis.__testExports;
+
+  assert.equal(extensionListItemIsConfigured({ installation_state: "active" }), true);
+  assert.equal(extensionListItemIsConfigured({ installation_state: "setup_needed" }), false);
+  assert.equal(extensionListItemIsConfigured({}), false);
+});
 
 function loadLocalizedMutationHooks({ startExtensionOauth, submitExtensionSetup }) {
   const mutationConfigs = [];
@@ -44,13 +58,10 @@ function loadLocalizedMutationHooks({ startExtensionOauth, submitExtensionSetup 
       useState: (initial) => [typeof initial === "function" ? initial() : initial, () => {}],
     },
     URL,
-    activateExtension: () => {},
-    approvePairingCode: () => {},
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
     fetchOauthFlowStatus: () => Promise.resolve(null),
-    fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
@@ -132,13 +143,10 @@ test("useOauthSetup exposes the popup-watcher phase as authorizing", () => {
       },
     },
     URL,
-    activateExtension: () => {},
-    approvePairingCode: () => {},
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
     fetchOauthFlowStatus: () => Promise.resolve(null),
-    fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
@@ -207,13 +215,10 @@ test("useOauthSetup waits for the matching Slack OAuth callback when reconnectin
       },
     },
     URL,
-    activateExtension: () => {},
-    approvePairingCode: () => {},
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
     fetchOauthFlowStatus: () => Promise.resolve(null),
-    fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
@@ -318,20 +323,17 @@ test("useOauthSetup waits for the matching Slack OAuth callback when reconnectin
   ]);
 });
 
-test("useOauthSetup completes reconnect when polling sees Slack become configured without a callback event", () => {
+test("useOauthSetup does not treat persisted first-time OAuth credentials as active", () => {
   const stateUpdates = [];
   const intervals = [];
   const storage = new Map();
   let mutationConfig = null;
   let stateIndex = 0;
   let configuredCount = 0;
+  let setupSecretProvided = false;
   let extensionState = {
     package_ref: { id: "slack" },
-    active: true,
-    authenticated: false,
-    needs_setup: true,
-    installation_state: "active",
-    onboarding_state: "setup_required",
+    installation_state: "setup_needed",
   };
   const popup = { closed: false, location: { href: "about:blank" } };
   const context = {
@@ -350,13 +352,10 @@ test("useOauthSetup completes reconnect when polling sees Slack become configure
       },
     },
     URL,
-    activateExtension: () => {},
-    approvePairingCode: () => {},
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
     fetchOauthFlowStatus: () => Promise.resolve(null),
-    fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
@@ -376,7 +375,7 @@ test("useOauthSetup completes reconnect when polling sees Slack become configure
               {
                 name: "slack_oauth",
                 provider: "slack",
-                provided: true,
+                provided: setupSecretProvided,
               },
             ],
           };
@@ -426,21 +425,22 @@ test("useOauthSetup completes reconnect when polling sees Slack become configure
     {
       secret: {
         provider: "slack",
-        provided: true,
+        provided: false,
       },
     },
   );
 
+  setupSecretProvided = true;
   intervals[0]();
-  assert.equal(configuredCount, 0);
+  assert.equal(
+    configuredCount,
+    0,
+    "credential persistence alone must not complete setup while installation_state is setup_needed",
+  );
 
   extensionState = {
     package_ref: { id: "slack" },
-    active: true,
-    authenticated: true,
-    needs_setup: false,
     installation_state: "active",
-    onboarding_state: null,
   };
   intervals[0]();
 
@@ -460,11 +460,7 @@ test("useOauthSetup keeps polling reconnect after Slack closes the OAuth popup",
   let configuredCount = 0;
   let extensionState = {
     package_ref: { id: "slack" },
-    active: true,
-    authenticated: false,
-    needs_setup: true,
-    installation_state: "active",
-    onboarding_state: "setup_required",
+    installation_state: "setup_needed",
   };
   const popup = { closed: false, location: { href: "about:blank" } };
   const context = {
@@ -483,13 +479,10 @@ test("useOauthSetup keeps polling reconnect after Slack closes the OAuth popup",
       },
     },
     URL,
-    activateExtension: () => {},
-    approvePairingCode: () => {},
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
     fetchOauthFlowStatus: () => Promise.resolve(null),
-    fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
@@ -570,11 +563,7 @@ test("useOauthSetup keeps polling reconnect after Slack closes the OAuth popup",
 
   extensionState = {
     package_ref: { id: "slack" },
-    active: true,
-    authenticated: true,
-    needs_setup: false,
     installation_state: "active",
-    onboarding_state: null,
   };
   intervals[0]();
 
@@ -609,13 +598,10 @@ test("useOauthSetup surfaces a flow-matched failure signal as a retryable error 
       },
     },
     URL,
-    activateExtension: () => {},
-    approvePairingCode: () => {},
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
     fetchOauthFlowStatus: () => Promise.resolve(null),
-    fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
@@ -744,11 +730,7 @@ test("useOauthSetup reconnect ignores the pre-flow configured snapshot and waits
   // first poll tick while the user was still on Slack's consent screen.
   const extensionState = {
     package_ref: { id: "slack" },
-    active: true,
-    authenticated: true,
-    needs_setup: false,
     installation_state: "active",
-    onboarding_state: null,
   };
   const popup = { closed: false, location: { href: "about:blank" } };
   const context = {
@@ -767,13 +749,10 @@ test("useOauthSetup reconnect ignores the pre-flow configured snapshot and waits
       },
     },
     URL,
-    activateExtension: () => {},
-    approvePairingCode: () => {},
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
     fetchOauthFlowStatus: () => Promise.resolve(null),
-    fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
@@ -895,13 +874,10 @@ test("useOauthSetup ignores a stale OAuth callback when the flow response carrie
       },
     },
     URL,
-    activateExtension: () => {},
-    approvePairingCode: () => {},
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
     fetchOauthFlowStatus: () => Promise.resolve(null),
-    fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
@@ -1015,8 +991,6 @@ test("useOauthSetup completes reconnect from the origin-independent flow-status 
       },
     },
     URL,
-    activateExtension: () => {},
-    approvePairingCode: () => {},
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
@@ -1027,7 +1001,6 @@ test("useOauthSetup completes reconnect from the origin-independent flow-status 
       flowStatusCalls.push({ flowId, invocationId });
       return Promise.resolve({ status: "completed" });
     },
-    fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
@@ -1148,13 +1121,10 @@ test("useOauthSetup translates expired and canceled flow-status failures", async
       },
     },
     URL,
-    activateExtension: () => {},
-    approvePairingCode: () => {},
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
     fetchOauthFlowStatus: () => Promise.resolve({ status: flowStatus }),
-    fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
@@ -1317,14 +1287,11 @@ test("useOauthSetup ignores flow A status after flow B becomes current", async (
       },
     },
     URL,
-    activateExtension: () => {},
-    approvePairingCode: () => {},
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
     fetchOauthFlowStatus: (flowId) =>
       flowId === "flow-a" ? flowAStatus : Promise.resolve({ status: "completed" }),
-    fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
@@ -1427,13 +1394,10 @@ test("useOauthSetup still times out when a matched failure signal cannot reach d
       },
     },
     URL,
-    activateExtension: () => {},
-    approvePairingCode: () => {},
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
     fetchOauthFlowStatus: () => Promise.reject(new Error("status unavailable")),
-    fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},

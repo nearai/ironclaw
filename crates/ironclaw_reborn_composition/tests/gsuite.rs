@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 
+use ironclaw_auth::CredentialAccountRecordSource;
 use ironclaw_auth::{
     AuthProductScope, AuthSurface, CredentialAccountLabel, CredentialAccountService,
     CredentialAccountStatus, CredentialOwnership, GOOGLE_GMAIL_SEND_SCOPE,
@@ -7,21 +8,176 @@ use ironclaw_auth::{
 };
 use ironclaw_extensions::{ExtensionRuntime, ManifestSource};
 use ironclaw_first_party_extensions::{
-    CALENDAR_LIST_CALENDARS_CAPABILITY_ID, GMAIL_SEND_MESSAGE_CAPABILITY_ID,
-    GsuiteCredentialStageError, GsuiteCredentialStageRequest, GsuiteCredentialStager,
+    CALENDAR_LIST_CALENDARS_CAPABILITY_ID, GMAIL_SEND_MESSAGE_CAPABILITY_ID, GOOGLE_PROVIDER_ID,
+    GsuiteCapabilitySpec, GsuiteCredentialDispatchReason, GsuiteCredentialStageError,
+    GsuiteCredentialStageRequest, GsuiteCredentialStager, GsuiteDispatchError,
+    GsuiteDispatchRequest, GsuiteExecutor, GsuitePackageSpec, find_gsuite_capability,
     google_provider_id, gsuite_package_specs,
 };
 use ironclaw_host_api::{
-    CapabilityId, DispatchFailureDetail, InvocationId, ResourceScope,
-    RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource, RuntimeCredentialSource,
+    CapabilityId, DispatchFailureDetail, HostApiError, InvocationId, NetworkScheme,
+    NetworkTargetPattern, ResourceScope, RuntimeCredentialAccountSetup,
+    RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement,
+    RuntimeCredentialRequirementSource, RuntimeCredentialSource, RuntimeCredentialTarget,
     RuntimeDispatchErrorKind, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
-    RuntimeHttpEgressResponse, SecretHandle, TrustClass, UserId,
+    RuntimeHttpEgressResponse, SecretHandle, UserId,
 };
-use ironclaw_host_runtime::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};
-use ironclaw_reborn_composition::{
-    bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers,
+use ironclaw_host_runtime::{
+    FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
+    FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
 use serde_json::json;
+
+// DEL-7 moved the GSuite `FirstPartyCapabilityHandler` wrapper + registration out
+// of composition into the assembling binary. These tests drive the real
+// `ironclaw_first_party_extensions::GsuiteExecutor` through the same thin wrapper
+// the binary supplies, built here directly over the executor (the composition
+// test crate links first-party / host-runtime / host-api as dev-dependencies).
+fn gsuite_first_party_handlers(
+    accounts: Arc<dyn CredentialAccountService>,
+    account_records: Arc<dyn CredentialAccountRecordSource>,
+    credential_stager: Arc<dyn GsuiteCredentialStager>,
+    google_oauth_configured: bool,
+) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
+    let mut registry = FirstPartyCapabilityRegistry::new();
+    let handler = Arc::new(GsuiteFirstPartyHandler {
+        executor: GsuiteExecutor::new(accounts, account_records, credential_stager),
+        google_oauth_configured,
+    });
+    for package in gsuite_package_specs() {
+        for capability in package.capabilities {
+            registry.insert_handler(CapabilityId::new(capability.id)?, Arc::clone(&handler));
+        }
+    }
+    Ok(registry)
+}
+
+struct GsuiteFirstPartyHandler {
+    executor: GsuiteExecutor,
+    google_oauth_configured: bool,
+}
+
+#[async_trait::async_trait]
+impl FirstPartyCapabilityHandler for GsuiteFirstPartyHandler {
+    async fn dispatch(
+        &self,
+        request: FirstPartyCapabilityRequest,
+    ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
+        if !self.google_oauth_configured {
+            return Err(FirstPartyCapabilityError::dispatch_with_host_remediation(
+                RuntimeDispatchErrorKind::OperationFailed,
+                None,
+                ironclaw_reborn_config::HostRemediationText::GoogleNotConfigured.text(),
+            ));
+        }
+        let egress = request
+            .services
+            .runtime_http_egress
+            .as_ref()
+            .ok_or_else(|| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::NetworkDenied))?
+            .clone();
+        let result = self
+            .executor
+            .dispatch(GsuiteDispatchRequest {
+                capability_id: &request.capability_id,
+                scope: &request.scope,
+                input: &request.input,
+                runtime_http_egress: egress,
+            })
+            .await
+            .map_err(|error| gsuite_error(error, &request.capability_id))?;
+        Ok(FirstPartyCapabilityResult::new(result.output, result.usage))
+    }
+}
+
+fn gsuite_error(
+    error: GsuiteDispatchError,
+    capability_id: &CapabilityId,
+) -> FirstPartyCapabilityError {
+    let usage = error.usage().cloned();
+    let base = match error.auth_requirement() {
+        Some(required_secrets) => match gsuite_credential_requirements(capability_id) {
+            Ok(credential_requirements) => FirstPartyCapabilityError::auth_required_with_context(
+                required_secrets,
+                credential_requirements,
+            ),
+            Err(error) => error,
+        },
+        None => match error.reason() {
+            Some(GsuiteCredentialDispatchReason::BackendAuth) => {
+                FirstPartyCapabilityError::dispatch_with_host_remediation(
+                    error.kind(),
+                    Some(
+                        "Google OAuth is configured but the provider rejected the credentials"
+                            .to_string(),
+                    ),
+                    ironclaw_reborn_config::HostRemediationText::GoogleBackendAuth.text(),
+                )
+            }
+            _ => FirstPartyCapabilityError::new(error.kind()),
+        },
+    };
+    match usage {
+        Some(u) => base.with_usage(u),
+        None => base,
+    }
+}
+
+fn gsuite_credential_requirements(
+    capability_id: &CapabilityId,
+) -> Result<Vec<RuntimeCredentialAuthRequirement>, FirstPartyCapabilityError> {
+    let (package, capability) =
+        find_gsuite_capability(capability_id.as_str()).ok_or_else(|| {
+            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::UndeclaredCapability)
+        })?;
+    let requester_extension = ironclaw_host_api::ExtensionId::new(package.extension_id)
+        .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend))?;
+    let requirements = gsuite_runtime_credentials(capability, package)
+        .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend))?
+        .into_iter()
+        .filter(|credential| credential.required)
+        .filter_map(|credential| {
+            credential.product_auth_requirement_for(requester_extension.clone())
+        })
+        .collect::<Vec<_>>();
+    if requirements.is_empty() {
+        return Err(FirstPartyCapabilityError::new(
+            RuntimeDispatchErrorKind::Backend,
+        ));
+    }
+    Ok(requirements)
+}
+
+fn gsuite_runtime_credentials(
+    capability: &GsuiteCapabilitySpec,
+    spec: &GsuitePackageSpec,
+) -> Result<Vec<RuntimeCredentialRequirement>, HostApiError> {
+    let provider_scopes: Vec<String> = capability
+        .required_scopes
+        .iter()
+        .map(|scope| (*scope).to_string())
+        .collect();
+    Ok(vec![RuntimeCredentialRequirement {
+        handle: SecretHandle::new(spec.credential_handle)?,
+        source: RuntimeCredentialRequirementSource::ProductAuthAccount {
+            provider: ironclaw_host_api::VendorId::new(GOOGLE_PROVIDER_ID)?,
+            setup: RuntimeCredentialAccountSetup::OAuth {
+                scopes: provider_scopes.clone(),
+            },
+        },
+        provider_scopes,
+        audience: NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: spec.credential_host_pattern.to_string(),
+            port: None,
+        },
+        target: RuntimeCredentialTarget::Header {
+            name: "authorization".to_string(),
+            prefix: Some("Bearer ".to_string()),
+        },
+        required: true,
+    }])
+}
 
 #[derive(Default)]
 struct RecordingEgress {
@@ -280,31 +436,6 @@ async fn bundled_gsuite_input_schemas_reject_reviewed_shape_regressions() {
 }
 
 #[tokio::test]
-async fn bundled_gsuite_packages_are_host_bundled_but_not_registered_by_default() {
-    let packages = bundled_gsuite_extension_packages().unwrap();
-
-    assert_eq!(packages.len(), 2);
-    assert_eq!(packages[0].id.as_str(), "google-calendar");
-    assert_eq!(packages[1].id.as_str(), "gmail");
-    for package in &packages {
-        assert_eq!(package.manifest.source, ManifestSource::HostBundled);
-        assert!(matches!(
-            package.manifest.runtime,
-            ExtensionRuntime::FirstParty { .. }
-        ));
-        assert_eq!(
-            package.manifest.descriptor_trust_default,
-            TrustClass::Sandbox
-        );
-    }
-    let capability_count = packages
-        .iter()
-        .map(|package| package.capabilities.len())
-        .sum::<usize>();
-    assert_eq!(capability_count, 15);
-}
-
-#[tokio::test]
 async fn bundled_gsuite_asset_manifests_match_package_specs() {
     for spec in gsuite_package_specs() {
         let manifest = asset_manifest(spec.extension_id);
@@ -413,7 +544,7 @@ async fn bundled_gsuite_asset_manifests_match_package_specs() {
 async fn bundled_gsuite_handlers_register_and_forward_runtime_egress() {
     let scope = scope();
     let auth = auth_with_google_account(&scope).await;
-    let registry = bundled_gsuite_first_party_handlers(
+    let registry = gsuite_first_party_handlers(
         auth.clone(),
         auth,
         Arc::new(RecordingCredentialStager::default()),
@@ -450,7 +581,7 @@ async fn bundled_gsuite_handlers_stage_selected_account_secret_before_egress() {
     let scope = scope();
     let auth = auth_with_google_account(&scope).await;
     let stager = Arc::new(RecordingCredentialStager::default());
-    let registry = bundled_gsuite_first_party_handlers(
+    let registry = gsuite_first_party_handlers(
         auth.clone(),
         auth,
         stager.clone() as Arc<dyn GsuiteCredentialStager>,
@@ -507,7 +638,7 @@ async fn bundled_gsuite_handlers_stage_oauth_account_secret_from_account_scope()
     .await
     .unwrap();
     let stager = Arc::new(RecordingCredentialStager::default());
-    let registry = bundled_gsuite_first_party_handlers(
+    let registry = gsuite_first_party_handlers(
         auth.clone(),
         auth,
         stager.clone() as Arc<dyn GsuiteCredentialStager>,
@@ -544,7 +675,7 @@ async fn bundled_gsuite_handlers_project_staging_auth_failures_as_auth_required(
     let scope = scope();
     let auth = auth_with_google_account(&scope).await;
     let stager = Arc::new(RecordingCredentialStager::auth_required());
-    let registry = bundled_gsuite_first_party_handlers(
+    let registry = gsuite_first_party_handlers(
         auth.clone(),
         auth,
         stager as Arc<dyn GsuiteCredentialStager>,
@@ -583,7 +714,7 @@ async fn bundled_gsuite_handlers_project_staging_auth_failures_as_auth_required(
 async fn bundled_gsuite_handlers_register_all_gsuite_capabilities() {
     let scope = scope();
     let auth = auth_with_google_account(&scope).await;
-    let registry = bundled_gsuite_first_party_handlers(
+    let registry = gsuite_first_party_handlers(
         auth.clone(),
         auth,
         Arc::new(RecordingCredentialStager::default()),
@@ -612,7 +743,7 @@ async fn bundled_gsuite_handlers_register_all_gsuite_capabilities() {
 async fn bundled_gsuite_handler_fails_closed_without_runtime_egress() {
     let scope = scope();
     let auth = Arc::new(InMemoryAuthProductServices::new());
-    let registry = bundled_gsuite_first_party_handlers(
+    let registry = gsuite_first_party_handlers(
         auth.clone(),
         auth,
         Arc::new(RecordingCredentialStager::default()),
@@ -656,7 +787,7 @@ impl GsuiteCredentialStager for BackendStager {
 async fn bundled_gsuite_handler_projects_stage_auth_required_to_first_party_auth_required() {
     let scope = scope();
     let auth = auth_with_google_account(&scope).await;
-    let registry = bundled_gsuite_first_party_handlers(
+    let registry = gsuite_first_party_handlers(
         auth.clone(),
         auth,
         Arc::new(RecordingCredentialStager::auth_required()),
@@ -706,8 +837,7 @@ async fn bundled_gsuite_handler_projects_stage_backend_to_first_party_dispatch_b
     let scope = scope();
     let auth = auth_with_google_account(&scope).await;
     let registry =
-        bundled_gsuite_first_party_handlers(auth.clone(), auth, Arc::new(BackendStager), true)
-            .unwrap();
+        gsuite_first_party_handlers(auth.clone(), auth, Arc::new(BackendStager), true).unwrap();
     let capability_id = cap_id(GMAIL_SEND_MESSAGE_CAPABILITY_ID);
     let handler = registry.get(&capability_id).expect("handler registered");
 
@@ -759,7 +889,7 @@ async fn bundled_gsuite_handler_projects_stage_backend_to_first_party_dispatch_b
 async fn bundled_gsuite_handler_returns_not_configured_tool_result_when_no_google_oauth_backend() {
     let scope = scope();
     let auth = Arc::new(InMemoryAuthProductServices::new());
-    let registry = bundled_gsuite_first_party_handlers(
+    let registry = gsuite_first_party_handlers(
         auth.clone(),
         auth,
         Arc::new(RecordingCredentialStager::default()),

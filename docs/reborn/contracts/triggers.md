@@ -10,7 +10,7 @@
 
 The trigger system owns scheduled trigger intake, trigger records, source-provider evaluation, and conversion of a due trigger into a synthetic inbound turn.
 
-It does **not** own a parallel agent loop, product adapter lifecycles, or outbound delivery targets. A trigger fire is routed into the normal Reborn turn pipeline and then persists through the same turn, run, and recovery machinery as any other inbound submission.
+It does **not** own a parallel agent loop, channel-adapter lifecycles, or outbound delivery targets. A trigger fire is routed into the normal Reborn turn pipeline and then persists through the same turn, run, and recovery machinery as any other inbound submission.
 
 ---
 
@@ -229,7 +229,7 @@ plumbing, not capability APIs.
   queries used by the trusted poller path.
 - Trigger-owned poller code must keep worker-local call sites explicit about the
   trusted poller transition without adding a user-facing capability surface.
-- Product adapters, first-party capability code, and other untrusted callers
+- Channel adapters, first-party capability code, and other untrusted callers
   must not treat the global list methods as a user-facing surface.
 - The poller may continue to use the raw repository methods internally, but the
   contract treats them as implementation plumbing, not a capability contract.
@@ -243,7 +243,7 @@ A trigger fire is synthetic inbound, not a parallel agent loop.
 - The fire must enter the normal Reborn inbound/turn pipeline.
 - The trusted submitter implementation is conversation-owned and exposed to host composition through `trusted_trigger_fire_submitter(...) -> Arc<dyn TrustedTriggerFireSubmitter>`. This public factory is wiring only; trusted authority lives in the sealed `TrustedTriggerSubmitRequest` minted by the trigger worker. The raw `TrustedInboundTurnRequest` constructor and concrete submitter type stay private inside `ironclaw_conversations`; host/composition code only wires the trait object into the poller while the conversation crate converts the worker-carried canonical binding into the private trusted turn request.
 - Binding resolution for trigger fires must use the trusted-scope path from `conversation-binding.md`.
-- Product adapters, first-party capabilities, and product workflow code must not construct the conversation-owned trusted trigger submitter or submit `TrustedTriggerSubmitRequest`. PR18.5a enforces this with a private trusted request and architecture tests over adapter/product paths.
+- Channel adapters, first-party capabilities, and product-surface code must not construct the conversation-owned trusted trigger submitter or submit `TrustedTriggerSubmitRequest`. PR18.5a enforces this with a private trusted request and architecture tests over adapter/product paths.
 - The host mints the trusted trigger ingress request from `TriggerRecord` state:
   `tenant_id`, `creator_user_id`, `agent_id`, and `project_id` are host state,
   not product payload data.
@@ -288,7 +288,7 @@ A trigger fire is synthetic inbound, not a parallel agent loop.
 Host-trusted trigger ingress request fields are:
 
 - `source`: `TriggerFire`;
-- `adapter_kind`: host-trusted trigger ingress marker, not a product adapter kind;
+- `adapter_kind`: host-trusted trigger ingress marker, not a channel adapter kind;
 - `adapter_installation_id`: host-trusted trigger installation marker;
 - `external_actor_ref`: canonical actor route for the trigger creator authority;
 - `external_conversation_ref`: synthetic trigger conversation key plus the
@@ -486,8 +486,9 @@ selection. Local-dev Reborn exposes model-visible outbound target
 discovery/selection capabilities that write the caller's final-reply
 preference. A trigger may also persist an optional opaque `delivery_target` id
 selected from that creator-scoped registry; the fire carries the id without
-placing it in `TriggerFireIdentity`. At fire time, composition re-resolves the
-id for the creator, obtains the current typed reply-target binding, and sends
+placing it in `TriggerFireIdentity`. At fire time, the product run-delivery
+workflow re-resolves the id for the creator through an assembled provider,
+obtains the current typed reply-target binding, and sends
 ordinary results through the outbound delivery-resolution path. Missing,
 foreign, disconnected, or removed targets fail closed. Triggers without an
 explicit target retain the user-wide preference fallback.
@@ -504,7 +505,14 @@ and select an outbound delivery target before calling `trigger_create`.
 - Delivery flows through the delivery-resolution/outbound contract track, not
   through trigger ingress identity.
 
-V1 acceptance does not require external delivery. A valid V1 trigger fire is one that submits a cron-backed synthetic inbound turn and persists through the normal Reborn turn path.
+The historical V1 acceptance milestone did not require external delivery. The
+shipping product contract does: a fire persists its typed, creator-scoped
+delivery selection and the ordinary run-delivery path consumes that authority
+after completion. An omitted selection inherits the sealed source route; an
+explicit target is re-resolved at send time and fails closed if it is removed,
+unpaired, revoked, stale, foreign, or otherwise unavailable. WebApp selection
+persists the result without external egress. Trigger execution itself still
+does not choose, parse, or infer a destination.
 
 ---
 

@@ -20,7 +20,7 @@ mod support;
 
 use std::time::Duration;
 
-use ironclaw_product_adapters::ProductInboundAck;
+use ironclaw_product::ProductInboundAck;
 use ironclaw_turns::TurnStatus;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::reply::RebornScriptedReply;

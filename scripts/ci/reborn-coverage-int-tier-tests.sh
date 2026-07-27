@@ -6,54 +6,68 @@
 # Integration-tier (task T0-COV) is the set of in-process suites under
 # tests/integration/ (post-restructure home of the roadmap integration suite;
 # see docs/superpowers/specs/2026-06-26-reborn-integration-test-framework-design.md):
-#   - tests/integration/<name>.rs   (flat [[test]] binaries; Cargo `name` is
-#                                    reborn_integration_<name>)
-#   - tests/integration/group_<x>/  ([[test]] binaries; Cargo `name` is
-#                                    reborn_group_<x>)
+#   - tests/integration/<name>.rs        (flat bins; `name = reborn_integration_<name>`)
+#   - tests/integration/group_<x>/       (group bins; `name = reborn_group_<x>`)
+#   - tests/integration/<domain>/<n>.rs  (domain-folder bins, e.g. auth/;
+#                                         `name = reborn_integration_<n>`)
 #
-# Discovery is dynamic so coverage automatically picks up new int-tier suites
-# as they land (mirrors scripts/ci/run-reborn-group-tests.sh's dir->name
-# rewrite and scripts/ci/run-reborn-root-partition.sh's overall shape).
+# Discovery is registration-driven: the workspace Cargo.toml's `[[test]]`
+# entries are the single source of truth, and every entry whose `path` sits
+# under tests/integration/ is selected. Deriving candidates from a filesystem
+# walk instead has already burned us once: the previous `find -maxdepth 1`
+# walk could not see domain-folder bins, so the six tests/integration/auth/
+# suites (oauth_connect, oauth_popup_journeys, oauth_refresh, auth_gate,
+# auth_failure, reopen_resume_through_gate) ran in NO PR or merge-queue lane
+# — their only executor was the push-to-main coverage workflow. Selecting
+# from the registration makes a new suite impossible to register without
+# also being selected, whatever directory shape it uses, and a registered
+# entry whose file was deleted fails the lane loudly ("couldn't read the
+# file") instead of being silently skipped.
 #
-# Candidate names are filtered against Cargo.toml's `[[test]] name = "..."`
-# entries: not every flat tests/integration/<name>.rs file is its own binary
-# — a file can be a #[path]-mounted shared-fixture sibling included by two or
-# more real suites instead (see slack_pairing_fixtures.rs, mounted by
-# slack_pairing_redeem.rs / slack_pairing_actor_resolution.rs), and such
-# siblings have no `[[test]]` entry of their own. Without this filter, a bare
-# directory scan derives a nonexistent `--test reborn_integration_<sibling>`
-# arg and `cargo llvm-cov ... test` fails outright with "no test target
-# named" before running anything in the lane.
+# `#[path]`-mounted shared-fixture siblings (auth/common.rs,
+# slack_pairing_fixtures.rs, support/) have no `[[test]]` entry and are
+# therefore never selected — same reason the old walk filtered its
+# candidates against the registration.
 
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${repo_root}"
 
-mapfile -t names < <(
-  {
-    find tests/integration -maxdepth 1 -type f -name '*.rs' \
-      | sed -E 's#^tests/integration/#reborn_integration_#; s#\.rs$##'
-    find tests/integration -mindepth 1 -maxdepth 1 -type d -name 'group_*' \
-      -exec sh -c 'test -f "$1/main.rs"' _ {} ';' -print \
-      | sed -E 's#^tests/integration/group_#reborn_group_#'
-  } | LC_ALL=C sort -u | while IFS= read -r candidate; do
-    if awk -v name="${candidate}" '
-      /^\[\[test\]\]/ { in_test=1; next }
-      /^\[/ { in_test=0 }
-      in_test && $0 == "name = \"" name "\"" { found=1; exit }
-      END { exit !found }
-    ' Cargo.toml; then
-      printf '%s\n' "${candidate}"
-    fi
-  done
-)
+# Plain string + while-read (no `mapfile`): macOS dev machines ship bash 3.2,
+# and the guardrail must be runnable where it is written, not only on CI.
+#
+# The manifest is parsed with Python's stdlib `tomllib` (python3 is already a
+# hard dependency of this lane's sibling scripts, e.g.
+# scripts/ci/lib/reborn_coverage_lcov.py) so the selector accepts exactly what
+# Cargo accepts — key order, spacing, and trailing comments can never drop a
+# registration the way a line-regex parser could (pinned by harness case D6's
+# reversed-order and compact stanzas).
+names="$(
+  python3 - <<'PY'
+import tomllib
 
-if [ "${#names[@]}" -eq 0 ]; then
+with open("Cargo.toml", "rb") as manifest:
+    data = tomllib.load(manifest)
+
+names = {
+    entry["name"]
+    for entry in data.get("test", [])
+    if isinstance(entry, dict)
+    and isinstance(entry.get("name"), str)
+    and isinstance(entry.get("path"), str)
+    and entry["path"].startswith("tests/integration/")
+}
+for name in sorted(names):
+    print(name)
+PY
+)"
+
+if [ -z "${names}" ]; then
   echo "No Reborn integration-tier test binaries discovered" >&2
   exit 1
 fi
 
-for name in "${names[@]}"; do
+printf '%s\n' "${names}" | while IFS= read -r name; do
   printf -- '--test\n%s\n' "${name}"
 done

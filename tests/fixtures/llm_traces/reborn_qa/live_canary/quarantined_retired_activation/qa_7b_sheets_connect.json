@@ -1,0 +1,89 @@
+{
+  "_quarantine_reason": "recorded trace invokes retired builtin.extension_activate",
+  "model_name": "reborn-qa-qa_7b_sheets_connect",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "In WebUI, ask IronClaw \"connect to Google Sheets.\" Go through the auth flow.\nExpected result: Google Sheets is connected"
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"connect to Google Sheets.\" Go through the auth flow.\nExp",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_b046caf44adf447b8381d9c1",
+            "name": "builtin__extension_search",
+            "arguments": {
+              "query": "google sheets"
+            }
+          }
+        ],
+        "input_tokens": 13398,
+        "output_tokens": 67
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"connect to Google Sheets.\" Go through the auth flow.\nExp",
+        "min_message_count": 4
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_d156a390ca0c4da4b6a5ca8f",
+            "name": "builtin__extension_install",
+            "arguments": {
+              "extension_id": "google-sheets"
+            }
+          }
+        ],
+        "input_tokens": 14074,
+        "output_tokens": 73
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"connect to Google Sheets.\" Go through the auth flow.\nExp",
+        "min_message_count": 6
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_67fe364af51e48b08b4c3d35",
+            "name": "builtin__extension_activate",
+            "arguments": {
+              "extension_id": "google-sheets"
+            }
+          }
+        ],
+        "input_tokens": 14431,
+        "output_tokens": 51
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "In WebUI, ask IronClaw \"connect to Google Sheets.\" Go through the auth flow.\nExp",
+        "min_message_count": 8
+      },
+      "response": {
+        "type": "text",
+        "content": "Google Sheets is now connected and ready to use.\n\nHere's what's available:\n\n**Google Sheets — Connected** ✅\n\nYou can create, read, write, format, and manage spreadsheets directly. All tools are active:\n\n| Tool | Purpose |\n|------|---------|\n| `create_spreadsheet` | Create a new spreadsheet |\n| `get_spreadsheet` | Get metadata by ID |\n| `read_values` / `batch_read_values` | Read cell data |\n| `write_values` / `append_values` | Write or append data |\n| `clear_values` | Clear a range |\n| `add_sheet` / `delete_sheet` / `rename_sheet` | Manage sheet tabs |\n| `format_cells` | Style cells (colors, bold, alignment, etc.) |\n\nNeed help finding a spreadsheet by name? Use the Google Drive integration too — let me know if you'd like me to connect that as well.",
+        "input_tokens": 17317,
+        "output_tokens": 195
+      }
+    }
+  ],
+  "expects": {
+    "tools_used": [
+      "builtin.extension_activate"
+    ]
+  }
+}

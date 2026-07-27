@@ -5,7 +5,7 @@ use std::sync::Mutex;
 
 use chrono::Utc;
 use ironclaw_host_api::{CapabilityId, ProviderToolName, ThreadId, UserId};
-use ironclaw_product_adapters::{
+use ironclaw_product::{
     AdapterInstallationId, ExternalConversationRef, ProductAdapterError, ProductAdapterId,
     ProductOutboundTarget, ProjectionCursor,
 };
@@ -1166,8 +1166,8 @@ fn provider_view(
     default_model: &str,
     active: bool,
     active_model: Option<&str>,
-) -> ironclaw_product_workflow::LlmProviderView {
-    ironclaw_product_workflow::LlmProviderView {
+) -> ironclaw_product::LlmProviderView {
+    ironclaw_product::LlmProviderView {
         id: id.to_string(),
         description: String::new(),
         adapter: "open_ai_completions".to_string(),
@@ -1185,14 +1185,14 @@ fn provider_view(
 
 #[test]
 fn model_entries_list_active_first_then_providers_deduped() {
-    let snapshot = ironclaw_product_workflow::LlmConfigSnapshot {
+    let snapshot = ironclaw_product::LlmConfigSnapshot {
         providers: vec![
             provider_view("openai", "gpt-4o", true, Some("gpt-4o")),
             provider_view("anthropic", "claude-opus-4", false, None),
             // Duplicate model id (same default) must not be listed twice.
             provider_view("openai-mirror", "gpt-4o", false, None),
         ],
-        active: Some(ironclaw_product_workflow::LlmActiveSelection {
+        active: Some(ironclaw_product::LlmActiveSelection {
             provider_id: "openai".to_string(),
             model: Some("gpt-4o".to_string()),
         }),
@@ -1209,7 +1209,7 @@ fn model_entries_list_active_first_then_providers_deduped() {
 
 #[test]
 fn model_entries_fall_back_to_default_model_when_no_active_selection() {
-    let snapshot = ironclaw_product_workflow::LlmConfigSnapshot {
+    let snapshot = ironclaw_product::LlmConfigSnapshot {
         providers: vec![provider_view("anthropic", "claude-opus-4", false, None)],
         active: None,
     };

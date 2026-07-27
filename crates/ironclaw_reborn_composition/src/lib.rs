@@ -2,12 +2,9 @@
 
 //! Reborn composition root.
 //!
-//! Two entry points:
+//! Main entry point:
 //!
-//! - [`build_reborn_services`] — substrate/product facades (host runtime,
-//!   turn coordinator, product auth). Useful when an outer harness wires the loop
-//!   drivers / turn-runner itself (e.g. v1 `AppBuilder`).
-//! - [`build_reborn_runtime`] — full runtime assembly: substrate + loop
+//! - [`build_runtime`] — full runtime assembly: deployment config + loop
 //!   driver registry + LLM model gateway + turn-runner worker, spawned
 //!   as one unit. This is the single entry
 //!   point used by the standalone `ironclaw-reborn` binary and any
@@ -28,60 +25,42 @@ mod approval_test_support;
 mod automation;
 mod blocked_auth_resume;
 mod builtin_capability_policy;
+#[cfg(test)]
+#[path = "extension_lifecycle_capabilities_auth_tests.rs"]
+mod composition_extension_lifecycle_auth_tests;
 pub mod deployment;
 mod error;
-mod extension_host;
 mod factory;
 mod google_oauth_secret_store;
 mod input;
 mod llm_admin;
 mod local_dev_authorization;
 mod local_dev_mounts;
+mod memory_binding;
+mod memory_provider_factory;
 mod observability;
 mod operator_tool_catalog;
 mod outbound;
-mod product_auth;
+mod product_capability;
+mod product_surface;
 mod production_runtime_policy;
 mod profile_approval_authorization;
-mod projection;
-mod provider_identity;
 mod readiness;
 mod root;
 mod runtime;
 mod runtime_input;
 mod runtime_profile_approval_policy;
+mod storage_catalog;
 mod support;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 mod trigger_fire_access;
 mod turn_run_snapshot;
-mod web_access;
-mod webui;
 
 pub use admin_token::AdminApiTokenMinter;
-pub use automation::facade::RebornAutomationProductFacade;
+pub use automation::service::RebornAutomationProductService;
 pub use automation::trigger_poller::PostSubmitDeliveryHook;
 pub use error::RebornBuildError;
-pub use extension_host::channel_host::{ChannelHostIdentity, GenericChannelHostAssembly};
-pub use extension_host::channel_identity::{
-    ChannelIdentityBindingConfig, channel_identity_binding_hook_factory,
-};
-pub use extension_host::extension_ingress::{
-    ChannelInboundSinkConfig, ChannelIngressDrain, ChannelIngressRegistration,
-    ExtensionIngressParts, ExtensionIngressRegistry, GenericChannelInboundSink,
-    InboundPayloadClassifier, PostAdmissionObserver, StaticIngressSecrets, VerifiedEvidenceMint,
-};
-pub use extension_host::extension_ingress::{
-    EXTENSION_INGRESS_ROUTE_PATTERN, extension_ingress_route_mount,
-};
-pub use extension_host::extension_lifecycle_command::{
-    RebornExtensionLifecycleCommand, RebornExtensionLifecycleCommandError,
-    execute_reborn_extension_lifecycle_command, render_reborn_extension_lifecycle_response,
-};
-pub use extension_host::gsuite::{
-    bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers,
-};
-pub use extension_host::skill_listing::{RebornSkillListError, list_reborn_local_skills};
 #[cfg(feature = "test-support")]
 pub use factory::AttachmentTestSupport;
 #[cfg(feature = "test-support")]
@@ -89,36 +68,52 @@ pub use factory::ChannelHostAssemblyTestWiring;
 pub use factory::LOCAL_DEV_SECRETS_MASTER_KEY_PATH;
 #[cfg(feature = "test-support")]
 pub use factory::RebornApprovalTestParts;
+/// Crate-root alias for composition's own unit tests (the src `#[cfg(test)]`
+/// modules that build a production trust policy from the concrete inventory).
+#[cfg(test)]
+pub(crate) use factory::builtin_first_party_trust_policy;
 pub use factory::local_dev_db_path;
 pub use factory::open_local_dev_secret_store;
+/// Production first-party trust-policy builder over the neutral injected bundle
+/// set. Public so integration tests (which convert the concrete first-party
+/// inventory via the dev-dependency) can build the same trust policy the
+/// production binary composes at build time.
+pub use factory::production_first_party_trust_policy;
 pub use factory::{KeychainMasterKeyOutcome, provision_local_dev_keychain_master_key};
-pub use factory::{RebornServices, build_reborn_services, builtin_first_party_trust_policy};
 pub use google_oauth_secret_store::{GoogleOauthSecretStore, GoogleOauthSecretStoreError};
 pub use input::{
-    ChannelExtensionBinding, OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding,
+    ChannelExtensionBinding, OAuthClientConfig, RebornHostBindings, RebornRuntimeProcessBinding,
 };
-/// OAuth redirect-URI newtype re-exported so the `ironclaw_reborn_cli` binary
-/// can name it without a direct `ironclaw_auth` dependency. Its
-/// `runtime/mod.rs` parses `IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI`
-/// and the Google OAuth redirect URI from env into `OAuthRedirectUri` when
-/// building the runtime input / OAuth client config. The
-/// `reborn_cli_binary_crate_stays_separate_from_v1_root` boundary test (in
-/// `ironclaw_architecture`) pins the CLI's workspace dependencies to exactly
-/// the composition-facade set, so adding `ironclaw_auth` there would fail that
-/// test — the type must travel through this facade instead.
+/// OAuth redirect-URI newtype re-exported for runtime input construction; the
+/// remaining product-auth contracts are named directly from `ironclaw_auth`.
 pub use ironclaw_auth::OAuthRedirectUri;
+#[cfg(any(test, feature = "test-support"))]
+pub use ironclaw_auth::{
+    AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountId, CredentialAccountLabel,
+    CredentialAccountStatus, CredentialOwnership, Timestamp,
+};
+pub use ironclaw_auth::{CredentialAccount, CredentialAccountSelectionRequest};
+pub use ironclaw_host_api::{
+    CapabilityId, HostApiError, NetworkScheme, NetworkTargetPattern, RuntimeCredentialRequirement,
+    RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeDispatchErrorKind,
+    SecretHandle,
+};
 pub use ironclaw_host_api::{
     ExtensionId, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, VendorId,
 };
+pub use ironclaw_host_runtime::{
+    FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
+    FirstPartyCapabilityRequest, FirstPartyCapabilityResult, ProductAuthProviderRuntimePorts,
+};
+pub use ironclaw_product::PreferenceTargetCodec;
 /// Channel-adapter and codec contracts re-exported for the assembling
 /// binary's [`ChannelExtensionBinding`] construction.
-pub use ironclaw_product_adapters::{ChannelAdapter, NormalizedInboundMessage};
-pub use ironclaw_product_workflow::PreferenceTargetCodec;
-pub use ironclaw_product_workflow::{
+pub use ironclaw_product::{ChannelAdapter, NormalizedInboundMessage};
+pub use ironclaw_product::{
     ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
     RebornChannelConnectStrategy,
 };
-pub use ironclaw_product_workflow::{
+pub use ironclaw_product::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleSearchExtensionSummary,
 };
@@ -139,21 +134,16 @@ pub use ironclaw_skills::{
 };
 pub use ironclaw_triggers::TriggerId;
 pub use ironclaw_turns::TurnStatus;
-pub use llm_admin::llm_catalog::{
-    ProviderCatalogValidationError, RebornLlmCatalogError, resolve_against_registry,
-    resolve_llm_selection_against_catalog, resolve_llm_selection_allow_missing_key,
-    resolve_reborn_runtime_llm, validate_reborn_provider_catalog_contents,
-};
-pub use llm_admin::llm_config_service::{LlmReloadTrigger, RebornLlmConfigService};
-pub use llm_admin::llm_key_store::{LlmKeyStore, LlmKeyStoreError};
-pub use llm_admin::nearai_mcp::{
-    NearAiMcpBootstrapConfig, NearAiMcpBootstrapConfigError, nearai_mcp_bootstrap_config_from_env,
-};
 pub use llm_admin::openai_compat_serve::build_openai_compat_route_mount;
+pub use memory_binding::{memory_binding_diagnostics, resolve_memory_binding_policy};
+pub use memory_provider_factory::{
+    Mem0ConnectionConfig, MemoryProviderDeps, build_memory_service_resolver,
+    create_document_store_provider,
+};
 // Re-exported for the host-owned `ironclaw_webui::webui_v2_app`
 // (hoisted up from this crate): its bearer-auth middleware mints tenant-scoped
 // verified-bearer evidence for protected OpenAI-compatible mounts. Ingress must
-// not depend on `ironclaw_product_adapters` directly (architecture boundary), so
+// not depend on `ironclaw_product` directly (architecture boundary), so
 // it reaches this helper through composition's facade.
 pub use deployment::{
     RebornRuntimeProfileError, RebornRuntimeProfileOptions, hosted_single_tenant_runtime_policy,
@@ -161,15 +151,16 @@ pub use deployment::{
     local_dev_yolo_runtime_policy, local_runtime_build_input,
     local_runtime_build_input_with_options,
 };
-pub use ironclaw_product_adapters::mark_bearer_token_verified_for_tenant;
-pub use llm_admin::provider_admin::{
-    DetectedEnvLlm, EXAMPLE_OVERLAY_PROVIDER_ID, ProviderMenuEntry, ProviderProbeOutcome,
-    RebornModelRoutesState, RebornProviderAdmin, RebornProviderAdminError, RebornProviderInfo,
-    RebornProviderList, RebornProviderMetadata, RebornProviderSelection, RebornProviderStatus,
-    RebornProviderWriteOutcome, RebornV1State,
+#[cfg(any(test, feature = "test-support"))]
+pub use deployment::{local_dev_build_input, local_dev_build_input_with_profile};
+pub use ironclaw_extension_host::provider_identity::ProviderIdentityActorResolver;
+pub use ironclaw_host_api::{
+    RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
+    RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,
+    RebornUserIdentityBindingStore, RebornUserIdentityLookup, RebornUserIdentityLookupError,
+    installation_scoped_provider_user_id,
 };
-pub use llm_admin::provider_admin_product_command::RebornProviderAdminProductCommandService;
-pub use llm_admin::provider_repo::{ProviderRepo, ProviderRepoError};
+pub use ironclaw_product::mark_bearer_token_verified_for_tenant;
 pub use observability::budget::build_default_budget_accountant;
 pub use observability::budget_events::{BudgetEventObserver, TracingBudgetEventObserver};
 pub use observability::hooks::{
@@ -179,38 +170,12 @@ pub use observability::hooks::{
     build_hook_dispatcher_builder_factory_for_tenant, build_hook_projection_registry,
     tenant_extension_root,
 };
-pub use observability::operator_logs::{
-    OperatorLogLayer, capture_tracing_log, operator_log_buffer,
-};
 pub use observability::trajectory_observer::RebornTrajectoryObserver;
-// Composition's facade re-exports the continuation dispatcher for its own
-// downstream consumers (root test suites, the CLI) alongside the
-// product-auth service surface that produces it.
-pub use product_auth::api::auth::RebornAuthContinuationDispatcher;
-pub use product_auth::api::auth::{
-    RebornAuthProductError, RebornCredentialLifecycleError, RebornManualTokenChallenge,
-    RebornManualTokenError, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
-    RebornManualTokenSubmitResponse, RebornOAuthCallbackError, RebornOAuthCallbackOutcome,
-    RebornOAuthCallbackRequest, RebornOAuthCallbackResponse, RebornProductAuthServicePorts,
-    RebornProductAuthServices,
-};
-// Product-auth WebUI route-mount builders, exposed so the host-owned
-// `ironclaw_webui::webui_v2_app` (moved up from this crate) can
-// compose the Reborn-native product-auth surface into the WebChat v2 router.
-pub use product_auth::serve::{
-    ProductAuthRouteMount, ProductAuthRouteState, product_auth_route_mount,
-};
 pub use production_runtime_policy::RebornProductionRuntimePolicy;
-pub use provider_identity::{
-    ProviderIdentityActorResolver, RebornIdentityProviderId, RebornIdentityProviderUserId,
-    RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
-    RebornUserIdentityBindingError, RebornUserIdentityBindingStore, RebornUserIdentityLookup,
-    RebornUserIdentityLookupError, installation_scoped_provider_user_id,
-};
 pub use readiness::{
-    RebornFacadeReadiness, RebornReadiness, RebornReadinessDiagnostic,
-    RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
-    RebornReadinessDiagnosticStatus, RebornReadinessState, RebornWorkerReadiness,
+    RebornReadiness, RebornReadinessDiagnostic, RebornReadinessDiagnosticComponent,
+    RebornReadinessDiagnosticReason, RebornReadinessDiagnosticStatus, RebornReadinessState,
+    RebornServiceReadiness, RebornWorkerReadiness,
 };
 pub use root::product_live_adapters::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
@@ -224,7 +189,8 @@ pub use runtime::RebornTurnDriveOutcome;
 pub use runtime::{
     AssistantReply, ConversationId, RebornRuntime, RebornRuntimeError, RebornSkillActivation,
     RebornSkillActivationMode, RebornSkillAsset, RebornSkillBundle, RebornSkillExecutionPlan,
-    RebornSkillExecutionResult, RebornSkillSourceKind, build_reborn_runtime,
+    RebornSkillExecutionResult, RebornSkillSourceKind, blocked_auth_flow_canceller,
+    build_reborn_runtime, build_runtime, product_auth_challenge_provider,
 };
 pub use runtime_input::{
     DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL, DEFAULT_TURN_RUNNER_POLL_INTERVAL,
@@ -234,15 +200,6 @@ pub use runtime_input::{
     TurnRunnerSettings,
 };
 pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
-pub use web_access::register_bundled_web_access_first_party_handlers;
-pub use webui::facade::{RebornWebuiBundle, build_webui_services};
-// Host-supplied route-mount vocabulary shared with composition's own route
-// builders (nearai login, OpenAI-compat) and the host-owned gateway assembly
-// in `ironclaw_webui`. The `WebuiServeConfig` / `webui_v2_app`
-// / `WebuiAuthenticator` surface moved up into that ingress crate.
-pub use webui::route_mounts::{
-    ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount,
-};
 
 /// Re-exported identity vocabulary host binaries need to construct
 /// public runtime/WebUI types whose signatures mention a host-api identity.
@@ -297,15 +254,13 @@ pub fn open_reborn_identity_resolver(
     let filesystem = std::sync::Arc::new(ironclaw_filesystem::ScopedFilesystem::with_fixed_view(
         root, view,
     ));
-    std::sync::Arc::new(
-        ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
-            filesystem,
-            tenant_id.clone(),
-            UserId::new("test-owner").expect("user"),
-            AgentId::new("test-agent").expect("agent"),
-            None,
-        ),
-    )
+    std::sync::Arc::new(ironclaw_reborn_identity::RebornIdentityStore::new(
+        filesystem,
+        tenant_id.clone(),
+        UserId::new("test-owner").expect("user"), // safety: test-support-only static valid ID
+        AgentId::new("test-agent").expect("agent"), // safety: test-support-only static valid ID
+        None,
+    ))
 }
 
 /// Reborn model purpose slot names exposed for diagnostic callers.
@@ -401,7 +356,7 @@ use ironclaw_host_api::{
     MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, VirtualPath,
 };
 use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
-use ironclaw_processes::{FilesystemProcessResultStore, FilesystemProcessStore};
+use ironclaw_processes::{ProcessResultStore, ProcessStore};
 use ironclaw_reborn_event_store::RebornEventStoreConfig;
 use ironclaw_reborn_event_store::RebornEventStoreError;
 use ironclaw_resources::FilesystemResourceGovernor;
@@ -417,15 +372,15 @@ use thiserror::Error;
 pub type LibSqlProductionHostRuntimeServices = HostRuntimeServices<
     LibSqlRootFilesystem,
     FilesystemResourceGovernor<LibSqlRootFilesystem>,
-    FilesystemProcessStore<LibSqlRootFilesystem>,
-    FilesystemProcessResultStore<LibSqlRootFilesystem>,
+    ProcessStore<LibSqlRootFilesystem>,
+    ProcessResultStore<LibSqlRootFilesystem>,
 >;
 
 pub type PostgresProductionHostRuntimeServices = HostRuntimeServices<
     PostgresRootFilesystem,
     FilesystemResourceGovernor<PostgresRootFilesystem>,
-    FilesystemProcessStore<PostgresRootFilesystem>,
-    FilesystemProcessResultStore<PostgresRootFilesystem>,
+    ProcessStore<PostgresRootFilesystem>,
+    ProcessResultStore<PostgresRootFilesystem>,
 >;
 
 /// Consumer-store mount aliases that are tenant-rewritten by
@@ -452,6 +407,11 @@ const PER_USER_ALIASES: &[&str] = &[
     "/skills",
     "/workspace",
 ];
+
+/// The canonical global `/system` subroots, each exposed as its own read-only
+/// alias resolving to the same tenant-independent `VirtualPath`. Single source
+/// for the mount-grant wiring and its resolution test so the two cannot drift.
+const SYSTEM_SUBROOTS: [&str; 3] = ["/system/settings", "/system/extensions", "/system/skills"];
 
 /// Per-invocation [`MountView`] used as the production resolver.
 ///
@@ -526,7 +486,7 @@ fn invocation_mount_view_for_segments(
         ))?,
         MountPermissions::read_write_list_delete(),
     ));
-    for system_subroot in ["/system/settings", "/system/extensions", "/system/skills"] {
+    for system_subroot in SYSTEM_SUBROOTS {
         grants.push(MountGrant::new(
             MountAlias::new(system_subroot)?,
             VirtualPath::new(system_subroot)?,
@@ -789,7 +749,7 @@ mod mount_view_tests {
         // read-only alias and resolves to the same VirtualPath
         // regardless of tenant — system data is global, not
         // per-tenant.
-        for system_subroot in ["/system/settings", "/system/extensions", "/system/skills"] {
+        for system_subroot in SYSTEM_SUBROOTS {
             let resolved = view
                 .resolve(&ScopedPath::new(format!("{system_subroot}/foo")).unwrap())
                 .unwrap();
@@ -887,7 +847,7 @@ mod two_tenant_isolation_tests {
     //! Regression test for the cross-tenant collision finding from the
     //! 2026-05-17 serrrfirat review.
     //!
-    //! Drives the public `SecretStore` surface from two distinct
+    //! Drives the public `SecretStorePort` surface from two distinct
     //! `(tenant, user)` scopes that share identical agent/project/handle,
     //! against the production-shape `wrap_scoped`/`invocation_mount_view`
     //! wiring over an `InMemoryBackend`. Without per-tenant path
@@ -902,7 +862,7 @@ mod two_tenant_isolation_tests {
     use super::*;
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{AgentId, InvocationId, ProjectId, SecretHandle, TenantId, UserId};
-    use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore, SecretsCrypto};
+    use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStorePort, SecretsCrypto};
     use secrecy::ExposeSecret;
 
     fn scope(tenant: &str, user: &str) -> ResourceScope {
@@ -930,7 +890,7 @@ mod two_tenant_isolation_tests {
     async fn two_tenants_with_same_agent_project_handle_do_not_collide_on_put() {
         let backend = Arc::new(InMemoryBackend::new());
         let scoped = wrap_scoped(Arc::clone(&backend));
-        let store = FilesystemSecretStore::new(Arc::clone(&scoped), test_crypto());
+        let store = SecretStore::new(Arc::clone(&scoped), test_crypto());
 
         let handle = SecretHandle::new("oauth_token").unwrap();
         let scope_a = scope("tenant_a", "alice");
@@ -968,7 +928,7 @@ mod two_tenant_isolation_tests {
 #[cfg(test)]
 mod gate_record_production_mount_tests {
     //! Production-shape mount coverage for the `/gate-records` alias: drives the
-    //! `GateRecordStore` seam over the real `wrap_scoped`/`invocation_mount_view`
+    //! `GateRecordStorePort` seam over the real `wrap_scoped`/`invocation_mount_view`
     //! wiring. Pins two things: the alias is actually registered in
     //! [`PER_USER_ALIASES`] (an unregistered alias fails every save with
     //! `MountNotFound`, making the store unusable in production), and the
@@ -979,7 +939,7 @@ mod gate_record_production_mount_tests {
     use ironclaw_host_api::{
         GateRecord, GateRef, InvocationId, ProjectId, SafeSummary, TenantId, UserId,
     };
-    use ironclaw_run_state::{FilesystemGateRecordStore, GateRecordStore};
+    use ironclaw_run_state::{GateRecordStore, GateRecordStorePort};
 
     fn scope(tenant: &str, user: &str) -> ResourceScope {
         ResourceScope {
@@ -996,7 +956,7 @@ mod gate_record_production_mount_tests {
     #[tokio::test]
     async fn gate_records_save_and_load_through_the_production_mount_view() {
         let scoped = wrap_scoped(Arc::new(InMemoryBackend::new()));
-        let store = FilesystemGateRecordStore::new(scoped);
+        let store = GateRecordStore::new(scoped);
         let record = GateRecord::Approval {
             summary: SafeSummary::new("awaiting decision").unwrap(), // safety: fixed-valid test fixture
         };

@@ -37,7 +37,7 @@ use ironclaw_loop_host::{
     CapabilityResultWrite, CapabilityWriteResult, LoopCapabilityInputResolver,
     LoopCapabilityResultWriter,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ProjectCaller, ProjectService, ProjectServiceError, RebornAddMemberRequest,
     RebornCreateProjectRequest, RebornDeleteProjectRequest, RebornGetProjectRequest,
     RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
@@ -146,6 +146,7 @@ impl HostRuntime for StubHostRuntime {
                     default_permission: PermissionMode::Allow,
                     runtime_credentials: Vec::new(),
                     network_targets: Vec::new(),
+                    max_egress_bytes: None,
                     resource_profile: None,
                     origin_gate_matrix: None,
                 },
@@ -399,19 +400,19 @@ fn test_parts(
         project_service: Arc::new(StubProjectService),
         thread_service: Arc::new(ironclaw_threads::InMemorySessionThreadService::default()),
         trajectory_observer: None,
-        outbound_preferences_facade: None,
+        outbound_preferences_service: None,
         outbound_delivery_target_set_requires_approval: false,
         tool_permission_overrides: Arc::new(in_memory_backed_capability_permission_override_store()),
         auto_approve_settings: Arc::new(in_memory_backed_auto_approve_setting_store()),
         persistent_approval_policies: Arc::new(in_memory_backed_persistent_approval_policy_store()),
         approval_requests: Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store()),
         capability_leases: Arc::new(in_memory_backed_capability_lease_store()),
-        gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+        gate_record_store: Arc::new(ironclaw_run_state::GateRecordStore::new(
             ironclaw_reborn_composition::wrap_scoped(Arc::new(
                 ironclaw_filesystem::InMemoryBackend::new(),
             )),
         )),
-        replay_payload_store: Arc::new(ironclaw_capabilities::FilesystemReplayPayloadStore::new(
+        replay_payload_store: Arc::new(ironclaw_capabilities::ReplayPayloadStore::new(
             ironclaw_reborn_composition::wrap_scoped(Arc::new(
                 ironclaw_filesystem::InMemoryBackend::new(),
             )),

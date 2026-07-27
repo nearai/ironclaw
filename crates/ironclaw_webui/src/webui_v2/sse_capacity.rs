@@ -10,7 +10,7 @@
 //! This module gates `stream_events` with a per-caller concurrent cap.
 //! Slots are reserved synchronously when the handler runs and released
 //! automatically when the underlying SSE stream is dropped (client
-//! disconnect, max-lifetime reached, or facade error).
+//! disconnect, max-lifetime reached, or service error).
 //!
 //! [`RateLimitPolicy`]: ironclaw_host_api::ingress::RateLimitPolicy
 
@@ -230,7 +230,7 @@ fn lock_state(mutex: &Mutex<CapacityState>) -> std::sync::MutexGuard<'_, Capacit
 ///
 /// The slot is held by the SSE handler's async generator for the lifetime
 /// of the stream and dropped automatically when the generator is dropped
-/// — client disconnect, max-lifetime expiry, or facade error.
+/// — client disconnect, max-lifetime expiry, or service error.
 #[derive(Debug)]
 pub(crate) struct SseSlot {
     capacity: Arc<SseCapacity>,

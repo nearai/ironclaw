@@ -4,9 +4,9 @@ use async_trait::async_trait;
 use ironclaw_approvals::{LeaseApproval, permission_mode_allows_persistent_approval};
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_host_api::{EffectKind, MountView, Principal};
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ApprovalGateRecord, ApprovalInteractionRejectionKind, ApprovalLeaseTermsProvider,
-    ProductWorkflowError,
+    ProductSurfaceFailure,
 };
 
 use crate::builtin_capability_policy::{
@@ -52,7 +52,7 @@ impl PolicyApprovalLeaseTermsProvider {
         &self,
         gate: &ApprovalGateRecord,
         action: BuiltinApprovalPolicyAction<'_>,
-    ) -> Result<LeaseApproval, ProductWorkflowError> {
+    ) -> Result<LeaseApproval, ProductSurfaceFailure> {
         self.extension_lease_terms_for_active_capability(gate, action)
             .await?
             .ok_or_else(lease_terms_unavailable)
@@ -62,7 +62,7 @@ impl PolicyApprovalLeaseTermsProvider {
         &self,
         gate: &ApprovalGateRecord,
         action: BuiltinApprovalPolicyAction<'_>,
-    ) -> Result<Option<LeaseApproval>, ProductWorkflowError> {
+    ) -> Result<Option<LeaseApproval>, ProductSurfaceFailure> {
         let capability = action.capability();
         let Principal::Extension(extension_id) = &gate.request().requested_by else {
             return Ok(None);
@@ -104,7 +104,7 @@ impl PolicyApprovalLeaseTermsProvider {
     async fn active_extension_persistent_approval_allowed(
         &self,
         action: BuiltinApprovalPolicyAction<'_>,
-    ) -> Result<bool, ProductWorkflowError> {
+    ) -> Result<bool, ProductSurfaceFailure> {
         let surface = self
             .extension_surface_source
             .snapshot()
@@ -134,9 +134,9 @@ impl ApprovalLeaseTermsProvider for PolicyApprovalLeaseTermsProvider {
     async fn lease_terms_for(
         &self,
         gate: &ApprovalGateRecord,
-    ) -> Result<ironclaw_approvals::LeaseApproval, ProductWorkflowError> {
+    ) -> Result<ironclaw_approvals::LeaseApproval, ProductSurfaceFailure> {
         let action = BuiltinApprovalPolicyAction::from_host_action(gate.request().action.as_ref())
-            .ok_or(ProductWorkflowError::ApprovalInteractionRejected {
+            .ok_or(ProductSurfaceFailure::ApprovalInteractionRejected {
                 kind: ApprovalInteractionRejectionKind::UnsupportedAction,
             })?;
         if action.is_spawn_capability()
@@ -167,16 +167,16 @@ impl ApprovalLeaseTermsProvider for PolicyApprovalLeaseTermsProvider {
     async fn persistent_approval_allowed(
         &self,
         gate: &ApprovalGateRecord,
-    ) -> Result<(), ProductWorkflowError> {
+    ) -> Result<(), ProductSurfaceFailure> {
         let action = BuiltinApprovalPolicyAction::from_host_action(gate.request().action.as_ref())
-            .ok_or(ProductWorkflowError::ApprovalInteractionRejected {
+            .ok_or(ProductSurfaceFailure::ApprovalInteractionRejected {
                 kind: ApprovalInteractionRejectionKind::UnsupportedAction,
             })?;
         if let Some(descriptor) = self.registry.get_capability(action.capability_id()) {
             if permission_mode_allows_persistent_approval(descriptor.default_permission) {
                 return Ok(());
             }
-            return Err(ProductWorkflowError::ApprovalInteractionRejected {
+            return Err(ProductSurfaceFailure::ApprovalInteractionRejected {
                 kind: ApprovalInteractionRejectionKind::AlwaysAllowUnsupported,
             });
         }
@@ -205,15 +205,15 @@ impl ApprovalLeaseTermsProvider for PolicyApprovalLeaseTermsProvider {
         {
             Ok(())
         } else {
-            Err(ProductWorkflowError::ApprovalInteractionRejected {
+            Err(ProductSurfaceFailure::ApprovalInteractionRejected {
                 kind: ApprovalInteractionRejectionKind::AlwaysAllowUnsupported,
             })
         }
     }
 }
 
-fn lease_terms_unavailable() -> ProductWorkflowError {
-    ProductWorkflowError::ApprovalInteractionRejected {
+fn lease_terms_unavailable() -> ProductSurfaceFailure {
+    ProductSurfaceFailure::ApprovalInteractionRejected {
         kind: ApprovalInteractionRejectionKind::LeaseTermsUnavailable,
     }
 }
@@ -227,14 +227,14 @@ mod tests {
         ExtensionId, InvocationId, PermissionMode, ResourceEstimate, ResourceScope, SecretHandle,
         TenantId, ThreadId, UserId,
     };
-    use ironclaw_product_workflow::approval_gate_ref;
+    use ironclaw_product::approval_gate_ref;
     use ironclaw_turns::{GateRef, TurnRunId};
 
     use crate::builtin_capability_policy::builtin_capability_policy;
-    use crate::extension_host::extension_lifecycle::ActiveExtensionCapability;
     use crate::runtime::local_dev::extension_surface::{
         ExtensionCapabilitySurface, ExtensionCapabilitySurfaceSource,
     };
+    use ironclaw_extension_host::ActiveExtensionCapability;
 
     use super::*;
 
@@ -251,6 +251,7 @@ mod tests {
                 default_permission: PermissionMode::Allow,
                 runtime_credentials: Vec::new(),
                 network_targets: Vec::new(),
+                max_egress_bytes: None,
                 owner: ironclaw_extensions::InstallationOwner::Tenant,
             }]),
         );
@@ -323,6 +324,7 @@ mod tests {
                     required: true,
                 }],
                 network_targets: Vec::new(),
+                max_egress_bytes: None,
                 owner: ironclaw_extensions::InstallationOwner::Tenant,
             }]),
         );
@@ -376,6 +378,7 @@ mod tests {
                 default_permission: PermissionMode::Allow,
                 runtime_credentials: Vec::new(),
                 network_targets: Vec::new(),
+                max_egress_bytes: None,
                 owner: ironclaw_extensions::InstallationOwner::Tenant,
             }]),
         );
@@ -416,6 +419,7 @@ mod tests {
                 default_permission: PermissionMode::Ask,
                 runtime_credentials: Vec::new(),
                 network_targets: Vec::new(),
+                max_egress_bytes: None,
                 owner: ironclaw_extensions::InstallationOwner::Tenant,
             }]),
         );
@@ -485,6 +489,7 @@ mod tests {
                 default_permission: PermissionMode::Deny,
                 runtime_credentials: Vec::new(),
                 network_targets: Vec::new(),
+                max_egress_bytes: None,
                 owner: ironclaw_extensions::InstallationOwner::Tenant,
             }]),
         );
@@ -513,7 +518,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            ProductWorkflowError::ApprovalInteractionRejected {
+            ProductSurfaceFailure::ApprovalInteractionRejected {
                 kind: ApprovalInteractionRejectionKind::AlwaysAllowUnsupported
             }
         ));

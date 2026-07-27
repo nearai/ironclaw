@@ -26,11 +26,11 @@ use ironclaw_host_api::{
     SandboxQuota, SecretHandle, Timestamp, VendorId,
 };
 use ironclaw_network::NetworkHttpEgress;
-use ironclaw_processes::{ProcessError, ProcessRecord, ProcessStart, ProcessStore};
+use ironclaw_processes::{ProcessError, ProcessRecord, ProcessStart, ProcessStorePort};
 use ironclaw_resources::{ResourceError, ResourceGovernor};
 use ironclaw_safety::LeakDetector;
 use ironclaw_secrets::{
-    SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore, SecretStoreError,
+    SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStoreError, SecretStorePort,
 };
 use secrecy::ExposeSecret;
 
@@ -427,7 +427,7 @@ impl NetworkPolicyKey {
 pub struct BuiltinObligationServices {
     audit_sink: Arc<dyn AuditSink>,
     network_policies: Arc<NetworkObligationPolicyStore>,
-    secret_store: Arc<dyn SecretStore>,
+    secret_store: Arc<dyn SecretStorePort>,
     secret_injections: Arc<RuntimeSecretInjectionStore>,
     resource_governor: Arc<dyn ResourceGovernor>,
     credential_account_resolver: Option<Arc<dyn RuntimeCredentialAccountResolver>>,
@@ -436,7 +436,7 @@ pub struct BuiltinObligationServices {
 impl BuiltinObligationServices {
     pub fn new(
         audit_sink: Arc<dyn AuditSink>,
-        secret_store: Arc<dyn SecretStore>,
+        secret_store: Arc<dyn SecretStorePort>,
         resource_governor: Arc<dyn ResourceGovernor>,
     ) -> Self {
         Self::with_handoff_stores(
@@ -451,7 +451,7 @@ impl BuiltinObligationServices {
     pub(crate) fn with_handoff_stores(
         audit_sink: Arc<dyn AuditSink>,
         network_policies: Arc<NetworkObligationPolicyStore>,
-        secret_store: Arc<dyn SecretStore>,
+        secret_store: Arc<dyn SecretStorePort>,
         secret_injections: Arc<RuntimeSecretInjectionStore>,
         resource_governor: Arc<dyn ResourceGovernor>,
     ) -> Self {
@@ -485,7 +485,7 @@ impl BuiltinObligationServices {
         self.audit_sink.clone()
     }
 
-    pub fn secret_store(&self) -> Arc<dyn SecretStore> {
+    pub fn secret_store(&self) -> Arc<dyn SecretStorePort> {
         self.secret_store.clone()
     }
 
@@ -530,7 +530,7 @@ impl BuiltinObligationServices {
         inner: Arc<S>,
     ) -> ProcessObligationLifecycleStore
     where
-        S: ProcessStore + 'static,
+        S: ProcessStorePort + 'static,
     {
         ProcessObligationLifecycleStore::new(
             inner,
@@ -542,7 +542,7 @@ impl BuiltinObligationServices {
 
     pub fn process_obligation_lifecycle_store_dyn(
         &self,
-        inner: Arc<dyn ProcessStore>,
+        inner: Arc<dyn ProcessStorePort>,
     ) -> ProcessObligationLifecycleStore {
         ProcessObligationLifecycleStore::from_dyn(
             inner,
@@ -587,10 +587,10 @@ impl fmt::Debug for BuiltinObligationServices {
 }
 
 #[derive(Clone)]
-pub(crate) struct SharedSecretStore(pub(crate) Arc<dyn SecretStore>);
+pub(crate) struct SharedSecretStore(pub(crate) Arc<dyn SecretStorePort>);
 
 #[async_trait]
-impl SecretStore for SharedSecretStore {
+impl SecretStorePort for SharedSecretStore {
     async fn put(
         &self,
         scope: ResourceScope,
@@ -657,14 +657,14 @@ impl SecretStore for SharedSecretStore {
 }
 
 /// Process-store wrapper that owns spawn-phase obligation handoffs after
-/// `ProcessStore::start` succeeds.
+/// `ProcessStorePort::start` succeeds.
 ///
 /// `CapabilityHost` aborts prepared effects when process start fails. Once
 /// start succeeds, this wrapper becomes responsible for discarding staged
 /// network/secret handoffs and reconciling or releasing a prepared resource
 /// reservation when the process reaches a terminal state.
 pub struct ProcessObligationLifecycleStore {
-    inner: Arc<dyn ProcessStore>,
+    inner: Arc<dyn ProcessStorePort>,
     network_policies: Arc<NetworkObligationPolicyStore>,
     secret_injections: Arc<RuntimeSecretInjectionStore>,
     resource_governor: Arc<dyn ResourceGovernor>,
@@ -681,9 +681,9 @@ impl ProcessObligationLifecycleStore {
         resource_governor: Arc<dyn ResourceGovernor>,
     ) -> Self
     where
-        S: ProcessStore + 'static,
+        S: ProcessStorePort + 'static,
     {
-        let inner: Arc<dyn ProcessStore> = inner;
+        let inner: Arc<dyn ProcessStorePort> = inner;
         Self::from_dyn(
             inner,
             network_policies,
@@ -693,7 +693,7 @@ impl ProcessObligationLifecycleStore {
     }
 
     pub(crate) fn from_dyn(
-        inner: Arc<dyn ProcessStore>,
+        inner: Arc<dyn ProcessStorePort>,
         network_policies: Arc<NetworkObligationPolicyStore>,
         secret_injections: Arc<RuntimeSecretInjectionStore>,
         resource_governor: Arc<dyn ResourceGovernor>,
@@ -975,7 +975,7 @@ impl ProcessObligationProcessKey {
 }
 
 #[async_trait]
-impl ProcessStore for ProcessObligationLifecycleStore {
+impl ProcessStorePort for ProcessObligationLifecycleStore {
     async fn start(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError> {
         let claimed = self.claim_active_process_handoff(&start)?;
         let process_id = start.process_id;
@@ -1092,7 +1092,7 @@ pub struct BuiltinObligationHandler {
     audit_sink: Option<Arc<dyn AuditSink>>,
     security_audit_sink: Option<Arc<dyn SecurityAuditSink>>,
     network_policies: Option<Arc<NetworkObligationPolicyStore>>,
-    secret_store: Option<Arc<dyn SecretStore>>,
+    secret_store: Option<Arc<dyn SecretStorePort>>,
     secret_injections: Option<Arc<RuntimeSecretInjectionStore>>,
     resource_governor: Option<Arc<dyn ResourceGovernor>>,
     credential_account_resolver: Option<Arc<dyn RuntimeCredentialAccountResolver>>,
@@ -1143,14 +1143,14 @@ impl BuiltinObligationHandler {
 
     pub fn with_secret_store<T>(mut self, store: Arc<T>) -> Self
     where
-        T: SecretStore + 'static,
+        T: SecretStorePort + 'static,
     {
-        let store: Arc<dyn SecretStore> = store;
+        let store: Arc<dyn SecretStorePort> = store;
         self.secret_store = Some(store);
         self
     }
 
-    pub fn with_secret_store_dyn(mut self, store: Arc<dyn SecretStore>) -> Self {
+    pub fn with_secret_store_dyn(mut self, store: Arc<dyn SecretStorePort>) -> Self {
         self.secret_store = Some(store);
         self
     }
@@ -1886,7 +1886,7 @@ fn credential_stage_error_to_obligation_error(
 /// [`CredentialStageError::AuthRequired`] via [`crate::services::stage_secret_error`];
 /// other failures map to [`CredentialStageError::Backend`].
 async fn stage_credential_material(
-    secret_store: &dyn SecretStore,
+    secret_store: &dyn SecretStorePort,
     secret_injections: &RuntimeSecretInjectionStore,
     source_scope: &ResourceScope,
     target_scope: &ResourceScope,
@@ -2107,7 +2107,7 @@ fn secret_obligation_failed() -> CapabilityObligationError {
 /// between the two call sites. Each caller decides how to treat a store `Err`
 /// (the pre-flight fails open and skips; the obligation backstop fails closed).
 pub(crate) async fn secret_present(
-    store: &dyn SecretStore,
+    store: &dyn SecretStorePort,
     scope: &ResourceScope,
     handle: &SecretHandle,
 ) -> Result<bool, SecretStoreError> {
@@ -2128,7 +2128,7 @@ pub(crate) async fn secret_present(
 /// to treat a store `Err` (the pre-flight fails open and skips; the obligation
 /// backstop and lease fail closed).
 pub(crate) async fn secret_owner_scope(
-    store: &dyn SecretStore,
+    store: &dyn SecretStorePort,
     caller_scope: &ResourceScope,
     handle: &SecretHandle,
 ) -> Result<Option<ResourceScope>, SecretStoreError> {
@@ -2353,7 +2353,7 @@ mod tests {
         ResourceReservationId, RuntimeKind, TenantId, TrustClass, UserId,
     };
     use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
-    use ironclaw_secrets::FilesystemSecretStore;
+    use ironclaw_secrets::SecretStore;
 
     use super::*;
 
@@ -2429,7 +2429,7 @@ mod tests {
     async fn builtin_obligation_handler_satisfy_release_preserves_staged_handoffs() {
         let network_policies = Arc::new(NetworkObligationPolicyStore::new());
         let secret_injections = Arc::new(RuntimeSecretInjectionStore::new());
-        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+        let secret_store = Arc::new(SecretStore::ephemeral());
         let governor = Arc::new(InMemoryResourceGovernor::new());
         let services = BuiltinObligationServices::with_handoff_stores(
             Arc::new(InMemoryAuditSink::new()),
@@ -2499,7 +2499,7 @@ mod tests {
         let shared = caller.tenant_shared_managed_scope();
 
         // Absent in both scopes -> None (dispatch then gates with AuthRequired).
-        let store = FilesystemSecretStore::ephemeral();
+        let store = SecretStore::ephemeral();
         assert_eq!(
             secret_owner_scope(&store, &caller, &handle).await.unwrap(),
             None,
@@ -2507,7 +2507,7 @@ mod tests {
 
         // Present ONLY at the tenant-shared admin-managed scope -> resolves there,
         // so one admin-set key satisfies a caller who never provisioned it.
-        let store = FilesystemSecretStore::ephemeral();
+        let store = SecretStore::ephemeral();
         store
             .put(
                 shared.clone(),
@@ -2526,7 +2526,7 @@ mod tests {
         );
 
         // Present at BOTH scopes -> the caller's OWN secret wins over the shared one.
-        let store = FilesystemSecretStore::ephemeral();
+        let store = SecretStore::ephemeral();
         store
             .put(
                 caller.clone(),
@@ -2559,7 +2559,7 @@ mod tests {
     // material is staged at the caller's own invocation slot (#5459).
     #[tokio::test]
     async fn inject_secret_once_falls_back_to_tenant_shared_admin_key() {
-        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+        let secret_store = Arc::new(SecretStore::ephemeral());
         let secret_injections = Arc::new(RuntimeSecretInjectionStore::new());
         let services = BuiltinObligationServices::with_handoff_stores(
             Arc::new(InMemoryAuditSink::new()),
@@ -2617,7 +2617,7 @@ mod tests {
         let services = BuiltinObligationServices::with_handoff_stores(
             Arc::new(InMemoryAuditSink::new()),
             Arc::new(NetworkObligationPolicyStore::new()),
-            Arc::new(FilesystemSecretStore::ephemeral()),
+            Arc::new(SecretStore::ephemeral()),
             Arc::new(RuntimeSecretInjectionStore::new()),
             Arc::new(InMemoryResourceGovernor::new()),
         );
@@ -2675,7 +2675,7 @@ mod tests {
         let services = BuiltinObligationServices::with_handoff_stores(
             Arc::new(InMemoryAuditSink::new()),
             Arc::new(NetworkObligationPolicyStore::new()),
-            Arc::new(FilesystemSecretStore::ephemeral()),
+            Arc::new(SecretStore::ephemeral()),
             Arc::new(RuntimeSecretInjectionStore::new()),
             Arc::new(InMemoryResourceGovernor::new()),
         );
@@ -2750,7 +2750,7 @@ mod tests {
         let services = BuiltinObligationServices::with_handoff_stores(
             Arc::new(InMemoryAuditSink::new()),
             Arc::new(NetworkObligationPolicyStore::new()),
-            Arc::new(FilesystemSecretStore::ephemeral()),
+            Arc::new(SecretStore::ephemeral()),
             Arc::new(RuntimeSecretInjectionStore::new()),
             Arc::new(InMemoryResourceGovernor::new()),
         );
@@ -2848,7 +2848,7 @@ mod tests {
         let services = BuiltinObligationServices::with_handoff_stores(
             Arc::new(InMemoryAuditSink::new()),
             Arc::new(NetworkObligationPolicyStore::new()),
-            Arc::new(FilesystemSecretStore::ephemeral()),
+            Arc::new(SecretStore::ephemeral()),
             Arc::new(RuntimeSecretInjectionStore::new()),
             Arc::new(InMemoryResourceGovernor::new()),
         );

@@ -447,12 +447,22 @@ async fn assert_provider_tools(
     capabilities: Arc<dyn LoopCapabilityPort>,
     capability_ids: &[CapabilityId],
 ) -> Result<(), HostManagedModelError> {
-    let definitions = provider_tool_definitions(&capabilities).await?;
-    for capability_id in capability_ids {
-        if !definitions
-            .iter()
-            .any(|definition| &definition.capability_id == capability_id)
-        {
+    // Hosted-MCP packages publish discovered tools asynchronously (bounded
+    // discovery retries under #6520), so re-check the surface briefly before
+    // failing — the contract is "advertised before the reply", not "at the
+    // first instant of the model call". Still fails if a tool never appears.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let definitions = provider_tool_definitions(&capabilities).await?;
+        let missing = capability_ids.iter().find(|capability_id| {
+            !definitions
+                .iter()
+                .any(|definition| &definition.capability_id == *capability_id)
+        });
+        let Some(capability_id) = missing else {
+            return Ok(());
+        };
+        if tokio::time::Instant::now() >= deadline {
             return Err(HostManagedModelError::safe(
                 HostManagedModelErrorKind::InvalidRequest,
                 format!(
@@ -461,8 +471,8 @@ async fn assert_provider_tools(
                 ),
             ));
         }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    Ok(())
 }
 
 async fn provider_tool_definitions(

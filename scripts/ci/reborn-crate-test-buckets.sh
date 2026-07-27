@@ -49,10 +49,7 @@ jq -c -n --argjson packages "${packages_json}" '
 
       ironclaw_reborn_composition: "composition-core",
 
-      ironclaw_product_adapter_registry: "product-workflow",
-      ironclaw_product_adapters: "product-workflow",
-      ironclaw_product_context: "product-workflow",
-      ironclaw_product_workflow: "product-workflow",
+      ironclaw_product: "product-workflow",
 
       ironclaw_attachments: "webui-ingress",
       ironclaw_projects: "webui-ingress",

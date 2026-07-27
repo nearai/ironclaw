@@ -21,16 +21,17 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{
     BUILTIN_FIRST_PARTY_PROVIDER, CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest,
     CapabilitySurfaceVersion as HostRuntimeCapabilitySurfaceVersion, HostRuntime, HostRuntimeError,
-    HostRuntimeHealth, HostRuntimeServices, HostRuntimeStatus, RuntimeApprovalResume,
-    RuntimeAuthResume, RuntimeCapabilityOutcome, RuntimeInvocation, RuntimeProcessPort,
-    RuntimeStatusRequest, TriggerCreateHook,
+    HostRuntimeHealth, HostRuntimeServices, HostRuntimeStatus, NATIVE_MEMORY_FIRST_PARTY_PROVIDER,
+    RuntimeApprovalResume, RuntimeAuthResume, RuntimeCapabilityOutcome, RuntimeInvocation,
+    RuntimeProcessPort, RuntimeStatusRequest, TriggerCreateHook,
     VisibleCapabilityRequest as RuntimeVisibleCapabilityRequest,
     VisibleCapabilitySurface as RuntimeVisibleCapabilitySurface, builtin_first_party_handlers,
     builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
+    native_memory_first_party_package,
 };
 use ironclaw_network::{PolicyNetworkHttpEgress, ReqwestNetworkTransport};
 use ironclaw_resources::InMemoryResourceGovernor;
-use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial};
+use ironclaw_secrets::{SecretMaterial, SecretStore};
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 use ironclaw_wasm::{WitToolHost, WitToolRuntimeConfig};
 
@@ -62,6 +63,7 @@ pub(crate) fn local_dev_host_runtime_with_http_egress(
 ) -> HarnessResult<Arc<dyn HostRuntime>> {
     let mut registry = ExtensionRegistry::new();
     registry.insert(builtin_first_party_package()?)?;
+    registry.insert(native_memory_first_party_package()?)?;
     local_dev_host_runtime_with_registry_and_runtime_http_egress(
         storage_root,
         registry,
@@ -236,6 +238,13 @@ impl HostRuntime for TriggerActiveRunLookupHostRuntime {
         self.inner.auth_resume_capability(request).await
     }
 
+    async fn decline_auth_capability(
+        &self,
+        request: ironclaw_host_runtime::RuntimeAuthDecline,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        self.inner.decline_auth_capability(request).await
+    }
+
     async fn resume_spawn_capability(
         &self,
         request: RuntimeApprovalResume,
@@ -278,14 +287,21 @@ pub(crate) fn local_dev_host_runtime_with_registry_and_egress(
     // dispatches); `Err(AuthRequired)` raises a `BlockedAuth` gate at dispatch.
     credential_account_result: Result<SecretHandle, CredentialStageError>,
 ) -> HarnessResult<Arc<dyn HostRuntime>> {
+    let filesystem = local_dev_root_filesystem(storage_root, LocalDevRootMounts::github_assets())?;
     let services = HostRuntimeServices::new(
         Arc::new(registry),
-        local_dev_root_filesystem(storage_root, LocalDevRootMounts::github_assets())?,
+        Arc::clone(&filesystem),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GithubHarnessAuthorizer::new()?),
         ironclaw_processes::ProcessServices::in_memory(),
         HostRuntimeCapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
+    // The typed auth-gate deny/resume paths (#6520) durably terminalize the
+    // parked invocation through the run-state store; without it the decline
+    // fails closed as HostUnavailable and kills the run.
+    .with_filesystem_run_state(ironclaw_reborn_composition::wrap_scoped(Arc::clone(
+        &filesystem,
+    )))
     .with_secret_store(Arc::new(StaticSecretStore::new(
         SecretHandle::new("github_manual_access")?,
         SecretMaterial::from("ghp_fake_fixture_token"),
@@ -311,6 +327,7 @@ pub(crate) fn local_dev_host_runtime_with_live_http_egress(
 ) -> HarnessResult<Arc<dyn HostRuntime>> {
     let mut registry = ExtensionRegistry::new();
     registry.insert(builtin_first_party_package()?)?;
+    registry.insert(native_memory_first_party_package()?)?;
 
     let services = HostRuntimeServices::new(
         Arc::new(registry),
@@ -320,7 +337,7 @@ pub(crate) fn local_dev_host_runtime_with_live_http_egress(
         ironclaw_processes::ProcessServices::in_memory(),
         HostRuntimeCapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
-    .with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()))
+    .with_secret_store(Arc::new(SecretStore::ephemeral()))
     .with_first_party_capabilities(Arc::new(builtin_first_party_handlers(Arc::new(
         ironclaw_triggers::InMemoryTriggerRepository::default(),
     ))?))
@@ -361,7 +378,7 @@ pub(crate) fn local_dev_host_runtime_with_real_egress_pipeline(
         ironclaw_processes::ProcessServices::in_memory(),
         HostRuntimeCapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
-    .with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()))
+    .with_secret_store(Arc::new(SecretStore::ephemeral()))
     .with_first_party_capabilities(Arc::new(builtin_first_party_handlers(Arc::new(
         ironclaw_triggers::InMemoryTriggerRepository::default(),
     ))?))
@@ -463,6 +480,23 @@ pub(crate) fn local_dev_root_filesystem(
             memory,
         )?;
     }
+    // Tenant-scoped structured state (run-state records, approval requests):
+    // the capability host's gate/decline/resume paths persist run records
+    // under `/tenants/...` via `with_filesystem_run_state`, mirroring the
+    // production `/tenants` mount in composition.
+    let tenant_state = Arc::new(InMemoryBackend::new());
+    root.mount(
+        local_dev_mount_descriptor(
+            "/tenants",
+            "local-dev-harness-tenant-state",
+            BackendKind::MemoryDocuments,
+            StorageClass::StructuredRecords,
+            ContentKind::StructuredRecord,
+            IndexPolicy::NotIndexed,
+            tenant_state.capabilities(),
+        )?,
+        tenant_state,
+    )?;
     Ok(Arc::new(root))
 }
 
@@ -521,23 +555,43 @@ pub(crate) fn local_dev_mount_descriptor(
 
 pub(crate) fn first_party_trust_policy() -> HarnessResult<HostTrustPolicy> {
     Ok(HostTrustPolicy::new(vec![Box::new(
-        AdminConfig::with_entries(vec![AdminEntry::for_local_manifest(
-            PackageId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
-            "/system/extensions/builtin/manifest.toml".to_string(),
-            None,
-            HostTrustAssignment::first_party(),
-            vec![
-                EffectKind::DispatchCapability,
-                EffectKind::ReadFilesystem,
-                EffectKind::WriteFilesystem,
-                EffectKind::DeleteFilesystem,
-                EffectKind::Network,
-                EffectKind::SpawnProcess,
-                EffectKind::ExecuteCode,
-                EffectKind::ExternalWrite,
-            ],
-            None,
-        )]),
+        AdminConfig::with_entries(vec![
+            AdminEntry::for_local_manifest(
+                PackageId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+                "/system/extensions/builtin/manifest.toml".to_string(),
+                None,
+                HostTrustAssignment::first_party(),
+                vec![
+                    EffectKind::DispatchCapability,
+                    EffectKind::ReadFilesystem,
+                    EffectKind::WriteFilesystem,
+                    EffectKind::DeleteFilesystem,
+                    EffectKind::Network,
+                    EffectKind::SpawnProcess,
+                    EffectKind::ExecuteCode,
+                    EffectKind::ExternalWrite,
+                ],
+                None,
+            ),
+            AdminEntry::for_local_manifest(
+                PackageId::new(NATIVE_MEMORY_FIRST_PARTY_PROVIDER)?,
+                "/system/extensions/ironclaw.memory/manifest.toml".to_string(),
+                None,
+                HostTrustAssignment::first_party(),
+                // Mirror the production native-memory ceiling
+                // (`builtin_first_party_trust_policy` in factory.rs and the
+                // local-dev provider trust in runtime/local_dev.rs): the v3
+                // memory tools carry `DispatchCapability` like every other
+                // first-party model tool (echo/http/shell/…), so the ceiling
+                // must include it or every memory dispatch is `PolicyDenied`.
+                vec![
+                    EffectKind::DispatchCapability,
+                    EffectKind::ReadFilesystem,
+                    EffectKind::WriteFilesystem,
+                ],
+                None,
+            ),
+        ]),
     )])?)
 }
 

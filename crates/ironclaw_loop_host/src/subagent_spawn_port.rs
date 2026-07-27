@@ -1374,7 +1374,7 @@ impl SpawnSubagentInputCodec for JsonSpawnSubagentInputCodec {
 /// filesystem/CAS/roster semantics. For `loop_host`'s own unit tests that
 /// just need a legal writer, not a durability test; production and any test
 /// that exercises real await-edge behavior use `ironclaw_runner`'s
-/// `FilesystemAwaitEdgeStore`.
+/// `AwaitEdgeStore`.
 #[derive(Default)]
 pub struct InMemoryAwaitEdgeWriter {
     inner: parking_lot::Mutex<HashMap<(TurnRunId, TurnRunId), AwaitedChildSetRecord>>,

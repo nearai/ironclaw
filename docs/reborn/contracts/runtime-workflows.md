@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-25
 **Status:** Draft contract
-**Depends on:** `docs/reborn/2026-04-24-os-like-architecture-design.md`, `docs/reborn/2026-04-24-os-like-architecture-feedback.md`, `docs/reborn/contracts/agent-loop-protocol.md`
+**Depends on:** `docs/reborn/contracts/agent-loop-protocol.md`, `docs/reborn/contracts/capability-access.md`, and the owning crate contracts.
 **Default loop mechanics:** `docs/reborn/contracts/lightweight-agent-loop.md`
 
 ---
@@ -40,7 +40,7 @@ These are logical service contracts. They do not all need to become crates immed
 | `ApprovalManager` | Approval requests, stable request ids, approve/deny/always decisions, replay-safe resolution | Chat transcript ownership, auth flows, runtime execution |
 | `AuthFlowManager` | Auth-required state, OAuth/token prompting, callback completion, retry-after-auth | Approval semantics, auth prompt delivery policy, raw secret display, runtime dispatch |
 | `RunStateManager` | One-active-run-per-thread, blocked states, cancel/interrupt/resume, terminal transitions, checkpoints | Transcript storage, stream delivery, capability execution |
-| `RuntimeDispatcher` | Runtime lane selection and fail-closed handoff to configured backends | Manifest discovery, runtime-specific implementation, product workflows |
+| `RuntimeDispatcher` | Runtime lane selection and fail-closed handoff to configured backends | Manifest discovery, runtime-specific implementation, product-surface orchestration |
 | `EventStreamManager` | Realtime delivery, event ids, reconnect semantics, keepalives, fanout | Durable audit/history ownership, business policy |
 | `ProjectionReducer` | Derived read models for sidebar/activity/progress/job/project/harness views | Durable source-of-truth state, external side effects |
 

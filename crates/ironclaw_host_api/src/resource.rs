@@ -27,6 +27,19 @@ pub const LOCAL_DEFAULT_PROJECT_ID: &str = "bootstrap";
 /// caller-supplied identifier can ever collide with it.
 pub const SYSTEM_RESERVED_ID: &str = "\x1fSYSTEM\x1f";
 
+/// Filesystem path segment for trusted resource-scope identifiers.
+///
+/// The unforgeable system sentinel contains a control byte that is invalid in
+/// virtual paths; durable scoped stores use this stable escaped segment while
+/// preserving ordinary validated IDs unchanged.
+pub fn resource_scope_path_segment(value: &str) -> &str {
+    if value == SYSTEM_RESERVED_ID {
+        "__system__"
+    } else {
+        value
+    }
+}
+
 /// Reserved `user_id` for tenant-shared, admin-managed credentials (#5459 P3).
 ///
 /// A secret stored under this sentinel user (paired with the caller's REAL
@@ -55,7 +68,7 @@ pub struct ResourceScope {
     // and the caller scope is stamped host-side from trusted installation config
     // plus the authenticator's verified `UserId` (see
     // `webui_serve::authenticate_request` and the rule in
-    // `crates/ironclaw_product_workflow/CLAUDE.md`), so a browser body cannot
+    // `crates/ironclaw_product/CLAUDE.md`), so a browser body cannot
     // influence it. Do not add a `ResourceScope` (or bare `TenantId`/`UserId`)
     // field to any untrusted request DTO.
     //

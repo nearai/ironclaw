@@ -3,9 +3,9 @@ use std::collections::BTreeMap;
 use ironclaw_host_api::{ExtensionId, SecretHandle};
 
 use crate::installations::{
-    ExtensionActivationState, ExtensionCredentialBinding, ExtensionCredentialHandle,
-    ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationId,
-    ExtensionInstallationPersistedParts, InstallationOwner,
+    ExtensionCredentialBinding, ExtensionCredentialHandle, ExtensionInstallation,
+    ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationPersistedParts,
+    InstallationOwner,
 };
 
 /// Reduce persisted installation rows to one deterministic row per extension.
@@ -13,10 +13,9 @@ use crate::installations::{
 /// The reducer is shared by persistence and migration adapters so the generic
 /// installation policy has one owner: the extension state model. The canonical
 /// row uses the extension id as its installation id, gives tenant ownership
-/// precedence over member ownership, unions member owners, keeps an activation
-/// state only when every source agrees, merges agreeing credential bindings,
-/// selects the newest health snapshot (with a typed installation-id tie-break),
-/// and preserves the maximum row update timestamp.
+/// precedence over member ownership, unions member owners, merges agreeing
+/// credential bindings, selects the newest health snapshot (with a typed
+/// installation-id tie-break), and preserves the maximum row update timestamp.
 pub fn canonicalize_installation_rows(
     installations: Vec<ExtensionInstallation>,
 ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError> {
@@ -44,16 +43,6 @@ pub fn canonicalize_installation_rows(
                 });
             }
 
-            let first_activation = first.activation_state();
-            let activation_state = if rows
-                .iter()
-                .all(|row| row.activation_state() == first_activation)
-            {
-                first_activation
-            } else {
-                ExtensionActivationState::Disabled
-            };
-
             let owner = if rows.iter().any(|row| row.owner().is_tenant()) {
                 InstallationOwner::Tenant
             } else {
@@ -64,7 +53,6 @@ pub fn canonicalize_installation_rows(
                     .collect();
                 InstallationOwner::users(user_ids)?
             };
-
             let mut bindings_by_handle = BTreeMap::<ExtensionCredentialHandle, SecretHandle>::new();
             for row in &rows {
                 for binding in row.credential_bindings() {
@@ -112,7 +100,6 @@ pub fn canonicalize_installation_rows(
             ExtensionInstallation::from_persisted_parts(ExtensionInstallationPersistedParts {
                 installation_id,
                 extension_id,
-                activation_state,
                 manifest_ref,
                 credential_bindings,
                 health,

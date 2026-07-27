@@ -1,5 +1,5 @@
 //! Caller-scoped, read-only multi-mount filesystem browser for the WebUI v2
-//! facade.
+//! service.
 //!
 //! Implements [`FilesystemBrowseReader`] — the port the standalone "Workspace /
 //! Files" viewer calls to navigate the agent's internal filesystem (persistent
@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use ironclaw_attachments::DEFAULT_MAX_ATTACHMENT_BYTES;
 use ironclaw_filesystem::{DirEntry, FilesystemError, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{ResourceScope, ScopedPath};
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     FilesystemBrowseReader, FsMount, ProjectFsEntry, ProjectFsError, ProjectFsFile, ProjectFsStat,
 };
 
@@ -49,7 +49,7 @@ impl<F: RootFilesystem> MountScopedFilesystemReader<F> {
     /// The mount alias this reader confines to, or `None` for a mount this
     /// composition does not serve (e.g. `Skills`, pending a scope-resolved
     /// skills mount). `None` is what keeps an unwired mount a clean 404 at the
-    /// facade rather than a backend error.
+    /// service rather than a backend error.
     fn alias_for(mount: FsMount) -> Option<&'static str> {
         match mount {
             FsMount::Memory => Some(BROWSE_MEMORY_ALIAS),

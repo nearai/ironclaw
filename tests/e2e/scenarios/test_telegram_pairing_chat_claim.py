@@ -31,7 +31,6 @@ import pytest
 from helpers import api_post, sse_stream
 
 from .test_telegram_e2e import (
-    _LOCAL_TELEGRAM_WASM,
     PAIRED_USER_ID,
     WEBHOOK_SECRET,
     _next_test_update_id,
@@ -40,6 +39,10 @@ from .test_telegram_e2e import (
     post_telegram_webhook,
     reset_fake_tg,
     wait_for_sent_messages,
+)
+
+pytestmark = pytest.mark.skip(
+    reason="legacy local Telegram WASM source tree has been retired"
 )
 
 
@@ -139,20 +142,11 @@ async def test_telegram_pairing_reply_names_every_surface(
     the ambiguity that #3317 surfaced (user pastes code into TUI, no
     handler matches, agent improvises an unhelpful reply).
 
-    The reply text lives inside the Telegram WASM channel binary, so this
-    assertion only runs when a locally-built WASM is available to overlay
-    onto the registry-downloaded artifact. CI workflows that don't build
-    `channels-src/telegram/` skip this scenario; the canary lane in
-    `scripts/live_canary/auth_registry.py` covers the same wording
-    against the deployed binary.
+    The reply text lives inside the Telegram WASM channel binary. The local
+    legacy source tree has been retired, so the canary lane in
+    `scripts/live_canary/auth_registry.py` covers this wording against the
+    deployed binary.
     """
-    if not _LOCAL_TELEGRAM_WASM.exists():
-        pytest.skip(
-            "Locally-built Telegram WASM not present at "
-            f"{_LOCAL_TELEGRAM_WASM} — pairing-reply wording asserts "
-            "source-tree text and can't be exercised against the registry "
-            "artifact."
-        )
     base_url = isolated_telegram_e2e_server["base_url"]
     http_url = isolated_telegram_e2e_server["http_url"]
     fake_tg_url = isolated_telegram_e2e_server["fake_tg_url"]
@@ -388,13 +382,6 @@ async def test_telegram_dm_approve_command_is_intercepted_by_allowlist_gate(
     `/api/chat/send`, so it covers exactly the layer the reviewer
     flagged.
     """
-    if not _LOCAL_TELEGRAM_WASM.exists():
-        pytest.skip(
-            "Locally-built Telegram WASM not present at "
-            f"{_LOCAL_TELEGRAM_WASM} — channel-layer interception is in "
-            "the WASM binary and can't be exercised against the registry "
-            "artifact."
-        )
     base_url = isolated_telegram_e2e_server["base_url"]
     http_url = isolated_telegram_e2e_server["http_url"]
     fake_tg_url = isolated_telegram_e2e_server["fake_tg_url"]

@@ -137,13 +137,13 @@ mounts = "workspace"
 network = "dev_wildcard"
 
 [[grants]]
-capability = "builtin.memory_search"
+capability = "ironclaw.memory.search"
 effects = ["dispatch_capability", "read_filesystem"]
 mounts = "memory"
 network = "default"
 
 [[grants]]
-capability = "builtin.memory_write"
+capability = "ironclaw.memory.write"
 effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
 mounts = "memory"
 network = "default"
@@ -155,13 +155,13 @@ mounts = "memory"
 network = "default"
 
 [[grants]]
-capability = "builtin.memory_read"
+capability = "ironclaw.memory.read"
 effects = ["dispatch_capability", "read_filesystem"]
 mounts = "memory"
 network = "default"
 
 [[grants]]
-capability = "builtin.memory_tree"
+capability = "ironclaw.memory.tree"
 effects = ["dispatch_capability", "read_filesystem"]
 mounts = "memory"
 network = "default"
@@ -226,12 +226,6 @@ network = "default"
 
 [[grants]]
 capability = "builtin.extension_install"
-effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
-mounts = "system_extensions_lifecycle"
-network = "default"
-
-[[grants]]
-capability = "builtin.extension_activate"
 effects = ["dispatch_capability", "read_filesystem", "write_filesystem", "network"]
 mounts = "system_extensions_lifecycle"
 network = "dev_wildcard"

@@ -427,7 +427,8 @@ mod tests {
         MODEL_CREDITS_EXHAUSTED_REASON_KIND,
     };
     use ironclaw_agent_loop::test_support::{
-        MockAgentLoopDriverHost, MockHostCall, test_run_context,
+        MockAgentLoopDriverHost, MockHostCall, ScenarioScript, ScriptedCapabilityOutcome,
+        test_run_context,
     };
     use ironclaw_turns::{
         LoopMessageRef, RedactedCheckpointPayload, TurnCheckpointId,
@@ -1295,8 +1296,16 @@ mod tests {
         };
         let checkpoint_id = TurnCheckpointId::new();
 
+        // The denied resume crosses the capability port as a typed terminal
+        // auth resume (the host terminalizes it as gate-declined); the loop
+        // then continues to the model, which closes the turn.
         let (inner, _checkpoints) = MockAgentLoopDriverHost::builder()
             .run_context(context.clone())
+            .script(
+                ScenarioScript::reply_only("denial surfaced").with_capability_outcomes(vec![vec![
+                    ScriptedCapabilityOutcome::failed("gate_declined"),
+                ]]),
+            )
             .build();
         let host = ResumePayloadHost::new(inner, checkpoint_id, loaded);
 

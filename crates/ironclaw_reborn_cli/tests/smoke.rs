@@ -3056,6 +3056,33 @@ fn run_reports_runtime_readiness_snapshot_without_touching_v1_state() {
 }
 
 #[test]
+fn no_subcommand_defaults_to_serve_command() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home_dir = temp.path().join("home");
+
+    let output = reborn_command()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("HOME", &home_dir)
+        .env_remove("IRONCLAW_REBORN_PROFILE")
+        .env_remove("IRONCLAW_REBORN_WEBUI_TOKEN")
+        .env_remove("IRONCLAW_REBORN_WEBUI_USER_ID")
+        .output()
+        .expect("ironclaw-reborn should default to serve");
+
+    assert!(
+        !output.status.success(),
+        "default serve must fail closed without a WebUI token; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("IRONCLAW_REBORN_WEBUI_TOKEN must be set"),
+        "stderr should match the `serve` auth gate: {stderr}"
+    );
+}
+
+#[test]
 fn doctor_uses_reborn_home_override_without_touching_v1_state() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
@@ -4657,7 +4684,7 @@ fn drive_real_turn_via_webui(port: u16, webui_token: &str, label: &str) -> Resul
 /// pins the fix: the stub HTTP server captures the `Authorization` header
 /// the live provider actually sends, and asserts it carries the stored key.
 #[test]
-fn stored_key_reaches_real_turn_via_webui_api() {
+fn stored_key_reaches_real_turn_via_product_surface() {
     const STORED_KEY: &str = "sk-smoke-real-turn-stored-nearai-key";
 
     let temp = tempfile::tempdir().expect("tempdir");
@@ -4749,7 +4776,7 @@ fn stored_key_reaches_real_turn_via_webui_api() {
     );
 }
 
-/// Companion to `stored_key_reaches_real_turn_via_webui_api`: proves the
+/// Companion to `stored_key_reaches_real_turn_via_product_surface`: proves the
 /// stored-key path is not a one-boot fluke by driving TWO independent `serve`
 /// boots (fresh child process each time, same `reborn_home`, no `onboard` or
 /// `models set-provider` run again in between) and asserting the second boot
@@ -4899,7 +4926,7 @@ fn seed_stored_llm_key(reborn_home: &Path, provider_id: &str, key: &str) {
         let store = ironclaw_reborn_composition::open_local_dev_secret_store(&reborn_home)
             .await
             .expect("open local dev secret store");
-        ironclaw_reborn_composition::LlmKeyStore::new(store)
+        ironclaw_operator::LlmKeyStore::new(store)
             .put(&provider_id, ironclaw_secrets::SecretMaterial::from(key))
             .await
             .expect("seed provider key");

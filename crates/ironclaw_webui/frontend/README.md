@@ -25,7 +25,9 @@ and generated JavaScript asset names are outside this module-import rule.
 `frontend/dist/`. Cargo does not embed that local preview directory.
 `crates/ironclaw_webui/build.rs` runs
 `corepack pnpm install --frozen-lockfile` and a Vite production build into
-Cargo's `OUT_DIR`, then embeds that generated output into the Rust binary.
+Cargo's `OUT_DIR`, then embeds that generated output into the Rust binary. If
+`corepack` is not on `PATH`, the build script falls back to
+`npm exec --yes --package=pnpm@11.7.0 -- pnpm ...`.
 
 `./build.sh` is the one-shot local refresh helper. It vendors pinned browser
 assets, installs dependencies with Corepack, and runs the Vite production build.

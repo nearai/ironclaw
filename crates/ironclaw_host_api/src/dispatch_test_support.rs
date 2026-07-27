@@ -151,7 +151,10 @@ impl CapabilityDispatcher for TestDispatcher {
                     Actor::System => None,
                 };
                 let run_id = match invocation.origin {
-                    InvocationOrigin::LoopRun(run_id) if invocation.process_id.is_none() => {
+                    InvocationOrigin::LoopRun(run_id)
+                    | InvocationOrigin::ScheduledLoopRun(run_id)
+                        if invocation.process_id.is_none() =>
+                    {
                         Some(run_id)
                     }
                     _ => None,

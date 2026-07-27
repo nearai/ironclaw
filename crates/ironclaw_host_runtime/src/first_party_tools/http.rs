@@ -646,6 +646,7 @@ mod tests {
         runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
     ) -> FirstPartyCapabilityRequest {
         FirstPartyCapabilityRequest {
+            origin: None,
             capability_id: CapabilityId::new(HTTP_SAVE_CAPABILITY_ID).unwrap(),
             scope: sample_scope(),
             run_id: None,

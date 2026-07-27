@@ -7,12 +7,12 @@
 - Use these neighboring contracts before changing behavior:
   - `crates/ironclaw_turns/AGENTS.md`
   - `crates/ironclaw_threads/CLAUDE.md`
-  - `crates/ironclaw_product_adapters/CLAUDE.md`
+  - `crates/ironclaw_product/CLAUDE.md`
   - `docs/reborn/contracts/events-projections.md`
 
 ## What This Crate Owns
 
-- Adapter-safe conversation binding and inbound-turn facade contracts.
+- Adapter-safe conversation binding and inbound-turn service contracts.
 - External actor/conversation refs, source/reply binding refs, participant checks, message acceptance refs, and idempotency semantics.
 - Binding/state-store persistence for conversation binding, accepted-message idempotency, and turn-submission state.
 - Canonical `TurnCoordinator` inputs: `TurnScope`, `TurnActor`, `AcceptedMessageRef`, `SourceBindingRef`, and `ReplyTargetBindingRef`.
