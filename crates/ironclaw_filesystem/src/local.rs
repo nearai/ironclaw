@@ -224,6 +224,17 @@ impl DiskFilesystem {
             FilesystemOperation::CreateDirAll,
         )
         .await?;
+        // Same residual TOCTOU window as `resolve_for_write` (see the
+        // comment at that function's re-rooting step): the ancestor check
+        // above and this `create_dir_all` are two syscalls, not one atomic
+        // operation, so a symlink swapped into the parent chain between
+        // them is not caught until the post-creation `ensure_contained`
+        // below — by which point `create_dir_all` may already have created
+        // directories at the swapped-in location. Closing this fully needs
+        // the same descriptor/capability-rooted traversal (openat /
+        // O_NOFOLLOW / cap-std) tracked as a follow-up in PR #2996 review;
+        // this function's defense-in-depth is the post-creation containment
+        // check, which still fails closed rather than silently succeeding.
         tokio::fs::create_dir_all(&resolved.joined)
             .await
             .map_err(|error| io_error(path.clone(), FilesystemOperation::CreateDirAll, error))?;
@@ -481,6 +492,15 @@ impl RootFilesystem for DiskFilesystem {
     }
 
     async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        // `resolved` is the canonicalized, containment-checked path from
+        // `resolve_existing`, but the check and the removal below are still
+        // two syscalls: an ancestor symlink swapped in between them is the
+        // same residual TOCTOU window documented on `resolve_for_write`
+        // (local.rs) and not closed until descriptor/capability-rooted
+        // traversal lands (PR #2996 review follow-up). `remove_dir_all` and
+        // `remove_file` operate on the already-canonical `resolved` path
+        // rather than re-walking `path`'s original components, which keeps
+        // this in line with the other mutating operations in this file.
         let resolved = self
             .resolve_existing(path, FilesystemOperation::Delete)
             .await?;
