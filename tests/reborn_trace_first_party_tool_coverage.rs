@@ -78,21 +78,28 @@ const REBORN_FIRST_PARTY_E2E_COVERED_CAPABILITIES: &[&str] = &[
 
 const SKILL_NAME: &str = "reborn-skill-e2e";
 
-static TRACE_COMMONS_BASE_DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+const TRACE_COMMONS_TEST_CHILD: &str = "IRONCLAW_TRACE_COMMONS_TEST_CHILD";
 
-fn setup_trace_commons_base_dir() -> &'static tempfile::TempDir {
-    TRACE_COMMONS_BASE_DIR.get_or_init(|| {
-        let dir = tempfile::tempdir().expect("tempdir for IRONCLAW_BASE_DIR");
-        let _env_guard = ironclaw_common::env_helpers::lock_env();
-        // SAFETY: OnceLock serializes this one write before either Trace Commons test
-        // reads the process-wide base directory.
-        unsafe {
-            std::env::set_var("IRONCLAW_BASE_DIR", dir.path());
-        }
-        // ponytail: process isolation is enough while only these tests read this state;
-        // inject an explicit path into the harness if that boundary grows.
-        dir
-    })
+fn isolated_trace_commons_base_dir(test_name: &str) -> Option<std::path::PathBuf> {
+    if std::env::var_os(TRACE_COMMONS_TEST_CHILD).is_some() {
+        return Some(
+            std::env::var_os("IRONCLAW_BASE_DIR")
+                .expect("child IRONCLAW_BASE_DIR")
+                .into(),
+        );
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir for IRONCLAW_BASE_DIR");
+    let status = std::process::Command::new(std::env::current_exe().expect("current test binary"))
+        .args(["--exact", test_name, "--nocapture"])
+        .env(TRACE_COMMONS_TEST_CHILD, "1")
+        .env("IRONCLAW_BASE_DIR", dir.path())
+        .status()
+        .expect("run isolated Trace Commons test process");
+    assert!(status.success(), "isolated Trace Commons test failed");
+    // ponytail: a child process isolates the existing env-based API; inject a
+    // base path into the capability harness if production gains that seam.
+    None
 }
 
 fn host_runtime_tool_wait() -> HarnessWaitConfig {
@@ -560,10 +567,14 @@ async fn reborn_trace_trigger_management_first_party_tools_parity() {
 
 #[tokio::test]
 async fn reborn_trace_trace_commons_first_party_tools_parity() {
-    let base_dir = setup_trace_commons_base_dir();
+    let Some(base_dir) =
+        isolated_trace_commons_base_dir("reborn_trace_trace_commons_first_party_tools_parity")
+    else {
+        return;
+    };
     assert_eq!(
         ironclaw_common::paths::ironclaw_base_dir(),
-        base_dir.path(),
+        base_dir,
         "Trace Commons coverage must not read developer state"
     );
     let onboard = CapabilityId::new(TRACE_COMMONS_ONBOARD_CAPABILITY_ID).expect("capability id");
@@ -739,7 +750,11 @@ async fn reborn_trace_trace_commons_first_party_tools_parity() {
 
 #[tokio::test]
 async fn reborn_trace_trace_commons_pilot_tools_are_model_visible() {
-    let _base_dir = setup_trace_commons_base_dir();
+    if isolated_trace_commons_base_dir("reborn_trace_trace_commons_pilot_tools_are_model_visible")
+        .is_none()
+    {
+        return;
+    }
     let onboard = CapabilityId::new(TRACE_COMMONS_ONBOARD_CAPABILITY_ID).expect("capability id");
     let status = CapabilityId::new(TRACE_COMMONS_STATUS_CAPABILITY_ID).expect("capability id");
     let credits = CapabilityId::new(TRACE_COMMONS_CREDITS_CAPABILITY_ID).expect("capability id");
