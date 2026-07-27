@@ -5861,7 +5861,7 @@ async fn setup_extension_projects_through_configured_lifecycle_service() {
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
             .expect("valid package ref")
     );
-    assert_eq!(response.phase, InstallationState::Unsupported);
+    assert_eq!(response.phase, LifecyclePublicState::SetupNeeded);
     assert!(response.blockers.iter().any(|blocker| matches!(
         blocker,
         LifecycleReadinessBlocker::Runtime { ref_id: Some(ref_id) }
@@ -5894,7 +5894,7 @@ async fn extension_setup_is_available_as_product_view() {
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
             .expect("valid package ref")
     );
-    assert_eq!(response.phase, InstallationState::Unsupported);
+    assert_eq!(response.phase, LifecyclePublicState::SetupNeeded);
     assert_eq!(
         lifecycle_service.package_refs(),
         vec![
@@ -9555,7 +9555,7 @@ async fn setup_extension_returns_post_setup_onboarding_payload() {
         .expect("setup extension response");
 
     let onboarding = response.onboarding.as_ref().expect("onboarding payload");
-    assert_eq!(response.phase, InstallationState::Configured);
+    assert_eq!(response.phase, LifecyclePublicState::SetupNeeded);
     assert_eq!(
         onboarding.credential_instructions.as_deref(),
         Some("github is installed. Activate it to make its tools available.")

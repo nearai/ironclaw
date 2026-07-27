@@ -506,7 +506,10 @@ mod tests {
     };
 
     use async_trait::async_trait;
-    use ironclaw_auth::{CredentialAccountId, CredentialAccountProjection};
+    use ironclaw_auth::{
+        CredentialAccountId, CredentialAccountLabel, CredentialAccountProjection,
+        CredentialOwnership,
+    };
     use ironclaw_host_api::{AgentId, CapabilitySurfaceKind, ProjectId, TenantId, UserId};
 
     use super::*;
@@ -606,6 +609,49 @@ mod tests {
         assert_eq!(request.scope.resource.project_id, caller.project_id);
         assert_eq!(request.provider.as_str(), "fixture");
         assert_eq!(request.requester_extension.as_str(), "fixture");
+    }
+
+    /// A durable credential account that exists but is not `Configured`
+    /// (expired, revoked, refresh-failed, missing secret material) is NOT
+    /// readiness. Projecting the mere existence of an account row as
+    /// "configured" makes a broken integration look callable and hides the
+    /// reconnect affordance the caller needs.
+    #[tokio::test]
+    async fn nonconfigured_durable_credential_status_overrides_active_runtime_checkpoint() {
+        for account_status in [
+            CredentialAccountStatus::Revoked,
+            CredentialAccountStatus::Expired,
+            CredentialAccountStatus::RefreshFailed,
+            CredentialAccountStatus::Missing,
+            CredentialAccountStatus::Inactive,
+            CredentialAccountStatus::PendingSetup,
+        ] {
+            let service = ListingService {
+                extension: LifecycleInstalledExtensionSummary {
+                    summary: summary_with_onboarding(),
+                    phase: InstallationState::Active,
+                    install_scope: None,
+                },
+            };
+            let credentials: Arc<dyn ExtensionCredentialSetupService> =
+                Arc::new(RecordingCredentials::with_account_status(account_status));
+
+            let response = list_extensions(
+                Arc::new(service),
+                Some(credentials),
+                no_channel_connections(),
+                caller(),
+            )
+            .await
+            .expect("list extensions");
+            let extension = response.extensions.first().expect("one extension");
+
+            assert_eq!(
+                extension.installation_state,
+                LifecyclePublicState::SetupNeeded,
+                "{account_status:?} personal auth must prevent active projection"
+            );
+        }
     }
 
     #[tokio::test]
@@ -968,6 +1014,16 @@ mod tests {
     #[derive(Default)]
     struct RecordingCredentials {
         status_requests: Mutex<Vec<ExtensionCredentialStatusRequest>>,
+        account_status: Option<CredentialAccountStatus>,
+    }
+
+    impl RecordingCredentials {
+        fn with_account_status(account_status: CredentialAccountStatus) -> Self {
+            Self {
+                account_status: Some(account_status),
+                ..Self::default()
+            }
+        }
     }
 
     #[async_trait]
@@ -976,8 +1032,21 @@ mod tests {
             &self,
             request: ExtensionCredentialStatusRequest,
         ) -> Result<Option<CredentialAccountProjection>, ProductSurfaceError> {
+            let account = self
+                .account_status
+                .map(|status| CredentialAccountProjection {
+                    id: CredentialAccountId::new(),
+                    provider: request.provider.clone(),
+                    label: CredentialAccountLabel::new("fixture account")
+                        .expect("valid account label"),
+                    status,
+                    ownership: CredentialOwnership::UserReusable,
+                    owner_extension: None,
+                    granted_extensions: Vec::new(),
+                    secret_handle_count: 1,
+                });
             self.status_requests.lock().expect("lock").push(request);
-            Ok(None)
+            Ok(account)
         }
 
         async fn submit_manual_token(

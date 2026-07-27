@@ -3,7 +3,7 @@ use crate::{ProductOutboundEnvelope, ProjectionCursor};
 use chrono::{DateTime, Utc};
 use ironclaw_auth::{AuthAccountLastError, AuthAccountState};
 use ironclaw_common::llm_costs::RunCost;
-use ironclaw_host_api::{InstallationState, LifecyclePublicState, ThreadId};
+use ironclaw_host_api::{LifecyclePublicState, ThreadId};
 use ironclaw_threads::{SessionThreadRecord, SummaryArtifact, ThreadMessageRecord};
 use ironclaw_turns::run_profile::LoopModelUsage;
 use ironclaw_turns::{
@@ -1492,7 +1492,10 @@ pub struct RebornExtensionOnboardingPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornSetupExtensionResponse {
     pub package_ref: LifecyclePackageRef,
-    pub phase: InstallationState,
+    /// The caller-visible setup phase (§6.1) -- the host checkpoint folded
+    /// together with this caller's credential readiness, never the raw
+    /// internal checkpoint.
+    pub phase: LifecyclePublicState,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blockers: Vec<LifecycleReadinessBlocker>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

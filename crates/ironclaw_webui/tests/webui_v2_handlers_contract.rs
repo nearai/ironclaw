@@ -25,9 +25,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Utc;
 use http_body_util::BodyExt;
 use ironclaw_host_api::{
-    ActivityId, AgentId, Blocked, CapabilityId, ExtensionId, GateRef, GateWaypoint,
-    InstallationState, InvocationId, LifecyclePublicState, Outcome, OutcomeRefs, ProductSurface,
-    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    ActivityId, AgentId, Blocked, CapabilityId, ExtensionId, GateRef, GateWaypoint, InvocationId,
+    LifecyclePublicState, Outcome, OutcomeRefs, ProductSurface, ProductSurfaceCaller,
+    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
     ProductSurfaceValidationCode, ProjectId, Resolution, ResultPreviewMeta, ResultProgress,
     ResultRef, RuntimeKind, SafeSummary, TenantId, TerminateHint, ThreadId, ToolVerdict, UserId,
 };
@@ -1784,7 +1784,7 @@ fn operator_config_entry(key: String, value: Value) -> RebornOperatorConfigEntry
 fn extension_setup_response(package_ref: LifecyclePackageRef) -> RebornSetupExtensionResponse {
     RebornSetupExtensionResponse {
         package_ref,
-        phase: InstallationState::Installed,
+        phase: LifecyclePublicState::SetupNeeded,
         blockers: Vec::new(),
         payload: None,
         secrets: Vec::new(),

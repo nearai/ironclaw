@@ -23,8 +23,8 @@ use ironclaw_auth::{
 };
 use ironclaw_auth::{RebornAuthContinuationDispatcher, RebornProductAuthServices};
 use ironclaw_host_api::{
-    AgentId, InstallationState, InvocationId, LifecyclePublicState, ProductSurfaceCaller,
-    ProductSurfaceError, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
+    AgentId, InvocationId, LifecyclePublicState, ProductSurfaceCaller, ProductSurfaceError,
+    ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
 };
 use ironclaw_product::{
     EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, LifecyclePackageKind, LifecyclePackageRef,
@@ -309,7 +309,7 @@ impl ironclaw_host_api::ProductSurface for UnusedServices {
                     items: vec![
                         serde_json::to_value(RebornSetupExtensionResponse {
                             package_ref,
-                            phase: InstallationState::Installed,
+                            phase: LifecyclePublicState::SetupNeeded,
                             blockers: Vec::new(),
                             payload: None,
                             secrets: vec![RebornExtensionSetupSecret {
