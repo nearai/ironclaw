@@ -1041,8 +1041,10 @@ async fn malformed_spawn_subagent_input_is_model_repairable_through_the_gateway(
         );
     }
 
-    // Control: the same armed registration error with a WELL-FORMED payload
-    // must not reject. Without this, the assertions above would pass on a port
+    // Control: the same armed errors with a WELL-FORMED payload must not
+    // reject — at BOTH stages. Without this, either double could reject
+    // unconditionally and every assertion above would still pass, proving
+    // error routing rather than malformed-input handling. Without this, the assertions above would pass on a port
     // double that rejects unconditionally — proving error routing, not that the
     // missing `mission` field is what triggers the rejection.
     let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
@@ -1059,21 +1061,52 @@ async fn malformed_spawn_subagent_input_is_model_repairable_through_the_gateway(
         LlmModelProfilePolicy::new()
             .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
     );
-    let capabilities = Arc::new(
-        GatewayCapabilityPort::with_spawn_subagent_surface()
-            .with_provider_tool_registration_error(AgentLoopHostErrorKind::InvalidInvocation),
-    );
+    for (stage, port) in [
+        (
+            "validation",
+            GatewayCapabilityPort::with_spawn_subagent_surface()
+                .with_provider_tool_validation_error(AgentLoopHostErrorKind::InvalidInvocation),
+        ),
+        (
+            "registration",
+            GatewayCapabilityPort::with_spawn_subagent_surface()
+                .with_provider_tool_registration_error(AgentLoopHostErrorKind::InvalidInvocation),
+        ),
+    ] {
+        let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
+            id: "call_1".to_string(),
+            name: "builtin__spawn_subagent".to_string(),
+            arguments: serde_json::json!({"flavor": "explorer", "mission": "survey the repo"}),
+            reasoning: None,
+            signature: None,
+            arguments_parse_error: None,
+        }]));
+        let gateway = LlmProviderModelGateway::with_provider_identity(
+            STATIC_PROVIDER_ID,
+            Arc::clone(&provider),
+            LlmModelProfilePolicy::new()
+                .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+        );
+        let capabilities = Arc::new(port);
 
-    gateway
-        .stream_model_with_capabilities(model_request(interactive_model()), capabilities.clone())
-        .await
-        .expect("a well-formed spawn payload must register even with the error armed");
+        gateway
+            .stream_model_with_capabilities(
+                model_request(interactive_model()),
+                capabilities.clone(),
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{stage}: a well-formed spawn payload must pass with the error armed: {error:?}"
+                )
+            });
 
-    assert_eq!(
-        capabilities.registered.lock().unwrap().len(),
-        1,
-        "a well-formed spawn payload must reach registration"
-    );
+        assert_eq!(
+            capabilities.registered.lock().unwrap().len(),
+            1,
+            "{stage}: a well-formed spawn payload must reach registration"
+        );
+    }
 }
 
 fn repair_request_messages(
@@ -4485,7 +4518,14 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
         &self,
         tool_call: &ProviderToolCall,
     ) -> Result<(), ironclaw_turns::run_profile::AgentLoopHostError> {
-        if let Some(kind) = self.validation_error {
+        // Payload-sensitive for the same reason as the registration stage
+        // below: an unconditional rejection would prove that an injected error
+        // maps correctly, while saying nothing about the malformed input the
+        // spawn test is named for. A well-formed `mission` must pass.
+        if let Some(kind) = self
+            .validation_error
+            .filter(|_| tool_call.arguments.get("mission").is_none())
+        {
             return Err(ironclaw_turns::run_profile::AgentLoopHostError::new(
                 kind,
                 "provider tool output was structurally invalid",
