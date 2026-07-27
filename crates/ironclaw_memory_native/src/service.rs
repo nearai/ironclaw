@@ -1,4 +1,4 @@
-//! IronClaw memory service facade for Reborn.
+//! IronClaw memory service service for Reborn.
 //!
 //! This module owns the host-facing IronClaw memory operation shapes. Host
 //! runtime callers still resolve scope, mounts, grants, approvals, and audit

@@ -17,33 +17,26 @@
 //! over the configured filesystem backend.
 //!
 //! Returns the raw `ironclaw_turns::TurnError`; each consumer maps it into
-//! its own domain error at its own boundary (`ProductWorkflowError` for the
+//! its own domain error at its own boundary (`ProductSurfaceFailure` for the
 //! approval/auth locators, `TriggerError` for the trigger poller) rather than
 //! this shared substrate trait picking a consumer's error type.
 
 use async_trait::async_trait;
 use ironclaw_turns::{TurnError, TurnPersistenceSnapshot};
+use std::sync::{Arc, RwLock};
 
 #[async_trait]
 pub(crate) trait TurnRunSnapshotSource: Send + Sync {
     async fn turn_run_snapshot(&self) -> Result<TurnPersistenceSnapshot, TurnError>;
 }
 
-/// A late-rebindable snapshot source. The trigger subsystem reads the current
-/// inner source on every snapshot, so a `test-support` caller can repoint it at
-/// its own `TurnStateRowStore` after the runtime is built (the
-/// `RebornIntegrationGroup` case the module docstring describes). Production
-/// installs it over the composed runtime's own store and never repoints it, so
-/// behavior is identical to holding the store directly.
 pub(crate) struct RebindableTurnRunSnapshotSource {
-    inner: std::sync::Arc<std::sync::RwLock<std::sync::Arc<dyn TurnRunSnapshotSource>>>,
+    source: Arc<RwLock<Arc<dyn TurnRunSnapshotSource>>>,
 }
 
 impl RebindableTurnRunSnapshotSource {
-    pub(crate) fn new(
-        inner: std::sync::Arc<std::sync::RwLock<std::sync::Arc<dyn TurnRunSnapshotSource>>>,
-    ) -> Self {
-        Self { inner }
+    pub(crate) fn new(source: Arc<RwLock<Arc<dyn TurnRunSnapshotSource>>>) -> Self {
+        Self { source }
     }
 }
 
@@ -51,9 +44,9 @@ impl RebindableTurnRunSnapshotSource {
 impl TurnRunSnapshotSource for RebindableTurnRunSnapshotSource {
     async fn turn_run_snapshot(&self) -> Result<TurnPersistenceSnapshot, TurnError> {
         let source = self
-            .inner
+            .source
             .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
         source.turn_run_snapshot().await
     }

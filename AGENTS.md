@@ -37,8 +37,8 @@ Narrative docs under `openwiki/` are generated and read-only.
 
 ## Reborn architecture mental model
 
-External surfaces normalize untrusted requests through product adapters and the
-product-workflow facade. Thread and turn services establish durable conversation
+External surfaces normalize untrusted requests through product adapters or
+`ProductSurface`. Thread and turn services establish durable conversation
 state. The scheduler and Reborn run executor invoke the canonical runner/driver
 and agent loop. Capability execution then crosses authorization, approvals,
 obligations, host-runtime mediation, and the selected runtime lane. Durable typed
@@ -77,8 +77,9 @@ Stable ownership decisions:
 - Durable events, projections, and transport streams are separate contracts.
 - Authorization, approvals, resources, obligations, dispatch, and runtime lanes
   remain separate stages.
-- Product workflow owns product-facing facades; composition implements/wires
-  ports; WebUI crates own HTTP/transport and frontend presentation.
+- `ironclaw_product` owns product-facing orchestration and `ProductSurface`
+  descriptors; composition wires dependencies; WebUI owns HTTP/transport and
+  frontend presentation.
 - Provider-neutral model contracts and provider implementations belong in
   `ironclaw_llm`; wrappers must delegate the complete provider trait.
 - Declarative extension metadata belongs in `ironclaw_extensions`; execution
@@ -120,7 +121,7 @@ process-local mutex held across backend I/O.
 Keep bootstrap configuration, persisted settings, and encrypted secrets as
 separate layers. Preserve configuration precedence, secret-mediated provider
 resolution, and fail-closed startup behavior. Update the owning Reborn config,
-composition, product-workflow, and frontend contracts when onboarding changes.
+product, composition, and frontend contracts when onboarding changes.
 
 ## Security and runtime invariants
 
@@ -155,39 +156,11 @@ composition, product-workflow, and frontend contracts when onboarding changes.
 
 ## Documentation and testing
 
-- Update relevant specs, API docs, `FEATURE_PARITY.md`, and `CHANGELOG.md` when
-  behavior or implementation status changes.
-- Production-wired Reborn behavior ships with a `tests/integration/` test at a
-  meaningful seam. Crate-tier fallback is acceptable only when integration
-  cannot reach the path, and the PR must explain why.
-- Test through the caller when a helper or classifier gates a side effect. A
-  helper-only unit test is not sufficient when wrappers compute or forward its
-  inputs.
-- Cross-layer behavior needs a caller-level or whole-path contract test using
-  hermetic external-service doubles. Recorded model fixtures protect model
-  choice or request-shape behavior; live canaries are supplemental drift checks.
-- Never commit live secrets or PII. Fixture changes must pass their repository
-  validation scripts.
-- Comments promising cross-layer guarantees must be enforced by code/tests or
-  softened to describe intent.
-
-Test progression for behavior changes:
-
-```bash
-cargo test -p OWNING_CRATE
-cargo clippy -p OWNING_CRATE --all-targets --all-features -- -D warnings
-cargo test -p ironclaw_architecture  # dependency/ownership changes
-cargo test --test reborn_integration_SCENARIO  # whole-turn behavior
-bash scripts/reborn-e2e-rust.sh  # Reborn contract/whole-path changes
-scripts/pre-commit-safety.sh
-```
-
-Before committing Rust changes, run the workspace-wide clippy command documented
-in `.claude/rules/review-discipline.md`; zero warnings includes pre-existing
-warnings surfaced by that command.
-
-Read the testing skill/rule for backend, recorded-model, browser, and live-canary
-tiers. Do not assume every tier ran merely because required PR checks are green.
+Update the owning contract/docs when behavior changes. Choose tests using
+`.claude/rules/testing.md` and
+`.claude/skills/ironclaw-reborn-testing/SKILL.md`; use the smallest tier that
+reaches the changed contract. Never commit secrets or PII. Before committing,
+follow `.claude/rules/testing.md` and the owning crate guidance for clippy and safety checks.
 
 Agents opening or updating a pull request must preserve and complete the
 `Test Strategy` section from `.github/pull_request_template.md`. Every test tier

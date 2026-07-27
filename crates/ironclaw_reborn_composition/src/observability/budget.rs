@@ -12,9 +12,7 @@ use std::sync::Arc;
 
 use ironclaw_loop_host::{BudgetSeedingPolicy, GovernorBackedAccountant, ModelCostTable};
 use ironclaw_reborn_config::BudgetDefaults;
-use ironclaw_resources::{
-    BudgetEventSink, BudgetGateStorePort, BudgetPeriod, BudgetThresholds, ResourceGovernor,
-};
+use ironclaw_resources::{BudgetEventSink, BudgetPeriod, BudgetThresholds, ResourceGovernor};
 use ironclaw_turns::run_profile::LoopModelBudgetAccountant;
 use rust_decimal::Decimal;
 
@@ -27,7 +25,7 @@ use rust_decimal::Decimal;
 ///    `FilesystemResourceGovernor` for libsql / postgres production).
 /// 2. The caller's `ModelCostTable` (typically derived from
 ///    `LlmModelProfilePolicy::build_cost_table()` at startup).
-/// 3. A `BudgetGateStorePort` (in-memory for local-dev,
+/// 3. A `BudgetGateStore` (in-memory for local-dev,
 ///    `BudgetGateStore` scoped to the tenant for production).
 /// 4. A `BudgetSeedingPolicy` derived from the caller-resolved
 ///    [`BudgetDefaults`] so fresh user/project accounts pick up the
@@ -56,7 +54,7 @@ use rust_decimal::Decimal;
 pub fn build_default_budget_accountant(
     governor: Arc<dyn ResourceGovernor>,
     cost_table: Arc<dyn ModelCostTable>,
-    gate_store: Arc<dyn BudgetGateStorePort>,
+    gate_store: Arc<dyn ironclaw_resources::BudgetGateStorePort>,
     event_sink: Arc<dyn BudgetEventSink>,
     defaults: &BudgetDefaults,
 ) -> Arc<dyn LoopModelBudgetAccountant> {
@@ -99,7 +97,7 @@ mod tests {
     #[tokio::test]
     async fn seeds_compiled_default_user_cap_on_first_touch() {
         let governor: Arc<dyn ResourceGovernor> = Arc::new(InMemoryResourceGovernor::new());
-        let gate_store: Arc<dyn BudgetGateStorePort> =
+        let gate_store: Arc<dyn ironclaw_resources::BudgetGateStorePort> =
             Arc::new(in_memory_backed_budget_gate_store());
         let cost_table: Arc<dyn ModelCostTable> = Arc::new(ZeroCostTable);
         let event_sink: Arc<dyn BudgetEventSink> = Arc::new(InMemoryBudgetEventSink::new());

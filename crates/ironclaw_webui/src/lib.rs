@@ -21,6 +21,7 @@
 mod auth;
 mod cli_token_login;
 mod oidc;
+mod product_auth;
 mod session;
 mod signed_session_login;
 // Folded in from the former `ironclaw_webui_v2` crate: the WebChat v2 HTTP
@@ -45,6 +46,7 @@ mod webui_ws_origin;
 pub use ironclaw_host_ingress::{
     ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount, SplitRouteMount,
 };
+pub use product_auth::{ProductAuthRouteMount, ProductAuthRouteState, product_auth_route_mount};
 pub use webui_rate_limit::RateLimitConfigError;
 pub use webui_serve::{
     WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, WebuiServeConfigError,

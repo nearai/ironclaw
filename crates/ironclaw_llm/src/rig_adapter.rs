@@ -32,8 +32,8 @@ use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, FinishReason,
     LlmProvider, ReasoningDetail as IronReasoningDetail, ReasoningDetails as IronReasoningDetails,
     ToolCall as IronToolCall, ToolCompletionRequest, ToolCompletionResponse,
-    ToolDefinition as IronToolDefinition, strip_unsupported_completion_params,
-    strip_unsupported_tool_params,
+    ToolDefinition as IronToolDefinition, normalized_model_override,
+    strip_unsupported_completion_params, strip_unsupported_tool_params,
 };
 use crate::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
 #[cfg(test)]
@@ -976,31 +976,13 @@ fn build_rig_request(
     })
 }
 
-/// Inject a per-request model override into the rig request's `additional_params`.
+/// Inject a per-request model override into the typed rig request field.
 ///
-/// Rig-core bakes the model name at construction time inside each provider's
-/// `CompletionModel` implementation. This helper inserts a top-level `"model"`
-/// key into `additional_params`, which rig-core flattens into the provider's
-/// request payload via `#[serde(flatten)]`.
-///
-/// Whether the override takes effect depends on the downstream API server's
-/// handling of duplicate JSON keys (most Python/Go servers use last-key-wins,
-/// but this is not guaranteed by the JSON spec). The `effective_model_name()`
-/// trait method should be consulted to determine the model actually used.
+/// Rig-core providers use this field in preference to their configured model.
+/// Keeping it out of flattened `additional_params` ensures the serialized JSON
+/// request has exactly one top-level `model` key.
 fn inject_model_override(rig_req: &mut RigRequest, model_override: Option<&str>) {
-    let Some(model) = model_override else {
-        return;
-    };
-    match rig_req.additional_params {
-        Some(ref mut params) => {
-            if let Some(obj) = params.as_object_mut() {
-                obj.insert("model".to_string(), serde_json::json!(model));
-            }
-        }
-        None => {
-            rig_req.additional_params = Some(serde_json::json!({ "model": model }));
-        }
-    }
+    rig_req.model = model_override.map(str::to_owned);
 }
 
 #[async_trait]
@@ -1328,8 +1310,10 @@ where
         self.model_name.clone()
     }
 
-    fn effective_model_name(&self, _requested_model: Option<&str>) -> String {
-        self.active_model_name()
+    fn effective_model_name(&self, requested_model: Option<&str>) -> String {
+        normalized_model_override(requested_model)
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.active_model_name())
     }
 
     fn set_model(&self, _model: &str) -> Result<(), LlmError> {
@@ -1424,7 +1408,224 @@ mod tests {
     use rig::completion::CompletionError;
     use rig::streaming::{RawStreamingChoice, RawStreamingToolCall, StreamingCompletionResponse};
     use std::sync::Arc;
-    use tokio::sync::mpsc;
+    use std::time::Duration;
+    use tokio::sync::{mpsc, oneshot};
+
+    const LOOPBACK_CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
+
+    async fn capture_one_http_request() -> (String, oneshot::Receiver<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback capture server");
+        let addr = listener.local_addr().expect("capture server address");
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let read = socket.read(&mut buffer).await.expect("read request");
+                if read == 0 {
+                    return;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers =
+                    std::str::from_utf8(&request[..header_end]).expect("request headers are UTF-8");
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then_some(value.trim())
+                    })
+                    .expect("content length header")
+                    .parse::<usize>()
+                    .expect("content length is numeric");
+                let body_start = header_end + 4;
+                if request.len() < body_start + content_length {
+                    continue;
+                }
+                tx.send(
+                    String::from_utf8(request[body_start..body_start + content_length].to_vec())
+                        .expect("request body is UTF-8"),
+                )
+                .expect("test receives captured request");
+                socket
+                    .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+                    .await
+                    .expect("write test response");
+                return;
+            }
+        });
+        (format!("http://{addr}/v1"), rx)
+    }
+
+    fn tool_request_with_model_override() -> ToolCompletionRequest {
+        ToolCompletionRequest::new(
+            vec![ChatMessage::user("use the echo tool")],
+            vec![IronToolDefinition {
+                name: "echo".to_string(),
+                description: "Echo the supplied text".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": { "text": { "type": "string" } },
+                    "required": ["text"]
+                }),
+            }],
+        )
+        .with_model("override-model")
+    }
+
+    fn assert_single_model_override(body: &str) {
+        assert_eq!(
+            body.match_indices("\"model\":").count(),
+            1,
+            "the raw JSON body must have exactly one top-level model key: {body}",
+        );
+        assert!(
+            body.contains("\"model\":\"override-model\""),
+            "the one serialized model must preserve the request override: {body}",
+        );
+    }
+
+    async fn captured_request_body(captured_body: oneshot::Receiver<String>) -> String {
+        tokio::time::timeout(LOOPBACK_CAPTURE_TIMEOUT, captured_body)
+            .await
+            .expect("request capture timed out")
+            .expect("captured request body")
+    }
+
+    #[tokio::test]
+    async fn tool_completion_request_serializes_the_model_once() {
+        use rig::client::CompletionClient;
+        use rig::providers::openai;
+
+        let (base_url, captured_body) = capture_one_http_request().await;
+        let client = openai::Client::builder()
+            .api_key("test-key")
+            .base_url(&base_url)
+            .build()
+            .expect("build OpenAI-compatible client")
+            .completions_api();
+        let adapter = RigAdapter::new(
+            client.completion_model("configured-model"),
+            "configured-model",
+        );
+        adapter
+            .complete_with_tools(tool_request_with_model_override())
+            .await
+            .expect_err("capture server intentionally rejects the request");
+
+        let body = captured_request_body(captured_body).await;
+        assert_single_model_override(&body);
+    }
+
+    #[derive(Clone)]
+    struct CacheableCompletionModel;
+
+    impl CompletionModel for CacheableCompletionModel {
+        type Response = serde_json::Value;
+        type StreamingResponse = ();
+        type Client = ();
+
+        fn make(_client: &Self::Client, _model: impl Into<String>) -> Self {
+            Self
+        }
+
+        async fn completion(
+            &self,
+            _request: RigRequest,
+        ) -> Result<rig::completion::CompletionResponse<Self::Response>, CompletionError> {
+            Ok(rig::completion::CompletionResponse {
+                choice: OneOrMany::one(AssistantContent::text("cached response")),
+                usage: RigUsage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    total_tokens: 2,
+                    cached_input_tokens: 0,
+                },
+                raw_response: serde_json::json!({}),
+                message_id: None,
+            })
+        }
+
+        async fn stream(
+            &self,
+            _request: RigRequest,
+        ) -> Result<StreamingCompletionResponse<Self::StreamingResponse>, CompletionError> {
+            Err(CompletionError::ProviderError(
+                "stream unsupported".to_string(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn cached_provider_separates_normalized_rig_model_overrides() {
+        use crate::response_cache::{CachedProvider, ResponseCacheConfig};
+
+        let adapter = Arc::new(RigAdapter::new(
+            CacheableCompletionModel,
+            "configured-model",
+        ));
+        let cached = CachedProvider::new(adapter, ResponseCacheConfig::default());
+
+        cached
+            .complete(
+                CompletionRequest::new(vec![ChatMessage::user("same prompt")])
+                    .with_model(" override-a "),
+            )
+            .await
+            .expect("first completion succeeds");
+        cached
+            .complete(
+                CompletionRequest::new(vec![ChatMessage::user("same prompt")])
+                    .with_model("override-b"),
+            )
+            .await
+            .expect("second completion succeeds");
+        cached
+            .complete(
+                CompletionRequest::new(vec![ChatMessage::user("same prompt")])
+                    .with_model("override-a"),
+            )
+            .await
+            .expect("normalized override reuses its cache entry");
+
+        assert_eq!(cached.len(), 2);
+        assert_eq!(cached.total_hits(), 1);
+    }
+
+    #[tokio::test]
+    async fn deepseek_tool_completion_request_serializes_the_model_once() {
+        use rig::client::CompletionClient;
+        use rig::providers::deepseek;
+
+        let (base_url, captured_body) = capture_one_http_request().await;
+        let client = deepseek::Client::builder()
+            .api_key("test-key")
+            .base_url(&base_url)
+            .build()
+            .expect("build DeepSeek client");
+        let adapter = RigAdapter::new(
+            client.completion_model("configured-model"),
+            "configured-model",
+        );
+        adapter
+            .complete_with_tools(tool_request_with_model_override())
+            .await
+            .expect_err("capture server intentionally rejects the request");
+
+        let body = captured_request_body(captured_body).await;
+        assert_single_model_override(&body);
+    }
 
     #[test]
     fn map_rig_error_auth_401_unauthorized() {
@@ -3331,18 +3532,16 @@ mod tests {
     }
 
     #[test]
-    fn test_inject_model_override_creates_params_when_none() {
+    fn test_inject_model_override_sets_typed_request_model() {
         let mut req = make_rig_request(None);
         inject_model_override(&mut req, Some("test-model"));
 
-        let params = req
-            .additional_params
-            .expect("additional_params should be Some");
-        assert_eq!(params, serde_json::json!({ "model": "test-model" }));
+        assert_eq!(req.model.as_deref(), Some("test-model"));
+        assert!(req.additional_params.is_none());
     }
 
     #[test]
-    fn test_inject_model_override_preserves_existing_params() {
+    fn test_inject_model_override_preserves_existing_additional_params() {
         let mut req = make_rig_request(Some(serde_json::json!({
             "cache_control": { "type": "ephemeral" },
         })));
@@ -3354,7 +3553,8 @@ mod tests {
             obj.get("cache_control"),
             Some(&serde_json::json!({ "type": "ephemeral" }))
         );
-        assert_eq!(obj.get("model"), Some(&serde_json::json!("override-model")));
+        assert!(obj.get("model").is_none());
+        assert_eq!(req.model.as_deref(), Some("override-model"));
     }
 
     #[test]

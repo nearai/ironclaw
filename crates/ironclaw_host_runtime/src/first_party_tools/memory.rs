@@ -170,7 +170,7 @@ impl MemoryCapabilityState {
 /// provider that is not constructable here (e.g. an unimplemented third party).
 ///
 /// Host-authored fixed text — no binding/extension id is interpolated, so the
-/// safe-summary validator cannot reject it (see `agent-loop-capabilities.md`).
+/// safe-summary validator cannot reject it (see the capability-access contract).
 fn binding_unavailable_error() -> FirstPartyCapabilityError {
     FirstPartyCapabilityError::with_safe_summary(
         RuntimeDispatchErrorKind::OperationFailed,
@@ -580,7 +580,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_memory_search_dispatches_through_memory_service_facade() {
+    async fn builtin_memory_search_dispatches_through_memory_service_service() {
         let memory_service = Arc::new(RecordingMemoryService::default());
         let state = MemoryCapabilityState::with_memory_service_for_test(memory_service.clone());
         let request = memory_request(
@@ -590,7 +590,7 @@ mod tests {
 
         let result = dispatch(&state, &request)
             .await
-            .expect("memory_search should succeed through IronClaw memory facade");
+            .expect("memory_search should succeed through IronClaw memory service");
 
         assert_eq!(result.output["result_count"], 1);
         assert_eq!(

@@ -51,6 +51,7 @@ mod support;
 mod scenario_auth_deny_then_retry_journey;
 mod scenario_auth_gate_grant_resume;
 mod scenario_auth_then_approval_journey;
+mod scenario_expired_credential_resume;
 mod scenario_interactive_approval_journey;
 mod scenario_multi_actor_gate_isolation;
 
@@ -107,6 +108,17 @@ async fn journeys_group_auth_convergence_e2e() {
     report.record(
         "auth_gate_grant_resume",
         scenario_auth_gate_grant_resume::run(&g_grant).await,
+    );
+
+    // The EXPIRED arm: a stored credential the provider rejects, reconnected
+    // mid-run. Fresh group for the same reason as `g_grant` — a shared group's
+    // already-seeded credential would resolve immediately and never park.
+    let g_expired = RebornIntegrationGroup::live_auth_and_approval()
+        .await
+        .expect("expired-credential resume group builds");
+    report.record(
+        "expired_credential_resume",
+        scenario_expired_credential_resume::run(&g_expired).await,
     );
     report.assert_all_passed();
 }

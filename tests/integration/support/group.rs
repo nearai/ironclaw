@@ -67,7 +67,7 @@ use ironclaw_loop_host::{
 use ironclaw_product::ProductTriggerReason;
 use ironclaw_product::{
     ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
-    IdempotencyLedger, InboundTurnService, ResolvedBinding, RunDeliveryEventRouter,
+    IdempotencyLedger, InboundTurnService, ResolvedBinding,
 };
 use ironclaw_reborn_composition::RebornTrajectoryObserver;
 use ironclaw_reborn_composition::build_default_budget_accountant;
@@ -119,7 +119,7 @@ use super::harness::{
 use super::planned_runtime_parts_shape::{
     DefaultPlannedRuntimePartsShape, harness_planned_runtime_parts_shape,
 };
-use super::product_workflow::RebornProductWorkflowHarness;
+use super::product_surface::RebornProductSurfaceHarness;
 use super::reply::RebornScriptedReply;
 use super::scope_gateway::ScopeRegistryGateway;
 use super::scripted_provider::{
@@ -175,12 +175,12 @@ pub(crate) struct GroupSharedStorage {
     /// Product-workflow harness (binding service + idempotency ledger).
     /// Shared so all threads resolve bindings within the same product context.
     /// `product_harness.scope` is the single-source `ResourceScope` (R5).
-    pub(crate) product_harness: RebornProductWorkflowHarness,
+    pub(crate) product_harness: RebornProductSurfaceHarness,
     /// Capability backend. Groups use `HostRuntime`; the degenerate single-shot
     /// path may use `Recording`.
     pub(crate) capability: GroupCapability,
     /// C-SLACK-LIFECYCLE (issue #6105): the REAL generic channel-connection
-    /// facade + OAuth-callback-shaped connect handles, built over the
+    /// service + OAuth-callback-shaped connect handles, built over the
     /// capability harness's own `RebornServices` (same durable stores, same
     /// late-bound cleanup slot `extension_remove` dispatches to).
     /// `Some` only for `extension_lifecycle()` groups.
@@ -227,11 +227,6 @@ pub(crate) struct GroupSharedStorage {
     /// opted in (C-TRACECAP seam); `None` otherwise. Concrete type (not `Arc<dyn
     /// TurnEventSink>`) so a test can read `.events()` back directly.
     pub(crate) turn_event_sink: Option<Arc<InMemoryTurnEventSink>>,
-    /// The production run-delivery lifecycle router wired into the group's
-    /// canonical turn-event sink. Present only for delivery-proof groups, so
-    /// those tests exercise the same event-driven final-reply path as the
-    /// channel host instead of relying on the admission observer.
-    pub(crate) run_delivery_events: Option<Arc<RunDeliveryEventRouter>>,
     /// W5-WIRING-PARITY: production local-dev always wires a security-audit
     /// sink; the harness mirrors that shape with a recording sink so tests can
     /// assert events emitted through real caller paths.
@@ -282,7 +277,7 @@ impl GroupSharedStorage {
                 scope.user_id = arc.user_id().clone();
                 Some(scope)
             }
-            GroupCapability::Recording => None,
+            GroupCapability::Recording | GroupCapability::RecordingNoProgress => None,
         }
     }
 
@@ -301,7 +296,7 @@ impl GroupSharedStorage {
                 scope.user_id = owner.clone();
                 Some(scope)
             }
-            GroupCapability::Recording => None,
+            GroupCapability::Recording | GroupCapability::RecordingNoProgress => None,
         }
     }
 }
@@ -311,12 +306,14 @@ impl GroupSharedStorage {
 // ---------------------------------------------------------------------------
 
 /// Shared capability backend for a group. Groups always use `HostRuntime`
-/// (sharing the approval/memory/credential stores across threads). `Recording`
-/// is the single-shot echo path for text-only turns.
+/// (sharing the approval/memory/credential stores across threads). The
+/// recording variants are single-shot echo paths for text-only turns.
 pub(crate) enum GroupCapability {
     /// Echo recorder — records invocations, executes nothing. Default for a
     /// text-only single-shot harness; no stores to share.
     Recording,
+    /// Recording echo whose results deliberately report `NoChange`.
+    RecordingNoProgress,
     /// Real first-party or MCP host runtime, shared across all threads.
     /// All approval/auto-approve/credential/memory state is common because the
     /// `Arc` is cloned per thread.
@@ -326,13 +323,16 @@ pub(crate) enum GroupCapability {
 impl GroupCapability {
     /// Return a fresh `HarnessCapabilityMode` for one thread.
     ///
-    /// `Recording` creates a fresh echo port each call (ports are consumed by
-    /// `into_parts`). `HostRuntime` clones the `Arc` — N threads share the
-    /// same underlying harness and all its stores.
+    /// Recording variants create a fresh echo port each call (ports are
+    /// consumed by `into_parts`). `HostRuntime` clones the `Arc` — N threads
+    /// share the same underlying harness and all its stores.
     pub(crate) fn mode(&self) -> HarnessCapabilityMode {
         match self {
             Self::Recording => {
                 HarnessCapabilityMode::Recording(RecordingTestCapabilityPort::echo())
+            }
+            Self::RecordingNoProgress => {
+                HarnessCapabilityMode::Recording(RecordingTestCapabilityPort::no_progress())
             }
             Self::HostRuntime(arc) => HarnessCapabilityMode::HostRuntime(Arc::clone(arc)),
         }
@@ -340,15 +340,15 @@ impl GroupCapability {
 
     /// The durable gate-record store this backend's capability port persists
     /// `GateRecord::Auth` into (§5.2.9) — the SAME `Arc` the turn executor must
-    /// re-read an auth block's `credential_requirements` from. `None` only for
-    /// the `Recording` (echo) backend; the host-runtime backend always resolves
-    /// a store (`HostRuntimeCapabilityHarness::gate_record_store` returns `Some`).
+    /// re-read an auth block's `credential_requirements` from. Recording
+    /// backends return `None`; the host-runtime backend always resolves a store
+    /// (`HostRuntimeCapabilityHarness::gate_record_store` returns `Some`).
     pub(crate) fn gate_record_store(
         &self,
     ) -> Option<Arc<dyn ironclaw_run_state::GateRecordStorePort>> {
         match self {
             Self::HostRuntime(harness) => harness.gate_record_store(),
-            Self::Recording => None,
+            Self::Recording | Self::RecordingNoProgress => None,
         }
     }
 
@@ -365,7 +365,7 @@ impl GroupCapability {
     ) -> HarnessResult<()> {
         let harness = match self {
             Self::HostRuntime(arc) => arc,
-            Self::Recording => {
+            Self::Recording | Self::RecordingNoProgress => {
                 return Err("no host-runtime capability backend for durable reopen".into());
             }
         };
@@ -428,7 +428,6 @@ impl RebornIntegrationGroup {
             storage: StorageMode::InMemory,
             safety_context: None,
             turn_event_sink: None,
-            run_delivery_events: None,
             trace_capture: false,
             tool_disclosure: None,
             budget: false,
@@ -437,6 +436,7 @@ impl RebornIntegrationGroup {
             trajectory_observer: None,
             runner_lease_ttl_override: None,
             lease_recovery_interval_override: None,
+            planned_default_iteration_limit: None,
             real_gate_dispatch_services: false,
             channel_connection: None,
         }
@@ -455,12 +455,6 @@ impl RebornIntegrationGroup {
     /// groups.
     pub fn channel_connection(&self) -> Option<Arc<ChannelConnectionTestBundle>> {
         self.shared.channel_connection.clone()
-    }
-
-    /// The run-delivery lifecycle router wired into this group's canonical
-    /// turn-event bus. Available only to delivery-proof scenarios.
-    pub fn run_delivery_events(&self) -> Option<Arc<RunDeliveryEventRouter>> {
-        self.shared.run_delivery_events.clone()
     }
 
     /// The group-canonical binding's ACTOR user id — the identity capability
@@ -484,14 +478,17 @@ impl RebornIntegrationGroup {
         let GroupCapability::HostRuntime(harness) = &self.shared.capability else {
             return Err("source delivery target requires a host-runtime capability backend".into());
         };
-        let services = harness
+        let runtime = harness
             .reborn_services_for_test()
-            .ok_or("source delivery target requires composed Reborn services")?;
+            .ok_or("source delivery target requires composed Reborn runtime")?;
         let target_id = ironclaw_product::RebornOutboundDeliveryTargetId::new(target_id)?;
-        ironclaw_reborn_composition::test_support::register_static_source_delivery_target_for_test(
-            services,
+        let display_name = target_id.as_str().to_string();
+        runtime.register_static_outbound_delivery_target_for_test(
             provider_key,
             target_id,
+            provider_key,
+            display_name.as_str(),
+            None,
             reply_target_binding_ref,
         )?;
         Ok(())
@@ -566,7 +563,7 @@ impl RebornIntegrationGroup {
     pub fn capability_harness(&self) -> Option<&Arc<HostRuntimeCapabilityHarness>> {
         match &self.shared.capability {
             GroupCapability::HostRuntime(arc) => Some(arc),
-            GroupCapability::Recording => None,
+            GroupCapability::Recording | GroupCapability::RecordingNoProgress => None,
         }
     }
 
@@ -642,7 +639,7 @@ impl RebornIntegrationGroup {
 
 /// Shared base data produced by [`RebornIntegrationGroupBuilder::build_base`].
 ///
-/// Replaces the 4-tuple `(RebornProductWorkflowHarness, Arc<CompositeRootFilesystem>,
+/// Replaces the 4-tuple `(RebornProductSurfaceHarness, Arc<CompositeRootFilesystem>,
 /// Option<PathBuf>, Arc<TempDir>)` so each constructor can name fields rather than
 /// position-destructure a tuple.
 ///
@@ -655,7 +652,7 @@ impl RebornIntegrationGroup {
 /// between `build_base` and `into_group`; `build_base`/`into_group` themselves
 /// stay module-private too.
 struct GroupBaseData {
-    product_harness: RebornProductWorkflowHarness,
+    product_harness: RebornProductSurfaceHarness,
     composite: Arc<CompositeRootFilesystem>,
     storage_reopen: super::builder::StorageReopen,
     turn_root: Arc<tempfile::TempDir>,
@@ -730,6 +727,8 @@ pub struct RebornIntegrationGroupBuilder {
     /// `lease_recovery_interval` (default 10s) when set. Builder method lives
     /// in `group_options.rs`. Default `None` (today's behavior, byte-identical).
     lease_recovery_interval_override: Option<Duration>,
+    /// Test-only override for the canonical loop's default iteration limit.
+    planned_default_iteration_limit: Option<std::num::NonZeroU32>,
     /// When `true`, wire the REAL approval/auth interaction services into
     /// every thread's `DefaultProductSurface` (see
     /// `with_real_gate_dispatch_services`). Default `false` (every workflow
@@ -741,9 +740,6 @@ pub struct RebornIntegrationGroupBuilder {
     /// Set by `extension_lifecycle()` before `into_group`; `None` for every
     /// other constructor.
     channel_connection: Option<Arc<ChannelConnectionTestBundle>>,
-    /// Canonical run-delivery lifecycle router for delivery-proof groups.
-    /// `into_group` composes this into the planned runtime's turn-event sink.
-    run_delivery_events: Option<Arc<RunDeliveryEventRouter>>,
 }
 
 impl RebornIntegrationGroupBuilder {
@@ -762,7 +758,7 @@ impl RebornIntegrationGroupBuilder {
             "agent-itest",
             Some("project-itest"),
         );
-        let product_harness = RebornProductWorkflowHarness::filesystem_temp(scope)?;
+        let product_harness = RebornProductSurfaceHarness::filesystem_temp(scope)?;
         let turn_root = Arc::new(tempfile::tempdir()?);
         let (composite, storage_reopen) =
             build_storage_composite(self.storage, turn_root.path()).await?;
@@ -948,9 +944,6 @@ impl RebornIntegrationGroupBuilder {
         if let Some((sink, _)) = &trace_capture {
             turn_event_sinks.push(Arc::clone(sink));
         }
-        if let Some(router) = self.run_delivery_events.clone() {
-            turn_event_sinks.push(router as Arc<dyn TurnEventSink>);
-        }
         let composed_turn_event_sink: Option<Arc<dyn TurnEventSink>> = match turn_event_sinks.len()
         {
             0 | 1 => turn_event_sinks.pop(),
@@ -1049,6 +1042,7 @@ impl RebornIntegrationGroupBuilder {
                 planned_model_availability_retry_attempts: Some(
                     std::num::NonZeroU32::new(1).expect("nonzero"),
                 ),
+                planned_default_iteration_limit: self.planned_default_iteration_limit,
                 ..DefaultPlannedRuntimeConfig::default()
             },
             model_route_resolver: None,
@@ -1125,7 +1119,6 @@ impl RebornIntegrationGroupBuilder {
                 capability_recorder,
                 user_profile_source,
                 turn_event_sink: self.turn_event_sink,
-                run_delivery_events: self.run_delivery_events,
                 security_audit_sink,
                 milestone_sink: milestone_sink_for_assertions,
                 trace_capture_scope: trace_capture.map(|(_, scope)| scope),
@@ -1427,7 +1420,7 @@ impl<'g> RebornThreadBuilder<'g> {
         if shared.real_gate_dispatch_services {
             let harness = match &shared.capability {
                 GroupCapability::HostRuntime(arc) => arc,
-                GroupCapability::Recording => {
+                GroupCapability::Recording | GroupCapability::RecordingNoProgress => {
                     return Err(
                         "with_real_gate_dispatch_services requires a HostRuntime capability backend"
                             .into(),

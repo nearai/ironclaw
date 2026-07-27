@@ -13,8 +13,7 @@
 //! - **tool dispatchability** of `github.*` through the real capability port.
 //!
 //! Runs after every earlier scenario that reads "github": scenario 1 leaves
-//! it installed (a same-member reinstall is rejected "already installed" by
-//! design — `install_policy.rs`), so phase 1 reconciles the existing member —
+//! it installed, so phase 1 reconciles the existing member —
 //! the state a real user's Extensions page is in when #6029 bites. The fresh
 //! single-install arm is pinned in phase 5, after the full remove.
 //! (Scenarios 8 and 9 run later but touch only slack/notion state.)

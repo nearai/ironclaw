@@ -30,7 +30,7 @@ use ironclaw_product::{
 };
 use ironclaw_product::{
     DefaultInboundTurnService, FakeConversationBindingService, InboundTurnOutcome,
-    InboundTurnService, ProductWorkflowError,
+    InboundTurnService, ProductSurfaceFailure,
 };
 use ironclaw_reborn_composition::ProductLiveCapabilityIo;
 use ironclaw_runner::loop_exit_applier::ThreadCheckpointLoopExitEvidencePort;
@@ -486,10 +486,6 @@ fn binding_with_user(user: &str, thread: &str) -> ironclaw_product::ResolvedBind
         tenant_id: TenantId::new("tenant:install_alpha").expect("valid tenant"),
         actor_user_id: user_id.clone(),
         subject_user_id: Some(user_id),
-        source_binding_ref: ironclaw_turns::SourceBindingRef::new("source:test-binding")
-            .expect("valid source binding ref"),
-        reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new("reply:test-binding")
-            .expect("valid reply target binding ref"),
         thread_id: ThreadId::new(thread).expect("valid thread"),
         agent_id: Some(AgentId::new("agent:fake").expect("valid agent")),
         project_id: None,
@@ -1236,7 +1232,7 @@ async fn retry_validates_live_binding_before_accepted_message_replay() {
         .expect_err("first submit fails after message acceptance");
     assert!(matches!(
         first_err,
-        ProductWorkflowError::TurnSubmissionFailed { .. }
+        ProductSurfaceFailure::TurnSubmissionFailed { .. }
     ));
     assert_eq!(binding_handle.resolve_count(), 1);
 
@@ -1432,7 +1428,7 @@ async fn legacy_deferred_busy_retry_resubmits_existing_message() {
 }
 
 #[tokio::test]
-async fn canonical_binding_refs_reach_turn_submission_unchanged() {
+async fn reply_target_binding_ref_has_single_reply_prefix() {
     let binding_service = FakeConversationBindingService::new();
     let thread_service = InMemorySessionThreadService::default();
     let coordinator = CapturingTurnCoordinator::default();
@@ -1450,11 +1446,10 @@ async fn canonical_binding_refs_reach_turn_submission_unchanged() {
         .expect("captured submit lock poisoned")
         .clone()
         .expect("submit request captured");
-    assert_eq!(request.source_binding_ref.as_str(), "source:fake-binding");
-    assert_eq!(
-        request.reply_target_binding_ref.as_str(),
-        "reply:fake-binding"
-    );
+    let reply_ref = request.reply_target_binding_ref.as_str();
+    assert!(reply_ref.starts_with("reply:"));
+    assert!(!reply_ref.starts_with("reply:reply:"));
+    assert_eq!(reply_ref.matches("reply:").count(), 1);
     assert_eq!(
         request.product_context.as_ref().map(|c| c.origin),
         Some(TurnOriginKind::Inbound),
@@ -1520,7 +1515,7 @@ async fn overflowing_turn_ref_inputs_hash_deterministically() {
 #[tokio::test]
 async fn binding_failure_surfaces_workflow_error() {
     let binding_service = FakeConversationBindingService::new();
-    binding_service.force_failure(ProductWorkflowError::BindingResolutionFailed {
+    binding_service.force_failure(ProductSurfaceFailure::BindingResolutionFailed {
         reason: "no tenant found".into(),
     });
 
@@ -1537,7 +1532,7 @@ async fn binding_failure_surfaces_workflow_error() {
 
     assert!(matches!(
         err,
-        ProductWorkflowError::BindingResolutionFailed { .. }
+        ProductSurfaceFailure::BindingResolutionFailed { .. }
     ));
 }
 

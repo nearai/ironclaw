@@ -111,7 +111,7 @@ pub enum ProductProjectionSubject {
 
     /// API/projection style request: caller has already resolved an opaque
     /// product/API id such as OpenAI `resp_*` into canonical Reborn metadata.
-    /// ProductSurface remains the facade door, but does not own that mapping.
+    /// ProductSurface remains the service door, but does not own that mapping.
     CanonicalProjection { actor: TurnActor, scope: TurnScope },
 }
 

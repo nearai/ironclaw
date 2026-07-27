@@ -6,8 +6,8 @@
 
 use crate::{
     AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ProductAdapterId,
-    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductRejection,
-    ProductRejectionKind, ProductTriggerReason, VerifiedAuthClaim,
+    ProductInboundEnvelope, ProductInboundPayload, ProductRejection, ProductRejectionKind,
+    ProductTriggerReason, VerifiedAuthClaim,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::action::{ActionFingerprintKey, ProductActionId};
 use crate::commands::ProductCommand;
-use crate::error::ProductWorkflowError;
+use ironclaw_host_api::{ProductSurfaceError, ProductSurfaceErrorCode};
 
 /// Authority-bearing command dispatch context built by the workflow.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -36,11 +36,13 @@ impl ProductCommandContext {
         envelope: &ProductInboundEnvelope,
         action_id: ProductActionId,
         fingerprint: ActionFingerprintKey,
-    ) -> Result<Self, ProductWorkflowError> {
+    ) -> Result<Self, ProductSurfaceError> {
         let ProductInboundPayload::Command(command) = envelope.payload() else {
-            return Err(ProductWorkflowError::UnsupportedActionKind {
-                kind: "non_command".to_string(),
-            });
+            return Err(ProductSurfaceError::from_status(
+                ProductSurfaceErrorCode::InvalidRequest,
+                400,
+                false,
+            ));
         };
         Ok(Self {
             action_id,
@@ -69,7 +71,7 @@ pub trait ProductCommandAdmissionService: Send + Sync {
         &self,
         context: &ProductCommandContext,
         command: &ProductCommand,
-    ) -> Result<ProductCommandAdmission, ProductWorkflowError>;
+    ) -> Result<ProductCommandAdmission, ProductSurfaceError>;
 }
 
 /// Fail-closed admission service used until a host composition supplies concrete
@@ -82,39 +84,12 @@ impl ProductCommandAdmissionService for RejectingProductCommandAdmissionService 
         &self,
         _context: &ProductCommandContext,
         command: &ProductCommand,
-    ) -> Result<ProductCommandAdmission, ProductWorkflowError> {
+    ) -> Result<ProductCommandAdmission, ProductSurfaceError> {
         Ok(ProductCommandAdmission::Rejected(
             ProductRejection::permanent(
                 ProductRejectionKind::PolicyDenied,
                 format!("command routing unavailable: {}", command.name()),
             ),
         ))
-    }
-}
-
-#[async_trait]
-pub trait ProductCommandService: Send + Sync {
-    async fn execute(
-        &self,
-        context: ProductCommandContext,
-        command: ProductCommand,
-    ) -> Result<ProductInboundAck, ProductWorkflowError>;
-}
-
-/// Fail-closed command executor used until a host composition supplies concrete
-/// command implementations.
-pub struct RejectingProductCommandService;
-
-#[async_trait]
-impl ProductCommandService for RejectingProductCommandService {
-    async fn execute(
-        &self,
-        _context: ProductCommandContext,
-        command: ProductCommand,
-    ) -> Result<ProductInboundAck, ProductWorkflowError> {
-        Ok(ProductInboundAck::Rejected(ProductRejection::permanent(
-            ProductRejectionKind::PolicyDenied,
-            format!("command routing unavailable: {}", command.name()),
-        )))
     }
 }

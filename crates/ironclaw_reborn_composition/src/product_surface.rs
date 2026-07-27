@@ -1,4 +1,4 @@
-// arch-exempt: large_file, product surface composition helper extraction, plan #4471
+// arch-exempt: large_file, WebUI bundle composition awaiting Reborn composition helper extraction, plan #4471
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -11,29 +11,26 @@ use ironclaw_host_api::{
     InvocationId, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
     ProductSurfaceErrorCode, ProductSurfaceErrorKind, ResourceScope,
 };
+use ironclaw_operator::OperatorServiceLifecycle;
 use ironclaw_product::ProjectionStream;
 use ironclaw_product::{
-    ChannelConnectionFacade, OperatorStatusService, RebornOperatorStatusCheck,
+    ChannelConnectionService, OperatorStatusService, RebornOperatorStatusCheck,
     RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
     RebornServices as ProductRebornServices, RebornSkillContentResponse, RebornSkillInfo,
     RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
-    RebornSkillTrustLevel, SkillsProductFacade,
+    RebornSkillTrustLevel, SkillsProductService,
 };
 
 use ironclaw_triggers::TriggerRepository;
 
-use crate::extension_host::admin_configuration::AdminConfigurationViewProvider;
 use crate::operator_tool_catalog::ActiveRegistryOperatorToolCatalog;
 use crate::product_capability::RuntimeProductCapabilityInvoker;
 use crate::{
-    RebornAutomationProductFacade, RebornBuildError, RebornReadiness, RebornReadinessDiagnostic,
+    RebornAutomationProductService, RebornBuildError, RebornReadiness, RebornReadinessDiagnostic,
     RebornReadinessDiagnosticStatus, RebornRuntime,
-    extension_host::lifecycle::{LifecycleFacade, SkillManagementPort, SkillManagementPortError},
-    extension_host::webui_extension_credentials::ProductAuthExtensionCredentialSetup,
-    observability::OperatorServiceLifecycle,
     outbound::{
         OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistry,
-        RebornOutboundPreferencesFacade, outbound_delivery_synthetic_provider,
+        RebornOutboundPreferencesService, outbound_delivery_synthetic_provider,
         outbound_delivery_target_set_operator_tool_info,
     },
     support::fs::{
@@ -41,6 +38,10 @@ use crate::{
         ProjectScopedFilesystemReader,
     },
 };
+use ironclaw_extension_host::ExtensionHostLifecycleProductService;
+use ironclaw_extension_host::admin_configuration::AdminConfigurationViewProvider;
+use ironclaw_extension_host::webui_extension_credentials::ProductAuthExtensionCredentialSetup;
+use ironclaw_skills::{ScopedSkillManagementError, ScopedSkillManagementPort};
 
 /// A trigger repository paired with the turn-run snapshot source from the
 /// SAME runtime. Local-dev and production graphs both carry these two
@@ -63,7 +64,7 @@ pub(crate) fn automation_backing(runtime: &RebornRuntime) -> AutomationBacking {
 pub(crate) fn build_product_surface_with_channel_connection(
     runtime: &RebornRuntime,
     event_stream: Option<Arc<dyn ProjectionStream>>,
-    channel_connection: Option<Arc<dyn ChannelConnectionFacade>>,
+    channel_connection: Option<Arc<dyn ChannelConnectionService>>,
     mut outbound_delivery_target_providers: Vec<Arc<dyn OutboundDeliveryTargetProvider>>,
 ) -> Result<Arc<dyn ProductSurface>, RebornBuildError> {
     if let Some(provider) = runtime.outbound_delivery_target_provider() {
@@ -187,30 +188,36 @@ pub(crate) fn build_product_surface_with_channel_connection(
                 Some(runtime.extension_management.clone()),
             )),
         );
-        let mut lifecycle_facade = LifecycleFacade::new(Arc::clone(&runtime.skill_management));
-        lifecycle_facade =
-            lifecycle_facade.with_extension_management(runtime.extension_management.clone());
-        lifecycle_facade = lifecycle_facade
-            .with_admin_configuration_resolver(runtime.admin_configuration_resolver.clone());
+        let mut lifecycle_service =
+            ExtensionHostLifecycleProductService::new(Arc::clone(&runtime.skill_management));
+        lifecycle_service =
+            lifecycle_service.with_extension_management(runtime.extension_management.clone());
+        lifecycle_service =
+            lifecycle_service.with_channel_config(runtime.channel_config_service.clone());
         if let Some(runtime_http_egress) = &runtime.runtime_http_egress {
-            lifecycle_facade =
-                lifecycle_facade.with_runtime_http_egress(runtime_http_egress.clone());
+            lifecycle_service =
+                lifecycle_service.with_runtime_http_egress(runtime_http_egress.clone());
         }
-        lifecycle_facade = lifecycle_facade.with_runtime_credential_accounts(
+        lifecycle_service = lifecycle_service.with_runtime_credential_accounts(
             runtime
                 .product_auth
                 .runtime_credential_account_selection_service(),
         );
-        api = api.with_lifecycle_product_facade(Arc::new(lifecycle_facade));
+        api = api.with_lifecycle_product_service(Arc::new(lifecycle_service));
     }
-    // The manifest-declared administrator-configuration surface is rendered and
-    // routed through `admin_configuration_view` (built above from the canonical
-    // Admin Configuration service); no separate channel-config facade port.
+    // The generic channel-config configure port: the setup service renders
+    // manifest-declared channel-config fields and routes submitted values
+    // through it (extension-runtime §6.4).
+    api = api.with_channel_config_product_service(Arc::new(
+        ironclaw_extension_host::RebornChannelConfigProductService::new(
+            runtime.channel_config_service.clone(),
+        ),
+    ));
     // Share the activation selector's live master switch when the selected skill
     // context reads it. Deployments without that selector pass `None`, so the
     // toggle reports unavailable rather than writing to an orphan flag.
     let auto_activate_flag = Some(runtime.skill_auto_activate_learned.clone());
-    api = api.with_skills_product_facade(Arc::new(LocalSkillsProductFacade::new(
+    api = api.with_skills_product_service(Arc::new(LocalSkillsProductService::new(
         Arc::clone(&runtime.skill_management),
         auto_activate_flag,
     )));
@@ -221,27 +228,29 @@ pub(crate) fn build_product_surface_with_channel_connection(
     let active_run_lookup: Arc<dyn ironclaw_triggers::TriggerActiveRunLookup> = Arc::new(
         crate::automation::trigger_poller::SnapshotActiveRunLookup::new(backing.snapshot_source),
     );
-    api = api.with_automation_product_facade(Arc::new(
-        RebornAutomationProductFacade::new(backing.repository, active_run_lookup)
+    api = api.with_automation_product_service(Arc::new(
+        RebornAutomationProductService::new(backing.repository, active_run_lookup)
             .with_scheduler_enabled(runtime.readiness.workers.trigger_poller),
     ));
     // First-class projects + membership (ACL). Built once per runtime over the
     // scoped substrate and shared by every deployment path.
     api = api.with_project_service(runtime.reborn_project_service());
-    api = api.with_outbound_preferences_facade(Arc::new(RebornOutboundPreferencesFacade::new(
-        Arc::clone(&runtime.outbound_preferences),
-        Arc::new(OutboundDeliveryTargetRegistry::new(
-            outbound_delivery_target_providers,
-        )),
-    )));
+    api = api.with_outbound_preferences_product_service(Arc::new(
+        RebornOutboundPreferencesService::new(
+            Arc::clone(&runtime.outbound_preferences),
+            Arc::new(OutboundDeliveryTargetRegistry::new(
+                outbound_delivery_target_providers,
+            )),
+        ),
+    ));
     if let Some(channel_connection) = channel_connection {
-        api = api.with_channel_connection_facade(channel_connection);
+        api = api.with_channel_connection_service(channel_connection);
     }
     api = api.with_event_stream(event_stream.unwrap_or_else(|| runtime.product_event_stream()));
     api = api.with_operator_status_service(Arc::new(ReadinessOperatorStatusService::new(
         runtime.readiness.clone(),
     )));
-    api = api.with_operator_logs_service(crate::operator_log_buffer());
+    api = api.with_operator_logs_service(ironclaw_operator::operator_log_buffer());
     {
         let webui_boot_config = runtime.webui_boot_config();
         api = api.with_operator_service_lifecycle_service(Arc::new(
@@ -255,7 +264,7 @@ pub(crate) fn build_product_surface_with_channel_connection(
 
     // Compose the operator LLM-config settings service when the runtime was
     // assembled with a boot config. The secret store stays private to this
-    // crate; the service is the only facade-shaped handle that leaves.
+    // crate; the service is the only service-shaped handle that leaves.
     if let Some(llm_config) = build_llm_config_service(runtime) {
         api = api.with_llm_config_service(llm_config);
     }
@@ -274,14 +283,14 @@ pub(crate) fn build_product_surface_with_channel_connection(
 /// config, secret store, and optional reload/session/login-state handles.
 ///
 /// Returns `None` when the runtime was assembled without a boot config. Shared
-/// by the runtime product surface (operator LLM routes) and the OpenAI-compatible
+/// by `RebornRuntime::product_surface` (operator LLM routes) and the OpenAI-compatible
 /// `/v1/models` catalog so both read the same configured-model source.
 pub(crate) fn build_llm_config_service(
     runtime: &RebornRuntime,
 ) -> Option<Arc<dyn ironclaw_product::LlmConfigService>> {
     let boot = runtime.webui_boot_config()?;
-    let keys = crate::LlmKeyStore::new(runtime.secret_store());
-    let mut llm_config = crate::RebornLlmConfigService::new(boot.clone(), keys);
+    let keys = ironclaw_operator::LlmKeyStore::new(runtime.secret_store());
+    let mut llm_config = ironclaw_operator::RebornLlmConfigService::new(boot.clone(), keys);
     if let Some(reload) = runtime.webui_llm_reload_trigger() {
         llm_config = llm_config.with_reload_trigger(reload);
     }
@@ -314,9 +323,9 @@ impl OperatorStatusService for ReadinessOperatorStatusService {
     }
 }
 
-struct LocalSkillsProductFacade {
-    skill_management: Arc<SkillManagementPort>,
-    // `RebornRuntimeStores::skill_auto_activate_learned`); the read facade
+struct LocalSkillsProductService {
+    skill_management: Arc<ScopedSkillManagementPort>,
+    // `RebornRuntimeStores::skill_auto_activate_learned`); the read service
     // reports it for the skills view. Writes go through the first-party
     // `builtin.skill_auto_activate_learned_set` capability. `None` when no
     // flag-reading selector is wired (the production assembly) — the toggle then
@@ -328,9 +337,9 @@ struct LocalSkillsProductFacade {
     auto_activate_learned: Option<Arc<AtomicBool>>,
 }
 
-impl LocalSkillsProductFacade {
+impl LocalSkillsProductService {
     fn new(
-        skill_management: Arc<SkillManagementPort>,
+        skill_management: Arc<ScopedSkillManagementPort>,
         auto_activate_learned: Option<Arc<AtomicBool>>,
     ) -> Self {
         Self {
@@ -341,7 +350,7 @@ impl LocalSkillsProductFacade {
 }
 
 #[async_trait]
-impl SkillsProductFacade for LocalSkillsProductFacade {
+impl SkillsProductService for LocalSkillsProductService {
     async fn list_skills(
         &self,
         caller: ProductSurfaceCaller,
@@ -459,10 +468,10 @@ fn skill_info(skill: ironclaw_skills::SkillSummary) -> RebornSkillInfo {
     }
 }
 
-fn map_skill_management_error(error: SkillManagementPortError) -> ProductSurfaceError {
+fn map_skill_management_error(error: ScopedSkillManagementError) -> ProductSurfaceError {
     match error {
-        SkillManagementPortError::InvalidContext { .. } => internal_skill_error(),
-        SkillManagementPortError::Skill(error) => match error.kind() {
+        ScopedSkillManagementError::InvalidContext { .. } => internal_skill_error(),
+        ScopedSkillManagementError::Skill(error) => match error.kind() {
             ironclaw_skills::SkillManagementErrorKind::NotFound => ProductSurfaceError {
                 code: ProductSurfaceErrorCode::NotFound,
                 kind: ProductSurfaceErrorKind::NotFound,
@@ -569,19 +578,19 @@ fn status_response_from_readiness(readiness: &RebornReadiness) -> RebornOperator
     ));
     checks.push(bool_check(
         "storage",
-        readiness.facades.turn_coordinator,
-        "turn coordinator facade is ready",
-        "turn coordinator facade is not wired",
+        readiness.services.turn_coordinator,
+        "turn coordinator service is ready",
+        "turn coordinator service is not wired",
     ));
     checks.push(bool_check(
         "secrets",
-        readiness.facades.product_auth,
+        readiness.services.product_auth,
         "product auth and secret-backed flows are ready",
-        "product auth facade is not wired",
+        "product auth service is not wired",
     ));
     checks.push(bool_check(
         "provider_model",
-        readiness.facades.host_runtime,
+        readiness.services.host_runtime,
         "host runtime is ready for model-backed execution",
         "host runtime is not wired",
     ));
@@ -589,7 +598,7 @@ fn status_response_from_readiness(readiness: &RebornReadiness) -> RebornOperator
         "webui",
         RebornOperatorStatusState::Ready,
         RebornOperatorStatusSeverity::Info,
-        "WebUI v2 product surface is available".to_string(),
+        "WebUI v2 route service is mounted".to_string(),
         None,
     ));
     checks.push(bool_check(

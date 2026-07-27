@@ -362,7 +362,7 @@ Not defaultable in the first E2E:
 
 - `docs/reborn/contracts/communication-delivery-resolution.md`
   - preference fields, rule order, and trigger delivery boundary.
-- `docs/reborn/contracts/product-adapters.md`
+- `docs/reborn/how-to-port-channel-to-reborn.md`
   - adapter outbound rendering boundary and Slack-like external channel
     capability model.
 - `crates/ironclaw_outbound/src/communication_preferences.rs`
@@ -375,7 +375,7 @@ Not defaultable in the first E2E:
   - `prepare_and_render_product_outbound` validation-before-render path.
 - `crates/ironclaw_reborn_composition/src/slack_delivery.rs`
   - Slack final-reply observer and observed reply-target authority.
-- `crates/ironclaw_reborn_composition/src/product_auth_serve/oauth.rs`
+- `crates/ironclaw_webui/src/product_auth/oauth.rs`
   - Slack OAuth callback binds identity only today.
 - `crates/ironclaw_webui_v2/src/handlers.rs`
   - WebUI handlers must delegate through `RebornServicesApi`.

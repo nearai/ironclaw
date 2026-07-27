@@ -18,7 +18,7 @@ pub mod oauth_flow;
 pub mod outbound_preferences;
 pub mod planned_runtime_parts_shape;
 pub mod process;
-pub mod product_workflow;
+pub mod product_surface;
 pub mod project_service_fault;
 pub mod reply;
 pub mod scope_gateway;

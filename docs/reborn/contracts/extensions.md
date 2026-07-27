@@ -358,7 +358,7 @@ schema_version = "reborn.extension_manifest.v2"
 id = "telegram"
 name = "Telegram"
 version = "0.1.0"
-description = "Telegram product adapter and tools"
+description = "Telegram channel extension and tools"
 trust = "third_party"
 
 [runtime]
@@ -644,7 +644,7 @@ Do not add in `ironclaw_extensions` V1:
 - secret resolution
 - marketplace install flows
 - OAuth/authentication
-- product workflows
+- product-surface orchestration
 - agent loop behavior
 
 

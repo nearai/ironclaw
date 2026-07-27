@@ -23,7 +23,7 @@
 //! identity for the standalone Reborn binary. Two surfaces install and
 //! manage it today: this CLI (`ironclaw service install`), and the
 //! WebUI operator facade (`OperatorServiceLifecycle` in
-//! `ironclaw_reborn_composition::observability::operator_service_lifecycle`,
+//! `ironclaw_operator::operator_service_lifecycle`,
 //! behind `POST /api/webchat/v2/operator/service`). Both target the same
 //! plist/unit path, so an install from either surface atomically replaces
 //! whatever the other last wrote there — see [`write_atomic`].
@@ -55,7 +55,7 @@ mod systemd;
 
 /// launchd label / systemd unit name for the canonical Reborn service
 /// identity. Shared, deliberately, with `OperatorServiceLifecycle` in
-/// `ironclaw_reborn_composition::observability::operator_service_lifecycle`
+/// `ironclaw_operator::operator_service_lifecycle`
 /// (the WebUI operator-service facade) — see the module doc above. An
 /// install from either surface atomically replaces the other's file at
 /// this same path; do not fork these constants to "avoid collisions"
@@ -892,13 +892,14 @@ mod tests {
         let expected_working_directory = reborn_home.join("workspace");
         assert!(
             contents.contains(&format!(
-                "WorkingDirectory=\"{}\"",
+                "WorkingDirectory={}\n",
                 expected_working_directory.display()
             )),
             "unit file must anchor cwd at <reborn_home>/workspace, not the Reborn home itself \
-             (the Reborn home is an ancestor of every default skill root, so cwd=reborn_home \
-             still trips composition's overlap check — the crash-loop persisted after the first \
-             attempt at this fix): {contents}"
+             (an ancestor of every default skill root, so cwd=reborn_home still trips \
+             composition's overlap check — the crash-loop persisted after the first attempt at \
+             this fix), as a bare unquoted path: WorkingDirectory= is never shell-quote-parsed, \
+             so a quoted value fails to load with `bad-setting` (issue #6575): {contents}"
         );
         assert!(
             expected_working_directory.is_dir(),

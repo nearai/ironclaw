@@ -4,24 +4,28 @@
 //! command payloads so command parsing does not depend on v1 agent routing or on
 //! the product surface that produced the command.
 
-use std::sync::Arc;
-
-use crate::{
-    InboundCommandPayload, ProductCommandResultPayload, ProductInboundAck, ProductRejection,
-    ProductRejectionKind,
-};
-use async_trait::async_trait;
+use crate::{InboundCommandPayload, ProductRejection, ProductRejectionKind};
+use ironclaw_host_api::HostApiError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{
-    ProductCommandContext, ProductCommandService, ProductWorkflowError,
-    lifecycle::{
-        LifecycleCommandKind, LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef,
-        LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
-        validate_lifecycle_text,
-    },
+use crate::lifecycle::{
+    LifecycleCommandKind, LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef,
+    LifecycleProductAction,
 };
+
+pub const PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID: &str = "product.lifecycle.command";
+pub const PRODUCT_MODEL_COMMAND_OPERATION_ID: &str = "product.model.command";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProductLifecycleCommandInput {
+    pub action: LifecycleProductAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProductModelCommandInput {
+    pub action: ProductModelCommand,
+}
 
 /// Public command inventory metadata. Policy decisions based on actor,
 /// installation, trigger, or product surface belong to `ProductCommandAdmissionService`.
@@ -189,45 +193,6 @@ fn parse_model_option(args: &[&str]) -> Result<Option<String>, ProductRejection>
     ))
 }
 
-pub struct LifecycleProductCommandService {
-    facade: Arc<dyn LifecycleProductFacade>,
-}
-
-impl LifecycleProductCommandService {
-    pub fn new(facade: Arc<dyn LifecycleProductFacade>) -> Self {
-        Self { facade }
-    }
-}
-
-#[async_trait]
-impl ProductCommandService for LifecycleProductCommandService {
-    async fn execute(
-        &self,
-        context: ProductCommandContext,
-        command: ProductCommand,
-    ) -> Result<ProductInboundAck, ProductWorkflowError> {
-        let ProductCommand::Lifecycle { action } = command else {
-            return Ok(ProductInboundAck::Rejected(ProductRejection::permanent(
-                ProductRejectionKind::PolicyDenied,
-                format!("command routing unavailable: {}", command.name()),
-            )));
-        };
-        let command_name = action.command_name().to_string();
-        let response = self
-            .facade
-            .execute(LifecycleProductContext::Command(Box::new(context)), action)
-            .await?;
-        let payload =
-            serde_json::to_value(response).map_err(|error| ProductWorkflowError::Transient {
-                reason: format!("lifecycle command response serialization failed: {error}"),
-            })?;
-        Ok(ProductInboundAck::CommandResult {
-            command: command_name,
-            payload: ProductCommandResultPayload::new(payload),
-        })
-    }
-}
-
 fn parse_lifecycle_command_payload(
     kind: LifecycleCommandKind,
     payload: &InboundCommandPayload,
@@ -246,6 +211,15 @@ fn parse_lifecycle_command_payload(
                 LifecycleProductAction::ExtensionInstall { package_ref }
             })?
         }
+        LifecycleCommandKind::ExtensionAuth => extension_package_command(payload, |package_ref| {
+            LifecycleProductAction::ExtensionAuth { package_ref }
+        })?,
+        LifecycleCommandKind::ExtensionActivate => {
+            extension_package_command(payload, |package_ref| {
+                LifecycleProductAction::ExtensionActivate { package_ref }
+            })?
+        }
+        LifecycleCommandKind::ExtensionConfigure => parse_extension_configure_command(payload)?,
         LifecycleCommandKind::ExtensionRemove => {
             extension_package_command(payload, |package_ref| {
                 LifecycleProductAction::ExtensionRemove { package_ref }
@@ -261,6 +235,28 @@ fn parse_lifecycle_command_payload(
     })
 }
 
+fn parse_extension_configure_command(payload: &InboundCommandPayload) -> ProductCommandParseResult {
+    let args = payload.arguments.trim();
+    let (id, config_payload) = match serde_json::from_str::<Value>(args) {
+        Ok(json) => {
+            let Some(id) = json.get("id").and_then(Value::as_str).map(str::to_string) else {
+                return invalid_lifecycle_command("extension_configure.id is required");
+            };
+            (id, json.get("payload").cloned())
+        }
+        Err(_) => (first_argument(args).to_string(), None),
+    };
+    match lifecycle_package_ref(LifecyclePackageKind::Extension, id) {
+        Ok(package_ref) => Ok(ProductCommand::Lifecycle {
+            action: LifecycleProductAction::ExtensionConfigure {
+                package_ref,
+                payload: config_payload,
+            },
+        }),
+        Err(error) => invalid_lifecycle_command(error.to_string()),
+    }
+}
+
 fn parse_skill_install_command(payload: &InboundCommandPayload) -> ProductCommandParseResult {
     let args = payload.arguments.trim();
     let Ok(json) = serde_json::from_str::<Value>(args) else {
@@ -270,10 +266,7 @@ fn parse_skill_install_command(payload: &InboundCommandPayload) -> ProductComman
         Some(content) => content,
         None => return invalid_lifecycle_command("skill_install.content is required"),
     };
-    let content = match validate_lifecycle_text(content.to_string(), "skill content", 64 * 1024) {
-        Ok(content) => content,
-        Err(error) => return invalid_lifecycle_command(error.to_string()),
-    };
+    let content = validate_lifecycle_text(content.to_string(), "skill content", 64 * 1024)?;
     let name = match json.get("name").and_then(Value::as_str) {
         Some(name) => match LifecyclePackageId::new(name) {
             Ok(name) => Some(name),
@@ -358,9 +351,33 @@ fn invalid_lifecycle_command(reason: impl Into<String>) -> ProductCommandParseRe
     ))
 }
 
+fn validate_lifecycle_text(
+    value: String,
+    label: &'static str,
+    max_bytes: usize,
+) -> Result<String, ProductRejection> {
+    if value.trim().is_empty() {
+        return invalid_lifecycle_rejection(format!("{label} must not be empty"));
+    }
+    if value.len() > max_bytes {
+        return invalid_lifecycle_rejection(format!("{label} must be at most {max_bytes} bytes"));
+    }
+    if value.chars().any(|c| c == '\0') {
+        return invalid_lifecycle_rejection(format!("{label} must not contain NUL characters"));
+    }
+    Ok(value)
+}
+
+fn invalid_lifecycle_rejection(reason: impl Into<String>) -> Result<String, ProductRejection> {
+    Err(ProductRejection::permanent(
+        ProductRejectionKind::InvalidRequest,
+        reason,
+    ))
+}
+
 fn lifecycle_package_ref(
     kind: LifecyclePackageKind,
     id: impl Into<String>,
-) -> Result<LifecyclePackageRef, ProductWorkflowError> {
+) -> Result<LifecyclePackageRef, HostApiError> {
     LifecyclePackageRef::new(kind, id)
 }

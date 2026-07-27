@@ -20,7 +20,7 @@ use ironclaw_product::{
     AuthGateRecord, AuthInteractionChallengeView, AuthInteractionDecision,
     AuthInteractionReadModel, AuthInteractionRejectionKind, AuthInteractionScope,
     AuthInteractionService, DefaultAuthInteractionService, ListPendingAuthInteractionsRequest,
-    ProductWorkflowError, ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
+    ProductSurfaceFailure, ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
@@ -48,7 +48,7 @@ impl AuthInteractionReadModel for FakeAuthReadModel {
     async fn auth_gates(
         &self,
         _scope: &AuthInteractionScope,
-    ) -> Result<Vec<AuthGateRecord>, ProductWorkflowError> {
+    ) -> Result<Vec<AuthGateRecord>, ProductSurfaceFailure> {
         Ok(self.gates.lock().expect("lock").clone())
     }
 
@@ -57,7 +57,7 @@ impl AuthInteractionReadModel for FakeAuthReadModel {
         _scope: &AuthInteractionScope,
         run_id_hint: Option<TurnRunId>,
         gate_ref: &GateRef,
-    ) -> Result<Option<AuthGateRecord>, ProductWorkflowError> {
+    ) -> Result<Option<AuthGateRecord>, ProductSurfaceFailure> {
         Ok(self
             .gates
             .lock()
@@ -790,7 +790,7 @@ async fn callback_completed_rejects_mismatched_callback_ref() {
 
     assert!(matches!(
         error,
-        ProductWorkflowError::AuthInteractionRejected {
+        ProductSurfaceFailure::AuthInteractionRejected {
             kind: AuthInteractionRejectionKind::InvalidCallbackRef
         }
     ));
@@ -831,7 +831,7 @@ async fn credential_provided_rejects_completed_flow_without_account_id() {
 
     assert!(matches!(
         error,
-        ProductWorkflowError::AuthInteractionRejected {
+        ProductSurfaceFailure::AuthInteractionRejected {
             kind: AuthInteractionRejectionKind::StaleAuth
         }
     ));
@@ -874,7 +874,7 @@ async fn deny_on_completed_flow_rejects_with_stale_auth() {
     assert!(
         matches!(
             error,
-            ProductWorkflowError::AuthInteractionRejected {
+            ProductSurfaceFailure::AuthInteractionRejected {
                 kind: AuthInteractionRejectionKind::StaleAuth
             }
         ),
@@ -1116,7 +1116,7 @@ async fn denied_auth_without_flow_record_requires_current_parked_auth_gate() {
 
     assert!(matches!(
         error,
-        ProductWorkflowError::AuthInteractionRejected {
+        ProductSurfaceFailure::AuthInteractionRejected {
             kind: AuthInteractionRejectionKind::MissingAuth
         }
     ));
@@ -1279,7 +1279,7 @@ async fn deny_on_canceled_flow_without_deny_marker_returns_stale_auth() {
     assert!(
         matches!(
             error,
-            ProductWorkflowError::AuthInteractionRejected {
+            ProductSurfaceFailure::AuthInteractionRejected {
                 kind: AuthInteractionRejectionKind::StaleAuth
             }
         ),
@@ -1405,7 +1405,7 @@ async fn deny_on_cancelled_run_with_fresh_key_returns_stale_auth() {
     assert!(
         matches!(
             error,
-            ProductWorkflowError::AuthInteractionRejected {
+            ProductSurfaceFailure::AuthInteractionRejected {
                 kind: AuthInteractionRejectionKind::StaleAuth
             }
         ),
@@ -1454,7 +1454,7 @@ async fn credential_resolution_requires_completed_flow() {
 
     assert!(matches!(
         error,
-        ProductWorkflowError::AuthInteractionRejected {
+        ProductSurfaceFailure::AuthInteractionRejected {
             kind: AuthInteractionRejectionKind::StaleAuth
         }
     ));
@@ -1498,7 +1498,7 @@ async fn cross_scope_auth_gate_is_denied_before_resume() {
 
     assert!(matches!(
         error,
-        ProductWorkflowError::AuthInteractionRejected {
+        ProductSurfaceFailure::AuthInteractionRejected {
             kind: AuthInteractionRejectionKind::CrossScopeDenied
         }
     ));
@@ -1541,7 +1541,7 @@ async fn auth_resolution_rejects_run_state_actor_mismatch() {
 
     assert!(matches!(
         error,
-        ProductWorkflowError::AuthInteractionRejected {
+        ProductSurfaceFailure::AuthInteractionRejected {
             kind: AuthInteractionRejectionKind::CrossScopeDenied
         }
     ));
@@ -1713,7 +1713,7 @@ fn auth_gate_record_new_rejects_invalid_continuation_run_and_gate() {
         .expect_err("non turn-gate continuation rejected");
     assert!(matches!(
         error,
-        ProductWorkflowError::AuthInteractionRejected {
+        ProductSurfaceFailure::AuthInteractionRejected {
             kind: AuthInteractionRejectionKind::UnsupportedResult
         }
     ));
@@ -1722,7 +1722,7 @@ fn auth_gate_record_new_rejects_invalid_continuation_run_and_gate() {
         .expect_err("mismatched run rejected");
     assert!(matches!(
         error,
-        ProductWorkflowError::AuthInteractionRejected {
+        ProductSurfaceFailure::AuthInteractionRejected {
             kind: AuthInteractionRejectionKind::StaleAuth
         }
     ));
@@ -1731,7 +1731,7 @@ fn auth_gate_record_new_rejects_invalid_continuation_run_and_gate() {
         .expect_err("mismatched gate rejected");
     assert!(matches!(
         error,
-        ProductWorkflowError::AuthInteractionRejected {
+        ProductSurfaceFailure::AuthInteractionRejected {
             kind: AuthInteractionRejectionKind::InvalidGateRef
         }
     ));

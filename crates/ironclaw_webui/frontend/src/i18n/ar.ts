@@ -1208,6 +1208,7 @@ registerPack("ar", {
   "common.pinned": "مثبت",
   "common.deleteChat": "حذف الدردشة",
   "chat.deleteFailed": "تعذّر حذف هذه المحادثة.",
+  "chat.cancelFailed": "تعذّر إيقاف هذا التشغيل. قد يظل قيد التشغيل. حاول مرة أخرى.",
   "chat.deleteBusy": "لا يمكن حذف محادثة أثناء تشغيلها. أوقفها أولاً ثم حاول مرة أخرى.",
   "command.placeholder": "اكتب أمرًا أو بحث...",
   "routine.searchPlaceholder": "اسم روتين البحث أو المشغل أو الإجراء",
@@ -1363,6 +1364,11 @@ registerPack("ar", {
 
 registerPack("ar", {
   "app.checkingSession": "جارٍ التحقق من الجلسة...",
+  "app.loadingPage": "جارٍ تحميل الصفحة...",
+  "app.pageLoadFailedTitle": "تعذّر تحميل هذه الصفحة",
+  "app.pageLoadFailedDescription":
+    "قد يتوفر إصدار جديد أو ربما انقطع الاتصال. أعد تحميل الصفحة للمحاولة مرة أخرى.",
+  "app.reloadPage": "إعادة تحميل الصفحة",
   "app.sessionCheckFailedTitle": "تعذّر التحقق من جلستك",
   "app.sessionCheckFailedDescription":
     "تعذّر التحقق من جلستك الآن. ما زالت معلومات تسجيل دخولك محفوظة. حاول مرة أخرى بعد قليل.",
@@ -1399,6 +1405,14 @@ registerPack("ar", {
   "chat.copyMessage": "نسخ الرسالة",
   "chat.retryMessage": "إعادة محاولة الرسالة",
   "chat.history.loadFailed": "فشل تحميل سجل المحادثة.",
+  "chat.failure.connectionLost": "فُقد الاتصال بالخادم. أعد الاتصال وحاول مرة أخرى.",
+  "chat.failure.request": "فشل الطلب قبل أن يتم إرساله.",
+  "chat.failure.requestDetail": "فشل الطلب: {detail}.",
+  "chat.failure.runCategory": "فشل التشغيل: {detail}.",
+  "chat.failure.recoveryRequired": "ينتظر التشغيل الاسترداد؛ أبلغت الواجهة الخلفية عن `recovery_required`.",
+  "chat.failure.run": "فشل التشغيل قبل إنتاج رد.",
+  "chat.failure.streamRetryable": "واجه تدفق المحادثة خطأً قابلاً لإعادة المحاولة: {detail}.",
+  "chat.failure.stream": "فشل تدفق المحادثة: {detail}.",
   "chat.finishPairingBeforeSend": "أكمل ربط القناة قبل إرسال رسالة أخرى.",
   "chat.resolveApprovalBeforeSend": "حل طلب الموافقة قبل إرسال رسالة أخرى.",
   "chat.retryIn": "إعادة المحاولة خلال {seconds} ث",

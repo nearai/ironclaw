@@ -3,7 +3,7 @@
 //! This module is intentionally composition-only. It wires the owning Reborn
 //! service crates together, adapts Script/MCP/WASM runtimes into the neutral
 //! dispatcher port, and hands upper services a single [`DefaultHostRuntime`]
-//! facade. Authorization, run-state transitions, approval leases, process
+//! service. Authorization, run-state transitions, approval leases, process
 //! lifecycle, and runtime execution semantics remain in their owning crates.
 
 mod process_executor;
@@ -13,8 +13,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use ironclaw_approvals::{ApprovalResolver, PersistentApprovalPolicyStorePort};
 use ironclaw_authorization::{CapabilityLeaseStorePort, TrustAwareCapabilityDispatchAuthorizer};
-use ironclaw_capabilities::CapabilityObligationHandler;
-use ironclaw_dispatcher::{RuntimeAdapterResult, RuntimeDispatcher, ToolResolver};
+use ironclaw_capabilities::{
+    CapabilityObligationHandler, RuntimeAdapterResult, RuntimeDispatcher, ToolResolver,
+};
 use ironclaw_events::{
     AuditSink, DurableAuditLog, DurableAuditSink, DurableEventLog, DurableEventSink, EventSink,
     InMemoryAuditSink, InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink,
@@ -111,15 +112,15 @@ use tool_resolver::RegistryLaneToolResolver;
 
 use extension_tool_binder::ServiceLanePackageBinder;
 pub use extension_tool_binder::{ExtensionLaneToolBinder, ExtensionToolBindError};
-use ironclaw_dispatcher::ChainToolResolver;
+use ironclaw_capabilities::ChainToolResolver;
 
 /// Concrete composition bundle for one Reborn host-runtime vertical slice.
 ///
 /// The bundle owns shared `Arc` handles for the configured substrate services
-/// and can build the narrow caller-facing [`DefaultHostRuntime`] facade. Lower
+/// and can build the narrow caller-facing [`DefaultHostRuntime`] service. Lower
 /// handles are available for setup/tests inside the host-runtime layer, but
 /// product/upper Reborn code should prefer [`Self::host_runtime`] and depend on
-/// `Arc<dyn crate::HostRuntime>` instead of reaching around the facade.
+/// `Arc<dyn crate::HostRuntime>` instead of reaching around the service.
 pub struct HostRuntimeServices<F, G, S, R>
 where
     F: RootFilesystem + 'static,
@@ -544,7 +545,7 @@ where
     /// lookup in the dispatch chain. From this point the registry-lane
     /// resolver serves only host built-ins — activated extension
     /// capabilities must resolve from the active snapshot (the cutover has
-    /// no fallback). Must be called before the host runtime facade is built.
+    /// no fallback). Must be called before the host runtime service is built.
     pub fn set_extension_tool_resolver(&self, resolver: Arc<dyn ToolResolver>) {
         let mut slot = match self.extension_tool_resolver.lock() {
             Ok(slot) => slot,
@@ -641,7 +642,7 @@ where
         Arc::new(RuntimeLaneExecutor::new(first_party, wasm, mcp, process))
     }
 
-    /// Builds the upper facade without production validation.
+    /// Builds the upper service without production validation.
     pub fn shared_extension_registry(&self) -> Arc<SharedExtensionRegistry> {
         Arc::clone(&self.registry)
     }
@@ -691,7 +692,7 @@ where
         self.build_host_runtime()
     }
 
-    /// Builds the upper facade with the same dispatcher, process services,
+    /// Builds the upper service with the same dispatcher, process services,
     /// stores, cancellation registry, result store, and runtime health graph.
     fn build_host_runtime(&self) -> DefaultHostRuntime {
         let lifecycle_process_store = Arc::clone(&self.process_lifecycle_store);

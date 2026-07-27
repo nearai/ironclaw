@@ -25,9 +25,11 @@ mod approval_test_support;
 mod automation;
 mod blocked_auth_resume;
 mod builtin_capability_policy;
+#[cfg(test)]
+#[path = "extension_lifecycle_capabilities_auth_tests.rs"]
+mod composition_extension_lifecycle_auth_tests;
 pub mod deployment;
 mod error;
-mod extension_host;
 mod factory;
 mod google_oauth_secret_store;
 mod input;
@@ -39,13 +41,10 @@ mod memory_provider_factory;
 mod observability;
 mod operator_tool_catalog;
 mod outbound;
-mod product_auth;
 mod product_capability;
 mod product_surface;
 mod production_runtime_policy;
 mod profile_approval_authorization;
-mod projection;
-mod provider_identity;
 mod readiness;
 mod root;
 mod runtime;
@@ -59,30 +58,9 @@ mod trigger_fire_access;
 mod turn_run_snapshot;
 
 pub use admin_token::AdminApiTokenMinter;
-pub use automation::facade::RebornAutomationProductFacade;
+pub use automation::service::RebornAutomationProductService;
 pub use automation::trigger_poller::PostSubmitDeliveryHook;
 pub use error::RebornBuildError;
-pub use extension_host::channel_host::{ChannelHostIdentity, GenericChannelHostAssembly};
-pub use extension_host::channel_identity::{
-    ChannelIdentityBindingConfig, channel_identity_binding_hook_factory,
-};
-pub use extension_host::extension_ingress::{
-    ChannelInboundSinkConfig, ChannelIngressDrain, ChannelIngressRegistration,
-    ExtensionIngressParts, ExtensionIngressRegistry, GenericChannelInboundSink,
-    PostAdmissionObserver, StaticIngressSecrets, VerifiedEvidenceMint,
-};
-pub use extension_host::extension_ingress::{
-    EXTENSION_INGRESS_ROUTE_PATTERN, extension_ingress_route_mount,
-};
-pub use extension_host::extension_lifecycle_command::{
-    RebornExtensionLifecycleCommand, RebornExtensionLifecycleCommandError,
-    execute_reborn_extension_lifecycle_command, render_reborn_extension_lifecycle_response,
-};
-pub use extension_host::first_party::{
-    FirstPartyHandlerRegistrar, FirstPartyPackageAsset, FirstPartyPackageBundle,
-    FirstPartyPackageOAuthSetup, FirstPartyPackageOnboarding, FirstPartyRegistrarContext,
-};
-pub use extension_host::skill_listing::{RebornSkillListError, list_reborn_local_skills};
 #[cfg(feature = "test-support")]
 pub use factory::AttachmentTestSupport;
 #[cfg(feature = "test-support")]
@@ -106,27 +84,14 @@ pub use google_oauth_secret_store::{GoogleOauthSecretStore, GoogleOauthSecretSto
 pub use input::{
     ChannelExtensionBinding, OAuthClientConfig, RebornHostBindings, RebornRuntimeProcessBinding,
 };
-/// OAuth redirect-URI newtype re-exported so the `ironclaw_reborn_cli` binary
-/// can name it without a direct `ironclaw_auth` dependency. Its
-/// `runtime/mod.rs` parses the Google OAuth redirect URI from env into
-/// `OAuthRedirectUri` when building the runtime input / OAuth client config. The
-/// `reborn_cli_binary_crate_stays_separate_from_v1_root` boundary test (in
-/// `ironclaw_architecture`) pins the CLI's workspace dependencies to exactly
-/// the composition-facade set, so adding `ironclaw_auth` there would fail that
-/// test — the type must travel through this facade instead.
+/// OAuth redirect-URI newtype re-exported for runtime input construction; the
+/// remaining product-auth contracts are named directly from `ironclaw_auth`.
 pub use ironclaw_auth::OAuthRedirectUri;
 #[cfg(any(test, feature = "test-support"))]
 pub use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountId, CredentialAccountLabel,
     CredentialAccountStatus, CredentialOwnership, Timestamp,
 };
-/// First-party capability-wiring vocabulary re-exported so the assembling
-/// binary (`ironclaw_reborn_cli`) can build the concrete GSuite / web tooling
-/// [`FirstPartyHandlerRegistrar`]s and the credential-account visibility policy
-/// without depending on `ironclaw_host_api` / `ironclaw_host_runtime` /
-/// `ironclaw_auth` directly (extension-runtime DEL-7). The CLI's exact-deps
-/// allow-list is frozen to the composition facade, so these types travel
-/// through here.
 pub use ironclaw_auth::{CredentialAccount, CredentialAccountSelectionRequest};
 pub use ironclaw_host_api::{
     CapabilityId, HostApiError, NetworkScheme, NetworkTargetPattern, RuntimeCredentialRequirement,
@@ -154,7 +119,6 @@ pub use ironclaw_product::{
 };
 pub use ironclaw_runner::failure_lane::{ALL_RUN_FAILURE_CATEGORIES, FailureLane, failure_lane};
 pub use ironclaw_runner::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
-pub use product_auth::credentials::runtime_credentials::RuntimeCredentialAccountVisibilityPolicy;
 // Re-exported for `ironclaw_reborn_cli` (`runtime/mod.rs` turn-failure display):
 // the CLI consumes composition as its facade and must not grow a direct
 // `ironclaw_runner` edge for one summary helper. All other run-failure
@@ -170,16 +134,6 @@ pub use ironclaw_skills::{
 };
 pub use ironclaw_triggers::TriggerId;
 pub use ironclaw_turns::TurnStatus;
-pub use llm_admin::llm_catalog::{
-    ProviderCatalogValidationError, RebornLlmCatalogError, resolve_against_registry,
-    resolve_llm_selection_against_catalog, resolve_llm_selection_allow_missing_key,
-    resolve_reborn_runtime_llm, validate_reborn_provider_catalog_contents,
-};
-pub use llm_admin::llm_config_service::{LlmReloadTrigger, RebornLlmConfigService};
-pub use llm_admin::llm_key_store::{LlmKeyStore, LlmKeyStoreError};
-pub use llm_admin::nearai_mcp::{
-    NearAiMcpBootstrapConfig, NearAiMcpBootstrapConfigError, nearai_mcp_bootstrap_config_from_env,
-};
 pub use llm_admin::openai_compat_serve::build_openai_compat_route_mount;
 pub use memory_binding::{memory_binding_diagnostics, resolve_memory_binding_policy};
 pub use memory_provider_factory::{
@@ -199,15 +153,14 @@ pub use deployment::{
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use deployment::{local_dev_build_input, local_dev_build_input_with_profile};
-pub use ironclaw_product::mark_bearer_token_verified_for_tenant;
-pub use llm_admin::provider_admin::{
-    DetectedEnvLlm, EXAMPLE_OVERLAY_PROVIDER_ID, ProviderMenuEntry, ProviderProbeOutcome,
-    RebornModelRoutesState, RebornProviderAdmin, RebornProviderAdminError, RebornProviderInfo,
-    RebornProviderList, RebornProviderMetadata, RebornProviderSelection, RebornProviderStatus,
-    RebornProviderWriteOutcome, RebornV1State,
+pub use ironclaw_extension_host::provider_identity::ProviderIdentityActorResolver;
+pub use ironclaw_host_api::{
+    RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
+    RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,
+    RebornUserIdentityBindingStore, RebornUserIdentityLookup, RebornUserIdentityLookupError,
+    installation_scoped_provider_user_id,
 };
-pub use llm_admin::provider_admin_product_command::RebornProviderAdminProductCommandService;
-pub use llm_admin::provider_repo::{ProviderRepo, ProviderRepoError};
+pub use ironclaw_product::mark_bearer_token_verified_for_tenant;
 pub use observability::budget::build_default_budget_accountant;
 pub use observability::budget_events::{BudgetEventObserver, TracingBudgetEventObserver};
 pub use observability::hooks::{
@@ -217,35 +170,12 @@ pub use observability::hooks::{
     build_hook_dispatcher_builder_factory_for_tenant, build_hook_projection_registry,
     tenant_extension_root,
 };
-pub use observability::operator_logs::{
-    OperatorLogLayer, capture_tracing_log, operator_log_buffer,
-};
 pub use observability::trajectory_observer::RebornTrajectoryObserver;
-// Composition's facade re-exports the continuation dispatcher for its own
-// downstream consumers (root test suites, the CLI) alongside the
-// product-auth service surface that produces it.
-pub use product_auth::api::auth::RebornAuthContinuationDispatcher;
-pub use product_auth::api::auth::{
-    RebornAuthProductError, RebornCredentialLifecycleError, RebornManualTokenChallenge,
-    RebornManualTokenError, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
-    RebornManualTokenSubmitResponse, RebornOAuthCallbackError, RebornOAuthCallbackOutcome,
-    RebornOAuthCallbackRequest, RebornOAuthCallbackResponse, RebornProductAuthServicePorts,
-    RebornProductAuthServices,
-};
-pub use product_auth::serve::{
-    ProductAuthRouteMount, ProductAuthRouteState, product_auth_route_mount,
-};
 pub use production_runtime_policy::RebornProductionRuntimePolicy;
-pub use provider_identity::{
-    ProviderIdentityActorResolver, RebornIdentityProviderId, RebornIdentityProviderUserId,
-    RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
-    RebornUserIdentityBindingError, RebornUserIdentityBindingStore, RebornUserIdentityLookup,
-    RebornUserIdentityLookupError, installation_scoped_provider_user_id,
-};
 pub use readiness::{
-    RebornFacadeReadiness, RebornReadiness, RebornReadinessDiagnostic,
-    RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
-    RebornReadinessDiagnosticStatus, RebornReadinessState, RebornWorkerReadiness,
+    RebornReadiness, RebornReadinessDiagnostic, RebornReadinessDiagnosticComponent,
+    RebornReadinessDiagnosticReason, RebornReadinessDiagnosticStatus, RebornReadinessState,
+    RebornServiceReadiness, RebornWorkerReadiness,
 };
 pub use root::product_live_adapters::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
@@ -259,7 +189,8 @@ pub use runtime::RebornTurnDriveOutcome;
 pub use runtime::{
     AssistantReply, ConversationId, RebornRuntime, RebornRuntimeError, RebornSkillActivation,
     RebornSkillActivationMode, RebornSkillAsset, RebornSkillBundle, RebornSkillExecutionPlan,
-    RebornSkillExecutionResult, RebornSkillSourceKind, build_reborn_runtime, build_runtime,
+    RebornSkillExecutionResult, RebornSkillSourceKind, blocked_auth_flow_canceller,
+    build_reborn_runtime, build_runtime, product_auth_challenge_provider,
 };
 pub use runtime_input::{
     DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL, DEFAULT_TURN_RUNNER_POLL_INTERVAL,

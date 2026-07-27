@@ -36,7 +36,7 @@ mod tests {
         OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary, OutboundError,
     };
     use ironclaw_product::{
-        LifecyclePackageKind, LifecyclePackageRef, OutboundPreferencesProductFacade,
+        LifecyclePackageKind, LifecyclePackageRef, OutboundPreferencesProductService,
         RebornOutboundDeliveryTargetId,
     };
     use ironclaw_threads::{
@@ -56,15 +56,15 @@ mod tests {
         },
     };
 
-    use crate::extension_host::extension_lifecycle_capabilities::{
+    use crate::outbound::{
+        OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
+        OutboundDeliveryTargetRegistry, RebornOutboundPreferencesService,
+    };
+    use crate::runtime::local_dev_filesystem_skill_context_source;
+    use ironclaw_extension_host::extension_lifecycle_capabilities::{
         EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REMOVE_CAPABILITY_ID,
         EXTENSION_SEARCH_CAPABILITY_ID,
     };
-    use crate::outbound::{
-        OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
-        OutboundDeliveryTargetRegistry, RebornOutboundPreferencesFacade,
-    };
-    use crate::runtime::local_dev_filesystem_skill_context_source;
 
     /// The §5.3 flip collapsed `CapabilityOutcome::Completed` into
     /// `Resolution::Done(Outcome)`; the minted `refs.result` is an opaque uuid,
@@ -808,14 +808,66 @@ mod tests {
                 .expect("install GSuite extension");
             if matches!(extension_state, GsuiteExtensionState::Activated) {
                 extension_management
-                    .activate_with_prechecked_credentials_for_test(
+                    .activate_with_prechecked_credentials_for_user_for_test(
                         package_ref,
-                        crate::extension_host::extension_lifecycle::ExtensionActivationMode::Static,
+                        ironclaw_extension_host::ExtensionActivationMode::Static,
                         surface_user,
                     )
                     .await
                     .expect("activate GSuite extension");
             }
+        }
+    }
+
+    #[allow(
+        dead_code,
+        reason = "kept as a local-dev runtime credential-account test double"
+    )]
+    struct ConfiguredRuntimeCredentialAccounts;
+
+    #[async_trait::async_trait]
+    impl ironclaw_auth::RuntimeCredentialAccountSelectionService
+        for ConfiguredRuntimeCredentialAccounts
+    {
+        async fn select_configured_account_for_binding(
+            &self,
+            _lookup: ironclaw_auth::CredentialAccountSelectionRequest,
+            _runtime_scope: ironclaw_auth::AuthProductScope,
+        ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
+            Err(ironclaw_auth::AuthProductError::CredentialMissing)
+        }
+
+        async fn select_unique_configured_runtime_account(
+            &self,
+            _request: ironclaw_auth::RuntimeCredentialAccountSelectionRequest,
+        ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
+            let now = chrono::Utc::now();
+            Ok(ironclaw_auth::CredentialAccount {
+                id: ironclaw_auth::CredentialAccountId::new(),
+                scope: ironclaw_auth::AuthProductScope::new(
+                    ironclaw_host_api::ResourceScope::local_default(
+                        UserId::new("configured-credential-user").expect("user id"),
+                        ironclaw_host_api::InvocationId::new(),
+                    )
+                    .expect("resource scope"),
+                    ironclaw_auth::AuthSurface::Api,
+                ),
+                provider: ironclaw_auth::AuthProviderId::new("test-provider").expect("provider id"),
+                label: ironclaw_auth::CredentialAccountLabel::new("test-provider")
+                    .expect("account label"),
+                status: ironclaw_auth::CredentialAccountStatus::Configured,
+                ownership: ironclaw_auth::CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(
+                    ironclaw_host_api::SecretHandle::new("test-secret").expect("secret handle"),
+                ),
+                refresh_secret: None,
+                scopes: Vec::new(),
+                provider_identity: None,
+                created_at: now,
+                updated_at: now,
+            })
         }
     }
 
@@ -1520,7 +1572,7 @@ mod tests {
             project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: thread_service.clone(),
             trajectory_observer: None,
-            outbound_preferences_facade: None,
+            outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
@@ -1830,7 +1882,7 @@ mod tests {
             project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: thread_service.clone(),
             trajectory_observer: None,
-            outbound_preferences_facade: None,
+            outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
@@ -2346,7 +2398,7 @@ mod tests {
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: Some(Arc::clone(&activation_source)),
             trajectory_observer: None,
-            outbound_preferences_facade: None,
+            outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
@@ -2596,7 +2648,7 @@ mod tests {
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: None,
             trajectory_observer: None,
-            outbound_preferences_facade: None,
+            outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
@@ -2682,7 +2734,7 @@ mod tests {
             project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             trajectory_observer: None,
-            outbound_preferences_facade: None,
+            outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
@@ -2884,7 +2936,7 @@ mod tests {
             project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: thread_service.clone(),
             trajectory_observer: None,
-            outbound_preferences_facade: None,
+            outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
@@ -3221,7 +3273,7 @@ mod tests {
             project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             trajectory_observer: None,
-            outbound_preferences_facade: None,
+            outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
@@ -3251,7 +3303,7 @@ mod tests {
         // handler's other, unrelated `InvalidInput` fallback (the "reference
         // unavailable" path). All cases must stay a model-recoverable
         // `Failed(InvalidInput)`, never an `Err` that would terminate the run
-        // (agent-loop-capabilities.md).
+        // (capability-access contract).
         let valid_ref = "result:matrix-target";
         let max_bytes_range = format!(
             "4..={}",
@@ -3651,7 +3703,7 @@ mod tests {
             project_service: Arc::clone(&runtime_surfaces.project_service),
             thread_service: thread_service.clone(),
             trajectory_observer: None,
-            outbound_preferences_facade: None,
+            outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
@@ -3756,8 +3808,8 @@ mod tests {
             Arc::new(OutboundDeliveryTargetRegistry::new(vec![
                 slack_provider_delegate,
             ]));
-        let outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade> =
-            Arc::new(RebornOutboundPreferencesFacade::new(
+        let outbound_preferences_service: Arc<dyn OutboundPreferencesProductService> =
+            Arc::new(RebornOutboundPreferencesService::new(
                 Arc::clone(runtime_surfaces.outbound_preferences_for_test()),
                 target_provider,
             ));
@@ -3806,7 +3858,7 @@ mod tests {
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: None,
             trajectory_observer: None,
-            outbound_preferences_facade: Some(outbound_preferences_facade),
+            outbound_preferences_service: Some(outbound_preferences_service),
             outbound_delivery_target_set_requires_approval: true,
             approval_settings,
             project_service: Arc::clone(&runtime_surfaces.project_service),
@@ -4487,8 +4539,8 @@ mod tests {
             Arc::new(OutboundDeliveryTargetRegistry::new(vec![
                 slack_provider_delegate,
             ]));
-        let outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade> =
-            Arc::new(RebornOutboundPreferencesFacade::new(
+        let outbound_preferences_service: Arc<dyn OutboundPreferencesProductService> =
+            Arc::new(RebornOutboundPreferencesService::new(
                 Arc::clone(runtime_surfaces.outbound_preferences_for_test()),
                 target_provider,
             ));
@@ -4517,7 +4569,7 @@ mod tests {
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
             None,
-            Some(outbound_preferences_facade),
+            Some(outbound_preferences_service),
             None,
         )
         .expect("capability wiring");
@@ -4662,7 +4714,7 @@ mod tests {
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: None,
             trajectory_observer: None,
-            outbound_preferences_facade: None,
+            outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
@@ -4778,7 +4830,7 @@ mod tests {
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: None,
             trajectory_observer: None,
-            outbound_preferences_facade: None,
+            outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
@@ -5028,7 +5080,7 @@ mod tests {
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: None,
             trajectory_observer: None,
-            outbound_preferences_facade: None,
+            outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
@@ -5147,7 +5199,7 @@ mod tests {
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: None,
             trajectory_observer: None,
-            outbound_preferences_facade: None,
+            outbound_preferences_service: None,
             outbound_delivery_target_set_requires_approval: false,
             approval_settings: Arc::new(
                 crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
@@ -5290,9 +5342,9 @@ mod tests {
                 .await
                 .expect("install github extension");
             extension_management
-                .activate_with_prechecked_credentials_for_test(
+                .activate_with_prechecked_credentials_for_user_for_test(
                     package_ref,
-                    crate::extension_host::extension_lifecycle::ExtensionActivationMode::Static,
+                    ironclaw_extension_host::ExtensionActivationMode::Static,
                     &surface_user,
                 )
                 .await
@@ -5394,9 +5446,9 @@ mod tests {
             .await
             .expect("install github extension");
         extension_management
-            .activate_with_prechecked_credentials_for_test(
+            .activate_with_prechecked_credentials_for_user_for_test(
                 package_ref,
-                crate::extension_host::extension_lifecycle::ExtensionActivationMode::Static,
+                ironclaw_extension_host::ExtensionActivationMode::Static,
                 &surface_user,
             )
             .await
@@ -5602,9 +5654,9 @@ mod tests {
             .await
             .expect("install github extension");
         extension_management
-            .activate_with_prechecked_credentials_for_test(
+            .activate_with_prechecked_credentials_for_user_for_test(
                 package_ref,
-                crate::extension_host::extension_lifecycle::ExtensionActivationMode::Static,
+                ironclaw_extension_host::ExtensionActivationMode::Static,
                 &surface_user,
             )
             .await

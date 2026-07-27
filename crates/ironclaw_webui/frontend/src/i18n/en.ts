@@ -1312,6 +1312,7 @@ registerPack("en", {
   "common.deleteChat": "Delete chat",
   "chat.deleteFailed": "Couldn't delete this conversation.",
   "chat.deleteBusy": "Can't delete a conversation while it's still running. Stop it first, then try again.",
+  "chat.cancelFailed": "Couldn't stop this run. It may still be running. Try again.",
   "command.placeholder": "Type a command or search...",
   "routine.searchPlaceholder": "Search routine name, trigger, or action",
   "routine.unavailable": "Routine unavailable",
@@ -1413,6 +1414,11 @@ registerPack("en", {
 
 registerPack("en", {
   "app.checkingSession": "Checking session...",
+  "app.loadingPage": "Loading page...",
+  "app.pageLoadFailedTitle": "This page couldn't be loaded",
+  "app.pageLoadFailedDescription":
+    "A new version may be available or the connection was interrupted. Reload the page to try again.",
+  "app.reloadPage": "Reload page",
   "app.sessionCheckFailedTitle": "Couldn't verify your session",
   "app.sessionCheckFailedDescription":
     "We couldn't verify your session right now. Your sign-in is still saved. Try again in a moment.",
@@ -1449,6 +1455,14 @@ registerPack("en", {
   "chat.copyMessage": "Copy message",
   "chat.retryMessage": "Retry message",
   "chat.history.loadFailed": "Failed to load conversation history.",
+  "chat.failure.connectionLost": "Connection to the server was lost. Please reconnect and try again.",
+  "chat.failure.request": "The request failed before it could be sent.",
+  "chat.failure.requestDetail": "The request failed: {detail}.",
+  "chat.failure.runCategory": "The run failed: {detail}.",
+  "chat.failure.recoveryRequired": "The run is awaiting recovery — backend reported `recovery_required`.",
+  "chat.failure.run": "The run failed before producing a reply.",
+  "chat.failure.streamRetryable": "The chat stream hit a retryable error: {detail}.",
+  "chat.failure.stream": "The chat stream failed: {detail}.",
   "chat.finishPairingBeforeSend": "Finish connecting the channel before sending another message.",
   "chat.resolveApprovalBeforeSend": "Resolve the approval request before sending another message.",
   "chat.retryIn": "Retry in {seconds}s",

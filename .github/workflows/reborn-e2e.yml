@@ -46,6 +46,13 @@ concurrency:
   group: reborn-e2e-${{ github.event_name }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
+env:
+  # Pin wall-clock rendering inputs so a browser/API assertion cannot pass or
+  # fail on the runner's locale. This suite asserts rendered timestamps and
+  # schedule text, which are exactly the values that shift with TZ/locale.
+  TZ: "UTC"
+  LANG: "C.UTF-8"
+
 jobs:
   changes:
     name: Detect Reborn E2E scope
@@ -213,6 +220,7 @@ jobs:
           tests/e2e/scenarios/test_provider_capability_inventory.py
           tests/e2e/scenarios/test_journey_coverage.py
           tests/e2e/scenarios/test_emulate_reborn_provider_contracts.py
+          tests/e2e/scenarios/test_provider_fault_proxy.py
           tests/e2e/scenarios/test_reborn_qa_trace_replay.py
           tests/e2e/scenarios/test_reborn_qa_trace_full_path.py
           -v

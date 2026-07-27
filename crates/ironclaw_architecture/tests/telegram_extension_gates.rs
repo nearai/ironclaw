@@ -86,8 +86,7 @@ fn generic_channel_delivery_is_not_owned_by_composition() {
 
 #[test]
 fn generic_extension_lifecycle_has_no_telegram_knowledge() {
-    let path = workspace_root()
-        .join("crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs");
+    let path = workspace_root().join("crates/ironclaw_extension_host/src/product_lifecycle.rs");
     let source = std::fs::read_to_string(&path).expect("extension lifecycle source readable");
     let forbidden = [
         "telegram_paired_source",

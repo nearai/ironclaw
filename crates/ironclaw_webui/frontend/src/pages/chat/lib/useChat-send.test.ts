@@ -18,7 +18,8 @@ import {
   resetToolActivityState,
 } from "./tool-activity-state";
 import {
-  CONNECTION_LOST_RUN_FAILURE_MESSAGE,
+  CONNECTION_LOST_RUN_FAILURE_KEY,
+  failureMessageForRequestError,
   rewriteConnectionLostRunFailures,
   upsertConnectionLostRunFailure,
 } from "./failureMessages";
@@ -54,6 +55,21 @@ const STATE_SLOT = Object.freeze({
   busyGateNotice: 6,
   stateThreadId: 7,
 });
+
+const ENGLISH_FAILURE_COPY = {
+  "chat.failure.connectionLost":
+    "Connection to the server was lost. Please reconnect and try again.",
+  "chat.failure.request": "The request failed before it could be sent.",
+};
+
+function testTranslator(copy = ENGLISH_FAILURE_COPY) {
+  return (key, params = {}) =>
+    (copy[key] || key).replace(/\{(\w+)\}/g, (match, name) =>
+      Object.hasOwn(params, name) ? String(params[name]) : match,
+    );
+}
+
+const t = testTranslator();
 
 function stateUpdatesFor(updates, slot) {
   return updates.filter((update) => update.index === slot);
@@ -126,7 +142,7 @@ function runUseChatSource(context) {
   if (!context.startExtensionOauth) {
     context.startExtensionOauth = async () => ({ success: false });
   }
-  if (!context.useT) context.useT = () => (key) => key;
+  if (!context.useT) context.useT = () => t;
   if (!("touchThreadInCache" in context)) context.touchThreadInCache = () => {};
   if (!("upsertThreadInCache" in context)) context.upsertThreadInCache = () => {};
   vm.runInNewContext(useChatSourceForTest(), context);
@@ -138,12 +154,15 @@ function createReactStub({
   stateSlots = new Map(),
   refs = [],
   runEffects = false,
+  runLayoutEffects = runEffects,
 } = {}) {
   let stateIndex = 0;
   let refIndex = 0;
   let effectIndex = 0;
+  let layoutEffectIndex = 0;
   const refSlots = [];
   const effectSlots = [];
+  const layoutEffectSlots = [];
   const depsChanged = (previous, next) => {
     if (!previous || !next || previous.length !== next.length) return true;
     return next.some((value, index) => !Object.is(value, previous[index]));
@@ -153,6 +172,7 @@ function createReactStub({
       stateIndex = 0;
       refIndex = 0;
       effectIndex = 0;
+      layoutEffectIndex = 0;
     },
     useCallback: (fn) => fn,
     useEffect: (effect, deps) => {
@@ -167,6 +187,19 @@ function createReactStub({
       slot.deps = deps ? [...deps] : null;
       slot.cleanup = effect() || null;
       effectSlots[index] = slot;
+    },
+    useLayoutEffect: (effect, deps) => {
+      if (!runLayoutEffects) return;
+      const index = layoutEffectIndex++;
+      const slot = layoutEffectSlots[index] || { deps: null, cleanup: null };
+      if (!depsChanged(slot.deps, deps)) {
+        layoutEffectSlots[index] = slot;
+        return;
+      }
+      if (typeof slot.cleanup === "function") slot.cleanup();
+      slot.deps = deps ? [...deps] : null;
+      slot.cleanup = effect() || null;
+      layoutEffectSlots[index] = slot;
     },
     useRef: (value) => {
       const index = refIndex++;
@@ -267,7 +300,10 @@ test("useChat: disconnected SSE rewrites an active driver_unavailable error", ()
 
   assert.equal(chat.sseStatus, CONNECTION_STATUS.DISCONNECTED);
   assert.equal(renderedMessages.length, 1);
-  assert.equal(renderedMessages[0].content, CONNECTION_LOST_RUN_FAILURE_MESSAGE);
+  assert.equal(
+    renderedMessages[0].content,
+    t(CONNECTION_LOST_RUN_FAILURE_KEY),
+  );
   assert.equal(
     stateUpdatesFor(setCalls, STATE_SLOT.isProcessing).at(-1)?.value,
     false,
@@ -347,7 +383,10 @@ test("useChat: disconnected SSE surfaces connection error before run id is known
   assert.equal(renderedMessages.length, 2);
   assert.equal(renderedMessages[0].content, historicalFailure);
   assert.equal(renderedMessages[1].id, "err-connection-lost");
-  assert.equal(renderedMessages[1].content, CONNECTION_LOST_RUN_FAILURE_MESSAGE);
+  assert.equal(
+    renderedMessages[1].content,
+    t(CONNECTION_LOST_RUN_FAILURE_KEY),
+  );
   assert.equal(
     stateUpdatesFor(setCalls, STATE_SLOT.isProcessing).at(-1)?.value,
     false,
@@ -989,9 +1028,13 @@ test("useChat.send: pending approval blocks before sendMessage", async () => {
   assert.equal(sendCalls, 0);
 });
 
-test("useChat.send: request failure appends inline error in the active thread", async () => {
+test("useChat.send: request failures use safe copy in the selected language", async () => {
   const threadId = "thread-1";
   let renderedMessages = [];
+  let sendAttempt = 0;
+  const zh = testTranslator({
+    "chat.failure.request": "请求在发送前失败。",
+  });
 
   const context = {
     AbortController,
@@ -1008,8 +1051,7 @@ test("useChat.send: request failure appends inline error in the active thread", 
     createThreadRequest: async () => {
       throw new Error("thread should already exist");
     },
-    failureMessageForRequestError: (error) =>
-      `inline:${error?.message || "unknown"}`,
+    failureMessageForRequestError,
     globalThis: {},
     queryClient: {
       fetchQuery: async () => {
@@ -1022,7 +1064,16 @@ test("useChat.send: request failure appends inline error in the active thread", 
     timelineMessageIdFromAcceptedRef,
     resolveGateRequest: async () => {},
     sendMessage: async () => {
-      throw new Error("AI provider account is out of credits");
+      sendAttempt += 1;
+      if (sendAttempt === 1) throw new TypeError("Failed to fetch");
+      throw {
+        name: "ApiError",
+        message: "Provider secret leaked",
+        payload: {
+          error: "customer email alice@example.com and token super-secret",
+          field: "api_key=super-secret",
+        },
+      };
     },
     setInterval,
     setTimeout,
@@ -1041,25 +1092,34 @@ test("useChat.send: request failure appends inline error in the active thread", 
       },
     }),
     useSSE: () => ({ status: "idle" }),
+    useT: () => zh,
   };
 
   runUseChatSource(context);
 
   const chat = context.globalThis.__testExports.useChat(threadId);
-  await assert.rejects(chat.send("please answer"), /out of credits/);
+  await assert.rejects(chat.send("please answer"), /Failed to fetch/);
 
   assert.equal(renderedMessages.length, 2);
   assert.equal(renderedMessages[0].role, "user");
   assert.equal(renderedMessages[0].status, "error");
-  assert.equal(
-    renderedMessages[0].error,
-    "inline:AI provider account is out of credits",
-  );
+  assert.equal(renderedMessages[0].error, "请求在发送前失败。");
   assert.equal(renderedMessages[1].role, "error");
   assert.equal(renderedMessages[1].requestForMessageId, renderedMessages[0].id);
-  assert.equal(
-    renderedMessages[1].content,
-    "inline:AI provider account is out of credits",
+  assert.equal(renderedMessages[1].content, "请求在发送前失败。");
+
+  await assert.rejects(chat.send("do not leak provider details"));
+
+  assert.equal(renderedMessages.length, 4);
+  assert.equal(renderedMessages[2].role, "user");
+  assert.equal(renderedMessages[2].status, "error");
+  assert.equal(renderedMessages[2].error, "请求在发送前失败。");
+  assert.equal(renderedMessages[3].role, "error");
+  assert.equal(renderedMessages[3].requestForMessageId, renderedMessages[2].id);
+  assert.equal(renderedMessages[3].content, "请求在发送前失败。");
+  assert.doesNotMatch(
+    renderedMessages.map((message) => message.content || message.error).join(" "),
+    /alice@example\.com|super-secret|api_key/,
   );
 });
 
@@ -1874,7 +1934,7 @@ test("useChat.send: repeated sends under the same pending gate stay blocked loca
   assert.equal(sendCalls, 0);
 });
 
-test("useChat.cancelRun clears local state before cancel request resolves", async () => {
+test("useChat.cancelRun keeps local state until the cancel request succeeds", async () => {
   const threadId = "thread-1";
   const stateUpdates = [];
   let cancelRequest = null;
@@ -1944,14 +2004,82 @@ test("useChat.cancelRun clears local state before cancel request resolves", asyn
   assert.equal(cancelRequest.threadId, threadId);
   assert.equal(cancelRequest.runId, "run-1");
   assert.equal(cancelRequest.reason, "user_requested");
+  assert.deepEqual(stateUpdates, []);
+
+  resolveCancelRequest({});
+  await cancelPromise;
+
   assert.deepEqual(stateUpdates.slice(0, 3), [
     { index: 4, value: null },
     { index: 3, value: false },
     { index: 2, value: null },
   ]);
+});
 
-  resolveCancelRequest({});
-  await cancelPromise;
+test("useChat.cancelRun preserves local state when the cancel request fails", async () => {
+  const threadId = "thread-1";
+  const stateUpdates = [];
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub({
+      initialByIndex: new Map([
+        [2, { runId: "run-1", threadId, status: "running" }],
+        [3, true],
+        [4, { runId: "run-1", gateRef: "gate-1" }],
+      ]),
+      setCalls: stateUpdates,
+    }),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {
+      throw new Error("cancel request failed");
+    },
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("createThread should not run");
+    },
+    globalThis: {},
+    queryClient: {
+      fetchQuery: async () => ({ channels: [] }),
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    resolveGateRequest: async () => {},
+    sendMessage: async () => {
+      throw new Error("sendMessage should not run");
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: [],
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      seedThreadMessages: () => {},
+      setMessages: () => {},
+    }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+  };
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  await assert.rejects(
+    chat.cancelRun("user_requested"),
+    /cancel request failed/,
+  );
+
+  assert.deepEqual(stateUpdates, []);
 });
 
 test("useChat clears transient run and gate state during thread switch render", () => {
@@ -2383,6 +2511,7 @@ test("useChat.cancelRun completion does not clear a newer run", async () => {
   const threadId = "thread-1";
   const stateUpdates = [];
   let resolveCancelRequest;
+  let updateActiveRun;
 
   const context = {
     AbortController,
@@ -2427,7 +2556,10 @@ test("useChat.cancelRun completion does not clear a newer run", async () => {
     setInterval,
     setTimeout,
     submitManualToken: async () => {},
-    useChatEvents: () => () => {},
+    useChatEvents: ({ setActiveRun }) => {
+      updateActiveRun = setActiveRun;
+      return () => {};
+    },
     useHistory: () => ({
       messages: [],
       hasMore: false,
@@ -2444,20 +2576,146 @@ test("useChat.cancelRun completion does not clear a newer run", async () => {
 
   const chat = context.globalThis.__testExports.useChat(threadId);
   const cancelPromise = chat.cancelRun("user_requested");
-  await chat.send("next request");
+  updateActiveRun({
+    runId: "run-2",
+    threadId,
+    status: "queued",
+    source: "projection",
+  });
 
   const newerRunUpdate = stateUpdates.find(
     (update) => update.index === 2 && update.value?.runId === "run-2",
   );
   assert.equal(newerRunUpdate?.value.threadId, threadId);
   assert.equal(newerRunUpdate?.value.status, "queued");
-  assert.equal(newerRunUpdate?.value.source, "local");
+  assert.equal(newerRunUpdate?.value.source, "projection");
 
   const updatesBeforeCancelResolution = stateUpdates.length;
   resolveCancelRequest({});
   await cancelPromise;
 
   assert.deepEqual(stateUpdates.slice(updatesBeforeCancelResolution), []);
+});
+
+test("useChat.cancelRun completion is fenced after a committed thread switch before passive effects", async () => {
+  const oldThreadId = "thread-old";
+  const nextThreadId = "thread-next";
+  const sharedRunId = "run-shared";
+  const nextGate = {
+    runId: sharedRunId,
+    gateRef: "gate-next",
+    kind: "gate",
+  };
+  const stateUpdates = [];
+  const stateSlots = new Map();
+  let resolveCancelRequest;
+  let latestEventState;
+
+  const react = createReactStub({
+    initialByIndex: new Map([
+      [STATE_SLOT.activeRun, {
+        runId: sharedRunId,
+        threadId: oldThreadId,
+        status: "running",
+      }],
+      [STATE_SLOT.isProcessing, true],
+      [STATE_SLOT.stateThreadId, oldThreadId],
+    ]),
+    setCalls: stateUpdates,
+    stateSlots,
+    // Exercise the exact React ordering under review: the new thread has
+    // committed and layout effects ran, but passive effects have not.
+    runEffects: false,
+    runLayoutEffects: true,
+  });
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: react,
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () =>
+      new Promise((resolve) => {
+        resolveCancelRequest = resolve;
+      }),
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("createThread should not run");
+    },
+    globalThis: {},
+    queryClient: {
+      fetchQuery: async () => ({ channels: [] }),
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    resolveGateRequest: async () => {},
+    sendMessage: async () => {
+      throw new Error("sendMessage should not run");
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: (eventState) => {
+      latestEventState = eventState;
+      return () => {};
+    },
+    useHistory: () => ({
+      messages: [],
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadError: null,
+      loadHistory: () => {},
+      seedThreadMessages: () => {},
+      setMessages: () => {},
+    }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+  };
+
+  runUseChatSource(context);
+  const renderChat = (threadId) => {
+    react.__beginRender();
+    return context.globalThis.__testExports.useChat(threadId);
+  };
+
+  const oldChat = renderChat(oldThreadId);
+  const cancelPromise = oldChat.cancelRun("user_requested");
+
+  // React retries a render-phase state adjustment before committing it.
+  renderChat(nextThreadId);
+  renderChat(nextThreadId);
+
+  // Reuse the run id deliberately so only the committed thread fence can
+  // distinguish this new thread state from the cancellation request.
+  latestEventState.setIsProcessing(true);
+  latestEventState.setPendingGate(nextGate);
+  latestEventState.setActiveRun({
+    runId: sharedRunId,
+    threadId: nextThreadId,
+    status: "awaiting_gate",
+    source: "projection",
+  });
+  const updatesBeforeAcknowledgement = stateUpdates.length;
+
+  resolveCancelRequest({});
+  await cancelPromise;
+
+  assert.deepEqual(
+    stateUpdates.slice(updatesBeforeAcknowledgement),
+    [],
+    "an old cancellation acknowledgement must not clear the newly committed thread",
+  );
+  assert.equal(stateSlots.get(STATE_SLOT.isProcessing).value, true);
+  assert.equal(stateSlots.get(STATE_SLOT.pendingGate).value, nextGate);
+  assert.equal(
+    stateSlots.get(STATE_SLOT.activeRun).value.threadId,
+    nextThreadId,
+  );
 });
 
 test("useChat.send: connect-like prompts submit to the model", async () => {

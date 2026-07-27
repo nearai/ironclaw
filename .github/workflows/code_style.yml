@@ -26,6 +26,13 @@ env:
   # cfg!(test) covers unit tests; this covers integration/e2e that link the
   # non-cfg(test) library.
   IRONCLAW_DISABLE_OS_KEYCHAIN: "1"
+  # Pin wall-clock rendering inputs so a test cannot pass or fail on the
+  # runner's locale. Reborn renders model-visible time slices, and date/number
+  # formatting differs by locale, so an unpinned runner turns a formatting
+  # regression into an unreproducible flake. UTC also keeps recorded fixtures
+  # comparable with what a developer sees locally.
+  TZ: "UTC"
+  LANG: "C.UTF-8"
 
 jobs:
   changes:

@@ -5,9 +5,9 @@ use std::sync::{
 
 use ironclaw_approvals::{
     AutoApproveSettingInput, AutoApproveSettingKey, AutoApproveSettingRecord,
-    AutoApproveSettingStore, AutoApproveSettingStorePort, CapabilityPermissionOverrideInput,
+    AutoApproveSettingStore, AutoApproveSettingStorePort as _, CapabilityPermissionOverrideInput,
     CapabilityPermissionOverrideKey, CapabilityPermissionOverrideRecord,
-    CapabilityPermissionOverrideStorePort, CapabilityPermissionStoreError,
+    CapabilityPermissionOverrideStorePort as _, CapabilityPermissionStoreError,
     PersistentApprovalPolicy, PersistentApprovalPolicyError, PersistentApprovalPolicyInput,
     PersistentApprovalPolicyKey, PersistentApprovalPolicyStore, ToolPermissionOverrideStore,
     test_support::{
@@ -114,7 +114,7 @@ impl CountingPersistentApprovalPolicyStore {
 }
 
 #[async_trait::async_trait]
-impl AutoApproveSettingStorePort for CountingAutoApproveSettingStore {
+impl ironclaw_approvals::AutoApproveSettingStorePort for CountingAutoApproveSettingStore {
     async fn set(
         &self,
         input: AutoApproveSettingInput,
@@ -150,7 +150,9 @@ impl AutoApproveSettingStorePort for CountingAutoApproveSettingStore {
 }
 
 #[async_trait::async_trait]
-impl CapabilityPermissionOverrideStorePort for CountingToolPermissionOverrideStore {
+impl ironclaw_approvals::CapabilityPermissionOverrideStorePort
+    for CountingToolPermissionOverrideStore
+{
     async fn set(
         &self,
         input: CapabilityPermissionOverrideInput,
@@ -243,7 +245,9 @@ impl ironclaw_approvals::PersistentApprovalPolicyStorePort
 }
 
 #[async_trait::async_trait]
-impl CapabilityPermissionOverrideStorePort for ErroringToolPermissionOverrideStore {
+impl ironclaw_approvals::CapabilityPermissionOverrideStorePort
+    for ErroringToolPermissionOverrideStore
+{
     async fn set(
         &self,
         _input: CapabilityPermissionOverrideInput,

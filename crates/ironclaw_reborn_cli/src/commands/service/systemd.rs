@@ -37,6 +37,29 @@ fn unit_quote(value: &str, escape_dollar: bool) -> Result<String> {
     Ok(escaped)
 }
 
+/// Escapes a value for a systemd "path"-type directive (e.g.
+/// `WorkingDirectory=`), which — unlike `ExecStart=`/`Environment=` — takes
+/// the rest of the line verbatim and is never subject to systemd's
+/// shell-style quote/backslash parsing. Wrapping such a value in `"..."`
+/// (as [`unit_quote`] does) makes the quote characters part of the path
+/// itself, which systemd rejects with `bad-setting`. Only `%` needs
+/// doubling here, to escape systemd's specifier expansion.
+fn unit_verbatim_value(value: &str) -> Result<String> {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\0' => bail!("systemd unit value contains NUL"),
+            '\n' | '\r' => bail!("systemd unit path value contains a line break"),
+            '%' => escaped.push_str("%%"),
+            character if character.is_control() => {
+                bail!("systemd unit value contains unsupported control character")
+            }
+            character => escaped.push(character),
+        }
+    }
+    Ok(escaped)
+}
+
 // ── Unit generation ─────────────────────────────────────────────
 
 fn unit_content(invocation: &ServeInvocation, working_directory: &Path) -> Result<String> {
@@ -59,7 +82,7 @@ fn unit_content(invocation: &ServeInvocation, working_directory: &Path) -> Resul
     // systemd's default and not the Reborn home itself — the home is an
     // ancestor of every default skill root, so it still trips
     // composition's `paths_overlap` check (see `service_working_directory`).
-    let working_directory = unit_quote(&working_directory.display().to_string(), false)?;
+    let working_directory = unit_verbatim_value(&working_directory.display().to_string())?;
 
     Ok(format!(
         "[Unit]\n\
@@ -205,7 +228,7 @@ pub(super) fn install_with_runner(
     };
     // Captured before the write: a pre-existing file at this path may
     // have been installed by this CLI's own prior run, or by the WebUI
-    // operator facade (`OperatorServiceLifecycle`) — both surfaces
+    // operator service (`RebornLocalServiceLifecycle`) — both surfaces
     // target the same unit name/path by design (see the module doc). The
     // write below atomically replaces it.
     let replaced_existing = previous.is_some();
@@ -756,6 +779,18 @@ mod tests {
     }
 
     #[test]
+    fn unit_verbatim_value_doubles_percent_and_rejects_control_characters() {
+        assert_eq!(
+            unit_verbatim_value("/home/%u/reborn").expect("valid path"),
+            "/home/%%u/reborn"
+        );
+        assert!(unit_verbatim_value("bad\0value").is_err());
+        assert!(unit_verbatim_value("line\nbreak").is_err());
+        assert!(unit_verbatim_value("line\rbreak").is_err());
+        assert!(unit_verbatim_value("bad\u{7}value").is_err());
+    }
+
+    #[test]
     fn unit_content_includes_service_type() {
         let unit = unit_content(&sample_invocation(), &sample_reborn_home()).expect("valid unit");
         assert!(unit.contains("Type=simple"));
@@ -813,10 +848,18 @@ mod tests {
     #[test]
     fn unit_content_includes_working_directory_line() {
         let unit = unit_content(&sample_invocation(), &sample_reborn_home()).expect("valid unit");
-        assert!(unit.contains(r#"WorkingDirectory="/home/op/.ironclaw/reborn""#));
+        // Bare, unquoted path: `WorkingDirectory=` is a systemd Path-type
+        // directive that is never shell-quote-parsed, so a quoted value
+        // (`WorkingDirectory="/path"`) fails to load with `bad-setting`
+        // (issue #6575) and would not match this exact string.
+        assert!(unit.contains("WorkingDirectory=/home/op/.ironclaw/reborn\n"));
         let working_dir_index = unit.find("WorkingDirectory=").unwrap();
         let exec_start_index = unit.find("ExecStart=").unwrap();
         assert!(working_dir_index < exec_start_index);
+
+        let percent_unit = unit_content(&sample_invocation(), Path::new("/home/%u/reborn"))
+            .expect("valid percent-containing working directory");
+        assert!(percent_unit.contains("WorkingDirectory=/home/%%u/reborn\n"));
     }
 
     #[test]

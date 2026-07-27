@@ -57,7 +57,7 @@ pub enum PackageAssetContent {
 }
 
 /// A package's user-facing onboarding copy, carried as plain data (no host
-/// lifecycle types — this crate sits below `product_workflow`). Composition
+/// lifecycle types — this crate sits below `product_surface`). Composition
 /// maps this to its `LifecycleExtensionOnboarding` at summary time. The strings
 /// are the exact bespoke copy that used to live in composition's per-id `match`.
 pub struct PackageOnboarding {

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use super::{
-    OutboundPreferencesProductFacade, ProductSurfaceCaller, ProductSurfaceError,
+    OutboundPreferencesProductService, ProductSurfaceCaller, ProductSurfaceError,
     ProductSurfaceErrorCode, ProductSurfaceErrorKind, RebornOutboundDeliveryModality,
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
@@ -12,28 +12,28 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_outbound::{
     CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
-    OutboundDeliveryTargetEntry, OutboundDeliveryTargetProvider, OutboundDeliveryTargetScope,
-    OutboundDeliveryTargetSummary, OutboundError, RunFinalReplyDestination,
-    WriteCommunicationPreferenceRequest,
+    OutboundDeliveryTargetEntry, OutboundDeliveryTargetId, OutboundDeliveryTargetProvider,
+    OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary, OutboundError,
+    RunFinalReplyDestination, WriteCommunicationPreferenceRequest,
 };
 use ironclaw_turns::ReplyTargetBindingRef;
 
-pub struct RebornOutboundPreferencesFacade {
+pub struct RebornOutboundPreferencesService {
     preferences: Arc<dyn CommunicationPreferenceRepository>,
     targets: Arc<dyn OutboundDeliveryTargetProvider>,
 }
 
-impl std::fmt::Debug for RebornOutboundPreferencesFacade {
+impl std::fmt::Debug for RebornOutboundPreferencesService {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("RebornOutboundPreferencesFacade")
+            .debug_struct("RebornOutboundPreferencesService")
             .field("preferences", &"Arc<dyn CommunicationPreferenceRepository>")
             .field("targets", &"Arc<dyn OutboundDeliveryTargetProvider>")
             .finish()
     }
 }
 
-impl RebornOutboundPreferencesFacade {
+impl RebornOutboundPreferencesService {
     pub fn new(
         preferences: Arc<dyn CommunicationPreferenceRepository>,
         targets: Arc<dyn OutboundDeliveryTargetProvider>,
@@ -100,8 +100,9 @@ impl RebornOutboundPreferencesFacade {
         caller: &ProductSurfaceCaller,
         target_id: &RebornOutboundDeliveryTargetId,
     ) -> Result<OutboundDeliveryTargetEntry, ProductSurfaceError> {
+        let target_id = outbound_target_id_from_reborn(target_id)?;
         self.targets
-            .resolve_outbound_delivery_target(&target_scope(caller), target_id)
+            .resolve_outbound_delivery_target(&target_scope(caller), &target_id)
             .await
             .map_err(map_outbound_repository_error)?
             .ok_or_else(outbound_target_not_found)
@@ -117,7 +118,7 @@ impl RebornOutboundPreferencesFacade {
 }
 
 #[async_trait]
-impl OutboundPreferencesProductFacade for RebornOutboundPreferencesFacade {
+impl OutboundPreferencesProductService for RebornOutboundPreferencesService {
     async fn get_outbound_preferences(
         &self,
         caller: ProductSurfaceCaller,
@@ -214,11 +215,26 @@ fn target_scope(caller: &ProductSurfaceCaller) -> OutboundDeliveryTargetScope {
     OutboundDeliveryTargetScope::new(caller.tenant_id.clone(), caller.user_id.clone())
 }
 
+fn outbound_target_id_from_reborn(
+    target_id: &RebornOutboundDeliveryTargetId,
+) -> Result<OutboundDeliveryTargetId, ProductSurfaceError> {
+    OutboundDeliveryTargetId::new(target_id.as_str()).map_err(|_| ProductSurfaceError {
+        code: ProductSurfaceErrorCode::InvalidRequest,
+        kind: ProductSurfaceErrorKind::Validation,
+        status_code: 400,
+        retryable: false,
+        field: Some("final_reply_target_id".to_string()),
+        validation_code: None,
+    })
+}
+
 fn reborn_summary_from_outbound(
     summary: &OutboundDeliveryTargetSummary,
 ) -> Result<RebornOutboundDeliveryTargetSummary, ProductSurfaceError> {
+    let target_id = RebornOutboundDeliveryTargetId::new(summary.target_id.as_str())
+        .map_err(|_| outbound_target_projection_error())?;
     RebornOutboundDeliveryTargetSummary::new(
-        summary.target_id.clone(),
+        target_id,
         summary.channel.as_str(),
         summary.display_name.as_str(),
         summary
@@ -309,7 +325,7 @@ mod tests {
     use ironclaw_outbound::{
         CommunicationModality, CommunicationPreferenceRepository, CommunicationPreferenceVersion,
         DeliveryDefaultScope, DeliveryTargetCapabilities, MutableOutboundDeliveryTargetRegistry,
-        OutboundDeliveryTargetId, OutboundDeliveryTargetOwner, OutboundDeliveryTargetRegistry,
+        OutboundDeliveryTargetOwner, OutboundDeliveryTargetRegistry,
         VersionedCommunicationPreferenceRecord,
     };
 
@@ -388,13 +404,14 @@ mod tests {
             _caller: &OutboundDeliveryTargetScope,
             target: &ReplyTargetBindingRef,
         ) -> Result<Option<OutboundDeliveryTargetEntry>, OutboundError> {
-            Ok(matches!(
-                &self.entry.destination,
+            Ok(match &self.entry.destination {
                 RunFinalReplyDestination::External {
                     reply_target_binding_ref,
-                } if reply_target_binding_ref.as_str() == target.as_str()
-            )
-            .then(|| self.entry.clone()))
+                } if reply_target_binding_ref.as_str() == target.as_str() => {
+                    Some(self.entry.clone())
+                }
+                _ => None,
+            })
         }
     }
 
@@ -563,9 +580,9 @@ mod tests {
             Some(reply_ref("reply:slack-alpha")),
         )
         .await;
-        let facade = RebornOutboundPreferencesFacade::new(store, provider);
+        let service = RebornOutboundPreferencesService::new(store, provider);
 
-        let response = facade
+        let response = service
             .get_outbound_preferences(caller("tenant-alpha", "user-alpha"))
             .await
             .expect("preferences response");
@@ -582,7 +599,7 @@ mod tests {
             RebornOutboundDeliveryTargetStatus::Available
         );
 
-        let other_user = facade
+        let other_user = service
             .get_outbound_preferences(caller("tenant-alpha", "user-bravo"))
             .await
             .expect("other user preferences");
@@ -605,9 +622,9 @@ mod tests {
             Some(reply_ref("reply:slack-alpha")),
         )
         .await;
-        let facade = RebornOutboundPreferencesFacade::new(store, provider);
+        let service = RebornOutboundPreferencesService::new(store, provider);
 
-        let response = facade
+        let response = service
             .get_outbound_preferences(caller("tenant-alpha", "user-alpha"))
             .await
             .expect("preferences response");
@@ -621,12 +638,12 @@ mod tests {
 
     #[tokio::test]
     async fn get_preferences_maps_backend_read_error_to_unavailable() {
-        let facade = RebornOutboundPreferencesFacade::new(
+        let service = RebornOutboundPreferencesService::new(
             Arc::new(LoadFailingPreferenceRepository),
             Arc::new(FakeTargetProvider::default()),
         );
 
-        let error = facade
+        let error = service
             .get_outbound_preferences(caller("tenant-alpha", "user-alpha"))
             .await
             .expect_err("backend read failure");
@@ -643,9 +660,9 @@ mod tests {
             "user-alpha",
             target_entry("slack-alpha", "reply:slack-alpha", true),
         );
-        let facade = RebornOutboundPreferencesFacade::new(store.clone(), provider);
+        let service = RebornOutboundPreferencesService::new(store.clone(), provider);
 
-        let response = facade
+        let response = service
             .set_outbound_preferences(
                 caller("tenant-alpha", "user-alpha"),
                 RebornSetOutboundPreferencesRequest {
@@ -684,7 +701,7 @@ mod tests {
         );
         assert!(stored.record.default_modality.is_none());
 
-        let error = facade
+        let error = service
             .set_outbound_preferences(
                 caller("tenant-alpha", "user-alpha"),
                 RebornSetOutboundPreferencesRequest {
@@ -704,12 +721,12 @@ mod tests {
             "user-alpha",
             target_entry("slack-alpha", "reply:slack-alpha", true),
         );
-        let facade = RebornOutboundPreferencesFacade::new(
+        let service = RebornOutboundPreferencesService::new(
             Arc::new(PutFailingPreferenceRepository),
             provider,
         );
 
-        let error = facade
+        let error = service
             .set_outbound_preferences(
                 caller("tenant-alpha", "user-alpha"),
                 RebornSetOutboundPreferencesRequest {
@@ -729,12 +746,12 @@ mod tests {
             "user-alpha",
             target_entry("slack-alpha", "reply:slack-alpha", true),
         );
-        let facade = RebornOutboundPreferencesFacade::new(
+        let service = RebornOutboundPreferencesService::new(
             Arc::new(LoadFailingPreferenceRepository),
             provider,
         );
 
-        let error = facade
+        let error = service
             .set_outbound_preferences(
                 caller("tenant-alpha", "user-alpha"),
                 RebornSetOutboundPreferencesRequest {
@@ -754,12 +771,12 @@ mod tests {
             "user-alpha",
             target_entry("slack-alpha", "reply:slack-alpha", true),
         );
-        let facade = RebornOutboundPreferencesFacade::new(
+        let service = RebornOutboundPreferencesService::new(
             Arc::new(CasConflictingPreferenceRepository),
             provider,
         );
 
-        let error = facade
+        let error = service
             .set_outbound_preferences(
                 caller("tenant-alpha", "user-alpha"),
                 RebornSetOutboundPreferencesRequest {
@@ -780,9 +797,9 @@ mod tests {
         let store =
             Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
         let provider = Arc::new(FakeTargetProvider::default());
-        let facade = RebornOutboundPreferencesFacade::new(store.clone(), provider);
+        let service = RebornOutboundPreferencesService::new(store.clone(), provider);
 
-        let response = facade
+        let response = service
             .set_outbound_preferences(
                 caller("tenant-alpha", "user-new"),
                 RebornSetOutboundPreferencesRequest {
@@ -823,15 +840,15 @@ mod tests {
             Some(reply_ref("reply:slack-alpha")),
         )
         .await;
-        let facade = RebornOutboundPreferencesFacade::new(store, Arc::new(FailingTargetProvider));
+        let service = RebornOutboundPreferencesService::new(store, Arc::new(FailingTargetProvider));
 
-        let get_error = facade
+        let get_error = service
             .get_outbound_preferences(caller("tenant-alpha", "user-alpha"))
             .await
             .expect_err("get target provider failure");
         assert_unavailable_backend_error(get_error);
 
-        let set_error = facade
+        let set_error = service
             .set_outbound_preferences(
                 caller("tenant-alpha", "user-alpha"),
                 RebornSetOutboundPreferencesRequest {
@@ -842,7 +859,7 @@ mod tests {
             .expect_err("set target provider failure");
         assert_unavailable_backend_error(set_error);
 
-        let list_error = facade
+        let list_error = service
             .list_outbound_delivery_targets(caller("tenant-alpha", "user-alpha"))
             .await
             .expect_err("list target provider failure");
@@ -861,9 +878,9 @@ mod tests {
             Some(reply_ref("reply:slack-alpha")),
         )
         .await;
-        let facade = RebornOutboundPreferencesFacade::new(store.clone(), provider);
+        let service = RebornOutboundPreferencesService::new(store.clone(), provider);
 
-        let response = facade
+        let response = service
             .set_outbound_preferences(
                 caller("tenant-alpha", "user-alpha"),
                 RebornSetOutboundPreferencesRequest {
@@ -934,9 +951,9 @@ mod tests {
             "user-bravo",
             target_entry("slack-bravo", "reply:slack-bravo", true),
         );
-        let facade = RebornOutboundPreferencesFacade::new(store, provider);
+        let service = RebornOutboundPreferencesService::new(store, provider);
 
-        let response = facade
+        let response = service
             .list_outbound_delivery_targets(caller("tenant-alpha", "user-alpha"))
             .await
             .expect("target list");
@@ -947,21 +964,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preference_facade_uses_authority_resolver_not_public_target_list_for_write_and_read() {
+    async fn preference_service_uses_authority_resolver_not_public_target_list_for_write_and_read()
+    {
         let store =
             Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
         let provider = Arc::new(ResolvingOnlyTargetProvider {
             entry: target_entry("slack-alpha", "reply:slack-alpha", true),
         });
-        let facade = RebornOutboundPreferencesFacade::new(store.clone(), provider);
+        let service = RebornOutboundPreferencesService::new(store.clone(), provider);
 
-        let listed = facade
+        let listed = service
             .list_outbound_delivery_targets(caller("tenant-alpha", "user-alpha"))
             .await
             .expect("list targets");
         assert!(listed.targets.is_empty());
 
-        let set_response = facade
+        let set_response = service
             .set_outbound_preferences(
                 caller("tenant-alpha", "user-alpha"),
                 RebornSetOutboundPreferencesRequest {
@@ -992,7 +1010,7 @@ mod tests {
             Some("reply:slack-alpha")
         );
 
-        let get_response = facade
+        let get_response = service
             .get_outbound_preferences(caller("tenant-alpha", "user-alpha"))
             .await
             .expect("get target through resolver");
@@ -1039,9 +1057,9 @@ mod tests {
             slack_provider,
             telegram_provider,
         ]));
-        let facade = RebornOutboundPreferencesFacade::new(store.clone(), registry);
+        let service = RebornOutboundPreferencesService::new(store.clone(), registry);
 
-        let listed = facade
+        let listed = service
             .list_outbound_delivery_targets(caller("tenant-alpha", "user-alpha"))
             .await
             .expect("target list");
@@ -1054,7 +1072,7 @@ mod tests {
             vec!["slack", "telegram"]
         );
 
-        facade
+        service
             .set_outbound_preferences(
                 caller("tenant-alpha", "user-alpha"),
                 RebornSetOutboundPreferencesRequest {
@@ -1090,9 +1108,9 @@ mod tests {
                 entry: target_entry("slack-progress", "reply:slack-progress", false),
             },
         )]));
-        let facade = RebornOutboundPreferencesFacade::new(store.clone(), registry);
+        let service = RebornOutboundPreferencesService::new(store.clone(), registry);
 
-        let error = facade
+        let error = service
             .set_outbound_preferences(
                 caller("tenant-alpha", "user-alpha"),
                 RebornSetOutboundPreferencesRequest {
@@ -1297,16 +1315,16 @@ mod tests {
             Some(reply_ref("reply:slack-alpha")),
         )
         .await;
-        let facade =
-            RebornOutboundPreferencesFacade::new(store, Arc::new(ResolveFailingTargetProvider));
+        let service =
+            RebornOutboundPreferencesService::new(store, Arc::new(ResolveFailingTargetProvider));
 
-        let get_error = facade
+        let get_error = service
             .get_outbound_preferences(caller("tenant-alpha", "user-alpha"))
             .await
             .expect_err("get target resolver failure");
         assert_unavailable_backend_error(get_error);
 
-        let set_error = facade
+        let set_error = service
             .set_outbound_preferences(
                 caller("tenant-alpha", "user-alpha"),
                 RebornSetOutboundPreferencesRequest {

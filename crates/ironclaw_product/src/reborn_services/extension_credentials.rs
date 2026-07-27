@@ -1,6 +1,5 @@
 use ironclaw_auth::{
-    AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountProjection,
-    CredentialAccountStatus, ProviderScope,
+    AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountProjection, ProviderScope,
 };
 use ironclaw_host_api::{
     ExtensionId, InvocationId, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
@@ -22,7 +21,7 @@ pub(super) enum ExtensionCredentialReadiness {
     Unknown,
 }
 
-pub(super) enum RequirementCredentialReadiness {
+enum RequirementCredentialReadiness {
     Configured,
     Missing,
     Unknown,
@@ -126,15 +125,7 @@ async fn credential_readiness_for_requirement(
 ) -> Result<RequirementCredentialReadiness, ProductSurfaceError> {
     let request = credential_status_request(scope, extension_id, requirement)?;
     match service.credential_status(request).await {
-        Ok(Some(account)) => match account.status {
-            CredentialAccountStatus::Configured => Ok(RequirementCredentialReadiness::Configured),
-            CredentialAccountStatus::Inactive
-            | CredentialAccountStatus::Missing
-            | CredentialAccountStatus::Expired
-            | CredentialAccountStatus::RefreshFailed
-            | CredentialAccountStatus::Revoked
-            | CredentialAccountStatus::PendingSetup => Ok(RequirementCredentialReadiness::Missing),
-        },
+        Ok(Some(_)) => Ok(RequirementCredentialReadiness::Configured),
         Ok(None) => Ok(RequirementCredentialReadiness::Missing),
         Err(error) if is_retryable_status_failure(&error) => {
             warn_retryable_status_failure(
@@ -154,31 +145,13 @@ pub(super) async fn credential_status_for_requirement(
     scope: AuthProductScope,
     extension_id: &ExtensionId,
     requirement: &LifecycleExtensionCredentialRequirement,
-) -> Result<
-    (
-        Option<CredentialAccountProjection>,
-        RequirementCredentialReadiness,
-    ),
-    ProductSurfaceError,
-> {
+) -> Result<Option<CredentialAccountProjection>, ProductSurfaceError> {
     let request = credential_status_request(scope, extension_id, requirement)?;
     match service.credential_status(request).await {
-        Ok(Some(account)) => {
-            let readiness = match account.status {
-                CredentialAccountStatus::Configured => RequirementCredentialReadiness::Configured,
-                CredentialAccountStatus::Inactive
-                | CredentialAccountStatus::Missing
-                | CredentialAccountStatus::Expired
-                | CredentialAccountStatus::RefreshFailed
-                | CredentialAccountStatus::Revoked
-                | CredentialAccountStatus::PendingSetup => RequirementCredentialReadiness::Missing,
-            };
-            Ok((Some(account), readiness))
-        }
-        Ok(None) => Ok((None, RequirementCredentialReadiness::Missing)),
+        Ok(account) => Ok(account),
         Err(error) if is_retryable_status_failure(&error) => {
             warn_retryable_status_failure(extension_id, requirement, &error, "setup_projection");
-            Ok((None, RequirementCredentialReadiness::Unknown))
+            Ok(None)
         }
         Err(error) => Err(error),
     }

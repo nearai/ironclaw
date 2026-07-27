@@ -303,6 +303,7 @@ async def test_workspace_tree_keyboard_navigation_and_accessibility(
     # to the newly selected, visible item.
     breadcrumb = page.get_by_role("navigation", name="workspace")
     await breadcrumb.get_by_role("button", name="Home", exact=True).click()
+    await expect(guide).to_be_visible()
     report = tree.get_by_role("treeitem", name="report.pdf", exact=True)
     await expect(report).to_be_visible()
     report_row = page.locator(

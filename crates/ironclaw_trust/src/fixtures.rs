@@ -8,17 +8,20 @@
 
 use ironclaw_host_api::{EffectKind, PackageId, PackageSource, ResourceCeiling};
 
-use crate::decision::EffectiveTrustClass;
+use crate::decision::{
+    EffectiveTrustClass, effective_first_party_for_test as effective_first_party_class_for_test,
+    effective_system_for_test as effective_system_class_for_test,
+};
 use crate::sources::{AdminEntry, BundledEntry, admin_entry_with_trust, bundled_entry_with_trust};
 
 /// Test fixture: privileged effective trust at the `FirstParty` ceiling.
 pub(crate) fn effective_first_party_for_test() -> EffectiveTrustClass {
-    EffectiveTrustClass::first_party()
+    effective_first_party_class_for_test()
 }
 
 /// Test fixture: privileged effective trust at the `System` ceiling.
 pub(crate) fn effective_system_for_test() -> EffectiveTrustClass {
-    EffectiveTrustClass::system()
+    effective_system_class_for_test()
 }
 
 /// Test fixture: a [`BundledEntry`] at the given effective trust ceiling.

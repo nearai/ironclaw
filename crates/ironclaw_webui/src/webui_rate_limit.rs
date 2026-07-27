@@ -548,7 +548,7 @@ mod tests {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         })
         .expect("policy must construct");
 

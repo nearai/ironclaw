@@ -1,5 +1,5 @@
 //! Shared axum mounting + request helpers for the real `webui_v2_router`
-//! over a real `RebornServices` facade (W5-WEBUI-API-1). Mirrors
+//! over a real `RebornServices` service (W5-WEBUI-API-1). Mirrors
 //! `webui_v2_router_smoke.rs::smoke_router`'s shape; auth bypassed by
 //! injecting `ProductSurfaceCaller` directly instead of the bearer middleware.
 
@@ -36,7 +36,7 @@ pub(crate) fn webui_caller_for(binding: &ResolvedBinding) -> ProductSurfaceCalle
 /// Mount the real WebUI v2 router over `services`, with `caller` injected as
 /// the authenticated-caller `Extension` (mirrors production's bearer
 /// middleware output — bypassed here since this tier tests the
-/// facade/router contract, not HTTP auth).
+/// service/router contract, not HTTP auth).
 pub(crate) fn mount_webui_v2_router(
     services: Arc<dyn ProductSurface>,
     caller: ProductSurfaceCaller,

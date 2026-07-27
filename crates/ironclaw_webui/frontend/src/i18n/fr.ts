@@ -1208,6 +1208,7 @@ registerPack("fr", {
   "common.pinned": "Épinglé",
   "common.deleteChat": "Supprimer le chat",
   "chat.deleteFailed": "Impossible de supprimer cette conversation.",
+  "chat.cancelFailed": "Impossible d'arrêter cette exécution. Elle est peut-être toujours en cours. Réessayez.",
   "chat.deleteBusy": "Impossible de supprimer une conversation en cours d'exécution. Arrêtez-la d'abord, puis réessayez.",
   "command.placeholder": "Tapez une commande ou recherchez...",
   "routine.searchPlaceholder": "Rechercher le nom, le déclencheur ou l'action de la routine",
@@ -1363,6 +1364,11 @@ registerPack("fr", {
 
 registerPack("fr", {
   "app.checkingSession": "Vérification de la session...",
+  "app.loadingPage": "Chargement de la page...",
+  "app.pageLoadFailedTitle": "Impossible de charger cette page",
+  "app.pageLoadFailedDescription":
+    "Une nouvelle version est peut-être disponible ou la connexion a été interrompue. Rechargez la page pour réessayer.",
+  "app.reloadPage": "Recharger la page",
   "app.sessionCheckFailedTitle": "Impossible de vérifier votre session",
   "app.sessionCheckFailedDescription":
     "Impossible de vérifier votre session pour le moment. Vos informations de connexion restent enregistrées. Réessayez dans quelques instants.",
@@ -1399,6 +1405,14 @@ registerPack("fr", {
   "chat.copyMessage": "Copier le message",
   "chat.retryMessage": "Réessayer le message",
   "chat.history.loadFailed": "Impossible de charger l'historique de la conversation.",
+  "chat.failure.connectionLost": "La connexion au serveur a été perdue. Reconnectez-vous et réessayez.",
+  "chat.failure.request": "La requête a échoué avant de pouvoir être envoyée.",
+  "chat.failure.requestDetail": "La requête a échoué : {detail}.",
+  "chat.failure.runCategory": "L'exécution a échoué : {detail}.",
+  "chat.failure.recoveryRequired": "L'exécution attend une récupération ; le backend a signalé `recovery_required`.",
+  "chat.failure.run": "L'exécution a échoué avant de produire une réponse.",
+  "chat.failure.streamRetryable": "Le flux du chat a rencontré une erreur réessayable : {detail}.",
+  "chat.failure.stream": "Le flux du chat a échoué : {detail}.",
   "chat.finishPairingBeforeSend": "Terminez la connexion du canal avant d'envoyer un autre message.",
   "chat.resolveApprovalBeforeSend": "Résolvez la demande d'approbation avant d'envoyer un autre message.",
   "chat.retryIn": "Réessayer dans {seconds}s",

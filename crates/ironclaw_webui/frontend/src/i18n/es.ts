@@ -1209,6 +1209,7 @@ registerPack("es", {
   "common.pinned": "Fijado",
   "common.deleteChat": "Eliminar chat",
   "chat.deleteFailed": "No se pudo eliminar esta conversación.",
+  "chat.cancelFailed": "No se pudo detener esta ejecución. Puede que siga en curso. Inténtalo de nuevo.",
   "chat.deleteBusy": "No se puede eliminar una conversación mientras se está ejecutando. Detenla primero y vuelve a intentarlo.",
   "command.placeholder": "Escriba un comando o busque...",
   "routine.searchPlaceholder": "Buscar nombre de rutina, activador o acción",
@@ -1364,6 +1365,11 @@ registerPack("es", {
 
 registerPack("es", {
   "app.checkingSession": "Comprobando sesión...",
+  "app.loadingPage": "Cargando página...",
+  "app.pageLoadFailedTitle": "No se pudo cargar esta página",
+  "app.pageLoadFailedDescription":
+    "Puede que haya una nueva versión disponible o que se haya interrumpido la conexión. Recarga la página para volver a intentarlo.",
+  "app.reloadPage": "Recargar página",
   "app.sessionCheckFailedTitle": "No se pudo verificar tu sesión",
   "app.sessionCheckFailedDescription":
     "No pudimos verificar tu sesión en este momento. Tu inicio de sesión sigue guardado. Inténtalo de nuevo en unos instantes.",
@@ -1400,6 +1406,14 @@ registerPack("es", {
   "chat.copyMessage": "Copiar mensaje",
   "chat.retryMessage": "Reintentar mensaje",
   "chat.history.loadFailed": "No se pudo cargar el historial de conversación.",
+  "chat.failure.connectionLost": "Se perdió la conexión con el servidor. Vuelve a conectarte e inténtalo de nuevo.",
+  "chat.failure.request": "La solicitud falló antes de poder enviarse.",
+  "chat.failure.requestDetail": "La solicitud falló: {detail}.",
+  "chat.failure.runCategory": "La ejecución falló: {detail}.",
+  "chat.failure.recoveryRequired": "La ejecución está esperando recuperación; el backend informó `recovery_required`.",
+  "chat.failure.run": "La ejecución falló antes de generar una respuesta.",
+  "chat.failure.streamRetryable": "El flujo del chat encontró un error reintentable: {detail}.",
+  "chat.failure.stream": "El flujo del chat falló: {detail}.",
   "chat.finishPairingBeforeSend": "Termina de conectar el canal antes de enviar otro mensaje.",
   "chat.resolveApprovalBeforeSend": "Resuelve la solicitud de aprobación antes de enviar otro mensaje.",
   "chat.retryIn": "Reintentar en {seconds}s",

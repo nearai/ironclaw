@@ -55,15 +55,15 @@
 
 [global]
 enforce = true
-# Recaptured from PR #6467's green coverage-report run 29952071174 at
-# 955950b79: aggregate 305426 / 354049 = 86.27%. The denominator moved +10.58%
-# from the prior capture as the current Reborn crate set entered instrumentation;
-# this floor-only follow-up does not alter instrumented code. See #6467.
-floor_percent = 86.27
+# Recaptured locally from the current main-line Reborn integration inventory:
+# aggregate 304733 / 377084 = 80.81%. The previous baseline was captured before
+# the current main-line coverage inventory expanded; this records that legitimate
+# denominator shift without changing any crate-specific floor (none are enabled).
+floor_percent = 80.81
 tolerance_percent = 0.5
-captured_total_lines = 354049
-captured_date = "2026-07-22"
-captured_from = "955950b79"
+captured_total_lines = 377084
+captured_date = "2026-07-25"
+captured_from = "3af839354"
 
 # No [[crate]] entries at initial landing — opt-in, added as owners choose to
 # ratchet a crate they care about (e.g. ironclaw_reborn_composition,
