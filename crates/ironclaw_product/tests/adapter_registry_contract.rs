@@ -112,10 +112,12 @@ async fn default_store_has_no_installations() {
 async fn installed_membership_surfaces_product_adapter_runtime_entries() {
     let store = installation_store().await;
     store
-        .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
+        .upsert_manifest_and_installation(
+            manifest("telegram_bot_token", "sha256:abc123"),
+            installation(),
+        )
         .await
         .unwrap();
-    store.upsert_installation(installation()).await.unwrap();
 
     let installations = store.list_installations().await.unwrap();
     assert_eq!(installations.len(), 1);
@@ -188,8 +190,10 @@ prompt_doc_ref = "prompts/do.md"
     .unwrap();
 
     let store = installation_store().await;
-    store.upsert_manifest(plain_manifest.clone()).await.unwrap();
-    store.upsert_installation(plain_install).await.unwrap();
+    store
+        .upsert_manifest_and_installation(plain_manifest.clone(), plain_install)
+        .await
+        .unwrap();
 
     let sections = product_adapter_sections(&plain_manifest).unwrap();
     assert!(
@@ -201,12 +205,14 @@ prompt_doc_ref = "prompts/do.md"
 #[tokio::test]
 async fn manifest_hash_mismatch_is_rejected() {
     let store = installation_store().await;
-    store
-        .upsert_manifest(manifest("telegram_bot_token", "sha256:different"))
-        .await
-        .unwrap();
 
-    let err = store.upsert_installation(installation()).await.unwrap_err();
+    let err = store
+        .upsert_manifest_and_installation(
+            manifest("telegram_bot_token", "sha256:different"),
+            installation(),
+        )
+        .await
+        .unwrap_err();
     assert!(matches!(
         err,
         ExtensionInstallationError::ManifestHashMismatch { .. }
@@ -344,8 +350,10 @@ handle = "outbound_token"
     .unwrap();
 
     let store = installation_store().await;
-    store.upsert_manifest(multi_manifest.clone()).await.unwrap();
-    store.upsert_installation(multi_install).await.unwrap();
+    store
+        .upsert_manifest_and_installation(multi_manifest.clone(), multi_install)
+        .await
+        .unwrap();
 
     let sections = product_adapter_sections(&multi_manifest).unwrap();
     assert_eq!(sections.len(), 2, "both PA sections should project");
@@ -362,10 +370,12 @@ async fn arc_store_delegation_works() {
     let store = installation_store().await;
     let arc_store: Arc<dyn ExtensionInstallationStorePort> = Arc::new(store);
     arc_store
-        .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
+        .upsert_manifest_and_installation(
+            manifest("telegram_bot_token", "sha256:abc123"),
+            installation(),
+        )
         .await
         .unwrap();
-    arc_store.upsert_installation(installation()).await.unwrap();
 
     let installations = arc_store.list_installations().await.unwrap();
     assert_eq!(installations.len(), 1);
@@ -375,10 +385,12 @@ async fn arc_store_delegation_works() {
 async fn update_health_uses_redacted_string() {
     let store = installation_store().await;
     store
-        .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
+        .upsert_manifest_and_installation(
+            manifest("telegram_bot_token", "sha256:abc123"),
+            installation(),
+        )
         .await
         .unwrap();
-    store.upsert_installation(installation()).await.unwrap();
 
     let health = ExtensionHealthSnapshot::new(
         ExtensionHealthStatus::Degraded,

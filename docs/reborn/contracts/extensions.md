@@ -60,7 +60,6 @@ record rows under:
 
 ```text
 /system/extensions/.installations/v2/
-  manifests/<hashed_extension_id>.json
   installations/<hashed_installation_id>.json
   memberships/<hashed_installation_id>/<hashed_user_id>.json
   credential-bindings/<hashed_installation_id>/<hashed_credential_handle>.json
@@ -68,41 +67,57 @@ record rows under:
 ```
 
 Each row has an explicit record kind, `extension_state.v2` schema version,
-typed body, and exact lookup indexes. The manifest row is the deployment's
-**install pin** — the validated, hash-pinned copy of the installed package
-definition — not an availability or policy declaration; what *can* be
-installed lives in the available-extension catalog. The installation row is
-the stable package-instance identity; user membership, credential bindings,
-and health are independently mutable records. Removing a user or the final installation
-marks the authoritative row `removed` with a timestamp rather than erasing it.
-Package bytes and assets remain under `/system/extensions/<extension_id>/` and
-are never embedded in lifecycle records.
+typed body, and exact lookup indexes. The installation record is both the
+stable package-instance identity and the deployment's **install pin**: it
+embeds the validated, hash-carrying manifest wire for the installed
+definition. That embedded definition is not an availability or policy
+declaration — what *can* be installed lives in the available-extension
+catalog — and a definition never exists outside an installation record. User
+membership, credential bindings, and health are independently mutable
+records. Lifecycle state is derived, not stored: a record with `removed_at`
+set is a tombstone, a record with a `lease` is mid-mutation, and a record
+with neither is live. A tombstone additionally carries
+`removal_cleanup_pending` until `delete_manifest` marks the removal
+converged; while pending, the embedded definition stays authoritative for
+manifest readers so an interrupted removal cleanup retries without the
+catalog and fresh imports stay blocked (`persist_removal_tombstone` seeds
+the same state for orphan cleanups that never had an installation row).
+Removing a user or the final installation sets `removed_at` rather than
+erasing rows. Package bytes and assets remain under
+`/system/extensions/<extension_id>/` and are never embedded in lifecycle
+records.
 
 All authoritative read-modify-write transitions use the shared bounded
-filesystem CAS helper. A fresh installation writes child rows before making
-the installation core active, so an interrupted write cannot expose a partial
-aggregate. Updates to an active aggregate first reserve the core as
-`removing`, keep it out of typed reads while children change, and publish the
-core as `active` last. A failed update restores the prior aggregate; startup
-uses the still-active compatibility snapshot to roll back an interrupted
-reservation. Aggregate `ExtensionInstallation` values are reconstructed at
-the typed store boundary for existing callers.
+filesystem CAS helper. A fresh installation writes child rows before
+committing the installation record (definition included) in one CAS, so an
+interrupted write cannot expose a partial aggregate and a free-floating
+definition row cannot exist. Updates to a live aggregate first take the
+record's `lease`, which keeps it out of typed installation reads while
+children change (the embedded definition stays readable), and commit the
+record lease-free last. A failed update restores the prior aggregate;
+startup uses the compatibility snapshot to roll back an interrupted lease.
+Aggregate `ExtensionInstallation` values are reconstructed at the typed
+store boundary for existing callers, with `manifest_ref` derived from the
+embedded definition so an installation can never disagree with its pin.
 
-Only a reserved update sweeps child rows omitted from its aggregate.
-Creation and reactivation hold no reservation and merge (activate-only), so
-they never tombstone a membership a concurrent creator or joiner wrote. A
-health update writes only the health row — never the installation core — so
-it cannot race a removal into resurrecting a tombstoned installation. A
-mutation's outcome is decided by the v2 records alone: once they commit, a
-failed compatibility-projection write does not fail the operation; startup
-repair converges the projection.
+Only a leased update sweeps child rows omitted from its aggregate. Creation
+and reactivation hold no lease and merge (activate-only), so they never
+tombstone a membership a concurrent creator or joiner wrote. A health update
+writes only the health row — never the installation record — so it cannot
+race a removal into resurrecting a tombstone. A mutation's outcome is
+decided by the v2 records alone: once they commit, a failed
+compatibility-projection write does not fail the operation; startup repair
+converges the projection.
 
-Membership removal uses the same core reservation as a cross-process gate.
-A non-final leave updates only the caller row and releases the core; a final
-leave keeps the reservation until shared runtime teardown and soft removal
-complete. Concurrent joins fail transiently while the reservation is held.
-Removal retries are idempotent, and the core becomes `removed` only after its
-child tombstones are durable. These transitions are pinned by
+Membership removal uses the same lease as a cross-process gate, with the
+leaving member recorded as the holder so only that caller's retry re-enters
+it. A non-final leave updates only the caller row and releases the lease; a
+final leave keeps it held until shared runtime teardown and soft removal
+complete. Concurrent joins fail transiently while the lease is held.
+Removal retries are idempotent, and the record gains `removed_at` only after
+its child tombstones are durable; the tombstone retains the embedded
+definition so reinstall revives the same identities. These transitions are
+pinned by
 `cargo test -p ironclaw_extensions --test installations_contract`
 (normalized layout, membership mutation, interruption, and backend
 contracts) and
@@ -123,18 +138,21 @@ views:
 /system/extensions/.installations/installations/<hashed_installation_id>.json
 ```
 
-Store startup imports a legacy row only when no v2 authority row exists, then
-repairs these views from v2. The installation compatibility row is also the
-bounded rollback snapshot while a v2 core is explicitly `removing`; outside
-that transition it is never lifecycle authority. Old and new binaries must not
-write the same installation root concurrently: deploys must quiesce old
-writers before the new binary starts. Same-version processes may share the
-root, but startup recovery assumes no concurrent mid-transition writer: a
-process that boots while another holds a reservation may transiently restore
-it, and the writers reconverge through re-reservation and retries rather
-than losing the removal. Once a v2 writer has run, rollback
-requires a data backup or a binary that understands v2; starting an
-aggregate-only writer would create divergent state.
+Store startup imports each legacy manifest+installation pair only when no v2
+authority record exists; an orphaned legacy manifest with no installation is
+the legacy flow's durable cleanup tombstone and imports as a
+cleanup-pending tombstone record so the interrupted removal stays
+retryable. Startup then repairs both views from v2. The installation compatibility row is also the bounded
+rollback snapshot while a v2 record holds a lease; outside that transition
+it is never lifecycle authority. Old and new binaries must not write the
+same installation root concurrently: deploys must quiesce old writers before
+the new binary starts. Same-version processes may share the root, but
+startup recovery assumes no concurrent mid-transition writer: a process that
+boots while another holds a lease may transiently restore it, and the
+writers reconverge through lease re-acquisition and retries rather than
+losing the removal. Once a v2 writer has run, rollback requires a data
+backup or a binary that understands v2; starting an aggregate-only writer
+would create divergent state.
 
 Manifest-declared administrator configuration is stored once per tenant under
 the tenant-rewriting admin-configuration scoped mount, at the logical record

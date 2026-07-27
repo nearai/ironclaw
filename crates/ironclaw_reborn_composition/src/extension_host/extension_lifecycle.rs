@@ -1718,8 +1718,11 @@ impl ExtensionManagementPort {
                 });
             }
             if installed_manifest.is_none() {
+                // Durable cleanup tombstone: retain the definition so an
+                // interrupted cleanup stays retryable without the catalog and
+                // fresh imports stay blocked until removal converges.
                 self.installation_store
-                    .upsert_manifest(removal_manifest)
+                    .persist_removal_tombstone(removal_manifest.clone())
                     .await
                     .map_err(map_extension_installation_error)?;
             }
@@ -2506,36 +2509,13 @@ impl ExtensionManagementPort {
         &self,
         plan: ExtensionInstallPlan,
     ) -> Result<(), ProductWorkflowError> {
-        let extension_id = plan.installation.extension_id().clone();
-        if let Err(error) = self
-            .installation_store
-            .upsert_manifest(plan.manifest_record)
+        // One merged record commits definition and installation together, so
+        // a failed install leaves nothing behind — the manifest-orphan
+        // compensation the old two-write sequence needed no longer exists.
+        self.installation_store
+            .upsert_manifest_and_installation(plan.manifest_record, plan.installation)
             .await
-        {
-            return Err(map_extension_installation_error(error));
-        }
-        if let Err(error) = self
-            .installation_store
-            .upsert_installation(plan.installation)
-            .await
-        {
-            if let Err(cleanup_error) = self.installation_store.delete_manifest(&extension_id).await
-            {
-                // Fail loud: the installation upsert failed *and* the manifest
-                // rollback failed, so a manifest is now orphaned with no
-                // installation. `ensure_not_installed` treats any manifest as
-                // installed, which would block every retry — surface both
-                // failures so the orphan is visible rather than silently
-                // poisoning future installs.
-                return Err(compensation_failure(
-                    "extension install persistence failed and manifest rollback failed",
-                    map_extension_installation_error(error),
-                    map_extension_installation_error(cleanup_error),
-                ));
-            }
-            return Err(map_extension_installation_error(error));
-        }
-        Ok(())
+            .map_err(map_extension_installation_error)
     }
 
     async fn delete_materialized_extension_files(
@@ -3350,15 +3330,12 @@ mod tests {
             .replace("id = \"fixture\"", "id = \"legacy-ready\"")
             .replace("id = \"fixture.", "id = \"legacy-ready.");
         store
-            .upsert_manifest(fixture_manifest_record_with_source(
-                &legacy_manifest,
-                ManifestSource::HostBundled,
-                None,
-            ))
-            .await
-            .expect("persist legacy manifest");
-        store
-            .upsert_installation(
+            .upsert_manifest_and_installation(
+                fixture_manifest_record_with_source(
+                    &legacy_manifest,
+                    ManifestSource::HostBundled,
+                    None,
+                ),
                 ExtensionInstallation::new(
                     installation_id,
                     extension_id.clone(),
@@ -3393,18 +3370,15 @@ mod tests {
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
             );
         let extension_id = ExtensionId::new("fixture").unwrap();
-        installation_store
-            .upsert_manifest(fixture_manifest_record_with_source(
-                fixture_extension_manifest(),
-                ManifestSource::HostBundled,
-                None,
-            ))
-            .await
-            .unwrap();
 
         for installation_id in ["fixture", "legacy-fixture"] {
             installation_store
-                .upsert_installation(
+                .upsert_manifest_and_installation(
+                    fixture_manifest_record_with_source(
+                        fixture_extension_manifest(),
+                        ManifestSource::HostBundled,
+                        None,
+                    ),
                     ExtensionInstallation::new(
                         ExtensionInstallationId::new(installation_id).unwrap(),
                         extension_id.clone(),
@@ -6455,15 +6429,12 @@ output_schema_ref = "schemas/search.output.json"
             ExtensionInstallationId::new(RETIRED_SLACK_USER_EXTENSION_ID).expect("valid install");
         let manifest_hash = "sha256:retired-slack-user".to_string();
         installation_store
-            .upsert_manifest(fixture_manifest_record_with_source(
-                retired_slack_user_manifest(),
-                ManifestSource::HostBundled,
-                Some(manifest_hash.clone()),
-            ))
-            .await
-            .expect("upsert retired slack_user manifest");
-        installation_store
-            .upsert_installation(
+            .upsert_manifest_and_installation(
+                fixture_manifest_record_with_source(
+                    retired_slack_user_manifest(),
+                    ManifestSource::HostBundled,
+                    Some(manifest_hash.clone()),
+                ),
                 ExtensionInstallation::new(
                     installation_id.clone(),
                     extension_id.clone(),
@@ -6555,15 +6526,12 @@ output_schema_ref = "schemas/search.output.json"
         let orphan_installation_id =
             ExtensionInstallationId::new("orphan_migrated").expect("valid installation");
         installation_store
-            .upsert_manifest(fixture_manifest_record_with_source(
-                &orphan_migrated_manifest(),
-                ManifestSource::InstalledLocal,
-                None,
-            ))
-            .await
-            .expect("upsert orphan manifest absent from the catalog");
-        installation_store
-            .upsert_installation(
+            .upsert_manifest_and_installation(
+                fixture_manifest_record_with_source(
+                    &orphan_migrated_manifest(),
+                    ManifestSource::InstalledLocal,
+                    None,
+                ),
                 ExtensionInstallation::new(
                     orphan_installation_id.clone(),
                     orphan_extension_id.clone(),
@@ -6775,13 +6743,12 @@ output_schema_ref = "schemas/search.output.json"
             Some("sha256:old".to_string()),
         );
         installation_store
-            .upsert_manifest(manifest_record)
+            .upsert_manifest_and_installation(
+                manifest_record,
+                fixture_installation(Some("sha256:old".to_string())),
+            )
             .await
-            .expect("upsert manifest");
-        installation_store
-            .upsert_installation(fixture_installation(Some("sha256:old".to_string())))
-            .await
-            .expect("upsert installation");
+            .expect("install fixture");
         let restored_lifecycle = Arc::new(Mutex::new(ExtensionLifecycleService::new(
             ExtensionRegistry::new(),
         )));
@@ -9310,11 +9277,11 @@ output_schema_ref = "schemas/search.output.json"
             self.inner.get_manifest(extension_id).await
         }
 
-        async fn upsert_manifest(
+        async fn persist_removal_tombstone(
             &self,
             manifest: ExtensionManifestRecord,
         ) -> Result<(), ExtensionInstallationError> {
-            self.inner.upsert_manifest(manifest).await
+            self.inner.persist_removal_tombstone(manifest).await
         }
 
         async fn upsert_manifest_and_installation(

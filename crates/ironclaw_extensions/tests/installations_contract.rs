@@ -203,16 +203,15 @@ async fn upsert_installation_rejects_unknown_manifest() {
 }
 
 #[tokio::test]
-async fn upsert_manifest_rejects_manifest_hash_change_for_existing_installation() {
+async fn upsert_installation_rejects_hash_change_against_the_pinned_definition() {
     let store = installation_store().await;
-    store.upsert_manifest(manifest("sha256:old")).await.unwrap();
     store
-        .upsert_installation(installation("sha256:old"))
+        .upsert_manifest_and_installation(manifest("sha256:old"), installation("sha256:old"))
         .await
         .unwrap();
 
     let err = store
-        .upsert_manifest(manifest("sha256:new"))
+        .upsert_installation(installation("sha256:new"))
         .await
         .unwrap_err();
 
@@ -225,9 +224,8 @@ async fn upsert_manifest_rejects_manifest_hash_change_for_existing_installation(
 #[tokio::test]
 async fn upsert_manifest_and_installation_replaces_coherent_manifest_hash_pair() {
     let store = installation_store().await;
-    store.upsert_manifest(manifest("sha256:old")).await.unwrap();
     store
-        .upsert_installation(installation("sha256:old"))
+        .upsert_manifest_and_installation(manifest("sha256:old"), installation("sha256:old"))
         .await
         .unwrap();
 
@@ -300,10 +298,11 @@ async fn missing_installation_mutations_return_not_found() {
 #[tokio::test]
 async fn manifest_hash_presence_mismatch_is_rejected() {
     let store = installation_store().await;
-    store.upsert_manifest(manifest("sha256:abc")).await.unwrap();
-
     let missing_ref_hash = store
-        .upsert_installation(installation_with_manifest_hash(None))
+        .upsert_manifest_and_installation(
+            manifest("sha256:abc"),
+            installation_with_manifest_hash(None),
+        )
         .await
         .unwrap_err();
     assert!(matches!(
@@ -320,10 +319,12 @@ async fn manifest_hash_presence_mismatch_is_rejected() {
         &contracts(),
     )
     .unwrap();
-    store.upsert_manifest(manifest_without_hash).await.unwrap();
 
     let unexpected_ref_hash = store
-        .upsert_installation(installation_with_manifest_hash(Some("sha256:abc")))
+        .upsert_manifest_and_installation(
+            manifest_without_hash,
+            installation_with_manifest_hash(Some("sha256:abc")),
+        )
         .await
         .unwrap_err();
     assert!(matches!(
@@ -473,7 +474,6 @@ async fn installations_sort_by_id() {
         .unwrap()
         .with_timezone(&Utc);
     let store = installation_store().await;
-    store.upsert_manifest(manifest("sha256:abc")).await.unwrap();
 
     for (id, updated_at) in [
         ("acme-tools-b", older),
@@ -481,7 +481,8 @@ async fn installations_sort_by_id() {
         ("acme-tools-a", older),
     ] {
         store
-            .upsert_installation(
+            .upsert_manifest_and_installation(
+                manifest("sha256:abc"),
                 ExtensionInstallation::new(
                     installation_id(id),
                     extension_id("acme-tools"),
@@ -591,7 +592,6 @@ async fn normalized_v2_layout_separates_mutable_extension_state_and_reopens_the_
         .unwrap();
 
     let collection_rows = [
-        ("manifests", "extension_manifest_record_v2"),
         ("installations", "extension_installation_record_v2"),
         ("memberships", "extension_membership_record_v2"),
         (
@@ -628,12 +628,26 @@ async fn normalized_v2_layout_separates_mutable_extension_state_and_reopens_the_
         .await
         .unwrap();
     let core: serde_json::Value = installation_rows[0].entry.parse_json().unwrap();
-    for aggregate_field in ["owner", "credential_bindings", "health"] {
+    for aggregate_field in [
+        "owner",
+        "credential_bindings",
+        "health",
+        "status",
+        "installed_at",
+    ] {
         assert!(
             core.get(aggregate_field).is_none(),
-            "installation core must not embed {aggregate_field}: {core}"
+            "installation record must not carry {aggregate_field}: {core}"
         );
     }
+    assert_eq!(
+        core["manifest"]["manifest_hash"], "sha256:abc",
+        "the installation record embeds the hash-pinned install definition"
+    );
+    assert!(
+        core["manifest"]["raw_toml"].is_string(),
+        "the installation record is the install pin and carries the definition"
+    );
 
     let membership_rows = filesystem
         .query(
@@ -646,7 +660,10 @@ async fn normalized_v2_layout_separates_mutable_extension_state_and_reopens_the_
     let membership: serde_json::Value = membership_rows[0].entry.parse_json().unwrap();
     assert_eq!(membership["installation_id"], "acme-tools-prod");
     assert_eq!(membership["user_id"], "alice");
-    assert_eq!(membership["status"], "active");
+    assert!(
+        membership["removed_at"].is_null(),
+        "an active membership has no tombstone"
+    );
     assert_eq!(
         membership_rows[0]
             .path
@@ -689,7 +706,7 @@ async fn normalized_v2_layout_separates_mutable_extension_state_and_reopens_the_
         )
         .await
         .unwrap();
-    assert_eq!(all_v2_rows.len(), 5);
+    assert_eq!(all_v2_rows.len(), 4);
     assert!(
         all_v2_rows
             .iter()
@@ -746,11 +763,11 @@ async fn normalized_v2_soft_removal_preserves_records_and_allows_reactivation() 
         "soft-removed installations are hidden from the live store view"
     );
 
-    for (collection, expected_status) in [
-        ("installations", Some("removed")),
-        ("memberships", Some("removed")),
-        ("credential-bindings", Some("removed")),
-        ("health", None),
+    for (collection, tombstoned) in [
+        ("installations", true),
+        ("memberships", true),
+        ("credential-bindings", true),
+        ("health", false),
     ] {
         let rows = filesystem
             .query(
@@ -765,9 +782,12 @@ async fn normalized_v2_soft_removal_preserves_records_and_allows_reactivation() 
             1,
             "soft removal must retain the {collection} row"
         );
-        if let Some(expected_status) = expected_status {
+        if tombstoned {
             let body: serde_json::Value = rows[0].entry.parse_json().unwrap();
-            assert_eq!(body["status"], expected_status);
+            assert!(
+                body["removed_at"].is_string(),
+                "soft removal tombstones the {collection} row: {body}"
+            );
         }
     }
 
@@ -796,17 +816,24 @@ async fn normalized_v2_soft_removal_preserves_records_and_allows_reactivation() 
             .unwrap()
             .is_none()
     );
-    let manifest_rows = filesystem
+    let record_rows = filesystem
         .query(
-            &VirtualPath::new(format!("{}/v2/manifests", root.as_str())).unwrap(),
+            &VirtualPath::new(format!("{}/v2/installations", root.as_str())).unwrap(),
             &Filter::All,
             Page::first(10),
         )
         .await
         .unwrap();
-    assert_eq!(manifest_rows.len(), 1);
-    let manifest_body: serde_json::Value = manifest_rows[0].entry.parse_json().unwrap();
-    assert_eq!(manifest_body["status"], "removed");
+    assert_eq!(record_rows.len(), 1);
+    let record_body: serde_json::Value = record_rows[0].entry.parse_json().unwrap();
+    assert!(
+        record_body["removed_at"].is_string(),
+        "the tombstoned record keeps its removal timestamp"
+    );
+    assert!(
+        record_body["manifest"]["raw_toml"].is_string(),
+        "the tombstoned record retains its pinned definition for reactivation"
+    );
 }
 
 #[tokio::test]
@@ -872,7 +899,7 @@ async fn normalized_v2_bootstrap_imports_legacy_rows_and_repairs_compatibility_v
         )
         .await
         .unwrap();
-    assert_eq!(v2_rows.len(), 5, "legacy aggregate must expand into v2");
+    assert_eq!(v2_rows.len(), 4, "legacy aggregate must expand into v2");
 
     let compatibility_rows = target_filesystem
         .query(
@@ -1049,7 +1076,10 @@ async fn interrupted_active_aggregate_update_rolls_back_before_readers_resume() 
         .map(|row| row.entry.parse_json::<serde_json::Value>().unwrap())
         .find(|body| body["user_id"] == "bob")
         .expect("the interrupted child remains as a tombstone");
-    assert_eq!(bob["status"], "removed");
+    assert!(
+        bob["removed_at"].is_string(),
+        "bob remains a tombstone: {bob}"
+    );
 }
 
 #[tokio::test]
@@ -1113,9 +1143,9 @@ async fn interrupted_soft_removal_is_idempotently_completed_by_same_store_retry(
             .unwrap();
         assert_eq!(rows.len(), 1);
         let body: serde_json::Value = rows[0].entry.parse_json().unwrap();
-        assert_eq!(
-            body["status"], "removed",
-            "the retry must finish the {collection} tombstone"
+        assert!(
+            body["removed_at"].is_string(),
+            "the retry must finish the {collection} tombstone: {body}"
         );
     }
 }
@@ -1177,9 +1207,9 @@ async fn interrupted_soft_removal_rolls_back_from_compatibility_snapshot_on_reop
             .await
             .unwrap();
         let body: serde_json::Value = rows[0].entry.parse_json().unwrap();
-        assert_eq!(
-            body["status"], "active",
-            "startup must restore the {collection} row from the compatibility snapshot"
+        assert!(
+            body["removed_at"].is_null(),
+            "startup must restore the {collection} row from the compatibility snapshot: {body}"
         );
     }
 }
@@ -1387,18 +1417,18 @@ async fn membership_v2_activation_and_deactivation_mutate_only_the_target_user_r
         )
         .await
         .unwrap();
-    let statuses = rows
+    let tombstoned = rows
         .iter()
         .map(|row| {
             let body: serde_json::Value = row.entry.parse_json().unwrap();
             (
                 body["user_id"].as_str().unwrap().to_string(),
-                body["status"].as_str().unwrap().to_string(),
+                body["removed_at"].is_string(),
             )
         })
         .collect::<std::collections::BTreeMap<_, _>>();
-    assert_eq!(statuses.get("alice").map(String::as_str), Some("removed"));
-    assert_eq!(statuses.get("bob").map(String::as_str), Some("active"));
+    assert_eq!(tombstoned.get("alice"), Some(&true));
+    assert_eq!(tombstoned.get("bob"), Some(&false));
 
     let final_member_result = store
         .deactivate_membership(installed.installation_id(), &bob)
@@ -1484,8 +1514,10 @@ async fn membership_deactivation_backend_failure_restores_the_prior_aggregate() 
 async fn membership_v2_concurrent_distinct_activations_lose_no_members() {
     let store = Arc::new(installation_store().await);
     let installed = normalized_installation("sha256:abc");
-    store.upsert_manifest(manifest("sha256:abc")).await.unwrap();
-    store.upsert_installation(installed.clone()).await.unwrap();
+    store
+        .upsert_manifest_and_installation(manifest("sha256:abc"), installed.clone())
+        .await
+        .unwrap();
     let bob = UserId::new("bob").unwrap();
     let carol = UserId::new("carol").unwrap();
 
@@ -1621,22 +1653,22 @@ async fn concurrent_creation_does_not_tombstone_the_other_creators_membership() 
         2,
         "creation must leave exactly one membership row per creator"
     );
-    let statuses = membership_rows
+    let tombstoned = membership_rows
         .iter()
         .map(|row| {
             let body: serde_json::Value = row.entry.parse_json().unwrap();
             (
                 body["user_id"].as_str().unwrap().to_string(),
-                body["status"].as_str().unwrap().to_string(),
+                body["removed_at"].is_string(),
             )
         })
         .collect::<std::collections::BTreeMap<_, _>>();
     assert_eq!(
-        statuses.get("alice").map(String::as_str),
-        Some("active"),
+        tombstoned.get("alice"),
+        Some(&false),
         "creation must not sweep a concurrent creator's membership row"
     );
-    assert_eq!(statuses.get("bob").map(String::as_str), Some("active"));
+    assert_eq!(tombstoned.get("bob"), Some(&false));
     let merged = second
         .get_installation(&installation_id("acme-tools-prod"))
         .await
@@ -1805,8 +1837,90 @@ async fn update_health_mutates_only_the_health_row() {
         .await
         .unwrap();
     let body: serde_json::Value = core_removed[0].entry.parse_json().unwrap();
-    assert_eq!(
-        body["status"], "removed",
-        "a health update must never resurrect a removed core"
+    assert!(
+        body["removed_at"].is_string(),
+        "a health update must never resurrect a removed record: {body}"
+    );
+}
+
+/// A removal that has not converged keeps the extension's definition
+/// authoritative: `delete_installation` leaves a cleanup-pending tombstone
+/// whose manifest stays visible (so removal retries work without the catalog
+/// and imports stay blocked), and `delete_manifest` marks convergence, after
+/// which the definition stops being served. `persist_removal_tombstone` seeds
+/// the same state for orphan cleanups that never had an installation row.
+#[tokio::test]
+async fn removal_tombstone_keeps_manifest_authoritative_until_convergence() {
+    let store = installation_store().await;
+    let installed = normalized_installation("sha256:abc");
+    store
+        .upsert_manifest_and_installation(manifest("sha256:abc"), installed.clone())
+        .await
+        .unwrap();
+
+    store
+        .delete_installation(installed.installation_id())
+        .await
+        .unwrap();
+    assert!(
+        store
+            .get_installation(installed.installation_id())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .get_manifest(installed.extension_id())
+            .await
+            .unwrap()
+            .is_some(),
+        "the definition stays authoritative while removal cleanup is pending"
+    );
+
+    store
+        .delete_manifest(installed.extension_id())
+        .await
+        .unwrap();
+    assert!(
+        store
+            .get_manifest(installed.extension_id())
+            .await
+            .unwrap()
+            .is_none(),
+        "convergence stops serving the definition"
+    );
+
+    let orphan_store = installation_store().await;
+    orphan_store
+        .persist_removal_tombstone(manifest("sha256:abc"))
+        .await
+        .unwrap();
+    assert!(
+        orphan_store
+            .get_manifest(&extension_id("acme-tools"))
+            .await
+            .unwrap()
+            .is_some(),
+        "an orphan cleanup tombstone serves its retained definition"
+    );
+    assert!(
+        orphan_store
+            .get_installation(&installation_id("acme-tools"))
+            .await
+            .unwrap()
+            .is_none(),
+        "a cleanup tombstone is not an installation"
+    );
+    orphan_store
+        .delete_manifest(&extension_id("acme-tools"))
+        .await
+        .unwrap();
+    assert!(
+        orphan_store
+            .get_manifest(&extension_id("acme-tools"))
+            .await
+            .unwrap()
+            .is_none()
     );
 }

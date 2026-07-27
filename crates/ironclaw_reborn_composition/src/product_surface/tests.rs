@@ -273,11 +273,11 @@ impl ExtensionInstallationStorePort for OwnerReadFailingStore {
         self.inner.get_manifest(extension_id).await
     }
 
-    async fn upsert_manifest(
+    async fn persist_removal_tombstone(
         &self,
         manifest: ExtensionManifestRecord,
     ) -> Result<(), ExtensionInstallationError> {
-        self.inner.upsert_manifest(manifest).await
+        self.inner.persist_removal_tombstone(manifest).await
     }
 
     async fn upsert_manifest_and_installation(

@@ -799,7 +799,11 @@ pub trait ExtensionInstallationStorePort: Send + Sync {
         extension_id: &ExtensionId,
     ) -> Result<Option<ExtensionManifestRecord>, ExtensionInstallationError>;
 
-    async fn upsert_manifest(
+    /// Durably retain `manifest` as removal-cleanup metadata for an extension
+    /// with no live installation, so an interrupted orphan cleanup can retry
+    /// without the catalog. The definition stays visible to `get_manifest`
+    /// until `delete_manifest` marks the removal converged.
+    async fn persist_removal_tombstone(
         &self,
         manifest: ExtensionManifestRecord,
     ) -> Result<(), ExtensionInstallationError>;
@@ -877,11 +881,11 @@ where
         (**self).get_manifest(extension_id).await
     }
 
-    async fn upsert_manifest(
+    async fn persist_removal_tombstone(
         &self,
         manifest: ExtensionManifestRecord,
     ) -> Result<(), ExtensionInstallationError> {
-        (**self).upsert_manifest(manifest).await
+        (**self).persist_removal_tombstone(manifest).await
     }
 
     async fn upsert_manifest_and_installation(
@@ -959,37 +963,18 @@ const DEFAULT_INSTALLATION_STATE_PATH: &str = "/system/extensions/.installations
 const MANIFEST_RECORD_KIND: &str = "extension_manifest_record";
 const INSTALLATION_RECORD_KIND: &str = "extension_installation_record";
 const EXTENSION_STATE_V2_SCHEMA: &str = "extension_state.v2";
-const MANIFEST_RECORD_KIND_V2: &str = "extension_manifest_record_v2";
 const INSTALLATION_RECORD_KIND_V2: &str = "extension_installation_record_v2";
 const MEMBERSHIP_RECORD_KIND_V2: &str = "extension_membership_record_v2";
 const CREDENTIAL_BINDING_RECORD_KIND_V2: &str = "extension_credential_binding_record_v2";
 const HEALTH_RECORD_KIND_V2: &str = "extension_health_record_v2";
 const FILESYSTEM_CAS_RETRIES: usize = 5;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum V2LifecycleStatus {
-    Active,
-    Removing,
-    Removed,
-}
-
-impl V2LifecycleStatus {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Active => "active",
-            Self::Removing => "removing",
-            Self::Removed => "removed",
-        }
-    }
-}
-
 /// How an aggregate write reconciles child rows it did not explicitly carry.
 ///
 /// `Full` may tombstone active rows omitted from the aggregate and is only
-/// safe under a core reservation, which excludes concurrent writers.
+/// safe under an installation lease, which excludes concurrent writers.
 /// `ActivateOnly` merges: it activates the aggregate's rows and leaves every
-/// other row untouched, so an unreserved write (creation, reactivation,
+/// other row untouched, so an unleased write (creation, reactivation,
 /// compensation) can never drop a concurrent creator's or joiner's membership.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum V2ComponentSync {
@@ -997,33 +982,84 @@ enum V2ComponentSync {
     ActivateOnly,
 }
 
+/// An exclusive mutation lease on an installation record — the cross-process
+/// gate for multi-row transitions. While a lease is held the installation is
+/// hidden from typed reads (its manifest stays readable) so readers never see
+/// a torn aggregate. `member: None` is a whole-aggregate mutation (update or
+/// full removal); `member: Some(user)` is that member's removal, recorded so
+/// the same caller's retry re-enters its own lease and no other flow can
+/// complete it. There is no expiry: a lease orphaned by a crash is resolved
+/// by startup repair (restore from the compatibility snapshot, or finish the
+/// removal).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct V2ManifestRecord {
-    schema_version: String,
-    extension_id: ExtensionId,
-    status: V2LifecycleStatus,
-    manifest: WireManifestRecord,
-    updated_at: DateTime<Utc>,
+struct V2MutationLease {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    removed_at: Option<DateTime<Utc>>,
+    member: Option<UserId>,
 }
 
+impl V2MutationLease {
+    fn update() -> Self {
+        Self { member: None }
+    }
+
+    fn member_removal(user_id: UserId) -> Self {
+        Self {
+            member: Some(user_id),
+        }
+    }
+}
+
+/// The installation record: the deployment's install pin (the embedded,
+/// hash-carrying manifest wire) plus instance lifecycle. Lifecycle state is
+/// derived, not stored: `removed_at: Some` is the tombstone, `lease: Some` is
+/// an in-flight exclusive mutation, and a record with neither is live.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct V2InstallationRecord {
     schema_version: String,
     installation_id: ExtensionInstallationId,
     extension_id: ExtensionId,
-    manifest_ref: ExtensionManifestRef,
-    status: V2LifecycleStatus,
-    installed_at: DateTime<Utc>,
+    manifest: WireManifestRecord,
+    legacy_tenant_owner: bool,
     updated_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     removed_at: Option<DateTime<Utc>>,
-    legacy_tenant_owner: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    removing_member: Option<UserId>,
+    lease: Option<V2MutationLease>,
+    /// A tombstoned record whose removal cleanup has not yet converged. While
+    /// set, the embedded definition stays authoritative for `get_manifest`
+    /// readers so removal retries work without the catalog and fresh imports
+    /// stay blocked until `delete_manifest` marks convergence. Fails open to
+    /// `false` only for records written before the field existed, all of
+    /// which had already converged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    removal_cleanup_pending: bool,
+}
+
+impl V2InstallationRecord {
+    fn is_removed(&self) -> bool {
+        self.removed_at.is_some()
+    }
+
+    /// Visible = reconstructable by typed reads: not removed, no lease held.
+    fn is_visible(&self) -> bool {
+        self.removed_at.is_none() && self.lease.is_none()
+    }
+
+    /// Whether the embedded definition is authoritative for manifest readers:
+    /// every non-removed record, plus removal-cleanup tombstones that have
+    /// not yet converged.
+    fn manifest_is_authoritative(&self) -> bool {
+        !self.is_removed() || self.removal_cleanup_pending
+    }
+
+    fn manifest_ref(&self) -> ExtensionManifestRef {
+        ExtensionManifestRef::new(
+            self.extension_id.clone(),
+            self.manifest.manifest_hash.clone(),
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1032,11 +1068,16 @@ struct V2MembershipRecord {
     schema_version: String,
     installation_id: ExtensionInstallationId,
     user_id: UserId,
-    status: V2LifecycleStatus,
     installed_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     removed_at: Option<DateTime<Utc>>,
+}
+
+impl V2MembershipRecord {
+    fn is_active(&self) -> bool {
+        self.removed_at.is_none()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1047,11 +1088,16 @@ struct V2CredentialBindingRecord {
     credential_handle: ExtensionCredentialHandle,
     secret_handle: SecretHandle,
     position: u32,
-    status: V2LifecycleStatus,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     removed_at: Option<DateTime<Utc>>,
+}
+
+impl V2CredentialBindingRecord {
+    fn is_active(&self) -> bool {
+        self.removed_at.is_none()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1117,7 +1163,7 @@ impl ExtensionInstallationStore {
         store.migrate_legacy_manifest_rows().await?;
         store.ensure_v2_indexes().await?;
         store.bootstrap_v2_from_compatibility_rows().await?;
-        store.repair_interrupted_v2_removals().await?;
+        store.repair_interrupted_v2_leases().await?;
         store.repair_removed_v2_children().await?;
         store.repair_compatibility_views().await?;
         Ok(store)
@@ -1155,11 +1201,6 @@ impl ExtensionInstallationStore {
 
     async fn ensure_v2_indexes(&self) -> Result<(), ExtensionInstallationError> {
         for (prefix, name, key) in [
-            (
-                self.v2_manifests_root()?,
-                "extension_v2_manifests_by_extension_id",
-                "extension_id",
-            ),
             (
                 self.v2_installations_root()?,
                 "extension_v2_installations_by_installation_id",
@@ -1291,10 +1332,6 @@ impl ExtensionInstallationStore {
         child_path(&self.root, "v2")
     }
 
-    fn v2_manifests_root(&self) -> Result<VirtualPath, ExtensionInstallationError> {
-        child_path(&self.v2_root()?, "manifests")
-    }
-
     fn v2_installations_root(&self) -> Result<VirtualPath, ExtensionInstallationError> {
         child_path(&self.v2_root()?, "installations")
     }
@@ -1328,16 +1365,6 @@ impl ExtensionInstallationStore {
         child_path(
             &self.installations_root()?,
             &format!("{}.json", row_token(installation_id.as_str())),
-        )
-    }
-
-    fn v2_manifest_path(
-        &self,
-        extension_id: &ExtensionId,
-    ) -> Result<VirtualPath, ExtensionInstallationError> {
-        child_path(
-            &self.v2_manifests_root()?,
-            &format!("{}.json", row_token(extension_id.as_str())),
         )
     }
 
@@ -1470,17 +1497,6 @@ impl ExtensionInstallationStore {
         Ok(Some((installation, entry.version)))
     }
 
-    async fn query_installations_by_extension(
-        &self,
-        extension_id: &ExtensionId,
-    ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError> {
-        let filter = Filter::Eq {
-            key: index_key("extension_id")?,
-            value: IndexValue::Text(extension_id.as_str().to_string()),
-        };
-        self.query_v2_installations(&filter).await
-    }
-
     async fn query_installations(
         &self,
         filter: &Filter,
@@ -1488,16 +1504,6 @@ impl ExtensionInstallationStore {
         let rows = query_all(&self.filesystem, &self.installations_root()?, filter).await?;
         rows.into_iter()
             .map(|entry| parse_installation_entry(entry.entry, &entry.path))
-            .collect()
-    }
-
-    async fn query_manifests(
-        &self,
-        filter: &Filter,
-    ) -> Result<Vec<ExtensionManifestRecord>, ExtensionInstallationError> {
-        let rows = query_all(&self.filesystem, &self.manifests_root()?, filter).await?;
-        rows.into_iter()
-            .map(|entry| self.parse_manifest_entry(entry.entry, &entry.path))
             .collect()
     }
 
@@ -1583,27 +1589,36 @@ impl ExtensionInstallationStore {
         }
     }
 
-    async fn load_v2_manifest_record(
+    /// All merged records for one extension id. Installation ids equal
+    /// package ids today so this is normally zero or one record, but legacy
+    /// data may hold duplicates, so extension-level decisions must consider
+    /// every record.
+    async fn load_v2_records_by_extension(
         &self,
         extension_id: &ExtensionId,
-    ) -> Result<Option<(V2ManifestRecord, RecordVersion)>, ExtensionInstallationError> {
-        let path = self.v2_manifest_path(extension_id)?;
-        let Some(entry) = self
-            .filesystem
-            .get(&path)
-            .await
-            .map_err(store_unavailable("load v2 extension manifest row"))?
-        else {
-            return Ok(None);
-        };
-        let record = parse_v2_manifest_entry(entry.entry, &path)?;
-        if &record.extension_id != extension_id {
-            return Err(invalid_installation_error(format!(
-                "v2 extension manifest row key {extension_id} contained manifest {}",
-                record.extension_id
-            )));
-        }
-        Ok(Some((record, entry.version)))
+    ) -> Result<Vec<V2InstallationRecord>, ExtensionInstallationError> {
+        let rows = query_all(
+            &self.filesystem,
+            &self.v2_installations_root()?,
+            &Filter::Eq {
+                key: index_key("extension_id")?,
+                value: IndexValue::Text(extension_id.as_str().to_string()),
+            },
+        )
+        .await?;
+        let mut records = rows
+            .into_iter()
+            .map(|row| parse_v2_installation_entry(row.entry, &row.path))
+            .collect::<Result<Vec<_>, _>>()?;
+        records.retain(|record| &record.extension_id == extension_id);
+        // Live records first so extension-level reads never answer from a
+        // tombstone while a sibling record is still live.
+        records.sort_by(|a, b| {
+            a.is_removed()
+                .cmp(&b.is_removed())
+                .then_with(|| a.installation_id.cmp(&b.installation_id))
+        });
+        Ok(records)
     }
 
     async fn load_v2_installation_record(
@@ -1629,46 +1644,7 @@ impl ExtensionInstallationStore {
         Ok(Some((record, entry.version)))
     }
 
-    async fn put_v2_manifest(
-        &self,
-        manifest: &ExtensionManifestRecord,
-    ) -> Result<(), ExtensionInstallationError> {
-        let now = Utc::now();
-        let record = V2ManifestRecord {
-            schema_version: EXTENSION_STATE_V2_SCHEMA.to_string(),
-            extension_id: manifest.extension_id().clone(),
-            status: V2LifecycleStatus::Active,
-            manifest: WireManifestRecord::from(manifest),
-            updated_at: now,
-            removed_at: None,
-        };
-        let path = self.v2_scoped_path(&self.v2_manifest_path(manifest.extension_id())?)?;
-        cas_update(
-            self.scoped_filesystem.as_ref(),
-            &ResourceScope::system(),
-            &path,
-            decode_v2_manifest_body,
-            entry_for_v2_manifest,
-            move |current: Option<V2ManifestRecord>| {
-                let record = record.clone();
-                async move {
-                    if current
-                        .as_ref()
-                        .is_some_and(|current| current.extension_id != record.extension_id)
-                    {
-                        return Err(invalid_installation_error(
-                            "v2 manifest body identity did not match its key",
-                        ));
-                    }
-                    Ok(CasApply::new(record, ()))
-                }
-            },
-        )
-        .await
-        .map_err(|error| map_extension_state_cas_error(error, "manifest"))
-    }
-
-    async fn require_active_v2_core(
+    async fn require_visible_v2_core(
         &self,
         installation_id: &ExtensionInstallationId,
     ) -> Result<V2InstallationRecord, ExtensionInstallationError> {
@@ -1677,40 +1653,44 @@ impl ExtensionInstallationStore {
                 installation_id: installation_id.clone(),
             });
         };
-        match core.status {
-            V2LifecycleStatus::Active => Ok(core),
-            V2LifecycleStatus::Removing => {
-                Err(ExtensionInstallationError::MembershipMutationInProgress {
-                    installation_id: installation_id.clone(),
-                })
-            }
-            V2LifecycleStatus::Removed => Err(ExtensionInstallationError::InstallationNotFound {
+        if core.is_removed() {
+            return Err(ExtensionInstallationError::InstallationNotFound {
                 installation_id: installation_id.clone(),
-            }),
+            });
         }
+        if core.lease.is_some() {
+            return Err(ExtensionInstallationError::MembershipMutationInProgress {
+                installation_id: installation_id.clone(),
+            });
+        }
+        Ok(core)
     }
 
+    /// Write the full aggregate. `manifest: Some` re-pins the embedded
+    /// definition (install/update); `None` carries the existing row's
+    /// definition forward (reactivation, restore, plain aggregate rewrites).
     async fn put_v2_installation(
         &self,
         installation: &ExtensionInstallation,
+        manifest: Option<&ExtensionManifestRecord>,
     ) -> Result<(), ExtensionInstallationError> {
         let prior = match self
             .load_v2_installation_record(installation.installation_id())
             .await?
         {
-            Some((core, _)) if core.status == V2LifecycleStatus::Active => {
+            Some((core, _)) if core.is_visible() => {
                 let prior = self.reconstruct_v2_installation(&core).await?;
-                self.begin_v2_installation_update(installation.installation_id())
+                self.take_v2_update_lease(installation.installation_id())
                     .await?;
                 Some(prior)
             }
             _ => None,
         };
-        // Only a reserved update of an ACTIVE core may sweep rows omitted from
-        // the aggregate: the reservation excludes concurrent writers, so an
+        // Only a leased update of a VISIBLE record may sweep rows omitted
+        // from the aggregate: the lease excludes concurrent writers, so an
         // omitted-but-active row is genuinely stale. Creation/reactivation
-        // holds no reservation — a concurrent creator may have activated its
-        // own membership between our core load and this write, and sweeping it
+        // holds no lease — a concurrent creator may have activated its own
+        // membership between our record load and this write, and sweeping it
         // would silently drop that user from an installation whose install
         // call succeeded. Creation therefore merges (activate-only).
         let sync = if prior.is_some() {
@@ -1719,12 +1699,12 @@ impl ExtensionInstallationStore {
             V2ComponentSync::ActivateOnly
         };
         if let Err(error) = self
-            .write_v2_installation_components(installation, sync)
+            .write_v2_installation_components(installation, manifest, sync)
             .await
         {
             if let Some(prior) = prior
                 && self
-                    .write_v2_installation_components(&prior, V2ComponentSync::Full)
+                    .write_v2_installation_components(&prior, None, V2ComponentSync::Full)
                     .await
                     .is_err()
             {
@@ -1740,6 +1720,7 @@ impl ExtensionInstallationStore {
     async fn write_v2_installation_components(
         &self,
         installation: &ExtensionInstallation,
+        manifest: Option<&ExtensionManifestRecord>,
         sync: V2ComponentSync,
     ) -> Result<(), ExtensionInstallationError> {
         let desired_members = installation.owner().members().cloned().unwrap_or_default();
@@ -1759,7 +1740,7 @@ impl ExtensionInstallationStore {
                 if desired_members.contains(&membership.user_id) {
                     continue;
                 }
-                if membership.status == V2LifecycleStatus::Active {
+                if membership.is_active() {
                     self.deactivate_v2_membership_row(
                         installation.installation_id(),
                         &membership.user_id,
@@ -1795,7 +1776,7 @@ impl ExtensionInstallationStore {
                 if desired_binding_handles.contains(&binding.credential_handle) {
                     continue;
                 }
-                if binding.status == V2LifecycleStatus::Active {
+                if binding.is_active() {
                     self.deactivate_v2_credential_binding_row(
                         installation.installation_id(),
                         &binding.credential_handle,
@@ -1813,12 +1794,12 @@ impl ExtensionInstallationStore {
             updated_at: installation.updated_at(),
         };
         self.write_v2_health(&health).await?;
-        self.put_v2_installation_core(installation)
+        self.put_v2_installation_core(installation, manifest)
             .await
             .map(|_| ())
     }
 
-    async fn begin_v2_installation_update(
+    async fn take_v2_update_lease(
         &self,
         installation_id: &ExtensionInstallationId,
     ) -> Result<(), ExtensionInstallationError> {
@@ -1843,13 +1824,12 @@ impl ExtensionInstallationStore {
                             "v2 installation body identity did not match its key",
                         ));
                     }
-                    if record.status != V2LifecycleStatus::Active {
+                    if !record.is_visible() {
                         return Err(ExtensionInstallationError::MembershipMutationInProgress {
                             installation_id,
                         });
                     }
-                    record.status = V2LifecycleStatus::Removing;
-                    record.removing_member = None;
+                    record.lease = Some(V2MutationLease::update());
                     record.updated_at = Utc::now();
                     Ok(CasApply::new(record, ()))
                 }
@@ -1862,10 +1842,12 @@ impl ExtensionInstallationStore {
     async fn put_v2_installation_core(
         &self,
         installation: &ExtensionInstallation,
+        manifest: Option<&ExtensionManifestRecord>,
     ) -> Result<V2InstallationRecord, ExtensionInstallationError> {
         let path =
             self.v2_scoped_path(&self.v2_installation_path(installation.installation_id())?)?;
         let installation = installation.clone();
+        let provided_wire = manifest.map(WireManifestRecord::from);
         cas_update(
             self.scoped_filesystem.as_ref(),
             &ResourceScope::system(),
@@ -1874,6 +1856,7 @@ impl ExtensionInstallationStore {
             entry_for_v2_installation,
             move |current: Option<V2InstallationRecord>| {
                 let installation = installation.clone();
+                let provided_wire = provided_wire.clone();
                 async move {
                     if current.as_ref().is_some_and(|current| {
                         current.installation_id != *installation.installation_id()
@@ -1882,20 +1865,26 @@ impl ExtensionInstallationStore {
                             "v2 installation body identity did not match its key",
                         ));
                     }
+                    // The commit either re-pins a provided definition or
+                    // carries the existing row's forward; a fresh id with no
+                    // definition to embed cannot become installed.
+                    let Some(wire) = provided_wire
+                        .or_else(|| current.as_ref().map(|record| record.manifest.clone()))
+                    else {
+                        return Err(ExtensionInstallationError::UnknownManifest {
+                            extension_id: installation.extension_id().clone(),
+                        });
+                    };
                     let record = V2InstallationRecord {
                         schema_version: EXTENSION_STATE_V2_SCHEMA.to_string(),
                         installation_id: installation.installation_id().clone(),
                         extension_id: installation.extension_id().clone(),
-                        manifest_ref: installation.manifest_ref().clone(),
-                        status: V2LifecycleStatus::Active,
-                        installed_at: current
-                            .as_ref()
-                            .map(|record| record.installed_at)
-                            .unwrap_or_else(|| installation.updated_at()),
+                        manifest: wire,
+                        legacy_tenant_owner: installation.owner().is_tenant(),
                         updated_at: installation.updated_at(),
                         removed_at: None,
-                        legacy_tenant_owner: installation.owner().is_tenant(),
-                        removing_member: None,
+                        lease: None,
+                        removal_cleanup_pending: false,
                     };
                     Ok(CasApply::new(record.clone(), record))
                 }
@@ -1931,8 +1920,13 @@ impl ExtensionInstallationStore {
                             "v2 installation body identity did not match its key",
                         ));
                     }
-                    if record.status != V2LifecycleStatus::Active {
+                    if record.is_removed() {
                         return Err(ExtensionInstallationError::InstallationNotFound {
+                            installation_id,
+                        });
+                    }
+                    if record.lease.is_some() {
+                        return Err(ExtensionInstallationError::MembershipMutationInProgress {
                             installation_id,
                         });
                     }
@@ -1977,21 +1971,20 @@ impl ExtensionInstallationStore {
                             "v2 installation body identity did not match its key",
                         ));
                     }
-                    if record.status == V2LifecycleStatus::Removed {
+                    if record.is_removed() {
                         return Err(ExtensionInstallationError::InstallationNotFound {
                             installation_id,
                         });
                     }
-                    if record.status == V2LifecycleStatus::Removing {
-                        if record.removing_member.as_ref() == Some(&user_id) {
+                    if let Some(lease) = record.lease.as_ref() {
+                        if lease.member.as_ref() == Some(&user_id) {
                             return Ok(CasApply::new(record.clone(), record));
                         }
                         return Err(ExtensionInstallationError::MembershipMutationInProgress {
                             installation_id,
                         });
                     }
-                    record.status = V2LifecycleStatus::Removing;
-                    record.removing_member = Some(user_id);
+                    record.lease = Some(V2MutationLease::member_removal(user_id));
                     record.updated_at = now;
                     Ok(CasApply::new(record.clone(), record))
                 }
@@ -2005,7 +1998,7 @@ impl ExtensionInstallationStore {
         &self,
         installation_id: &ExtensionInstallationId,
         now: DateTime<Utc>,
-    ) -> Result<V2LifecycleStatus, ExtensionInstallationError> {
+    ) -> Result<(), ExtensionInstallationError> {
         let path = self.v2_scoped_path(&self.v2_installation_path(installation_id)?)?;
         let installation_id = installation_id.clone();
         cas_update(
@@ -2027,13 +2020,15 @@ impl ExtensionInstallationStore {
                             "v2 installation body identity did not match its key",
                         ));
                     }
-                    let prior_status = record.status;
-                    if prior_status == V2LifecycleStatus::Active {
-                        record.status = V2LifecycleStatus::Removing;
-                        record.removing_member = None;
+                    // A visible record takes the exclusive lease; an existing
+                    // lease (this removal's own retry, or the member-removal
+                    // lease this final removal continues) and an existing
+                    // tombstone both pass through so removal stays idempotent.
+                    if record.is_visible() {
+                        record.lease = Some(V2MutationLease::update());
                         record.updated_at = now;
                     }
-                    Ok(CasApply::new(record, prior_status))
+                    Ok(CasApply::new(record, ()))
                 }
             },
         )
@@ -2070,15 +2065,17 @@ impl ExtensionInstallationStore {
                             "v2 installation body identity did not match its key",
                         ));
                     }
-                    if record.status != V2LifecycleStatus::Removing
-                        || record.removing_member.as_ref() != Some(&user_id)
+                    if record.is_removed()
+                        || record
+                            .lease
+                            .as_ref()
+                            .is_none_or(|lease| lease.member.as_ref() != Some(&user_id))
                     {
                         return Err(ExtensionInstallationError::MembershipMutationInProgress {
                             installation_id,
                         });
                     }
-                    record.status = V2LifecycleStatus::Active;
-                    record.removing_member = None;
+                    record.lease = None;
                     record.updated_at = now;
                     Ok(CasApply::new(record.clone(), record))
                 }
@@ -2114,12 +2111,15 @@ impl ExtensionInstallationStore {
                             "v2 installation body identity did not match its key",
                         ));
                     }
-                    if record.status != V2LifecycleStatus::Removed {
-                        record.status = V2LifecycleStatus::Removed;
-                        record.removing_member = None;
+                    if !record.is_removed() {
                         record.removed_at = Some(now);
                         record.updated_at = now;
+                        // The embedded definition stays authoritative for
+                        // cleanup retries until `delete_manifest` marks the
+                        // removal converged.
+                        record.removal_cleanup_pending = true;
                     }
+                    record.lease = None;
                     Ok(CasApply::new(record, ()))
                 }
             },
@@ -2128,42 +2128,45 @@ impl ExtensionInstallationStore {
         .map_err(|error| map_extension_state_cas_error(error, "installation"))
     }
 
-    async fn soft_remove_v2_manifest(
+    /// Clear the removal-cleanup-pending marker on a tombstoned record:
+    /// `delete_manifest` calls this when removal cleanup has converged, after
+    /// which the embedded definition stops being authoritative for manifest
+    /// readers and fresh imports are unblocked.
+    async fn mark_v2_removal_converged(
         &self,
-        extension_id: &ExtensionId,
-        now: DateTime<Utc>,
+        installation_id: &ExtensionInstallationId,
     ) -> Result<(), ExtensionInstallationError> {
-        let path = self.v2_scoped_path(&self.v2_manifest_path(extension_id)?)?;
-        let extension_id = extension_id.clone();
+        let path = self.v2_scoped_path(&self.v2_installation_path(installation_id)?)?;
+        let installation_id = installation_id.clone();
         cas_update(
             self.scoped_filesystem.as_ref(),
             &ResourceScope::system(),
             &path,
-            decode_v2_manifest_body,
-            entry_for_v2_manifest,
-            move |current: Option<V2ManifestRecord>| {
-                let extension_id = extension_id.clone();
+            decode_v2_installation_body,
+            entry_for_v2_installation,
+            move |current: Option<V2InstallationRecord>| {
+                let installation_id = installation_id.clone();
                 async move {
                     let Some(mut record) = current else {
-                        return Err(ExtensionInstallationError::ManifestNotFound { extension_id });
+                        return Err(ExtensionInstallationError::InstallationNotFound {
+                            installation_id,
+                        });
                     };
-                    if record.extension_id != extension_id {
+                    if record.installation_id != installation_id {
                         return Err(invalid_installation_error(
-                            "v2 manifest body identity did not match its key",
+                            "v2 installation body identity did not match its key",
                         ));
                     }
-                    if record.status == V2LifecycleStatus::Removed {
-                        return Err(ExtensionInstallationError::ManifestNotFound { extension_id });
+                    if record.is_removed() && record.removal_cleanup_pending {
+                        record.removal_cleanup_pending = false;
+                        record.updated_at = Utc::now();
                     }
-                    record.status = V2LifecycleStatus::Removed;
-                    record.removed_at = Some(now);
-                    record.updated_at = now;
                     Ok(CasApply::new(record, ()))
                 }
             },
         )
         .await
-        .map_err(|error| map_extension_state_cas_error(error, "manifest"))
+        .map_err(|error| map_extension_state_cas_error(error, "installation"))
     }
 
     async fn activate_v2_membership_row(
@@ -2192,9 +2195,8 @@ impl ExtensionInstallationStore {
                             "v2 membership body identity did not match its key",
                         ));
                     }
-                    let already_active = current
-                        .as_ref()
-                        .is_some_and(|record| record.status == V2LifecycleStatus::Active);
+                    let already_active =
+                        current.as_ref().is_some_and(V2MembershipRecord::is_active);
                     let installed_at = current
                         .as_ref()
                         .map(|record| record.installed_at)
@@ -2204,7 +2206,6 @@ impl ExtensionInstallationStore {
                             schema_version: EXTENSION_STATE_V2_SCHEMA.to_string(),
                             installation_id,
                             user_id,
-                            status: V2LifecycleStatus::Active,
                             installed_at,
                             updated_at: if already_active {
                                 current
@@ -2241,7 +2242,7 @@ impl ExtensionInstallationStore {
             return Ok(false);
         };
         let current = parse_v2_membership_entry(current.entry, &virtual_path)?;
-        if current.status == V2LifecycleStatus::Removed {
+        if !current.is_active() {
             return Ok(false);
         }
 
@@ -2268,10 +2269,9 @@ impl ExtensionInstallationStore {
                             "v2 membership body identity did not match its key",
                         ));
                     }
-                    if record.status == V2LifecycleStatus::Removed {
+                    if !record.is_active() {
                         return Ok(CasApply::new(record, false));
                     }
-                    record.status = V2LifecycleStatus::Removed;
                     record.updated_at = now;
                     record.removed_at = Some(now);
                     Ok(CasApply::new(record, true))
@@ -2321,7 +2321,6 @@ impl ExtensionInstallationStore {
                             credential_handle,
                             secret_handle,
                             position,
-                            status: V2LifecycleStatus::Active,
                             created_at: current
                                 .as_ref()
                                 .map(|record| record.created_at)
@@ -2371,8 +2370,7 @@ impl ExtensionInstallationStore {
                             "v2 credential binding body identity did not match its key",
                         ));
                     }
-                    if record.status == V2LifecycleStatus::Active {
-                        record.status = V2LifecycleStatus::Removed;
+                    if record.is_active() {
                         record.updated_at = now;
                         record.removed_at = Some(now);
                     }
@@ -2471,7 +2469,7 @@ impl ExtensionInstallationStore {
             .query_v2_memberships(installation_id)
             .await?
             .into_iter()
-            .filter(|record| record.status == V2LifecycleStatus::Active)
+            .filter(V2MembershipRecord::is_active)
             .collect::<Vec<_>>();
         let caller_is_active = active_memberships
             .iter()
@@ -2490,7 +2488,7 @@ impl ExtensionInstallationStore {
             .query_v2_memberships(installation_id)
             .await?
             .into_iter()
-            .any(|record| record.status == V2LifecycleStatus::Active && &record.user_id != user_id);
+            .any(|record| record.is_active() && &record.user_id != user_id);
         if !other_active_after_deactivation {
             self.activate_v2_membership_row(installation_id, user_id, now)
                 .await?;
@@ -2512,16 +2510,16 @@ impl ExtensionInstallationStore {
         &self,
         core: &V2InstallationRecord,
     ) -> Result<ExtensionInstallation, ExtensionInstallationError> {
-        if core.status != V2LifecycleStatus::Active {
+        if !core.is_visible() {
             return Err(invalid_installation_error(
-                "inactive v2 installation cannot be reconstructed as active",
+                "a removed or leased v2 installation cannot be reconstructed as live",
             ));
         }
         let all_memberships = self.query_v2_memberships(&core.installation_id).await?;
         let membership_updated_at = all_memberships.iter().map(|record| record.updated_at).max();
         let memberships = all_memberships
             .into_iter()
-            .filter(|record| record.status == V2LifecycleStatus::Active)
+            .filter(V2MembershipRecord::is_active)
             .collect::<Vec<_>>();
         let owner = if core.legacy_tenant_owner {
             InstallationOwner::Tenant
@@ -2539,7 +2537,7 @@ impl ExtensionInstallationStore {
         let binding_updated_at = all_bindings.iter().map(|record| record.updated_at).max();
         let mut bindings = all_bindings
             .into_iter()
-            .filter(|record| record.status == V2LifecycleStatus::Active)
+            .filter(V2CredentialBindingRecord::is_active)
             .collect::<Vec<_>>();
         bindings.sort_by(|left, right| {
             left.position
@@ -2581,7 +2579,7 @@ impl ExtensionInstallationStore {
         ExtensionInstallation::from_persisted_parts(ExtensionInstallationPersistedParts {
             installation_id: core.installation_id.clone(),
             extension_id: core.extension_id.clone(),
-            manifest_ref: core.manifest_ref.clone(),
+            manifest_ref: core.manifest_ref(),
             credential_bindings,
             health: health.health,
             updated_at,
@@ -2597,33 +2595,40 @@ impl ExtensionInstallationStore {
         let mut installations = Vec::new();
         for row in rows {
             let core = parse_v2_installation_entry(row.entry, &row.path)?;
-            if core.status == V2LifecycleStatus::Active {
+            if core.is_visible() {
                 installations.push(self.reconstruct_v2_installation(&core).await?);
             }
         }
         Ok(installations)
     }
 
+    /// Import legacy two-row aggregates (manifest row + installation row)
+    /// absent from v2 by joining each legacy installation with its legacy
+    /// manifest. A legacy installation without its manifest could never have
+    /// operated and fails the import loudly; an orphaned legacy manifest row
+    /// (a v1 crash artifact with nothing installed) is left in place and
+    /// never becomes v2 state.
     async fn bootstrap_v2_from_compatibility_rows(&self) -> Result<(), ExtensionInstallationError> {
-        let legacy_manifests = self.query_manifests(&Filter::All).await?;
-        for manifest in legacy_manifests {
-            if self
-                .load_v2_manifest_record(manifest.extension_id())
-                .await?
-                .is_none()
-            {
-                self.put_v2_manifest(&manifest).await?;
-            }
-        }
         let legacy_installations = self.query_installations(&Filter::All).await?;
         for installation in legacy_installations {
             if self
                 .load_v2_installation_record(installation.installation_id())
                 .await?
-                .is_none()
+                .is_some()
             {
-                self.put_v2_installation(&installation).await?;
+                continue;
             }
+            let Some((manifest, _)) = self
+                .load_manifest_entry(installation.extension_id())
+                .await?
+            else {
+                return Err(invalid_installation_error(format!(
+                    "legacy installation {} has no legacy manifest row to import",
+                    installation.installation_id()
+                )));
+            };
+            self.put_v2_installation(&installation, Some(&manifest))
+                .await?;
         }
         Ok(())
     }
@@ -2637,12 +2642,12 @@ impl ExtensionInstallationStore {
         .await?;
         for row in installation_rows {
             let core = parse_v2_installation_entry(row.entry, &row.path)?;
-            if core.status != V2LifecycleStatus::Removed {
+            if !core.is_removed() {
                 continue;
             }
             let removed_at = core.removed_at.unwrap_or(core.updated_at);
             for membership in self.query_v2_memberships(&core.installation_id).await? {
-                if membership.status == V2LifecycleStatus::Active {
+                if membership.is_active() {
                     self.deactivate_v2_membership_row(
                         &core.installation_id,
                         &membership.user_id,
@@ -2655,7 +2660,7 @@ impl ExtensionInstallationStore {
                 .query_v2_credential_bindings(&core.installation_id)
                 .await?
             {
-                if binding.status == V2LifecycleStatus::Active {
+                if binding.is_active() {
                     self.deactivate_v2_credential_binding_row(
                         &core.installation_id,
                         &binding.credential_handle,
@@ -2668,7 +2673,7 @@ impl ExtensionInstallationStore {
         Ok(())
     }
 
-    async fn repair_interrupted_v2_removals(&self) -> Result<(), ExtensionInstallationError> {
+    async fn repair_interrupted_v2_leases(&self) -> Result<(), ExtensionInstallationError> {
         let rows = query_all(
             &self.filesystem,
             &self.v2_installations_root()?,
@@ -2677,13 +2682,13 @@ impl ExtensionInstallationStore {
         .await?;
         for row in rows {
             let core = parse_v2_installation_entry(row.entry, &row.path)?;
-            if core.status != V2LifecycleStatus::Removing {
+            if core.lease.is_none() || core.is_removed() {
                 continue;
             }
             if let Some((installation, _)) =
                 self.load_installation_entry(&core.installation_id).await?
             {
-                self.put_v2_installation(&installation).await?;
+                self.put_v2_installation(&installation, None).await?;
             } else {
                 self.finish_v2_installation_removal(&core.installation_id, Utc::now())
                     .await?;
@@ -2693,33 +2698,6 @@ impl ExtensionInstallationStore {
     }
 
     async fn repair_compatibility_views(&self) -> Result<(), ExtensionInstallationError> {
-        let manifest_rows =
-            query_all(&self.filesystem, &self.v2_manifests_root()?, &Filter::All).await?;
-        for row in manifest_rows {
-            let record = parse_v2_manifest_entry(row.entry, &row.path)?;
-            match record.status {
-                V2LifecycleStatus::Active => {
-                    let manifest = record.manifest.into_manifest_record()?;
-                    self.put_manifest(&manifest, CasExpectation::Any)
-                        .await
-                        .map_err(SaveRowError::into_installation_error)?;
-                }
-                V2LifecycleStatus::Removed => {
-                    if let Some((_, version)) =
-                        self.load_manifest_entry(&record.extension_id).await?
-                    {
-                        self.delete_manifest_row(&record.extension_id, version)
-                            .await
-                            .map_err(SaveRowError::into_installation_error)?;
-                    }
-                }
-                V2LifecycleStatus::Removing => {
-                    return Err(invalid_installation_error(
-                        "v2 manifest row cannot be in removing state",
-                    ));
-                }
-            }
-        }
         let installation_rows = query_all(
             &self.filesystem,
             &self.v2_installations_root()?,
@@ -2728,57 +2706,45 @@ impl ExtensionInstallationStore {
         .await?;
         for row in installation_rows {
             let core = parse_v2_installation_entry(row.entry, &row.path)?;
-            match core.status {
-                V2LifecycleStatus::Active => {
-                    let installation = self.reconstruct_v2_installation(&core).await?;
-                    self.put_installation(&installation, CasExpectation::Any)
+            if core.lease.is_some() && !core.is_removed() {
+                return Err(invalid_installation_error(
+                    "v2 installation lease repair did not converge",
+                ));
+            }
+            if core.is_removed() {
+                if let Some((_, version)) =
+                    self.load_installation_entry(&core.installation_id).await?
+                {
+                    self.delete_installation_row(&core.installation_id, version)
                         .await
                         .map_err(SaveRowError::into_installation_error)?;
                 }
-                V2LifecycleStatus::Removed => {
-                    if let Some((_, version)) =
-                        self.load_installation_entry(&core.installation_id).await?
-                    {
-                        self.delete_installation_row(&core.installation_id, version)
-                            .await
-                            .map_err(SaveRowError::into_installation_error)?;
-                    }
+                if core.removal_cleanup_pending {
+                    // The definition is still authoritative for cleanup
+                    // retries, so its legacy projection stays in place.
+                    let manifest = core.manifest.clone().into_manifest_record()?;
+                    self.put_manifest(&manifest, CasExpectation::Any)
+                        .await
+                        .map_err(SaveRowError::into_installation_error)?;
+                } else if let Some((_, version)) =
+                    self.load_manifest_entry(&core.extension_id).await?
+                {
+                    self.delete_manifest_row(&core.extension_id, version)
+                        .await
+                        .map_err(SaveRowError::into_installation_error)?;
                 }
-                V2LifecycleStatus::Removing => {
-                    return Err(invalid_installation_error(
-                        "v2 installation removal repair did not converge",
-                    ));
-                }
+            } else {
+                let manifest = core.manifest.clone().into_manifest_record()?;
+                self.put_manifest(&manifest, CasExpectation::Any)
+                    .await
+                    .map_err(SaveRowError::into_installation_error)?;
+                let installation = self.reconstruct_v2_installation(&core).await?;
+                self.put_installation(&installation, CasExpectation::Any)
+                    .await
+                    .map_err(SaveRowError::into_installation_error)?;
             }
         }
         Ok(())
-    }
-
-    async fn restore_manifest_best_effort(
-        &self,
-        extension_id: &ExtensionId,
-        prior: Option<ExtensionManifestRecord>,
-    ) {
-        match prior {
-            Some(prior) => {
-                let _ = self.put_v2_manifest(&prior).await;
-                let _ = self.put_manifest(&prior, CasExpectation::Any).await;
-            }
-            None => {
-                if self
-                    .load_v2_manifest_record(extension_id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .is_some_and(|(record, _)| record.status == V2LifecycleStatus::Active)
-                {
-                    let _ = self.soft_remove_v2_manifest(extension_id, Utc::now()).await;
-                }
-                if let Ok(Some((_, version))) = self.load_manifest_entry(extension_id).await {
-                    let _ = self.delete_manifest_row(extension_id, version).await;
-                }
-            }
-        }
     }
 }
 
@@ -2787,13 +2753,21 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
     async fn list_manifests(
         &self,
     ) -> Result<Vec<ExtensionManifestRecord>, ExtensionInstallationError> {
-        let rows = query_all(&self.filesystem, &self.v2_manifests_root()?, &Filter::All).await?;
+        let rows = query_all(
+            &self.filesystem,
+            &self.v2_installations_root()?,
+            &Filter::All,
+        )
+        .await?;
         let mut manifests = rows
             .into_iter()
-            .map(|row| parse_v2_manifest_entry(row.entry, &row.path))
+            .map(|row| parse_v2_installation_entry(row.entry, &row.path))
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
-            .filter(|record| record.status == V2LifecycleStatus::Active)
+            // The definition stays readable while a lease is held — an
+            // in-flight membership mutation does not change what is pinned —
+            // and while a removal-cleanup tombstone awaits convergence.
+            .filter(V2InstallationRecord::manifest_is_authoritative)
             .map(|record| record.manifest.into_manifest_record())
             .collect::<Result<Vec<_>, _>>()?;
         manifests.sort_by(|a, b| a.extension_id().cmp(b.extension_id()));
@@ -2804,29 +2778,84 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
         &self,
         extension_id: &ExtensionId,
     ) -> Result<Option<ExtensionManifestRecord>, ExtensionInstallationError> {
-        let Some((record, _)) = self.load_v2_manifest_record(extension_id).await? else {
+        let Some(record) = self
+            .load_v2_records_by_extension(extension_id)
+            .await?
+            .into_iter()
+            .find(V2InstallationRecord::manifest_is_authoritative)
+        else {
             return Ok(None);
         };
-        if record.status != V2LifecycleStatus::Active {
-            return Ok(None);
-        }
         record.manifest.into_manifest_record().map(Some)
     }
 
-    async fn upsert_manifest(
+    async fn persist_removal_tombstone(
         &self,
         manifest: ExtensionManifestRecord,
     ) -> Result<(), ExtensionInstallationError> {
-        for installation in self
-            .query_installations_by_extension(manifest.extension_id())
-            .await?
-        {
-            validate_installation_against_one_manifest(&manifest, &installation)?;
-        }
-        self.put_v2_manifest(&manifest).await?;
-        self.put_manifest(&manifest, CasExpectation::Any)
-            .await
-            .map_err(SaveRowError::into_installation_error)
+        let installation_id =
+            ExtensionInstallationId::new(manifest.extension_id().as_str().to_string())
+                .map_err(invalid_installation_error)?;
+        let path = self.v2_scoped_path(&self.v2_installation_path(&installation_id)?)?;
+        let wire = WireManifestRecord::from(&manifest);
+        let extension_id = manifest.extension_id().clone();
+        cas_update(
+            self.scoped_filesystem.as_ref(),
+            &ResourceScope::system(),
+            &path,
+            decode_v2_installation_body,
+            entry_for_v2_installation,
+            move |current: Option<V2InstallationRecord>| {
+                let installation_id = installation_id.clone();
+                let extension_id = extension_id.clone();
+                let wire = wire.clone();
+                async move {
+                    if current.as_ref().is_some_and(|record| {
+                        record.installation_id != installation_id
+                            || record.extension_id != extension_id
+                    }) {
+                        return Err(invalid_installation_error(
+                            "v2 installation body identity did not match its key",
+                        ));
+                    }
+                    if let Some(record) = current.as_ref()
+                        && !record.is_removed()
+                    {
+                        return Err(ExtensionInstallationError::InvalidInstallation {
+                            reason: format!("extension {extension_id} still has installations"),
+                        });
+                    }
+                    let now = Utc::now();
+                    let record = V2InstallationRecord {
+                        schema_version: EXTENSION_STATE_V2_SCHEMA.to_string(),
+                        installation_id,
+                        extension_id,
+                        manifest: wire,
+                        legacy_tenant_owner: current
+                            .as_ref()
+                            .map(|record| record.legacy_tenant_owner)
+                            .unwrap_or(false),
+                        updated_at: now,
+                        removed_at: Some(
+                            current
+                                .as_ref()
+                                .and_then(|record| record.removed_at)
+                                .unwrap_or(now),
+                        ),
+                        lease: None,
+                        removal_cleanup_pending: true,
+                    };
+                    Ok(CasApply::new(record, ()))
+                }
+            },
+        )
+        .await
+        .map_err(|error| map_extension_state_cas_error(error, "installation"))?;
+        // silent-ok: the v2 tombstone (the authority) is committed; the legacy
+        // manifest projection mirrors it best-effort and startup repair
+        // converges it.
+        let _ = self.put_manifest(&manifest, CasExpectation::Any).await;
+        Ok(())
     }
 
     async fn upsert_manifest_and_installation(
@@ -2835,23 +2864,13 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
         installation: ExtensionInstallation,
     ) -> Result<(), ExtensionInstallationError> {
         validate_installation_against_one_manifest(&manifest, &installation)?;
-        let extension_id = manifest.extension_id().clone();
-        let prior_manifest = self.get_manifest(&extension_id).await?;
-        self.put_v2_manifest(&manifest).await?;
-        if let Err(error) = self.put_manifest(&manifest, CasExpectation::Any).await {
-            self.restore_manifest_best_effort(&extension_id, prior_manifest)
-                .await;
-            return Err(error.into_installation_error());
-        }
-        if let Err(error) = self.put_v2_installation(&installation).await {
-            self.restore_manifest_best_effort(&extension_id, prior_manifest)
-                .await;
-            return Err(error);
-        }
-        // silent-ok: the v2 records (the authority) are committed, so the
-        // install has succeeded; failing on a compatibility-projection write
-        // would make callers compensate against a live install and leave a
-        // ghost. Startup repairs the projection from v2.
+        self.put_v2_installation(&installation, Some(&manifest))
+            .await?;
+        // silent-ok: the merged v2 record (the authority) is committed, so
+        // the install has succeeded; failing on a compatibility-projection
+        // write would make callers compensate against a live install and
+        // leave a ghost. Startup repairs the projections from v2.
+        let _ = self.put_manifest(&manifest, CasExpectation::Any).await;
         let _ = self
             .put_installation(&installation, CasExpectation::Any)
             .await;
@@ -2873,7 +2892,7 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
         let Some((core, _)) = self.load_v2_installation_record(installation_id).await? else {
             return Ok(None);
         };
-        if core.status != V2LifecycleStatus::Active {
+        if !core.is_visible() {
             return Ok(None);
         }
         self.reconstruct_v2_installation(&core).await.map(Some)
@@ -2883,14 +2902,29 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
         &self,
         installation: ExtensionInstallation,
     ) -> Result<(), ExtensionInstallationError> {
-        let manifest = self
-            .get_manifest(installation.extension_id())
+        // Validate against the record's own pinned definition — a removed
+        // record retains it, which is what lets a reactivating upsert
+        // revalidate without re-supplying the manifest. A row that does not
+        // exist yet (a legacy-shaped additional installation of an already
+        // pinned extension) falls back to the extension's authoritative
+        // definition, which that new row then embeds.
+        let (manifest, provide_manifest) = match self
+            .load_v2_installation_record(installation.installation_id())
             .await?
-            .ok_or_else(|| ExtensionInstallationError::UnknownManifest {
-                extension_id: installation.extension_id().clone(),
-            })?;
+        {
+            Some((record, _)) => (record.manifest.into_manifest_record()?, false),
+            None => (
+                self.get_manifest(installation.extension_id())
+                    .await?
+                    .ok_or_else(|| ExtensionInstallationError::UnknownManifest {
+                        extension_id: installation.extension_id().clone(),
+                    })?,
+                true,
+            ),
+        };
         validate_installation_against_one_manifest(&manifest, &installation)?;
-        self.put_v2_installation(&installation).await?;
+        self.put_v2_installation(&installation, provide_manifest.then_some(&manifest))
+            .await?;
         // silent-ok: v2 is authoritative and committed; see
         // upsert_manifest_and_installation for why the projection write must
         // not fail the operation. Startup repairs the projection from v2.
@@ -2910,18 +2944,15 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
                 installation_id: installation_id.clone(),
             });
         };
-        match core.status {
-            V2LifecycleStatus::Active => {}
-            V2LifecycleStatus::Removing => {
-                return Err(ExtensionInstallationError::MembershipMutationInProgress {
-                    installation_id: installation_id.clone(),
-                });
-            }
-            V2LifecycleStatus::Removed => {
-                return Err(ExtensionInstallationError::InstallationNotFound {
-                    installation_id: installation_id.clone(),
-                });
-            }
+        if core.is_removed() {
+            return Err(ExtensionInstallationError::InstallationNotFound {
+                installation_id: installation_id.clone(),
+            });
+        }
+        if core.lease.is_some() {
+            return Err(ExtensionInstallationError::MembershipMutationInProgress {
+                installation_id: installation_id.clone(),
+            });
         }
         let now = Utc::now();
         let changed = self
@@ -2937,32 +2968,26 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
                 installation_id: installation_id.clone(),
             });
         };
-        if observed_core.status != V2LifecycleStatus::Active {
-            // Deliberately roll the new row back only for `Removed`. While a
-            // removal reservation (`Removing`) is held, unconditionally
-            // deactivating our row can interleave with the reserver's
-            // member-count recheck and strand the core active with zero
+        if !observed_core.is_visible() {
+            // Deliberately roll the new row back only for a tombstoned
+            // record. While a removal lease is held, unconditionally
+            // deactivating our row can interleave with the lease holder's
+            // member-count recheck and strand a live record with zero
             // members. Leaving the row active is the safe at-least-once
             // outcome: a final removal tombstones every active row, and the
             // caller's transient error invites the retry that converges.
-            if changed && observed_core.status == V2LifecycleStatus::Removed {
+            if changed && observed_core.is_removed() {
                 self.deactivate_v2_membership_row(installation_id, user_id, now)
                     .await?;
             }
-            return match observed_core.status {
-                V2LifecycleStatus::Removing => {
-                    Err(ExtensionInstallationError::MembershipMutationInProgress {
-                        installation_id: installation_id.clone(),
-                    })
-                }
-                V2LifecycleStatus::Removed => {
-                    Err(ExtensionInstallationError::InstallationNotFound {
-                        installation_id: installation_id.clone(),
-                    })
-                }
-                V2LifecycleStatus::Active => Err(invalid_installation_error(
-                    "active v2 installation failed its active-state check",
-                )),
+            return if observed_core.is_removed() {
+                Err(ExtensionInstallationError::InstallationNotFound {
+                    installation_id: installation_id.clone(),
+                })
+            } else {
+                Err(ExtensionInstallationError::MembershipMutationInProgress {
+                    installation_id: installation_id.clone(),
+                })
             };
         }
         let core = self
@@ -2992,7 +3017,7 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
         if current_core.legacy_tenant_owner {
             return Err(ExtensionInstallationError::LegacyTenantOwnerNotCanonicalized);
         }
-        if current_core.status != V2LifecycleStatus::Active {
+        if !current_core.is_visible() {
             return Err(ExtensionInstallationError::MembershipMutationInProgress {
                 installation_id: installation_id.clone(),
             });
@@ -3010,7 +3035,7 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
             // and must never sweep a row a concurrent creator/join wrote —
             // sweeping here could drop a user whose own call succeeded.
             let v2_restored = self
-                .write_v2_installation_components(&prior, V2ComponentSync::ActivateOnly)
+                .write_v2_installation_components(&prior, None, V2ComponentSync::ActivateOnly)
                 .await;
             let compatibility_restored = self.put_installation(&prior, CasExpectation::Any).await;
             if v2_restored.is_err() || compatibility_restored.is_err() {
@@ -3027,7 +3052,7 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
             Ok(result) => Ok(result),
             Err(error) => {
                 let v2_restored = self
-                    .write_v2_installation_components(&prior, V2ComponentSync::ActivateOnly)
+                    .write_v2_installation_components(&prior, None, V2ComponentSync::ActivateOnly)
                     .await;
                 let compatibility_restored =
                     self.put_installation(&prior, CasExpectation::Any).await;
@@ -3049,13 +3074,13 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
         self.begin_v2_installation_removal(installation_id, now)
             .await?;
         for membership in self.query_v2_memberships(installation_id).await? {
-            if membership.status == V2LifecycleStatus::Active {
+            if membership.is_active() {
                 self.deactivate_v2_membership_row(installation_id, &membership.user_id, now)
                     .await?;
             }
         }
         for binding in self.query_v2_credential_bindings(installation_id).await? {
-            if binding.status == V2LifecycleStatus::Active {
+            if binding.is_active() {
                 self.deactivate_v2_credential_binding_row(
                     installation_id,
                     &binding.credential_handle,
@@ -3066,29 +3091,57 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
         }
         self.finish_v2_installation_removal(installation_id, now)
             .await?;
-        if let Some((_, version)) = self.load_installation_entry(installation_id).await? {
+        if let Some((installation, version)) = self.load_installation_entry(installation_id).await?
+        {
             self.delete_installation_row(installation_id, version)
                 .await
                 .map_err(SaveRowError::into_installation_error)?;
+            if let Some((_, version)) = self
+                .load_manifest_entry(installation.extension_id())
+                .await?
+            {
+                self.delete_manifest_row(installation.extension_id(), version)
+                    .await
+                    .map_err(SaveRowError::into_installation_error)?;
+            }
         }
         Ok(())
     }
 
+    /// With the merged record the definition is retired by
+    /// `delete_installation` itself; this method remains as the idempotent
+    /// verifier its callers treat it as — it errors while the definition is
+    /// still live and otherwise converges the legacy manifest projection.
     async fn delete_manifest(
         &self,
         extension_id: &ExtensionId,
     ) -> Result<(), ExtensionInstallationError> {
-        if !self
-            .query_installations_by_extension(extension_id)
-            .await?
-            .is_empty()
+        let records = self.load_v2_records_by_extension(extension_id).await?;
+        if records.is_empty() {
+            return Err(ExtensionInstallationError::ManifestNotFound {
+                extension_id: extension_id.clone(),
+            });
+        }
+        if let Some(leased) = records
+            .iter()
+            .find(|record| record.lease.is_some() && !record.is_removed())
         {
+            return Err(ExtensionInstallationError::MembershipMutationInProgress {
+                installation_id: leased.installation_id.clone(),
+            });
+        }
+        if records.iter().any(|record| !record.is_removed()) {
             return Err(ExtensionInstallationError::InvalidInstallation {
                 reason: format!("extension {extension_id} still has installations"),
             });
         }
-        let now = Utc::now();
-        self.soft_remove_v2_manifest(extension_id, now).await?;
+        for record in records
+            .iter()
+            .filter(|record| record.removal_cleanup_pending)
+        {
+            self.mark_v2_removal_converged(&record.installation_id)
+                .await?;
+        }
         if let Some((_, version)) = self.load_manifest_entry(extension_id).await? {
             self.delete_manifest_row(extension_id, version)
                 .await
@@ -3103,9 +3156,10 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
         health: ExtensionHealthSnapshot,
     ) -> Result<(), ExtensionInstallationError> {
         // Health is a diagnostic record isolated from lifecycle state: write
-        // only the health row, never the core. Rewriting the aggregate here
-        // could race a final removal and resurrect a removed core.
-        self.require_active_v2_core(installation_id).await?;
+        // only the health row, never the installation record. Rewriting the
+        // aggregate here could race a final removal and resurrect a removed
+        // record.
+        self.require_visible_v2_core(installation_id).await?;
         let record = V2HealthRecord {
             schema_version: EXTENSION_STATE_V2_SCHEMA.to_string(),
             installation_id: installation_id.clone(),
@@ -3114,10 +3168,10 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
         };
         self.write_v2_health(&record).await?;
         // Re-check after the write: if a removal landed in between, the row
-        // above is an orphaned diagnostic on a tombstoned core (harmless and
-        // invisible) and the installation must be reported as gone rather
+        // above is an orphaned diagnostic on a tombstoned record (harmless
+        // and invisible) and the installation must be reported as gone rather
         // than projected back into the compatibility view.
-        let core = self.require_active_v2_core(installation_id).await?;
+        let core = self.require_visible_v2_core(installation_id).await?;
         let installation = self.reconstruct_v2_installation(&core).await?;
         // silent-ok: v2 is authoritative and committed; the compatibility
         // projection is repaired from v2 at the next startup if this write
@@ -3286,23 +3340,6 @@ fn parse_installation_entry(
         .map_err(|error| corrupt_row("deserialize extension installation row", path, error))
 }
 
-fn entry_for_v2_manifest(record: &V2ManifestRecord) -> Result<Entry, ExtensionInstallationError> {
-    entry_for_v2_record(
-        MANIFEST_RECORD_KIND_V2,
-        record,
-        [
-            (
-                "extension_id",
-                IndexValue::Text(record.extension_id.as_str().to_string()),
-            ),
-            (
-                "status",
-                IndexValue::Text(record.status.as_str().to_string()),
-            ),
-        ],
-    )
-}
-
 fn entry_for_v2_installation(
     record: &V2InstallationRecord,
 ) -> Result<Entry, ExtensionInstallationError> {
@@ -3317,10 +3354,6 @@ fn entry_for_v2_installation(
             (
                 "extension_id",
                 IndexValue::Text(record.extension_id.as_str().to_string()),
-            ),
-            (
-                "status",
-                IndexValue::Text(record.status.as_str().to_string()),
             ),
         ],
     )
@@ -3341,10 +3374,6 @@ fn entry_for_v2_membership(
                 "user_id",
                 IndexValue::Text(record.user_id.as_str().to_string()),
             ),
-            (
-                "status",
-                IndexValue::Text(record.status.as_str().to_string()),
-            ),
         ],
     )
 }
@@ -3363,10 +3392,6 @@ fn entry_for_v2_credential_binding(
             (
                 "credential_handle",
                 IndexValue::Text(record.credential_handle.as_str().to_string()),
-            ),
-            (
-                "status",
-                IndexValue::Text(record.status.as_str().to_string()),
             ),
         ],
     )
@@ -3400,13 +3425,6 @@ where
     Ok(entry)
 }
 
-fn parse_v2_manifest_entry(
-    entry: Entry,
-    path: &VirtualPath,
-) -> Result<V2ManifestRecord, ExtensionInstallationError> {
-    parse_v2_entry(entry, path, MANIFEST_RECORD_KIND_V2, "manifest")
-}
-
 fn parse_v2_installation_entry(
     entry: Entry,
     path: &VirtualPath,
@@ -3419,10 +3437,6 @@ fn parse_v2_membership_entry(
     path: &VirtualPath,
 ) -> Result<V2MembershipRecord, ExtensionInstallationError> {
     parse_v2_entry(entry, path, MEMBERSHIP_RECORD_KIND_V2, "membership")
-}
-
-fn decode_v2_manifest_body(body: &[u8]) -> Result<V2ManifestRecord, ExtensionInstallationError> {
-    decode_v2_record_body(body, "manifest")
 }
 
 fn decode_v2_installation_body(
@@ -3700,6 +3714,16 @@ mod tests {
             .put(&path, entry, CasExpectation::Any)
             .await
             .expect("seed legacy row");
+        // The merged v2 record imports legacy state as a manifest+installation
+        // pair; an orphan legacy manifest is a v1 crash artifact and stays
+        // uninstalled, so pair the seeded wire with its installation row.
+        store
+            .put_installation(
+                &installation("legacy-fixture", Some("hash-legacy")),
+                CasExpectation::Any,
+            )
+            .await
+            .expect("seed legacy installation row");
         drop(store);
 
         let reopened = ExtensionInstallationStore::load_at(
@@ -3724,13 +3748,9 @@ mod tests {
         let manifest = manifest_record("fixture", Some("hash-1"));
         let extension_id = manifest.extension_id().clone();
         store
-            .upsert_manifest(manifest)
+            .upsert_manifest_and_installation(manifest, installation("fixture", Some("hash-1")))
             .await
-            .expect("upsert manifest");
-        store
-            .upsert_installation(installation("fixture", Some("hash-1")))
-            .await
-            .expect("upsert installation");
+            .expect("install fixture");
 
         let error = store
             .delete_manifest(&extension_id)
