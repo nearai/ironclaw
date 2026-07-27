@@ -7,9 +7,10 @@ use std::sync::{Arc, Mutex};
 use tokio::time::Instant;
 
 use crate::{
-    ExternalActorRef, ExternalConversationRef, ExternalEventId, OutboundPart, ProductAdapterError,
-    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductRejection,
-    ProductRejectionKind, ProductSurfaceRejectionKind, ProductTriggerReason,
+    AuthPromptChallengeKind, ExternalActorRef, ExternalConversationRef, ExternalEventId,
+    OutboundPart, ProductAdapterError, ProductInboundAck, ProductInboundEnvelope,
+    ProductInboundPayload, ProductRejection, ProductRejectionKind, ProductSurfaceRejectionKind,
+    ProductTriggerReason,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -643,12 +644,28 @@ impl RunDeliveryObserver {
                 // it: cancel the run (same outcome as `auth deny`) and
                 // redirect to the web app.
                 match view {
-                    Some(view) if view.authorization_url.is_some() => {
+                    // Serviceable = the challenge can actually be completed
+                    // from a chat surface: an OAuth link the provider hosts,
+                    // or a host-issued pairing code. A manual-token challenge
+                    // never is, and an unknown one fails closed.
+                    Some(view) if prompts::auth_prompt_is_serviceable(&view) => {
                         let mut view = view;
-                        // OAuth setup links are only safe in a private DM;
-                        // strip the URL for any other origin.
+                        view.body = prompts::actionable_auth_prompt_body(&view);
+                        // Setup links and pairing codes are bearer material:
+                        // only a private DM may carry them. Any other origin
+                        // gets a redirect to the web app instead.
                         if !auth_setup_link_is_private(envelope) {
                             view.authorization_url = None;
+                            view.pairing = None;
+                            view.body = match view.challenge_kind {
+                                Some(AuthPromptChallengeKind::Pairing) => {
+                                    prompts::PAIRING_PRIVATE_SETUP_MESSAGE.to_string()
+                                }
+                                Some(AuthPromptChallengeKind::OAuthUrl) => {
+                                    prompts::OAUTH_PRIVATE_SETUP_MESSAGE.to_string()
+                                }
+                                _ => prompts::AUTH_UNAVAILABLE_MESSAGE.to_string(),
+                            };
                         }
                         ActionableNotification {
                             event_kind: RunNotificationEventKind::AuthRequired,
@@ -657,7 +674,7 @@ impl RunDeliveryObserver {
                             gate_ref_for_routing: Some(gate_ref.as_str().to_string()),
                         }
                     }
-                    _ => {
+                    view => {
                         cancel_auth_blocked_run(
                             self.services.turn_coordinator.as_ref(),
                             self.services.auth_flow_cancel.as_deref(),
@@ -673,7 +690,7 @@ impl RunDeliveryObserver {
                                 scope.clone(),
                                 Some(run_id),
                                 envelope.external_conversation_ref(),
-                                prompts::AUTH_UNAVAILABLE_MESSAGE,
+                                prompts::unserviceable_auth_prompt_message(view.as_ref()),
                                 format!("auth-unavailable:{run_id}"),
                             )
                             .await;
