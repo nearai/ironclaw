@@ -711,7 +711,8 @@ pub fn state_after_no_progress_warning_attempt(context: &LoopRunContext) -> Loop
         .terminal_warning_state
         .schedule(TerminalWarningObservation::no_progress(None, None));
     assert!(scheduled); // safety: test-support scenario construction must fail loudly on invalid static setup.
-    state.terminal_warning_state.clear_pending();
+    state.terminal_warning_state.mark_delivered();
+    state.terminal_warning_state.clear_active();
     state
 }
 

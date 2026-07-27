@@ -247,7 +247,8 @@ async fn budget_stage_exits_at_iteration_limit() {
             .terminal_warning_state
             .schedule(TerminalWarningObservation::iteration_limit(state.iteration))
     );
-    state.terminal_warning_state.clear_pending();
+    state.terminal_warning_state.mark_delivered();
+    state.terminal_warning_state.clear_active();
 
     let step = BudgetStage
         .process(
@@ -324,11 +325,6 @@ async fn iteration_warning_survives_before_model_checkpoint_reload() {
 
     let restored = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeModel);
     assert!(restored.terminal_warning_state.pending().is_some());
-    assert!(
-        restored
-            .terminal_warning_state
-            .attempted(crate::state::TerminalWarningKind::IterationLimit)
-    );
     assert!(host.model_requests().is_empty());
 
     let exit = CanonicalAgentLoopExecutor
@@ -341,12 +337,12 @@ async fn iteration_warning_survives_before_model_checkpoint_reload() {
         .expect("checkpointed warning should reach the resumed model request");
 
     assert!(matches!(exit, LoopExit::Completed(_)));
-    let final_state = final_staged_state(&host);
+    let mut final_state = final_staged_state(&host);
     assert!(final_state.terminal_warning_state.pending().is_none());
     assert!(
-        final_state
+        !final_state
             .terminal_warning_state
-            .attempted(crate::state::TerminalWarningKind::IterationLimit)
+            .schedule(TerminalWarningObservation::iteration_limit(0))
     );
     let requests = host.model_requests();
     assert_eq!(requests.len(), 1);
@@ -373,7 +369,8 @@ async fn explanation_prompt_bundle_error_degrades_to_original_failed_exit() {
             .terminal_warning_state
             .schedule(TerminalWarningObservation::iteration_limit(state.iteration))
     );
-    state.terminal_warning_state.clear_pending();
+    state.terminal_warning_state.mark_delivered();
+    state.terminal_warning_state.clear_active();
 
     let step = BudgetStage
         .process(
@@ -2580,7 +2577,8 @@ async fn consumed_iteration_warning_falls_back_to_failed_exit() {
             .terminal_warning_state
             .schedule(TerminalWarningObservation::iteration_limit(state.iteration))
     );
-    state.terminal_warning_state.clear_pending();
+    state.terminal_warning_state.mark_delivered();
+    state.terminal_warning_state.clear_active();
 
     let step = BudgetStage
         .process(
@@ -5079,7 +5077,8 @@ async fn repeated_non_provider_replayable_failures_do_not_trigger_no_progress_st
             .terminal_warning_state
             .schedule(TerminalWarningObservation::iteration_limit(3))
     );
-    state.terminal_warning_state.clear_pending();
+    state.terminal_warning_state.mark_delivered();
+    state.terminal_warning_state.clear_active();
 
     let exit = executor
         .execute_family(&family_with_iteration_limit(3), &host, state)

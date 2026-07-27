@@ -133,17 +133,8 @@ impl TerminalWarningState {
         true
     }
 
-    #[cfg(test)]
-    pub(crate) fn attempted(&self, kind: TerminalWarningKind) -> bool {
-        self.attempted.contains(&kind)
-    }
-
     pub(crate) fn pending(&self) -> Option<&TerminalWarningObservation> {
         self.pending.as_ref()
-    }
-
-    pub(crate) fn clear_pending(&mut self) {
-        self.pending = None;
     }
 
     /// Mark the pending warning as delivered only after a model response was
@@ -185,7 +176,8 @@ mod tests {
         let mut state = TerminalWarningState::default();
 
         assert!(state.schedule(TerminalWarningObservation::iteration_limit(8)));
-        state.clear_pending();
+        state.mark_delivered();
+        state.clear_active();
         assert!(!state.schedule(TerminalWarningObservation::iteration_limit(8)));
         assert!(state.schedule(TerminalWarningObservation::no_progress(None, None)));
     }
@@ -200,7 +192,9 @@ mod tests {
             state.pending().map(TerminalWarningObservation::kind),
             Some(TerminalWarningKind::NoProgressDetected)
         );
-        assert!(!state.attempted(TerminalWarningKind::IterationLimit));
+        state.mark_delivered();
+        state.clear_active();
+        assert!(state.schedule(TerminalWarningObservation::iteration_limit(8)));
     }
 
     #[test]
@@ -210,7 +204,7 @@ mod tests {
         state.mark_delivered();
 
         let encoded = serde_json::to_vec(&state).expect("warning state serializes");
-        let restored: TerminalWarningState =
+        let mut restored: TerminalWarningState =
             serde_json::from_slice(&encoded).expect("warning state deserializes");
 
         assert!(restored.pending().is_none());
@@ -218,7 +212,7 @@ mod tests {
             restored.active(),
             Some(TerminalWarningKind::NoProgressDetected)
         );
-        assert!(restored.attempted(TerminalWarningKind::NoProgressDetected));
+        assert!(!restored.schedule(TerminalWarningObservation::no_progress(None, None)));
     }
 
     #[test]

@@ -345,7 +345,8 @@ async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
                     .terminal_warning_state
                     .schedule(TerminalWarningObservation::iteration_limit(0))
             );
-            state.terminal_warning_state.clear_pending();
+            state.terminal_warning_state.mark_delivered();
+            state.terminal_warning_state.clear_active();
             run_local(family_with_iteration_limit(0), host, Some(state)).await
         }
         FailureSetup::InvalidModelOutput => {
@@ -405,7 +406,8 @@ async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
                     .terminal_warning_state
                     .schedule(TerminalWarningObservation::no_progress(None, None))
             );
-            state.terminal_warning_state.clear_pending();
+            state.terminal_warning_state.mark_delivered();
+            state.terminal_warning_state.clear_active();
             run_local(crate::families::default(), host, Some(state)).await
         }
         FailureSetup::PolicyDenied => {
