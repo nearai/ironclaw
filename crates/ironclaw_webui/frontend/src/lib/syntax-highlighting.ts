@@ -22,7 +22,7 @@ import yaml from "highlight.js/lib/languages/yaml";
 // Keep this set focused on the languages most commonly emitted in assistant
 // responses. Highlight.js aliases cover variants such as js/jsx, ts/tsx,
 // sh/shell, html, and cs; unsupported fences remain readable plain code.
-const SUPPORTED_LANGUAGES = {
+export const SUPPORTED_LANGUAGES = {
   bash,
   c,
   cpp,

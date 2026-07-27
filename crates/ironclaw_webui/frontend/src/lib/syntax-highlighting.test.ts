@@ -2,9 +2,12 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
-import { highlightCodeBlocks } from "./syntax-highlighting";
+import {
+  highlightCodeBlocks,
+  SUPPORTED_LANGUAGES,
+} from "./syntax-highlighting";
 
-const SUPPORTED_LANGUAGES = [
+const EXPECTED_SUPPORTED_LANGUAGES = [
   "bash",
   "c",
   "cpp",
@@ -26,9 +29,17 @@ const SUPPORTED_LANGUAGES = [
   "yaml",
 ];
 
-test("highlights every explicitly supported language", () => {
+test("highlight registry matches the supported language allowlist", () => {
+  assert.deepEqual(
+    Object.keys(SUPPORTED_LANGUAGES).sort(),
+    [...EXPECTED_SUPPORTED_LANGUAGES].sort(),
+  );
+});
+
+test("highlights every language in the implementation registry", () => {
   const root = document.createElement("div");
-  const codeBlocks = SUPPORTED_LANGUAGES.map((language) => {
+  const languageNames = Object.keys(SUPPORTED_LANGUAGES);
+  const codeBlocks = languageNames.map((language) => {
     const pre = document.createElement("pre");
     const code = document.createElement("code");
     code.className = `language-${language}`;
@@ -44,7 +55,7 @@ test("highlights every explicitly supported language", () => {
     assert.equal(
       code.dataset.highlighted,
       "yes",
-      `expected ${SUPPORTED_LANGUAGES[index]} to be highlighted`,
+      `expected ${languageNames[index]} to be highlighted`,
     );
   }
 });

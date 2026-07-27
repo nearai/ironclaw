@@ -188,11 +188,6 @@ test("markdown and syntax highlighting stay out of the synchronous chat chunk", 
     /highlight\.js\/lib\/core/,
     "the lazy highlighter should start from highlight.js core",
   );
-  assert.match(
-    highlighterSource,
-    /const SUPPORTED_LANGUAGES = \{/,
-    "the lazy highlighter should declare its explicit language set",
-  );
 });
 
 test("streaming markdown renders sanitized snapshots at a bounded cadence", () => {
