@@ -343,6 +343,39 @@ impl InMemoryCredentialBroker {
     /// (see [`InMemoryCredentialBroker::release_lease`]), so an earlier
     /// caller finishing first can never pull the session out from under a
     /// later caller still using it.
+    ///
+    /// **Concurrency:** the lookup-or-mint sequence below (checking
+    /// `jit_minted` for an existing live session, and minting+publishing a
+    /// new one if there isn't one) runs under a single, held-once lock on
+    /// `jit_minted`. Two threads racing on an identical `JitMintKey` used to
+    /// be able to both observe "nothing minted yet" — `jit_minted_session_id`
+    /// and `record_jit_mint` each locked/read-or-wrote/unlocked `jit_minted`
+    /// *separately* — and both mint their own session, defeating the
+    /// one-session-per-binding guarantee this module's doc comment asserts.
+    /// Holding one coarse lock across the whole sequence closes that window;
+    /// see `mint_on_first_use_is_race_free_under_concurrent_first_use` below.
+    /// Binding the result to a placeholder (`finish_lease` /
+    /// `bind_placeholder_to_session`) happens *after* the lock is dropped —
+    /// the invariant being protected is "at most one session per binding",
+    /// not "at most one placeholder-bind call", so that part doesn't need to
+    /// be in the critical section.
+    ///
+    /// **Lock ordering invariant:** `jit_minted` is always the outermost lock
+    /// whenever held together with `accounts` / `sessions` /
+    /// `lease_refcounts` — no path may acquire `jit_minted` while already
+    /// holding one of those. This is the first place in this module that
+    /// holds `jit_minted` across calls into other locking helpers
+    /// (`try_join_live_lease`, `create_session`, `acquire_lease_refcount`),
+    /// so it is also the first place a self-deadlock is possible: on
+    /// `std::sync::Mutex` (non-reentrant), a helper that itself tried to lock
+    /// `jit_minted` while this method still held it would hang forever.
+    /// `try_join_live_lease`'s failure path used to reach `revoke_session`
+    /// (via `release_lease`), which prunes `jit_minted` — exactly that
+    /// hazard — so it now calls `release_lease_ignoring_jit_minted` instead,
+    /// which does the same cleanup minus the `jit_minted` prune (safe here
+    /// because this method is about to overwrite that same key's entry under
+    /// the lock it already holds). `create_session` and
+    /// `acquire_lease_refcount` never touch `jit_minted` at all.
     pub fn mint_on_first_use(
         self: &Arc<Self>,
         placeholder: &CredentialPlaceholderToken,
@@ -354,20 +387,26 @@ impl InMemoryCredentialBroker {
             account_id: request.account_id.clone(),
         };
 
-        if let Some(session_id) = self.jit_minted_session_id(&key)?
+        let mut jit_minted = lock_or_recover(&self.jit_minted);
+
+        if let Some(&session_id) = jit_minted.get(&key)
             && self.try_join_live_lease(session_id, chrono::Utc::now())?
         {
+            drop(jit_minted);
             return self.finish_lease(placeholder, session_id);
         }
 
         let session = self.create_session(request)?;
         let session_id = session.correlation_id();
-        self.record_jit_mint(key, session_id)?;
+        jit_minted.insert(key, session_id);
         // This session_id was just minted and is not yet published to
-        // `jit_minted`/`sessions_by_placeholder`, so no concurrent caller can
-        // reference it yet: registering the first lease reference here can't
-        // race a concurrent `release_lease` the way the reuse path above can.
+        // `sessions_by_placeholder`, and its `jit_minted` slot was just
+        // (re)written under the lock we are still holding, so no concurrent
+        // caller can reference it yet: registering the first lease reference
+        // here can't race a concurrent `release_lease` the way the reuse
+        // path above can.
         self.acquire_lease_refcount(session_id);
+        drop(jit_minted);
         self.finish_lease(placeholder, session_id)
     }
 
@@ -405,9 +444,20 @@ impl InMemoryCredentialBroker {
     ///
     /// If the count was joined but the session turns out to be expired or
     /// use-exhausted, the just-acquired reference is released again (via
-    /// [`InMemoryCredentialBroker::release_lease`], which revokes if that
-    /// makes this the last reference) so this method never leaves a
-    /// dangling refcount behind on its own failure path.
+    /// [`InMemoryCredentialBroker::release_lease_ignoring_jit_minted`], which
+    /// revokes if that makes this the last reference) so this method never
+    /// leaves a dangling refcount behind on its own failure path.
+    ///
+    /// The release on the failure path deliberately skips pruning
+    /// `jit_minted` (unlike the general [`InMemoryCredentialBroker::release_lease`]):
+    /// this method is only ever called from
+    /// [`InMemoryCredentialBroker::mint_on_first_use`] while that method
+    /// already holds the `jit_minted` lock, so re-locking it here (as plain
+    /// `release_lease` would, via `revoke_session`) would deadlock on the
+    /// non-reentrant `std::sync::Mutex`. Skipping it doesn't leave anything
+    /// stale: `mint_on_first_use` overwrites this exact key's `jit_minted`
+    /// entry with the freshly minted session id immediately afterward, under
+    /// the same lock.
     fn try_join_live_lease(
         &self,
         session_id: CredentialSessionId,
@@ -429,7 +479,7 @@ impl InMemoryCredentialBroker {
         match self.validate_session(session_id, now) {
             Ok(_) => Ok(true),
             Err(error) => {
-                self.release_lease(session_id);
+                self.release_lease_ignoring_jit_minted(session_id);
                 match error {
                     CredentialBrokerError::UnknownSession { .. }
                     | CredentialBrokerError::SessionExpired { .. }
@@ -484,9 +534,20 @@ impl InMemoryCredentialBroker {
     /// does not accumulate stale entries for every invocation/binding that
     /// has ever existed.
     pub fn revoke_session(&self, session_id: CredentialSessionId) {
-        lock_or_recover(&self.sessions).remove(&session_id);
         lock_or_recover(&self.jit_minted)
             .retain(|_, minted_session_id| *minted_session_id != session_id);
+        self.revoke_session_ignoring_jit_minted(session_id);
+    }
+
+    /// Same cleanup as [`InMemoryCredentialBroker::revoke_session`] minus the
+    /// `jit_minted` prune. Split out so
+    /// [`InMemoryCredentialBroker::release_lease_ignoring_jit_minted`] (and,
+    /// through it, `try_join_live_lease`'s failure path) can revoke a stale
+    /// session without acquiring `jit_minted` a second time on a thread that
+    /// may already hold it — see the lock-ordering note on
+    /// [`InMemoryCredentialBroker::mint_on_first_use`].
+    fn revoke_session_ignoring_jit_minted(&self, session_id: CredentialSessionId) {
+        lock_or_recover(&self.sessions).remove(&session_id);
         lock_or_recover(&self.sessions_by_placeholder).retain(|_, session_ids| {
             session_ids.remove(&session_id);
             !session_ids.is_empty()
@@ -517,50 +578,41 @@ impl InMemoryCredentialBroker {
     /// their still-live session revoked out from under them by an earlier
     /// caller finishing first.
     pub(crate) fn release_lease(&self, session_id: CredentialSessionId) {
-        let should_revoke = {
-            let mut counts = lock_or_recover(&self.lease_refcounts);
-            match counts.get_mut(&session_id) {
-                Some(count) if *count > 1 => {
-                    *count -= 1;
-                    false
-                }
-                _ => {
-                    counts.remove(&session_id);
-                    true
-                }
-            }
-        };
-        if should_revoke {
+        if Self::release_lease_refcount(&self.lease_refcounts, session_id) {
             self.revoke_session(session_id);
         }
     }
 
-    fn jit_minted_session_id(
-        &self,
-        key: &JitMintKey,
-    ) -> Result<Option<CredentialSessionId>, CredentialBrokerError> {
-        Ok(self
-            .jit_minted
-            .lock()
-            .map_err(|error| CredentialBrokerError::BrokerUnavailable {
-                reason: error.to_string(),
-            })?
-            .get(key)
-            .copied())
+    /// Same as [`InMemoryCredentialBroker::release_lease`], but revokes
+    /// through [`InMemoryCredentialBroker::revoke_session_ignoring_jit_minted`]
+    /// instead of [`InMemoryCredentialBroker::revoke_session`] — i.e. it never
+    /// acquires `jit_minted`. Used only by `try_join_live_lease`'s failure
+    /// path, which always runs while `mint_on_first_use` already holds
+    /// `jit_minted`; see the lock-ordering note there.
+    fn release_lease_ignoring_jit_minted(&self, session_id: CredentialSessionId) {
+        if Self::release_lease_refcount(&self.lease_refcounts, session_id) {
+            self.revoke_session_ignoring_jit_minted(session_id);
+        }
     }
 
-    fn record_jit_mint(
-        &self,
-        key: JitMintKey,
+    /// Decrements (or removes) the outstanding-lease refcount entry for
+    /// `session_id`, returning whether that made this the last reference
+    /// (i.e. whether the caller should now actually revoke the session).
+    fn release_lease_refcount(
+        lease_refcounts: &Mutex<HashMap<CredentialSessionId, usize>>,
         session_id: CredentialSessionId,
-    ) -> Result<(), CredentialBrokerError> {
-        self.jit_minted
-            .lock()
-            .map_err(|error| CredentialBrokerError::BrokerUnavailable {
-                reason: error.to_string(),
-            })?
-            .insert(key, session_id);
-        Ok(())
+    ) -> bool {
+        let mut counts = lock_or_recover(lease_refcounts);
+        match counts.get_mut(&session_id) {
+            Some(count) if *count > 1 => {
+                *count -= 1;
+                false
+            }
+            _ => {
+                counts.remove(&session_id);
+                true
+            }
+        }
     }
 
     fn bind_placeholder_to_session(
@@ -623,7 +675,7 @@ mod tests {
 
     use super::{
         CREDENTIAL_PLACEHOLDER_SUFFIX_LEN, CredentialPlaceholderRegistry,
-        CredentialPlaceholderToken,
+        CredentialPlaceholderToken, CredentialSessionLease,
     };
 
     fn sample_scope(tenant: &str, user: &str) -> ResourceScope {
@@ -1164,6 +1216,70 @@ mod tests {
 
         first_lease.revoke();
         second_lease.revoke();
+    }
+
+    #[test]
+    fn mint_on_first_use_is_race_free_under_concurrent_first_use() {
+        // Regression test for a confirmed race: `jit_minted_session_id`
+        // (read) and `record_jit_mint` (write) used to lock/unlock
+        // `jit_minted` *separately*, so two threads racing on the identical
+        // `JitMintKey` could both observe "nothing minted yet" and both mint
+        // their own session — defeating the one-session-per-binding
+        // guarantee this module's doc comment asserts, and multiplying a
+        // `max_uses: Some(1)` budget. The fix holds one lock across the
+        // whole lookup-or-mint sequence in `mint_on_first_use`.
+        //
+        // This is only probabilistic at *catching* a reintroduced race — a
+        // `Barrier`-aligned start makes the race window likely to be hit,
+        // not guaranteed. But it has zero false-fail risk once the fix is
+        // in place: the lock enforces exclusion structurally, so a passing
+        // run here is a real guarantee, not a lucky one.
+        const THREAD_COUNT: usize = 32;
+
+        let broker = Arc::new(InMemoryCredentialBroker::new());
+        let registry = CredentialPlaceholderRegistry::new();
+        let (token, scope_a, account_id) = seeded(&broker, &registry, "user-race");
+        let barrier = Arc::new(std::sync::Barrier::new(THREAD_COUNT));
+
+        let handles: Vec<_> = (0..THREAD_COUNT)
+            .map(|_| {
+                let broker = Arc::clone(&broker);
+                let token = token.clone();
+                let scope_a = scope_a.clone();
+                let account_id = account_id.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let request =
+                        session_request(scope_a, account_id, "https://api.example.com/v1/x");
+                    barrier.wait();
+                    broker
+                        .mint_on_first_use(&token, request)
+                        .expect("mint_on_first_use must succeed for every racing thread")
+                })
+            })
+            .collect();
+
+        let leases: Vec<CredentialSessionLease> = handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .expect("mint_on_first_use thread must not panic")
+            })
+            .collect();
+
+        let distinct_session_ids: std::collections::HashSet<_> =
+            leases.iter().map(|lease| lease.session_id()).collect();
+        assert_eq!(
+            distinct_session_ids.len(),
+            1,
+            "every thread racing on the identical (invocation, capability, account) binding \
+             must be handed a lease for the exact same session, not one each"
+        );
+
+        for lease in leases {
+            lease.revoke();
+        }
     }
 
     fn seeded(
