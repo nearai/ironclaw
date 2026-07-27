@@ -32,8 +32,8 @@ use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, FinishReason,
     LlmProvider, ReasoningDetail as IronReasoningDetail, ReasoningDetails as IronReasoningDetails,
     ToolCall as IronToolCall, ToolCompletionRequest, ToolCompletionResponse,
-    ToolDefinition as IronToolDefinition, strip_unsupported_completion_params,
-    strip_unsupported_tool_params,
+    ToolDefinition as IronToolDefinition, normalized_model_override,
+    strip_unsupported_completion_params, strip_unsupported_tool_params,
 };
 use crate::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
 #[cfg(test)]
@@ -1310,8 +1310,10 @@ where
         self.model_name.clone()
     }
 
-    fn effective_model_name(&self, _requested_model: Option<&str>) -> String {
-        self.active_model_name()
+    fn effective_model_name(&self, requested_model: Option<&str>) -> String {
+        normalized_model_override(requested_model)
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.active_model_name())
     }
 
     fn set_model(&self, _model: &str) -> Result<(), LlmError> {
@@ -1524,6 +1526,81 @@ mod tests {
 
         let body = captured_request_body(captured_body).await;
         assert_single_model_override(&body);
+    }
+
+    #[derive(Clone)]
+    struct CacheableCompletionModel;
+
+    impl CompletionModel for CacheableCompletionModel {
+        type Response = serde_json::Value;
+        type StreamingResponse = ();
+        type Client = ();
+
+        fn make(_client: &Self::Client, _model: impl Into<String>) -> Self {
+            Self
+        }
+
+        async fn completion(
+            &self,
+            _request: RigRequest,
+        ) -> Result<rig::completion::CompletionResponse<Self::Response>, CompletionError> {
+            Ok(rig::completion::CompletionResponse {
+                choice: OneOrMany::one(AssistantContent::text("cached response")),
+                usage: RigUsage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    total_tokens: 2,
+                    cached_input_tokens: 0,
+                },
+                raw_response: serde_json::json!({}),
+                message_id: None,
+            })
+        }
+
+        async fn stream(
+            &self,
+            _request: RigRequest,
+        ) -> Result<StreamingCompletionResponse<Self::StreamingResponse>, CompletionError> {
+            Err(CompletionError::ProviderError(
+                "stream unsupported".to_string(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn cached_provider_separates_normalized_rig_model_overrides() {
+        use crate::response_cache::{CachedProvider, ResponseCacheConfig};
+
+        let adapter = Arc::new(RigAdapter::new(
+            CacheableCompletionModel,
+            "configured-model",
+        ));
+        let cached = CachedProvider::new(adapter, ResponseCacheConfig::default());
+
+        cached
+            .complete(
+                CompletionRequest::new(vec![ChatMessage::user("same prompt")])
+                    .with_model(" override-a "),
+            )
+            .await
+            .expect("first completion succeeds");
+        cached
+            .complete(
+                CompletionRequest::new(vec![ChatMessage::user("same prompt")])
+                    .with_model("override-b"),
+            )
+            .await
+            .expect("second completion succeeds");
+        cached
+            .complete(
+                CompletionRequest::new(vec![ChatMessage::user("same prompt")])
+                    .with_model("override-a"),
+            )
+            .await
+            .expect("normalized override reuses its cache entry");
+
+        assert_eq!(cached.len(), 2);
+        assert_eq!(cached.total_hits(), 1);
     }
 
     #[tokio::test]
