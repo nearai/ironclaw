@@ -306,14 +306,14 @@ impl SandboxCredentialFirewall {
         obligation: StagedCredentialObligation,
     ) -> StagedObligationLease {
         let entry_id = StagedEntryId(self.next_entry_id.fetch_add(1, Ordering::Relaxed));
+        let key = StagingKey::new(tenant_id, user_id);
         self.lock()
-            .entry(StagingKey::new(tenant_id, user_id))
+            .entry(key.clone())
             .or_default()
             .insert(entry_id, obligation);
         StagedObligationLease {
             firewall: Arc::clone(self),
-            tenant_id: tenant_id.clone(),
-            user_id: user_id.clone(),
+            key,
             entry_id,
             revoked: false,
         }
@@ -334,13 +334,12 @@ impl SandboxCredentialFirewall {
     /// same module, so it can still reach a private method) is meant to call
     /// this — keeping it out of the crate-visible surface means no other
     /// code in this crate can revoke an entry it never staged.
-    fn revoke(&self, tenant_id: &TenantId, user_id: &UserId, entry_id: StagedEntryId) {
-        let key = StagingKey::new(tenant_id, user_id);
+    fn revoke(&self, key: &StagingKey, entry_id: StagedEntryId) {
         let mut staged = self.lock();
-        if let Some(entries) = staged.get_mut(&key) {
+        if let Some(entries) = staged.get_mut(key) {
             entries.remove(&entry_id);
             if entries.is_empty() {
-                staged.remove(&key);
+                staged.remove(key);
             }
         }
     }
@@ -450,8 +449,11 @@ impl SandboxCredentialFirewall {
 #[allow(dead_code)] // consumed by W6; not wired yet
 pub(crate) struct StagedObligationLease {
     firewall: Arc<SandboxCredentialFirewall>,
-    tenant_id: TenantId,
-    user_id: UserId,
+    /// The same key `stage()` inserted this entry under — stored once and
+    /// reused by `revoke`, rather than kept as separate `tenant_id`/`user_id`
+    /// fields that would have to be re-assembled into a `StagingKey` again
+    /// at revoke time.
+    key: StagingKey,
     /// The id this lease's `stage()` call assigned its entry in the
     /// key's set. Carried so this lease's revoke can only ever delete *its
     /// own* entry — never the whole key, and never a sibling entry that a
@@ -473,8 +475,7 @@ impl StagedObligationLease {
     fn revoke_inner(&mut self) {
         if !self.revoked {
             self.revoked = true;
-            self.firewall
-                .revoke(&self.tenant_id, &self.user_id, self.entry_id);
+            self.firewall.revoke(&self.key, self.entry_id);
         }
     }
 }

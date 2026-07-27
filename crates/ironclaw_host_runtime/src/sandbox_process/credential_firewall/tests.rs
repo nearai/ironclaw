@@ -735,3 +735,36 @@ fn concurrent_stage_authorize_and_revoke_preserve_per_entry_isolation() {
         "all 8 concurrently staged-and-revoked entries must be gone"
     );
 }
+
+#[test]
+fn staged_obligation_debug_output_never_contains_secret_handle() {
+    let obligation =
+        StagedCredentialObligation::new(handle("github-token"), allow_all_targets(), FAR_FUTURE);
+
+    let debug_output = format!("{obligation:?}");
+
+    // Regression: `StagedCredentialObligation`'s manual `Debug` must omit
+    // `secret_handle` — only `allowed_targets`/`expires_at` are safe to print.
+    assert!(!debug_output.contains("github-token"));
+}
+
+#[test]
+fn firewall_debug_output_never_contains_staged_identity_or_secret_handles() {
+    let firewall = Arc::new(SandboxCredentialFirewall::new());
+    let tenant_a = tenant("tenant-a");
+    let user_a = user("user-a");
+    let _lease = firewall.stage(
+        &tenant_a,
+        &user_a,
+        StagedCredentialObligation::new(handle("github-token"), allow_all_targets(), FAR_FUTURE),
+    );
+
+    let debug_output = format!("{firewall:?}");
+
+    // Regression: `SandboxCredentialFirewall`'s manual `Debug` must expose
+    // only an aggregate staged-key count, never the staged tenant/user
+    // identity or any secret handle nested inside it.
+    assert!(!debug_output.contains("tenant-a"));
+    assert!(!debug_output.contains("user-a"));
+    assert!(!debug_output.contains("github-token"));
+}
