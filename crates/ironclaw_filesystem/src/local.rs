@@ -142,15 +142,37 @@ impl DiskFilesystem {
     ) -> Result<PathBuf, FilesystemError> {
         let resolved = self.resolve_joined(path)?;
 
-        if tokio::fs::try_exists(&resolved.joined)
-            .await
-            .map_err(|error| io_error(path.clone(), operation, error))?
-        {
-            let canonical = tokio::fs::canonicalize(&resolved.joined)
-                .await
-                .map_err(|error| io_error(path.clone(), operation, error))?;
-            ensure_contained(path, &resolved.containment_root, &canonical, true)?;
-            return Ok(canonical);
+        // `symlink_metadata` (lstat) reports whether a directory entry
+        // exists at this path at all, without following a final symlink —
+        // unlike `try_exists`, which follows symlinks and reports `false`
+        // for a *dangling* one (target missing). Using `try_exists` here
+        // would let a pre-existing dangling symlink fall through to the
+        // "brand new file in this leaf" bootstrap path below, which hands
+        // back an unchecked path through the symlink; `write_file`/
+        // `append_file` open with `O_CREAT` and the OS creates the file at
+        // wherever the symlink points, bypassing containment entirely.
+        match tokio::fs::symlink_metadata(&resolved.joined).await {
+            Ok(metadata) => {
+                match tokio::fs::canonicalize(&resolved.joined).await {
+                    Ok(canonical) => {
+                        ensure_contained(path, &resolved.containment_root, &canonical, true)?;
+                        return Ok(canonical);
+                    }
+                    Err(error) if metadata.file_type().is_symlink() => {
+                        // The entry is a symlink whose target can't be
+                        // resolved (dangling, or a broken intermediate
+                        // component). Fail closed: we cannot verify
+                        // containment of a target we can't resolve, and
+                        // silently falling through would let a write
+                        // escape via the symlink.
+                        let _ = error;
+                        return Err(FilesystemError::SymlinkEscape { path: path.clone() });
+                    }
+                    Err(error) => return Err(io_error(path.clone(), operation, error)),
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io_error(path.clone(), operation, error)),
         }
 
         let parent = resolved
@@ -908,6 +930,47 @@ mod tests {
         let error = root
             .write_file(
                 &VirtualPath::new("/tmp/leaf-a/escape/planted.txt").unwrap(),
+                b"planted",
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, FilesystemError::SymlinkEscape { .. }),
+            "expected SymlinkEscape, got: {error:?}"
+        );
+        assert!(!leaf_b.join("planted.txt").exists());
+    }
+
+    /// A *dangling* final symlink — the entry exists but its target does
+    /// not — must still be rejected. `tokio::fs::try_exists` follows
+    /// symlinks and reports `false` for a target that doesn't exist yet, so
+    /// naively treating "not exists" as "brand new file in this leaf" would
+    /// let `write_file`/`append_file` open through the symlink (the OS
+    /// creates the target on `O_CREAT`), writing into whatever sibling leaf
+    /// (or worse) the symlink points at.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn leaf_scoped_mount_rejects_dangling_final_symlink_escape_on_write() {
+        let storage = tempdir().unwrap();
+        let host_root = storage.path();
+
+        let leaf_a = host_root.join("leaf-a");
+        let leaf_b = host_root.join("leaf-b");
+        std::fs::create_dir_all(&leaf_a).unwrap();
+        std::fs::create_dir_all(&leaf_b).unwrap();
+        std::os::unix::fs::symlink("../leaf-b/planted.txt", leaf_a.join("escape.txt")).unwrap();
+
+        let mut root = DiskFilesystem::new();
+        root.mount_local_per_leaf(
+            VirtualPath::new("/tmp").unwrap(),
+            HostPath::from_path_buf(host_root.to_path_buf()),
+        )
+        .unwrap();
+
+        let error = root
+            .write_file(
+                &VirtualPath::new("/tmp/leaf-a/escape.txt").unwrap(),
                 b"planted",
             )
             .await
