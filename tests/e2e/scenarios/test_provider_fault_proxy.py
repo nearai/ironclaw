@@ -12,6 +12,7 @@ from provider_fault_proxy import (
     PROVIDER_FAULT_PROFILES,
     ProviderFaultProfile,
     ProviderFaultProxy,
+    ProviderFaultProxyWorld,
 )
 
 _RESPONSE_PROFILE_NAMES = [
@@ -345,3 +346,106 @@ def test_every_published_profile_has_a_self_test():
         "untested": sorted(set(PROVIDER_FAULT_PROFILES) - covered),
         "stale": sorted(covered - set(PROVIDER_FAULT_PROFILES)),
     }
+
+
+# --- fault-state isolation between cases (#6524 workstream 3) -----------------
+#
+# `reset()` is the only thing standing between one case's fault rules and the
+# next case's requests, and it had no test. A leak here is nasty to diagnose
+# from the far end: the next journey fails against a fault it never armed, and
+# nothing in that journey's own code explains why.
+
+
+async def test_reset_disarms_rules_the_previous_case_left_behind(fault_proxy):
+    """An armed-but-unfired rule must not fire for whoever runs next."""
+    proxy, upstream_requests = fault_proxy
+    proxy.arm(PROVIDER_FAULT_PROFILES["http_500"], method="GET", path="/objects/1")
+
+    proxy.reset()
+
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{proxy.url}/objects/1")
+
+    assert response.status_code == 200
+    assert len(upstream_requests) == 1
+    assert proxy.state["rules"] == []
+
+
+async def test_reset_clears_recorded_evidence_from_the_previous_case(fault_proxy):
+    """Request evidence is per-case: counts and fingerprints must not carry."""
+    proxy, _ = fault_proxy
+    async with httpx.AsyncClient() as client:
+        await client.get(
+            f"{proxy.url}/objects/1",
+            headers={"Authorization": "Bearer previous-case-token"},
+        )
+    assert proxy.state["requests"]
+
+    proxy.reset()
+
+    assert proxy.state["requests"] == []
+    # An assertion like `assert_network_egress_count(1)` in the next case would
+    # silently pass on a leftover request, so the fingerprint must go too.
+    assert "previous-case-token" not in str(proxy.state)
+
+
+async def test_reset_leaves_no_delayed_fault_task_pending(fault_proxy):
+    """A parked delay must not outlive the case that armed it.
+
+    Not about the next request: the parked task holds its own request object,
+    so leaving it running cannot abort anyone else's call — I asserted that
+    first and sabotage proved the assertion blind. What it does leak is the
+    task itself, which stays asleep past the case, keeps the proxy alive in
+    the event loop, and fires its abort during whatever runs next.
+    """
+    proxy, _ = fault_proxy
+    proxy.arm(
+        ProviderFaultProfile(
+            name="slow_fault",
+            action="delay_before_disconnect",
+            delay_seconds=30.0,
+        ),
+        method="GET",
+        path="/objects/1",
+    )
+    async with httpx.AsyncClient(timeout=0.01) as client:
+        with pytest.raises(httpx.ReadTimeout):
+            await client.get(f"{proxy.url}/objects/1")
+    await asyncio.sleep(0)
+    assert proxy.state["pending_faults"] == 1, proxy.state
+
+    proxy.reset()
+    await asyncio.sleep(0)
+
+    assert proxy.state["pending_faults"] == 0, proxy.state
+
+
+async def test_world_reset_covers_every_provider_not_just_the_first():
+    """One un-reset provider is enough to leak, so the loop must cover all."""
+    upstreams = []
+    proxies = {}
+    try:
+        for service in ("google", "slack", "github"):
+            url, requests, runner = await _start_upstream()
+            upstreams.append(runner)
+            proxies[service] = url
+        world = ProviderFaultProxyWorld(proxies)
+        await world.start()
+        try:
+            for proxy in world.proxies.values():
+                proxy.arm(
+                    PROVIDER_FAULT_PROFILES["http_500"],
+                    method="GET",
+                    path="/objects/1",
+                )
+            world.reset()
+            assert [proxy.state["rules"] for proxy in world.proxies.values()] == [
+                [],
+                [],
+                [],
+            ]
+        finally:
+            await world.close()
+    finally:
+        for runner in upstreams:
+            await runner.cleanup()
