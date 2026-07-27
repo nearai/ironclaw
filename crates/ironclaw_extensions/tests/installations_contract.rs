@@ -1593,93 +1593,6 @@ async fn final_member_reservation_blocks_a_join_from_a_second_store() {
     );
 }
 
-/// Review finding: two processes that both observe "no active core" (fresh
-/// install or reinstall race) must not have the later creator's component
-/// sync tombstone the earlier creator's just-activated membership. Creation
-/// merges membership rows; it never sweeps rows it did not write.
-#[tokio::test]
-async fn concurrent_creation_does_not_tombstone_the_other_creators_membership() {
-    let backend = Arc::new(
-        FaultInjecting::new(InMemoryBackend::new()).with_fault(
-            Fault::on(FilesystemOperation::WriteFile)
-                .path("/v2/installations/")
-                .nth(1)
-                .backend("interrupt the first creator before its core commit"),
-        ),
-    );
-    let filesystem: Arc<dyn RootFilesystem> = backend;
-    let root = VirtualPath::new("/system/extensions/.installations/creation-race").unwrap();
-    let first = ExtensionInstallationStore::load_at(
-        Arc::clone(&filesystem),
-        root.clone(),
-        HostPortCatalog::empty(),
-        contracts(),
-    )
-    .await
-    .unwrap();
-    let second = ExtensionInstallationStore::load_at(
-        Arc::clone(&filesystem),
-        root.clone(),
-        HostPortCatalog::empty(),
-        contracts(),
-    )
-    .await
-    .unwrap();
-    let alice_install = normalized_installation("sha256:abc");
-    let bob = UserId::new("bob").unwrap();
-    let bob_install = alice_install
-        .clone()
-        .with_owner(InstallationOwner::user(bob.clone()));
-
-    first
-        .upsert_manifest_and_installation(manifest("sha256:abc"), alice_install)
-        .await
-        .expect_err("the injected core-commit failure must interrupt the first creator");
-    second
-        .upsert_manifest_and_installation(manifest("sha256:abc"), bob_install)
-        .await
-        .expect("the second creator completes the installation");
-
-    let membership_rows = filesystem
-        .query(
-            &VirtualPath::new(format!("{}/v2/memberships", root.as_str())).unwrap(),
-            &Filter::All,
-            Page::first(10),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        membership_rows.len(),
-        2,
-        "creation must leave exactly one membership row per creator"
-    );
-    let tombstoned = membership_rows
-        .iter()
-        .map(|row| {
-            let body: serde_json::Value = row.entry.parse_json().unwrap();
-            (
-                body["user_id"].as_str().unwrap().to_string(),
-                body["removed_at"].is_string(),
-            )
-        })
-        .collect::<std::collections::BTreeMap<_, _>>();
-    assert_eq!(
-        tombstoned.get("alice"),
-        Some(&false),
-        "creation must not sweep a concurrent creator's membership row"
-    );
-    assert_eq!(tombstoned.get("bob"), Some(&false));
-    let merged = second
-        .get_installation(&installation_id("acme-tools-prod"))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        merged.owner().members().unwrap(),
-        &BTreeSet::from([UserId::new("alice").unwrap(), bob])
-    );
-}
-
 /// Review finding: once the v2 records (the authority) are committed, a
 /// failure writing the legacy compatibility projection must not fail the
 /// operation — the caller would compensate against a live install and leave a
@@ -2105,5 +2018,56 @@ async fn interrupted_update_without_compatibility_snapshot_stays_live_on_reopen(
             .expect("member-owned installation")
             .contains(&UserId::new("alice").unwrap()),
         "the prior member survives lease recovery"
+    );
+}
+
+/// Review finding: a fresh install that fails after writing its membership
+/// row leaves debris (no installation record ever committed). A later
+/// installer's successful install must not merge that debris into its member
+/// set — a user whose install failed would silently gain membership.
+#[tokio::test]
+async fn failed_install_debris_is_not_granted_to_a_later_installer() {
+    let backend = Arc::new(
+        FaultInjecting::new(InMemoryBackend::new()).with_fault(
+            Fault::on(FilesystemOperation::WriteFile)
+                .path("/v2/installations/")
+                .nth(1)
+                .backend("interrupt alice's install before its record commit"),
+        ),
+    );
+    let filesystem: Arc<dyn RootFilesystem> = backend;
+    let root = VirtualPath::new("/system/extensions/.installations/install-debris").unwrap();
+    let store = ExtensionInstallationStore::load_at(
+        Arc::clone(&filesystem),
+        root.clone(),
+        HostPortCatalog::empty(),
+        contracts(),
+    )
+    .await
+    .unwrap();
+    let alice_install = normalized_installation("sha256:abc");
+    store
+        .upsert_manifest_and_installation(manifest("sha256:abc"), alice_install.clone())
+        .await
+        .expect_err("alice's install is interrupted before the record commits");
+
+    let bob = UserId::new("bob").unwrap();
+    let bob_install = alice_install
+        .clone()
+        .with_owner(InstallationOwner::user(bob.clone()));
+    store
+        .upsert_manifest_and_installation(manifest("sha256:abc"), bob_install)
+        .await
+        .expect("bob's fresh install succeeds");
+
+    let installed = store
+        .get_installation(&installation_id("acme-tools-prod"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        installed.owner().members().unwrap(),
+        &BTreeSet::from([bob]),
+        "debris from alice's failed install must not grant her membership"
     );
 }

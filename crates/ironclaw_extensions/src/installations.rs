@@ -969,19 +969,6 @@ const CREDENTIAL_BINDING_RECORD_KIND_V2: &str = "extension_credential_binding_re
 const HEALTH_RECORD_KIND_V2: &str = "extension_health_record_v2";
 const FILESYSTEM_CAS_RETRIES: usize = 5;
 
-/// How an aggregate write reconciles child rows it did not explicitly carry.
-///
-/// `Full` may tombstone active rows omitted from the aggregate and is only
-/// safe under an installation lease, which excludes concurrent writers.
-/// `ActivateOnly` merges: it activates the aggregate's rows and leaves every
-/// other row untouched, so an unleased write (creation, reactivation,
-/// compensation) can never drop a concurrent creator's or joiner's membership.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum V2ComponentSync {
-    Full,
-    ActivateOnly,
-}
-
 /// An exclusive mutation lease on an installation record — the cross-process
 /// gate for multi-row transitions. While a lease is held the installation is
 /// hidden from typed reads (its manifest stays readable) so readers never see
@@ -1686,25 +1673,19 @@ impl ExtensionInstallationStore {
             }
             _ => None,
         };
-        // Only a leased update of a VISIBLE record may sweep rows omitted
-        // from the aggregate: the lease excludes concurrent writers, so an
-        // omitted-but-active row is genuinely stale. Creation/reactivation
-        // holds no lease — a concurrent creator may have activated its own
-        // membership between our record load and this write, and sweeping it
-        // would silently drop that user from an installation whose install
-        // call succeeded. Creation therefore merges (activate-only).
-        let sync = if prior.is_some() {
-            V2ComponentSync::Full
-        } else {
-            V2ComponentSync::ActivateOnly
-        };
+        // Every aggregate write sweeps child rows omitted from its member
+        // and binding sets. Under the single-writer-per-root deployment
+        // contract an omitted-but-active row can only be debris from an
+        // earlier failed write (an interrupted install's membership row, a
+        // crashed update's leftovers) — merging it in would grant membership
+        // to a user whose install never succeeded.
         if let Err(error) = self
-            .write_v2_installation_components(installation, manifest, sync)
+            .write_v2_installation_components(installation, manifest)
             .await
         {
             if let Some(prior) = prior
                 && self
-                    .write_v2_installation_components(&prior, None, V2ComponentSync::Full)
+                    .write_v2_installation_components(&prior, None)
                     .await
                     .is_err()
             {
@@ -1721,7 +1702,6 @@ impl ExtensionInstallationStore {
         &self,
         installation: &ExtensionInstallation,
         manifest: Option<&ExtensionManifestRecord>,
-        sync: V2ComponentSync,
     ) -> Result<(), ExtensionInstallationError> {
         let desired_members = installation.owner().members().cloned().unwrap_or_default();
         for user_id in &desired_members {
@@ -1732,22 +1712,20 @@ impl ExtensionInstallationStore {
             )
             .await?;
         }
-        if sync == V2ComponentSync::Full {
-            let existing_memberships = self
-                .query_v2_memberships(installation.installation_id())
+        let existing_memberships = self
+            .query_v2_memberships(installation.installation_id())
+            .await?;
+        for membership in existing_memberships {
+            if desired_members.contains(&membership.user_id) {
+                continue;
+            }
+            if membership.is_active() {
+                self.deactivate_v2_membership_row(
+                    installation.installation_id(),
+                    &membership.user_id,
+                    installation.updated_at(),
+                )
                 .await?;
-            for membership in existing_memberships {
-                if desired_members.contains(&membership.user_id) {
-                    continue;
-                }
-                if membership.is_active() {
-                    self.deactivate_v2_membership_row(
-                        installation.installation_id(),
-                        &membership.user_id,
-                        installation.updated_at(),
-                    )
-                    .await?;
-                }
             }
         }
 
@@ -1768,22 +1746,20 @@ impl ExtensionInstallationStore {
             )
             .await?;
         }
-        if sync == V2ComponentSync::Full {
-            let existing_bindings = self
-                .query_v2_credential_bindings(installation.installation_id())
+        let existing_bindings = self
+            .query_v2_credential_bindings(installation.installation_id())
+            .await?;
+        for binding in existing_bindings {
+            if desired_binding_handles.contains(&binding.credential_handle) {
+                continue;
+            }
+            if binding.is_active() {
+                self.deactivate_v2_credential_binding_row(
+                    installation.installation_id(),
+                    &binding.credential_handle,
+                    installation.updated_at(),
+                )
                 .await?;
-            for binding in existing_bindings {
-                if desired_binding_handles.contains(&binding.credential_handle) {
-                    continue;
-                }
-                if binding.is_active() {
-                    self.deactivate_v2_credential_binding_row(
-                        installation.installation_id(),
-                        &binding.credential_handle,
-                        installation.updated_at(),
-                    )
-                    .await?;
-                }
             }
         }
 
@@ -3119,12 +3095,7 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
             if !matches!(error, ExtensionInstallationError::StoreUnavailable { .. }) {
                 return Err(error);
             }
-            // Activate-only: compensation re-activates the prior member set
-            // and must never sweep a row a concurrent creator/join wrote —
-            // sweeping here could drop a user whose own call succeeded.
-            let v2_restored = self
-                .write_v2_installation_components(&prior, None, V2ComponentSync::ActivateOnly)
-                .await;
+            let v2_restored = self.write_v2_installation_components(&prior, None).await;
             let compatibility_restored = self.put_installation(&prior, CasExpectation::Any).await;
             if v2_restored.is_err() || compatibility_restored.is_err() {
                 return Err(store_unavailable_error(
@@ -3139,9 +3110,7 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
         {
             Ok(result) => Ok(result),
             Err(error) => {
-                let v2_restored = self
-                    .write_v2_installation_components(&prior, None, V2ComponentSync::ActivateOnly)
-                    .await;
+                let v2_restored = self.write_v2_installation_components(&prior, None).await;
                 let compatibility_restored =
                     self.put_installation(&prior, CasExpectation::Any).await;
                 if v2_restored.is_err() || compatibility_restored.is_err() {
