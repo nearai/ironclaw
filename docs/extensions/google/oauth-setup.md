@@ -25,44 +25,25 @@ Go to [**Google Auth Platform → Clients**](https://console.cloud.google.com/au
 1. Click **Create client**
 2. Set **Application type** to **Web application**
 3. Give it a name (e.g. `ironclaw`)
-4. Under **Authorized redirect URIs**, click **+ Add URI**. Which URI you need depends on
-   how you complete the OAuth flow:
-
-   **Loopback flow** — the browser returns to a fixed local port. Used when you authorize
-   from the machine running IronClaw, or through the SSH tunnel described below:
-
-   ```
-   http://127.0.0.1:9876/callback
-   ```
-
-   **Server-hosted flow** — the browser returns to your running instance. Use this for a
-   deployment that is already reachable over HTTPS:
+4. Under **Authorized redirect URIs**, click **+ Add URI** and enter your instance's
+   callback, replacing `your-host`:
 
    ```
    https://your-host/api/reborn/product-auth/oauth/google/callback
    ```
 
-   Adding both is fine, and is the simplest option if you're unsure.
-
 5. Click **Create** and copy the **Client ID** and **Client Secret** shown
 
 <Warning>
 Google matches redirect URIs **exactly** — scheme, host, port, and path. A mismatch fails
-with `redirect_uri_mismatch` before the consent screen appears. `http` for loopback and
-`https` for a hosted instance are both correct; don't "fix" the loopback one to HTTPS.
+with `redirect_uri_mismatch` before the consent screen appears.
 </Warning>
 
-If you use the server-hosted flow, tell IronClaw the same value so both sides agree:
-
-```bash
-export IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI=https://your-host/api/reborn/product-auth/oauth/google/callback
-export IRONCLAW_REBORN_GOOGLE_CLIENT_ID=...
-export IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET=...
-```
-
-These can also live under `[google]` in `config.toml` as `google.redirect_uri` and
-`google.client_id`. The client secret belongs in the encrypted secret store, not the file.
-See [Configuration](/capabilities/configuration).
+<Note>
+The browser returns to your running IronClaw instance, so it must be reachable at that URL
+when you complete the flow. Google will not redirect to a loopback address or a host it
+cannot resolve.
+</Note>
 
 </Step>
 
@@ -75,32 +56,6 @@ Add the Google account(s) that will use the extension. The app supports up to 10
 <Info>
 Only test users can complete the OAuth flow while the app is in Testing mode. If you get an "access blocked" error, make sure your account is listed here.
 </Info>
-
-</Step>
-
-<Step title="Open the SSH Tunnel">
-The loopback callback listens on port 9876 *inside* the server, and your browser runs on your own machine. An SSH tunnel bridges the two by forwarding your local port 9876 to the server's loopback address.
-
-Open a new SSH session using port forwarding:
-
-```bash
-# ssh -p <SSH-PORT> -L 9876:127.0.0.1:9876 <user>@<ironclaw-server-ip>
-ssh -p 15222 -L 9876:127.0.0.1:9876 liquid-zebra@agent4.near.ai
-```
-
-Keep this terminal session open while completing the OAuth flow.
-
-<Info>
-The port forwarding will remain active as long as the SSH session remains open, and automatically closes when you exit the session.
-</Info>
-
-<Warning>
-Do **not** open port 9876 in the server's firewall. Local port forwarding carries the
-traffic inside the existing SSH connection, so no additional inbound port is needed —
-opening it would expose the OAuth callback to the internet for no benefit. The port must
-stay loopback-only.
-</Warning>
-
 
 </Step>
 
@@ -128,13 +83,21 @@ ironclaw config get google.client_id
 ironclaw config get google.redirect_uri
 ```
 
-Environment variables work too, if you'd rather set them in a service unit or container:
+The same values can be supplied as environment variables when a service unit or container
+injects them from a secret manager:
 
-```bash
-export IRONCLAW_REBORN_GOOGLE_CLIENT_ID=<your-client-id>
-export IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET=<your-client-secret>
-export IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI=https://<your-instance-host>/api/reborn/product-auth/oauth/google/callback
 ```
+IRONCLAW_REBORN_GOOGLE_CLIENT_ID
+IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET
+IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI
+```
+
+<Warning>
+Do not `export` the client secret by hand in an interactive shell. It persists in shell
+history and is visible to every child process. Use `ironclaw config set
+google.client_secret`, which prompts with input hidden, or inject the variable from your
+platform's secret manager.
+</Warning>
 
 </Step>
 

@@ -70,6 +70,12 @@ export IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_SECRET=...
 
 Restrict which accounts may sign in with `IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS`.
 
+<Warning>
+The `export` lines above are shown for clarity. Don't type the client secret into an
+interactive shell in production — it persists in shell history and is visible to child
+processes. Inject these from your service unit, container runtime, or secret manager.
+</Warning>
+
 <Info>
 Sign-in sessions carry user identity only. They do not inherit operator configuration
 privileges — the bearer token remains the separate operator credential. A signed-in user

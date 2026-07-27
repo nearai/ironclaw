@@ -25,37 +25,21 @@ description: "IronClaw 中所有 Google 扩展的一次性 OAuth 配置"
 1. 点击 **Create client**
 2. 将 **Application type** 设置为 **Web application**
 3. 设置名称（例如 `ironclaw`）
-4. 在 **Authorized redirect URIs** 中点击 **+ Add URI**，填写：
-
-   **回环（loopback）流程** —— 浏览器回调到固定的本地端口。适用于在运行 IronClaw 的机器上授权，或通过下文的 SSH 隧道完成授权：
-
-   ```
-   http://127.0.0.1:9876/callback
-   ```
-
-   **服务端托管流程** —— 浏览器回调到您正在运行的实例。适用于已可通过 HTTPS 访问的部署：
+4. 在 **Authorized redirect URIs** 中点击 **+ Add URI**，填入您实例的回调地址（把 `your-host` 换成实际主机）：
 
    ```
    https://your-host/api/reborn/product-auth/oauth/google/callback
    ```
 
-   两个都添加也没有问题；如果不确定，这是最省事的做法。
-
 5. 点击 **Create**，复制生成的 **Client ID** 与 **Client Secret**
 
 <Warning>
-Google 对重定向 URI 进行**完全匹配** —— 协议、主机、端口、路径都必须一致。不匹配时会在同意页出现之前直接报 `redirect_uri_mismatch`。回环地址用 `http`、托管实例用 `https` 都是正确的，请不要把回环地址改成 HTTPS。
+Google 对重定向 URI 进行**完全匹配** —— 协议、主机、端口、路径都必须一致。不匹配时会在同意页出现之前直接报 `redirect_uri_mismatch`。
 </Warning>
 
-若使用服务端托管流程，请同时告知 IronClaw 相同的值，使两侧保持一致：
-
-```bash
-export IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI=https://your-host/api/reborn/product-auth/oauth/google/callback
-export IRONCLAW_REBORN_GOOGLE_CLIENT_ID=...
-export IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET=...
-```
-
-这些也可以写在 `config.toml` 的 `[google]` 小节中（`google.redirect_uri`、`google.client_id`）。客户端密钥应存放在加密的密钥存储中，而不是配置文件里。
+<Note>
+浏览器会回调到您正在运行的 IronClaw 实例，因此完成授权时该地址必须可访问。Google 不会重定向到回环地址或无法解析的主机。
+</Note>
 
 </Step>
 
@@ -68,29 +52,6 @@ export IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET=...
 <Info>
 若出现 “access blocked” 错误，请先确认当前账号已被加入测试用户。
 </Info>
-
-</Step>
-
-<Step title="打开 SSH 隧道">
-
-回环回调监听在服务器**内部**的 `9876` 端口，而浏览器运行在您本机。SSH 隧道会把本机的 `9876` 端口转发到服务器的回环地址，从而把两者连接起来。
-
-在新终端中执行：
-
-```bash
-# ssh -p <SSH-PORT> -L 9876:127.0.0.1:9876 <user>@<ironclaw-server-ip>
-ssh -p 15222 -L 9876:127.0.0.1:9876 liquid-zebra@agent4.near.ai
-```
-
-在 OAuth 完成前请保持该会话开启。
-
-<Info>
-端口转发会在 SSH 会话存活期间持续有效，关闭会话后自动失效。
-</Info>
-
-<Warning>
-**请勿**在服务器防火墙中开放 `9876` 端口。本地端口转发的流量走的是已建立的 SSH 连接，无需额外放行入站端口；开放该端口只会把 OAuth 回调暴露到公网，没有任何好处。该端口应始终保持仅回环可达。
-</Warning>
 
 </Step>
 
@@ -115,13 +76,17 @@ ironclaw config get google.client_id
 ironclaw config get google.redirect_uri
 ```
 
-如果您更希望在服务单元或容器中配置，也可以使用环境变量：
+当服务单元或容器从密钥管理器注入配置时，也可以使用等价的环境变量：
 
-```bash
-export IRONCLAW_REBORN_GOOGLE_CLIENT_ID=<your-client-id>
-export IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET=<your-client-secret>
-export IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI=https://<your-instance-host>/api/reborn/product-auth/oauth/google/callback
 ```
+IRONCLAW_REBORN_GOOGLE_CLIENT_ID
+IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET
+IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI
+```
+
+<Warning>
+请勿在交互式 shell 中手动 `export` 客户端密钥 —— 它会留在 shell 历史中，并对所有子进程可见。请使用会隐藏输入的 `ironclaw config set google.client_secret`，或由平台的密钥管理器注入该环境变量。
+</Warning>
 
 </Step>
 

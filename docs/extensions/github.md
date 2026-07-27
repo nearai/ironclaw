@@ -27,12 +27,9 @@ ironclaw extension install github
 Create a GitHub OAuth app at [github.com/settings/apps](https://github.com/settings/apps)
 and set its callback URL to the IronClaw OAuth callback URL your gateway uses.
 
-Then expose the app credentials to IronClaw:
-
-```bash
-export GITHUB_OAUTH_CLIENT_ID=...
-export GITHUB_OAUTH_CLIENT_SECRET=...
-```
+Then supply the app credentials through the GitHub extension's setup flow under
+**Extensions** in the [web interface](/using/webui). They are stored in the encrypted
+secret store.
 
 Now authenticate:
 
@@ -126,8 +123,8 @@ Now that you have either OAuth app credentials or a PAT, authenticate the GitHub
 ironclaw extension activate github
 ```
 
-If `GITHUB_OAUTH_CLIENT_ID` and `GITHUB_OAUTH_CLIENT_SECRET` are set, IronClaw
-will use browser OAuth. Otherwise it falls back to prompting for a PAT.
+If you configured OAuth app credentials in the extension's setup flow, IronClaw uses
+browser OAuth. Otherwise it falls back to a Personal Access Token.
 
 </Step>
 
