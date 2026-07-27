@@ -114,7 +114,7 @@ Boundary rule: if you need an upstream crate in a low-level crate, stop and chec
 | `ironclaw_wasm` | `ironclaw_wasm/AGENTS.md`, `ironclaw_wasm/CLAUDE.md`, `docs/reborn/contracts/wasm.md`, `wit/tool.wit` | WASM runtime lane, component/WIT bindings, folded `wasm_sandbox_core` primitives, store, host adapters, runtime config. | Privileged host effects outside mediated APIs; copied secrets/network/resource logic; product/runtime-specific dependencies inside `wasm_sandbox_core`. |
 | `ironclaw_wasm_limiter` | `Cargo.toml`, `src/lib.rs` | Shared `wasmtime::ResourceLimiter` for WASM tool and hook runtimes. | Product adapter workflow, policy decisions, or runtime-specific side effects beyond limiter accounting. |
 | `ironclaw_extensions` | `ironclaw_extensions/AGENTS.md`, `ironclaw_extensions/CLAUDE.md` | Declarative extension manifests (v2), capability descriptors, side-effect-free in-memory registry, installation records. | Execution of any kind (WASM/MCP/process), secrets, trust decisions. |
-| `ironclaw_process_sandbox` | `ironclaw_process_sandbox/CLAUDE.md` | Docker process-sandbox backend behind `ironclaw_processes::ProcessExecutor`: typed sandbox plans, install/credentialed-run phase separation, mount roots. | Process lifecycle/stores (`ironclaw_processes`); raw Docker flags for extensions. |
+| `ironclaw_process_sandbox` | `ironclaw_process_sandbox/CLAUDE.md` | Typed `SandboxProcessPlan` contract and validation only: install/credentialed-run phase separation in plan types. No production execution backend is wired for this capability today. | Process lifecycle/stores (`ironclaw_processes`); raw Docker flags for extensions; adding an execution backend here. |
 
 ### Turns, threads, loops, engine
 
