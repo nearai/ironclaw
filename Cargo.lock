@@ -3986,7 +3986,6 @@ dependencies = [
  "chrono-tz",
  "hex",
  "ironclaw_host_api",
- "ironclaw_prompt_envelope",
  "serde",
  "serde_json",
  "sha2 0.11.0",

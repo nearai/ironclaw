@@ -16,7 +16,8 @@
 //! | IronClaw op        | mem0 mapping                                   | fidelity |
 //! |--------------------|------------------------------------------------|----------|
 //! | `search`           | `POST /search`                                 | clean    |
-//! | `retrieve_context` | `POST /search` → snippets                      | clean    |
+//! | `read_long_term`   | `POST /search` → snippets                      | clean    |
+//! | `read_short_term`  | not declared (no thread partitioning)          | none     |
 //! | `write` (add)      | `POST /memories` add (`infer=false`, verbatim) | good     |
 //! | `read`             | `GET /memories` + filter by `target` metadata  | loose    |
 //! | `tree`             | `GET /memories` → distinct `target` tags       | loose    |
@@ -414,7 +415,13 @@ impl MemoryService for Mem0MemoryService {
         Ok(MemoryServiceProfileReadResponse { document })
     }
 
-    async fn retrieve_context(
+    /// Long-term retrieval lane, the only lane mem0 declares: its namespace
+    /// partition is tenant/user/agent/project with no thread axis, so there is
+    /// no distinct short-term (active-thread) lane to serve. `read_short_term`
+    /// stays at the trait default (`unavailable`), the manifest does not
+    /// declare it, and the host therefore never queries it — one query per
+    /// run instead of two identical ones (F4).
+    async fn read_long_term(
         &self,
         invocation: MemoryInvocation,
         request: MemoryServiceContextRequest,
@@ -432,7 +439,7 @@ impl MemoryService for Mem0MemoryService {
             .execute(Mem0HttpRequest::post(SEARCH_PATH, body))
             .await
             .map_err(MemoryServiceError::unavailable_from)?;
-        ensure_success(&response, "retrieve_context")
+        ensure_success(&response, "read_long_term")
             .map_err(MemoryServiceError::unavailable_from)?;
         let scope = &invocation.scope;
         // Return raw, unsanitized snippet bodies plus the resolved scope/path
@@ -811,9 +818,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retrieve_context_maps_search_hits_to_snippets() {
+    async fn read_long_term_maps_search_hits_to_snippets() {
         // The kind=profile record shares the owner namespace with memories, so
-        // search can return it; retrieve_context must drop it (profile state
+        // search can return it; read_long_term must drop it (profile state
         // has its own read path and must not enter the prompt as a snippet).
         let (service, _transport) = service_with(MockMem0Transport::always_ok(json!({
             "results": [
@@ -822,7 +829,7 @@ mod tests {
             ]
         })));
         let snippets = service
-            .retrieve_context(
+            .read_long_term(
                 invocation(),
                 MemoryServiceContextRequest {
                     query: "ctx".to_string(),
@@ -831,7 +838,7 @@ mod tests {
                 },
             )
             .await
-            .expect("retrieve_context should succeed");
+            .expect("read_long_term should succeed");
         assert_eq!(
             snippets.len(),
             1,
@@ -844,11 +851,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retrieve_context_short_circuits_when_disabled_or_empty() {
+    async fn read_long_term_short_circuits_when_disabled_or_empty() {
         let (service, transport) =
             service_with(MockMem0Transport::always_ok(json!({ "results": [] })));
         let disabled = service
-            .retrieve_context(
+            .read_long_term(
                 invocation(),
                 MemoryServiceContextRequest {
                     query: "ctx".to_string(),
@@ -861,7 +868,7 @@ mod tests {
         assert!(disabled.is_empty());
 
         let zero = service
-            .retrieve_context(
+            .read_long_term(
                 invocation(),
                 MemoryServiceContextRequest {
                     query: "ctx".to_string(),
@@ -874,6 +881,36 @@ mod tests {
         assert!(zero.is_empty());
         // Neither short-circuit should have touched the transport.
         assert!(transport.recorded().is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_short_term_stays_at_the_unavailable_default() {
+        // mem0 has no thread partitioning, so it does not implement (or
+        // declare) the short-term lane: the trait default fails closed as
+        // `unavailable` without touching the transport. F4 regression — the
+        // host no longer receives duplicate snippets from a second identical
+        // query.
+        let (service, transport) =
+            service_with(MockMem0Transport::always_ok(json!({ "results": [] })));
+        let error = service
+            .read_short_term(
+                invocation(),
+                MemoryServiceContextRequest {
+                    query: "ctx".to_string(),
+                    max_snippets: 3,
+                    context_profile_id: MemoryContextProfileId::new("default").unwrap(),
+                },
+            )
+            .await
+            .expect_err("mem0 must not implement the short-term lane");
+        assert!(matches!(
+            error.kind(),
+            ironclaw_memory::MemoryServiceErrorKind::Unavailable
+        ));
+        assert!(
+            transport.recorded().is_empty(),
+            "the unimplemented lane must not issue a transport call"
+        );
     }
 
     #[tokio::test]

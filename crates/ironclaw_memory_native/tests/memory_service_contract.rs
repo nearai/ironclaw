@@ -118,7 +118,7 @@ async fn native_context_retrieve_filters_cross_scope_results_and_returns_raw_com
     }));
 
     let snippets = service
-        .retrieve_context(
+        .read_long_term(
             invocation(),
             MemoryServiceContextRequest {
                 query: "planning".to_string(),
@@ -146,9 +146,9 @@ async fn native_context_retrieve_filters_out_of_scope_tenant_user_agent_and_proj
     // The request scope is (tenant-native-memory, user-native-memory, no agent,
     // no project) from `invocation()`. The backend returns one in-scope result
     // plus four results that each differ on exactly one scope axis. The
-    // provider-side `retain` in `retrieve_context` is solely responsible for
-    // dropping every cross-scope result; if it were removed, all five would
-    // survive and the `len() == 1` assertion below would fail.
+    // provider-side `retain` shared by the lane methods is solely responsible
+    // for dropping every cross-scope result; if it were removed, all five
+    // would survive and the `len() == 1` assertion below would fail.
     let service = NativeMemoryService::new(Arc::new(MockSearchBackend {
         results: vec![
             search_result(
@@ -199,7 +199,7 @@ async fn native_context_retrieve_filters_out_of_scope_tenant_user_agent_and_proj
     }));
 
     let snippets = service
-        .retrieve_context(
+        .read_long_term(
             invocation(),
             MemoryServiceContextRequest {
                 query: "planning".to_string(),
@@ -261,7 +261,7 @@ async fn native_context_retrieve_scopes_short_term_to_active_thread() {
     scoped.scope.thread_id = Some(ThreadId::new("thread-a").expect("valid thread"));
 
     let snippets = service
-        .retrieve_context(
+        .read_short_term(
             scoped,
             MemoryServiceContextRequest {
                 query: "planning".to_string(),
@@ -334,7 +334,7 @@ async fn native_short_term_retrieval_over_fetches_before_thread_lane_filter() {
         .expect("record_interaction seeds the thread doc");
 
     let snippets = service
-        .retrieve_context(
+        .read_short_term(
             scoped,
             MemoryServiceContextRequest {
                 query: "planning".to_string(),
@@ -394,7 +394,7 @@ async fn native_write_rejects_reserved_thread_namespace() {
     let mut sneaky = invocation();
     sneaky.scope.thread_id = Some(ThreadId::new("sneaky").expect("valid thread"));
     let snippets = service
-        .retrieve_context(
+        .read_short_term(
             sneaky,
             MemoryServiceContextRequest {
                 query: "smuggled".to_string(),
@@ -436,11 +436,12 @@ async fn native_write_rejects_reserved_thread_namespace() {
 }
 
 #[tokio::test]
-async fn native_read_long_term_and_thread_split_lanes_and_envelope_text() {
-    // The provider-agnostic `read_long_term`/`read_thread` defaults own the lane
-    // scoping AND the safety: long-term clears the thread (general memory, excludes
-    // `threads/`), short-term keeps it (this conversation), and BOTH return text
-    // already wrapped in the untrusted-memory envelope so callers never see raw.
+async fn native_lane_methods_stay_disjoint_and_return_raw_text() {
+    // The two lane methods own the lane semantics: `read_long_term` is general
+    // memory (excludes `threads/`), `read_short_term` is the active thread's
+    // scratch. Both receive the SAME thread-carrying invocation — the lane is
+    // the METHOD, not a thread_id convention — and both return RAW text (the
+    // host owns sanitization, the untrusted envelope, and the budgets).
     let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
     let thread = ThreadId::new("convo").expect("valid thread");
     let mut scoped = invocation();
@@ -463,19 +464,24 @@ async fn native_read_long_term_and_thread_split_lanes_and_envelope_text() {
         .await
         .expect("seed the thread doc");
 
-    let profile = MemoryContextProfileId::new("default").unwrap();
+    let request = || MemoryServiceContextRequest {
+        query: "launch".to_string(),
+        max_snippets: 5,
+        context_profile_id: MemoryContextProfileId::new("default").unwrap(),
+    };
 
     let long = service
-        .read_long_term(scoped.clone(), "launch".to_string(), 5, profile.clone())
-        .await;
+        .read_long_term(scoped.clone(), request())
+        .await
+        .expect("long-term lane retrieval");
     assert!(
         !long.is_empty(),
         "long-term lane should surface the general doc"
     );
     assert!(
         long.iter()
-            .all(|snippet| snippet.text.starts_with("Untrusted memory content:")),
-        "read_long_term must return untrusted-enveloped text, not raw: {long:?}"
+            .all(|snippet| !snippet.text.starts_with("Untrusted memory content:")),
+        "lane methods return raw text; the host owns the envelope: {long:?}"
     );
     assert!(
         long.iter()
@@ -484,30 +490,56 @@ async fn native_read_long_term_and_thread_split_lanes_and_envelope_text() {
     );
 
     let short = service
-        .read_thread(scoped, "launch".to_string(), 5, profile)
-        .await;
+        .read_short_term(scoped, request())
+        .await
+        .expect("short-term lane retrieval");
     assert!(
         short
             .iter()
             .any(|snippet| snippet.relative_path.starts_with("threads/convo/")),
-        "thread lane must surface the active thread's doc: {short:?}"
+        "short-term lane must surface the active thread's doc: {short:?}"
     );
     assert!(
         short
             .iter()
-            .all(|snippet| snippet.text.starts_with("Untrusted memory content:")),
-        "read_thread must return untrusted-enveloped text, not raw: {short:?}"
+            .all(|snippet| snippet.relative_path.starts_with("threads/convo/")),
+        "short-term lane must contain ONLY the active thread's docs: {short:?}"
+    );
+}
+
+#[tokio::test]
+async fn native_read_short_term_without_thread_degrades_to_empty() {
+    // The short-term lane is thread scratch: with no `thread_id` on the trusted
+    // invocation scope there is nothing to retrieve, so the lane degrades to
+    // empty rather than erroring or leaking general memory.
+    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
+    write_general_doc(&service, "notes/plan.md", "launch is on friday").await;
+
+    let snippets = service
+        .read_short_term(
+            invocation(),
+            MemoryServiceContextRequest {
+                query: "launch".to_string(),
+                max_snippets: 5,
+                context_profile_id: MemoryContextProfileId::new("default").unwrap(),
+            },
+        )
+        .await
+        .expect("threadless short-term lane degrades, not errors");
+    assert!(
+        snippets.is_empty(),
+        "a threadless short-term read must return nothing: {snippets:?}"
     );
 }
 
 #[tokio::test]
 async fn native_context_retrieve_excludes_thread_scratch_from_long_term() {
-    // Long-term retrieval (no `thread_id` on the invocation scope) is the user's
-    // general/durable memory; it must EXCLUDE per-thread short-term scratch
-    // (anything under a `threads/<id>/` prefix). With `thread_id = None`, only the
-    // general doc survives — the thread-scoped doc is dropped — so the long-term
-    // and short-term lanes stay disjoint (no duplicate snippet when the run-level
-    // fetch concatenates both lanes).
+    // `read_long_term` is the user's general/durable memory; it must EXCLUDE
+    // per-thread short-term scratch (anything under a `threads/<id>/` prefix)
+    // EVEN when the invocation scope carries the active thread — the lane is
+    // the method, not a thread_id convention (F4 regression). Only the general
+    // doc survives, so the two lanes stay disjoint (no duplicate snippet when
+    // the host concatenates them).
     let service = NativeMemoryService::new(Arc::new(MockSearchBackend {
         results: vec![
             search_result(
@@ -535,10 +567,12 @@ async fn native_context_retrieve_excludes_thread_scratch_from_long_term() {
         fail: false,
     }));
 
-    // `invocation()` carries `thread_id: None` — the long-term lane.
+    // The invocation carries the ACTIVE thread: exclusion must still apply.
+    let mut scoped = invocation();
+    scoped.scope.thread_id = Some(ThreadId::new("thread-a").expect("valid thread"));
     let snippets = service
-        .retrieve_context(
-            invocation(),
+        .read_long_term(
+            scoped,
             MemoryServiceContextRequest {
                 query: "planning".to_string(),
                 max_snippets: 10,
@@ -559,8 +593,8 @@ async fn native_context_retrieve_excludes_thread_scratch_from_long_term() {
 #[tokio::test]
 async fn native_context_retrieve_filters_non_finite_scores_before_ordering() {
     // The backend returns three in-scope results: two with non-finite scores
-    // (NaN and +inf) and one finite. The provider-side `retain` in
-    // `retrieve_context` drops the non-finite ones via `score.is_finite()`;
+    // (NaN and +inf) and one finite. The provider-side `retain` shared by the
+    // lane methods drops the non-finite ones via `score.is_finite()`;
     // if that predicate were removed, all three would survive (and NaN ordering
     // would be ill-defined), so the `len() == 1` assertion below depends on it.
     let service = NativeMemoryService::new(Arc::new(MockSearchBackend {
@@ -591,7 +625,7 @@ async fn native_context_retrieve_filters_non_finite_scores_before_ordering() {
     }));
 
     let snippets = service
-        .retrieve_context(
+        .read_long_term(
             invocation(),
             MemoryServiceContextRequest {
                 query: "score".to_string(),
@@ -625,7 +659,7 @@ async fn native_context_retrieve_returns_raw_content_for_host_sanitization() {
     }));
 
     let snippets = service
-        .retrieve_context(
+        .read_long_term(
             invocation(),
             MemoryServiceContextRequest {
                 query: "path".to_string(),
@@ -647,7 +681,7 @@ async fn native_context_retrieve_returns_raw_content_for_host_sanitization() {
 async fn native_context_retrieve_orders_score_desc_then_path_asc() {
     // Ordering service test, ported from the pre-lift
     // `deterministic_ordering_score_desc_then_path_asc`. It drives
-    // `retrieve_context`, whose `results.sort_by(compare_memory_search_results)`
+    // `read_long_term`, whose `results.sort_by(compare_memory_search_results)`
     // is solely responsible for the ordering. Two of the three in-scope results
     // share the same score (0.5) to force the path-ascending tie-break; if the
     // sort were removed or its key inverted, the assertions below would fail.
@@ -680,7 +714,7 @@ async fn native_context_retrieve_orders_score_desc_then_path_asc() {
     }));
 
     let snippets = service
-        .retrieve_context(
+        .read_long_term(
             invocation(),
             MemoryServiceContextRequest {
                 query: "snippet".to_string(),
@@ -725,7 +759,7 @@ async fn native_context_retrieve_returns_candidates_without_aggregate_byte_budge
     }));
 
     let snippets = service
-        .retrieve_context(
+        .read_long_term(
             invocation(),
             MemoryServiceContextRequest {
                 query: "budget".to_string(),
@@ -808,7 +842,7 @@ async fn native_record_interaction_writes_thread_log_and_feeds_short_term_lane()
     //     doc — proving the write feeds the short-term read lane inside the
     //     provider, not just a raw file write.
     let snippets = service
-        .retrieve_context(
+        .read_short_term(
             scoped,
             MemoryServiceContextRequest {
                 query: "favorite planning color".to_string(),
