@@ -79,7 +79,7 @@ Only test users can complete the OAuth flow while the app is in Testing mode. If
 </Step>
 
 <Step title="Open the SSH Tunnel">
-To complete the OAuth flow, we need to allow Google to reach the IronClaw server. Since port 9876 is only accessible from within the server, you need to open an SSH tunnel that forwards your local port 9876 to the server.
+The loopback callback listens on port 9876 *inside* the server, and your browser runs on your own machine. An SSH tunnel bridges the two by forwarding your local port 9876 to the server's loopback address.
 
 Open a new SSH session using port forwarding:
 
@@ -94,9 +94,12 @@ Keep this terminal session open while completing the OAuth flow.
 The port forwarding will remain active as long as the SSH session remains open, and automatically closes when you exit the session.
 </Info>
 
-<Tip>
-Remember to whitelist the port 9876 in your server's firewall settings to allow the tunnel to work properly
-</Tip>
+<Warning>
+Do **not** open port 9876 in the server's firewall. Local port forwarding carries the
+traffic inside the existing SSH connection, so no additional inbound port is needed —
+opening it would expose the OAuth callback to the internet for no benefit. The port must
+stay loopback-only.
+</Warning>
 
 
 </Step>
