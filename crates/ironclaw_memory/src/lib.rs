@@ -40,13 +40,17 @@ pub use safety::{
     PromptWriteSource,
 };
 pub use service::{
-    MEMORY_DISABLED_CONTEXT_ALIASES, MemoryContextProfileId, MemoryInteractionMessage,
-    MemoryInteractionRole, MemoryInvocation, MemoryProfileSetStatus, MemoryService,
-    MemoryServiceContextRequest, MemoryServiceContextSnippet, MemoryServiceError,
-    MemoryServiceErrorKind, MemoryServiceProfileReadResponse, MemoryServiceProfileSetRequest,
+    MEMORY_DISABLED_CONTEXT_ALIASES, MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID,
+    MEMORY_SEARCH_SCOPE, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
+    MemoryContextProfileId, MemoryInteractionMessage, MemoryInteractionRole, MemoryInvocation,
+    MemoryProfileSetStatus, MemoryService, MemoryServiceContextRequest,
+    MemoryServiceContextSnippet, MemoryServiceError, MemoryServiceErrorKind,
+    MemoryServiceProfileReadResponse, MemoryServiceProfileSetRequest,
     MemoryServiceProfileSetResponse, MemoryServiceReadRequest, MemoryServiceReadResponse,
     MemoryServiceRecordRequest, MemoryServiceRecordResponse, MemoryServiceSearchRequest,
     MemoryServiceSearchResponse, MemoryServiceSearchResult, MemoryServiceTreeRequest,
     MemoryServiceTreeResponse, MemoryServiceWriteRequest, MemoryServiceWriteResponse,
-    MemoryWriteStatus, memory_context_disabled,
+    MemoryWriteStatus, PROFILE_SET_CAPABILITY_ID, memory_context_disabled,
+    profile_set_response_output, read_response_output, search_response_output,
+    tree_response_output, write_response_output,
 };

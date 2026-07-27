@@ -223,23 +223,23 @@ mod tests {
         assert!(resolver.resolve_provider(filesystem(), None).is_none());
     }
 
-    /// Minimal in-test third-party provider: a unique `read` marker lets the
-    /// test assert the resolver returned *this* instance, not the native one.
+    /// Minimal in-test third-party provider: a unique `profile_read` marker
+    /// lets the test assert the resolver returned *this* instance, not the
+    /// native one.
     #[derive(Debug)]
     struct MarkerProvider;
 
     #[async_trait::async_trait]
     impl MemoryService for MarkerProvider {
-        async fn read(
+        async fn profile_read(
             &self,
             _invocation: ironclaw_memory::MemoryInvocation,
-            _request: ironclaw_memory::MemoryServiceReadRequest,
-        ) -> Result<ironclaw_memory::MemoryServiceReadResponse, ironclaw_memory::MemoryServiceError>
-        {
-            Ok(ironclaw_memory::MemoryServiceReadResponse {
-                path: "marker".to_string(),
-                content: "registered-third-party".to_string(),
-                word_count: 1,
+        ) -> Result<
+            ironclaw_memory::MemoryServiceProfileReadResponse,
+            ironclaw_memory::MemoryServiceError,
+        > {
+            Ok(ironclaw_memory::MemoryServiceProfileReadResponse {
+                document: Some(b"registered-third-party".to_vec()),
             })
         }
     }
@@ -270,16 +270,14 @@ mod tests {
             .resolve_provider(filesystem(), None)
             .expect("registered third-party provider must resolve");
         let read = provider
-            .read(
-                marker_invocation(),
-                ironclaw_memory::MemoryServiceReadRequest {
-                    path: "anything".to_string(),
-                },
-            )
+            .profile_read(marker_invocation())
             .await
-            .expect("marker provider read");
+            .expect("marker provider profile_read");
         // Proves it is the registered instance, not the native filesystem one.
-        assert_eq!(read.content, "registered-third-party");
+        assert_eq!(
+            read.document.as_deref(),
+            Some(&b"registered-third-party"[..])
+        );
     }
 
     #[test]

@@ -538,70 +538,27 @@ pub struct MemoryServiceRecordResponse {
     pub recorded: bool,
 }
 
-/// Provider-neutral memory service contract.
+/// The host-initiated memory LIFECYCLE contract — the only stable part of
+/// the memory system.
 ///
-/// Tool-backed methods (`search` / `write` / `read` / `tree` / `profile_set`)
-/// back the tools the bound provider's manifest declares; lifecycle methods
-/// (`read_long_term` / `read_short_term` / `record_interaction` /
-/// `profile_read`) are host-initiated and called only when the manifest
-/// declares the matching `[memory].lifecycle` hook. Every default fails
-/// closed (`unavailable`), except `record_interaction`, whose no-op default
-/// reports `recorded: false`.
+/// These four hooks fire at fixed points of the agent loop and are called
+/// only when the bound provider's manifest declares the matching
+/// `[memory].lifecycle` token. Everything model-facing is a manifest-declared
+/// TOOL served through the ordinary first-party capability handler seam —
+/// providers declare whatever tools they want and back them with their own
+/// handler; nothing in the memory contract enumerates tool ids.
+///
+/// Every default fails closed (`unavailable`), except `record_interaction`,
+/// whose no-op default reports `recorded: false`.
 ///
 /// Lane retrieval returns RAW snippets: the host — never a provider — owns
 /// scope filtering, sanitization, the untrusted-memory envelope, and the
 /// model-visible byte budgets (`ironclaw_host_runtime::memory_context`).
 #[async_trait]
 pub trait MemoryService: Send + Sync {
-    async fn search(
-        &self,
-        invocation: MemoryInvocation,
-        request: MemoryServiceSearchRequest,
-    ) -> Result<MemoryServiceSearchResponse, MemoryServiceError> {
-        let _ = (invocation, request);
-        Err(MemoryServiceError::unavailable())
-    }
-
-    async fn write(
-        &self,
-        invocation: MemoryInvocation,
-        request: MemoryServiceWriteRequest,
-    ) -> Result<MemoryServiceWriteResponse, MemoryServiceError> {
-        let _ = (invocation, request);
-        Err(MemoryServiceError::unavailable())
-    }
-
-    async fn read(
-        &self,
-        invocation: MemoryInvocation,
-        request: MemoryServiceReadRequest,
-    ) -> Result<MemoryServiceReadResponse, MemoryServiceError> {
-        let _ = (invocation, request);
-        Err(MemoryServiceError::unavailable())
-    }
-
-    async fn tree(
-        &self,
-        invocation: MemoryInvocation,
-        request: MemoryServiceTreeRequest,
-    ) -> Result<MemoryServiceTreeResponse, MemoryServiceError> {
-        let _ = (invocation, request);
-        Err(MemoryServiceError::unavailable())
-    }
-
-    async fn profile_set(
-        &self,
-        invocation: MemoryInvocation,
-        request: MemoryServiceProfileSetRequest,
-    ) -> Result<MemoryServiceProfileSetResponse, MemoryServiceError> {
-        let _ = (invocation, request);
-        Err(MemoryServiceError::unavailable())
-    }
-
-    /// Read the run owner's profile document. Provider-neutral counterpart of
-    /// [`profile_set`](MemoryService::profile_set): the provider owns the
-    /// scope/path resolution (single home shared with the write path) and returns
-    /// raw bytes; the host parses + size-caps them.
+    /// Read the run owner's profile document (loop start). The provider owns
+    /// the scope/path resolution and returns raw bytes; the host parses +
+    /// size-caps them.
     async fn profile_read(
         &self,
         invocation: MemoryInvocation,
@@ -673,6 +630,95 @@ pub trait MemoryService: Send + Sync {
         tracing::debug!("memory provider does not implement record_interaction; skipping");
         Ok(MemoryServiceRecordResponse { recorded: false })
     }
+}
+
+// ---------------------------------------------------------------------------
+// The shared memory tool vocabulary
+// ---------------------------------------------------------------------------
+// The five tools both bundled providers happen to declare, under the reserved
+// stable namespace, plus the wire-output helpers their handlers share so the
+// model-visible shapes cannot drift between backends. These are CONVENTIONS —
+// not a required surface: a provider may declare any subset, or entirely
+// different tools of its own, served by its own capability handler.
+
+pub const MEMORY_SEARCH_CAPABILITY_ID: &str = "ironclaw.memory.search";
+pub const MEMORY_WRITE_CAPABILITY_ID: &str = "ironclaw.memory.write";
+pub const MEMORY_READ_CAPABILITY_ID: &str = "ironclaw.memory.read";
+pub const MEMORY_TREE_CAPABILITY_ID: &str = "ironclaw.memory.tree";
+pub const PROFILE_SET_CAPABILITY_ID: &str = "ironclaw.memory.profile_set";
+
+/// Search-scope marker surfaced on every search output so the model knows the
+/// search covered internal persistent memory only.
+pub const MEMORY_SEARCH_SCOPE: &str = "reborn_internal_persistent_memory";
+
+/// Wire output for a search tool response. Shared by every provider declaring
+/// the conventional search tool so the model-visible shape cannot drift
+/// between backends.
+pub fn search_response_output(response: MemoryServiceSearchResponse) -> Value {
+    let results = response
+        .results
+        .into_iter()
+        .map(|result| {
+            json!({
+                "content": result.content,
+                "score": result.score,
+                "path": result.path,
+                "is_hybrid_match": result.is_hybrid_match,
+            })
+        })
+        .collect::<Vec<_>>();
+    let result_count = results.len();
+    json!({
+        "query": response.query,
+        "results": results,
+        "result_count": result_count,
+        "search_scope": MEMORY_SEARCH_SCOPE,
+        "external_services_searched": false,
+    })
+}
+
+/// Wire output for a write tool response. Exhaustive over
+/// [`MemoryWriteStatus`]; the `"status"` field serializes to the stable
+/// snake_case wire strings (`cleared`/`patched`/`written`).
+pub fn write_response_output(response: MemoryServiceWriteResponse) -> Value {
+    match response.status {
+        MemoryWriteStatus::Cleared => json!({
+            "status": response.status,
+            "path": response.path,
+            "message": response.message.unwrap_or_default(),
+        }),
+        MemoryWriteStatus::Patched => json!({
+            "status": response.status,
+            "path": response.path,
+            "replacements": response.replacements.unwrap_or(0),
+            "content_length": response.content_length,
+        }),
+        MemoryWriteStatus::Written => json!({
+            "status": response.status,
+            "path": response.path,
+            "append": response.append,
+            "content_length": response.content_length,
+        }),
+    }
+}
+
+/// Wire output for a read tool response.
+pub fn read_response_output(response: MemoryServiceReadResponse) -> Value {
+    json!({
+        "path": response.path,
+        "content": response.content,
+        "word_count": response.word_count,
+    })
+}
+
+/// Wire output for a tree tool response.
+pub fn tree_response_output(response: MemoryServiceTreeResponse) -> Value {
+    Value::Array(response.entries)
+}
+
+/// Wire output for a profile_set tool response.
+pub fn profile_set_response_output(response: MemoryServiceProfileSetResponse) -> Value {
+    json!({ "status": response.status })
 }
 
 fn search_query(input: &Value) -> Result<&str, MemoryServiceError> {

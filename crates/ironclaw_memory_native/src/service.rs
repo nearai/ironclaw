@@ -87,9 +87,12 @@ impl NativeMemoryService {
     }
 }
 
-#[async_trait]
-impl MemoryService for NativeMemoryService {
-    async fn search(
+/// The provider's conventional tool operations — INHERENT methods, not part
+/// of any memory contract. The model reaches them only through the tools the
+/// manifest declares, served by this provider's first-party capability
+/// handler.
+impl NativeMemoryService {
+    pub async fn search(
         &self,
         invocation: MemoryInvocation,
         request: MemoryServiceSearchRequest,
@@ -119,7 +122,7 @@ impl MemoryService for NativeMemoryService {
         })
     }
 
-    async fn write(
+    pub async fn write(
         &self,
         invocation: MemoryInvocation,
         request: MemoryServiceWriteRequest,
@@ -222,7 +225,7 @@ impl MemoryService for NativeMemoryService {
         })
     }
 
-    async fn read(
+    pub async fn read(
         &self,
         invocation: MemoryInvocation,
         request: MemoryServiceReadRequest,
@@ -246,7 +249,7 @@ impl MemoryService for NativeMemoryService {
         })
     }
 
-    async fn tree(
+    pub async fn tree(
         &self,
         invocation: MemoryInvocation,
         request: MemoryServiceTreeRequest,
@@ -269,7 +272,7 @@ impl MemoryService for NativeMemoryService {
         })
     }
 
-    async fn profile_set(
+    pub async fn profile_set(
         &self,
         invocation: MemoryInvocation,
         request: MemoryServiceProfileSetRequest,
@@ -325,7 +328,10 @@ impl MemoryService for NativeMemoryService {
         }
         Err(MemoryServiceError::operation())
     }
+}
 
+#[async_trait]
+impl MemoryService for NativeMemoryService {
     async fn profile_read(
         &self,
         invocation: MemoryInvocation,

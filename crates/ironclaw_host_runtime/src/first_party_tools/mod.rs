@@ -12,7 +12,6 @@ mod json;
 mod memory;
 mod model_visible_output;
 mod outbound_delivery;
-mod profile_set;
 mod schemas;
 mod shell;
 mod skill_management;
@@ -40,7 +39,6 @@ use ironclaw_host_api::{
     RuntimeHttpEgressError, RuntimeHttpEgressResponse, TrustClass, VirtualPath,
 };
 
-use crate::memory_provider::MemoryServiceResolver;
 use crate::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
@@ -52,13 +50,18 @@ pub(crate) use self::schemas::{
 
 pub use echo::ECHO_CAPABILITY_ID;
 pub use http::{HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID};
+pub use ironclaw_memory::{
+    MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
+    MEMORY_WRITE_CAPABILITY_ID, PROFILE_SET_CAPABILITY_ID,
+};
 pub use json::JSON_CAPABILITY_ID;
 pub use memory::{
-    MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
-    MEMORY_WRITE_CAPABILITY_ID,
+    MemoryToolProfile, NativeMemoryToolHandler, ensure_memory_mount, finish_memory_tool_result,
+    invocation_for_request as memory_invocation_for_request, map_memory_service_error,
+    memory_tool_profiles, normalize_memory_tool_input, register_memory_tool_handler,
+    register_native_memory_tools,
 };
 pub use outbound_delivery::OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID;
-pub use profile_set::PROFILE_SET_CAPABILITY_ID;
 pub use shell::SHELL_CAPABILITY_ID;
 pub use skill_management::{
     SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
@@ -426,81 +429,14 @@ pub fn builtin_first_party_handlers_with_trigger_clock(
     Ok(registry)
 }
 
-/// Like [`builtin_first_party_handlers_with_trigger_create_hook`] but routes the
-/// memory capabilities through an explicit memory provider resolver (issue
-/// #3537) instead of hardwiring the native provider. Used by the local-dev
-/// composition path (no process-backend filtering).
-pub fn builtin_first_party_handlers_with_trigger_create_hook_and_memory_resolver(
-    trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
-    trigger_create_hook: Arc<dyn TriggerCreateHook>,
-    active_run_lookup: Arc<dyn ironclaw_triggers::TriggerActiveRunLookup>,
-    memory_resolver: MemoryServiceResolver,
-) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
-    let mut registry = builtin_first_party_base_registry_with_memory_resolver(memory_resolver)?;
-    trigger_management::insert_handlers_with_create_hook(
-        &mut registry,
-        trigger_repository,
-        trigger_create_hook,
-        active_run_lookup,
-    )?;
-    Ok(registry)
-}
-
-/// Like
-/// [`builtin_first_party_handlers_with_trigger_create_hook_for_process_backend`]
-/// but routes the memory capabilities through an explicit memory provider
-/// resolver (issue #3537). Used by the production composition path.
-pub fn builtin_first_party_handlers_with_trigger_create_hook_for_process_backend_and_memory_resolver(
-    trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
-    trigger_create_hook: Arc<dyn TriggerCreateHook>,
-    active_run_lookup: Arc<dyn ironclaw_triggers::TriggerActiveRunLookup>,
-    process_backend: ProcessBackendKind,
-    memory_resolver: MemoryServiceResolver,
-) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
-    let mut registry = builtin_first_party_handlers_with_trigger_create_hook_and_memory_resolver(
-        trigger_repository,
-        trigger_create_hook,
-        active_run_lookup,
-        memory_resolver,
-    )?;
-    if !process_port_backed_builtins_enabled(process_backend) {
-        remove_process_port_backed_builtin_handlers(&mut registry)?;
-    }
-    Ok(registry)
-}
-
 fn builtin_first_party_base_registry() -> Result<FirstPartyCapabilityRegistry, HostApiError> {
-    builtin_first_party_base_registry_with_memory_resolver(MemoryServiceResolver::default())
-}
-
-fn builtin_first_party_base_registry_with_memory_resolver(
-    memory_resolver: MemoryServiceResolver,
-) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
-    let handler = Arc::new(BuiltinFirstPartyTools::with_memory_resolver(
-        memory_resolver,
-    ));
+    let handler = Arc::new(BuiltinFirstPartyTools::default());
     let mut registry = FirstPartyCapabilityRegistry::new()
         .with_handler(CapabilityId::new(ECHO_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(TIME_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(JSON_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(HTTP_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(HTTP_SAVE_CAPABILITY_ID)?, handler.clone())
-        .with_handler(
-            CapabilityId::new(MEMORY_SEARCH_CAPABILITY_ID)?,
-            handler.clone(),
-        )
-        .with_handler(
-            CapabilityId::new(MEMORY_WRITE_CAPABILITY_ID)?,
-            handler.clone(),
-        )
-        .with_handler(
-            CapabilityId::new(MEMORY_READ_CAPABILITY_ID)?,
-            handler.clone(),
-        )
-        .with_handler(
-            CapabilityId::new(MEMORY_TREE_CAPABILITY_ID)?,
-            handler.clone(),
-        )
         .with_handler(CapabilityId::new(SHELL_CAPABILITY_ID)?, handler.clone());
     for metadata in CODING_CAPABILITIES {
         registry.insert_handler(CapabilityId::new(metadata.id)?, handler.clone());
@@ -531,9 +467,8 @@ fn builtin_first_party_base_registry_with_memory_resolver(
     );
     registry.insert_handler(
         CapabilityId::new(TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID)?,
-        handler.clone(),
+        handler,
     );
-    registry.insert_handler(CapabilityId::new(PROFILE_SET_CAPABILITY_ID)?, handler);
     outbound_delivery::insert_handler(&mut registry, Arc::new(UnavailableRunFinalReplyRouter))?;
     skill_management::insert_handlers(&mut registry)?;
     Ok(registry)
@@ -598,7 +533,6 @@ fn first_party_origin_gate_matrix(id: &str) -> OriginGateMatrix {
 #[derive(Debug, Default)]
 pub struct BuiltinFirstPartyTools {
     coding_state: CodingCapabilityState,
-    memory_state: memory::MemoryCapabilityState,
     post_edit_check_seen: crate::post_edit_check::PostEditCheckSeenLines,
 }
 
@@ -654,17 +588,6 @@ impl BuiltinFirstPartyTools {
     }
 }
 
-impl BuiltinFirstPartyTools {
-    /// Build with a memory provider resolver (issue #3537). The default
-    /// (`MemoryServiceResolver::native()`) preserves pre-binding behavior.
-    fn with_memory_resolver(memory_resolver: MemoryServiceResolver) -> Self {
-        Self {
-            memory_state: memory::MemoryCapabilityState::with_resolver(memory_resolver),
-            ..Default::default()
-        }
-    }
-}
-
 #[async_trait]
 impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
     async fn dispatch(
@@ -684,23 +607,6 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
                 let result = http::dispatch(&request).await?;
                 network_egress_bytes = result.network_egress_bytes;
                 (result.output, None)
-            }
-            MEMORY_SEARCH_CAPABILITY_ID
-            | MEMORY_WRITE_CAPABILITY_ID
-            | MEMORY_READ_CAPABILITY_ID
-            | MEMORY_TREE_CAPABILITY_ID => {
-                let mut result = memory::dispatch(&self.memory_state, &request).await?;
-                result.usage.output_bytes =
-                    bounded_output_bytes(&result.output, FIRST_PARTY_MAX_OUTPUT_BYTES)?;
-                return Ok(result);
-            }
-            PROFILE_SET_CAPABILITY_ID => {
-                let mut result = profile_set::dispatch(&self.memory_state, &request).await?;
-                result.usage.output_bytes =
-                    bounded_output_bytes(&result.output, FIRST_PARTY_MAX_OUTPUT_BYTES)?;
-                result.usage.wall_clock_ms =
-                    start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
-                return Ok(result);
             }
             SHELL_CAPABILITY_ID => {
                 let (output, duration) = shell::dispatch(&request).await?;
@@ -851,14 +757,18 @@ fn normalize_optional_null_sentinels(request: &mut FirstPartyCapabilityRequest) 
         .strip_prefix("builtin.")
         .unwrap_or(request.capability_id.as_str())
         .replace('.', "-");
-    // The bound memory provider's profile tool keeps the builtin-era
-    // normalization: its manifest-declared schema is served inline from the
-    // memory schema set.
-    let schema = if request.capability_id.as_str() == PROFILE_SET_CAPABILITY_ID {
-        resolve_native_memory_input_schema_ref("schemas/memory/profile-set.input.v1.json")
-    } else {
-        resolve_builtin_input_schema_ref(&format!("schemas/builtin/{schema_name}.input.v1.json"))
-    };
+    let schema =
+        resolve_builtin_input_schema_ref(&format!("schemas/builtin/{schema_name}.input.v1.json"));
+    normalize_optional_null_sentinels_against_schema(&mut request.input, schema.as_ref());
+}
+
+/// Schema-driven core of the null-sentinel normalization, shared with the
+/// memory tool handlers (whose schemas come from the bound package's
+/// manifest): drop declared-optional fields whose value is `null`/"null".
+pub(super) fn normalize_optional_null_sentinels_against_schema(
+    input: &mut serde_json::Value,
+    schema: Option<&serde_json::Value>,
+) {
     let Some(schema) = schema else {
         return;
     };
@@ -888,7 +798,7 @@ fn normalize_optional_null_sentinels(request: &mut FirstPartyCapabilityRequest) 
         .and_then(|value| value.as_object())
         .map(|properties| properties.keys().map(String::as_str).collect())
         .unwrap_or_default();
-    let Some(object) = request.input.as_object_mut() else {
+    let Some(object) = input.as_object_mut() else {
         return;
     };
     object.retain(|key, value| {

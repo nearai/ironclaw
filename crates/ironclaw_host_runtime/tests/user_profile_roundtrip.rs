@@ -38,6 +38,7 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, MemoryBackedUserProfileSource,
     PROFILE_SET_CAPABILITY_ID, RuntimeCapabilityOutcome, builtin_first_party_handlers,
+    register_native_memory_tools,
 };
 use ironclaw_host_runtime::{builtin_first_party_package, native_memory_first_party_package};
 use ironclaw_resources::InMemoryResourceGovernor;
@@ -244,9 +245,15 @@ fn build_runtime(shared_fs: Arc<InMemoryBackend>) -> impl HostRuntime {
         ironclaw_processes::ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_first_party_capabilities(Arc::new(
-        builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
-    ))
+    .with_first_party_capabilities(Arc::new({
+        // Local-testing analog of the composition registration: builtin
+        // handlers + the bound (native) memory provider's registry-routed
+        // tools (this test dispatches `ironclaw.memory.profile_set`).
+        let mut handlers =
+            builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap();
+        register_native_memory_tools(&mut handlers).unwrap();
+        handlers
+    }))
     .with_runtime_http_egress(Arc::new(NoopRuntimeHttpEgress))
     .with_audit_sink(Arc::new(InMemoryAuditSink::new()))
     .with_runtime_policy(local_dev_policy())

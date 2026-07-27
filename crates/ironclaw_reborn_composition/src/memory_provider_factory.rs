@@ -24,11 +24,13 @@ use std::sync::Arc;
 use ironclaw_extensions::ExtensionPackage;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{MemoryDescriptor, MemoryLifecycleHook};
-use ironclaw_host_runtime::MemoryBackedUserProfileSource;
 use ironclaw_host_runtime::memory_binding::{MemoryBindingPolicy, MemoryProviderBinding};
 use ironclaw_host_runtime::memory_context::ProductionMemoryPromptContextService;
 use ironclaw_host_runtime::memory_native_extension as memory_extension;
 use ironclaw_host_runtime::memory_provider::MemoryServiceResolver;
+use ironclaw_host_runtime::{
+    FirstPartyCapabilityHandler, MemoryBackedUserProfileSource, NativeMemoryToolHandler,
+};
 use ironclaw_loop_host::HostUserProfileSource;
 use ironclaw_memory::{MemoryService, PromptWriteSafetyEventSink};
 #[cfg(feature = "memory-mem0")]
@@ -152,7 +154,7 @@ fn create_third_party_provider(
 ) -> Option<Arc<dyn MemoryService>> {
     #[cfg(feature = "memory-mem0")]
     if extension_id == MEM0_MEMORY_EXTENSION_ID {
-        return create_mem0_provider(deps);
+        return create_mem0_provider(deps).map(|provider| provider as Arc<dyn MemoryService>);
     }
     // No provider is registered for this third-party id — or the `memory-mem0`
     // feature is not compiled in — so the memory binding fails closed.
@@ -167,7 +169,7 @@ fn create_third_party_provider(
 }
 
 #[cfg(feature = "memory-mem0")]
-fn create_mem0_provider(deps: &MemoryProviderDeps) -> Option<Arc<dyn MemoryService>> {
+fn create_mem0_provider(deps: &MemoryProviderDeps) -> Option<Arc<Mem0MemoryService>> {
     let config = Mem0Config {
         app_id: deps.mem0.app_id.clone(),
     };
@@ -221,6 +223,10 @@ pub struct ResolvedMemoryProvider {
     pub resolver: MemoryServiceResolver,
     pub package: Option<ExtensionPackage>,
     pub lifecycle: MemoryDescriptor,
+    /// The bound provider's first-party tool handler, registered for exactly
+    /// the capability ids `package` declares. `None` ⇒ no memory tools are
+    /// dispatchable (matching their absence from the surface).
+    pub tool_handler: Option<Arc<dyn FirstPartyCapabilityHandler>>,
 }
 
 impl ResolvedMemoryProvider {
@@ -229,6 +235,7 @@ impl ResolvedMemoryProvider {
             resolver,
             package: None,
             lifecycle: MemoryDescriptor::default(),
+            tool_handler: None,
         }
     }
 }
@@ -249,6 +256,10 @@ pub fn resolve_memory_provider(
     policy: Option<MemoryBindingPolicy>,
     deps: &MemoryProviderDeps,
 ) -> Result<ResolvedMemoryProvider, crate::RebornBuildError> {
+    // `deps` feeds only third-party provider construction (mem0 today); with
+    // every provider feature off, no arm consumes it.
+    #[cfg(not(feature = "memory-mem0"))]
+    let _ = deps;
     let binding = policy
         .as_ref()
         .map(|policy| policy.binding().clone())
@@ -261,43 +272,160 @@ pub fn resolve_memory_provider(
                     reason: format!("native memory provider package is invalid: {error}"),
                 }
             })?;
+            let tool_handler: Arc<dyn FirstPartyCapabilityHandler> =
+                Arc::new(NativeMemoryToolHandler::from_package(&bundle.package));
             Ok(ResolvedMemoryProvider {
                 resolver,
                 package: Some(bundle.package),
                 lifecycle: bundle.lifecycle,
+                tool_handler: Some(tool_handler),
             })
         }
         MemoryProviderBinding::Disabled => Ok(ResolvedMemoryProvider::unbound(resolver)),
         MemoryProviderBinding::ThirdParty { extension_id } => {
-            let provider = create_provider(
-                &MemoryProviderBinding::ThirdParty {
-                    extension_id: extension_id.clone(),
-                },
-                deps,
-            );
-            match provider {
-                Some(provider)
-                    if extension_id.as_str() == memory_extension::MEM0_MEMORY_EXTENSION_ID =>
-                {
-                    let bundle =
-                        memory_extension::mem0_memory_provider_bundle().map_err(|error| {
-                            crate::RebornBuildError::InvalidConfig {
-                                reason: format!("mem0 memory provider package is invalid: {error}"),
-                            }
-                        })?;
-                    Ok(ResolvedMemoryProvider {
-                        resolver: resolver
-                            .with_third_party_provider(extension_id.as_str(), provider),
-                        package: Some(bundle.package),
-                        lifecycle: bundle.lifecycle,
-                    })
-                }
-                // No provider instance (create_* already logged why), or a
-                // provider for an id with no bundled manifest: fail closed —
-                // no tools registered, no lifecycle hooks called.
-                _ => Ok(ResolvedMemoryProvider::unbound(resolver)),
+            #[cfg(feature = "memory-mem0")]
+            if extension_id.as_str() == memory_extension::MEM0_MEMORY_EXTENSION_ID {
+                // The CONCRETE provider instance backs both halves: coerced
+                // into the lifecycle resolver, and held typed by mem0's tool
+                // handler (which calls its inherent tool operations).
+                return Ok(match create_mem0_provider(deps) {
+                    Some(provider) => {
+                        let bundle =
+                            memory_extension::mem0_memory_provider_bundle().map_err(|error| {
+                                crate::RebornBuildError::InvalidConfig {
+                                    reason: format!(
+                                        "mem0 memory provider package is invalid: {error}"
+                                    ),
+                                }
+                            })?;
+                        let tool_handler: Arc<dyn FirstPartyCapabilityHandler> =
+                            Arc::new(Mem0MemoryToolHandler {
+                                provider: Arc::clone(&provider),
+                            });
+                        ResolvedMemoryProvider {
+                            resolver: resolver.with_third_party_provider(
+                                extension_id.as_str(),
+                                provider as Arc<dyn MemoryService>,
+                            ),
+                            package: Some(bundle.package),
+                            lifecycle: bundle.lifecycle,
+                            tool_handler: Some(tool_handler),
+                        }
+                    }
+                    // create_mem0_provider already logged why; fail closed —
+                    // no tools registered, no lifecycle hooks called.
+                    None => ResolvedMemoryProvider::unbound(resolver),
+                });
             }
+            // Unknown third-party id, or the bound provider's feature is not
+            // compiled in: fail closed with no tools and no lifecycle hooks.
+            tracing::warn!(
+                target: LOG_TARGET,
+                extension_id = extension_id.as_str(),
+                "no memory provider is registered for this third-party extension id (or its \
+                 provider feature is not compiled in); the memory binding fails closed"
+            );
+            Ok(ResolvedMemoryProvider::unbound(resolver))
         }
+    }
+}
+
+/// mem0's first-party tool handler — PURE BEHAVIOR. Lives in composition (the
+/// one layer allowed to name the mem0 crate) while the tool logic itself is
+/// mem0's inherent operations; the wire shapes come from `ironclaw_memory`'s
+/// shared output helpers. The host-owned `MemoryToolGuard` wrapped around it
+/// at registration already enforced the manifest-derived mount authority and
+/// input normalization, and bounds the output.
+#[cfg(feature = "memory-mem0")]
+#[derive(Debug)]
+struct Mem0MemoryToolHandler {
+    provider: Arc<Mem0MemoryService>,
+}
+
+#[cfg(feature = "memory-mem0")]
+#[async_trait::async_trait]
+impl FirstPartyCapabilityHandler for Mem0MemoryToolHandler {
+    async fn dispatch(
+        &self,
+        request: ironclaw_host_runtime::FirstPartyCapabilityRequest,
+    ) -> Result<
+        ironclaw_host_runtime::FirstPartyCapabilityResult,
+        ironclaw_host_runtime::FirstPartyCapabilityError,
+    > {
+        use ironclaw_host_api::RuntimeDispatchErrorKind;
+        use ironclaw_host_runtime::{
+            FirstPartyCapabilityError, finish_memory_tool_result, map_memory_service_error,
+            memory_invocation_for_request,
+        };
+        use ironclaw_memory::{
+            MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
+            MEMORY_WRITE_CAPABILITY_ID, MemoryServiceProfileSetRequest, MemoryServiceReadRequest,
+            MemoryServiceSearchRequest, MemoryServiceTreeRequest, MemoryServiceWriteRequest,
+            PROFILE_SET_CAPABILITY_ID, profile_set_response_output, read_response_output,
+            search_response_output, tree_response_output, write_response_output,
+        };
+
+        let start = std::time::Instant::now();
+        let invocation = memory_invocation_for_request(&request);
+        let output = match request.capability_id.as_str() {
+            PROFILE_SET_CAPABILITY_ID => {
+                let parsed = MemoryServiceProfileSetRequest::from_tool_input(&request.input)
+                    .map_err(map_memory_service_error)?;
+                let response = self
+                    .provider
+                    .profile_set(invocation, parsed)
+                    .await
+                    .map_err(map_memory_service_error)?;
+                profile_set_response_output(response)
+            }
+            MEMORY_SEARCH_CAPABILITY_ID => {
+                let parsed = MemoryServiceSearchRequest::from_tool_input(&request.input)
+                    .map_err(map_memory_service_error)?;
+                let response = self
+                    .provider
+                    .search(invocation, parsed)
+                    .await
+                    .map_err(map_memory_service_error)?;
+                search_response_output(response)
+            }
+            MEMORY_WRITE_CAPABILITY_ID => {
+                let parsed = MemoryServiceWriteRequest::from_tool_input(&request.input)
+                    .map_err(map_memory_service_error)?;
+                let response = self
+                    .provider
+                    .write(invocation, parsed)
+                    .await
+                    .map_err(map_memory_service_error)?;
+                write_response_output(response)
+            }
+            MEMORY_READ_CAPABILITY_ID => {
+                let parsed = MemoryServiceReadRequest::from_tool_input(&request.input)
+                    .map_err(map_memory_service_error)?;
+                let response = self
+                    .provider
+                    .read(invocation, parsed)
+                    .await
+                    .map_err(map_memory_service_error)?;
+                read_response_output(response)
+            }
+            MEMORY_TREE_CAPABILITY_ID => {
+                let parsed = MemoryServiceTreeRequest::from_tool_input(&request.input)
+                    .map_err(map_memory_service_error)?;
+                let response = self
+                    .provider
+                    .tree(invocation, parsed)
+                    .await
+                    .map_err(map_memory_service_error)?;
+                tree_response_output(response)
+            }
+            // Declared but not implemented by this provider: fail closed.
+            _ => {
+                return Err(FirstPartyCapabilityError::new(
+                    RuntimeDispatchErrorKind::OperationFailed,
+                ));
+            }
+        };
+        finish_memory_tool_result(output, start)
     }
 }
 

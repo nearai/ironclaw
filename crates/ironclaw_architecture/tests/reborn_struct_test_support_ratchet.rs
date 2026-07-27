@@ -79,12 +79,6 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
         category: "test-support",
         item_kind: "field",
-        path: "crates/ironclaw_host_runtime/src/first_party_tools/memory.rs",
-        count: 1,
-    },
-    FrozenPathCount {
-        category: "test-support",
-        item_kind: "field",
         path: "crates/ironclaw_host_runtime/src/services/runtime_adapters.rs",
         count: 1,
     },
@@ -237,12 +231,6 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         item_kind: "method",
         path: "crates/ironclaw_host_api/src/product_adapter/auth.rs",
         count: 2,
-    },
-    FrozenPathCount {
-        category: "test-support",
-        item_kind: "method",
-        path: "crates/ironclaw_host_runtime/src/first_party_tools/memory.rs",
-        count: 1,
     },
     FrozenPathCount {
         category: "test-support",

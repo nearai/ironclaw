@@ -22,9 +22,15 @@
 //! contract — profile-write atomicity is per-provider (native CASes; mem0
 //! read-merge-writes), accepted variance behind the shared tool id.
 //!
+//! Tool surfaces are provider-owned (registry-routed handlers), so the suite
+//! cannot seed content through a shared trait method: each wiring supplies a
+//! SEED async closure that writes through the provider's own write operation.
+//!
 //! Wire with [`memory_service_contract_full!`] (both lanes + recording — the
 //! native shape) or [`memory_service_contract_retrieval_only!`] (a
-//! long-term-only provider — the mem0 shape).
+//! long-term-only provider — the mem0 shape); both take
+//! `(label, factory, seed)` where `seed` is
+//! `async |service, invocation, write_request| { … }`.
 
 use ironclaw_host_api::{
     AgentId, CorrelationId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
@@ -93,20 +99,20 @@ fn texts(snippets: &[MemoryServiceContextSnippet]) -> Vec<&str> {
 /// Contract: content written in the base scope is retrievable there and
 /// invisible to every scope differing on exactly one of
 /// tenant/user/agent/project.
-pub async fn scope_isolation_across_tenant_user_agent_project<S, F>(factory: F)
+pub async fn scope_isolation_across_tenant_user_agent_project<S, F, Seed>(factory: F, seed: Seed)
 where
     S: MemoryService,
     F: Fn() -> S,
+    Seed: AsyncFn(&S, MemoryInvocation, MemoryServiceWriteRequest),
 {
     let service = factory();
     let base = base_scope();
-    service
-        .write(
-            invocation(base.clone()),
-            write_request("notes/isolation.md", "contract isolation marker kestrel"),
-        )
-        .await
-        .expect("base-scope write must succeed");
+    seed(
+        &service,
+        invocation(base.clone()),
+        write_request("notes/isolation.md", "contract isolation marker kestrel"),
+    )
+    .await;
 
     let own = service
         .read_long_term(invocation(base.clone()), context_request("kestrel"))
@@ -152,21 +158,21 @@ where
 /// stay disjoint under the SAME thread-carrying invocation — a short-term
 /// (active-thread) result never appears in the long-term lane, and the
 /// short-term lane never surfaces general memory.
-pub async fn retrieval_lanes_are_disjoint<S, F>(factory: F)
+pub async fn retrieval_lanes_are_disjoint<S, F, Seed>(factory: F, seed: Seed)
 where
     S: MemoryService,
     F: Fn() -> S,
+    Seed: AsyncFn(&S, MemoryInvocation, MemoryServiceWriteRequest),
 {
     let service = factory();
     let scoped = with_thread(base_scope(), "thread-disjoint");
 
-    service
-        .write(
-            invocation(scoped.clone()),
-            write_request("notes/general.md", "osprey durable general fact"),
-        )
-        .await
-        .expect("general write must succeed");
+    seed(
+        &service,
+        invocation(scoped.clone()),
+        write_request("notes/general.md", "osprey durable general fact"),
+    )
+    .await;
     let recorded = service
         .record_interaction(
             invocation(scoped.clone()),
@@ -302,21 +308,21 @@ where
 /// service over a fresh backing per call.
 #[macro_export]
 macro_rules! memory_service_contract_full {
-    ($label:ident, $factory:expr) => {
+    ($label:ident, $factory:expr, $seed:expr) => {
         mod $label {
             use super::*;
 
             #[tokio::test]
             async fn scope_isolation_across_tenant_user_agent_project() {
                 $crate::service_contract_tests::scope_isolation_across_tenant_user_agent_project(
-                    $factory,
+                    $factory, $seed,
                 )
                 .await;
             }
 
             #[tokio::test]
             async fn retrieval_lanes_are_disjoint() {
-                $crate::service_contract_tests::retrieval_lanes_are_disjoint($factory).await;
+                $crate::service_contract_tests::retrieval_lanes_are_disjoint($factory, $seed).await;
             }
 
             #[tokio::test]
@@ -336,14 +342,14 @@ macro_rules! memory_service_contract_full {
 /// calls them).
 #[macro_export]
 macro_rules! memory_service_contract_retrieval_only {
-    ($label:ident, $factory:expr) => {
+    ($label:ident, $factory:expr, $seed:expr) => {
         mod $label {
             use super::*;
 
             #[tokio::test]
             async fn scope_isolation_across_tenant_user_agent_project() {
                 $crate::service_contract_tests::scope_isolation_across_tenant_user_agent_project(
-                    $factory,
+                    $factory, $seed,
                 )
                 .await;
             }

@@ -45,6 +45,7 @@ use ironclaw_host_runtime::{
     builtin_first_party_handlers_for_process_backend,
     builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
     builtin_first_party_package_for_process_backend, native_memory_first_party_package,
+    register_native_memory_tools,
 };
 #[cfg(feature = "test-support")]
 use ironclaw_host_runtime::{
@@ -8581,9 +8582,14 @@ where
         ironclaw_processes::ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_first_party_capabilities(Arc::new(
-        builtin_first_party_handlers(trigger_repository).unwrap(),
-    ))
+    .with_first_party_capabilities(Arc::new({
+        // Local-testing analog of the composition registration: builtin
+        // handlers + the bound (native) memory provider's registry-routed
+        // tools.
+        let mut handlers = builtin_first_party_handlers(trigger_repository).unwrap();
+        register_native_memory_tools(&mut handlers).unwrap();
+        handlers
+    }))
     .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
     .with_audit_sink(Arc::new(InMemoryAuditSink::new()))
     .with_runtime_policy(policy)
@@ -9290,9 +9296,12 @@ where
         ironclaw_processes::ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_first_party_capabilities(Arc::new(
-        builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
-    ))
+    .with_first_party_capabilities(Arc::new({
+        let mut handlers =
+            builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap();
+        register_native_memory_tools(&mut handlers).unwrap();
+        handlers
+    }))
     .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
     .with_audit_sink(audit_sink)
     .with_runtime_policy(local_dev_policy())

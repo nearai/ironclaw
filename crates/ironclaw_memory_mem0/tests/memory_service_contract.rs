@@ -108,9 +108,16 @@ impl Mem0Transport for FakeMem0Server {
 // and record round-trip contracts are for hooks it does not declare — the
 // host never calls them (`read_short_term_stays_at_the_unavailable_default`
 // in the unit suite pins the fail-closed default).
-ironclaw_memory::memory_service_contract_retrieval_only!(mem0_provider, || {
-    Mem0MemoryService::new(
+ironclaw_memory::memory_service_contract_retrieval_only!(
+    mem0_provider,
+    || Mem0MemoryService::new(
         Arc::new(FakeMem0Server::default()),
         Mem0Config { app_id: None },
-    )
-});
+    ),
+    async |service: &Mem0MemoryService, invocation, request| {
+        service
+            .write(invocation, request)
+            .await
+            .expect("seed write through mem0's own write operation");
+    }
+);

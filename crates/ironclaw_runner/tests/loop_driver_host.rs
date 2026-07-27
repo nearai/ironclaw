@@ -1895,11 +1895,15 @@ async fn turn_runner_worker_records_after_turn_memory_on_completed_run() {
         )
         .unwrap();
 
-    // Real native memory provider over an in-memory filesystem backend.
-    let memory_writer: Arc<dyn MemoryService> = Arc::new(NativeMemoryService::from_filesystem(
+    // Real native memory provider over an in-memory filesystem backend. Keep the
+    // concrete handle: the post-run poll reads the doc via the provider's own
+    // (inherent) document API, which is no longer part of the lifecycle-only
+    // `MemoryService` contract.
+    let memory_service = Arc::new(NativeMemoryService::from_filesystem(
         Arc::new(InMemoryBackend::new()) as Arc<dyn RootFilesystem>,
         None,
     ));
+    let memory_writer: Arc<dyn MemoryService> = memory_service.clone();
     let recorder = Arc::new(AfterTurnMemoryRecorder::new(
         fixture.thread_service.clone() as Arc<dyn SessionThreadService>,
         Arc::clone(&memory_writer),
@@ -1935,7 +1939,7 @@ async fn turn_runner_worker_records_after_turn_memory_on_completed_run() {
     .await;
 
     let content =
-        wait_for_after_turn_memory_doc(&memory_writer, &fixture.thread_id, run_id, "thread log")
+        wait_for_after_turn_memory_doc(&memory_service, &fixture.thread_id, run_id, "thread log")
             .await;
 
     assert!(
@@ -1999,11 +2003,13 @@ async fn build_default_planned_runtime_wires_after_turn_memory_writer() {
 
     // Real native memory provider over an in-memory filesystem backend, wired
     // through the composition's `after_turn_memory_writer` — NOT the executor
-    // builder shortcut the sibling test uses.
-    let memory_writer: Arc<dyn MemoryService> = Arc::new(NativeMemoryService::from_filesystem(
+    // builder shortcut the sibling test uses. The concrete handle stays for the
+    // post-run doc poll (inherent document API, not the lifecycle contract).
+    let memory_service = Arc::new(NativeMemoryService::from_filesystem(
         Arc::new(InMemoryBackend::new()) as Arc<dyn RootFilesystem>,
         None,
     ));
+    let memory_writer: Arc<dyn MemoryService> = memory_service.clone();
 
     let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
@@ -2097,7 +2103,7 @@ async fn build_default_planned_runtime_wires_after_turn_memory_writer() {
     .expect("composition scheduler should drive the submitted run to Completed");
 
     let content = wait_for_after_turn_memory_doc(
-        &memory_writer,
+        &memory_service,
         &fixture.thread_id,
         run_id,
         "composition wiring doc",
@@ -8813,7 +8819,7 @@ async fn wait_for_run_status(
 }
 
 async fn wait_for_after_turn_memory_doc(
-    memory_writer: &Arc<dyn MemoryService>,
+    memory_service: &NativeMemoryService,
     thread_id: &ThreadId,
     run_id: TurnRunId,
     label: &'static str,
@@ -8833,7 +8839,7 @@ async fn wait_for_after_turn_memory_doc(
     let log_path = format!("threads/{thread_id}/{run_id}.md");
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
-        match memory_writer
+        match memory_service
             .read(
                 read_invocation.clone(),
                 MemoryServiceReadRequest {

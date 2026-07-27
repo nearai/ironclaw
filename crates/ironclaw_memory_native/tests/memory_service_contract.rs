@@ -1219,6 +1219,13 @@ async fn write_raw_profile(service: &NativeMemoryService, content: &str) {
 // tenant/user/agent/project, lane disjointness (F4), and the
 // record_interaction round trip (F5). Each contract gets a fresh service over
 // a fresh in-memory backing.
-ironclaw_memory::memory_service_contract_full!(native_provider, || {
-    NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None)
-});
+ironclaw_memory::memory_service_contract_full!(
+    native_provider,
+    || NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None),
+    async |service: &NativeMemoryService, invocation, request| {
+        service
+            .write(invocation, request)
+            .await
+            .expect("seed write through native's own write operation");
+    }
+);

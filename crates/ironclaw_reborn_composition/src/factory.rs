@@ -131,7 +131,7 @@ use ironclaw_host_runtime::{
     builtin_first_party_package,
 };
 use ironclaw_host_runtime::{
-    builtin_first_party_handlers_with_trigger_create_hook_for_process_backend_and_memory_resolver,
+    builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
     builtin_first_party_package_for_process_backend,
 };
 use ironclaw_loop_host::CheckpointStateStore;
@@ -3158,14 +3158,12 @@ fn production_first_party_registry_with_trigger_create_hook(
     trigger_create_hook: Arc<dyn TriggerCreateHook>,
     active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
     process_backend: ProcessBackendKind,
-    memory_resolver: MemoryServiceResolver,
 ) -> Result<FirstPartyCapabilityRegistry, RebornBuildError> {
-    builtin_first_party_handlers_with_trigger_create_hook_for_process_backend_and_memory_resolver(
+    builtin_first_party_handlers_with_trigger_create_hook_for_process_backend(
         trigger_repository,
         trigger_create_hook,
         active_run_lookup,
         process_backend,
-        memory_resolver,
     )
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("built-in first-party handlers are invalid: {error}"),
@@ -4736,8 +4734,21 @@ async fn build_backend_production(
         trigger_create_hook,
         trigger_active_run_lookup,
         process_backend,
-        resolved_memory.resolver.clone(),
     )?;
+    // Memory tools are registry-routed off the BOUND provider's manifest: the
+    // handler serves whatever ids that package declares; no provider bound ⇒
+    // nothing registered (the tools are absent from dispatch exactly as they
+    // are absent from the surface).
+    if let (Some(package), Some(handler)) = (
+        resolved_memory.package.as_ref(),
+        resolved_memory.tool_handler.as_ref(),
+    ) {
+        ironclaw_host_runtime::register_memory_tool_handler(
+            &mut first_party_registry,
+            package,
+            Arc::clone(handler),
+        );
+    }
     let product_auth_filesystem = Arc::clone(&stores.scoped_filesystem);
     let services = with_shared_host_runtime_wiring!(
         HostRuntimeServices::new(
