@@ -99,6 +99,27 @@ PROVIDER_FAULT_CASES = (
         expected_preview_error="github_api_error_status_503",
         expected_outcome="unchanged",
     ),
+    # Authenticated but not authorised for this operation. The assertion that
+    # matters is `expected_outcome="unchanged"`: a scope rejection must not
+    # perform the write the scope existed to prevent.
+    #
+    # This is the only credential-lifecycle profile that belongs in this
+    # matrix. `expired_credential` returns 401, which the GitHub extension
+    # classifies as `auth_required`
+    # (assets/github/wasm-src/src/lib.rs), and the host turns that into a
+    # re-auth gate and a blocked turn rather than a failed capability. They
+    # need a gate-shaped journey, not this test's `status == "failed"` shape —
+    # see the PR description.
+    ProviderFaultCase(
+        case_id="idempotent_write_wrong_scope",
+        operation=_operation("github_update_issue"),
+        profile="wrong_scope",
+        method="PATCH",
+        path="/repos/nearai/ironclaw/issues/1",
+        expected_tool_result="github_api_error_status_403",
+        expected_preview_error="github_api_error_status_403",
+        expected_outcome="unchanged",
+    ),
     ProviderFaultCase(
         case_id="non_idempotent_write_lost_acknowledgement",
         operation=_operation("github_create_issue"),
