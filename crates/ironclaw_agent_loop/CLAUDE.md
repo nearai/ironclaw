@@ -51,6 +51,8 @@ canonical executor, loop execution state, and executor test support.
 - Do not add stages for pure mapping helpers or one-line wrappers.
 - Keep cancellation, checkpoint, and pending-input-ack ordering explicit at the
   stage boundary that owns the state transition.
+- See `src/executor/CLAUDE.md` for the review flag and exception cases for
+  this rule.
 
 ## Common mistakes
 

@@ -6,6 +6,7 @@ use crate::planner::AgentLoopPlannerInternal;
 use super::{
     AgentLoopExecutorError, AssistantReplyStage, BudgetStage, CapabilityStage, ExitStage,
     InputStage, ModelStage, PostCapabilityStage, PromptStage, ReplyAdmissionStage, StopStage,
+    latency,
 };
 
 #[derive(Clone, Copy)]
@@ -23,6 +24,29 @@ pub(crate) trait ExecutorStage<Input>: Send + Sync {
         ctx: StageContext<'_>,
         input: Input,
     ) -> Result<Self::Output, AgentLoopExecutorError>;
+}
+
+/// Latency-instrumented entry point. Wraps [`ExecutorStage::process`] with the
+/// shared timing/tracing primitive so call sites (`canonical.rs`) don't each
+/// repeat the `latency::stage!` invocation and its redundant
+/// `ctx.host.run_context()` argument.
+pub(crate) async fn timed<S, Input>(
+    stage: &S,
+    operation: &'static str,
+    ctx: StageContext<'_>,
+    iteration: u32,
+    input: Input,
+) -> Result<S::Output, AgentLoopExecutorError>
+where
+    S: ExecutorStage<Input> + ?Sized,
+    Input: Send + 'static,
+{
+    latency::stage!(
+        operation,
+        ctx.host.run_context(),
+        iteration,
+        stage.process(ctx, input)
+    )
 }
 
 #[derive(Debug, Clone)]

@@ -2525,6 +2525,260 @@ async fn completion_nudge_skipped_on_clean_reply() {
     );
 }
 
+/// `StopStage::decide` (used by canonical.rs's ResumeApproval/ResumeAuth/
+/// ResumeExternalTool/SkipModel paths) must never apply the completion nudge,
+/// even when the stop kind is unconditionally nudge-eligible
+/// (`NoProgressDetected`). Only `decide_with_completion_nudge` (the main
+/// per-iteration path) may nudge — this is the explicit contract that
+/// replaced the old implicit main-path-only behavior.
+#[tokio::test]
+async fn plain_decide_never_nudges_while_decide_with_completion_nudge_does() {
+    let host = MockHost::new(Vec::new()).with_driver_nudges_enabled();
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    // Pre-seed the typed no-progress escape threshold (default 3) so
+    // should_stop_after_observed_turn returns Stop{NoProgressDetected}
+    // deterministically without needing to drive a real capability batch.
+    state.stop_state.trailing_no_progress_results = 3;
+    let summary = TurnSummary::after_capability_batch(
+        Vec::new(),
+        CapabilityBatchTurnSummary {
+            invocation_count: 1,
+            terminate_hint_count: 0,
+            no_progress_count: 1,
+            observed_signatures: Vec::new(),
+            made_progress_signatures: Vec::new(),
+            no_change_signatures: Vec::new(),
+        },
+    );
+
+    let plain = StopStage
+        .decide(
+            ctx,
+            StopInput {
+                state: state.clone(),
+                summary: summary.clone(),
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await
+        .expect("decide");
+    assert!(
+        matches!(
+            plain,
+            StopStep::Stop {
+                kind: StopKind::NoProgressDetected,
+                ..
+            }
+        ),
+        "plain decide must stop on NoProgressDetected without ever nudging"
+    );
+
+    let nudged = StopStage
+        .decide_with_completion_nudge(
+            ctx,
+            StopInput {
+                state,
+                summary,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await
+        .expect("decide_with_completion_nudge");
+    match nudged {
+        StopStep::Continue { state, .. } => {
+            assert_eq!(
+                state.completion_nudges_used, 1,
+                "decide_with_completion_nudge must apply the nudge under the same conditions"
+            );
+        }
+        StopStep::Stop { .. } => {
+            panic!("expected decide_with_completion_nudge to nudge (Continue)")
+        }
+        StopStep::Exit(_) => panic!("expected Continue, got Exit"),
+    }
+}
+
+/// Caller-level sibling of `plain_decide_never_nudges_while_decide_with_completion_nudge_does`:
+/// drives a real `ResumeApproval` turn through the full `CanonicalAgentLoopExecutor`
+/// (not `StopStage` directly) and confirms `execute_resume_turn` never applies the
+/// completion nudge, even though the driver-nudge gate is ON and the stop condition
+/// is unconditionally nudge-eligible (`NoProgressDetected`). If canonical.rs ever
+/// swapped `decide_timed` for `decide_with_completion_nudge_timed` in
+/// `execute_resume_turn`, this stop would silently become a `Continue` instead of
+/// a `Stop` and this test would fail — closing the coverage gap the stage-level
+/// test above cannot: it never proves the real dispatcher actually routes
+/// `PromptStep::ResumeApproval` through the plain-`decide` method.
+///
+/// The nudge-eligible condition is seeded via `recent_output_token_counts` (the
+/// diminishing-returns escape), not `trailing_no_progress_results`: the resumed
+/// call's own capability outcome would reset the latter (see the SkipModel sibling
+/// test below for why), so the token-count window is the one signal that survives
+/// untouched from before the resume dispatch to its stop decision.
+#[tokio::test]
+async fn resume_turn_stop_decision_never_applies_completion_nudge() {
+    let gate_ref = LoopGateRef::new("gate:resume-no-nudge").expect("valid");
+    let completed_ref = LoopResultRef::new("result:resume-no-nudge").expect("valid");
+    let approval_resume = CapabilityApprovalResume {
+        approval_request_id: ApprovalRequestId::new(),
+        resume_token: CapabilityResumeToken::new("resume-token:resume-no-nudge").expect("valid"),
+        correlation_id: CorrelationId::new(),
+        input_ref: CapabilityInputRef::new("input:resume-no-nudge-original").expect("valid"),
+        input: serde_json::json!({"message": "hello"}),
+        estimate: ResourceEstimate::default(),
+    };
+    let host = MockHost::new(vec![calls_response()])
+        .with_driver_nudges_enabled()
+        .with_batch_outcomes(vec![
+            // Phase 1: parks on an approval gate.
+            ironclaw_turns::run_profile::CapabilityBatchOutcome {
+                outcomes: vec![CapabilityOutcome::ApprovalRequired {
+                    gate_ref: gate_ref.clone(),
+                    safe_summary: "approval required".to_string(),
+                    approval_resume: Some(approval_resume),
+                }],
+                stopped_on_suspension: true,
+            },
+            // Phase 2 (resume dispatch): an ordinary completion. The stop
+            // condition under test comes from the seeded diminishing-returns
+            // window below, not from this outcome's own progress signal.
+            ironclaw_turns::run_profile::CapabilityBatchOutcome {
+                outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
+                    result_ref: completed_ref,
+                    safe_summary: "resumed call completed".to_string(),
+                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    terminate_hint: false,
+                    byte_len: 0,
+                    output_digest: None,
+                    model_observation: None,
+                })],
+                stopped_on_suspension: false,
+            },
+        ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let initial_state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let first_exit = executor
+        .execute_family(&crate::families::default(), &host, initial_state)
+        .await
+        .expect("first execute blocks on approval gate");
+    assert!(
+        matches!(first_exit, LoopExit::Blocked(_)),
+        "expected Blocked exit for approval gate, got {first_exit:?}"
+    );
+
+    let mut resumed_state = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock);
+    assert!(
+        resumed_state.pending_approval_resume.is_some(),
+        "BeforeBlock checkpoint must carry pending_approval_resume to resume from"
+    );
+    assert_eq!(resumed_state.completion_nudges_used, 0);
+    // Seed the unconditionally nudge-eligible diminishing-returns window (4
+    // low-output-token turns) so `should_stop_after_observed_turn` deterministically
+    // returns Stop{NoProgressDetected} on the resume dispatch's own stop decision,
+    // regardless of that turn's capability outcome.
+    for _ in 0..4 {
+        resumed_state.recent_output_token_counts.push(0);
+    }
+
+    let second_exit = executor
+        .execute_family(&crate::families::default(), &host, resumed_state)
+        .await
+        .expect("second execute resumes and stops on no-progress");
+
+    match second_exit {
+        LoopExit::Failed(failed) => {
+            assert_eq!(
+                failed.reason_kind,
+                LoopFailureKind::NoProgressDetected,
+                "expected the seeded diminishing-returns window to trip a no-progress stop"
+            );
+        }
+        other => panic!("expected Failed(NoProgressDetected) exit, got {other:?}"),
+    }
+
+    let final_state = final_staged_state(&host);
+    assert_eq!(
+        final_state.completion_nudges_used, 0,
+        "execute_resume_turn must use plain StopStage::decide and never apply the completion nudge"
+    );
+    // A wrongly-applied nudge would re-enter the main per-iteration path for
+    // another turn, which writes a second BeforeModel checkpoint (only
+    // execute_prepared_turn does that); the resume path itself never does.
+    assert_eq!(
+        host.checkpoint_kinds()
+            .iter()
+            .filter(|kind| **kind == LoopCheckpointKind::BeforeModel)
+            .count(),
+        1,
+        "resume path must stop immediately instead of re-entering the model stage \
+         for another iteration"
+    );
+}
+
+/// SkipModel sibling of `resume_turn_stop_decision_never_applies_completion_nudge`:
+/// confirms `execute_skip_model_turn` also never applies the completion nudge.
+///
+/// Unlike the resume turn, a SkipModel turn's synthesized `TurnSummary::compaction_only()`
+/// carries `TurnEndKind::CompactionOnly`, which makes `observe_completed_turn` reset
+/// `trailing_no_progress_results` to 0 (that escape only accumulates on
+/// `AfterCapabilityBatch` turns) — so seeding it would prove nothing here. The
+/// diminishing-returns escape (`recent_output_token_counts`) is kind-independent and
+/// untouched by `observe`/`decide`, so it is seeded directly on the initial state,
+/// which is also set up to route straight into `PromptStep::SkipModel` on the very
+/// first iteration (mirroring `prompt_stage_returns_skip_model_when_flag_set`, but
+/// driven through the full executor instead of `PromptStage` alone).
+#[tokio::test]
+async fn skip_model_turn_stop_decision_never_applies_completion_nudge() {
+    let host = MockHost::new(Vec::new()).with_driver_nudges_enabled();
+    let executor = CanonicalAgentLoopExecutor;
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    // Force PromptStage straight into the SkipModel branch on the very first
+    // iteration — no model call or capability batch is needed to reach it.
+    state.post_capability_state.skip_model_this_iteration = true;
+    // Seed 4 low-output-token turns so the diminishing-returns escape trips
+    // deterministically on this turn's stop decision.
+    for _ in 0..4 {
+        state.recent_output_token_counts.push(0);
+    }
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    match exit {
+        LoopExit::Failed(failed) => {
+            assert_eq!(
+                failed.reason_kind,
+                LoopFailureKind::NoProgressDetected,
+                "expected the seeded diminishing-returns window to trip a no-progress stop"
+            );
+        }
+        other => panic!("expected Failed(NoProgressDetected) exit, got {other:?}"),
+    }
+
+    // The only model call must be the exit stage's own best-effort
+    // final-answer-nudge attempt (which fails open: the mock's model script is
+    // exhausted). A wrongly-applied completion nudge would instead re-enter
+    // PromptStage for a real second iteration and call the model again there.
+    assert_eq!(
+        host.model_requests().len(),
+        1,
+        "SkipModel path must stop immediately instead of re-entering the loop for \
+         another iteration"
+    );
+    let final_state = final_staged_state(&host);
+    assert_eq!(
+        final_state.completion_nudges_used, 0,
+        "execute_skip_model_turn must use plain StopStage::decide and never apply the completion nudge"
+    );
+}
+
 #[tokio::test]
 async fn no_progress_nudge_model_failure_falls_back_to_failed_exit() {
     // Gate ON but the nudge's OWN model call fails (non-cancel host error). The
