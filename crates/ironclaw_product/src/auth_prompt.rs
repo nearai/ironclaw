@@ -5,15 +5,36 @@
 //! constructor both the delivery path and the projection layer render
 //! through. Composition consumes these — it must not re-declare them.
 
-use crate::{AuthPromptChallengeKind, AuthPromptView, ProductAdapterError, RedactedString};
+use crate::ChannelConnectionRequirement;
+use crate::{
+    AuthPromptChallengeKind, AuthPromptView, ConnectionPromptContext, ProductAdapterError,
+    RedactedString,
+};
 use async_trait::async_trait;
 use ironclaw_auth::{
     AuthProductError, AuthProviderId, CredentialAccountLabel, OAuthAuthorizationUrl,
 };
+use ironclaw_host_api::PairingPromptView;
 use ironclaw_host_api::{
     InvocationId, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, UserId,
 };
 use ironclaw_turns::{TurnRunId, TurnScope};
+
+/// A host-issued pairing challenge: the minted proof code plus the manifest
+/// connection recipe it belongs to. Carrying both is what lets a product
+/// surface render the pairing panel instead of a generic "unsupported
+/// challenge" fallback.
+#[derive(Debug, Clone)]
+pub struct PairingAuthChallengeView {
+    /// The host-issued proof code, already rendered. Deliberately primitives
+    /// rather than `ChannelPairingIssue`: that type lives in
+    /// `ironclaw_extension_host`, which depends on this crate, so importing it
+    /// would close a dependency cycle.
+    pub code: String,
+    pub deep_link: Option<String>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub connection: ChannelConnectionRequirement,
+}
 
 /// Redacted view of a pending auth challenge used for product auth prompt
 /// enrichment. Contains only data safe to surface over product adapters.
@@ -25,6 +46,7 @@ pub struct AuthChallengeView {
     pub account_label: Option<CredentialAccountLabel>,
     pub authorization_url: Option<OAuthAuthorizationUrl>,
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub pairing: Option<PairingAuthChallengeView>,
 }
 
 impl AuthChallengeView {
@@ -39,9 +61,30 @@ impl AuthChallengeView {
         view.account_label = self.account_label.map(|label| label.as_str().to_string());
         view.authorization_url = self.authorization_url.map(|url| url.as_str().to_string());
         view.expires_at = self.expires_at;
-        // OAuth relay / stored-secret challenges carry no channel-connection
-        // context; that rides only on the credential-requirement fallback path.
-        view.connection = None;
+        if let Some(pairing) = self.pairing {
+            let connection = pairing.connection;
+            view.connection = Some(ConnectionPromptContext {
+                channel: connection.channel.clone(),
+                strategy: Some(connection.strategy.as_str().to_string()),
+                instructions: Some(connection.instructions.clone()),
+                input_placeholder: Some(connection.input_placeholder),
+                submit_label: Some(connection.submit_label),
+                error_message: Some(connection.error_message),
+            });
+            view.pairing = Some(PairingPromptView {
+                channel: connection.channel,
+                display_name: connection.display_name,
+                instructions: connection.instructions,
+                code: pairing.code,
+                deep_link: pairing.deep_link,
+                expires_at: pairing.expires_at,
+            });
+        } else {
+            // OAuth relay and stored-secret challenges carry no channel
+            // connection context.
+            view.connection = None;
+            view.pairing = None;
+        }
         view
     }
 }
@@ -195,9 +238,12 @@ fn auth_prompt_from_credential_requirement(
         // A retired setup kind (legacy persisted record) has no serviceable
         // challenge; keep the generic requirement-derived prompt.
         RuntimeCredentialAccountSetup::Retired => {}
-        // Pairing setups are serviced by the channel pairing surface (code
-        // redemption), not an auth-prompt challenge; keep the generic prompt.
-        RuntimeCredentialAccountSetup::Pairing => {}
+        // A pairing setup IS a serviceable challenge: the product surface
+        // renders the pairing panel. Leaving the kind unset drops the caller
+        // onto the "unsupported challenge" fallback card.
+        RuntimeCredentialAccountSetup::Pairing => {
+            view.challenge_kind = Some(AuthPromptChallengeKind::Pairing);
+        }
     }
     view.provider = Some(provider);
     view

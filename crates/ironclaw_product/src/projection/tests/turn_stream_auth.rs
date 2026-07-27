@@ -41,6 +41,7 @@ impl AuthChallengeProvider for FakeAuthChallengeProvider {
                     .unwrap(),
             ),
             expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(10)),
+            pairing: None,
         }))
     }
 }
@@ -75,6 +76,20 @@ impl AuthChallengeProvider for FakePairingAuthChallengeProvider {
             account_label: None,
             authorization_url: None,
             expires_at: None,
+            pairing: Some(crate::PairingAuthChallengeView {
+                code: "ABCD2345".to_string(),
+                deep_link: Some("https://t.me/fixturebot?start=ABCD2345".to_string()),
+                expires_at: chrono::Utc::now() + chrono::Duration::minutes(15),
+                connection: crate::ChannelConnectionRequirement {
+                    channel: "telegram".to_string(),
+                    display_name: "Telegram".to_string(),
+                    strategy: crate::RebornChannelConnectStrategy::WebGeneratedCode,
+                    instructions: "Send this code to the bot.".to_string(),
+                    input_placeholder: "Paste the code".to_string(),
+                    submit_label: "Connect".to_string(),
+                    error_message: "Pairing failed.".to_string(),
+                },
+            }),
         }))
     }
 }
@@ -170,7 +185,7 @@ async fn product_event_stream_enriches_auth_prompt_through_projection_stream() {
 }
 
 #[tokio::test]
-async fn product_event_stream_does_not_invent_pairing_prompt_context() {
+async fn product_event_stream_projects_pairing_prompt_connection_context() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();
     let agent_id = AgentId::new("webui-events-agent").unwrap();
@@ -248,8 +263,24 @@ async fn product_event_stream_does_not_invent_pairing_prompt_context() {
         Some(AuthPromptChallengeKind::Pairing)
     );
     assert_eq!(prompt.provider.as_deref(), Some("telegram"));
-    assert!(prompt.connection.is_none());
-    assert!(prompt.pairing.is_none());
+    // A pairing challenge MUST carry its manifest connection recipe and the
+    // host-issued code. Without both, the WebUI card router
+    // (`channelConnectionFromGate`) falls through to the "unsupported
+    // challenge" card and the user is told to cancel and retry elsewhere.
+    // #6616 reverted this and rewrote these two lines to assert `is_none()`,
+    // which is why the regression shipped green.
+    let connection = prompt
+        .connection
+        .as_ref()
+        .expect("pairing prompt carries its channel-connection recipe");
+    assert_eq!(connection.channel, "telegram");
+    assert_eq!(connection.strategy.as_deref(), Some("web_generated_code"));
+    let pairing = prompt
+        .pairing
+        .as_ref()
+        .expect("pairing prompt carries the host-issued code");
+    assert_eq!(pairing.code, "ABCD2345");
+    assert_eq!(pairing.channel, "telegram");
 
     let auth_context = events
         .iter()
@@ -267,8 +298,11 @@ async fn product_event_stream_does_not_invent_pairing_prompt_context() {
             _ => None,
         })
         .expect("projected pairing auth context");
-    assert!(auth_context.connection.is_none());
-    assert!(auth_context.pairing.is_none());
+    assert!(
+        auth_context.connection.is_some(),
+        "the projected gate must carry connection context so the card renders"
+    );
+    assert!(auth_context.pairing.is_some());
 }
 
 #[tokio::test]
@@ -628,6 +662,7 @@ async fn product_event_stream_creates_vendor_oauth_prompt_for_runtime_credential
                     .unwrap(),
                 ),
                 expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(10)),
+                pairing: None,
             }))
         }
     }

@@ -282,6 +282,22 @@ pub enum ChannelConnectStrategy {
     OAuth,
 }
 
+impl ChannelConnectStrategy {
+    /// The wire form, identical to the serde representation. Product surfaces
+    /// render the strategy as a string (the connect affordance) and must not
+    /// re-derive it with `format!("{:?}")`, which would emit `WebGeneratedCode`
+    /// where the wire contract is `web_generated_code`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InboundProofCode => "inbound_proof_code",
+            Self::AdminManagedChannels => "admin_managed_channels",
+            Self::WebGeneratedCode => "web_generated_code",
+            Self::QrCode => "qr_code",
+            Self::OAuth => "oauth",
+        }
+    }
+}
+
 /// Structured "the caller must connect this channel" affordance attached to a
 /// channel-extension activation result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -596,6 +612,23 @@ fn validate_optional_ref(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn channel_connect_strategy_as_str_matches_the_serde_wire_form() {
+        for strategy in [
+            ChannelConnectStrategy::InboundProofCode,
+            ChannelConnectStrategy::AdminManagedChannels,
+            ChannelConnectStrategy::WebGeneratedCode,
+            ChannelConnectStrategy::QrCode,
+            ChannelConnectStrategy::OAuth,
+        ] {
+            assert_eq!(
+                serde_json::to_value(strategy).expect("serialize"),
+                serde_json::Value::String(strategy.as_str().to_string()),
+                "as_str must not drift from the serde wire form"
+            );
+        }
+    }
+
     use super::*;
 
     #[test]

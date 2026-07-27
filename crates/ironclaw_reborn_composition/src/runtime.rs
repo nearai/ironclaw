@@ -258,6 +258,8 @@ fn auth_challenge_to_view(
             account_label: None,
             authorization_url: Some(authorization_url.clone()),
             expires_at: Some(*expires_at),
+            // Product-auth OAuth relay: no channel-connection context.
+            pairing: None,
         },
         AuthChallenge::ManualTokenRequired {
             provider,
@@ -270,6 +272,7 @@ fn auth_challenge_to_view(
             account_label: Some(label.clone()),
             authorization_url: None,
             expires_at: Some(*expires_at),
+            pairing: None,
         },
         AuthChallenge::AccountSelectionRequired { .. }
         | AuthChallenge::ReauthorizeRequired { .. }
@@ -279,6 +282,7 @@ fn auth_challenge_to_view(
             account_label: None,
             authorization_url: None,
             expires_at: None,
+            pairing: None,
         },
     }
 }
