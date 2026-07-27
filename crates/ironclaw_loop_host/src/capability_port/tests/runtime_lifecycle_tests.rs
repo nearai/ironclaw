@@ -23,8 +23,8 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
-    CapabilityFailureKind, CapabilityInputRef, CapabilityResumeToken, LoopCapabilityPort,
-    LoopHostMilestoneSink, LoopRequestBatch, LoopRunContext, RegisterProviderToolCallRequest,
+    CapabilityInputRef, CapabilityResumeToken, LoopCapabilityPort, LoopHostMilestoneSink,
+    LoopRequestBatch, LoopRunContext, RegisterProviderToolCallRequest,
 };
 
 #[tokio::test]
@@ -284,7 +284,7 @@ async fn runtime_capability_batch_returns_runtime_unavailable_as_failed_outcome(
             ..
         } if actual == &capability_id
             && provider == &provider_id
-            && reason_kind == &CapabilityFailureKind::Unavailable
+            && reason_kind == &FailureKind::Unavailable
     ));
 }
 
@@ -384,7 +384,7 @@ async fn runtime_capability_batch_continues_after_runtime_failure_outcome() {
             ..
         } if actual == &capability_id
             && provider == &provider_id
-            && reason_kind == &CapabilityFailureKind::Unavailable
+            && reason_kind == &FailureKind::Unavailable
     ));
     assert!(matches!(
         &milestones[3].kind,
@@ -403,10 +403,10 @@ async fn runtime_capability_failed_and_unknown_outcomes_emit_failure_milestones(
         (
             RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure::new(
                 CapabilityId::new("demo.echo").expect("valid capability id"),
-                RuntimeFailureKind::InvalidInput,
+                FailureKind::InputEncode,
                 Some("invalid input".to_string()),
             )),
-            CapabilityFailureKind::InvalidInput,
+            FailureKind::InputEncode,
         ),
         (
             RuntimeCapabilityOutcome::Unknown(RuntimeCapabilityUnknown {
@@ -414,7 +414,10 @@ async fn runtime_capability_failed_and_unknown_outcomes_emit_failure_milestones(
                 kind: "custom_failure".to_string(),
                 message: Some("custom failure".to_string()),
             }),
-            capability_failure_kind("custom_failure").expect("valid custom failure kind"),
+            // Unrecognized legacy open-set tag: the closed vocabulary's total
+            // `from_tag` fallback lands on the non-retryable `Unclassified`
+            // sink.
+            FailureKind::Unclassified,
         ),
     ];
 
@@ -770,7 +773,7 @@ async fn denied_auth_resume_terminalizes_through_runtime_without_dispatch() {
             Ok(RuntimeCapabilityOutcome::Failed(
                 RuntimeCapabilityFailure::new(
                     capability_id.clone(),
-                    RuntimeFailureKind::GateDeclined,
+                    FailureKind::GateDeclined,
                     Some("auth gate denied by user".to_string()),
                 ),
             )),
@@ -853,7 +856,7 @@ async fn denied_auth_resume_terminalizes_through_runtime_without_dispatch() {
         ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityFailed {
             activity_id,
             capability_id: failed_capability_id,
-            reason_kind: CapabilityFailureKind::GateDeclined,
+            reason_kind: FailureKind::GateDeclined,
             ..
         } if *activity_id == ironclaw_turns::CapabilityActivityId::from_uuid(
             expected_invocation_id.as_uuid()
@@ -952,8 +955,13 @@ async fn host_runtime_default_auth_decline_fails_closed_as_unavailable() {
     assert!(matches!(error, HostRuntimeError::Unavailable { .. }));
 }
 
+/// The unified `FailureKind` vocabulary is closed and `from_tag` is total, so
+/// a wild/unsafe unknown-outcome tag no longer aborts the run with an internal
+/// "could not be represented" host error — it lands in the non-retryable
+/// `Unclassified` sink, emits the failure milestone, and returns a
+/// model-visible failed resolution.
 #[tokio::test]
-async fn runtime_capability_unknown_outcome_with_invalid_kind_does_not_emit_failure_milestone() {
+async fn runtime_capability_unknown_outcome_with_wild_kind_maps_to_unclassified_failure() {
     let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
     let provider_id = ExtensionId::new("demo").expect("valid provider id");
     let milestone_sink =
@@ -980,19 +988,29 @@ async fn runtime_capability_unknown_outcome_with_invalid_kind_does_not_emit_fail
     )
     .await;
 
-    let error = invoke_visible_runtime_capability(&port)
+    let outcome = invoke_visible_runtime_capability(&port)
         .await
-        .expect_err("invalid unknown kind is rejected");
+        .expect("wild unknown-outcome kind becomes a model-visible failure");
 
-    assert_eq!(error.kind, AgentLoopHostErrorKind::Internal);
-    let milestones = milestone_sink.milestones();
-    assert_eq!(milestones.len(), 1);
     assert!(matches!(
-        &milestones[0].kind,
-        ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityInvoked {
+        &outcome,
+        Resolution::Done(o)
+            if o.verdict.error_kind() == Some(&FailureKind::Unclassified)
+    ));
+    let milestones = milestone_sink.milestones();
+    assert_eq!(milestones.len(), 2);
+    assert!(matches!(
+        &milestones[1].kind,
+        ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityFailed {
             activity_id: _,
-            capability_id: actual
+            capability_id: actual,
+            provider: Some(provider),
+            runtime: Some(RuntimeKind::FirstParty),
+            reason_kind,
+            ..
         } if actual == &capability_id
+            && provider == &provider_id
+            && reason_kind == &FailureKind::Unclassified
     ));
 }
 
@@ -1040,7 +1058,7 @@ async fn runtime_capability_unavailable_returns_failed_outcome_and_emits_failure
             ..
         } if actual == &capability_id
             && provider == &provider_id
-            && reason_kind == &CapabilityFailureKind::Unavailable
+            && reason_kind == &FailureKind::Unavailable
     ));
 }
 
@@ -1084,7 +1102,7 @@ async fn runtime_capability_invalid_request_preserves_host_error_and_emits_failu
             ..
         } if actual == &capability_id
             && provider == &provider_id
-            && reason_kind.as_str() == AgentLoopHostErrorKind::InvalidInvocation.as_str()
+            && reason_kind == &FailureKind::InputEncode
     ));
 }
 
@@ -1505,7 +1523,7 @@ async fn approval_resume_host_error_returns_failed_outcome_and_emits_failure_mil
             ..
         } if actual == &capability_id
             && provider == &provider_id
-            && reason_kind == &CapabilityFailureKind::Unavailable
+            && reason_kind == &FailureKind::Unavailable
     ));
 }
 

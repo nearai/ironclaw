@@ -11,8 +11,8 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_host_api::{
-    CapabilityId, InvocationId, LoopRef, ProviderToolName, Resolution, ResolutionBatch,
-    RuntimeKind, Suspension, ThreadId,
+    CapabilityId, FailureKind, InvocationId, LoopRef, ProviderToolName, Resolution,
+    ResolutionBatch, RuntimeKind, Suspension, ThreadId,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, SessionThreadService,
@@ -25,12 +25,11 @@ use ironclaw_turns::{
     TurnError, TurnErrorCategory, TurnRunId, TurnScope, TurnSpawnTreePort, TurnSpawnTreeStateStore,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate,
-        CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailureKind,
-        CapabilityInputRef, ConcurrencyHint, LoopCapabilityPort, LoopRequest, LoopRequestBatch,
-        LoopRunContext, LoopSafeSummary, ProviderToolCall, ProviderToolCallCapabilityIds,
-        ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
-        VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
-        sanitize_model_visible_text,
+        CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityInputRef, ConcurrencyHint,
+        LoopCapabilityPort, LoopRequest, LoopRequestBatch, LoopRunContext, LoopSafeSummary,
+        ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReplay,
+        ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
+        VisibleCapabilitySurface, resolution, sanitize_model_visible_text,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -964,7 +963,7 @@ impl SubagentSpawnCapabilityPort {
             .await
         {
             return Ok(resolution::failed(
-                CapabilityFailureKind::Transient,
+                FailureKind::Transient,
                 format!("subagent spawn scope recovery in progress: {error}"),
                 None,
             ));
@@ -1166,11 +1165,15 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
         request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         if self.is_spawn(&request.capability_id) {
-            let args = self
+            let args = match self
                 .deps
                 .spawn_input_codec
                 .decode(&self.run_context, &request.input_ref)
-                .await?;
+                .await
+            {
+                Ok(args) => args,
+                Err(error) => return spawn_input_decode_outcome(error),
+            };
             if let Some(resolution) = self.authorize_spawn(&request).await? {
                 return Ok(resolution);
             }
@@ -1190,18 +1193,28 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
         // from gate coalescing; otherwise the gate would be created and never
         // registered, wasting a TurnRunId.
         let mut spawn_args: HashMap<usize, SpawnSubagentArgs> = HashMap::new();
+        let mut spawn_input_denials: HashMap<usize, Resolution> = HashMap::new();
         let mut blocking_count = 0_usize;
         for (idx, invocation) in request.invocations.iter().enumerate() {
             if !self.is_spawn(&invocation.capability_id) {
                 continue;
             }
-            let args = self
+            match self
                 .deps
                 .spawn_input_codec
                 .decode(&self.run_context, &invocation.input_ref)
-                .await?;
-            blocking_count += 1;
-            spawn_args.insert(idx, args);
+                .await
+            {
+                Ok(args) => {
+                    blocking_count += 1;
+                    spawn_args.insert(idx, args);
+                }
+                // Model-supplied input problem: park the per-invocation denial
+                // for the main loop; genuine host faults still fail the batch.
+                Err(error) => {
+                    spawn_input_denials.insert(idx, spawn_input_decode_outcome(error)?);
+                }
+            }
         }
         let batch_blocking_gate = if blocking_count > 1 {
             Some(
@@ -1215,6 +1228,11 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
         while index < request.invocations.len() {
             let invocation = &request.invocations[index];
             if self.is_spawn(&invocation.capability_id) {
+                if let Some(denial) = spawn_input_denials.remove(&index) {
+                    resolutions.push(denial);
+                    index += 1;
+                    continue;
+                }
                 let outcome = match self.authorize_spawn(invocation).await {
                     Ok(Some(outcome)) => outcome,
                     Ok(None) => {
@@ -1415,6 +1433,29 @@ fn spawn_rejected(reason: &'static str) -> Resolution {
         format!("subagent spawn rejected: {reason}"),
     )
     .resolution
+}
+
+/// Classify a spawn-input decode failure onto its loop channel.
+///
+/// The spawn-args codec decodes MODEL-SUPPLIED JSON, so an
+/// `InvalidInvocation` failure (malformed JSON, schema-violating wire args,
+/// model-correctable rejections like requesting the disabled background mode)
+/// is the model's own mistake: surface it on the `spawn_rejected` `Denied`
+/// channel with the codec's sanitized summary so the model can correct the
+/// call. Propagating it as `Err(AgentLoopHostError)` instead lets the
+/// executor map it to a run-ending `HostUnavailable`, killing the run on
+/// malformed model output. Genuine host faults (input-store outages and every
+/// other error kind) still propagate as errors.
+fn spawn_input_decode_outcome(error: AgentLoopHostError) -> Result<Resolution, AgentLoopHostError> {
+    if error.kind != AgentLoopHostErrorKind::InvalidInvocation {
+        return Err(error);
+    }
+    Ok(resolution::denied(
+        CapabilityDeniedReasonKind::unknown("invalid_spawn_input")
+            .unwrap_or(CapabilityDeniedReasonKind::EmptySurface),
+        error.safe_summary,
+    )
+    .resolution)
 }
 
 fn background_subagents_disabled() -> AgentLoopHostError {

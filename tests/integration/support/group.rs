@@ -277,7 +277,9 @@ impl GroupSharedStorage {
                 scope.user_id = arc.user_id().clone();
                 Some(scope)
             }
-            GroupCapability::Recording | GroupCapability::RecordingNoProgress => None,
+            GroupCapability::Recording
+            | GroupCapability::RecordingNoProgress
+            | GroupCapability::RecordingRecoverablePortError => None,
         }
     }
 
@@ -296,7 +298,9 @@ impl GroupSharedStorage {
                 scope.user_id = owner.clone();
                 Some(scope)
             }
-            GroupCapability::Recording | GroupCapability::RecordingNoProgress => None,
+            GroupCapability::Recording
+            | GroupCapability::RecordingNoProgress
+            | GroupCapability::RecordingRecoverablePortError => None,
         }
     }
 }
@@ -314,6 +318,10 @@ pub(crate) enum GroupCapability {
     Recording,
     /// Recording echo whose results deliberately report `NoChange`.
     RecordingNoProgress,
+    /// Recording echo whose port returns a caller-shaped `InvalidInvocation`
+    /// error instead of a resolution, projecting to `FailureKind::InputEncode`
+    /// (#6284 capability-stage contract).
+    RecordingRecoverablePortError,
     /// Real first-party or MCP host runtime, shared across all threads.
     /// All approval/auto-approve/credential/memory state is common because the
     /// `Arc` is cloned per thread.
@@ -334,6 +342,9 @@ impl GroupCapability {
             Self::RecordingNoProgress => {
                 HarnessCapabilityMode::Recording(RecordingTestCapabilityPort::no_progress())
             }
+            Self::RecordingRecoverablePortError => HarnessCapabilityMode::Recording(
+                RecordingTestCapabilityPort::recoverable_port_error(),
+            ),
             Self::HostRuntime(arc) => HarnessCapabilityMode::HostRuntime(Arc::clone(arc)),
         }
     }
@@ -348,7 +359,9 @@ impl GroupCapability {
     ) -> Option<Arc<dyn ironclaw_run_state::GateRecordStorePort>> {
         match self {
             Self::HostRuntime(harness) => harness.gate_record_store(),
-            Self::Recording | Self::RecordingNoProgress => None,
+            Self::Recording | Self::RecordingNoProgress | Self::RecordingRecoverablePortError => {
+                None
+            }
         }
     }
 
@@ -365,7 +378,7 @@ impl GroupCapability {
     ) -> HarnessResult<()> {
         let harness = match self {
             Self::HostRuntime(arc) => arc,
-            Self::Recording | Self::RecordingNoProgress => {
+            Self::Recording | Self::RecordingNoProgress | Self::RecordingRecoverablePortError => {
                 return Err("no host-runtime capability backend for durable reopen".into());
             }
         };
@@ -563,7 +576,9 @@ impl RebornIntegrationGroup {
     pub fn capability_harness(&self) -> Option<&Arc<HostRuntimeCapabilityHarness>> {
         match &self.shared.capability {
             GroupCapability::HostRuntime(arc) => Some(arc),
-            GroupCapability::Recording | GroupCapability::RecordingNoProgress => None,
+            GroupCapability::Recording
+            | GroupCapability::RecordingNoProgress
+            | GroupCapability::RecordingRecoverablePortError => None,
         }
     }
 
@@ -1420,7 +1435,9 @@ impl<'g> RebornThreadBuilder<'g> {
         if shared.real_gate_dispatch_services {
             let harness = match &shared.capability {
                 GroupCapability::HostRuntime(arc) => arc,
-                GroupCapability::Recording | GroupCapability::RecordingNoProgress => {
+                GroupCapability::Recording
+                | GroupCapability::RecordingNoProgress
+                | GroupCapability::RecordingRecoverablePortError => {
                     return Err(
                         "with_real_gate_dispatch_services requires a HostRuntime capability backend"
                             .into(),

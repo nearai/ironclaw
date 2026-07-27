@@ -351,6 +351,14 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Every capability dispatch returns a caller-shaped port error
+    /// (`InvalidInvocation`). #6284: such errors surface model-visibly and the
+    /// run continues; only genuine host faults still end it.
+    pub fn with_recoverable_port_error_for_test(mut self) -> Self {
+        self.capability = RebornCapabilityBackend::RecoverablePortErrorEcho;
+        self
+    }
+
     /// Replace the default echo with a deterministic no-progress echo. This is
     /// a test seam; the same canonical stop strategy and runtime wiring run.
     pub fn with_no_progress_echo_for_test(mut self) -> Self {
@@ -1770,7 +1778,9 @@ impl RebornIntegrationHarness {
         }
         let harness = match &self._shared.capability {
             GroupCapability::HostRuntime(arc) => arc,
-            GroupCapability::Recording | GroupCapability::RecordingNoProgress => {
+            GroupCapability::Recording
+            | GroupCapability::RecordingNoProgress
+            | GroupCapability::RecordingRecoverablePortError => {
                 return Err(
                     "no host-runtime capability backend to seed a github credential account".into(),
                 );
@@ -1815,9 +1825,31 @@ impl RebornIntegrationHarness {
         label: &str,
         provider_scopes: &[&str],
     ) -> HarnessResult<()> {
+        self.seed_capability_credential_account_with_token(
+            provider,
+            label,
+            provider_scopes,
+            &format!("itest-{provider}-token"),
+        )
+        .await
+    }
+
+    /// [`Self::seed_capability_credential_account`] with caller-chosen token
+    /// material, so a later credential can be told apart from this one on the
+    /// wire. See `seed_credential_account_with_token` for why identical
+    /// material would make a re-auth assertion unable to fail.
+    pub async fn seed_capability_credential_account_with_token(
+        &self,
+        provider: &str,
+        label: &str,
+        provider_scopes: &[&str],
+        token: &str,
+    ) -> HarnessResult<()> {
         let harness = match &self._shared.capability {
             GroupCapability::HostRuntime(arc) => arc,
-            GroupCapability::Recording | GroupCapability::RecordingNoProgress => {
+            GroupCapability::Recording
+            | GroupCapability::RecordingNoProgress
+            | GroupCapability::RecordingRecoverablePortError => {
                 return Err(
                     "no host-runtime capability backend to seed a credential account".into(),
                 );
@@ -1832,7 +1864,7 @@ impl RebornIntegrationHarness {
             .unwrap_or_else(|| self.binding.actor_user_id.clone());
         let scope = self.run_resource_scope_for_user(dispatch_user);
         harness
-            .seed_credential_account_with_material(&scope, provider, label, provider_scopes)
+            .seed_credential_account_with_token(&scope, provider, label, provider_scopes, token)
             .await
     }
 
@@ -1844,7 +1876,9 @@ impl RebornIntegrationHarness {
     pub async fn revoke_capability_credential_accounts(&self, provider: &str) -> HarnessResult<()> {
         let harness = match &self._shared.capability {
             GroupCapability::HostRuntime(arc) => arc,
-            GroupCapability::Recording | GroupCapability::RecordingNoProgress => {
+            GroupCapability::Recording
+            | GroupCapability::RecordingNoProgress
+            | GroupCapability::RecordingRecoverablePortError => {
                 return Err(
                     "no host-runtime capability backend to revoke credential accounts".into(),
                 );

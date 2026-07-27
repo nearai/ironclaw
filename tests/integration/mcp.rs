@@ -249,7 +249,7 @@ async fn assert_mcp_tool_called_fails_when_no_mcp_call_ran() {
 }
 
 /// Error path — MCP `tools/call` returns a JSON-RPC `error` object. The client
-/// surfaces this as `Failed{Backend}` (a recoverable, model-visible tool
+/// surfaces this as `Failed{Client}` (a recoverable, model-visible tool
 /// error), so the run continues to completion rather than dying with
 /// `driver_unavailable`. Distinct wire path from the 5xx case below: this trips
 /// the client's JSON-RPC error-field guard, not its HTTP status gate.
@@ -277,19 +277,19 @@ async fn mcp_tool_call_error_cause_reaches_next_model_request() {
     h.assert_mcp_tool_called("search")
         .await
         .expect("MCP tool was invoked before the error");
-    h.assert_tool_error(ToolErrorClass::Failed, "backend")
+    h.assert_tool_error(ToolErrorClass::Failed, "client")
         .await
         .expect("JSON-RPC error surfaced as a model-visible Failed tool error");
     h.assert_model_request_contains("distinctive-mcp-cause-5965")
         .await
-        .expect("MCP backend cause reached the next captured model request");
+        .expect("MCP client cause reached the next captured model request");
     h.assert_reply_contains("done")
         .await
         .expect("run recovered and finalized (not terminal driver_unavailable)");
 }
 
 /// Error path — MCP server returns HTTP 5xx on the tool call. The client
-/// surfaces this as `Failed{Backend}` (recoverable, model-visible), and the run
+/// surfaces this as `Failed{Client}` (recoverable, model-visible), and the run
 /// completes. Distinct wire path from the JSON-RPC-error case above: this trips
 /// the client's HTTP status gate, not its JSON-RPC error-field guard.
 #[tokio::test]
@@ -316,7 +316,7 @@ async fn mcp_server_5xx_surfaces_recoverable_failed() {
     h.assert_mcp_tool_called("search")
         .await
         .expect("MCP tool call reached the server before the 5xx");
-    h.assert_tool_error(ToolErrorClass::Failed, "backend")
+    h.assert_tool_error(ToolErrorClass::Failed, "client")
         .await
         .expect("server 5xx surfaced as a model-visible Failed tool error");
     h.assert_reply_contains("done")

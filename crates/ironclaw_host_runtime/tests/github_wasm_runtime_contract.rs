@@ -6,6 +6,7 @@ use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_filesystem::InMemoryBackend;
+use ironclaw_host_api::FailureKind;
 use ironclaw_host_api::{
     AgentId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet,
     CorrelationId, CredentialStageError, Decision, EffectKind, ExecutionContext, ExtensionId,
@@ -17,8 +18,8 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome,
     RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
-    RuntimeCredentialAccountResolver, RuntimeFailureKind, RuntimeInvocation,
-    default_host_api_contract_registry, default_host_port_catalog,
+    RuntimeCredentialAccountResolver, RuntimeInvocation, default_host_api_contract_registry,
+    default_host_port_catalog,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -832,7 +833,7 @@ async fn host_runtime_services_maps_github_wasm_input_errors_to_invalid_input() 
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::InvalidInput);
+    assert_failed_outcome(outcome, FailureKind::InputEncode);
     assert!(
         network.requests().is_empty(),
         "guest validation failures must block before HTTP egress"
@@ -874,7 +875,7 @@ async fn host_runtime_services_maps_github_search_validation_status_to_invalid_i
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::InvalidInput);
+    assert_failed_outcome(outcome, FailureKind::InputEncode);
     assert_eq!(network.requests().len(), 1);
 }
 
@@ -914,7 +915,7 @@ async fn host_runtime_services_keeps_github_non_validation_422_as_operation_fail
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::OperationFailed);
+    assert_failed_outcome(outcome, FailureKind::OperationFailed);
     assert_eq!(network.requests().len(), 1);
 }
 
@@ -1775,7 +1776,7 @@ fn bundled_google_drive_wasm_rejects_invalid_context_derived_dispatch_inputs() {
     );
 }
 
-fn assert_failed_outcome(outcome: RuntimeCapabilityOutcome, expected_kind: RuntimeFailureKind) {
+fn assert_failed_outcome(outcome: RuntimeCapabilityOutcome, expected_kind: FailureKind) {
     match outcome {
         RuntimeCapabilityOutcome::Failed(failure) => assert_eq!(failure.kind, expected_kind),
         other => panic!("expected failed outcome {expected_kind:?}, got {other:?}"),
@@ -3031,7 +3032,7 @@ async fn slack_get_conversation_info_rejects_missing_conversation_identity() {
     };
     assert_eq!(
         failure.kind,
-        RuntimeFailureKind::OperationFailed,
+        FailureKind::OperationFailed,
         "malformed exact lookup must fail instead of returning an empty conversation: {failure:?}"
     );
 }
@@ -3067,7 +3068,7 @@ async fn slack_get_conversation_info_rejects_dm_without_counterpart() {
     };
     assert_eq!(
         failure.kind,
-        RuntimeFailureKind::OperationFailed,
+        FailureKind::OperationFailed,
         "a DM without its authoritative counterpart must fail: {failure:?}"
     );
 }
@@ -3532,7 +3533,7 @@ async fn slack_channel_not_found_surfaces_code_in_model_visible_failure() {
     };
     assert_eq!(
         failure.kind,
-        RuntimeFailureKind::InvalidInput,
+        FailureKind::InputEncode,
         "channel_not_found is a model-fixable input error: {failure:?}"
     );
     let message = failure.message.as_deref().unwrap_or_default();

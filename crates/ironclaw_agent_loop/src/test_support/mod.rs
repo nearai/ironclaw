@@ -11,29 +11,28 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    CapabilityId, Resolution, ResolutionBatch, RuntimeKind, TenantId, ThreadId,
+    CapabilityId, FailureKind, Resolution, ResolutionBatch, RuntimeKind, TenantId, ThreadId,
 };
 use ironclaw_turns::{
     AgentLoopDriverDescriptor, LoopFailureKind, LoopGateRef, LoopMessageRef, LoopResultRef,
     RunProfileId, RunProfileVersion, TurnCheckpointId, TurnId, TurnRunId, TurnScope,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, AssistantReply,
-        CancellationPolicy, CapabilityCallCandidate, CapabilityDescriptorView,
-        CapabilityFailureKind, CapabilityInputRef, CapabilityProgress, CapabilitySurfaceProfileId,
-        CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass,
-        ConcurrencyHint, ContentDigest, ContextProfileId, FinalizeAssistantMessage,
-        LoopCancellationPort, LoopCancellationSignal, LoopCheckpointKind, LoopCheckpointRequest,
-        LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome, LoopCompactionRequest,
-        LoopCompactionResponse, LoopContextBundle, LoopContextCompactionMetadata,
-        LoopContextRequest, LoopDriverId, LoopInput, LoopInputAck, LoopInputAckToken,
-        LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopModelMessage, LoopModelRequest,
-        LoopModelResponse, LoopProgressEvent, LoopPromptBundle, LoopPromptBundleRef,
-        LoopPromptBundleRequest, LoopRequest, LoopRequestBatch, LoopRunContext, LoopRunInfoPort,
-        ModelProfileId, ModelStreamChunk, ParentLoopOutput, ProviderToolCallReference,
-        RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier,
-        RunClassId, RunProfileFingerprint, RuntimeProfileConstraints, SchedulingClass,
-        StageCheckpointPayloadRequest, SteeringPolicy, VisibleCapabilityRequest,
-        VisibleCapabilitySurface, resolution,
+        CancellationPolicy, CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInputRef,
+        CapabilityProgress, CapabilitySurfaceProfileId, CapabilitySurfaceVersion, CheckpointPolicy,
+        CheckpointSchemaId, ConcurrencyClass, ConcurrencyHint, ContentDigest, ContextProfileId,
+        FinalizeAssistantMessage, LoopCancellationPort, LoopCancellationSignal, LoopCheckpointKind,
+        LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome,
+        LoopCompactionRequest, LoopCompactionResponse, LoopContextBundle,
+        LoopContextCompactionMetadata, LoopContextRequest, LoopDriverId, LoopInput, LoopInputAck,
+        LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopModelMessage,
+        LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopPromptBundle,
+        LoopPromptBundleRef, LoopPromptBundleRequest, LoopRequest, LoopRequestBatch,
+        LoopRunContext, LoopRunInfoPort, ModelProfileId, ModelStreamChunk, ParentLoopOutput,
+        ProviderToolCallReference, RedactedRunProfileProvenance, ResolvedRunProfile,
+        ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
+        RuntimeProfileConstraints, SchedulingClass, StageCheckpointPayloadRequest, SteeringPolicy,
+        VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
     },
 };
 
@@ -529,7 +528,7 @@ pub enum ScriptedCapabilityOutcome {
     /// Failed result.
     Failed {
         /// Error kind string consumed by the executor classifier.
-        error_kind: CapabilityFailureKind,
+        error_kind: FailureKind,
     },
 }
 
@@ -1214,30 +1213,12 @@ fn checkpoint_kind_from_host(kind: LoopCheckpointKind) -> CheckpointKind {
     }
 }
 
-fn scripted_failure_kind(kind: &str) -> CapabilityFailureKind {
+fn scripted_failure_kind(kind: &str) -> FailureKind {
     match kind {
-        "authorization" => CapabilityFailureKind::Authorization,
-        "backend" => CapabilityFailureKind::Backend,
-        "cancelled" => CapabilityFailureKind::Cancelled,
-        "dispatcher" => CapabilityFailureKind::Dispatcher,
-        "gate_declined" => CapabilityFailureKind::GateDeclined,
-        "input_invalid" | "invalid_input" => CapabilityFailureKind::InvalidInput,
-        "invalid_output" => CapabilityFailureKind::InvalidOutput,
-        "missing_runtime" => CapabilityFailureKind::MissingRuntime,
-        "network" => CapabilityFailureKind::Network,
-        "operation_failed" => CapabilityFailureKind::OperationFailed,
-        "output_too_large" => CapabilityFailureKind::OutputTooLarge,
-        "policy_denied" => CapabilityFailureKind::PolicyDenied,
-        "process" => CapabilityFailureKind::Process,
-        "resource" => CapabilityFailureKind::Resource,
-        "transient" => CapabilityFailureKind::Transient,
-        "unavailable" => CapabilityFailureKind::Unavailable,
-        "internal" => CapabilityFailureKind::Internal,
-        "permanent" => CapabilityFailureKind::Permanent,
-        other => match CapabilityFailureKind::unknown(other.to_string()) {
-            Ok(kind) => kind,
-            Err(_) => CapabilityFailureKind::Permanent,
-        },
+        // Historical scripted alias that predates the unified tag set.
+        "input_invalid" => FailureKind::InputEncode,
+        // Total over every tag (historical aliases included).
+        other => FailureKind::from_tag(other),
     }
 }
 

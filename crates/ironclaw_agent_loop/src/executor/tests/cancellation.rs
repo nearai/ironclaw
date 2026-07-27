@@ -1,11 +1,11 @@
 use super::{
     AgentLoopExecutor, AgentLoopExecutorError, AgentLoopHostError, AgentLoopHostErrorKind,
-    CanonicalAgentLoopExecutor, CapabilityFailureKind, CheckpointKind, HostStage,
-    LoopCancelReasonKind, LoopCancelledReasonKind, LoopCheckpointKind, LoopExecutionState,
-    LoopExit, LoopGateRef, LoopInput, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
-    LoopInterruptKind, LoopResultRef, LoopRunInfoPort, LoopSafeSummary, MockHost, calls_response,
-    family_with_drain, final_staged_state, input_ack, input_cursor, message_ref, reply_response,
-    resolution, surface_version,
+    CanonicalAgentLoopExecutor, CheckpointKind, FailureKind, HostStage, LoopCancelReasonKind,
+    LoopCancelledReasonKind, LoopCheckpointKind, LoopExecutionState, LoopExit, LoopGateRef,
+    LoopInput, LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInterruptKind,
+    LoopResultRef, LoopRunInfoPort, LoopSafeSummary, MockHost, calls_response, family_with_drain,
+    final_staged_state, input_ack, input_cursor, message_ref, reply_response, resolution,
+    surface_version,
 };
 
 #[tokio::test]
@@ -541,7 +541,7 @@ async fn capability_cancelled_returns_cancelled_exit_without_retry() {
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
         ironclaw_host_api::ResolutionBatch {
             resolutions: vec![resolution::failed(
-                CapabilityFailureKind::Cancelled,
+                FailureKind::Cancelled,
                 "capability cancelled".to_string(),
                 None,
             )],

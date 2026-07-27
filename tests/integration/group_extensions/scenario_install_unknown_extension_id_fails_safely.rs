@@ -9,7 +9,7 @@
 //! production. The one reachable arm is an unknown `extension_id`:
 //! `catalog.resolve` returns `InvalidBindingRequest`, mapped by
 //! `extension_lifecycle_capabilities.rs::lifecycle_error` to
-//! `RuntimeDispatchErrorKind::InputEncode` — the `"invalid_input"` reason token,
+//! `RuntimeDispatchErrorKind::InputEncode` — the `"input_encode"` reason token,
 //! a `Failed` (not `Denied`) outcome distinct from Scenario 1's success path.
 //!
 //! Phase 2 pins the catalog-disclosure half of the same arm: install resolves
@@ -41,12 +41,12 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 
     // Proved as a *class* (not a needle-prefix convention): the same reason
     // string could in principle render under either class.
-    h.assert_tool_error(ToolErrorClass::Failed, "invalid_input")
+    h.assert_tool_error(ToolErrorClass::Failed, "input_encode")
         .await?;
 
     // Discriminating negative arm: the same reason token under the OTHER class
     // must be absent, proving the class argument is load-bearing here.
-    h.assert_no_tool_error(ToolErrorClass::Denied, "invalid_input")
+    h.assert_no_tool_error(ToolErrorClass::Denied, "input_encode")
         .await?;
 
     model_chosen_extension_id_is_not_reflected_by_catalog_error(g).await

@@ -6,7 +6,7 @@
 //! Covers the reachable model-visible routes: `targets_list` happy path (its
 //! only reachable route — every service error is `driver_unavailable`);
 //! `target_set` happy path; settings-`Deny` → `Failed{policy_denied}`; service
-//! `NotFound` → `Failed{invalid_input}`; approval gate `Ask` → approve applies
+//! `NotFound` → `Failed{input_encode}`; approval gate `Ask` → approve applies
 //! the preference / deny leaves it unchanged.
 //!
 //! Read-back through the SAME service double (`recorded_set_target_ids`) proves
@@ -153,7 +153,7 @@ async fn target_set_capability_applies_preference_through_service() {
 }
 
 #[tokio::test]
-async fn target_set_unknown_target_routes_to_invalid_input() {
+async fn target_set_unknown_target_routes_to_input_encode() {
     let group = RebornIntegrationGroup::outbound_target_tools()
         .await
         .expect("outbound-target-tools group builds");
@@ -180,9 +180,9 @@ async fn target_set_unknown_target_routes_to_invalid_input() {
         .await
         .expect("target_set dispatched through the synthetic-capability port");
     harness
-        .assert_tool_error(ToolErrorClass::Failed, "invalid_input")
+        .assert_tool_error(ToolErrorClass::Failed, "input_encode")
         .await
-        .expect("an unknown target surfaces as Failed(InvalidInput)");
+        .expect("an unknown target surfaces as Failed(InputEncode)");
 }
 
 #[test]
