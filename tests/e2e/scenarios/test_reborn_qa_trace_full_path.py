@@ -1471,6 +1471,7 @@ async def _replay_qa_journey_provider_leg(
     }
 
 
+@pytest.mark.shared_world
 async def test_mutating_qa_journeys_replay_in_reverse_against_shared_provider_world(
     reborn_qa_emulate_runtime,
     resettable_emulate_provider_world,
