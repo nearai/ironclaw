@@ -18,6 +18,11 @@ from provider_capability_inventory import (
     PROVIDER_WIRE_PREFIXES,
     capability_id_to_wire_name,
 )
+from mock_llm import (
+    _capture_trace_tool_call_id_aliases,
+    _resolve_trace_result_bindings,
+    _trace_tool_results_with_recorded_ids,
+)
 
 pytest_plugins = ["reborn_webui_harness"]
 
@@ -39,6 +44,345 @@ def _model_cases() -> list[str]:
 
 
 MODEL_CASES = _model_cases()
+
+
+def test_exact_trace_result_binding_uses_only_the_requested_call():
+    arguments = {
+        "document_id": {
+            "$trace_result": {
+                "tool_call_id": "call_create",
+                "pointer": "/document/documentId",
+            }
+        }
+    }
+    observed = [
+        {
+            "tool_call_id": "call_create",
+            "content": {"document": {"documentId": "fresh-document"}},
+        },
+        {
+            "tool_call_id": "call_similar",
+            "content": {"document": {"documentId": "wrong-document"}},
+        },
+    ]
+
+    assert _resolve_trace_result_bindings(arguments, observed) == {
+        "document_id": "fresh-document"
+    }
+
+
+def test_exact_trace_result_binding_does_not_guess_missing_calls():
+    marker = {
+        "$trace_result": {
+            "tool_call_id": "call_missing",
+            "pointer": "/document/documentId",
+        }
+    }
+    observed = [
+        {
+            "tool_call_id": "call_similar",
+            "content": {"document": {"documentId": "wrong-document"}},
+        }
+    ]
+
+    with pytest.raises(ValueError, match="no tool call with id"):
+        _resolve_trace_result_bindings(marker, observed)
+
+
+def test_exact_trace_result_binding_rejects_duplicate_observed_ids():
+    marker = {
+        "$trace_result": {
+            "tool_call_id": "call_create",
+            "pointer": "/document/documentId",
+        }
+    }
+    observed = [
+        {
+            "tool_call_id": "call_create",
+            "content": {"document": {"documentId": "first-document"}},
+        },
+        {
+            "tool_call_id": "call_create",
+            "content": {"document": {"documentId": "second-document"}},
+        },
+    ]
+
+    with pytest.raises(ValueError, match="multiple tool results with id"):
+        _resolve_trace_result_bindings(marker, observed)
+
+
+def test_exact_trace_result_binding_uses_results_from_prior_user_turns():
+    marker = {
+        "$trace_result": {
+            "tool_call_id": "call_create",
+            "pointer": "/document/documentId",
+        }
+    }
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "runtime_create",
+                    "function": {
+                        "name": "google_docs__create_document",
+                        "arguments": json.dumps({"title": "first turn"}),
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "runtime_create",
+            "content": json.dumps(
+                {"document": {"documentId": "fresh-document"}}
+            ),
+        },
+        {"role": "user", "content": "Now read that document"},
+    ]
+    state = {
+        "tool_call_id_aliases": {"call_create": "runtime_create"},
+    }
+
+    observed = _trace_tool_results_with_recorded_ids(state, messages)
+
+    assert _resolve_trace_result_bindings(marker, observed) == "fresh-document"
+
+
+def test_exact_trace_result_binding_rejects_paged_evidence_preview():
+    marker = {
+        "$trace_result": {
+            "tool_call_id": "call_create",
+            "pointer": "/detail/preview",
+        }
+    }
+    observed = [
+        {
+            "tool_call_id": "call_create",
+            "content": {
+                "schema_version": 1,
+                "status": "success",
+                "trust": "provider",
+                "detail": {
+                    "byte_len": 48,
+                    "total_bytes": 48,
+                    "next_offset": 48,
+                    "preview": json.dumps(
+                        {"document": {"documentId": "partial-document"}}
+                    ),
+                },
+            },
+        }
+    ]
+
+    with pytest.raises(ValueError, match="has no JSON Pointer"):
+        _resolve_trace_result_bindings(marker, observed)
+
+
+def test_exact_trace_result_binding_unwraps_complete_preview_and_pointer_escapes():
+    preview = json.dumps({"files": [{"a/b~c": "escaped-hit"}]})
+    marker = {
+        "$trace_result": {
+            "tool_call_id": "call_list",
+            "pointer": "/files/0/a~1b~0c",
+        }
+    }
+    observed = [
+        {
+            "tool_call_id": "call_list",
+            "content": {
+                "schema_version": 1,
+                "status": "success",
+                "trust": "provider",
+                "detail": {
+                    "byte_len": len(preview),
+                    "total_bytes": len(preview),
+                    "preview": preview,
+                },
+            },
+        }
+    ]
+
+    assert _resolve_trace_result_bindings(marker, observed) == "escaped-hit"
+
+
+def test_trace_aliasing_rejects_indistinguishable_parallel_calls():
+    state = {
+        "pending_tool_calls": [
+            {
+                "id": "call_first",
+                "name": "google-docs__create_document",
+                "arguments": {"title": "same"},
+            },
+            {
+                "id": "call_second",
+                "name": "google-docs__create_document",
+                "arguments": {"title": "same"},
+            },
+        ],
+        "tool_call_id_aliases": {},
+    }
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "runtime_second",
+                    "function": {
+                        "name": "google_docs__create_document",
+                        "arguments": json.dumps({"title": "same"}),
+                    },
+                },
+                {
+                    "id": "runtime_first",
+                    "function": {
+                        "name": "google_docs__create_document",
+                        "arguments": json.dumps({"title": "same"}),
+                    },
+                },
+            ],
+        }
+    ]
+
+    with pytest.raises(ValueError, match="ambiguous trace tool-call aliases"):
+        _capture_trace_tool_call_id_aliases(state, messages)
+
+
+def test_trace_aliasing_matches_reordered_calls_by_arguments():
+    state = {
+        "pending_tool_calls": [
+            {
+                "id": "call_wanted",
+                "name": "google-docs__create_document",
+                "arguments": {"title": "wanted"},
+            },
+            {
+                "id": "call_other",
+                "name": "google-docs__create_document",
+                "arguments": {"title": "other"},
+            },
+        ],
+        "tool_call_id_aliases": {},
+    }
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "runtime_other",
+                    "function": {
+                        "name": "google_docs__create_document",
+                        "arguments": json.dumps({"title": "other"}),
+                    },
+                },
+                {
+                    "id": "runtime_wanted",
+                    "function": {
+                        "name": "google_docs__create_document",
+                        "arguments": json.dumps({"title": "wanted"}),
+                    },
+                },
+            ],
+        }
+    ]
+
+    _capture_trace_tool_call_id_aliases(state, messages)
+
+    assert state["tool_call_id_aliases"] == {
+        "call_wanted": "runtime_wanted",
+        "call_other": "runtime_other",
+    }
+
+
+def test_trace_aliasing_discards_mismatched_pending_batch():
+    state = {
+        "pending_tool_calls": [
+            {
+                "id": "call_pending",
+                "name": "google-docs__create_document",
+                "arguments": {},
+            }
+        ],
+        "tool_call_id_aliases": {},
+    }
+
+    with pytest.raises(ValueError, match="alias count mismatch"):
+        _capture_trace_tool_call_id_aliases(state, [])
+
+    assert state["pending_tool_calls"] == []
+
+
+async def test_trace_install_rejects_missing_tool_call_id(mock_llm_server):
+    trace = {
+        "steps": [
+            {"response": {"type": "user_input", "content": "create"}},
+            {
+                "response": {
+                    "type": "tool_calls",
+                    "tool_calls": [
+                        {
+                            "name": "google-docs__create_document",
+                            "arguments": {},
+                        }
+                    ],
+                }
+            },
+        ]
+    }
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{mock_llm_server}/__mock/llm_trace",
+            json={"source": "missing-id.json", "trace": trace},
+            timeout=15,
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == (
+        "trace.steps[1].tool_calls[0] is invalid"
+    )
+
+
+async def test_trace_install_rejects_duplicate_tool_call_id(mock_llm_server):
+    trace = {
+        "steps": [
+            {"response": {"type": "user_input", "content": "create twice"}},
+            {
+                "response": {
+                    "type": "tool_calls",
+                    "tool_calls": [
+                        {
+                            "id": "call_duplicate",
+                            "name": "google-docs__create_document",
+                            "arguments": {"title": "first"},
+                        }
+                    ],
+                }
+            },
+            {
+                "response": {
+                    "type": "tool_calls",
+                    "tool_calls": [
+                        {
+                            "id": "call_duplicate",
+                            "name": "google-docs__create_document",
+                            "arguments": {"title": "second"},
+                        }
+                    ],
+                }
+            },
+        ]
+    }
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{mock_llm_server}/__mock/llm_trace",
+            json={"source": "duplicate-id.json", "trace": trace},
+            timeout=15,
+        )
+
+    assert response.status_code == 400
+    assert "reuses tool call id 'call_duplicate'" in response.json()["error"]
 
 
 def _load_case(case: str) -> dict:
@@ -282,7 +626,16 @@ async def test_trace_replay_binds_fresh_provider_ids_into_follow_up_calls(
                 "response": {
                     "type": "tool_calls",
                     "tool_calls": [
-                        {"name": "google-docs__create_document", "arguments": {}}
+                        {
+                            "id": "call_create_document",
+                            "name": "google-docs__create_document",
+                            "arguments": {"title": "wanted"},
+                        },
+                        {
+                            "id": "call_create_other_document",
+                            "name": "google-docs__create_document",
+                            "arguments": {"title": "other"},
+                        }
                     ],
                 }
             },
@@ -291,12 +644,13 @@ async def test_trace_replay_binds_fresh_provider_ids_into_follow_up_calls(
                     "type": "tool_calls",
                     "tool_calls": [
                         {
+                            "id": "call_read_document",
                             "name": "google-docs__read_content",
                             "arguments": {
                                 "document_id": {
                                     "$trace_result": {
-                                        "tool": "google-docs__create_document",
-                                        "fields": ["documentId", "document_id", "id"],
+                                        "tool_call_id": "call_create_document",
+                                        "pointer": "/document/documentId",
                                     }
                                 }
                             },
@@ -319,14 +673,30 @@ async def test_trace_replay_binds_fresh_provider_ids_into_follow_up_calls(
         )
         created.raise_for_status()
         created_message = created.json()["choices"][0]["message"]
+        created_message["tool_calls"][0]["id"] = "runtime_normalized_call_id"
+        created_message["tool_calls"][0]["function"]["name"] = (
+            "google_docs__create_document"
+        )
+        created_message["tool_calls"][1]["id"] = "runtime_other_call_id"
+        created_message["tool_calls"][1]["function"]["name"] = (
+            "google_docs__create_document"
+        )
+        created_message["tool_calls"].reverse()
         messages.extend(
             [
                 created_message,
                 {
                     "role": "tool",
-                    "tool_call_id": created_message["tool_calls"][0]["id"],
+                    "tool_call_id": "runtime_normalized_call_id",
                     "content": json.dumps(
                         {"document": {"documentId": "doc-created-locally"}}
+                    ),
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "runtime_other_call_id",
+                    "content": json.dumps(
+                        {"document": {"documentId": "wrong-document"}}
                     ),
                 },
             ]
@@ -357,7 +727,13 @@ async def test_trace_replay_accepts_direct_calls_from_deferred_tool_catalog(
             {
                 "response": {
                     "type": "tool_calls",
-                    "tool_calls": [{"name": "slack__whoami", "arguments": {}}],
+                    "tool_calls": [
+                        {
+                            "id": "call_whoami",
+                            "name": "slack__whoami",
+                            "arguments": {},
+                        }
+                    ],
                 }
             },
         ]
@@ -396,7 +772,13 @@ async def test_trace_replay_stops_after_failed_capability_result(mock_llm_server
             {
                 "response": {
                     "type": "tool_calls",
-                    "tool_calls": [{"name": "slack__whoami", "arguments": {}}],
+                    "tool_calls": [
+                        {
+                            "id": "call_whoami",
+                            "name": "slack__whoami",
+                            "arguments": {},
+                        }
+                    ],
                 }
             },
             {"response": {"type": "text", "content": "done"}},
@@ -442,7 +824,13 @@ async def test_trace_replay_accepts_exact_expected_capability_failure(mock_llm_s
             {
                 "response": {
                     "type": "tool_calls",
-                    "tool_calls": [{"name": "slack__whoami", "arguments": {}}],
+                    "tool_calls": [
+                        {
+                            "id": "call_whoami",
+                            "name": "slack__whoami",
+                            "arguments": {},
+                        }
+                    ],
                 }
             },
             {

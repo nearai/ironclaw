@@ -575,8 +575,13 @@ def _provider_leg(trace: dict, provider_tools: frozenset[str]) -> dict:
     }
 
 
-def _result_binding(tool: str, *fields: str) -> dict:
-    return {"$trace_result": {"tool": tool, "fields": list(fields)}}
+def _result_binding(tool_call_id: str, pointer: str) -> dict:
+    return {
+        "$trace_result": {
+            "tool_call_id": tool_call_id,
+            "pointer": pointer,
+        }
+    }
 
 
 def _inject_deferred_tool_disclosure(trace: dict) -> None:
@@ -604,14 +609,47 @@ def _inject_deferred_tool_disclosure(trace: dict) -> None:
                 "type": "tool_calls",
                 "tool_calls": [
                     {
+                        "id": f"call_disclose_{index}",
                         "name": "capability_info",
                         "arguments": {"name": name.replace("__", ".")},
                     }
-                    for name in provider_names
+                    for index, name in enumerate(provider_names)
                 ],
             }
         },
     )
+
+
+def test_injected_deferred_tool_disclosures_have_stable_ids():
+    trace = {
+        "steps": [
+            {"response": {"type": "user_input", "content": "inspect Slack"}},
+            {
+                "response": {
+                    "type": "tool_calls",
+                    "tool_calls": [
+                        {
+                            "id": "call_whoami",
+                            "name": "slack__whoami",
+                            "arguments": {},
+                        }
+                    ],
+                }
+            },
+            {"response": {"type": "text", "content": "done"}},
+        ]
+    }
+
+    _inject_deferred_tool_disclosure(trace)
+
+    disclosure_calls = trace["steps"][1]["response"]["tool_calls"]
+    assert disclosure_calls == [
+        {
+            "id": "call_disclose_0",
+            "name": "capability_info",
+            "arguments": {"name": "slack.whoami"},
+        }
+    ]
 
 
 def _coalesce_independent_provider_reads(trace: dict, batch_size: int = 25) -> None:
@@ -648,8 +686,8 @@ def _coalesce_independent_provider_reads(trace: dict, batch_size: int = 25) -> N
 
 
 def _normalize_google_arguments(trace: dict, case: str) -> None:
-    created_document = False
-    created_spreadsheet = False
+    created_document_call_id = None
+    created_spreadsheet_call_id = None
     document_upload_contents = []
     for step in trace["steps"]:
         for call in step["response"].get("tool_calls", []):
@@ -664,6 +702,7 @@ def _normalize_google_arguments(trace: dict, case: str) -> None:
     seeded_spreadsheet = (
         "sheet_reborn_bug_tracker" if case.startswith("qa_7") else "sheet_reborn_abc"
     )
+    seeded_sheet_id = 0
 
     for step in trace["steps"]:
         if "tool_calls" not in step["response"]:
@@ -675,7 +714,7 @@ def _normalize_google_arguments(trace: dict, case: str) -> None:
             _replace_value(arguments, "EMAIL_REDACTED", "e2e.google@example.com")
 
             if name == "google-docs__create_document":
-                created_document = True
+                created_document_call_id = call.get("id")
                 call["name"] = "google-drive__upload_file"
                 content = (
                     document_upload_contents[document_upload_index]
@@ -694,29 +733,31 @@ def _normalize_google_arguments(trace: dict, case: str) -> None:
                 call["name"] = "google-drive__download_file"
                 call["arguments"] = {
                     "file_id": (
-                        _result_binding("google-drive__upload_file", "id", "file_id")
-                        if created_document
+                        _result_binding(created_document_call_id, "/file/id")
+                        if created_document_call_id
                         else "drv_near_ai_strategy"
                     )
                 }
 
             if name == "google-sheets__create_spreadsheet":
-                created_spreadsheet = True
+                created_spreadsheet_call_id = call.get("id")
             elif name.startswith("google-sheets__"):
                 if "spreadsheet_id" in arguments:
                     arguments["spreadsheet_id"] = (
                         _result_binding(
-                            "google-sheets__create_spreadsheet",
-                            "spreadsheetId",
-                            "spreadsheet_id",
-                            "id",
+                            created_spreadsheet_call_id, "/spreadsheet_id"
                         )
-                        if created_spreadsheet
+                        if created_spreadsheet_call_id
                         else seeded_spreadsheet
                     )
-                if created_spreadsheet and "sheet_id" in arguments:
-                    arguments["sheet_id"] = _result_binding(
-                        "google-sheets__create_spreadsheet", "sheetId", "sheet_id"
+                if "sheet_id" in arguments:
+                    arguments["sheet_id"] = (
+                        _result_binding(
+                            created_spreadsheet_call_id,
+                            "/sheets/0/sheet_id",
+                        )
+                        if created_spreadsheet_call_id
+                        else seeded_sheet_id
                     )
 
             if name == "gmail__get_message":
@@ -731,6 +772,35 @@ def _normalize_google_arguments(trace: dict, case: str) -> None:
         if step["response"].get("type") != "tool_calls"
         or step["response"].get("tool_calls")
     ]
+
+
+def test_google_normalization_seeds_consistent_spreadsheet_and_sheet_ids():
+    trace = {
+        "steps": [
+            {
+                "response": {
+                    "type": "tool_calls",
+                    "tool_calls": [
+                        {
+                            "id": "call_format",
+                            "name": "google-sheets__format_cells",
+                            "arguments": {
+                                "spreadsheet_id": "harvested-spreadsheet",
+                                "sheet_id": 123,
+                            },
+                        }
+                    ],
+                }
+            }
+        ]
+    }
+
+    _normalize_google_arguments(trace, "qa_7c_slack_bug_logger_routine")
+
+    assert trace["steps"][0]["response"]["tool_calls"][0]["arguments"] == {
+        "spreadsheet_id": "sheet_reborn_bug_tracker",
+        "sheet_id": 0,
+    }
 
 
 def _normalize_slack_arguments(
