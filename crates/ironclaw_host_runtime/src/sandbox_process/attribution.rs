@@ -254,9 +254,9 @@ impl<L: NetworkContainerLookup> ConnectionAttributionResolver<L> {
             }
         };
 
-        let mut matches = containers
-            .iter()
-            .filter(|container| container_ip_on_network(container, &self.network) == Some(peer_ip));
+        let mut matches = containers.iter().filter(|container| {
+            container_addresses_on_network(container, &self.network).any(|ip| ip == peer_ip)
+        });
 
         let Some(first) = matches.next() else {
             return ConnectionAttribution::Unattributed;
@@ -283,21 +283,40 @@ impl<L: NetworkContainerLookup> ConnectionAttributionResolver<L> {
     }
 }
 
-/// Reads `container`'s IPv4/IPv6 address on `network`, or `None` if the
-/// container has no recorded address there (network-settings absent, the
-/// named network missing from its network map, or an empty/unparseable
-/// address string).
-fn container_ip_on_network(container: &ContainerSummary, network: &str) -> Option<IpAddr> {
+/// Yields every address `container` holds on `network` — bollard reports
+/// IPv4 and IPv6 in separate `EndpointSettings` fields (`ip_address` and
+/// `global_ipv6_address`), and a dual-stack container can legitimately have
+/// both, so this checks both rather than only `ip_address` (which would
+/// silently make an IPv6-only peer connection un-matchable). Yields nothing
+/// if network-settings are absent, the named network is missing from the
+/// container's network map, or neither address field parses.
+fn container_addresses_on_network<'a>(
+    container: &'a ContainerSummary,
+    network: &'a str,
+) -> impl Iterator<Item = IpAddr> + 'a {
     container
         .network_settings
-        .as_ref()?
-        .networks
-        .as_ref()?
-        .get(network)?
-        .ip_address
-        .as_deref()
-        .filter(|ip| !ip.is_empty())
-        .and_then(|ip| ip.parse().ok())
+        .as_ref()
+        .and_then(|settings| settings.networks.as_ref())
+        .and_then(|networks| networks.get(network))
+        .into_iter()
+        .flat_map(|endpoint| {
+            [
+                endpoint.ip_address.as_deref(),
+                endpoint.global_ipv6_address.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .filter(|ip| !ip.is_empty())
+            // silent-ok: an unparseable Docker-reported address string can
+            // only mean "this container has no usable address of this
+            // family on this network" for attribution purposes — the
+            // caller's `query` loop already treats "no address equals
+            // `peer_ip`" as no match, so folding a malformed address into
+            // that same case still fails closed (`Unattributed`) rather
+            // than mis-attributing; it never needs the parse error itself.
+            .filter_map(|ip| ip.parse().ok())
+        })
 }
 
 /// Parses the `{tenant, user}` labels off `container` using the same
@@ -313,6 +332,11 @@ fn parse_attribution_labels(
     label_prefix: &str,
 ) -> Option<(TenantId, UserId)> {
     let labels = container.labels.as_ref()?;
+    // silent-ok: a label that fails `TenantId`/`UserId` newtype validation is
+    // exactly the "malformed label set" case this function's doc says must
+    // collapse to `None` (never a half-trusted `Attributed`) — the caller
+    // already logs at the `Unattributed` outcome this produces, so the
+    // per-field validation error itself is redundant, not swallowed.
     let tenant_id = labels
         .get(&label_tenant(label_prefix))
         .and_then(|value| TenantId::new(value).ok())?;
@@ -470,6 +494,54 @@ mod tests {
         let outcome = resolver.resolve("10.200.0.9".parse().unwrap()).await;
 
         assert_eq!(outcome, ConnectionAttribution::Unattributed);
+    }
+
+    #[tokio::test]
+    async fn empty_container_listing_is_unattributed() {
+        // An empty running-container response (e.g. the egress network has
+        // no live containers yet) must fail closed exactly like "no match
+        // found among several", not panic on an empty iterator or otherwise
+        // special-case zero containers.
+        let lookup = FakeLookup::new(Vec::new());
+        let resolver = ConnectionAttributionResolver::with_lookup(lookup, NETWORK, PREFIX);
+
+        let outcome = resolver.resolve("10.200.0.5".parse().unwrap()).await;
+
+        assert_eq!(outcome, ConnectionAttribution::Unattributed);
+    }
+
+    #[tokio::test]
+    async fn ipv6_container_address_resolves_to_its_labeled_tenant_and_user() {
+        // Regression for `container_addresses_on_network` only reading
+        // bollard's IPv4 `ip_address` field: a container with only a
+        // `global_ipv6_address` on the network must still be matchable.
+        let networks = HashMap::from([(
+            NETWORK.to_string(),
+            EndpointSettings {
+                global_ipv6_address: Some("fd00::5".to_string()),
+                ..Default::default()
+            },
+        )]);
+        let container = ContainerSummary {
+            id: Some("c1".to_string()),
+            labels: Some(labels("tenant-a", "user-a")),
+            network_settings: Some(ContainerSummaryNetworkSettings {
+                networks: Some(networks),
+            }),
+            ..Default::default()
+        };
+        let lookup = FakeLookup::new(vec![container]);
+        let resolver = ConnectionAttributionResolver::with_lookup(lookup, NETWORK, PREFIX);
+
+        let outcome = resolver.resolve("fd00::5".parse().unwrap()).await;
+
+        assert_eq!(
+            outcome,
+            ConnectionAttribution::Attributed {
+                tenant_id: TenantId::new("tenant-a").unwrap(),
+                user_id: UserId::new("user-a").unwrap(),
+            }
+        );
     }
 
     #[tokio::test]
@@ -738,7 +810,13 @@ mod tests {
         }
 
         for task in tasks {
-            let (ip, outcome) = task.await.expect("resolve task must not panic");
+            // Bounded so a regression that prevents even one of the 20 tasks
+            // from reaching the barrier fails this test loudly instead of
+            // hanging CI indefinitely.
+            let (ip, outcome) = tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .expect("concurrent resolve tasks must not deadlock")
+                .expect("resolve task must not panic");
             let expected = if ip == ip_a {
                 ConnectionAttribution::Attributed {
                     tenant_id: TenantId::new("tenant-a").unwrap(),

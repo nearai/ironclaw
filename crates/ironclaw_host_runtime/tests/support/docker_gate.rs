@@ -1,11 +1,16 @@
-//! Docker daemon / sandbox-image availability gate for real-Docker crate-tier
-//! tests in this crate.
+//! Docker daemon availability gate for real-Docker crate-tier tests in this
+//! crate.
 //!
-//! Real-Docker tests run only where a daemon (and the locally-built
-//! `ironclaw-worker` image) is reachable — CI/hosted Docker runners, not this
-//! development machine. Callers MUST skip with a visible "SKIP: ..." line on
-//! `eprintln!` when either check fails, never a silent pass — a quietly
-//! vanishing assertion is indistinguishable from a real green run.
+//! This module only gates on daemon reachability ([`docker_available`]) —
+//! whether an image the test needs is present is each caller's own concern.
+//! `attribution.rs`'s real-Docker test pulls `busybox:1.36` itself before
+//! using it; a caller that instead needs the locally-built `ironclaw-worker`
+//! image (e.g. `exec_transport`, which declares this same file via `#[path]`
+//! — see `attribution.rs`'s module-level comment on its own declaration) is
+//! responsible for ensuring that image is present. Callers MUST skip with a
+//! visible "SKIP: ..." line on `eprintln!` when either the daemon or their
+//! own image precondition fails, never a silent pass — a quietly vanishing
+//! assertion is indistinguishable from a real green run.
 
 use std::process::Command;
 

@@ -1,15 +1,23 @@
 //! Coarse `{tenant, user}` container identity key for the persistent
 //! per-user sandbox container model (Phase A). Unlike
 //! [`super::scope_key::RebornSandboxScopeKey`] (fine-grained; includes
-//! agent/project/thread/invocation and is used for nothing
-//! container-related after this phase), this key derives container name
-//! and workspace root from `{tenant_id, user_id}` ONLY — every
-//! thread/project/agent for the same user shares one container.
+//! agent/project/thread/invocation), this key derives container name and
+//! workspace root from `{tenant_id, user_id}` ONLY — every thread/project/
+//! agent for the same user shares one container.
+//!
+//! **Current vs. planned:** `RebornSandboxScopeKey` remains the key the
+//! currently-wired ephemeral exec transport uses for workspace and container
+//! naming today (see `sandbox_process.rs`). `RebornSandboxUserKey` is not
+//! constructed by any production call site in this PR — it is reserved for
+//! the future persistent per-user transport (Task A5's reaper and the
+//! exec-based transport's per-user container reuse), which will replace
+//! `RebornSandboxScopeKey` for container concerns once wired.
 
 use std::path::{Path, PathBuf};
 
 use ironclaw_host_api::{ResourceScope, TenantId, UserId};
-use sha2::{Digest, Sha256};
+
+use super::key_codec::{digest_hex, encode_parts};
 
 // Not constructed by any production call site in this PR: the consumer
 // (the exec-based transport's per-user container reuse and Task A5's
@@ -37,15 +45,12 @@ impl RebornSandboxUserKey {
     /// a reconstructable `ResourceScope` (no agent/project/thread/
     /// invocation survive on a label). One formula, two entry points.
     pub fn from_tenant_user(tenant_id: &TenantId, user_id: &UserId) -> Self {
-        let raw = format!(
-            "tenant:{}:{}|user:{}:{}",
-            tenant_id.as_str().len(),
-            tenant_id.as_str(),
-            user_id.as_str().len(),
-            user_id.as_str(),
-        );
+        let raw = encode_parts(&[
+            ("tenant", tenant_id.as_str().to_string()),
+            ("user", user_id.as_str().to_string()),
+        ]);
         Self {
-            digest: hex::encode(Sha256::digest(raw.as_bytes())),
+            digest: digest_hex(&raw),
         }
     }
 

@@ -1,13 +1,17 @@
 //! Labels-as-identity container registry for the persistent per-user
-//! sandbox model. Two responsibilities:
+//! sandbox model. Three responsibilities:
 //!
 //! 1. Docker label construction/parsing for `{tenant, user, created_at}`
 //!    identity — crash-safe (survives daemon restart), no DB.
-//! 2. A push-based in-memory last-activity map. The exec transport calls
-//!    [`SandboxActivityRegistry::touch`] after every successful command;
-//!    the reaper only ever reads via `idle_for`/`last_activity` — it
-//!    never inspects container stats to infer activity. Labels are
-//!    immutable post-create and NEVER carry this mutable state.
+//! 2. A push-based in-memory last-activity map ([`SandboxActivityRegistry`]).
+//!    The exec transport calls [`SandboxActivityRegistry::touch`] after
+//!    every successful command; the reaper only ever reads via
+//!    `idle_for`/`last_activity` — it never inspects container stats to
+//!    infer activity. Labels are immutable post-create and NEVER carry this
+//!    mutable state.
+//! 3. A push-based in-memory per-user background-job map
+//!    ([`BackgroundJobRegistry`]), keyed the same way, so the foreground
+//!    command path can render a "still-live background processes" footer.
 
 use std::{
     collections::HashMap,
@@ -382,6 +386,61 @@ mod tests {
         registry.drop_dead(&key, &[]);
 
         assert!(registry.jobs_for(&key).is_empty());
+    }
+
+    #[test]
+    fn background_job_registry_survives_concurrent_record_read_and_drop_dead() {
+        // `BackgroundJobRegistry` owns its own `Mutex`, separate from
+        // `SandboxActivityRegistry`'s — this drives real concurrent access
+        // from multiple OS threads across `record`/`jobs_for`/`drop_dead` so
+        // that lock is exercised the same way the activity registry's is
+        // above. The assertion is simply that it completes without
+        // panicking/deadlocking, and that state from a still-recording
+        // thread is observable afterwards.
+        use std::sync::Arc;
+        use std::thread;
+
+        let registry = Arc::new(BackgroundJobRegistry::new());
+        let keys: Vec<RebornSandboxUserKey> = (0..8)
+            .map(|index| test_key("t", &format!("user-{index}")))
+            .collect();
+
+        let mut handles = Vec::new();
+        for (index, key) in keys.clone().into_iter().enumerate() {
+            let registry = Arc::clone(&registry);
+            handles.push(thread::spawn(move || {
+                for iteration in 0..200 {
+                    let pid = (index * 1000 + iteration) as u32;
+                    registry.record(&key, pid, format!("job-{pid}"));
+                    let _ = registry.jobs_for(&key);
+                    registry.drop_dead(&key, &[pid]);
+                }
+            }));
+        }
+        // A concurrent record/drop_dead on a disjoint key, so one thread's
+        // record/jobs_for races with another thread's drop_dead on the same
+        // underlying map.
+        let prune_registry = Arc::clone(&registry);
+        let prune_key = test_key("t", "user-prune-target");
+        prune_registry.record(&prune_key, 1, "seed".to_string());
+        handles.push(thread::spawn(move || {
+            for iteration in 0..200 {
+                prune_registry.record(&prune_key, iteration as u32, "job".to_string());
+                prune_registry.drop_dead(&prune_key, &[]);
+            }
+        }));
+
+        for handle in handles {
+            handle
+                .join()
+                .expect("registry access thread must not panic");
+        }
+
+        for key in &keys {
+            // Every record/drop_dead pair above leaves exactly the just-
+            // recorded pid alive, so the map must still contain that entry.
+            assert_eq!(registry.jobs_for(key).len(), 1);
+        }
     }
 
     #[test]

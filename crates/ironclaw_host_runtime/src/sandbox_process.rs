@@ -31,6 +31,7 @@ use crate::{
 
 mod broker;
 mod container_identity;
+mod key_codec;
 mod mounts;
 mod scope_key;
 

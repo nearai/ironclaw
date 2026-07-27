@@ -127,11 +127,11 @@ impl DiskFilesystem {
         path: &VirtualPath,
         operation: FilesystemOperation,
     ) -> Result<PathBuf, FilesystemError> {
-        let (_mount, joined, containment_root) = self.resolve_joined(path)?;
-        let canonical = tokio::fs::canonicalize(&joined)
+        let resolved = self.resolve_joined(path)?;
+        let canonical = tokio::fs::canonicalize(&resolved.joined)
             .await
             .map_err(|error| io_error(path.clone(), operation, error))?;
-        ensure_contained(path, &containment_root, &canonical, true)?;
+        ensure_contained(path, &resolved.containment_root, &canonical, true)?;
         Ok(canonical)
     }
 
@@ -140,27 +140,27 @@ impl DiskFilesystem {
         path: &VirtualPath,
         operation: FilesystemOperation,
     ) -> Result<PathBuf, FilesystemError> {
-        let (mount, joined, containment_root) = self.resolve_joined(path)?;
+        let resolved = self.resolve_joined(path)?;
 
-        if tokio::fs::try_exists(&joined)
+        if tokio::fs::try_exists(&resolved.joined)
             .await
             .map_err(|error| io_error(path.clone(), operation, error))?
         {
-            let canonical = tokio::fs::canonicalize(&joined)
+            let canonical = tokio::fs::canonicalize(&resolved.joined)
                 .await
                 .map_err(|error| io_error(path.clone(), operation, error))?;
-            ensure_contained(path, &containment_root, &canonical, true)?;
+            ensure_contained(path, &resolved.containment_root, &canonical, true)?;
             return Ok(canonical);
         }
 
-        let parent = joined
+        let parent = resolved
+            .joined
             .parent()
             .ok_or_else(|| FilesystemError::PathOutsideMount { path: path.clone() })?;
-        let bootstrap_root = leaf_bootstrap_root(mount);
         ensure_existing_ancestor_contained(
             path,
-            &containment_root,
-            bootstrap_root,
+            &resolved.containment_root,
+            resolved.bootstrap_root,
             parent,
             operation,
         )
@@ -174,7 +174,7 @@ impl DiskFilesystem {
         // `joined` is constructed from validated virtual path segments under the
         // backend root. If its canonical parent leaves the backend root, an
         // existing symlink in the parent chain caused the escape.
-        ensure_contained(path, &containment_root, &canonical_parent, true)?;
+        ensure_contained(path, &resolved.containment_root, &canonical_parent, true)?;
         // Re-root the final path on the canonicalized, containment-checked
         // parent rather than returning `joined` (which still contains the
         // un-canonicalized ancestor components). This narrows the TOCTOU
@@ -182,7 +182,8 @@ impl DiskFilesystem {
         // later swap of an ancestor symlink does not change the path we hand
         // back. Robust defense (openat / O_NOFOLLOW / cap-std) is tracked as a
         // follow-up; see PR #2996 review.
-        let file_name = joined
+        let file_name = resolved
+            .joined
             .file_name()
             .ok_or_else(|| FilesystemError::PathOutsideMount { path: path.clone() })?;
         Ok(canonical_parent.join(file_name))
@@ -192,42 +193,37 @@ impl DiskFilesystem {
         &self,
         path: &VirtualPath,
     ) -> Result<PathBuf, FilesystemError> {
-        let (mount, joined, containment_root) = self.resolve_joined(path)?;
-        let bootstrap_root = leaf_bootstrap_root(mount);
+        let resolved = self.resolve_joined(path)?;
         ensure_existing_ancestor_contained(
             path,
-            &containment_root,
-            bootstrap_root,
-            &joined,
+            &resolved.containment_root,
+            resolved.bootstrap_root,
+            &resolved.joined,
             FilesystemOperation::CreateDirAll,
         )
         .await?;
-        tokio::fs::create_dir_all(&joined)
+        tokio::fs::create_dir_all(&resolved.joined)
             .await
             .map_err(|error| io_error(path.clone(), FilesystemOperation::CreateDirAll, error))?;
-        let canonical = tokio::fs::canonicalize(&joined)
+        let canonical = tokio::fs::canonicalize(&resolved.joined)
             .await
             .map_err(|error| io_error(path.clone(), FilesystemOperation::CreateDirAll, error))?;
-        ensure_contained(path, &containment_root, &canonical, true)?;
+        ensure_contained(path, &resolved.containment_root, &canonical, true)?;
         Ok(canonical)
     }
 
-    /// Resolves `path` to `(mount, joined host path, containment root)`.
+    /// Resolves `path` to its host-side join point plus the containment
+    /// invariant callers must enforce against it.
     ///
-    /// `containment_root` is the boundary [`ensure_contained`] checks
-    /// against. For an ordinary mount it is `mount.host_root`. For a
-    /// [`LocalMount::leaf_scoped`] mount it is `mount.host_root` plus the
-    /// first tail segment after `virtual_root` — the caller's own leaf,
-    /// which the composition-layer `MountView` grant target (not the
-    /// caller-controlled tail) determines. This is what closes the
-    /// same-mount cross-leaf symlink escape: a symlink planted inside one
-    /// caller's leaf that resolves into a sibling leaf still starts with the
-    /// shared `host_root`, but no longer starts with the caller's own
-    /// `containment_root`.
-    fn resolve_joined(
-        &self,
-        path: &VirtualPath,
-    ) -> Result<(&LocalMount, PathBuf, PathBuf), FilesystemError> {
+    /// Bundled into one typed [`ResolvedMountPath`] — rather than a
+    /// positional tuple with `bootstrap_root` re-derived per caller — because
+    /// the three fields are one invariant, not three independent values: a
+    /// caller that threads `joined`/`containment_root` from one mount but
+    /// `bootstrap_root` from another (or forgets it for a leaf-scoped mount)
+    /// would silently reopen the bootstrap containment gap this type exists
+    /// to close. Computing all three together, once, in the one place that
+    /// knows which mount `path` resolved to removes that chance entirely.
+    fn resolve_joined(&self, path: &VirtualPath) -> Result<ResolvedMountPath<'_>, FilesystemError> {
         let mount = self
             .mounts
             .iter()
@@ -260,8 +256,30 @@ impl DiskFilesystem {
                 }
             }
         }
-        Ok((mount, joined, containment_root))
+        Ok(ResolvedMountPath {
+            joined,
+            containment_root,
+            bootstrap_root: leaf_bootstrap_root(mount),
+        })
     }
+}
+
+/// The host-side join point for a resolved `VirtualPath` plus the
+/// containment invariant every write/read caller must enforce against it —
+/// see [`DiskFilesystem::resolve_joined`] for why these three fields travel
+/// together instead of as a positional tuple.
+struct ResolvedMountPath<'a> {
+    /// The host path `path` joins to under the mount's `host_root`,
+    /// pre-canonicalization.
+    joined: PathBuf,
+    /// The boundary [`ensure_contained`] checks the canonicalized path
+    /// against: `host_root` for an ordinary mount, or `host_root` plus the
+    /// caller's own leaf segment for a [`LocalMount::leaf_scoped`] mount —
+    /// see [`DiskFilesystem::resolve_joined`].
+    containment_root: PathBuf,
+    /// `Some(host_root)` for a leaf-scoped mount, `None` otherwise — see
+    /// [`leaf_bootstrap_root`] for the bootstrap gap this covers.
+    bootstrap_root: Option<&'a Path>,
 }
 
 #[async_trait]
