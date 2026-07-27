@@ -148,7 +148,7 @@ impl RebornIntegrationGroup {
         Self::builder().project_lifecycle_fault_injected().await
     }
 
-    /// Group whose ONLY capability is `builtin.profile_set` (E-PROFILE seam).
+    /// Group whose ONLY capability is `ironclaw.memory.profile_set` (E-PROFILE seam).
     /// Auto-approve is enabled. Use `user_profile_source_for_test()` to read
     /// a written profile back through the same adapter the group's planned
     /// runtime resolves user profiles from.
@@ -519,7 +519,7 @@ impl RebornIntegrationGroupBuilder {
     /// Build a profile-tools group. See [`RebornIntegrationGroup::profile_tools`].
     pub async fn profile_tools(self) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;
-        // Align `builtin.profile_set`'s executor to the canonical subject user
+        // Align `ironclaw.memory.profile_set`'s executor to the canonical subject user
         // (mirrors `live_approvals`) — otherwise a write and its read-back
         // resolve under different users. Needs `base` first, so can't go
         // through `build_with_capability`.

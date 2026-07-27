@@ -494,8 +494,9 @@ async fn local_dev_trace_commons_profile_set_requires_approval_gate() {
     );
 }
 
-/// Surface-visibility regression test: `builtin.profile_set` must be
-/// Available (Allow) in the local-dev authorizer, not RequireApproval.
+/// Surface-visibility regression test: `ironclaw.memory.profile_set` (the
+/// bound memory provider's profile tool, formerly builtin-declared) must
+/// be Available (Allow) in the local-dev authorizer, not RequireApproval.
 ///
 /// This exercises the FULL authorizer path (grant lookup + effect-set
 /// check + exemption list) to guard against the MissingGrant regression
@@ -505,7 +506,7 @@ async fn local_dev_trace_commons_profile_set_requires_approval_gate() {
 /// decision can only come from the exemption list, not from a non-gating
 /// default policy.
 #[tokio::test]
-async fn local_dev_builtin_profile_set_skips_approval_gate() {
+async fn local_dev_memory_profile_set_skips_approval_gate() {
     let decision = trace_commons_authorize_decision(
         PROFILE_SET_CAPABILITY_ID,
         vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
@@ -513,7 +514,7 @@ async fn local_dev_builtin_profile_set_skips_approval_gate() {
     .await;
     assert!(
         matches!(decision, ironclaw_host_api::Decision::Allow { .. }),
-        "builtin.profile_set is a private local write (no network/external_write) and is \
+        "ironclaw.memory.profile_set is a private local write (no network/external_write) and is \
              exempt from the approval gate; got {decision:?}"
     );
 }

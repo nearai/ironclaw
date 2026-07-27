@@ -59,7 +59,7 @@ exempt_capabilities = [
     # the runtime approval gate (user-controlled consent), with `confirmed=true`
     # as defense-in-depth rather than the sole control.
     #
-    # `builtin.profile_set` is safe to exempt (no approval gate needed) because:
+    # `ironclaw.memory.profile_set` is safe to exempt (no approval gate needed) because:
     # - It writes only to a fixed, narrow user-scoped path (context/profile.json)
     #   under the memory mount, which is already scoped to this user.
     # - Its field set is closed and validated server-side: only timezone (parsed
@@ -68,11 +68,11 @@ exempt_capabilities = [
     #   write, no process.
     # - Contrast with `builtin.trace_commons.profile_set` above: that capability
     #   is a PUBLIC external write to a community surface and must remain gated.
-    #   `builtin.profile_set` is a PRIVATE local agent-context write to a fixed,
+    #   `ironclaw.memory.profile_set` is a PRIVATE local agent-context write to a fixed,
     #   closed-field, non-external path — that combination is what makes it safe
     #   to exempt here (unlike `memory_write`, an arbitrary-path write that is
     #   NOT exempt and still hits the gate).
-    "builtin.profile_set",
+    "ironclaw.memory.profile_set",
     # This API-only capability is reachable only from an authenticated
     # operator's explicit save gesture. Its handler repeats operator identity
     # enforcement and uses revision CAS plus idempotent replay.
@@ -149,7 +149,7 @@ mounts = "memory"
 network = "default"
 
 [[grants]]
-capability = "builtin.profile_set"
+capability = "ironclaw.memory.profile_set"
 effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
 mounts = "memory"
 network = "default"

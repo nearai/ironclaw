@@ -47,7 +47,7 @@ prompt_doc_ref = "prompts/memory-native/read.md"
 
 [[tools]]
 id = "ironclaw.memory.write"
-description = "Write, append, or patch Reborn persistent memory documents in the current tenant/user/agent/project scope. For structured user facts (timezone, locale, location), use builtin.profile_set instead."
+description = "Write, append, or patch Reborn persistent memory documents in the current tenant/user/agent/project scope. For structured user facts (timezone, locale, location), use ironclaw.memory.profile_set instead."
 effects = ["read_filesystem", "write_filesystem"]
 default_permission = "allow"
 visibility = "model"
@@ -77,3 +77,13 @@ origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation =
 input_schema_ref = "schemas/memory/tree.input.v1.json"
 output_schema_ref = "schemas/memory/tree.output.v1.json"
 prompt_doc_ref = "prompts/memory-native/tree.md"
+
+[[tools]]
+id = "ironclaw.memory.profile_set"
+description = "Record a private, local fact about the user's agent context — timezone (IANA name), locale (BCP-47), or location (free label). Use this (not memory write) whenever the user states one of these so future answers stay correct. This is a private local write, not a public profile; it is unrelated to builtin.trace_commons.profile_set."
+effects = ["read_filesystem", "write_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/memory/profile-set.input.v1.json"
+output_schema_ref = "schemas/memory/profile-set.output.v1.json"

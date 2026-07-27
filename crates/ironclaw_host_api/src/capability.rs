@@ -104,7 +104,11 @@ pub const UNGATED_LOOP_RUN_CAPABILITIES: &[&str] = &[
     "builtin.trace_commons.status",
     "builtin.trace_commons.credits",
     "builtin.trace_commons.onboard",
-    "builtin.profile_set",
+    // The bound memory provider's profile tool (formerly builtin-declared,
+    // #3537 lifecycle rework): a private local write to the user's own agent
+    // context, grandfathered with the same reviewed posture under its stable
+    // provider-declared id.
+    "ironclaw.memory.profile_set",
     // The memory tools moved from the builtin package (`builtin.memory_*`) to
     // the always-on `ironclaw.memory` package (#3537); same tools, same
     // reviewed read-only posture, renamed ids. `ironclaw.memory.write` stays

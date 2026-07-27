@@ -40,7 +40,7 @@ prompt_doc_ref = "prompts/memory-native/read.md"
 
 [[tools]]
 id = "ironclaw.memory.write"
-description = "Write or append Reborn persistent memory documents in the current tenant/user/agent/project scope. For structured user facts (timezone, locale, location), use builtin.profile_set instead."
+description = "Write or append Reborn persistent memory documents in the current tenant/user/agent/project scope. For structured user facts (timezone, locale, location), use ironclaw.memory.profile_set instead."
 effects = ["read_filesystem", "write_filesystem"]
 default_permission = "allow"
 visibility = "model"
@@ -70,3 +70,20 @@ origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation =
 input_schema_ref = "schemas/memory/tree.input.v1.json"
 output_schema_ref = "schemas/memory/tree.output.v1.json"
 prompt_doc_ref = "prompts/memory-native/tree.md"
+
+# F6 (recorded decision, 2026-07-27): profile-write atomicity is per-provider.
+# Native profile_set is a compare-and-swap loop; mem0 has no CAS, so its
+# profile_set is a read-merge-write (closes the field-drop gap, and concurrent
+# writers can still race). The owner accepted this variance behind the shared
+# tool id — the internal system does not require write atomicity of a
+# provider's profile tool.
+
+[[tools]]
+id = "ironclaw.memory.profile_set"
+description = "Record a private, local fact about the user's agent context — timezone (IANA name), locale (BCP-47), or location (free label). Use this (not memory write) whenever the user states one of these so future answers stay correct. This is a private local write, not a public profile; it is unrelated to builtin.trace_commons.profile_set."
+effects = ["read_filesystem", "write_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/memory/profile-set.input.v1.json"
+output_schema_ref = "schemas/memory/profile-set.output.v1.json"

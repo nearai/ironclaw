@@ -26,6 +26,7 @@ pub async fn run() -> HarnessResult<()> {
         "ironclaw__memory__write",
         "ironclaw__memory__read",
         "ironclaw__memory__tree",
+        "ironclaw__memory__profile_set",
     ] {
         harness.assert_model_tool_not_offered(tool)?;
     }

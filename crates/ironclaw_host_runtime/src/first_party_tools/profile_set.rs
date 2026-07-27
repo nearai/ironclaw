@@ -1,5 +1,4 @@
-use ironclaw_extensions::{CapabilityManifest, ExtensionError};
-use ironclaw_host_api::{EffectKind, PermissionMode, ResourceUsage};
+use ironclaw_host_api::ResourceUsage;
 use ironclaw_memory::MemoryServiceProfileSetRequest;
 use serde_json::json;
 
@@ -8,23 +7,14 @@ use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest, FirstPartyCa
 use super::memory::{
     MemoryCapabilityState, ensure_memory_mount, invocation_for_request, map_memory_service_error,
 };
-use super::{first_party_capability_manifest, resource_profile};
 
-pub const PROFILE_SET_CAPABILITY_ID: &str = "builtin.profile_set";
-
-pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
-    first_party_capability_manifest(
-        PROFILE_SET_CAPABILITY_ID,
-        "Record a private, local fact about the user's agent context — timezone \
-         (IANA name), locale (BCP-47), or location (free label). Use this \
-         (not memory_write) whenever the user states one of these so future \
-         answers stay correct. This is a private local write, not a public \
-         profile; it is unrelated to builtin.trace_commons.profile_set.",
-        vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
-        PermissionMode::Allow,
-        resource_profile(),
-    )
-}
+/// The profile-write tool of the bound memory provider. Declared by the
+/// provider's manifest (`[[tools]]` under the reserved `ironclaw.memory.*`
+/// namespace) — not in Rust — so a backend that cannot serve it simply does
+/// not declare it. Still a PRIVATE local write to the user's own agent
+/// context; unrelated to `builtin.trace_commons.profile_set` (a public
+/// external write that stays approval-gated).
+pub const PROFILE_SET_CAPABILITY_ID: &str = "ironclaw.memory.profile_set";
 
 pub(super) async fn dispatch(
     state: &MemoryCapabilityState,

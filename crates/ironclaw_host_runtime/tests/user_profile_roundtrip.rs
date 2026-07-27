@@ -1,5 +1,5 @@
 //! Caller-level integration test for the user-profile round trip:
-//! `builtin.profile_set` (writer) → `MemoryBackedUserProfileSource` (reader) →
+//! `ironclaw.memory.profile_set` (writer) → `MemoryBackedUserProfileSource` (reader) →
 //! `LoopRuntimeContext::render_model_content()` (render).
 //!
 //! This test exercises the full real-capability dispatch path (not just
@@ -35,11 +35,11 @@ use ironclaw_host_api::{
         NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
     },
 };
-use ironclaw_host_runtime::builtin_first_party_package;
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, MemoryBackedUserProfileSource,
     PROFILE_SET_CAPABILITY_ID, RuntimeCapabilityOutcome, builtin_first_party_handlers,
 };
+use ironclaw_host_runtime::{builtin_first_party_package, native_memory_first_party_package};
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_triggers::InMemoryTriggerRepository;
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
@@ -99,6 +99,21 @@ fn trust_policy() -> HostTrustPolicy {
                 EffectKind::SpawnProcess,
                 EffectKind::ExecuteCode,
                 EffectKind::ExternalWrite,
+            ],
+            None,
+        ),
+        // The profile tool rides the bound memory provider's package
+        // (`ironclaw.memory`), so it carries the production memory trust
+        // entry: dispatch + filesystem read/write only.
+        AdminEntry::for_local_manifest(
+            PackageId::new("ironclaw.memory").unwrap(),
+            "/system/extensions/ironclaw.memory/manifest.toml".to_string(),
+            None,
+            HostTrustAssignment::first_party(),
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
             ],
             None,
         ),
@@ -212,6 +227,12 @@ async fn loop_run_context_with_user(
 
 fn build_runtime(shared_fs: Arc<InMemoryBackend>) -> impl HostRuntime {
     let mut registry = ExtensionRegistry::new();
+    // The profile tool is declared by the bound memory provider's package now
+    // (`ironclaw.memory.profile_set`), so the roundtrip runtime registers the
+    // native memory package beside builtin — mirroring the default binding.
+    registry
+        .insert(native_memory_first_party_package().unwrap())
+        .unwrap();
     registry
         .insert(builtin_first_party_package().unwrap())
         .unwrap();
@@ -235,7 +256,7 @@ fn build_runtime(shared_fs: Arc<InMemoryBackend>) -> impl HostRuntime {
 
 // ── Round-trip test ──
 
-/// End-to-end round trip: dispatch `builtin.profile_set` through the real
+/// End-to-end round trip: dispatch `ironclaw.memory.profile_set` through the real
 /// capability dispatch path for an AGENT+PROJECT-scoped run, then read back
 /// via `MemoryBackedUserProfileSource`, and assert `render_model_content()`
 /// renders the expected strings.
@@ -256,7 +277,7 @@ async fn profile_set_then_runtime_context_renders_local_time_and_profile_line() 
     let shared_fs = Arc::new(InMemoryBackend::new());
     let runtime = build_runtime(shared_fs.clone());
 
-    // ── Step 1: dispatch builtin.profile_set for an agent+project-scoped run ──
+    // ── Step 1: dispatch ironclaw.memory.profile_set for an agent+project-scoped run ──
     //
     // The `ResourceScope` on this request carries agent_id and project_id.
     // `profile_merge_write` → `profile_scope_and_path` will drop these,

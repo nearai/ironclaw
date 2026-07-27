@@ -271,7 +271,6 @@ async fn builtin_first_party_package_declares_behavior_neutral_origin_gate_matri
         JSON_CAPABILITY_ID,
         READ_FILE_CAPABILITY_ID,
         TRIGGER_LIST_CAPABILITY_ID,
-        PROFILE_SET_CAPABILITY_ID,
     ] {
         assert_eq!(loop_run(ungated), OriginGatePolicy::Ungated, "{ungated}");
     }
@@ -3378,7 +3377,7 @@ async fn memory_write_rejects_protected_prompt_write_through_runtime() {
 }
 
 #[tokio::test]
-async fn builtin_profile_set_rejects_missing_memory_mount_authority() {
+async fn memory_profile_set_rejects_missing_memory_mount_authority() {
     // profile_set routes through ensure_memory_mount(request, /*write*/ true) in
     // profile_merge_write. This test verifies that the guard fires when the invocation
     // context carries only a /workspace mount (no /memory write grant), mirroring
@@ -3399,7 +3398,7 @@ async fn builtin_profile_set_rejects_missing_memory_mount_authority() {
 }
 
 #[tokio::test]
-async fn builtin_profile_set_rejects_memory_mount_without_delete_permission() {
+async fn memory_profile_set_rejects_memory_mount_without_delete_permission() {
     // ensure_memory_mount(write=true) requires read + list + write + delete.
     // A /memory grant with read+list+write but NO delete must be rejected with
     // Authorization, locking the current contract.
@@ -9545,7 +9544,6 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
         TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
         TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
-        PROFILE_SET_CAPABILITY_ID,
         OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
         READ_FILE_CAPABILITY_ID,
         WRITE_FILE_CAPABILITY_ID,

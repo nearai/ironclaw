@@ -223,7 +223,6 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                     trace_commons::profile_token_manifest()?,
                     trace_commons::profile_set_manifest()?,
                     trace_commons::account_login_link_manifest()?,
-                    profile_set::manifest()?,
                     outbound_delivery::manifest()?,
                 ];
                 capabilities.extend(coding_manifests()?);
@@ -852,9 +851,15 @@ fn normalize_optional_null_sentinels(request: &mut FirstPartyCapabilityRequest) 
         .strip_prefix("builtin.")
         .unwrap_or(request.capability_id.as_str())
         .replace('.', "-");
-    let Some(schema) =
+    // The bound memory provider's profile tool keeps the builtin-era
+    // normalization: its manifest-declared schema is served inline from the
+    // memory schema set.
+    let schema = if request.capability_id.as_str() == PROFILE_SET_CAPABILITY_ID {
+        resolve_native_memory_input_schema_ref("schemas/memory/profile-set.input.v1.json")
+    } else {
         resolve_builtin_input_schema_ref(&format!("schemas/builtin/{schema_name}.input.v1.json"))
-    else {
+    };
+    let Some(schema) = schema else {
         return;
     };
     let mut required: std::collections::HashSet<String> = schema

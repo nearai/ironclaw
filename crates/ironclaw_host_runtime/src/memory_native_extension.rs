@@ -188,7 +188,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_declares_four_model_visible_capabilities() {
+    fn manifest_declares_the_model_visible_memory_tools() {
         let manifest = native_memory_manifest().expect("manifest");
         let ids: Vec<&str> = manifest
             .capabilities
@@ -202,6 +202,7 @@ mod tests {
                 MEMORY_WRITE_CAPABILITY_ID,
                 MEMORY_SEARCH_CAPABILITY_ID,
                 MEMORY_TREE_CAPABILITY_ID,
+                crate::PROFILE_SET_CAPABILITY_ID,
             ]
         );
         for capability in &manifest.capabilities {
@@ -286,6 +287,7 @@ mod tests {
                 MEMORY_WRITE_CAPABILITY_ID,
                 MEMORY_SEARCH_CAPABILITY_ID,
                 MEMORY_TREE_CAPABILITY_ID,
+                crate::PROFILE_SET_CAPABILITY_ID,
             ]
         );
     }
@@ -318,6 +320,7 @@ mod tests {
                 MEMORY_WRITE_CAPABILITY_ID,
                 MEMORY_SEARCH_CAPABILITY_ID,
                 MEMORY_TREE_CAPABILITY_ID,
+                crate::PROFILE_SET_CAPABILITY_ID,
             ]
         );
         for capability in &record.manifest().capabilities {

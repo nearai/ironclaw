@@ -1,0 +1,21 @@
+{
+  "type": "object",
+  "description": "Record a private, local fact about the user's agent context: timezone (IANA name), locale (BCP-47), or location (free label). At least one field is required.",
+  "properties": {
+    "timezone": {
+      "type": "string",
+      "description": "IANA timezone name, e.g. America/Los_Angeles or Asia/Tokyo"
+    },
+    "locale": {
+      "type": "string",
+      "description": "BCP-47 locale tag, e.g. en-US or ja-JP",
+      "maxLength": 35
+    },
+    "location": {
+      "type": "string",
+      "description": "Free-text location label, e.g. Tokyo, Japan"
+    }
+  },
+  "minProperties": 1,
+  "additionalProperties": false
+}

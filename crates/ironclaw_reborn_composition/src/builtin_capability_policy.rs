@@ -508,7 +508,7 @@ mod tests {
         // before the network POST); trace_commons.profile_set is deliberately NOT
         // exempt — publishing a public community profile must hit the runtime
         // approval gate, with its model-controlled confirmed=true only as
-        // defense-in-depth. builtin.profile_set IS exempt: private local write
+        // defense-in-depth. ironclaw.memory.profile_set IS exempt: private local write
         // only (no network/external_write), analogous to memory_write on a fixed path.
         assert!(
             policy
@@ -558,8 +558,8 @@ mod tests {
             policy
                 .approval_gate_exempt_capabilities()
                 .iter()
-                .any(|capability| capability.as_str() == "builtin.profile_set"),
-            "builtin.profile_set must be in the exempt list (private local write, no \
+                .any(|capability| capability.as_str() == "ironclaw.memory.profile_set"),
+            "ironclaw.memory.profile_set must be in the exempt list (private local write, no \
              network/external_write — analogous to memory_write on a fixed path)"
         );
         assert!(
@@ -653,23 +653,23 @@ mod tests {
             assert_eq!(grant.mounts, CapabilityMountProfile::Ambient);
             assert_eq!(grant.network, CapabilityNetworkProfile::Default);
         }
-        // builtin.profile_set writes context/profile.json under the memory mount.
+        // ironclaw.memory.profile_set writes context/profile.json under the memory mount.
         // It mirrors memory_write's effect set (read+write filesystem, memory mount,
         // default network) and must be present here or it is denied as MissingGrant.
-        let builtin_profile_set = policy
-            .grant(&CapabilityId::new("builtin.profile_set").expect("capability id"))
-            .expect("builtin.profile_set grant must be present");
+        let memory_profile_set = policy
+            .grant(&CapabilityId::new("ironclaw.memory.profile_set").expect("capability id"))
+            .expect("ironclaw.memory.profile_set grant must be present");
         assert_eq!(
-            builtin_profile_set.effects,
+            memory_profile_set.effects,
             vec![
                 EffectKind::DispatchCapability,
                 EffectKind::ReadFilesystem,
                 EffectKind::WriteFilesystem,
             ]
         );
-        assert_eq!(builtin_profile_set.mounts, CapabilityMountProfile::Memory);
+        assert_eq!(memory_profile_set.mounts, CapabilityMountProfile::Memory);
         assert_eq!(
-            builtin_profile_set.network,
+            memory_profile_set.network,
             CapabilityNetworkProfile::Default
         );
 
