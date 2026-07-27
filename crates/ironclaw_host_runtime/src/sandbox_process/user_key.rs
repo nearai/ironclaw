@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use ironclaw_host_api::{ResourceScope, TenantId, UserId};
 
-use super::key_codec::{digest_hex, encode_parts};
+use crate::sandbox_process::key_codec::{digest_hex, encode_parts};
 
 // Not constructed by any production call site in this PR: the consumer
 // (the exec-based transport's per-user container reuse and Task A5's

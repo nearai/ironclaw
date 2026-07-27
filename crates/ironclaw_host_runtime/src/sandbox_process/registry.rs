@@ -101,6 +101,11 @@ impl UserContainerCandidate {
     pub(crate) fn from_summary(container: &ContainerSummary, label_prefix: &str) -> Option<Self> {
         let container_id = container.id.clone()?;
         let labels = container.labels.as_ref()?;
+        // silent-ok: a missing or unparseable created_at label means this
+        // container is not a valid recycle candidate; the caller already
+        // treats a rejected candidate as "not ours" via the `?` short
+        // circuit, so the parse error itself is not needed to make that
+        // decision.
         let created_at = labels
             .get(&label_created_at(label_prefix))
             .and_then(|value| DateTime::parse_from_rfc3339(value).ok())

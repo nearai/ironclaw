@@ -210,6 +210,12 @@ Rules:
 9. Symlink writes that would create or follow an escape outside the root are denied.
 10. Returned errors must identify virtual/scoped paths, not raw host paths.
 
+**Leaf-scoped local mounts (`mount_local_per_leaf`).** Multiple callers can share one `host_root` while each is confined to its own first-path-segment leaf (`host_root/<leaf>`), for the persistent per-user sandbox container model where one shared workspace directory hosts every user's leaf:
+
+- a request for the bare mount root (no leaf segment) is denied, not silently rooted at `host_root`
+- a leaf that does not yet exist on disk is bootstrapped on first write — the containment check accepts `host_root` itself as the nearest *existing* ancestor for a brand-new leaf, rather than rejecting it as an escape
+- containment is enforced per leaf, not just per `host_root`: a symlink inside `leaf-a` that resolves to a path physically under `host_root` but outside `leaf-a` (e.g. into `leaf-b`) is rejected on both the read and write paths, even though a plain `mount_local` (host_root-only) containment check would let it resolve
+
 ---
 
 ## 7. Permissions
@@ -498,6 +504,7 @@ Add tests through the caller-facing filesystem APIs, not only helper functions:
 - path traversal in scoped path is rejected before backend access
 - local backend denies symlink escape
 - local backend does not leak raw host path in display error
+- `mount_local_per_leaf` denies a bare mount-root request, bootstraps a brand-new leaf on first write, and rejects a same-`host_root` cross-leaf symlink escape on both read and write
 - `CompositeRootFilesystem` routes operations by longest virtual mount prefix
 - `CompositeRootFilesystem::describe_path` reports matched root, backend identity, content kind, and index policy
 - exact duplicate composite mount roots fail closed

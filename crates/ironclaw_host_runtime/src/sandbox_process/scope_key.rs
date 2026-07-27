@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use ironclaw_host_api::ResourceScope;
 
-use super::key_codec::{digest_hex, encode_parts};
+use crate::sandbox_process::key_codec::{digest_hex, encode_parts};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebornSandboxScopeKey {

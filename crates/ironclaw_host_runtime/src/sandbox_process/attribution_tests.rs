@@ -267,6 +267,42 @@ async fn malformed_label_value_is_rejected() {
 }
 
 #[tokio::test]
+async fn missing_tenant_label_is_rejected() {
+    // Mirror of `partial_label_set_is_rejected_not_partially_parsed`, but
+    // with the tenant label missing and the user label present/valid —
+    // `parse_attribution_labels` must fail closed on this half-labeled
+    // shape too, not only on the missing-user shape.
+    let only_user = HashMap::from([(label_user(PREFIX), "user-a".to_string())]);
+    let lookup = FakeLookup::new(vec![container_with(
+        "c1",
+        Some("10.200.0.5"),
+        Some(only_user),
+    )]);
+    let resolver = ConnectionAttributionResolver::with_lookup(lookup, NETWORK, PREFIX);
+
+    let outcome = resolver.resolve("10.200.0.5".parse().unwrap()).await;
+
+    assert_eq!(outcome, ConnectionAttribution::Unattributed);
+}
+
+#[tokio::test]
+async fn malformed_tenant_label_value_is_rejected() {
+    // "/" fails `TenantId`'s scope-id validation (path separators
+    // forbidden), mirroring `malformed_label_value_is_rejected` for the
+    // tenant field instead of the user field.
+    let lookup = FakeLookup::new(vec![container_with(
+        "c1",
+        Some("10.200.0.5"),
+        Some(labels("tenant/../escape", "user-a")),
+    )]);
+    let resolver = ConnectionAttributionResolver::with_lookup(lookup, NETWORK, PREFIX);
+
+    let outcome = resolver.resolve("10.200.0.5".parse().unwrap()).await;
+
+    assert_eq!(outcome, ConnectionAttribution::Unattributed);
+}
+
+#[tokio::test]
 async fn docker_query_failure_is_unattributed_not_a_panic() {
     let resolver = ConnectionAttributionResolver::with_lookup(FailingLookup, NETWORK, PREFIX);
 

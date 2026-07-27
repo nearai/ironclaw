@@ -137,10 +137,21 @@ struct CacheEntry {
 /// from the new container could be attributed to the old owner until the
 /// entry expires and is re-queried. `invalidate` exists so a caller that
 /// *does* know about a teardown event (e.g. a future hook from `reaper`'s
-/// stop/remove path) can collapse that window to zero for the IPs it knows
-/// changed, rather than relying on TTL expiry alone. Until such a hook is
-/// wired, the TTL is the only bound — keep it short relative to how often
-/// containers are recycled if this is tightened further.
+/// stop/remove path) can collapse that window *toward* zero for the IPs it
+/// knows changed, rather than relying on TTL expiry alone.
+///
+/// **`invalidate` is not itself race-free against a concurrent [`Self::resolve`].**
+/// `resolve`'s Docker query runs outside the cache lock (see that method's
+/// doc), so a call sequence of resolve-misses -> invalidate -> the in-flight
+/// query returns its (now stale) pre-teardown result -> resolve unconditionally
+/// re-inserts it can resurrect an entry `invalidate` just removed. Closing
+/// that race needs a generation/version check threaded through `resolve` and
+/// `invalidate` — deferred until W6/`reaper` actually calls `invalidate`
+/// concurrently with in-flight resolves, so the fix is shaped by the real
+/// call pattern rather than guessed here (same reasoning as the thundering-herd
+/// tradeoff on `resolve`, below). Until such a hook is wired, the TTL is the
+/// only bound — keep it short relative to how often containers are recycled
+/// if this is tightened further.
 pub(crate) struct ConnectionAttributionResolver<L: NetworkContainerLookup = Docker> {
     lookup: L,
     network: String,
@@ -218,8 +229,10 @@ impl<L: NetworkContainerLookup> ConnectionAttributionResolver<L> {
     }
 
     /// Explicit invalidation for a caller that knows `peer_ip`'s owning
-    /// container was just torn down — collapses the staleness window to
-    /// zero for that IP instead of waiting out the TTL. See the type doc.
+    /// container was just torn down — collapses the staleness window
+    /// toward zero for that IP instead of waiting out the TTL, but is not
+    /// itself race-free against a concurrent in-flight [`Self::resolve`].
+    /// See the type doc's "not race-free" section.
     #[allow(dead_code)] // consumed by W6 / a future reaper teardown hook; not wired yet
     pub(crate) fn invalidate(&self, peer_ip: IpAddr) {
         self.lock_cache().remove(&peer_ip);

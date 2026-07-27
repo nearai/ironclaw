@@ -797,6 +797,7 @@ mod tests {
     /// `host_root` — a plain `mount_local` containment check (host_root
     /// only) would let it resolve — but leaves `leaf-a`'s own containment
     /// root, so it must be rejected here.
+    #[cfg(unix)]
     #[tokio::test]
     async fn leaf_scoped_mount_rejects_cross_leaf_symlink_escape() {
         let storage = tempdir().unwrap();
@@ -885,6 +886,7 @@ mod tests {
     /// escape the write path closes: a *pre-existing* sibling leaf's
     /// symlink must still be rejected by `resolve_for_write`
     /// (`append_file`/`write_file`), not just by `read_file`.
+    #[cfg(unix)]
     #[tokio::test]
     async fn leaf_scoped_mount_rejects_cross_leaf_symlink_escape_on_write() {
         let storage = tempdir().unwrap();
