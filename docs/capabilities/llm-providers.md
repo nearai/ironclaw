@@ -304,11 +304,9 @@ Browse all models at [openrouter.ai/models](https://openrouter.ai/models).
 
 [Together AI](https://www.together.ai) provides fast inference for open-source models.
 
-```env
-LLM_BACKEND=openai_compatible
-LLM_BASE_URL=https://api.together.xyz/v1
-LLM_API_KEY=...
-LLM_MODEL=meta-llama/Llama-3.3-70B-Instruct-Turbo
+```bash
+ironclaw models set-provider together --model meta-llama/Llama-3.3-70B-Instruct-Turbo
+export TOGETHER_API_KEY=...
 ```
 
 Popular Together AI model IDs:
@@ -323,11 +321,9 @@ Popular Together AI model IDs:
 
 [Fireworks AI](https://fireworks.ai) offers fast inference with compound AI system support.
 
-```env
-LLM_BACKEND=openai_compatible
-LLM_BASE_URL=https://api.fireworks.ai/inference/v1
-LLM_API_KEY=fw_...
-LLM_MODEL=accounts/fireworks/models/llama4-maverick-instruct-basic
+```bash
+ironclaw models set-provider fireworks --model accounts/fireworks/models/llama4-maverick-instruct-basic
+export FIREWORKS_API_KEY=fw_...
 ```
 
 ### vLLM / LiteLLM (self-hosted)

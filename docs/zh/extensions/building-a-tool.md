@@ -207,10 +207,14 @@ cargo build --release --target wasm32-wasip2
 
 ## 8. 安装并测试
 
+在 [Web 界面](/using/webui)的 **Extensions** 中导入打包好的扩展归档，然后按 id 安装：
+
 ```bash
-ironclaw extension install ./target/wasm32-wasip2/release/weather_tool.wasm
-ironclaw extension search
+ironclaw extension search weather-tool
+ironclaw extension install weather-tool
 ```
+
+`extension install` 只接受扩展 id，不接受 `.wasm` 文件路径。
 
 然后在聊天中测试：
 
