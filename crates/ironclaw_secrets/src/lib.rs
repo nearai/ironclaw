@@ -43,6 +43,22 @@ use uuid::Uuid;
 const CREDENTIAL_ID_MAX_LEN: usize = 128;
 const DEFAULT_SECRET_LEASE_TTL_SECONDS: i64 = 300;
 
+/// Default lifetime handed to a [`CredentialSession`] whose
+/// [`CredentialSessionRequest::expires_at`] is `None`. A caller that asks for
+/// "no expiry" still gets a bounded session — see
+/// [`CREDENTIAL_SESSION_MAX_TTL_SECONDS`] for why unbounded is never actually
+/// granted.
+const CREDENTIAL_SESSION_DEFAULT_TTL_SECONDS: i64 = 30 * 60;
+
+/// Hard cap on how far in the future any [`CredentialSession::expires_at`]
+/// may be set, regardless of what the caller requests. Explicit revocation
+/// (via [`CredentialSessionLease`]/[`InMemoryCredentialBroker::revoke_session`])
+/// is the primary way a session's life ends; this is only the backstop for a
+/// lease held or leaked past the caller's own error/timeout/panic handling —
+/// see `create_session`'s doc comment for why a background sweep task is not
+/// the fix here.
+const CREDENTIAL_SESSION_MAX_TTL_SECONDS: i64 = 30 * 60;
+
 /// Opaque identifier for a one-shot secret lease.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -648,6 +664,32 @@ impl InMemoryCredentialBroker {
         Ok(())
     }
 
+    /// Mints a [`CredentialSession`] for `request`, capping its expiry so a
+    /// session can never be genuinely unbounded.
+    ///
+    /// `request.expires_at` and `request.max_uses` are both `Option`, and a
+    /// caller (in practice, `mint_on_first_use`'s upstream capability
+    /// dispatch) can legitimately pass `expires_at: None` meaning "I have no
+    /// opinion" rather than "never expire". Combined with revocation that
+    /// depends on `Drop` running (see [`CredentialSessionLease`]), a lease
+    /// held or leaked forever — a caller that never awaits its future to
+    /// completion or cancellation, for instance — would otherwise be a
+    /// standing grant for the process lifetime. So `expires_at` is always
+    /// defaulted-and-capped here: `None` becomes
+    /// [`CREDENTIAL_SESSION_DEFAULT_TTL_SECONDS`] out, and anything longer
+    /// than [`CREDENTIAL_SESSION_MAX_TTL_SECONDS`] (including an explicit
+    /// request for longer) is clamped down to it. Enforcement of the
+    /// resulting expiry is the existing lazy check in
+    /// `ensure_credential_session_record_usable` / `validate_session` — this
+    /// only ever narrows the stored value, it adds no new enforcement path.
+    ///
+    /// Deliberately **not** paired with a background sweep task: proactive
+    /// eviction of expired-but-unrevoked sessions would be standing
+    /// infrastructure (a spawn point, shutdown handling, interval tuning) for
+    /// a path with zero live callers today, and this crate owns no runtime to
+    /// host it on. Explicit revoke stays the primary mechanism; this cap is
+    /// only the backstop. Proactive eviction is deferred to whichever later
+    /// PR gives this store an owning runtime.
     pub fn create_session(
         &self,
         request: CredentialSessionRequest,
@@ -705,6 +747,14 @@ impl InMemoryCredentialBroker {
                 account_id: request.account_id,
             });
         }
+        let now = chrono::Utc::now();
+        let default_expires_at =
+            now + chrono::Duration::seconds(CREDENTIAL_SESSION_DEFAULT_TTL_SECONDS);
+        let max_expires_at = now + chrono::Duration::seconds(CREDENTIAL_SESSION_MAX_TTL_SECONDS);
+        let expires_at = request
+            .expires_at
+            .unwrap_or(default_expires_at)
+            .min(max_expires_at);
         let session = CredentialSession {
             scope: request.scope,
             invocation_id: request.invocation_id,
@@ -713,7 +763,7 @@ impl InMemoryCredentialBroker {
             account_id: account.id.clone(),
             secret_handles: account.secret_handles.clone(),
             allowed_targets: account.allowed_targets.clone(),
-            expires_at: request.expires_at,
+            expires_at: Some(expires_at),
             max_uses: request.max_uses,
             correlation_id: CredentialSessionId::new(),
         };
@@ -1094,9 +1144,11 @@ mod tests {
     use serde_json::json;
 
     use crate::{
-        CREDENTIAL_ID_MAX_LEN, CredentialAccount, CredentialAccountId, CredentialAccountStatus,
-        CredentialBrokerError, CredentialPathPolicy, CredentialSessionId, CredentialSessionRequest,
-        CredentialTargetPolicy, InMemoryCredentialBroker, RedactedJson, SecretStoreError,
+        CREDENTIAL_ID_MAX_LEN, CREDENTIAL_SESSION_DEFAULT_TTL_SECONDS,
+        CREDENTIAL_SESSION_MAX_TTL_SECONDS, CredentialAccount, CredentialAccountId,
+        CredentialAccountStatus, CredentialBrokerError, CredentialPathPolicy, CredentialSessionId,
+        CredentialSessionRequest, CredentialTargetPolicy, InMemoryCredentialBroker, RedactedJson,
+        SecretStoreError,
     };
 
     #[test]
@@ -1295,6 +1347,69 @@ mod tests {
             "CredentialSession Debug must not include the raw correlation UUID"
         );
         assert!(debug.contains("CredentialSessionId([REDACTED])"));
+    }
+
+    #[test]
+    fn create_session_defaults_and_caps_expires_at() {
+        // A request with no opinion on expiry (`None`) must not come back
+        // genuinely unbounded — it gets the default TTL. A request asking
+        // for longer than the hard cap must be clamped down to the cap
+        // rather than honored as requested. Both defend the same invariant:
+        // a leaked/held-forever lease can never be a standing grant for the
+        // process lifetime (see `create_session`'s doc comment).
+        let broker = InMemoryCredentialBroker::new();
+        let scope = sample_scope("tenant-a", "user-a");
+        let account_id = CredentialAccountId::new("openai_prod").unwrap();
+        broker
+            .put_account(sample_account(
+                scope.clone(),
+                account_id.clone(),
+                SecretHandle::new("openai_key").unwrap(),
+            ))
+            .unwrap();
+
+        let before = Utc::now();
+        let defaulted = broker
+            .create_session(CredentialSessionRequest {
+                expires_at: None,
+                ..session_request(
+                    scope.clone(),
+                    account_id.clone(),
+                    "https://api.example.com/v1/models",
+                )
+            })
+            .unwrap();
+        let after = Utc::now();
+        let defaulted_expiry = defaulted
+            .expires_at()
+            .expect("None must be defaulted, not left unbounded");
+        assert!(
+            defaulted_expiry
+                >= before + chrono::Duration::seconds(CREDENTIAL_SESSION_DEFAULT_TTL_SECONDS)
+                && defaulted_expiry
+                    <= after + chrono::Duration::seconds(CREDENTIAL_SESSION_DEFAULT_TTL_SECONDS),
+            "expires_at: None must default to ~{CREDENTIAL_SESSION_DEFAULT_TTL_SECONDS}s out, got {defaulted_expiry}"
+        );
+
+        let requested_far_future = Utc::now() + chrono::Duration::days(365);
+        let capped = broker
+            .create_session(CredentialSessionRequest {
+                expires_at: Some(requested_far_future),
+                ..session_request(scope, account_id, "https://api.example.com/v1/models")
+            })
+            .unwrap();
+        let capped_expiry = capped
+            .expires_at()
+            .expect("capped session must still carry an expiry");
+        assert!(
+            capped_expiry < requested_far_future,
+            "a request for a 1-year expiry must be clamped down to the cap, got {capped_expiry}"
+        );
+        assert!(
+            capped_expiry
+                <= Utc::now() + chrono::Duration::seconds(CREDENTIAL_SESSION_MAX_TTL_SECONDS),
+            "clamped expiry must not exceed the {CREDENTIAL_SESSION_MAX_TTL_SECONDS}s cap, got {capped_expiry}"
+        );
     }
 
     #[test]
