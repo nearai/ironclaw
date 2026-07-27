@@ -378,11 +378,16 @@ mod tests {
     }
 
     /// Counts calls and returns a fixed, pre-programmed container list —
-    /// lets tests assert cache hit/miss behavior precisely.
+    /// lets tests assert cache hit/miss behavior precisely. An optional
+    /// `barrier` forces every concurrent caller to land inside this async
+    /// fn's body at the same time, so a test can prove tasks actually
+    /// overlap in the miss/query/insert window instead of merely hoping
+    /// the scheduler interleaves them.
     #[derive(Default)]
     struct FakeLookup {
         calls: AtomicUsize,
         containers: Vec<ContainerSummary>,
+        barrier: Option<std::sync::Arc<tokio::sync::Barrier>>,
     }
 
     impl FakeLookup {
@@ -390,11 +395,20 @@ mod tests {
             Self {
                 calls: AtomicUsize::new(0),
                 containers,
+                barrier: None,
             }
         }
 
         fn call_count(&self) -> usize {
             self.calls.load(Ordering::SeqCst)
+        }
+
+        /// Every call to `containers_on_network` waits on `barrier` before
+        /// returning, so `barrier`'s party count callers all reach that
+        /// point before any of them proceeds to insert into the cache.
+        fn with_barrier(mut self, barrier: std::sync::Arc<tokio::sync::Barrier>) -> Self {
+            self.barrier = Some(barrier);
+            self
         }
     }
 
@@ -405,6 +419,9 @@ mod tests {
             _network: &str,
         ) -> Result<Vec<ContainerSummary>, RuntimeProcessError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(barrier) = &self.barrier {
+                barrier.wait().await;
+            }
             Ok(self.containers.clone())
         }
     }
@@ -687,12 +704,24 @@ mod tests {
         // simultaneous `resolve` calls for two distinct IPs sharing one
         // resolver and asserts every call lands on the correct owner, with
         // no panic/deadlock across the shared cache mutex.
+        //
+        // `FakeLookup::containers_on_network` returns immediately with no
+        // yield point of its own, so without forcing one, tasks could run
+        // to completion sequentially and never actually overlap inside the
+        // miss/query/insert window this test claims to exercise. The
+        // barrier (party count == task count) makes every one of the 20
+        // calls land inside `containers_on_network` before any of them is
+        // allowed to proceed to the insert — this is sound because the
+        // cache starts empty, so all 20 `resolve` calls miss and reach the
+        // lookup before any has inserted.
         use std::sync::Arc;
 
+        let barrier = Arc::new(tokio::sync::Barrier::new(20));
         let lookup = FakeLookup::new(vec![
             container_with("c1", Some("10.200.0.5"), Some(labels("tenant-a", "user-a"))),
             container_with("c2", Some("10.200.0.6"), Some(labels("tenant-b", "user-b"))),
-        ]);
+        ])
+        .with_barrier(Arc::clone(&barrier));
         let resolver = Arc::new(ConnectionAttributionResolver::with_lookup(
             lookup, NETWORK, PREFIX,
         ));
