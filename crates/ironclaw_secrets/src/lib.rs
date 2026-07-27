@@ -15,8 +15,8 @@ mod placeholder;
 mod secret_store;
 
 pub use placeholder::{
-    CREDENTIAL_PLACEHOLDER_PREFIX, CredentialPlaceholderOwner, CredentialPlaceholderRegistry,
-    CredentialPlaceholderToken, CredentialSessionLease,
+    CREDENTIAL_PLACEHOLDER_PREFIX, CREDENTIAL_PLACEHOLDER_SUFFIX_LEN, CredentialPlaceholderOwner,
+    CredentialPlaceholderRegistry, CredentialPlaceholderToken, CredentialSessionLease,
 };
 pub use secret_store::{CredentialBroker, SecretStore};
 
@@ -470,8 +470,8 @@ pub enum CredentialBrokerError {
     CredentialExtensionMismatch { account_id: CredentialAccountId },
     #[error("credential account {account_id} is not allowed for requested target")]
     CredentialPolicyMismatch { account_id: CredentialAccountId },
-    #[error("credential placeholder token {value} is invalid: {reason}")]
-    InvalidPlaceholderToken { value: String, reason: String },
+    #[error("credential placeholder token is invalid: {reason}")]
+    InvalidPlaceholderToken { reason: String },
 }
 
 impl CredentialBrokerError {
@@ -1245,7 +1245,6 @@ mod tests {
         );
         assert_eq!(
             CredentialBrokerError::InvalidPlaceholderToken {
-                value: "bad".to_string(),
                 reason: "must start with 'icsbx_'".to_string(),
             }
             .stable_reason(),

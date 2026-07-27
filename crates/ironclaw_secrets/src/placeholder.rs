@@ -49,6 +49,26 @@ use crate::{
 /// update the regex there too.
 pub const CREDENTIAL_PLACEHOLDER_PREFIX: &str = "icsbx_";
 
+/// Required length of the suffix after [`CREDENTIAL_PLACEHOLDER_PREFIX`].
+///
+/// Registry-issued tokens are always exactly this long — a UUIDv4
+/// `simple()` string (32 lowercase hex characters, see
+/// [`CredentialPlaceholderToken::generate`]) — and nothing in this crate
+/// legitimately needs a shorter or longer suffix. [`CredentialPlaceholderToken::parse`]
+/// enforces this length exactly (not just a minimum) so that a sandbox
+/// caller cannot hand back an arbitrarily long `icsbx_...` string and drive
+/// unbounded hashing/cloning/map-insertion work on the host from unvalidated
+/// input.
+///
+/// Exposed publicly so `ironclaw_safety::leak_detector`'s
+/// `sandbox_credential_placeholder` pattern — which independently matches
+/// `icsbx_` plus 16+ alphanumeric characters — can pin its own minimum
+/// against a token this crate's public API would actually accept, rather
+/// than a hardcoded literal drifting silently out of sync. See
+/// `sandbox_credential_placeholder_prefix_matches_registry` in
+/// `ironclaw_safety/src/leak_detector.rs`.
+pub const CREDENTIAL_PLACEHOLDER_SUFFIX_LEN: usize = 32;
+
 /// Opaque, stable placeholder token for a `(tenant, user, provider)` triple.
 ///
 /// Deliberately **not** bearer-like: unlike [`CredentialSessionId`], a
@@ -67,17 +87,9 @@ impl CredentialPlaceholderToken {
         ))
     }
 
-    /// Minimum length of the suffix after [`CREDENTIAL_PLACEHOLDER_PREFIX`],
-    /// matching the shortest suffix the `sandbox_credential_placeholder` leak
-    /// pattern (`ironclaw_safety::leak_detector`) will recognize and the
-    /// shape [`CredentialPlaceholderToken::generate`] actually produces (a
-    /// 32-character UUIDv4 `simple()` suffix).
-    const MIN_SUFFIX_LEN: usize = 16;
-
     fn validate(value: &str) -> Result<(), CredentialBrokerError> {
         let Some(suffix) = value.strip_prefix(CREDENTIAL_PLACEHOLDER_PREFIX) else {
             return Err(CredentialBrokerError::InvalidPlaceholderToken {
-                value: value.to_string(),
                 reason: format!("must start with '{CREDENTIAL_PLACEHOLDER_PREFIX}'"),
             });
         };
@@ -89,16 +101,23 @@ impl CredentialPlaceholderToken {
         // characters or shell metacharacters an attacker-controlled sandbox
         // side might send back through `parse` — must fail closed here
         // instead of propagating downstream.
-        if suffix.len() < Self::MIN_SUFFIX_LEN
+        //
+        // The length check is an exact match, not just a minimum: registry-
+        // issued tokens are always exactly `CREDENTIAL_PLACEHOLDER_SUFFIX_LEN`
+        // characters (see that constant's doc comment), and nothing here
+        // legitimately needs a variable-length suffix. Accepting an
+        // arbitrarily long `icsbx_...` string from the sandbox would let
+        // untrusted input drive unbounded hashing/cloning/map-insertion work
+        // on the host.
+        if suffix.len() != CREDENTIAL_PLACEHOLDER_SUFFIX_LEN
             || !suffix
                 .chars()
                 .all(|character| character.is_ascii_alphanumeric())
         {
             return Err(CredentialBrokerError::InvalidPlaceholderToken {
-                value: value.to_string(),
                 reason: format!(
-                    "must be '{CREDENTIAL_PLACEHOLDER_PREFIX}' followed by at least {} ASCII alphanumeric characters",
-                    Self::MIN_SUFFIX_LEN
+                    "must be '{CREDENTIAL_PLACEHOLDER_PREFIX}' followed by exactly {} ASCII alphanumeric characters",
+                    CREDENTIAL_PLACEHOLDER_SUFFIX_LEN
                 ),
             });
         }
@@ -602,7 +621,10 @@ mod tests {
         InMemoryCredentialBroker, RedactedJson,
     };
 
-    use super::{CredentialPlaceholderRegistry, CredentialPlaceholderToken};
+    use super::{
+        CREDENTIAL_PLACEHOLDER_SUFFIX_LEN, CredentialPlaceholderRegistry,
+        CredentialPlaceholderToken,
+    };
 
     fn sample_scope(tenant: &str, user: &str) -> ResourceScope {
         ResourceScope {
@@ -726,6 +748,16 @@ mod tests {
         // metacharacters) must fail closed rather than being accepted and
         // potentially propagated into a log line or env var downstream.
         assert!(CredentialPlaceholderToken::parse("icsbx_0123456789abcdef\n; rm -rf /").is_err());
+        // Suffix longer than the registry ever produces: an arbitrarily long
+        // `icsbx_...` string from the sandbox must be rejected, not accepted
+        // and driven through hashing/cloning/map-insertion downstream.
+        assert!(
+            CredentialPlaceholderToken::parse(format!(
+                "icsbx_{}",
+                "a".repeat(CREDENTIAL_PLACEHOLDER_SUFFIX_LEN + 1)
+            ))
+            .is_err()
+        );
     }
 
     #[test]
