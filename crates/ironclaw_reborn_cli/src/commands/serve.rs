@@ -5,6 +5,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
 use clap::Args;
+use ironclaw_extension_host::channel_identity_binding::channel_identity_binding_hook_factory;
+use ironclaw_extension_host::extension_ingress::extension_ingress_route_mount;
 use ironclaw_reborn_composition::build_openai_compat_route_mount;
 use ironclaw_reborn_composition::host_api::{
     AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
@@ -15,9 +17,10 @@ use ironclaw_reborn_composition::{
 };
 use ironclaw_reborn_config::{IdentitySection, seed_default_config_file_if_missing};
 use ironclaw_webui::{
-    DeferredWebuiRouterHandle, EnvBearerAuthenticator, RebornWebuiServeError,
-    RebornWebuiServeOptions, WebuiAuthenticator, WebuiServeConfig,
-    deferred_webui_v2_startup_router, serve_webui_v2, webui_v2_app_with_lifecycle,
+    DeferredWebuiRouterHandle, EnvBearerAuthenticator, ProductAuthRouteState,
+    RebornWebuiServeError, RebornWebuiServeOptions, WebuiAuthenticator, WebuiServeConfig,
+    deferred_webui_v2_startup_router, product_auth_route_mount, serve_webui_v2,
+    webui_v2_app_with_lifecycle,
 };
 use secrecy::SecretString;
 
@@ -85,7 +88,7 @@ impl ironclaw_reborn_composition::AdminApiTokenMinter for SignedSessionTokenMint
     }
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Default, Args)]
 pub(crate) struct ServeCommand {
     /// Host interface for the Reborn WebChat v2 HTTP listener.
     /// Overrides `[webui].listen_host` from the boot config file.
@@ -250,8 +253,9 @@ impl ServeCommand {
             IpAddr::from_str(raw)
                 .map_err(|err| anyhow!("[webui].listen_host `{raw}` invalid: {err}"))?
         } else {
-            IpAddr::from_str(DEFAULT_SERVE_HOST)
-                .expect("DEFAULT_SERVE_HOST is a crate-local literal that parses as IpAddr") // safety: crate-local const known to be valid
+            IpAddr::from_str(DEFAULT_SERVE_HOST).map_err(|err| {
+                anyhow!("DEFAULT_SERVE_HOST `{DEFAULT_SERVE_HOST}` invalid: {err}")
+            })?
         };
         // `port = 0` would tell the OS to pick a free port — useful
         // when invoked from a test harness with `--port 0`, but in a
@@ -562,7 +566,7 @@ impl ServeCommand {
                 serve_config = serve_config.with_canonical_host(host);
             }
             {
-                let mut state = ironclaw_reborn_composition::ProductAuthRouteState::new(
+                let mut state = ProductAuthRouteState::new(
                     runtime.product_auth_services(),
                     tenant_id.clone(),
                     Some(default_agent_id.clone()),
@@ -571,23 +575,18 @@ impl ServeCommand {
                 .with_product_surface(product_surface.clone());
                 if let Some(channel_identity_binding) = runtime.channel_identity_binding_config() {
                     state = state.with_provider_identity_hook(
-                        ironclaw_reborn_composition::channel_identity_binding_hook_factory(
-                            channel_identity_binding,
-                        ),
+                        channel_identity_binding_hook_factory(channel_identity_binding),
                     );
                 }
-                serve_config = serve_config.with_split_route_mount(
-                    ironclaw_reborn_composition::product_auth_route_mount(state),
-                );
+                serve_config = serve_config.with_split_route_mount(product_auth_route_mount(state));
             }
             // Generic extension channel ingress (extension-runtime P4): one
             // mount serves `/webhooks/extensions/{extension_id}/{route_suffix}`
             // for every active extension; the route table follows the active
             // snapshot.
             if let Some(ingress_parts) = runtime.extension_ingress_parts() {
-                let ingress_mount =
-                    ironclaw_reborn_composition::extension_ingress_route_mount(&ingress_parts)
-                        .context("failed to compose the extension ingress route mount")?;
+                let ingress_mount = extension_ingress_route_mount(&ingress_parts)
+                    .context("failed to compose the extension ingress route mount")?;
                 serve_config = serve_config.with_public_route_mount(ingress_mount);
             }
             // Generic WebGeneratedCode pairing routes (mint/status/unpair per
@@ -597,7 +596,10 @@ impl ServeCommand {
             }
             // Public NEAR AI login callback route (token redirect target). Built
             // from the runtime's LLM seam; absent when no LLM was wired.
-            if let Some(nearai_mount) = runtime.nearai_login_callback_mount() {
+            if let Some(nearai_mount) = runtime
+                .nearai_login_callback_mount()
+                .context("failed to compose NEAR AI login callback route")?
+            {
                 serve_config = serve_config.with_public_route_mount(nearai_mount);
             }
             if let Some(mount) = public_mount {
@@ -1596,10 +1598,10 @@ slack_user_id = "U123"
         .expect("reborn runtime builds");
 
         assert!(
-            runtime
-                .product_auth_for_test()
-                .as_auth_challenge_provider()
-                .is_some(),
+            ironclaw_reborn_composition::product_auth_challenge_provider(
+                &runtime.product_auth_for_test()
+            )
+            .is_some(),
             "serve wiring must expose the DCR-backed auth challenge provider"
         );
         runtime.shutdown().await.expect("runtime shutdown");
@@ -1629,10 +1631,10 @@ slack_user_id = "U123"
         .expect("reborn runtime builds");
 
         assert!(
-            runtime
-                .product_auth_for_test()
-                .as_auth_challenge_provider()
-                .is_some(),
+            ironclaw_reborn_composition::product_auth_challenge_provider(
+                &runtime.product_auth_for_test()
+            )
+            .is_some(),
             "serve wiring must expose the DCR-backed auth challenge provider"
         );
         runtime.shutdown().await.expect("runtime shutdown");
@@ -1673,10 +1675,10 @@ slack_user_id = "U123"
         .expect("reborn runtime builds");
 
         assert!(
-            runtime
-                .product_auth_for_test()
-                .as_auth_challenge_provider()
-                .is_some(),
+            ironclaw_reborn_composition::product_auth_challenge_provider(
+                &runtime.product_auth_for_test()
+            )
+            .is_some(),
             "serve wiring must expose the DCR-backed auth challenge provider"
         );
         runtime.shutdown().await.expect("runtime shutdown");

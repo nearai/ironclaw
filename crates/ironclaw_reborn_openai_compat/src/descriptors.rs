@@ -148,7 +148,7 @@ fn create_policy(body_limit: BodyLimitPolicy) -> IngressPolicy {
         websocket_origin: WebSocketOriginPolicy::NotApplicable,
         streaming: StreamingMode::Sse,
         audit: AuditTraceClass::UserAction,
-        effect_path: AllowedEffectPath::ProductWorkflow,
+        effect_path: AllowedEffectPath::ProductSurface,
     })
     .expect("OpenAI-compatible create policy must validate") // safety: crate-local constants declare LocalGateway + bearer + AuthenticatedCaller with host-mediated product-surface effects and SSE response support
 }
@@ -180,7 +180,7 @@ fn cancel_policy() -> IngressPolicy {
         websocket_origin: WebSocketOriginPolicy::NotApplicable,
         streaming: StreamingMode::None,
         audit: AuditTraceClass::UserAction,
-        effect_path: AllowedEffectPath::ProductWorkflow,
+        effect_path: AllowedEffectPath::ProductSurface,
     })
     .expect("OpenAI-compatible cancel policy must validate") // safety: cancel is host-mediated through ProductSurface and requires authenticated caller scope
 }

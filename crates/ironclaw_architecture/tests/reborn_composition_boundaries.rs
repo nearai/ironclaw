@@ -64,7 +64,7 @@ fn composition_root_is_workspace_member() {
 }
 
 #[test]
-fn composition_public_api_is_facade_shaped() {
+fn composition_public_api_is_service_shaped() {
     let lib = std::fs::read_to_string(
         workspace_root().join("crates/ironclaw_reborn_composition/src/lib.rs"),
     )
@@ -81,7 +81,7 @@ fn composition_public_api_is_facade_shaped() {
 
     assert!(
         !lib.contains("pub use input::RebornStorageInput"),
-        "composition facade API must not re-export raw storage input types"
+        "composition service API must not re-export raw storage input types"
     );
     assert!(
         !input.contains("pub enum RebornStorageInput"),
@@ -124,7 +124,7 @@ fn composition_public_pub_use_surface_matches_snapshot() {
     assert_eq!(
         snapshot, actual,
         "composition public pub-use surface must match docs/plans/composition-pubuse.snapshot; \
-         update the snapshot only for intentional public facade changes"
+         update the snapshot only for intentional public service changes"
     );
 }
 
@@ -132,34 +132,28 @@ fn composition_public_pub_use_surface_matches_snapshot() {
 fn extension_host_cluster_stays_internal() {
     let lib = std::fs::read_to_string(composition_src_path().join("lib.rs"))
         .expect("composition lib.rs readable");
-    let extension_host =
-        std::fs::read_to_string(composition_src_path().join("extension_host/mod.rs"))
-            .expect("composition extension_host mod.rs readable");
 
     assert!(
-        has_module_decl(&lib, "mod extension_host;"),
-        "extension_host must stay an internal crate-root module"
+        !has_module_decl(&lib, "mod extension_host;"),
+        "extension_host compatibility facade must stay removed from composition"
     );
     assert!(
         !has_module_decl(&lib, "pub mod extension_host;"),
         "extension_host must not become public"
     );
     assert!(
+        !composition_src_path().join("extension_host").exists(),
+        "composition must not grow a replacement extension_host module directory"
+    );
+    assert!(
         has_module_decl(&lib, "mod builtin_capability_policy;"),
         "builtin_capability_policy is runtime-profile policy and must stay at the crate root"
     );
-    assert!(
-        !extension_host.contains("builtin_capability_policy"),
-        "builtin_capability_policy must not be dragged into extension_host"
-    );
 
-    for module in EXTENSION_HOST_INTERNAL_MODULES {
-        let extension_host_decl = format!("pub(crate) mod {module};");
-        assert!(
-            has_module_decl(&extension_host, &extension_host_decl),
-            "{module} must stay behind extension_host as `pub(crate)`"
-        );
-
+    for module in EXTENSION_HOST_MOVED_MODULES
+        .iter()
+        .chain(EXTENSION_HOST_EXTERNALIZED_GENERIC_MODULES.iter())
+    {
         let root_decl = format!("mod {module};");
         let public_root_decl = format!("pub mod {module};");
         assert!(
@@ -293,22 +287,37 @@ fn strip_test_module(contents: &str) -> &str {
     }
 }
 
-const EXTENSION_HOST_INTERNAL_MODULES: &[&str] = &[
-    "available_extensions",
+const EXTENSION_HOST_MOVED_MODULES: &[&str] = &[
     "bundled_skills",
     "extension_activation_credentials",
-    "extension_credential_requirements",
     "extension_lifecycle",
     "extension_lifecycle_capabilities",
     "extension_lifecycle_capabilities_auth_tests",
-    "extension_lifecycle_command",
-    "first_party",
     "lifecycle",
-    "mcp",
-    "mcp_discovery",
     "skill_learning",
     "skill_listing",
     "webui_extension_credentials",
+];
+
+const EXTENSION_HOST_EXTERNALIZED_GENERIC_MODULES: &[&str] = &[
+    "active_publication",
+    "available_extension_import",
+    "available_extensions",
+    "channel_lifecycle",
+    "channel_delivery",
+    "channel_dm_targets",
+    "extension_credential_requirements",
+    "first_party_package",
+    "host_api_contracts",
+    "install_policy",
+    "lifecycle_restore",
+    "lifecycle_vocabulary",
+    "mcp",
+    "mcp_discovery",
+    "nearai_mcp",
+    "provider_instance_readiness",
+    "product_lifecycle",
+    "reply_contexts",
 ];
 
 fn composition_src_path() -> PathBuf {

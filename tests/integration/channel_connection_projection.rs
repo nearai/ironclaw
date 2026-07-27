@@ -1,8 +1,8 @@
 //! Caller-level regression for the model-visible `builtin.extension_search`
 //! channel-connection contract (#6618): a generated-code channel's setup
 //! guidance IS model-visible (the model needs it to explain the next step),
-//! while UI-only chrome — the static pairing failure copy — stays on the
-//! display preview path and never reads as live state.
+//! while UI-only chrome — the static pairing failure copy — is intentionally
+//! excluded from this model-visible path.
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]

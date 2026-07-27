@@ -20,12 +20,10 @@ use chrono::{Duration, Utc};
 use common::{authorized_callback_request, hex64, new_flow_request, test_scope};
 use ironclaw_auth::{
     AuthErrorCode, AuthFlowStatus, AuthProviderId, AuthorizationCodeHash,
-    CredentialAccountListRequest, OpaqueStateHash, PkceVerifierHash,
+    CredentialAccountListRequest, OpaqueStateHash, PkceVerifierHash, RebornOAuthCallbackOutcome,
+    RebornOAuthCallbackRequest,
 };
-use ironclaw_reborn_composition::{
-    RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
-    test_support::build_oauth_product_auth_for_test,
-};
+use ironclaw_reborn_composition::test_support::build_oauth_product_auth_for_test;
 
 /// Extension-runtime P6 S3: a CHANNEL extension's OAuth connect must bind
 /// the proven vendor identity to the authenticated caller through the
@@ -52,22 +50,31 @@ async fn oauth_connect_binds_channel_identity_through_the_generic_hook() {
         CredentialAccountLookupRequest, NewAuthFlow, OAuthAuthorizationCode, OAuthAuthorizationUrl,
         OAuthProviderCallbackRequest, PkceVerifierSecret, ProviderScope,
     };
+    use ironclaw_extension_host::channel_identity_binding::ChannelIdentityBindingConfig;
+    use ironclaw_extension_host::{
+        AdminConfigurationIdempotencyKey, AdminConfigurationService,
+        AdminConfigurationSubmittedValue, ChannelConfigReactivation,
+        ChannelConfigReactivationError, ChannelConfigService, FilesystemAdminConfigurationStore,
+    };
     use ironclaw_extensions::{
         ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStore,
         ExtensionInstallationStorePort, ExtensionManifestRecord, ExtensionManifestRef,
         ManifestSource,
     };
-    use ironclaw_filesystem::InMemoryBackend;
-    use ironclaw_host_api::{ExtensionId, VirtualPath};
+    use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
+    use ironclaw_host_api::{
+        ExtensionId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
+        ResourceScope, SecretHandle, UserId, VirtualPath,
+    };
     use ironclaw_reborn_composition::{
-        ChannelIdentityBindingConfig, RebornUserIdentityBinding,
-        RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,
-        RebornUserIdentityBindingStore,
+        RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
+        RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
         test_support::{
             build_oauth_product_auth_with_identity_for_test,
             handle_oauth_callback_with_channel_identity_binding_for_test,
         },
     };
+    use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStorePort};
     use secrecy::SecretString;
 
     const VENDOR: &str = "test-oauth-provider";
@@ -113,6 +120,18 @@ async fn oauth_connect_binds_channel_identity_through_the_generic_hook() {
                     && prefix_matches)
             });
             Ok(before - bindings.len())
+        }
+    }
+
+    struct NoopReactivation;
+
+    #[async_trait::async_trait]
+    impl ChannelConfigReactivation for NoopReactivation {
+        async fn reactivate_if_active(
+            &self,
+            _extension_id: &ExtensionId,
+        ) -> Result<(), ChannelConfigReactivationError> {
+            Ok(())
         }
     }
 
@@ -214,6 +233,7 @@ app_id = "/app_id"
         &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
     )
     .expect("fixture manifest parses");
+    let admin_descriptors = record.resolved().admin_configuration.clone();
     let extension_id = ExtensionId::new(EXTENSION_ID).expect("extension id");
     installation_store
         .upsert_manifest_and_installation(
@@ -232,18 +252,69 @@ app_id = "/app_id"
         .expect("persist install");
     let identity_store = Arc::new(RecordingIdentityStore::default());
     let scope = test_scope();
-    let binding_config = ChannelIdentityBindingConfig::for_test_with_admin_configuration(
+    let admin_scope = ResourceScope::local_default(
+        UserId::new("oauth-popup-admin").expect("admin user id"),
+        InvocationId::new(),
+    )
+    .expect("admin resource scope");
+    let admin_filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+    let admin_secrets: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
+    let admin = Arc::new(
+        AdminConfigurationService::new(
+            FilesystemAdminConfigurationStore::new(Arc::new(ScopedFilesystem::new(
+                admin_filesystem,
+                |_scope| {
+                    MountView::new(vec![MountGrant::new(
+                        MountAlias::new("/extension-admin-configuration")
+                            .expect("valid mount alias"),
+                        VirtualPath::new("/tenants/test/shared/admin-configuration")
+                            .expect("valid virtual path"),
+                        MountPermissions::read_write_list_delete(),
+                    )])
+                },
+            ))),
+            Arc::clone(&admin_secrets),
+            admin_descriptors,
+        )
+        .expect("admin configuration service"),
+    );
+    admin
+        .replace(
+            &admin_scope,
+            &ironclaw_extensions::AdminConfigurationGroupId::new("extension.acmechat")
+                .expect("admin group id"),
+            &AdminConfigurationIdempotencyKey::new("oauth-popup-channel-scope")
+                .expect("idempotency key"),
+            0,
+            vec![
+                AdminConfigurationSubmittedValue {
+                    handle: SecretHandle::new("acmechat_team_id").expect("team handle"),
+                    value: SecretMaterial::from("T-team".to_string()),
+                },
+                AdminConfigurationSubmittedValue {
+                    handle: SecretHandle::new("acmechat_app_id").expect("app handle"),
+                    value: SecretMaterial::from("A-app".to_string()),
+                },
+            ],
+        )
+        .await
+        .expect("seed channel scoping admin configuration");
+    let channel_config = Arc::new(
+        ChannelConfigService::new(
+            Arc::clone(&installation_store) as Arc<dyn ExtensionInstallationStorePort>,
+            Arc::clone(&admin_secrets),
+            admin_scope.clone(),
+            Arc::new(NoopReactivation),
+        )
+        .with_admin_configuration(admin, admin_scope),
+    );
+    let binding_config = ChannelIdentityBindingConfig::for_test(
         scope.resource.tenant_id.clone(),
         Arc::clone(&installation_store) as Arc<dyn ExtensionInstallationStorePort>,
         identity_store.clone(),
         identity_store.clone(),
-        vec![
-            ("acmechat_team_id".to_string(), "T-team".to_string()),
-            ("acmechat_app_id".to_string(), "A-app".to_string()),
-        ],
     )
-    .await
-    .expect("configure manifest-declared administrator values");
+    .with_channel_config_for_test(channel_config);
     let provider = AuthProviderId::new(VENDOR).unwrap();
 
     let run_callback = |token_body: serde_json::Value, fill: u8| {

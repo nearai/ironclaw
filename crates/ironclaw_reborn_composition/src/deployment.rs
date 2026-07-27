@@ -1,10 +1,8 @@
 //! Deployment configuration: a deployment mode is policy *data* resolved at
 //! the composition edge, never a type the kernel or a substrate names.
 //!
-//! This is the Slice B artifact of
-//! `docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`
-//! (§4.4 "Eliminate `Local*`", §5.6 "The deployment interface — modes are
-//! data"). Each deployment target is one [`DeploymentConfig`] value built by a
+//! Deployment modes are configuration data resolved at the composition edge;
+//! each deployment target is one [`DeploymentConfig`] value built by a
 //! named constructor; the difference between local-dev, local-dev-yolo, and
 //! the hosted volume preview is readable on this one page as data.
 //!
@@ -87,7 +85,7 @@ impl RebornReadinessDiagnostic {
 /// deployment selects a substrate, it does not *have a mode that implies one*.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeSubstrate {
-    /// No runtime is assembled — the facades report disabled.
+    /// No runtime is assembled — the services report disabled.
     None,
     /// The production-shaped substrate (libSQL or PostgreSQL store graph).
     ProductionShaped,
@@ -254,7 +252,7 @@ pub struct DeploymentConfig {
     /// Late-overridable via [`DeploymentConfig::with_owner_id`] (WebChat serve
     /// pins the authenticated user after the disclosure gate is built).
     pub(crate) owner_id: String,
-    pub(crate) local_runtime_identity: Option<crate::input::RuntimeOwnerIdentity>,
+    pub(crate) local_runtime_identity: Option<crate::input::RebornLocalRuntimeIdentity>,
     /// Resolved runtime policy. Populated late (the yolo host-access disclosure
     /// is not known at preset-construction time); the profile→bindings bridge
     /// installs the accurate value.
@@ -263,10 +261,9 @@ pub struct DeploymentConfig {
     pub(crate) oauth_provider_configs: Vec<crate::input::OAuthProviderBackendConfig>,
     pub(crate) oauth_dcr_callback: Option<crate::input::OAuthDcrCallbackConfig>,
     pub(crate) nearai_mcp_bootstrap_config:
-        Option<crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
+        Option<ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
     pub(crate) account_setup_descriptors: Vec<ironclaw_product::ExtensionAccountSetupDescriptor>,
-    pub(crate) first_party_bundles:
-        Vec<crate::extension_host::first_party::FirstPartyPackageBundle>,
+    pub(crate) first_party_bundles: Vec<ironclaw_extension_host::FirstPartyPackageBundle>,
 }
 
 impl DeploymentConfig {

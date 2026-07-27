@@ -1,6 +1,6 @@
 //! ProductSurface-backed Responses route service.
 //!
-//! This slice routes Responses create/cancel through the ProductSurface facade,
+//! This slice routes Responses create/cancel through the ProductSurface service,
 //! resolves retrieve through a composition-supplied projection reader, and
 //! translates projection-backed streaming creates into OpenAI-compatible SSE.
 //! The ack and text helpers intentionally mirror the chat slice until the two

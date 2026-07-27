@@ -2,7 +2,7 @@
 
 The **WebUI host stack** for Reborn WebChat v2 — the single `products`-layer
 crate, above `ironclaw_reborn_composition`, that turns composition's product/API
-surface into a running HTTP server a browser can talk to. It owns three
+surface into a running HTTP server a browser can talk to. It owns four
 subsystems that used to live apart (see `README.md` for the fold-in map):
 
 1. **WebChat v2 route surface + SPA** (`src/webui_v2/`, from the former
@@ -19,6 +19,11 @@ subsystems that used to live apart (see `README.md` for the fold-in map):
    runs `axum::serve`; the `Env`/`Session`/`Oidc` authenticators, the
    signed-token session store, and the `/auth/*` OAuth login surface that mints
    sessions.
+4. **Product-auth HTTP route serving** (`src/product_auth/`) — host-owned
+   routes that parse/bound OAuth/manual-token/account/cleanup HTTP input and
+   call `ironclaw_auth::RebornProductAuthServices`. Auth contracts and durable
+   services stay in `ironclaw_auth`; composition wires the service bundle into
+   this gateway.
 
 Composition deliberately stops at the
 `reborn_product_api_crates_do_not_bind_http_ingress` boundary — it returns a
@@ -60,6 +65,7 @@ turning the `webui_v2_routes()` descriptors into tower layers.
 | `SessionAuthenticator` | `WebuiAuthenticator` that resolves bearer tokens through `SignedTokenSessionStore` |
 | `OidcAuthenticator` | OIDC bearer-token verifier (JWKS + standard claims); accepted tokens map to non-operator WebUI capabilities |
 | `webui_v2_auth_router(config) -> PublicRouteMount` | OAuth login router + route descriptors. The descriptors travel with the router so composition can fold them into the descriptor-driven per-route rate-limit / body-limit middleware — same machinery the v2 facade and product-auth callback already use, no side door. |
+| `product_auth_route_mount(state) -> ProductAuthRouteMount` | Product-auth route router + descriptors for OAuth start/callback/status, manual-token setup/submit, account selection/recovery/refresh, and lifecycle cleanup. |
 | `PublicRouteMount` | `{ router, descriptors }` pair handed to `WebuiServeConfig::with_public_route_mount` |
 | `OAuthProvider` trait (in `auth/provider.rs`) | Extension point for per-provider URL / code-exchange logic. Deliberately lives in its own module so each provider does not depend on the others. `GoogleProvider` and `GitHubProvider` ship today. |
 | `GoogleProvider` (in `auth/google.rs`) | Google OIDC provider (scopes `openid email profile`, PKCE S256, optional `hd` hosted-domain restriction). Built from `GoogleOAuthConfig`. |
@@ -80,9 +86,9 @@ closed (`500`) if that layer is missing (locked by
 | Route ID | Method | Pattern | Streaming | Effect path |
 |---|---|---|---|---|
 | `webui.v2.get_session` | GET | `/api/webchat/v2/session` | — | `ProjectionOnly` |
-| `webui.v2.create_thread` | POST | `/api/webchat/v2/threads` | — | `ProductWorkflow` |
+| `webui.v2.create_thread` | POST | `/api/webchat/v2/threads` | — | `ProductSurface` |
 | `webui.v2.list_threads` | GET | `/api/webchat/v2/threads` (`?limit&cursor`) | — | `ProjectionOnly` |
-| `webui.v2.delete_thread` | DELETE | `/api/webchat/v2/threads/{thread_id}` | — | `ProductWorkflow` |
+| `webui.v2.delete_thread` | DELETE | `/api/webchat/v2/threads/{thread_id}` | — | `ProductSurface` |
 | `webui.v2.send_message` | POST | `/api/webchat/v2/threads/{thread_id}/messages` | — | `TurnCoordinator` |
 | `webui.v2.get_timeline` | GET | `/api/webchat/v2/threads/{thread_id}/timeline` (`?limit&cursor`) | — | `ProjectionOnly` |
 | `webui.v2.get_run_artifact` | GET | `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/artifact` | — | `ProjectionOnly` |
@@ -90,13 +96,13 @@ closed (`500`) if that layer is missing (locked by
 | `webui.v2.stream_events` | GET | `/api/webchat/v2/threads/{thread_id}/events` | **SSE** | `ProjectionOnly` |
 | `webui.v2.stream_events_ws` | GET | `/api/webchat/v2/threads/{thread_id}/ws` | **WebSocket** | `ProjectionOnly` |
 | `webui.v2.cancel_run` / `retry_run` / `resolve_gate` | POST | `…/runs/{run_id}/…` | — | `TurnCoordinator` |
-| `webui.v2.list/pause/resume/rename/delete_automation` | GET/POST/DELETE | `/api/webchat/v2/automations…` | — | `ProductWorkflow` |
-| `webui.v2.list/install/import/remove/get_setup/setup_extension` | GET/POST | `/api/webchat/v2/extensions…` | — | `ProjectionOnly` / `ProductWorkflow` |
-| `webui.v2.*_llm_*` | GET/POST | `/api/webchat/v2/llm/…` | — | `ProjectionOnly` / `ProductWorkflow` |
-| `webui.v2.settings.list_tools` / `set_tools_auto_approve` / `set_tool_permission` | GET/POST | `/api/webchat/v2/settings/tools…` | — | `ProjectionOnly` / `ProductWorkflow` |
-| `webui.v2.operator.*` (setup, config, config/{key}, validate, diagnostics, status, logs, service) | GET/POST | `/api/webchat/v2/operator/…` | — | `ProjectionOnly` / `ProductWorkflow` |
-| `webui.v2.admin.*` (users CRUD, status, role, secrets) | GET/POST/PATCH/PUT/DELETE | `/api/webchat/v2/admin/users…` | — | `ProductWorkflow` |
-| `webui.v2.trace_*` (credit, account, account-login-link, holds/authorize) | GET/POST | `/api/webchat/v2/traces/…` | — | `ProductWorkflow` |
+| `webui.v2.list/pause/resume/rename/delete_automation` | GET/POST/DELETE | `/api/webchat/v2/automations…` | — | `ProductSurface` |
+| `webui.v2.list/install/import/remove/get_setup/setup_extension` | GET/POST | `/api/webchat/v2/extensions…` | — | `ProjectionOnly` / `ProductSurface` |
+| `webui.v2.*_llm_*` | GET/POST | `/api/webchat/v2/llm/…` | — | `ProjectionOnly` / `ProductSurface` |
+| `webui.v2.settings.list_tools` / `set_tools_auto_approve` / `set_tool_permission` | GET/POST | `/api/webchat/v2/settings/tools…` | — | `ProjectionOnly` / `ProductSurface` |
+| `webui.v2.operator.*` (setup, config, config/{key}, validate, diagnostics, status, logs, service) | GET/POST | `/api/webchat/v2/operator/…` | — | `ProjectionOnly` / `ProductSurface` |
+| `webui.v2.admin.*` (users CRUD, status, role, secrets) | GET/POST/PATCH/PUT/DELETE | `/api/webchat/v2/admin/users…` | — | `ProductSurface` |
+| `webui.v2.trace_*` (credit, account, account-login-link, holds/authorize) | GET/POST | `/api/webchat/v2/traces/…` | — | `ProductSurface` |
 
 The exact per-route set (methods, query params, auth, rate/body limits) is the
 descriptor table in `src/webui_v2/descriptors.rs`; the count/shape is locked by

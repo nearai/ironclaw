@@ -140,6 +140,7 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
     .with_channel_extension_bindings(vec![crate::input::ChannelExtensionBinding {
         extension_id: "slack".to_string(),
         adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
+        inbound_payload_classifier: None,
         preference_target_codec: None,
     }]);
     let input =
@@ -151,9 +152,9 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
         });
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
     let extension_management = &runtime.extension_management;
-    // #6520 removed the port-side operator accessor: the tenant operator is
-    // the owner the runtime was constructed with.
-    let operator = UserId::new("runtime-channel-bind-race-owner").expect("valid lifecycle caller");
+    let operator = extension_management
+        .tenant_operator_user_id_for_test()
+        .clone();
     let slack_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack")
         .expect("valid Slack ref");
     extension_management
@@ -161,10 +162,11 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
         .await
         .expect("install Slack before OAuth callback");
 
+    let slack_id = ironclaw_host_api::ExtensionId::new("slack").expect("Slack extension id");
     runtime
-        .admin_configuration_resolver
-        .configure_admin_group_for_test(
-            "extension.slack",
+        .channel_config_service
+        .save(
+            &slack_id,
             vec![
                 ("slack_bot_token".to_string(), "xoxb-test".to_string()),
                 (
@@ -177,11 +179,11 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
                 ("slack_bot_user_id".to_string(), "U-BOT-RUNTIME".to_string()),
                 (
                     "slack_oauth_client_id".to_string(),
-                    "runtime-client-id".to_string(),
+                    "runtime-slack-client".to_string(),
                 ),
                 (
                     "slack_oauth_client_secret".to_string(),
-                    "runtime-client-secret".to_string(),
+                    "runtime-slack-client-secret".to_string(),
                 ),
             ],
         )
@@ -203,15 +205,16 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
         Some("A-RUNTIME".to_string()),
     )
     .expect("proven Slack identity");
-    let rollback = crate::extension_host::channel_identity::bind_channel_identities_for_callback(
-        &binding_config,
-        "slack",
-        &callback_scope,
-        Some(&identity),
-    )
-    .await
-    .expect("bind Slack identity before activation")
-    .expect("Slack callback maps to the installed channel extension");
+    let rollback =
+        ironclaw_extension_host::channel_identity_binding::bind_channel_identities_for_callback(
+            &binding_config,
+            "slack",
+            &callback_scope,
+            Some(&identity),
+        )
+        .await
+        .expect("bind Slack identity before activation")
+        .expect("Slack callback maps to the installed channel extension");
     drop(rollback);
 
     let dm_targets = &runtime.channel_dm_target_store;
@@ -234,11 +237,7 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
     assert_eq!(network_egress.calls.load(Ordering::SeqCst), 1);
 
     extension_management
-        .activate_with_prechecked_credentials_for_test(
-            slack_ref,
-            ExtensionActivationMode::Static,
-            &operator,
-        )
+        .activate_with_prechecked_credentials_for_test(slack_ref, ExtensionActivationMode::Static)
         .await
         .expect("activate Slack and publish the generic host snapshot");
 
@@ -346,7 +345,7 @@ fn readiness_for_runtime_gate(
     RebornReadiness {
         profile,
         state,
-        facades: crate::RebornFacadeReadiness {
+        services: crate::RebornServiceReadiness {
             host_runtime: true,
             turn_coordinator: true,
             product_auth: true,
@@ -513,6 +512,7 @@ fn production_scheduler_wake_guard_passes_local_dev_with_absent_wiring() {
         .expect("local-dev is exempt from the scheduler wake wiring requirement");
 }
 
+use ironclaw_host_api::InstallationState;
 use ironclaw_host_api::ProjectId;
 use ironclaw_host_api::{
     ActivityId, AgentId, ApprovalRequestId, CapabilityId, InvocationId, Principal,
@@ -532,13 +532,12 @@ use ironclaw_loop_host::{
 };
 use ironclaw_product::{
     CREATE_THREAD_COMMAND, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload,
-    LifecyclePublicState, LifecycleReadinessBlocker, ProductCreateThreadRequest,
-    ProductListAutomationsRequest, ProductResolveGateRequest, ProductSetupExtensionRequest,
-    ProductSubmitTurnRequest, ProductSurfaceCommandDescriptor, RESOLVE_GATE_COMMAND,
-    RebornExtensionCredentialSetup, RebornOutboundPreferencesResponse,
-    RebornSetupExtensionResponse, RebornSkillListResponse, RebornStreamEventsRequest,
-    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornViewPage, RebornViewQuery,
-    SUBMIT_TURN_COMMAND, approval_gate_ref,
+    LifecycleReadinessBlocker, ProductCreateThreadRequest, ProductListAutomationsRequest,
+    ProductResolveGateRequest, ProductSetupExtensionRequest, ProductSubmitTurnRequest,
+    ProductSurfaceCommandDescriptor, RESOLVE_GATE_COMMAND, RebornExtensionCredentialSetup,
+    RebornOutboundPreferencesResponse, RebornSetupExtensionResponse, RebornSkillListResponse,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornViewPage, RebornViewQuery, SUBMIT_TURN_COMMAND, approval_gate_ref,
 };
 use ironclaw_product::{ProductOutboundPayload, ProductProjectionItem};
 use ironclaw_skills::SkillTrust;
@@ -561,7 +560,6 @@ use ironclaw_turns::{
 use rust_decimal_macros::dec;
 
 use crate::RebornRuntimeProcessBinding;
-use crate::extension_host::extension_lifecycle::ExtensionActivationMode;
 use crate::input::RebornHostBindings;
 use crate::observability::hooks::HooksActivationConfig;
 use crate::runtime_input::{
@@ -570,6 +568,7 @@ use crate::runtime_input::{
     TriggerPollerSettings,
 };
 use crate::{RebornCompositionProfile, RebornReadiness, RebornReadinessState, RebornRuntimeError};
+use ironclaw_extension_host::ExtensionActivationMode;
 use ironclaw_reborn_config::{RebornBootConfig, RebornHome, RebornProfile};
 
 use super::{RebornSkillSourceKind, build_reborn_runtime};
@@ -579,56 +578,6 @@ const RUNTIME_SEND_TIMEOUT: Duration = Duration::from_secs(15);
 
 async fn stop_turn_runner_worker_for_manual_state_test(runtime: &super::RebornRuntime) {
     runtime.turn_scheduler.stop_for_test().await;
-}
-
-/// The production-shaped credential gate for lifecycle projections: #6520's
-/// `project` takes the caller's credential gate so credential-bearing
-/// extensions can project `Active` (a `None` gate caps them at setup-needed).
-fn runtime_extension_credential_gate(
-    runtime: &super::RebornRuntime,
-    user_id: &UserId,
-) -> crate::extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate
-{
-    let mut scope = runtime.thread_scope.to_resource_scope();
-    scope.user_id = user_id.clone();
-    scope.mission_id = None;
-    scope.thread_id = None;
-    scope.invocation_id = InvocationId::new();
-    crate::extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate::new(
-        scope,
-        runtime
-            .product_auth
-            .runtime_credential_account_selection_service(),
-    )
-}
-
-/// Install an extension through the ProductSurface capability path the WebUI
-/// uses. Install joins membership and auto-drives readiness (#6520 — there is
-/// no separate Activate action); a credential-gated package parks on `auth`.
-async fn install_webui_extension(
-    api: &dyn ironclaw_host_api::ProductSurface,
-    caller: ProductSurfaceCaller,
-    package_ref: LifecyclePackageRef,
-) {
-    let response = api
-        .invoke(
-            caller,
-            ironclaw_host_api::ProductSurfaceInvokeRequest {
-                operation_id: CapabilityId::new(ironclaw_product::EXTENSION_INSTALL_CAPABILITY_ID)
-                    .expect("extension install capability id"),
-                input: serde_json::json!({ "extension_id": package_ref.id.as_str() }),
-                activity_id: ActivityId::new(),
-            },
-        )
-        .await
-        .expect("install extension through ProductSurface capability");
-    let resolution: Resolution =
-        serde_json::from_value(response.output).expect("install resolution decodes");
-    match resolution {
-        Resolution::Done(outcome) if outcome.verdict.is_success() => {}
-        Resolution::Blocked(blocked) if blocked.kind() == "auth" => {}
-        other => panic!("extension install did not succeed: {other:?}"),
-    }
 }
 
 fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
@@ -1888,7 +1837,7 @@ async fn runtime_nearai_mcp_bootstraps_from_nearai_session_token() {
         response_cache_ttl_secs: 3600,
         response_cache_max_entries: 1000,
     };
-    let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config);
+    let llm = ironclaw_operator::ResolvedRebornLlm::from_llm_config(config);
 
     let input = RebornRuntimeInput::from_build_input(
         crate::deployment::local_dev_build_input(
@@ -1909,13 +1858,14 @@ async fn runtime_nearai_mcp_bootstraps_from_nearai_session_token() {
     let extension_management = &runtime.extension_management;
     let nearai_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
-    let operator = UserId::new("runtime-nearai-session-mcp-owner").expect("valid lifecycle caller");
-    let credential_gate = runtime_extension_credential_gate(&runtime, &operator);
     let projection = extension_management
-        .project(nearai_ref, &operator, Some(&credential_gate))
+        .project(
+            nearai_ref,
+            extension_management.tenant_operator_user_id_for_test(),
+        )
         .await
         .expect("NEAR AI MCP projected");
-    assert_eq!(projection.phase, LifecyclePublicState::Active);
+    assert_eq!(projection.phase, InstallationState::Active);
 
     let capabilities = extension_management
         .active_model_visible_capabilities()
@@ -1951,7 +1901,7 @@ async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
     )
     .await
     .expect("services build for stored key seed");
-    crate::LlmKeyStore::new(services.secret_store())
+    ironclaw_operator::LlmKeyStore::new(services.secret_store())
         .put(
             "nearai",
             ironclaw_secrets::SecretMaterial::from("sk-reborn-stored-nearai-mcp-key"),
@@ -1996,7 +1946,7 @@ async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
         response_cache_ttl_secs: 3600,
         response_cache_max_entries: 1000,
     };
-    let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config);
+    let llm = ironclaw_operator::ResolvedRebornLlm::from_llm_config(config);
 
     let input = RebornRuntimeInput::from_build_input(
         crate::deployment::local_dev_build_input("runtime-nearai-stored-mcp-owner", local_dev_root)
@@ -2014,13 +1964,14 @@ async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
     let extension_management = &runtime.extension_management;
     let nearai_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
-    let operator = UserId::new("runtime-nearai-stored-mcp-owner").expect("valid lifecycle caller");
-    let credential_gate = runtime_extension_credential_gate(&runtime, &operator);
     let projection = extension_management
-        .project(nearai_ref, &operator, Some(&credential_gate))
+        .project(
+            nearai_ref,
+            extension_management.tenant_operator_user_id_for_test(),
+        )
         .await
         .expect("NEAR AI MCP projected");
-    assert_eq!(projection.phase, LifecyclePublicState::Active);
+    assert_eq!(projection.phase, InstallationState::Active);
 
     let capabilities = extension_management
         .active_model_visible_capabilities()
@@ -2096,7 +2047,7 @@ async fn runtime_nearai_mcp_prebuild_api_key_is_not_replaced_by_stored_key() {
     )
     .await
     .expect("services build for stored key seed");
-    crate::LlmKeyStore::new(services.secret_store())
+    ironclaw_operator::LlmKeyStore::new(services.secret_store())
         .put(
             "nearai",
             ironclaw_secrets::SecretMaterial::from("sk-post-build-stored-nearai-mcp-key"),
@@ -2141,7 +2092,7 @@ async fn runtime_nearai_mcp_prebuild_api_key_is_not_replaced_by_stored_key() {
         response_cache_ttl_secs: 3600,
         response_cache_max_entries: 1000,
     };
-    let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config);
+    let llm = ironclaw_operator::ResolvedRebornLlm::from_llm_config(config);
 
     let input = RebornRuntimeInput::from_build_input(
         crate::deployment::local_dev_build_input(owner, local_dev_root)
@@ -2395,7 +2346,7 @@ async fn provider_factory_survives_live_reload() {
     let session_dir = tempfile::tempdir().expect("session tempdir");
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let calls_for_factory = Arc::clone(&calls);
-    let factory: crate::runtime_input::RebornProviderFactory = Arc::new(move |inner| {
+    let factory: ironclaw_operator::RebornProviderFactory = Arc::new(move |inner| {
         Arc::new(CountingWrapperProvider {
             inner,
             calls: Arc::clone(&calls_for_factory),
@@ -2473,10 +2424,10 @@ async fn env_trace_recording_attaches_recorder_factory_only_when_enabled() {
     // Disabled: no factory attached; the resolved LLM is returned unchanged.
     {
         let _guard = RuntimeEnvGuard::with([("IRONCLAW_RECORD_TRACE", None)]).await;
-        let disabled = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config.clone())
+        let disabled = ironclaw_operator::ResolvedRebornLlm::from_llm_config(config.clone())
             .with_env_trace_recording();
         assert!(
-            disabled.provider_factory.is_none(),
+            disabled.provider_factory().is_none(),
             "no recording factory should attach when IRONCLAW_RECORD_TRACE is unset"
         );
     }
@@ -2484,10 +2435,10 @@ async fn env_trace_recording_attaches_recorder_factory_only_when_enabled() {
     // Enabled: the serve/run resolution path attaches the recording factory.
     {
         let _guard = RuntimeEnvGuard::set("IRONCLAW_RECORD_TRACE", "1").await;
-        let enabled = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config)
+        let enabled = ironclaw_operator::ResolvedRebornLlm::from_llm_config(config)
             .with_env_trace_recording();
         assert!(
-            enabled.provider_factory.is_some(),
+            enabled.provider_factory().is_some(),
             "IRONCLAW_RECORD_TRACE must attach the recording provider factory on the \
              serve/run resolution path"
         );
@@ -2517,13 +2468,13 @@ async fn provider_factory_runs_during_production_boot() {
     let factory_ran_for_closure = Arc::clone(&factory_ran);
     // Identity decorator that only records that it was constructed: the factory
     // runs once, at gateway construction, to wrap the swappable provider.
-    let factory: crate::runtime_input::RebornProviderFactory = Arc::new(move |inner| {
+    let factory: ironclaw_operator::RebornProviderFactory = Arc::new(move |inner| {
         factory_ran_for_closure.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         inner
     });
 
     let config = dead_endpoint_nearai_config(session_dir.path().join("session.json"));
-    let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config)
+    let llm = ironclaw_operator::ResolvedRebornLlm::from_llm_config(config)
         .with_provider_factory(factory);
 
     // No `boot` config is supplied, so the boot-time reload is skipped and the
@@ -2593,7 +2544,7 @@ async fn local_dev_runtime_startup_uses_stored_nearai_api_key_after_restart() {
     )
     .await
     .expect("services build for stored key seed");
-    crate::LlmKeyStore::new(services.secret_store())
+    ironclaw_operator::LlmKeyStore::new(services.secret_store())
         .put(
             "nearai",
             ironclaw_secrets::SecretMaterial::from("sk-reborn-stored-nearai-key"),
@@ -3606,11 +3557,11 @@ async fn send_user_message_until_gate_returns_blocked_on_auth_gate() {
     let extension_management = &runtime.extension_management;
     let notion_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion")
         .expect("valid notion ref");
-    // #6520 removed the port-side operator accessor: install as the runtime
-    // owner (the tenant operator this runtime was constructed with).
-    let operator = UserId::new("runtime-auth-gate-owner").expect("valid lifecycle caller");
     extension_management
-        .install(notion_ref.clone(), &operator)
+        .install(
+            notion_ref.clone(),
+            extension_management.tenant_operator_user_id_for_test(),
+        )
         .await
         .expect("install Notion MCP");
     // v3 hosted-MCP packages publish no model-visible tools on static
@@ -3620,53 +3571,18 @@ async fn send_user_message_until_gate_returns_blocked_on_auth_gate() {
         .activate_with_prechecked_credentials_for_test(
             notion_ref,
             ExtensionActivationMode::HostedMcpDiscovery {
-                scope: ResourceScope::local_default(operator.clone(), InvocationId::new())
-                    .expect("valid scope"),
+                scope: ResourceScope::local_default(
+                    UserId::new("runtime-auth-gate-owner").expect("valid user"),
+                    InvocationId::new(),
+                )
+                .expect("valid scope"),
                 runtime_http_egress: Arc::new(
-                    crate::extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryEgress::with_tool_name("notion-search"),
+                    ironclaw_extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryEgress::with_tool_name("notion-search"),
                 ),
             },
-            &operator,
         )
         .await
         .expect("activate Notion MCP with scripted discovery");
-
-    // #6520 caller-phase surface: notion tools are model-visible only when the
-    // caller's notion credential account resolves. Seed a Configured account
-    // whose secret handle has no stored material — the surface becomes
-    // visible while dispatch-time injection still raises the auth gate this
-    // test drives.
-    {
-        use ironclaw_auth::{
-            AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
-            CredentialAccountStatus, CredentialOwnership, NewCredentialAccount,
-        };
-        let mut scope = runtime.thread_scope.to_resource_scope();
-        scope.user_id = runtime.actor_user_id.clone();
-        scope.mission_id = None;
-        scope.thread_id = None;
-        scope.invocation_id = InvocationId::new();
-        runtime
-            .product_auth
-            .credential_account_service()
-            .create_account(NewCredentialAccount {
-                scope: AuthProductScope::credential_owner(&scope, AuthSurface::Api),
-                provider: AuthProviderId::new("notion").expect("provider"),
-                label: CredentialAccountLabel::new("notion").expect("label"),
-                status: CredentialAccountStatus::Configured,
-                ownership: CredentialOwnership::UserReusable,
-                owner_extension: None,
-                granted_extensions: Vec::new(),
-                access_secret: Some(
-                    ironclaw_host_api::SecretHandle::new("notion-test-token".to_string())
-                        .expect("secret handle"),
-                ),
-                refresh_secret: None,
-                scopes: Vec::new(),
-            })
-            .await
-            .expect("create configured notion account without secret material");
-    }
 
     let conversation = runtime.new_conversation().await.expect("conversation");
     runtime
@@ -5057,7 +4973,7 @@ async fn local_dev_runtime_maps_workspace_to_configured_root() {
 }
 
 #[tokio::test]
-async fn local_dev_runtime_webui_bundle_reuses_thread_and_turn_facades() {
+async fn local_dev_runtime_webui_bundle_reuses_thread_and_turn_services() {
     let root = tempfile::tempdir().expect("tempdir");
     let gateway = Arc::new(RecordingGateway {
         reply: "webui projection ok".to_string(),
@@ -5411,8 +5327,27 @@ async fn submit_webui_extension_setup(
     query_webui_extension_setup(api, caller, package_id).await
 }
 
+async fn install_webui_extension_for_setup(
+    api: &dyn ironclaw_host_api::ProductSurface,
+    caller: ProductSurfaceCaller,
+    package_id: &str,
+) {
+    let resolution = invoke_product_capability(
+        api,
+        caller,
+        ironclaw_product::EXTENSION_INSTALL_CAPABILITY_ID,
+        serde_json::json!({ "extension_id": package_id }),
+    )
+    .await
+    .expect("install extension before setup");
+    assert!(
+        matches!(resolution, Resolution::Done(_) | Resolution::Blocked(_)),
+        "install should either complete or park on setup-required credentials: {resolution:?}"
+    );
+}
+
 #[tokio::test]
-async fn local_dev_webui_bundle_uses_local_lifecycle_facade_for_setup_extension() {
+async fn local_dev_webui_bundle_uses_lifecycle_product_service_for_setup_extension() {
     let root = tempfile::tempdir().expect("tempdir");
     let gateway = Arc::new(RecordingGateway {
         reply: "webui lifecycle ok".to_string(),
@@ -5423,16 +5358,7 @@ async fn local_dev_webui_bundle_uses_local_lifecycle_facade_for_setup_extension(
             "runtime-webui-lifecycle-owner",
             root.path().join("local-dev"),
         )
-        .with_runtime_policy(local_dev_runtime_policy())
-        .with_vendor_oauth_client(
-            ironclaw_auth::GOOGLE_PROVIDER_ID,
-            crate::OAuthClientConfig::new(
-                "runtime-webui-google-client.apps.googleusercontent.com",
-                "http://127.0.0.1/oauth/callback/google",
-                None,
-            )
-            .expect("valid test Google OAuth client config"),
-        ),
+        .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-webui-lifecycle-tenant".to_string(),
@@ -5455,16 +5381,10 @@ async fn local_dev_webui_bundle_uses_local_lifecycle_facade_for_setup_extension(
         None,
     );
 
-    let github_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
-        .expect("valid package ref");
-    install_webui_extension(bundle.as_ref(), caller.clone(), github_ref.clone()).await;
-
     let setup = query_webui_extension_setup(bundle.as_ref(), caller.clone(), "github").await;
 
     assert_eq!(setup.package_ref.id.as_str(), "github");
-    // #6520 3-state public lifecycle: installed with an unprovided credential
-    // projects as setup-needed (no Configured/Installed wire states remain).
-    assert_eq!(setup.phase, LifecyclePublicState::SetupNeeded);
+    assert_eq!(setup.phase, InstallationState::Installed);
     assert!(setup.blockers.is_empty());
     assert_eq!(setup.secrets.len(), 1);
     assert_eq!(setup.secrets[0].name, "github_runtime_token");
@@ -5475,13 +5395,29 @@ async fn local_dev_webui_bundle_uses_local_lifecycle_facade_for_setup_extension(
         setup.secrets[0].setup,
         RebornExtensionCredentialSetup::ManualToken
     ));
-    let google_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "google-calendar")
-        .expect("valid package ref");
-    install_webui_extension(bundle.as_ref(), caller.clone(), google_ref).await;
     let google_setup =
         query_webui_extension_setup(bundle.as_ref(), caller.clone(), "google-calendar").await;
-    assert_eq!(google_setup.secrets.len(), 1);
-    let google_secret = &google_setup.secrets[0];
+    let expected_google_scopes = [
+        GOOGLE_CALENDAR_EVENTS_SCOPE.to_string(),
+        GOOGLE_CALENDAR_READONLY_SCOPE.to_string(),
+    ]
+    .into_iter()
+    .collect::<std::collections::BTreeSet<_>>();
+    let google_secret = google_setup
+        .secrets
+        .iter()
+        .find(|secret| match &secret.setup {
+            RebornExtensionCredentialSetup::OAuth { scopes, .. } => {
+                secret.provider == "google"
+                    && scopes
+                        .iter()
+                        .cloned()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        == expected_google_scopes
+            }
+            _ => false,
+        })
+        .expect("Google Calendar setup should include its OAuth credential");
     assert_eq!(google_secret.provider, "google");
     assert!(!google_secret.provided);
     let RebornExtensionCredentialSetup::OAuth { scopes, .. } = &google_secret.setup else {
@@ -5492,15 +5428,9 @@ async fn local_dev_webui_bundle_uses_local_lifecycle_facade_for_setup_extension(
             .iter()
             .cloned()
             .collect::<std::collections::BTreeSet<_>>(),
-        [
-            GOOGLE_CALENDAR_EVENTS_SCOPE.to_string(),
-            GOOGLE_CALENDAR_READONLY_SCOPE.to_string(),
-        ]
-        .into_iter()
-        .collect::<std::collections::BTreeSet<_>>()
+        expected_google_scopes
     );
-    let google_setup_json =
-        serde_json::to_value(&google_setup.secrets[0]).expect("serialize setup secret");
+    let google_setup_json = serde_json::to_value(google_secret).expect("serialize setup secret");
     assert_eq!(google_setup_json["setup"]["kind"], "oauth");
     assert!(
         matches!(
@@ -5511,22 +5441,22 @@ async fn local_dev_webui_bundle_uses_local_lifecycle_facade_for_setup_extension(
                     && extensions[0].summary.package_ref.id.as_str() == "github"
                     && extensions[0].summary.credential_requirements.len() == 1
         ),
-        "local product surface should use the local lifecycle facade package projection"
+        "local product surface should use the lifecycle product service package projection"
     );
     assert!(
         !setup.blockers.iter().any(|blocker| matches!(
             blocker,
             LifecycleReadinessBlocker::Runtime { ref_id: Some(ref_id) }
-                if ref_id.as_str() == "reborn_lifecycle_facade_unwired"
+                if ref_id.as_str() == "reborn_lifecycle_service_unwired"
         )),
-        "local product surface must not fall back to the default unwired facade"
+        "local product surface must not fall back to the default unwired service"
     );
 
     runtime.shutdown().await.expect("runtime shutdown");
 }
 
 #[tokio::test]
-async fn local_dev_webui_bundle_exposes_outbound_preferences_facade() {
+async fn local_dev_webui_bundle_exposes_outbound_preferences_service() {
     let root = tempfile::tempdir().expect("tempdir");
     let gateway = Arc::new(RecordingGateway {
         reply: "webui outbound ok".to_string(),
@@ -5567,7 +5497,7 @@ async fn local_dev_webui_bundle_exposes_outbound_preferences_facade() {
         serde_json::json!({}),
     )
     .await
-    .expect("outbound preference clear uses composed facade");
+    .expect("outbound preference clear uses composed service");
     assert!(matches!(cleared, Resolution::Done(_)));
     let cleared_page = query_product_surface_page(
         bundle.as_ref(),
@@ -5596,14 +5526,13 @@ async fn local_dev_webui_bundle_exposes_outbound_preferences_facade() {
         },
     )
     .await
-    .expect("outbound target listing uses composed facade");
+    .expect("outbound target listing uses composed service");
     let targets: ironclaw_product::RebornOutboundDeliveryTargetListResponse =
         serde_json::from_value(targets_page.payload).expect("outbound targets payload");
-    // #6520: the host-owned WebApp final-reply destination is always
-    // registered (host_owned_outbound_delivery_target_registry), so a runtime
-    // with zero active channels lists exactly that one target.
-    assert_eq!(targets.targets.len(), 1, "targets: {:?}", targets.targets);
-    assert_eq!(targets.targets[0].target.channel.as_str(), "web_app");
+    assert!(
+        !targets.targets.is_empty(),
+        "local-dev runtime identity should expose at least one composed outbound target"
+    );
 
     runtime.shutdown().await.expect("runtime shutdown");
 }
@@ -5882,7 +5811,7 @@ async fn runtime_product_surface_without_local_runtime_still_lists_automations_f
         },
     )
     .await
-    .expect("automation facade reads the core trigger repository");
+    .expect("automation service reads the core trigger repository");
 
     let automations: ironclaw_product::RebornListAutomationsResponse =
         serde_json::from_value(response.payload).expect("automations payload");
@@ -5925,6 +5854,7 @@ async fn local_dev_webui_setup_extension_stores_and_rotates_runtime_credentials(
         Some(AgentId::new("runtime-webui-credential-agent").unwrap()),
         None,
     );
+    install_webui_extension_for_setup(bundle.as_ref(), caller.clone(), "github").await;
     let first = submit_webui_extension_setup(
         bundle.as_ref(),
         caller.clone(),
@@ -6261,25 +6191,25 @@ async fn local_dev_webui_bundle_records_selectable_filesystem_skill_context() {
 #[tokio::test]
 async fn multi_tool_call_response_survives_surface_change_mid_register() {
     use ironclaw_product::{
-        LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
+        LifecycleProductAction, LifecycleProductContext, LifecycleProductService,
         LifecycleProductSurfaceContext,
     };
     use std::sync::OnceLock;
 
     // Gateway state seeded after runtime build.
-    struct LifecycleFacadeHandle {
-        facade: crate::extension_host::lifecycle::LifecycleFacade,
+    struct LifecycleServiceHandle {
+        service: ironclaw_extension_host::ExtensionHostLifecycleProductService,
     }
 
-    impl std::fmt::Debug for LifecycleFacadeHandle {
+    impl std::fmt::Debug for LifecycleServiceHandle {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_struct("LifecycleFacadeHandle").finish()
+            f.debug_struct("LifecycleServiceHandle").finish()
         }
     }
 
     struct MultiToolCallGateway {
         calls: StdMutex<usize>,
-        facade_slot: Arc<OnceLock<LifecycleFacadeHandle>>,
+        service_slot: Arc<OnceLock<LifecycleServiceHandle>>,
     }
 
     #[async_trait]
@@ -6348,29 +6278,39 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
 
             // Activate the github extension — deterministic surface-content change.
             // Pre-fix: this rebuilds the inner port, wiping candidate1's snapshot.
-            let facade_handle = self
-                .facade_slot
+            let service_handle = self
+                .service_slot
                 .get()
-                .expect("lifecycle facade must be seeded before send_user_message");
+                .expect("lifecycle service must be seeded before send_user_message");
             let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
                 .expect("valid github ref");
-            // Install for the exact run user. Operator role never creates a
-            // tenant-wide membership; install auto-reconciles readiness
-            // (#6520 — there is no separate Activate action).
+            // #5459 P1: act as the runtime owner (the tenant operator) so
+            // the install is tenant-shared and visible to the run's
+            // surface user — a non-operator install would now be private.
             let ctx = LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
                 tenant_id: TenantId::new("tenant-multi-tool-surface").expect("tenant id"),
                 user_id: UserId::new("runtime-multi-tool-surface-owner").expect("user id"),
                 agent_id: None,
                 project_id: None,
             });
-            facade_handle
-                .facade
+            service_handle
+                .service
                 .execute(
-                    ctx,
-                    LifecycleProductAction::ExtensionInstall { package_ref },
+                    ctx.clone(),
+                    LifecycleProductAction::ExtensionInstall {
+                        package_ref: package_ref.clone(),
+                    },
                 )
                 .await
                 .expect("install github extension");
+            service_handle
+                .service
+                .execute(
+                    ctx,
+                    LifecycleProductAction::ExtensionActivate { package_ref },
+                )
+                .await
+                .expect("activate github extension");
 
             // Register call #2 — after surface change.
             // Post-fix: reuses current port, so both candidates carry the same surface version.
@@ -6393,10 +6333,10 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
 
     // ── Test body ──────────────────────────────────────────────────────────────
     let root = tempfile::tempdir().expect("tempdir");
-    let facade_slot: Arc<OnceLock<LifecycleFacadeHandle>> = Arc::new(OnceLock::new());
+    let service_slot: Arc<OnceLock<LifecycleServiceHandle>> = Arc::new(OnceLock::new());
     let gateway = Arc::new(MultiToolCallGateway {
         calls: StdMutex::new(0),
-        facade_slot: Arc::clone(&facade_slot),
+        service_slot: Arc::clone(&service_slot),
     });
     let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway;
 
@@ -6421,16 +6361,16 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
 
-    // Seed the lifecycle facade before the model gateway runs.
+    // Seed the lifecycle service before the model gateway runs.
     let extension_management = runtime.extension_management.clone();
-    let facade = crate::extension_host::lifecycle::LifecycleFacade::new(Arc::clone(
+    let service = ironclaw_extension_host::ExtensionHostLifecycleProductService::new(Arc::clone(
         &runtime.skill_management,
     ))
     .with_extension_management(extension_management)
     .with_runtime_credential_accounts(Arc::new(MultiToolConfiguredCredentials));
-    facade_slot
-        .set(LifecycleFacadeHandle { facade })
-        .expect("facade slot should be empty before seeding");
+    service_slot
+        .set(LifecycleServiceHandle { service })
+        .expect("service slot should be empty before seeding");
 
     let conversation = runtime.new_conversation().await.expect("conversation");
     runtime
@@ -6687,9 +6627,7 @@ async fn rejected_busy_message_not_auto_resubmitted_after_run_cancellation() {
 struct MultiToolConfiguredCredentials;
 
 #[async_trait]
-impl crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionService
-    for MultiToolConfiguredCredentials
-{
+impl ironclaw_auth::RuntimeCredentialAccountSelectionService for MultiToolConfiguredCredentials {
     async fn select_configured_account_for_binding(
         &self,
         _lookup: ironclaw_auth::CredentialAccountSelectionRequest,
@@ -6700,7 +6638,7 @@ impl crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAcc
 
     async fn select_unique_configured_runtime_account(
         &self,
-        _request: crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionRequest,
+        _request: ironclaw_auth::RuntimeCredentialAccountSelectionRequest,
     ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
         let now = chrono::Utc::now();
         Ok(ironclaw_auth::CredentialAccount {

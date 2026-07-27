@@ -14,6 +14,12 @@ from provider_fault_proxy import (
     ProviderFaultProxy,
 )
 
+_RESPONSE_PROFILE_NAMES = [
+    name
+    for name, profile in PROVIDER_FAULT_PROFILES.items()
+    if profile.action == "respond"
+]
+
 
 async def _start_upstream() -> tuple[str, list[dict], web.AppRunner]:
     requests = []
@@ -116,18 +122,7 @@ async def test_provider_fault_proxy_preserves_compressed_responses(fault_proxy):
 
 @pytest.mark.parametrize(
     "profile_name",
-    (
-        "http_400",
-        "http_401",
-        "http_403",
-        "http_404",
-        "http_409",
-        "http_429",
-        "http_500",
-        "http_503",
-        "malformed_json",
-        "missing_field",
-    ),
+    _RESPONSE_PROFILE_NAMES,
 )
 async def test_response_fault_profiles_do_not_reach_provider(
     fault_proxy,
@@ -144,6 +139,79 @@ async def test_response_fault_profiles_do_not_reach_provider(
     assert response.text == profile.body
     assert upstream_requests == []
     assert proxy.state["requests"][0]["forwarded"] is False
+
+
+@pytest.mark.parametrize(
+    ("profile_name", "status", "challenge_contains"),
+    [
+        ("expired_credential", 401, 'error="invalid_token"'),
+        ("wrong_scope", 403, 'error="insufficient_scope"'),
+    ],
+)
+def test_credential_lifecycle_profiles_state_their_condition(
+    profile_name,
+    status,
+    challenge_contains,
+):
+    """Each credential-lifecycle fault names its condition in the challenge.
+
+    The point of these profiles is that they are *not* interchangeable with a
+    bare `http_401`/`http_403`. A provider distinguishes "your token expired"
+    from "your token lacks the scope" in the RFC 6750 `WWW-Authenticate`
+    challenge, and that is the only signal a client can key
+    credential-lifecycle handling on. A profile that dropped the challenge
+    would still have the same status and would still look like a passing fault
+    case, so assert the discriminator itself.
+    """
+    profile = PROVIDER_FAULT_PROFILES[profile_name]
+    challenge = profile.headers.get("WWW-Authenticate", "")
+
+    assert profile.status == status
+    assert challenge_contains in challenge, challenge
+
+
+def test_credential_lifecycle_profiles_are_not_aliases_of_generic_faults():
+    """The generic status profiles carry no challenge, so the pair differ."""
+    for generic_name in ("http_401", "http_403"):
+        assert "WWW-Authenticate" not in PROVIDER_FAULT_PROFILES[generic_name].headers
+
+    challenges = {
+        name: PROVIDER_FAULT_PROFILES[name].headers["WWW-Authenticate"]
+        for name in ("expired_credential", "wrong_scope")
+    }
+    assert len(set(challenges.values())) == 2, challenges
+
+
+async def test_credential_lifecycle_faults_never_reach_the_provider(fault_proxy):
+    """A rejected credential must not let the request through.
+
+    The caller is authenticated but not for this operation, so forwarding the
+    rejected request would perform the very side effect the scope was meant to
+    prevent.
+    """
+    proxy, upstream_requests = fault_proxy
+    proxy.arm(
+        PROVIDER_FAULT_PROFILES["wrong_scope"],
+        method="POST",
+        path="/objects",
+    )
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{proxy.url}/objects",
+            headers={"Authorization": "Bearer scoped-too-narrowly"},
+            json={"name": "never-created"},
+        )
+
+    assert response.status_code == 403
+    assert 'error="insufficient_scope"' in response.headers["WWW-Authenticate"]
+    assert upstream_requests == []
+    requests = proxy.state["requests"]
+    assert len(requests) == 1
+    request = requests[0]
+    assert request["fault"] == "wrong_scope"
+    assert request["forwarded"] is False
+    assert "scoped-too-narrowly" not in str(proxy.state)
 
 
 async def test_timeout_profile_never_forwards_after_caller_times_out(fault_proxy):
@@ -251,3 +319,29 @@ async def test_counted_fifo_rules_fire_then_restore_transparency(fault_proxy):
     ]
     assert proxy.state["rules"] == []
     assert len(upstream_requests) == 1
+
+
+# Response profiles are exercised automatically by the parametrized test
+# above. Non-response profiles have distinct behavior and therefore point to
+# the dedicated tests pytest collects for each one.
+_NON_RESPONSE_PROFILE_TESTS = {
+    "timeout": test_timeout_profile_never_forwards_after_caller_times_out,
+    "connection_reset": test_connection_reset_before_forward_never_reaches_provider,
+    "truncated_response": test_truncated_response_aborts_before_declared_body_length,
+    "lost_acknowledgement": test_lost_acknowledgement_commits_once_then_disconnects,
+}
+
+
+def test_every_published_profile_has_a_self_test():
+    """Every published profile is exercised by a collected test."""
+    dedicated_tests = tuple(_NON_RESPONSE_PROFILE_TESTS.values())
+    assert all(
+        test.__module__ == __name__ and test.__name__.startswith("test_")
+        for test in dedicated_tests
+    ), dedicated_tests
+
+    covered = set(_RESPONSE_PROFILE_NAMES) | set(_NON_RESPONSE_PROFILE_TESTS)
+    assert covered == set(PROVIDER_FAULT_PROFILES), {
+        "untested": sorted(set(PROVIDER_FAULT_PROFILES) - covered),
+        "stale": sorted(covered - set(PROVIDER_FAULT_PROFILES)),
+    }

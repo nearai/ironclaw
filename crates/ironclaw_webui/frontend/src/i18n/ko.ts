@@ -1208,6 +1208,7 @@ registerPack("ko", {
   "common.pinned": "고정됨",
   "common.deleteChat": "채팅 삭제",
   "chat.deleteFailed": "이 대화를 삭제하지 못했습니다.",
+  "chat.cancelFailed": "이 실행을 중지하지 못했습니다. 아직 실행 중일 수 있습니다. 다시 시도하세요.",
   "chat.deleteBusy": "실행 중인 대화는 삭제할 수 없습니다. 먼저 중지한 후 다시 시도하세요.",
   "command.placeholder": "명령 입력 또는 검색...",
   "routine.searchPlaceholder": "루틴 이름, 트리거 또는 작업 검색",
@@ -1363,6 +1364,11 @@ registerPack("ko", {
 
 registerPack("ko", {
   "app.checkingSession": "세션 확인 중...",
+  "app.loadingPage": "페이지 불러오는 중...",
+  "app.pageLoadFailedTitle": "이 페이지를 불러올 수 없습니다",
+  "app.pageLoadFailedDescription":
+    "새 버전을 사용할 수 있거나 연결이 중단되었을 수 있습니다. 페이지를 새로고침하여 다시 시도하세요.",
+  "app.reloadPage": "페이지 새로고침",
   "app.sessionCheckFailedTitle": "세션을 확인할 수 없습니다",
   "app.sessionCheckFailedDescription":
     "현재 세션을 확인할 수 없습니다. 로그인 정보는 계속 저장되어 있습니다. 잠시 후 다시 시도하세요.",
@@ -1399,6 +1405,14 @@ registerPack("ko", {
   "chat.copyMessage": "메시지 복사",
   "chat.retryMessage": "메시지 다시 시도",
   "chat.history.loadFailed": "대화 기록을 불러오지 못했습니다.",
+  "chat.failure.connectionLost": "서버 연결이 끊어졌습니다. 다시 연결한 후 재시도하세요.",
+  "chat.failure.request": "요청을 보내기 전에 실패했습니다.",
+  "chat.failure.requestDetail": "요청에 실패했습니다: {detail}.",
+  "chat.failure.runCategory": "실행에 실패했습니다: {detail}.",
+  "chat.failure.recoveryRequired": "실행이 복구를 기다리고 있습니다. 백엔드에서 `recovery_required`를 보고했습니다.",
+  "chat.failure.run": "응답을 생성하기 전에 실행이 실패했습니다.",
+  "chat.failure.streamRetryable": "채팅 스트림에 재시도 가능한 오류가 발생했습니다: {detail}.",
+  "chat.failure.stream": "채팅 스트림에 실패했습니다: {detail}.",
   "chat.finishPairingBeforeSend": "다른 메시지를 보내기 전에 채널 연결을 완료하세요.",
   "chat.resolveApprovalBeforeSend": "다른 메시지를 보내기 전에 승인 요청을 처리하세요.",
   "chat.retryIn": "{seconds}초 후 다시 시도",

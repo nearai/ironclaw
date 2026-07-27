@@ -25,6 +25,36 @@ use crate::entrypoint::{BindContext, BindError, ExtensionBindings, ExtensionEntr
 use crate::lifecycle::{DrainController, EgressFactory, HookError};
 use crate::loaders::{ExtensionLoader, LoadContext, LoadedExtension};
 
+#[cfg(feature = "test-support")]
+pub mod first_party_registrars;
+
+/// Opaque test-support handle carrying the Reborn local extension-management
+/// port without forcing composition harness structs to define extension-host
+/// wrapper types locally.
+#[cfg(feature = "test-support")]
+pub struct ExtensionManagementTestHandle {
+    extension_management: Arc<crate::extension_lifecycle::RebornLocalExtensionManagementPort>,
+}
+
+#[cfg(feature = "test-support")]
+impl ExtensionManagementTestHandle {
+    /// Build a test-support handle over the local extension-management port.
+    pub fn new(
+        extension_management: Arc<crate::extension_lifecycle::RebornLocalExtensionManagementPort>,
+    ) -> Self {
+        Self {
+            extension_management,
+        }
+    }
+
+    /// Return the wrapped local extension-management port.
+    pub fn extension_management(
+        &self,
+    ) -> Arc<crate::extension_lifecycle::RebornLocalExtensionManagementPort> {
+        self.extension_management.clone()
+    }
+}
+
 const MCP_MANIFEST: &str = r#"
 schema_version = "reborn.extension_manifest.v3"
 id = "acme-tools"
@@ -66,11 +96,6 @@ version = "0.1.0"
 description = "fixture: channel-only extension"
 trust = "third_party"
 
-[admin_configuration]
-group_id = "extension.acme-chat"
-display_name = "Acme Chat deployment configuration"
-fields = [ { handle = "acme_chat_signing_secret", label = "Signing secret", secret = true, required = false } ]
-
 [runtime]
 kind = "wasm"
 module = "wasm/acme_chat.wasm"
@@ -93,6 +118,11 @@ secret_handle = "acme_chat_signing_secret"
 signature_header = "X-Acme-Signature"
 signed_payload = [ { body = true } ]
 
+[admin_configuration]
+group_id = "acme.chat"
+display_name = "Acme Chat channel"
+fields = [ { handle = "acme_chat_signing_secret", label = "Signing secret", secret = true } ]
+
 [[channel.egress]]
 scheme = "https"
 host = "api.acme.example"
@@ -106,11 +136,6 @@ name = "Acme"
 version = "0.1.0"
 description = "fixture: tool + channel + auth"
 trust = "third_party"
-
-[admin_configuration]
-group_id = "extension.acme"
-display_name = "Acme deployment configuration"
-fields = [ { handle = "acme_signing_secret", label = "Signing secret", secret = true, required = false } ]
 
 [runtime]
 kind = "wasm"
@@ -148,6 +173,11 @@ kind = "hmac_sha256"
 secret_handle = "acme_signing_secret"
 signature_header = "X-Acme-Signature"
 signed_payload = [ { body = true } ]
+
+[admin_configuration]
+group_id = "acme.channel"
+display_name = "Acme channel"
+fields = [ { handle = "acme_signing_secret", label = "Signing secret", secret = true } ]
 
 [[channel.egress]]
 scheme = "https"
@@ -189,13 +219,6 @@ fn resolve(toml: &str) -> ResolvedExtensionManifest {
             .unwrap();
         registry
     };
-    // These channel fixtures declare an `[admin_configuration]` group to back
-    // their channel signing secrets — a deployment-owned surface only a
-    // host-bundled (first-party) manifest may declare (see `parse_v3`'s trust
-    // gate). Real channel extensions (Slack, Telegram) are host-bundled, so
-    // resolve fixtures with that source. Their `trust = "third_party"` ceiling
-    // is unaffected: the resolved manifest is source-independent for a
-    // third-party trust class.
     ExtensionManifestRecord::from_toml(
         toml,
         ManifestSource::HostBundled,
@@ -221,6 +244,63 @@ pub fn channel_only_manifest() -> ResolvedExtensionManifest {
 /// A tool + channel + auth resolved manifest.
 pub fn tool_and_channel_manifest() -> ResolvedExtensionManifest {
     resolve(TOOL_AND_CHANNEL_MANIFEST)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn first_party_bundles_from_inventory() -> Vec<crate::FirstPartyPackageBundle> {
+    use crate::{FirstPartyPackageAsset, FirstPartyPackageBundle, FirstPartyPackageOnboarding};
+    use ironclaw_first_party_extensions::is_gsuite_extension_id;
+    use ironclaw_first_party_extensions::packages::{PackageAssetContent, bundled_packages};
+    use ironclaw_host_api::ExtensionId;
+
+    bundled_packages()
+        .into_iter()
+        .map(|bundle| {
+            let assets = bundle
+                .assets
+                .into_iter()
+                .map(|asset| {
+                    let PackageAssetContent::Bytes(bytes) = asset.content;
+                    FirstPartyPackageAsset {
+                        path: asset.path,
+                        bytes,
+                    }
+                })
+                .collect();
+            let search_aliases = if ExtensionId::new(bundle.id)
+                .map(|id| is_gsuite_extension_id(&id))
+                .unwrap_or(false)
+            {
+                [
+                    "google",
+                    "gsuite",
+                    "g suite",
+                    "workspace",
+                    "google workspace",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+            } else {
+                Vec::new()
+            };
+            FirstPartyPackageBundle {
+                id: bundle.id.to_string(),
+                display_name: bundle.display_name.to_string(),
+                manifest_toml: bundle.manifest_toml.into_owned(),
+                assets,
+                onboarding: bundle.onboarding.map(|copy| FirstPartyPackageOnboarding {
+                    instructions: copy.instructions,
+                    credential_instructions: copy.credential_instructions,
+                    setup_url: copy.setup_url,
+                    credential_next_step: copy.credential_next_step,
+                }),
+                oauth_setup: None,
+                trust_effects: bundle.trust_effects,
+                search_aliases,
+            }
+        })
+        .collect()
 }
 
 /// A no-op tool adapter.

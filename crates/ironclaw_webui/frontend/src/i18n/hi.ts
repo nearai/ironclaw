@@ -1208,6 +1208,7 @@ registerPack("hi", {
   "common.pinned": "पिन किया गया",
   "common.deleteChat": "चैट हटाएं",
   "chat.deleteFailed": "यह बातचीत हटाई नहीं जा सकी.",
+  "chat.cancelFailed": "इस रन को रोका नहीं जा सका। यह अभी भी चल रहा हो सकता है। फिर से कोशिश करें।",
   "chat.deleteBusy": "चल रही बातचीत को हटाया नहीं जा सकता. पहले उसे रोकें, फिर दोबारा कोशिश करें.",
   "command.placeholder": "एक कमांड टाइप करें या खोजें...",
   "routine.searchPlaceholder": "रूटीन नाम, ट्रिगर, या क्रिया खोजें",
@@ -1363,6 +1364,11 @@ registerPack("hi", {
 
 registerPack("hi", {
   "app.checkingSession": "सत्र जांचा जा रहा है...",
+  "app.loadingPage": "पेज लोड हो रहा है...",
+  "app.pageLoadFailedTitle": "यह पेज लोड नहीं हो सका",
+  "app.pageLoadFailedDescription":
+    "हो सकता है कि नया वर्ज़न उपलब्ध हो या कनेक्शन बाधित हुआ हो। फिर से कोशिश करने के लिए पेज को रीलोड करें।",
+  "app.reloadPage": "पेज रीलोड करें",
   "app.sessionCheckFailedTitle": "आपके सत्र की पुष्टि नहीं हो सकी",
   "app.sessionCheckFailedDescription":
     "अभी आपके सत्र की पुष्टि नहीं हो सकी। आपकी साइन-इन जानकारी अभी भी सहेजी हुई है। थोड़ी देर बाद फिर कोशिश करें।",
@@ -1399,6 +1405,14 @@ registerPack("hi", {
   "chat.copyMessage": "संदेश कॉपी करें",
   "chat.retryMessage": "संदेश फिर से आज़माएं",
   "chat.history.loadFailed": "वार्तालाप इतिहास लोड करने में विफल।",
+  "chat.failure.connectionLost": "सर्वर से कनेक्शन टूट गया। दोबारा कनेक्ट करके फिर प्रयास करें।",
+  "chat.failure.request": "अनुरोध भेजे जाने से पहले विफल हो गया।",
+  "chat.failure.requestDetail": "अनुरोध विफल हुआ: {detail}।",
+  "chat.failure.runCategory": "रन विफल हुआ: {detail}।",
+  "chat.failure.recoveryRequired": "रन रिकवरी की प्रतीक्षा कर रहा है; बैकएंड ने `recovery_required` रिपोर्ट किया।",
+  "chat.failure.run": "उत्तर बनने से पहले रन विफल हो गया।",
+  "chat.failure.streamRetryable": "चैट स्ट्रीम में फिर से प्रयास योग्य त्रुटि आई: {detail}।",
+  "chat.failure.stream": "चैट स्ट्रीम विफल हुई: {detail}।",
   "chat.finishPairingBeforeSend": "दूसरा संदेश भेजने से पहले चैनल कनेक्शन पूरा करें।",
   "chat.resolveApprovalBeforeSend": "दूसरा संदेश भेजने से पहले स्वीकृति अनुरोध हल करें।",
   "chat.retryIn": "{seconds}से में फिर से प्रयास करें",

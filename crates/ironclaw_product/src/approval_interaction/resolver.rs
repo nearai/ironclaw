@@ -8,19 +8,19 @@ use ironclaw_host_api::{Action, ApprovalRequestId, CapabilityId, ResourceScope};
 use ironclaw_run_state::{ApprovalRequestStorePort, ApprovalStatus, RunStateError};
 
 use super::{ApprovalGateRecord, ApprovalInteractionRejectionKind, approval_rejected};
-use crate::error::ProductWorkflowError;
+use crate::error::ProductSurfaceFailure;
 
 #[async_trait]
 pub trait ApprovalLeaseTermsProvider: Send + Sync {
     async fn lease_terms_for(
         &self,
         gate: &ApprovalGateRecord,
-    ) -> Result<LeaseApproval, ProductWorkflowError>;
+    ) -> Result<LeaseApproval, ProductSurfaceFailure>;
 
     async fn persistent_approval_allowed(
         &self,
         _gate: &ApprovalGateRecord,
-    ) -> Result<(), ProductWorkflowError> {
+    ) -> Result<(), ProductSurfaceFailure> {
         Err(approval_rejected(
             ApprovalInteractionRejectionKind::AlwaysAllowUnsupported,
         ))
@@ -34,35 +34,35 @@ pub trait ApprovalResolutionPort: Send + Sync {
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
         approval: LeaseApproval,
-    ) -> Result<(), ProductWorkflowError>;
+    ) -> Result<(), ProductSurfaceFailure>;
 
     async fn approve_spawn(
         &self,
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
         approval: LeaseApproval,
-    ) -> Result<(), ProductWorkflowError>;
+    ) -> Result<(), ProductSurfaceFailure>;
 
     async fn ensure_dispatch_lease(
         &self,
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
         approval: LeaseApproval,
-    ) -> Result<(), ProductWorkflowError>;
+    ) -> Result<(), ProductSurfaceFailure>;
 
     async fn ensure_spawn_lease(
         &self,
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
         approval: LeaseApproval,
-    ) -> Result<(), ProductWorkflowError>;
+    ) -> Result<(), ProductSurfaceFailure>;
 
     async fn deny(
         &self,
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
         denial: DenyApproval,
-    ) -> Result<(), ProductWorkflowError>;
+    ) -> Result<(), ProductSurfaceFailure>;
 }
 
 pub struct ApprovalResolverPort {
@@ -103,7 +103,7 @@ impl ApprovalResolverPort {
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
         expected_action: ApprovedApprovalAction,
-    ) -> Result<bool, ProductWorkflowError> {
+    ) -> Result<bool, ProductSurfaceFailure> {
         let record = self
             .approvals
             .get(scope, request_id)
@@ -144,7 +144,7 @@ impl ApprovalResolutionPort for ApprovalResolverPort {
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
         approval: LeaseApproval,
-    ) -> Result<(), ProductWorkflowError> {
+    ) -> Result<(), ProductSurfaceFailure> {
         self.resolver()
             .approve_dispatch(scope, request_id, approval)
             .await
@@ -157,7 +157,7 @@ impl ApprovalResolutionPort for ApprovalResolverPort {
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
         approval: LeaseApproval,
-    ) -> Result<(), ProductWorkflowError> {
+    ) -> Result<(), ProductSurfaceFailure> {
         self.resolver()
             .approve_spawn(scope, request_id, approval)
             .await
@@ -170,7 +170,7 @@ impl ApprovalResolutionPort for ApprovalResolverPort {
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
         approval: LeaseApproval,
-    ) -> Result<(), ProductWorkflowError> {
+    ) -> Result<(), ProductSurfaceFailure> {
         if self
             .matching_lease_exists(scope, request_id, ApprovedApprovalAction::Dispatch)
             .await?
@@ -189,7 +189,7 @@ impl ApprovalResolutionPort for ApprovalResolverPort {
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
         approval: LeaseApproval,
-    ) -> Result<(), ProductWorkflowError> {
+    ) -> Result<(), ProductSurfaceFailure> {
         if self
             .matching_lease_exists(scope, request_id, ApprovedApprovalAction::Spawn)
             .await?
@@ -208,7 +208,7 @@ impl ApprovalResolutionPort for ApprovalResolverPort {
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
         denial: DenyApproval,
-    ) -> Result<(), ProductWorkflowError> {
+    ) -> Result<(), ProductSurfaceFailure> {
         self.resolver()
             .deny(scope, request_id, denial)
             .await
@@ -226,7 +226,7 @@ enum ApprovedApprovalAction {
 fn capability_for_action(
     action: &Action,
     expected_action: ApprovedApprovalAction,
-) -> Result<&CapabilityId, ProductWorkflowError> {
+) -> Result<&CapabilityId, ProductSurfaceFailure> {
     match (action, expected_action) {
         (Action::Dispatch { capability, .. }, ApprovedApprovalAction::Dispatch)
         | (Action::SpawnCapability { capability, .. }, ApprovedApprovalAction::Spawn) => {
@@ -238,7 +238,7 @@ fn capability_for_action(
     }
 }
 
-fn map_approval_resolution_error(error: ApprovalResolutionError) -> ProductWorkflowError {
+fn map_approval_resolution_error(error: ApprovalResolutionError) -> ProductSurfaceFailure {
     match error {
         ApprovalResolutionError::RunState(RunStateError::UnknownApprovalRequest { .. }) => {
             approval_rejected(ApprovalInteractionRejectionKind::MissingGate)
@@ -255,7 +255,7 @@ fn map_approval_resolution_error(error: ApprovalResolutionError) -> ProductWorkf
             approval_rejected(ApprovalInteractionRejectionKind::StaleGate)
         }
         ApprovalResolutionError::RunState(_) | ApprovalResolutionError::Lease(_) => {
-            ProductWorkflowError::Transient {
+            ProductSurfaceFailure::Transient {
                 reason: "approval resolver unavailable".to_string(),
             }
         }
@@ -293,7 +293,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            ProductWorkflowError::ApprovalInteractionRejected {
+            ProductSurfaceFailure::ApprovalInteractionRejected {
                 kind: ApprovalInteractionRejectionKind::StaleGate
             }
         ));
@@ -323,7 +323,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            ProductWorkflowError::ApprovalInteractionRejected {
+            ProductSurfaceFailure::ApprovalInteractionRejected {
                 kind: ApprovalInteractionRejectionKind::StaleGate
             }
         ));

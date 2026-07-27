@@ -17,10 +17,10 @@ New features and almost all current work are **Reborn** (`crates/`). Trace v1 (`
 
 | Hop | Anchor | Re-derive with |
 |---|---|---|
-| Browser JS | `crates/ironclaw_webui_v2_static/static/js/lib/api.js` (`apiFetch`) + `static/js/pages/*/lib/*-api.js` | `grep -rn "apiFetch(" crates/ironclaw_webui_v2_static/static/js/pages` |
+| Browser JS | `crates/ironclaw_webui/frontend/src` API client and page modules | `rg -n "apiFetch\(" crates/ironclaw_webui/frontend/src` |
 | Route + policy | `crates/ironclaw_webui/src/webui_v2/descriptors.rs`, `router.rs`, `handlers.rs` | `grep -n "WEBUI_V2_PATTERN_\|_descriptor" crates/ironclaw_webui/src/webui_v2/descriptors.rs` |
-| Facade | `RebornServicesApi` in `crates/ironclaw_product_workflow/src/reborn_services.rs` | `grep -n "async fn <name>" crates/ironclaw_product_workflow/src/reborn_services.rs` |
-| Port impl | `crates/ironclaw_reborn_composition/src/<feature>*.rs` | `grep -rn "impl <PortTrait>" crates/ironclaw_reborn_composition/src` |
+| Product surface | `ProductSurface` in `ironclaw_host_api`, descriptors in `crates/ironclaw_product/src/reborn_services.rs` | `rg -n "ProductSurface|ProductView|ProductSurfaceCommandDescriptor" crates/ironclaw_host_api crates/ironclaw_product` |
+| Composition | `crates/ironclaw_reborn_composition/src` | `rg -n "build_.*service|impl .*Service" crates/ironclaw_reborn_composition/src` |
 | Turn accept | `SessionThreadService::accept_inbound_message` (`crates/ironclaw_threads`) → `TurnCoordinator::submit_turn` (`crates/ironclaw_turns/src/coordinator.rs`) | `grep -rn --include='*.rs' "submit_turn(" crates/` |
 | Claim + execute | `TurnRunScheduler` → `RebornTurnRunExecutor` (`crates/ironclaw_runner/src/`) | `grep -n "claim_next_run\|invoke_driver" crates/ironclaw_runner/src/turn_scheduler.rs crates/ironclaw_runner/src/turn_run_executor.rs` |
 | Loop | `PlannedDriver` (`crates/ironclaw_runner/src/planned_driver.rs`) → `CanonicalAgentLoopExecutor` (`crates/ironclaw_agent_loop/src/executor.rs`) → host ports (`crates/ironclaw_loop_host`) | `grep -rn "invoke_capability\|stream_model" crates/ironclaw_agent_loop/src/executor` |

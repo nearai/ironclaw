@@ -1,6 +1,6 @@
-//! Project-scoped read-only filesystem access for the WebUI v2 facade.
+//! Project-scoped read-only filesystem access for the WebUI v2 service.
 //!
-//! Implements the [`ProjectFilesystemReader`] port the facade calls for
+//! Implements the [`ProjectFilesystemReader`] port the service calls for
 //! directory listing and file download. It reads through the same
 //! project-scoped workspace [`ScopedFilesystem`] the agent's file tools resolve
 //! through (a read-only mount view), so a file the agent wrote at
@@ -414,7 +414,7 @@ mod tests {
     #[tokio::test]
     async fn read_file_rejects_oversize() {
         // The size cap denies an oversized read before its bytes reach the
-        // caller. Locks the `TooLarge` path (and its facade 413 mapping
+        // caller. Locks the `TooLarge` path (and its service 413 mapping
         // upstream) end-to-end through the reader.
         let fs = workspace_fs(MountPermissions::read_write());
         let scope = thread_scope().to_resource_scope();

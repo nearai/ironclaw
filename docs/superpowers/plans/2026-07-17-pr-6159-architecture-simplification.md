@@ -181,8 +181,8 @@ git commit -m "test(reborn): pin PR 6159 simplification boundaries"
 - Create: `crates/ironclaw_product/src/auth_prompt.rs`
 - Create: `crates/ironclaw_product/src/approval_prompt.rs`
 - Modify: `crates/ironclaw_product/src/lib.rs`
-- Modify: `crates/ironclaw_reborn_composition/src/product_auth/api/auth_prompt.rs`
-- Modify: `crates/ironclaw_reborn_composition/src/product_auth/api/mod.rs`
+- Modify: `crates/ironclaw_product/src/auth_prompt.rs`
+- Modify: `crates/ironclaw_auth/src/product_auth/api/mod.rs`
 - Modify: `crates/ironclaw_reborn_composition/src/projection/turn_events.rs`
 - Modify: `crates/ironclaw_reborn_composition/src/lib.rs`
 - Modify: composition projection and product-auth tests importing these types.
@@ -680,7 +680,7 @@ git commit -m "refactor(telegram): own revision and delivery runtime behavior"
 - Modify: `crates/ironclaw_channel_host/AGENTS.md`
 - Create/update: `crates/ironclaw_channel_delivery/AGENTS.md`
 - Modify: `crates/ironclaw_telegram_extension/AGENTS.md`
-- Modify: `docs/reborn/contracts/telegram-v2.md`
+- Modify: `docs/reborn/extension-runtime/overview.md`
 - Modify: `docs/superpowers/specs/2026-07-17-pr-6159-architecture-simplification-design.md`
 - Modify: this plan.
 

@@ -1,7 +1,7 @@
 //! In-memory-backed approval store constructors for tests.
 //!
 //! The Reborn architecture-simplification note
-//! (`docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`, §4.3)
+//! (`docs/reborn/contracts/approvals.md`)
 //! replaces the hand-written `InMemory*Store` parallel implementations with the
 //! one production `Filesystem*Store<F>` exercised over an in-memory backend:
 //! "in-memory" stops being a store and becomes a filesystem backend

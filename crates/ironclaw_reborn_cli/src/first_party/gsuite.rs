@@ -1,31 +1,34 @@
 //! Binary-assembled GSuite first-party capability wiring (extension-runtime
 //! DEL-7).
 //!
-//! Composition owns the generic `FirstPartyHandlerRegistrar` seam and the
+//! `ironclaw_extension_host` owns the generic `FirstPartyHandlerRegistrar` seam and the
 //! shared context; the concrete GSuite executor, credential stager, error
 //! mapping, and Google-account visibility policy live here in the assembling
-//! binary. Every host-api / host-runtime / auth type is reached through the
-//! `ironclaw_reborn_composition` facade re-exports so the CLI's exact-deps
-//! allow-list stays frozen to the facade set plus `ironclaw_first_party_extensions`.
+//! binary. Host-api / host-runtime types are named from their owning crates;
+//! auth-owned contracts are named from `ironclaw_auth`.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_auth::{
+    CredentialAccount, CredentialAccountSelectionRequest, RuntimeCredentialAccountVisibilityPolicy,
+};
+use ironclaw_extension_host::{
+    FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
+    FirstPartyCapabilityRequest, FirstPartyCapabilityResult, FirstPartyHandlerRegistrar,
+    FirstPartyRegistrarContext, ProductAuthProviderRuntimePorts,
+};
 use ironclaw_first_party_extensions::{
     GOOGLE_PROVIDER_ID, GsuiteCapabilitySpec, GsuiteCredentialDispatchReason,
     GsuiteCredentialStageError, GsuiteCredentialStageRequest, GsuiteCredentialStager,
     GsuiteDispatchError, GsuiteDispatchRequest, GsuiteExecutor, GsuitePackageSpec,
     find_gsuite_capability, gsuite_google_account_visible_to_requester, gsuite_package_specs,
 };
-use ironclaw_reborn_composition::{
-    CapabilityId, CredentialAccount, CredentialAccountSelectionRequest, ExtensionId,
-    FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
-    FirstPartyCapabilityRequest, FirstPartyCapabilityResult, FirstPartyHandlerRegistrar,
-    FirstPartyRegistrarContext, HostApiError, NetworkScheme, NetworkTargetPattern,
-    ProductAuthProviderRuntimePorts, RuntimeCredentialAccountSetup,
-    RuntimeCredentialAccountVisibilityPolicy, RuntimeCredentialAuthRequirement,
-    RuntimeCredentialRequirement, RuntimeCredentialRequirementSource, RuntimeCredentialTarget,
-    RuntimeDispatchErrorKind, SecretHandle, VendorId,
+use ironclaw_host_api::{
+    CapabilityId, ExtensionId, HostApiError, NetworkScheme, NetworkTargetPattern,
+    RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement,
+    RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeDispatchErrorKind,
+    SecretHandle, VendorId,
 };
 
 /// Installs the GSuite first-party capability handlers into the shared registry.
@@ -45,7 +48,7 @@ impl FirstPartyHandlerRegistrar for GsuiteFirstPartyRegistrar {
                     context.product_auth_runtime_ports.clone(),
                 )),
             ),
-            google_oauth_configured: context.google_oauth_configured,
+            google_oauth_configured: context.oauth_backend_configured,
         });
         for package in gsuite_package_specs() {
             for capability in package.capabilities {

@@ -12,7 +12,7 @@
 use ironclaw_extensions::ExtensionRegistry;
 
 use crate::error::RebornBuildError;
-use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
+use ironclaw_extension_host::product_extension_host_api_contract_registry;
 
 use super::HooksActivationConfig;
 use super::audit::emit_hook_quarantined;

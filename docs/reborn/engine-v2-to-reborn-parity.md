@@ -43,7 +43,9 @@ engine v2 and are intentionally reshaped or deferred in Reborn.
 
 Legend: **Covered** = Reborn has an equivalent contract, crate, and test
 evidence; **Partial** = an equivalent exists but with a scoped delta noted;
-**Gap** = no direct equivalent.
+**Not covered** = a typed contract/plan exists but no production execution
+backend is wired for it; **Gap** = no direct equivalent, and none is needed
+(safe to drop or reintroduce later as a new slice).
 
 | Engine v2 capability | Reborn equivalent | Contract doc | Crate(s) | Test evidence | Status |
 | --- | --- | --- | --- | --- | --- |
@@ -60,18 +62,18 @@ evidence; **Partial** = an equivalent exists but with a scoped delta noted;
 | **Gates / Approvals** — `gate/` (`ExecutionGate`, `GatePipeline`, `LeaseGate`, `GateResolution`, `ResumeKind`), auth/approval resume | Durable approval requests resolved into bounded scoped leases; typed gate/resume with exact invocation identity; deny-continue flow | `contracts/approvals.md`, `contracts/capability-access.md`, `contracts/run-state.md`; plan `docs/plans/2026-06-15-reborn-approval-deny-continue.md` | `ironclaw_approvals`, `ironclaw_run_state` | `tests/reborn_approval_traces_parity.rs`, `tests/integration/auth/auth_failure.rs`, `crates/ironclaw_reborn_composition/tests/budget_approval_e2e.rs`, `crates/ironclaw_reborn_composition/src/factory/local_dev_host_tests/approval_gates.rs` | Covered (note 3) |
 | **CodeAct / Tier 1** — embedded Python via Monty (RLM): context-as-variables, `llm_query()` recursive subagent, compact output metadata; `executor/scripting.rs` | Two parts: (a) native script/software execution lane (`RuntimeKind::Script`); (b) CodeAct is an *allowed* pluggable parent loop family, and recursive subagents exist as `spawn_subagent` | `contracts/scripts.md`, `contracts/agent-loop-protocol.md` (CodeAct as parent protocol) | `ironclaw_scripts`, `ironclaw_agent_loop`, `ironclaw_process_sandbox` | `tests/integration/process_port.rs`, `tests/reborn_subagent_spawn_e2e.rs`, `crates/ironclaw_reborn_composition/tests/subagent_runtime_wiring.rs` | Partial (note 4) |
 | **Self-modify** — prompt overlays / orchestrator patches applied by the self-improvement mission; skill versioning/rollback (`memory/skill_tracker.rs::SkillTracker`) | Versioned skill evolution (distill/refine with validation); overlay/orchestrator self-patching intentionally not carried over (Reborn has no Monty orchestrator to patch) | plan `docs/plans/2026-06-16-reborn-skill-evolution.md`; `contracts/skills-extension.md` | `ironclaw_skills::learning`, `ironclaw_skills` | `crates/ironclaw_skills/src/learning.rs` (refine/distill tests) | Partial (note 4) |
-| **Per-project Docker sandbox** — filesystem/shell tools routed through a per-project container (`SANDBOX_ENABLED`; `crates/Dockerfile.sandbox`) | Typed process plans, backend-neutral sandbox backends, hardened Docker command construction, fail-closed network-host validation, timeout/cancel cleanup | `contracts/processes.md`, `contracts/scripts.md`; design `docs/reborn/2026-05-26-docker-process-sandbox-mvp.md` | `ironclaw_process_sandbox`, `ironclaw_processes`, `ironclaw_wasm` | `tests/integration/process_port.rs`, `crates/ironclaw_reborn_composition/tests/production_runtime_automations.rs` | Covered (note 5) |
-| **OpenAI-compatible Responses API** — engine v2's OpenAI-compatible ingress | Contract-first, ProductWorkflow-backed Chat Completions + Responses (create/retrieve/cancel), idempotency/opaque-ref, projection-backed SSE streaming | `contracts/openai-compatible-api.md` | `ironclaw_reborn_openai_compat` | `crates/ironclaw_reborn_openai_compat/tests/responses_workflow_handlers_contract.rs`, `.../chat_workflow_handlers_contract.rs`, `.../streaming_handlers_contract.rs`, `.../error_contract.rs`, `.../ref_store_contract.rs` | Covered (note 6) |
+| **Per-project Docker sandbox** — filesystem/shell tools routed through a per-project container (`SANDBOX_ENABLED`; `crates/Dockerfile.sandbox`) | Typed `SandboxProcessPlan` contract and validation only (`ironclaw_process_sandbox`); no production execution backend is wired for this capability today | `contracts/processes.md`, `contracts/scripts.md` | `ironclaw_process_sandbox` (plan validation only); `ironclaw_processes`, `ironclaw_wasm` are unrelated general process/WASM runtimes, not the sandbox backend | `crates/ironclaw_process_sandbox/src/tests.rs` (plan validation); `tests/integration/process_port.rs` shows the *inert* `RecordingProcessPort` — it proves no real OS process is spawned, i.e. the absence of a backend, not evidence of one | Not covered (note 5) |
+| **OpenAI-compatible Responses API** — engine v2's OpenAI-compatible ingress | Contract-first, ProductSurface-backed Chat Completions + Responses (create/retrieve/cancel), idempotency/opaque-ref, projection-backed SSE streaming | `contracts/openai-compatible-api.md` | `ironclaw_reborn_openai_compat` | `crates/ironclaw_reborn_openai_compat/tests/responses_workflow_handlers_contract.rs`, `.../chat_workflow_handlers_contract.rs`, `.../streaming_handlers_contract.rs`, `.../error_contract.rs`, `.../ref_store_contract.rs` | Covered (note 6) |
 | **Skills** — trusted/installed skills, activation criteria, `skill_*` tools | First-party in-process skills extension: portable `SKILL.md` bundles; kernel owns trust/visibility/leases/context injection; catalog-first model-selected activation | `contracts/skills-extension.md` | `ironclaw_skills` | `tests/integration/group_extensions/` (suite), `crates/ironclaw_reborn_cli/tests/smoke.rs` | Covered |
 | **Hooks** — lifecycle hooks (6 points); `Hook` trait | Host-mediated hook execution with multi-backend persistence and an adversarial parity oracle | (hooks are exercised through `contracts/extensions.md` + capability dispatch) | `ironclaw_hooks`, `ironclaw_hooks_libsql`, `ironclaw_hooks_postgres`, `ironclaw_hooks_parity` | `crates/ironclaw_runner/tests/hooks_integration.rs`, `crates/ironclaw_hooks_parity/tests/parity_matrix.rs`, `crates/ironclaw_hooks_parity/tests/multi_host_adversarial.rs`, `crates/ironclaw_reborn_composition/tests/third_party_hook_projection.rs` | Covered |
-| **Extensions** — installed extension/channel lifecycle | Host-mediated extension registry + first-party extension ports; product adapters (Telegram/Slack v2, GSuite, MCP-hosted) | `contracts/extensions.md`, `contracts/product-adapters.md`, `contracts/mcp.md` | `ironclaw_extensions`, `ironclaw_first_party_extensions`, `ironclaw_product_adapters`, `ironclaw_mcp` | `tests/reborn_adapter_installation_scope_isolation_parity.rs`, `tests/integration/mcp.rs`, `crates/ironclaw_reborn_cli/tests/extension.rs`, `crates/ironclaw_reborn_composition/tests/gsuite.rs` | Covered |
+| **Extensions** — installed extension/channel lifecycle | Host-mediated extension registry + first-party extension ports; `ChannelAdapter` integrations (Telegram/Slack), GSuite, and MCP-hosted extensions | `contracts/extensions.md`, `extension-runtime/overview.md`, `contracts/mcp.md` | `ironclaw_extensions`, `ironclaw_extension_host`, `ironclaw_first_party_extensions`, `ironclaw_mcp` | `tests/reborn_adapter_installation_scope_isolation_parity.rs`, `tests/integration/mcp.rs`, `crates/ironclaw_reborn_cli/tests/extension.rs`, `crates/ironclaw_reborn_composition/tests/gsuite.rs` | Covered |
 | **Effect execution / tool dispatch** — `traits/effect.rs::EffectExecutor`, `ThreadExecutionContext` | Composition-only `RuntimeDispatcher::dispatch_json` selecting a `RuntimeAdapter` per `RuntimeKind`, normalized results, fail-closed | `contracts/dispatcher.md`, `contracts/capabilities.md` | `ironclaw_dispatcher`, `ironclaw_capabilities` | `tests/reborn_minimal_dispatch_parity.rs`, `tests/reborn_tool_param_coercion_parity.rs`, `tests/reborn_trace_core_builtin_tools_parity.rs`, `tests/reborn_trace_file_tools_parity.rs`, `tests/reborn_trace_wasm_github_fixture_parity.rs` | Covered |
 | **Events + Projections** — `ThreadEvent`, `EventKind` (18 variants), event sourcing from day one; `types/event.rs` | Explicit boundary between realtime delivery, durable audit/history, transcript milestones, and derived projections; durable event store | `contracts/events.md`, `contracts/events-projections.md` | `ironclaw_events`, `ironclaw_event_projections`, `ironclaw_event_streams`, `ironclaw_reborn_event_store` | `crates/ironclaw_reborn_event_store/tests/durable_event_store_contract.rs`, `.../filesystem_event_log_contract.rs`, `.../coalescing_sink_contract.rs`, `crates/ironclaw_runner/tests/loop_milestone_event_projection.rs` | Covered |
 | **`LlmBackend` trait** — `complete(messages, actions, config)`; host wraps `LlmProvider` | Host-managed model requests / tool-capable model gateway; provider-safe tool projection (dotted `CapabilityId` ↔ provider names) | `contracts/host-api.md`, `contracts/runtime-workflows.md` | `ironclaw_llm`, `ironclaw_runner` (model routes/gateway) | `crates/ironclaw_runner/tests/model_routes.rs`, `crates/ironclaw_runner/tests/llm_gateway.rs` | Covered |
 | **`Store` trait** — 20-method Thread/Step/Event/Project/Doc/Lease/Mission CRUD; host wraps `Database` (PG + libSQL) | Durable stores over the scoped-filesystem substrate + PostgreSQL/libSQL, with backend-parity readiness diagnostics | `contracts/storage-placement.md`, `contracts/turn-persistence.md`, `contracts/run-state.md` | `ironclaw_run_state`, `ironclaw_reborn_event_store`, `ironclaw_memory_native`, `ironclaw_conversations` | `crates/ironclaw_reborn_composition/tests/postgres_substrate.rs`, `.../libsql_substrate.rs`, `crates/ironclaw_conversations/tests/conversation_state_store_contract.rs` | Covered |
-| **`WorkspaceReader` trait** — read-side workspace access; `traits/workspace.rs`, `workspace/` mounts (`MountBackend`, `ProjectMounts`) | Scoped filesystem substrate + memory read side; per-project mounts realized by the process sandbox bind-mount path | `contracts/filesystem.md`, `contracts/memory.md` | `ironclaw_filesystem`, `ironclaw_memory` | `crates/ironclaw_reborn_composition/tests/libsql_substrate.rs`, `tests/reborn_trace_file_tools_parity.rs` | Covered |
+| **`WorkspaceReader` trait** — read-side workspace access; `traits/workspace.rs`, `workspace/` mounts (`MountBackend`, `ProjectMounts`) | Scoped filesystem substrate + memory read side; per-project scoping realized by the `RootFilesystem` mount catalog (`CompositeRootFilesystem`/`ScopedFilesystem`), independent of the (Not covered) process-sandbox execution backend | `contracts/filesystem.md`, `contracts/memory.md` | `ironclaw_filesystem`, `ironclaw_memory` | `crates/ironclaw_reborn_composition/tests/libsql_substrate.rs`, `tests/reborn_trace_file_tools_parity.rs` | Covered |
 | **ConversationManager / ConversationSurface** — routes UI messages to threads; `runtime/conversation.rs` | Conversation binding: inbound routing to the correct run/thread with scope isolation | `contracts/conversation-binding.md`, `contracts/communication-delivery-resolution.md` | `ironclaw_conversations`, `ironclaw_outbound` | `tests/reborn_direct_chat_user_scope_isolation_parity.rs`, `tests/reborn_outbound_reply_target_scope_isolation_parity.rs`, `crates/ironclaw_conversations/tests/inbound_contract.rs` | Covered |
-| **Context builder + compaction** — `executor/context.rs`, `executor/compaction.rs` (context assembly, compaction near model limit) | Loop context strategies + context-compaction design; prompt envelope assembly | design `docs/reborn/2026-05-26-context-compaction.md`; `contracts/turns-agent-loop.md` | `ironclaw_agent_loop` (`strategies/context.rs`), `ironclaw_prompt_envelope` | `crates/ironclaw_agent_loop/src/executor/tests.rs`, `crates/ironclaw_reborn_composition/src/runtime/tests/default_system_prompt.rs` | Covered |
+| **Context builder + compaction** — `executor/context.rs`, `executor/compaction.rs` (context assembly, compaction near model limit) | Loop context strategies and prompt envelope assembly | `contracts/turns-agent-loop.md` | `ironclaw_agent_loop` (`strategies/context.rs`), `ironclaw_prompt_envelope` | `crates/ironclaw_agent_loop/src/executor/tests.rs`, `crates/ironclaw_reborn_composition/src/runtime/tests/default_system_prompt.rs` | Covered |
 | **ThreadTree / sub-agents** — parent-child relationships; `runtime/tree.rs` | Subagent spawn through capability authorization/dispatch, wired into the runtime | `contracts/agent-loop-protocol.md` (`spawn_subagent`) | `ironclaw_agent_loop`, `ironclaw_reborn_composition` | `tests/reborn_subagent_spawn_e2e.rs`, `crates/ironclaw_reborn_composition/tests/subagent_runtime_wiring.rs` | Covered |
 | **ReliabilityTracker** — per-action success-rate + latency via EMA; `reliability.rs` | No direct EMA reliability/estimation service; `ironclaw_observability` is a minimal event/metric sink, not a per-action learning tracker | (none dedicated) | `ironclaw_observability` (partial) | — | Gap (note 7) |
 
@@ -124,19 +126,18 @@ evidence; **Partial** = an equivalent exists but with a scoped delta noted;
    (`ironclaw_skills::learning`) carries the durable-knowledge half. Net: the
    engine-v2 CodeAct primitive is reshaped, not reproduced byte-for-byte. This
    is acceptable for removal because engine-v2 CodeAct was itself experimental
-   (Tier 1, RLM), never a production default, and the `.claude/rules/tool-evidence.md`
-   note records that even its side-effect gating was only a soft nudge, never a
+   (Tier 1, RLM), never a production default, and the capability evidence rules
+   record that even its side-effect gating was only a soft nudge, never a
    hard gate.
 
-5. **Sandbox (Covered).** The per-project Docker sandbox is reproduced as typed
-   process plans over backend-neutral sandbox backends with hardened command
-   construction and fail-closed network-host validation. The comparison doc
-   marks production MITM/product wiring as still partial, but the engine-v2
-   capability (route filesystem/shell effects through a per-project container)
-   is present and tested.
+5. **Sandbox (Not covered).** Reborn defines a typed `SandboxProcessPlan`
+   contract with plan validation only (`ironclaw_process_sandbox`); no
+   production execution backend is wired for it. The engine-v2 capability
+   (route filesystem/shell effects through a per-project Docker container) has
+   no Reborn equivalent running today.
 
 6. **OpenAI-compatible API (Covered for the engine-v2 surface).** Reborn ships
-   contract-first, ProductWorkflow-backed Chat Completions and the Responses
+   contract-first, ProductSurface-backed Chat Completions and the Responses
    API (create/retrieve/cancel) with opaque-ref/idempotency and
    projection-backed SSE streaming — deliberately *not* reusing the v1
    stateless proxy path. The comparison doc's "OpenAI-compatible API" row
@@ -167,33 +168,44 @@ The only items that are not **Covered** are:
 - **Per-action ReliabilityTracker (EMA)** — Gap (note 7). Internal heuristic
   with no wire/contract surface; safe to drop or re-introduce as a new
   observability slice.
+- **Per-project Docker sandbox** — Not covered (note 5). `ironclaw_process_sandbox`
+  owns a typed plan contract and validation only; no production execution
+  backend is wired, so effects that engine v2 routed through a per-project
+  Docker container currently have no Reborn execution path at all.
 
-These correspond to entries in the "Notable Gaps Before Reborn Can Replace
-Legacy" section of
-`docs/internal/2026-06-26-legacy-vs-reborn-feature-comparison.md` (Automation
-production readiness; Model/provider feature parity) and to the residual epics
-noted in `docs/reborn/production-cutover-readiness-closeout.md` (#4539
-approvals parity, #3029 migration). Critically, **none of these gaps are
-engine-v2-specific**: they are Reborn-vs-legacy-product deltas that exist
-independently of whether engine v2 is present, because engine v2 is gated off
-and no shipping path depends on it.
+The unified learning-mission automation gap corresponds to the "Automation
+production readiness" and "Model/provider feature parity" entries in the
+"Notable Gaps Before Reborn Can Replace Legacy" section of
+`docs/internal/2026-06-26-legacy-vs-reborn-feature-comparison.md`, and to the
+residual epics noted in `docs/reborn/production-cutover-readiness-closeout.md`
+(#4539 approvals parity, #3029 migration). The per-project Docker sandbox gap
+has no separate tracked follow-up ticket today; `FEATURE_PARITY.md` carries
+the same "plan validation only, no execution backend" status as the row
+above. Critically, **none of these gaps are engine-v2-specific**: they are
+Reborn-vs-legacy-product deltas that exist independently of whether engine v2
+is present, because engine v2 is gated off and no shipping path depends on
+it.
 
 ## Conclusion
 
 Every one of engine v2's five primitives (Thread, Step, Capability, MemoryDoc,
-Project) and every runtime concern it layered on top (missions,
-gates/approvals, sandbox, OpenAI-compatible Responses API, skills/hooks/
-extensions, effect dispatch, events/projections, the `LlmBackend`/`Store`/
-`EffectExecutor`/`WorkspaceReader` trait boundaries) maps to a named Reborn
-contract, one or more dedicated crates, and passing test evidence. Two
-capabilities are honestly **Partial** and one is a **Gap** — all three are
-internal/experimental engine-v2 features (in-loop Monty CodeAct, unified
-learning-mission firing, EMA reliability tracking) with no durable contract,
-wire format, or shipping code path that engine-v2 removal would strand.
+Project) and every runtime concern it layered on top — missions,
+gates/approvals, OpenAI-compatible Responses API, skills/hooks/extensions,
+effect dispatch, events/projections, the `LlmBackend`/`Store`/
+`EffectExecutor`/`WorkspaceReader` trait boundaries — maps to a named Reborn
+contract, one or more dedicated crates, and passing test evidence, with one
+notable exception: the **per-project Docker sandbox** is **Not covered**
+(note 5) — Reborn validates typed sandbox plans but wires no production
+execution backend for them today. Two further capabilities are honestly
+**Partial** and one is a **Gap** — these three are internal/experimental
+engine-v2 features (in-loop Monty CodeAct, unified learning-mission firing,
+EMA reliability tracking) with no durable contract, wire format, or shipping
+code path that engine-v2 removal would strand.
 
 Because engine v2 is default-off (`ENGINE_V2` false) and Reborn is fully
 independent of `ironclaw_engine`, deleting engine v2 removes only dead-by-default
 interim code. **Engine v2 can be safely removed.** The recommended follow-ups
-(CodeAct loop family productionization, unified learning-mission wiring, and an
-optional reliability/estimation observability slice) are net-new Reborn work,
-not regressions caused by the removal.
+(CodeAct loop family productionization, unified learning-mission wiring, an
+optional reliability/estimation observability slice, and — separately from
+this removal — wiring a production sandbox execution backend) are net-new
+Reborn work, not regressions caused by the removal.

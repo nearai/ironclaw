@@ -124,6 +124,8 @@ def _new_llm_trace_state() -> dict:
         "next_response": 0,
         "expected_user_inputs": {},
         "request_hints": [],
+        "pending_tool_calls": [],
+        "tool_call_id_aliases": {},
         "error": None,
     }
 
@@ -149,6 +151,7 @@ def _parse_llm_trace(trace: object, source: str | None = None) -> dict:
     expected_user_inputs = {0: first_response["content"]}
     request_hints = []
     pending_user_input = True
+    seen_tool_call_ids: set[str] = set()
     for index, step in enumerate(steps[1:], start=1):
         if not isinstance(step, dict) or not isinstance(step.get("response"), dict):
             raise ValueError(f"trace.steps[{index}].response must be an object")
@@ -178,12 +181,21 @@ def _parse_llm_trace(trace: object, source: str | None = None) -> dict:
             for tool_index, tool_call in enumerate(tool_calls):
                 if (
                     not isinstance(tool_call, dict)
+                    or not isinstance(tool_call.get("id"), str)
+                    or not tool_call["id"]
                     or not isinstance(tool_call.get("name"), str)
                     or not isinstance(tool_call.get("arguments"), dict)
                 ):
                     raise ValueError(
                         f"trace.steps[{index}].tool_calls[{tool_index}] is invalid"
                     )
+                tool_call_id = tool_call["id"]
+                if tool_call_id in seen_tool_call_ids:
+                    raise ValueError(
+                        f"trace.steps[{index}].tool_calls[{tool_index}] "
+                        f"reuses tool call id {tool_call_id!r}"
+                    )
+                seen_tool_call_ids.add(tool_call_id)
         else:
             raise ValueError(
                 f"trace.steps[{index}] has unsupported response type {response_type!r}"
@@ -233,6 +245,8 @@ def _parse_llm_trace(trace: object, source: str | None = None) -> dict:
         "next_response": 0,
         "expected_user_inputs": expected_user_inputs,
         "request_hints": request_hints,
+        "pending_tool_calls": [],
+        "tool_call_id_aliases": {},
         "error": None,
     }
 
@@ -252,6 +266,12 @@ def _next_llm_trace_response(
             "recorded LLM trace is exhausted but the agent requested another response"
         )
         raise web.HTTPConflict(text=state["error"])
+
+    try:
+        _capture_trace_tool_call_id_aliases(state, messages)
+    except ValueError as error:
+        state["error"] = str(error)
+        raise web.HTTPConflict(text=state["error"]) from error
 
     request_hint = state["request_hints"][next_index]
     min_message_count = request_hint.get("min_message_count")
@@ -331,73 +351,250 @@ def _next_llm_trace_response(
             raise web.HTTPConflict(text=state["error"])
         try:
             response["tool_calls"] = _resolve_trace_result_bindings(
-                response["tool_calls"], messages
+                response["tool_calls"],
+                _trace_tool_results_with_recorded_ids(state, messages),
             )
         except ValueError as error:
             state["error"] = str(error)
             raise web.HTTPConflict(text=state["error"]) from error
+        state["pending_tool_calls"] = deepcopy(response["tool_calls"])
 
     state["next_response"] += 1
     return response
 
 
-def _resolve_trace_result_bindings(value: object, messages: list[dict]) -> object:
-    """Resolve test-only arguments from earlier real capability results.
-
-    Harvested traces necessarily contain the provider IDs returned during the
-    live run. Full-path replay creates fresh Docs and Sheets resources, so a
-    later recorded call must consume the ID returned by the local provider,
-    not the stale live ID. Tests opt into that behavior with an argument value
-    shaped like::
-
-        {"$trace_result": {"tool": "google-docs__create_document",
-                            "fields": ["documentId", "document_id", "id"]}}
-
-    The marker is accepted only inside the mock server; committed trace files
-    remain unchanged and production code never sees it.
-    """
+def _resolve_trace_result_bindings(
+    value: object,
+    tool_results: list[dict],
+) -> object:
+    """Resolve exact tool-call-ID/JSON-Pointer markers recursively."""
     if isinstance(value, list):
-        return [_resolve_trace_result_bindings(item, messages) for item in value]
+        return [
+            _resolve_trace_result_bindings(item, tool_results) for item in value
+        ]
     if not isinstance(value, dict):
         return value
-
-    if set(value) == {"$trace_result"}:
-        binding = value["$trace_result"]
-        if not isinstance(binding, dict):
-            raise ValueError("$trace_result binding must be an object")
-        tool = binding.get("tool")
-        fields = binding.get("fields")
-        if not isinstance(tool, str) or not tool:
-            raise ValueError("$trace_result.tool must be a non-empty string")
-        if (
-            not isinstance(fields, list)
-            or not fields
-            or not all(isinstance(field, str) and field for field in fields)
-        ):
-            raise ValueError("$trace_result.fields must be non-empty strings")
-
-        named_results = _find_named_tool_results(messages, tool)
-        for result in reversed(named_results):
-            payload = _parse_trace_result_content(result.get("content"))
-            found = _find_trace_result_field(payload, fields)
-            if found is not None:
-                return found
-        observed = [
-            {
-                "name": result.get("name"),
-                "content": str(result.get("content", ""))[:500],
-            }
-            for result in _find_tool_results(messages)
-        ]
+    if "$trace_result" not in value:
+        return {
+            key: _resolve_trace_result_bindings(item, tool_results)
+            for key, item in value.items()
+        }
+    if set(value) != {"$trace_result"}:
         raise ValueError(
-            f"recorded LLM trace could not bind a result from {tool} "
-            f"using fields {fields}; observed tool results: {observed}"
+            "$trace_result marker object must contain only $trace_result"
         )
 
-    return {
-        key: _resolve_trace_result_bindings(item, messages)
-        for key, item in value.items()
+    binding = value["$trace_result"]
+    if not isinstance(binding, dict) or set(binding) != {
+        "tool_call_id",
+        "pointer",
+    }:
+        raise ValueError(
+            "$trace_result must contain exactly tool_call_id and pointer"
+        )
+    tool_call_id = binding["tool_call_id"]
+    pointer = binding["pointer"]
+    if not isinstance(tool_call_id, str) or not tool_call_id:
+        raise ValueError("$trace_result.tool_call_id must be a non-empty string")
+    if not isinstance(pointer, str) or (
+        pointer and not pointer.startswith("/")
+    ):
+        raise ValueError(
+            "$trace_result.pointer must be empty or start with '/'"
+        )
+
+    matching_results = [
+        candidate
+        for candidate in tool_results
+        if candidate.get("tool_call_id") == tool_call_id
+    ]
+    if not matching_results:
+        observed_ids = [
+            candidate.get("tool_call_id") for candidate in tool_results
+        ]
+        raise ValueError(
+            f"trace result has no tool call with id {tool_call_id!r}; "
+            f"observed tool call IDs: {observed_ids}"
+        )
+    if len(matching_results) > 1:
+        raise ValueError(
+            f"trace result has multiple tool results with id {tool_call_id!r}"
+        )
+    result = matching_results[0]
+    parsed_content = _parse_trace_result_content(result.get("content"))
+    content = _canonical_trace_result_payload(parsed_content)
+    if content is parsed_content and _is_trace_result_evidence(parsed_content):
+        raise ValueError(
+            f"trace result for tool call {tool_call_id!r} "
+            f"has no JSON Pointer {pointer!r}"
+        )
+    try:
+        return _resolve_trace_json_pointer(content, pointer)
+    except (KeyError, IndexError, TypeError, ValueError) as error:
+        raise ValueError(
+            f"trace result for tool call {tool_call_id!r} "
+            f"has no JSON Pointer {pointer!r}"
+        ) from error
+
+
+def _resolve_trace_json_pointer(document: object, pointer: str) -> object:
+    current = document
+    if not pointer:
+        return current
+    for raw_token in pointer[1:].split("/"):
+        token = _decode_trace_pointer_token(raw_token)
+        if isinstance(current, dict):
+            current = current[token]
+        elif isinstance(current, list):
+            if not token.isascii() or not token.isdecimal():
+                raise ValueError("array pointer token must be a decimal index")
+            current = current[int(token)]
+        else:
+            raise TypeError("pointer traversed a scalar")
+    return current
+
+
+def _decode_trace_pointer_token(token: str) -> str:
+    decoded = []
+    index = 0
+    while index < len(token):
+        if token[index] != "~":
+            decoded.append(token[index])
+            index += 1
+            continue
+        if index + 1 >= len(token) or token[index + 1] not in {"0", "1"}:
+            raise ValueError("invalid JSON Pointer escape")
+        decoded.append("~" if token[index + 1] == "0" else "/")
+        index += 2
+    return "".join(decoded)
+
+
+def _canonical_trace_result_payload(content: object) -> object:
+    if not isinstance(content, dict):
+        return content
+    if not _is_trace_result_evidence(content):
+        return content
+    detail = content.get("detail")
+    if not isinstance(detail, dict) or not isinstance(detail.get("preview"), str):
+        return content
+    byte_len = detail.get("byte_len")
+    total_bytes = detail.get("total_bytes")
+    if (
+        isinstance(byte_len, bool)
+        or not isinstance(byte_len, int)
+        or isinstance(total_bytes, bool)
+        or not isinstance(total_bytes, int)
+        or byte_len != total_bytes
+        or detail.get("next_offset") is not None
+    ):
+        return content
+    try:
+        return json.loads(detail["preview"])
+    except json.JSONDecodeError:
+        return content
+
+
+def _is_trace_result_evidence(content: object) -> bool:
+    return isinstance(content, dict) and {
+        "schema_version",
+        "status",
+        "trust",
+    } <= set(content)
+
+
+def _capture_trace_tool_call_id_aliases(state: dict, messages: list[dict]) -> None:
+    """Map stable fixture call IDs to IDs normalized by the provider stack."""
+    pending = state.get("pending_tool_calls") or []
+    if not pending:
+        return
+    actual_calls = next(
+        (
+            message.get("tool_calls") or []
+            for message in reversed(messages)
+            if message.get("role") == "assistant" and message.get("tool_calls")
+        ),
+        [],
+    )
+    if len(actual_calls) != len(pending):
+        state["pending_tool_calls"] = []
+        raise ValueError(
+            "trace tool-call alias count mismatch: "
+            f"recorded {len(pending)}, observed {len(actual_calls)}"
+        )
+
+    recorded_calls_by_identity: dict[tuple[str, str], list[dict]] = {}
+    for recorded in pending:
+        identity = _trace_tool_call_identity(recorded)
+        if identity is not None:
+            recorded_calls_by_identity.setdefault(identity, []).append(recorded)
+
+    actual_calls_by_identity: dict[tuple[str, str], list[dict]] = {}
+    for actual in actual_calls:
+        identity = _trace_tool_call_identity(actual)
+        if identity is not None:
+            actual_calls_by_identity.setdefault(identity, []).append(actual)
+
+    aliases = state["tool_call_id_aliases"]
+    for identity, recorded_calls in recorded_calls_by_identity.items():
+        actual_candidates = actual_calls_by_identity.get(identity, [])
+        if len(recorded_calls) > 1 or len(actual_candidates) > 1:
+            raise ValueError(
+                "ambiguous trace tool-call aliases for normalized tool name "
+                f"{identity[0]!r}; repeated calls must have distinct arguments"
+            )
+        if len(recorded_calls) != 1 or len(actual_candidates) != 1:
+            continue
+        recorded = recorded_calls[0]
+        actual = actual_candidates[0]
+        recorded_id = recorded.get("id")
+        actual_id = actual.get("id")
+        if (
+            isinstance(recorded_id, str)
+            and recorded_id
+            and isinstance(actual_id, str)
+            and actual_id
+        ):
+            aliases[recorded_id] = actual_id
+    state["pending_tool_calls"] = []
+
+
+def _trace_tool_call_identity(call: dict) -> tuple[str, str] | None:
+    function = call.get("function")
+    if isinstance(function, dict):
+        name = function.get("name") or call.get("name")
+        arguments = function.get("arguments", call.get("arguments"))
+    else:
+        name = call.get("name")
+        arguments = call.get("arguments")
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(name, str) or not isinstance(arguments, dict):
+        return None
+    return (
+        name.replace("-", "_"),
+        json.dumps(arguments, sort_keys=True, separators=(",", ":")),
+    )
+
+
+def _trace_tool_results_with_recorded_ids(
+    state: dict,
+    messages: list[dict],
+) -> list[dict]:
+    """Present runtime results under their stable fixture IDs."""
+    runtime_to_recorded = {
+        runtime_id: recorded_id
+        for recorded_id, runtime_id in state["tool_call_id_aliases"].items()
     }
+    results = []
+    for observed in _find_tool_results(messages, after_latest_user=False):
+        rewritten = dict(observed)
+        runtime_id = rewritten.get("tool_call_id")
+        rewritten["tool_call_id"] = runtime_to_recorded.get(runtime_id, runtime_id)
+        results.append(rewritten)
+    return results
 
 
 def _parse_trace_result_content(content: object) -> object:
@@ -1964,8 +2161,12 @@ def _extract_tool_name(msg: dict) -> str:
     return "unknown"
 
 
-def _find_tool_results(messages: list[dict]) -> list[dict]:
-    """Collect every fresh tool result that follows the most recent user turn.
+def _find_tool_results(
+    messages: list[dict],
+    *,
+    after_latest_user: bool = True,
+) -> list[dict]:
+    """Collect tool results, optionally limited to the most recent user turn.
 
     A single assistant turn can dispatch *several* tool calls (the v2 engine
     fans them out in parallel and CodeAct can call multiple Python helpers
@@ -1974,10 +2175,11 @@ def _find_tool_results(messages: list[dict]) -> list[dict]:
     acknowledge each result instead of dropping all but the first.
     """
     last_user_idx = -1
-    for i in range(len(messages) - 1, -1, -1):
-        if messages[i].get("role") == "user":
-            last_user_idx = i
-            break
+    if after_latest_user:
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i].get("role") == "user":
+                last_user_idx = i
+                break
 
     tool_call_names: dict[str, str] = {}
     results: list[dict] = []
@@ -2000,6 +2202,7 @@ def _find_tool_results(messages: list[dict]) -> list[dict]:
                 name = tool_call_names.get(message.get("tool_call_id", ""), name)
             results.append({
                 "name": name,
+                "tool_call_id": message.get("tool_call_id"),
                 "content": message.get("content", ""),
             })
     return results
@@ -2884,6 +3087,7 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
         if trace_response["type"] == "tool_calls":
             calls = [
                 {
+                    "id": tool_call.get("id"),
                     "tool_name": tool_call["name"],
                     "arguments": tool_call["arguments"],
                 }
@@ -3106,7 +3310,7 @@ def _tool_call_response(cid: str, calls: list[dict] | dict) -> web.Response:
         calls = [calls]
     tool_calls = [
         {
-            "id": f"call_{uuid.uuid4().hex[:8]}",
+            "id": tc.get("id") or f"call_{uuid.uuid4().hex[:8]}",
             "type": "function",
             "function": {
                 "name": tc["tool_name"],
@@ -3186,7 +3390,7 @@ async def _stream_tool_call(
     await resp.prepare(request)
     base = _make_base(cid)
     for idx, tc in enumerate(calls):
-        call_id = f"call_{uuid.uuid4().hex[:8]}"
+        call_id = tc.get("id") or f"call_{uuid.uuid4().hex[:8]}"
         # Header chunk: declare a new tool call slot at this index. Only
         # the very first chunk in the stream needs the assistant role.
         delta: dict = {

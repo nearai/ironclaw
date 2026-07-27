@@ -120,10 +120,9 @@ silently fixed:
    explanation.**
    The `StopKind::NoProgressDetected` failed branch calls
    `attach_failure_explanation` (same path as other explainable kinds) after
-   the final-answer nudge declines and before the Final checkpoint; the
-   explanation ref rides `LoopFailed.explanation_message_refs`. The
-   PinchBench-load-bearing nudge is untouched: a successful nudge still
-   completes with no explanation call, and the explanation is best-effort
+   the bounded capability-enabled warning turn is exhausted and before the
+   Final checkpoint; the explanation ref rides
+   `LoopFailed.explanation_message_refs`. The explanation is best-effort
    (fails soft, bounded 10 s).
 3. **RESOLVED BY STACK #5389 — model-fixable capability failures recover and
    complete.** A single `Denied` outcome is fed back to the model as a tool

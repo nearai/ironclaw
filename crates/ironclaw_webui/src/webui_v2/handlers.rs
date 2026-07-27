@@ -12,7 +12,7 @@
 //!
 //! [`ProductSurface`]: ironclaw_host_api::ProductSurface
 
-// arch-exempt: large_file, ProductSurface facade-collapse routes stay in the existing WebUI handler table until the WebUI route split lands, plan #5985
+// arch-exempt: large_file, ProductSurface service-collapse routes stay in the existing WebUI handler table until the WebUI route split lands, plan #5985
 
 mod run_artifact;
 pub use run_artifact::get_run_artifact;
@@ -40,26 +40,25 @@ use ironclaw_product::{
     EXTENSION_INSTALL_CAPABILITY, EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY,
     EXTENSION_SETUP_SUBMIT_CAPABILITY, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW,
     EmptyProductCommandInput, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_READ_COMMAND, FS_STAT_VIEW, FsMount,
-    GLOBAL_AUTO_APPROVE_VIEW, IdempotencyKey, LLM_ACTIVE_SET_CAPABILITY, LLM_CODEX_LOGIN_COMMAND,
-    LLM_CONFIG_VIEW, LLM_LIST_MODELS_COMMAND, LLM_NEARAI_LOGIN_COMMAND,
-    LLM_NEARAI_WALLET_LOGIN_COMMAND, LLM_PROVIDER_DELETE_CAPABILITY,
-    LLM_PROVIDER_UPSERT_CAPABILITY, LLM_TEST_CONNECTION_COMMAND, LOGS_VIEW, LifecyclePackageKind,
-    LifecyclePackageRef, LlmConfigSnapshot, LlmModelsResult, LlmProbeResult, NearAiLoginStart,
-    NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
-    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY, OPERATOR_CONFIG_SET_KEY_COMMAND,
-    OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
-    OPERATOR_SERVICE_LIFECYCLE_COMMAND, OPERATOR_SETUP_RUN_CAPABILITY, OPERATOR_SETUP_VIEW,
-    OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_SET_CAPABILITY,
-    OUTBOUND_PREFERENCES_VIEW, PROJECT_CREATE_COMMAND, PROJECT_DELETE_CAPABILITY,
-    PROJECT_FS_LIST_VIEW, PROJECT_FS_READ_COMMAND, PROJECT_FS_STAT_VIEW,
+    GLOBAL_AUTO_APPROVE_VIEW, LLM_ACTIVE_SET_CAPABILITY, LLM_CODEX_LOGIN_COMMAND, LLM_CONFIG_VIEW,
+    LLM_LIST_MODELS_COMMAND, LLM_NEARAI_LOGIN_COMMAND, LLM_NEARAI_WALLET_LOGIN_COMMAND,
+    LLM_PROVIDER_DELETE_CAPABILITY, LLM_PROVIDER_UPSERT_CAPABILITY, LLM_TEST_CONNECTION_COMMAND,
+    LOGS_VIEW, LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot, LlmModelsResult,
+    LlmProbeResult, NearAiLoginStart, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
+    OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY,
+    OPERATOR_CONFIG_SET_KEY_COMMAND, OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW,
+    OPERATOR_LOGS_VIEW, OPERATOR_SERVICE_LIFECYCLE_COMMAND, OPERATOR_SETUP_RUN_CAPABILITY,
+    OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
+    OUTBOUND_PREFERENCES_SET_CAPABILITY, OUTBOUND_PREFERENCES_VIEW, PROJECT_CREATE_COMMAND,
+    PROJECT_DELETE_CAPABILITY, PROJECT_FS_LIST_VIEW, PROJECT_FS_READ_COMMAND, PROJECT_FS_STAT_VIEW,
     PROJECT_MEMBER_ADD_CAPABILITY, PROJECT_MEMBER_REMOVE_CAPABILITY,
     PROJECT_MEMBER_UPDATE_CAPABILITY, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY,
     PROJECT_VIEW, PROJECTS_VIEW, ProductAttachmentCapabilities, ProductCancelRunRequest,
     ProductCapabilityDescriptor, ProductCreateThreadRequest, ProductListAutomationsRequest,
     ProductListThreadsRequest, ProductOutboundEnvelope, ProductRenameAutomationRequest,
     ProductResolveGateRequest, ProductRetryRunRequest, ProductSetupExtensionRequest,
-    ProductSubmitTurnRequest, ProductSurfaceCommandDescriptor, ProductWorkflowError, ProjectFsFile,
-    ProjectionCursor, RESOLVE_GATE_COMMAND, RETRY_RUN_COMMAND, RebornAccountLoginLinkResponse,
+    ProductSubmitTurnRequest, ProductSurfaceCommandDescriptor, ProjectFsFile, ProjectionCursor,
+    RESOLVE_GATE_COMMAND, RETRY_RUN_COMMAND, RebornAccountLoginLinkResponse,
     RebornAccountTracesResponse, RebornAddMemberRequest, RebornAdminCreateUserRequest,
     RebornAdminDeleteSecretProductRequest, RebornAdminPutSecretProductRequest,
     RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse, RebornAdminSecretResponse,
@@ -98,17 +97,17 @@ use ironclaw_product::{
     SUBMIT_TURN_COMMAND, SetActiveLlmRequest, SettingsToolPermissionState,
     THREAD_DELETE_CAPABILITY, THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_LOGIN_LINK_COMMAND,
     TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, TRACE_HOLD_AUTHORIZE_COMMAND,
-    UpsertLlmProviderRequest, install_extension_on_surface, parse_client_action_id,
-    product_attachment_capabilities,
+    UpsertLlmProviderRequest, product_attachment_capabilities, project_public_lifecycle_states,
 };
 use secrecy::ExposeSecret;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use ironclaw_host_api::turn::IdempotencyKey;
 use ironclaw_host_api::{
-    ActivityId, Blocked, FailureKind, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
-    ProductSurfaceErrorCode, ProductSurfaceErrorKind, ProductSurfaceValidationCode, Resolution,
-    SecretHandle, ThreadId, UserId,
+    ActivityId, Blocked, FailureKind, InstallationState, ProductSurface, ProductSurfaceCaller,
+    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    ProductSurfaceValidationCode, Resolution, SecretHandle, ThreadId, UserId,
 };
 use uuid::Uuid;
 
@@ -125,6 +124,7 @@ const SETTINGS_TOOLS_AUTO_APPROVE_KEY: &str = "agent.auto_approve_tools";
 const SETTINGS_TOOL_CONFIG_PREFIX: &str = "tool.";
 const SETTINGS_TOOL_CAPABILITY_ID_MAX_BYTES: usize =
     OPERATOR_CONFIG_KEY_MAX_BYTES - SETTINGS_TOOL_CONFIG_PREFIX.len();
+const CLIENT_ACTION_ID_MAX_BYTES: usize = 256;
 const ADMIN_CONFIGURATION_IDEMPOTENCY_KEY_MAX_BYTES: usize = 256;
 
 #[derive(Debug, Clone, Serialize)]
@@ -257,15 +257,15 @@ pub async fn delete_thread(
 
 // --- Admin user management ---------------------------------------------------
 //
-// Every handler delegates straight to the facade, which enforces admin
+// Every handler delegates straight to the service, which enforces admin
 // authorization (operator token or admin/owner role) and last-admin protection.
 // The `{user_id}` and `{handle}` path segments are parsed into their domain
 // types (`UserId` / `SecretHandle`) here so a malformed value is a sanitized
-// 400 before the facade runs — raw strings are a boundary format and never
+// 400 before the service runs — raw strings are a boundary format and never
 // travel deeper than this edge (see `.claude/rules/types.md`).
 
 /// Parse a `{user_id}` path segment into a `UserId`, mapping a malformed value
-/// to a sanitized `400 invalid_request` before the facade is touched.
+/// to a sanitized `400 invalid_request` before the service is touched.
 fn parse_admin_user_id(raw: String) -> Result<UserId, WebUiV2HttpError> {
     UserId::new(raw).map_err(|_| {
         WebUiV2HttpError::from(ProductSurfaceError::validation(
@@ -276,7 +276,7 @@ fn parse_admin_user_id(raw: String) -> Result<UserId, WebUiV2HttpError> {
 }
 
 /// Parse a `{handle}` path segment into a `SecretHandle`, mapping a malformed
-/// value to a sanitized `400 invalid_request` before the facade is touched.
+/// value to a sanitized `400 invalid_request` before the service is touched.
 /// Keeps a bad handle a client fault (400), never an internal 500 downstream.
 fn parse_admin_secret_handle(raw: String) -> Result<SecretHandle, WebUiV2HttpError> {
     SecretHandle::new(raw).map_err(|_| {
@@ -554,7 +554,7 @@ pub async fn send_message(
 /// `GET /api/webchat/v2/threads/{thread_id}/timeline`
 ///
 /// Optional query parameters:
-/// - `limit`: maximum number of messages per response. The facade
+/// - `limit`: maximum number of messages per response. The service
 ///   clamps to a hard ceiling so an unbounded value cannot widen the
 ///   response.
 /// - `cursor`: opaque cursor echoed from the previous response's
@@ -588,7 +588,7 @@ pub struct TimelineQuery {
 }
 
 /// Default workspace root listed when a `list_project_files` request omits
-/// `?path=`. The facade confines all paths to this alias regardless.
+/// `?path=`. The service confines all paths to this alias regardless.
 const PROJECT_FS_ROOT: &str = "/workspace";
 
 /// Query parameters for the project-filesystem read routes. `path` is a scoped
@@ -702,7 +702,7 @@ pub struct FsBrowseQuery {
     pub mount: FsMount,
     #[serde(default)]
     pub path: Option<String>,
-    /// Optional project to browse, authorized by the product-workflow facade.
+    /// Optional project to browse, authorized by the product-workflow service.
     #[serde(default)]
     pub project_id: Option<ironclaw_host_api::ProjectId>,
 }
@@ -792,7 +792,7 @@ fn require_fs_browse_path(path: Option<String>) -> Result<String, WebUiV2HttpErr
 }
 
 /// Reject a missing or blank `?path=` on the stat/download routes with a
-/// field-scoped 400, rather than forwarding an empty string to the facade where
+/// field-scoped 400, rather than forwarding an empty string to the service where
 /// it surfaces as a murkier downstream invalid-path error.
 /// Resolve the directory-listing path. An absent, empty, or whitespace-only
 /// `?path=` means "list the workspace root" — mirrors `require_project_fs_path`'s
@@ -1069,7 +1069,7 @@ fn sanitized_download_filename(filename: Option<&str>) -> String {
 /// Serves one landed attachment's raw bytes so the browser can render an image
 /// thumbnail (or download a file) for a persisted message. The `(thread_id,
 /// message_id, attachment_id)` triple addresses the attachment; the caller's
-/// authority comes from the authenticated session, and the facade derives the
+/// authority comes from the authenticated session, and the service derives the
 /// scope and resolves the storage path server-side. The response sets the
 /// authoritative `Content-Type` from the stored ref plus `nosniff` and a short
 /// private cache so the browser can reuse the bytes without re-fetching.
@@ -1107,7 +1107,7 @@ pub async fn get_attachment(
     Ok((StatusCode::OK, headers, attachment.bytes).into_response())
 }
 
-/// SSE polling cadence for `stream_events`. The facade only exposes a
+/// SSE polling cadence for `stream_events`. The service only exposes a
 /// drain-style read; once the backlog is flushed the handler waits this
 /// long before checking for newly arrived events.
 const SSE_POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -1154,7 +1154,7 @@ fn sse_poll_interval_for_idle_polls(idle_polls: u32) -> Duration {
 /// `Last-Event-ID`, which bounds drift and recycles slots even under
 /// long-running tab leaks.
 ///
-/// When the facade supports subscriptions, the handler forwards that live
+/// When the service supports subscriptions, the handler forwards that live
 /// stream directly. Older compositions fall back to drain/poll semantics,
 /// documented on [`ProductSurface::stream_events`].
 ///
@@ -1315,7 +1315,7 @@ fn build_sse_stream(
         // The slot guard moves into the generator and stays alive for
         // the lifetime of this stream. It drops automatically when the
         // generator is dropped (client disconnect, max-lifetime expiry,
-        // or facade error), releasing the per-caller concurrency slot.
+        // or service error), releasing the per-caller concurrency slot.
         let mut slot_guard = slot;
         let started_at = tokio::time::Instant::now();
         let mut after_cursor = initial_cursor.and_then(parse_cursor_token);
@@ -1347,12 +1347,12 @@ fn build_sse_stream(
             };
             match drain {
                 Err(_elapsed) => {
-                    // The facade drain was still pending when SSE_MAX_LIFETIME
+                    // The service drain was still pending when SSE_MAX_LIFETIME
                     // ran out. Returning here drops the generator (and the
                     // SseSlot it owns), so the per-caller concurrency budget
                     // recovers even under a stuck projection stream — without
                     // this bound, an unbounded `.await` on a non-resolving
-                    // facade would pin the slot indefinitely.
+                    // service would pin the slot indefinitely.
                     tracing::debug!(
                         target = "ironclaw_webui_v2::sse",
                         "stream_events drain pending past SSE_MAX_LIFETIME; closing stream"
@@ -1377,7 +1377,7 @@ fn build_sse_stream(
                         }
                     }
                     if had_events {
-                        // The production projection facade waits on its live
+                        // The production projection service waits on its live
                         // subscription when no new item is replayable. Re-enter
                         // it immediately after delivering a batch so assistant
                         // text deltas are not delayed by the idle poll cadence.
@@ -1404,7 +1404,7 @@ fn build_sse_stream(
                     tracing::debug!(
                         target = "ironclaw_webui_v2::sse",
                         error = ?error,
-                        "facade rejected SSE drain; closing stream",
+                        "service rejected SSE drain; closing stream",
                     );
                     yield Ok(sse_error_event(error));
                     return;
@@ -1538,7 +1538,7 @@ pub struct ListThreadsQuery {
 ///
 /// Lists the caller-scoped schedule automations visible to the browser. The
 /// optional `?limit=N` and `?run_limit=N` queries are capped by the product
-/// workflow facade; the response is a single bounded page and does not include
+/// workflow service; the response is a single bounded page and does not include
 /// a cursor. By default only active automations are returned; pass
 /// `?include_completed=true` to also include soft-completed (fire-once)
 /// automations. See [`ListAutomationsQuery`] for the full per-parameter parse
@@ -1651,7 +1651,7 @@ pub struct ListAutomationsQuery {
 /// `GET /api/webchat/v2/traces/credit`
 ///
 /// Read-only Trace Commons credit summary scoped strictly to the
-/// authenticated caller — the facade derives the trace scope from the
+/// authenticated caller — the service derives the trace scope from the
 /// caller's user id; no scope input is accepted from the request. The
 /// response is the contributor-local view as of the last credit sync;
 /// the authoritative ledger is server-side. A caller with no local
@@ -2127,7 +2127,10 @@ pub async fn install_extension(
     Extension(caller): Extension<ProductSurfaceCaller>,
     Json(body): Json<InstallExtensionBody>,
 ) -> Result<Json<RebornExtensionActionResponse>, WebUiV2HttpError> {
-    let package_ref = extension_package_ref_for_request(Ok(body.package_ref), "package_ref")?;
+    let package_ref = extension_package_ref_for_request(
+        Ok::<LifecyclePackageRef, std::convert::Infallible>(body.package_ref),
+        "package_ref",
+    )?;
     let client_action_id = parse_client_action_id(body.client_action_id)?;
     let activity_id = extension_lifecycle_activity_id(
         &caller,
@@ -2135,11 +2138,16 @@ pub async fn install_extension(
         &package_ref,
         &client_action_id,
     )?;
-    let surface = ironclaw_host_api::BoundProductSurface::new(
-        std::sync::Arc::clone(state.services()),
-        caller,
-    );
-    let response = install_extension_on_surface(&surface, package_ref, activity_id).await?;
+    let resolution = invoke_product_capability_with_activity_id(
+        state.services(),
+        caller.clone(),
+        EXTENSION_INSTALL_CAPABILITY,
+        serde_json::json!({ "extension_id": package_ref.id.as_str() }),
+        activity_id,
+    )
+    .await?;
+    extension_install_succeeded(state.services(), caller, &package_ref, resolution).await?;
+    let response = extension_action_completed("Extension installed.");
     Ok(Json(response))
 }
 
@@ -2241,6 +2249,102 @@ fn extension_lifecycle_mutation_succeeded(
     }
 }
 
+async fn extension_install_succeeded(
+    services: &std::sync::Arc<dyn ProductSurface>,
+    caller: ProductSurfaceCaller,
+    package_ref: &LifecyclePackageRef,
+    resolution: Resolution,
+) -> Result<(), ProductSurfaceError> {
+    match resolution {
+        Resolution::Done(outcome) => {
+            if outcome.verdict.is_success() {
+                return ensure_extension_inventory_readback(
+                    services,
+                    caller.clone(),
+                    package_ref,
+                    |extension| {
+                        matches!(
+                            extension.installation_state,
+                            InstallationState::Active
+                                | InstallationState::Installed
+                                | InstallationState::Configured
+                                | InstallationState::Disabled
+                                | InstallationState::Failed
+                        )
+                    },
+                )
+                .await;
+            } else if matches!(
+                outcome.verdict.error_kind(),
+                Some(FailureKind::Backend | FailureKind::Transient | FailureKind::Unavailable)
+            ) {
+                let readback = ensure_extension_inventory_readback(
+                    services,
+                    caller.clone(),
+                    package_ref,
+                    |extension| {
+                        extension.needs_setup
+                            || matches!(
+                                extension.installation_state,
+                                InstallationState::Installed
+                                    | InstallationState::Configured
+                                    | InstallationState::Failed
+                            )
+                    },
+                )
+                .await;
+                match readback {
+                    Ok(()) => Ok(()),
+                    Err(_) => extension_lifecycle_mutation_succeeded(Resolution::Done(outcome)),
+                }
+            } else {
+                extension_lifecycle_mutation_succeeded(Resolution::Done(outcome))
+            }
+        }
+        Resolution::Blocked(Blocked::Auth(_)) => {
+            ensure_extension_inventory_readback(services, caller, package_ref, |extension| {
+                extension.needs_setup
+                    || matches!(
+                        extension.installation_state,
+                        InstallationState::Installed
+                            | InstallationState::Configured
+                            | InstallationState::Failed
+                    )
+            })
+            .await
+        }
+        other => extension_lifecycle_mutation_succeeded(other),
+    }
+}
+
+async fn ensure_extension_inventory_readback(
+    services: &std::sync::Arc<dyn ProductSurface>,
+    caller: ProductSurfaceCaller,
+    package_ref: &LifecyclePackageRef,
+    accepts: impl Fn(&ironclaw_product::RebornExtensionInfo) -> bool,
+) -> Result<(), ProductSurfaceError> {
+    let page = query_product_page(
+        services,
+        caller,
+        RebornViewQuery {
+            view_id: EXTENSIONS_VIEW.id.to_string(),
+            params: serde_json::json!({}),
+            cursor: None,
+        },
+    )
+    .await?;
+    let inventory: RebornExtensionListResponse =
+        serde_json::from_value(page.payload).map_err(ProductSurfaceError::internal_from)?;
+    if inventory.extensions.iter().any(|extension| {
+        extension.package_ref.kind == package_ref.kind
+            && extension.package_ref.id.as_str() == package_ref.id.as_str()
+            && accepts(extension)
+    }) {
+        return Ok(());
+    }
+    Err(extension_lifecycle_unavailable(true))
+}
+
 fn extension_lifecycle_forbidden() -> ProductSurfaceError {
     ProductSurfaceError {
         code: ProductSurfaceErrorCode::Forbidden,
@@ -2267,6 +2371,12 @@ fn extension_action_completed(message: impl Into<String>) -> RebornExtensionActi
     RebornExtensionActionResponse {
         success: true,
         message: message.into(),
+        activated: None,
+        auth_url: None,
+        awaiting_token: None,
+        instructions: None,
+        onboarding_state: None,
+        onboarding: None,
     }
 }
 
@@ -2275,7 +2385,7 @@ pub async fn get_extension_setup(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<ProductSurfaceCaller>,
     Path(ExtensionPackagePath { package_id }): Path<ExtensionPackagePath>,
-) -> Result<Json<RebornSetupExtensionResponse>, WebUiV2HttpError> {
+) -> Result<Json<serde_json::Value>, WebUiV2HttpError> {
     let package_ref = extension_package_ref_for_request(
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id),
         "package_id",
@@ -2290,9 +2400,9 @@ pub async fn get_extension_setup(
         },
     )
     .await?;
-    let response =
+    let response: RebornSetupExtensionResponse =
         serde_json::from_value(page.payload).map_err(ProductSurfaceError::internal_from)?;
-    Ok(Json(response))
+    Ok(Json(public_lifecycle_json(response)?))
 }
 
 /// `POST /api/webchat/v2/extensions/{package_id}/setup`
@@ -2303,14 +2413,14 @@ pub async fn get_extension_setup(
 /// onboarding controllers.
 ///
 /// The path segment is lifted into a lifecycle package ref at the
-/// handler/facade boundary; a malformed identifier returns `400
-/// invalid_argument` before the facade is called.
+/// handler/service boundary; a malformed identifier returns `400
+/// invalid_argument` before the service is called.
 pub async fn setup_extension(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<ProductSurfaceCaller>,
     Path(ExtensionPackagePath { package_id }): Path<ExtensionPackagePath>,
     Json(body): Json<ProductSetupExtensionRequest>,
-) -> Result<Json<RebornSetupExtensionResponse>, WebUiV2HttpError> {
+) -> Result<Json<serde_json::Value>, WebUiV2HttpError> {
     let package_ref = extension_package_ref_for_request(
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id),
         "package_id",
@@ -2342,9 +2452,15 @@ pub async fn setup_extension(
         },
     )
     .await?;
-    let response =
+    let response: RebornSetupExtensionResponse =
         serde_json::from_value(page.payload).map_err(ProductSurfaceError::internal_from)?;
-    Ok(Json(response))
+    Ok(Json(public_lifecycle_json(response)?))
+}
+
+fn public_lifecycle_json<T: Serialize>(value: T) -> Result<serde_json::Value, ProductSurfaceError> {
+    let mut value = serde_json::to_value(value).map_err(ProductSurfaceError::internal_from)?;
+    project_public_lifecycle_states(&mut value);
+    Ok(value)
 }
 
 fn require_operator_webui_config(
@@ -2790,6 +2906,35 @@ fn validate_idempotency_key(idempotency_key: &str) -> Result<(), ProductSurfaceE
         });
     }
     Ok(())
+}
+
+fn parse_client_action_id(value: Option<String>) -> Result<IdempotencyKey, ProductSurfaceError> {
+    let value = value.ok_or_else(|| {
+        ProductSurfaceError::validation(
+            "client_action_id",
+            ProductSurfaceValidationCode::MissingField,
+        )
+    })?;
+    let validation_code = if value.is_empty() {
+        Some(ProductSurfaceValidationCode::Blank)
+    } else if value.len() > CLIENT_ACTION_ID_MAX_BYTES {
+        Some(ProductSurfaceValidationCode::TooLong)
+    } else if value.trim() != value {
+        Some(ProductSurfaceValidationCode::InvalidId)
+    } else if value.chars().any(char::is_control) {
+        Some(ProductSurfaceValidationCode::InvalidControlCharacter)
+    } else {
+        None
+    };
+    if let Some(validation_code) = validation_code {
+        return Err(ProductSurfaceError::validation(
+            "client_action_id",
+            validation_code,
+        ));
+    }
+    IdempotencyKey::new(value).map_err(|_| {
+        ProductSurfaceError::validation("client_action_id", ProductSurfaceValidationCode::InvalidId)
+    })
 }
 
 fn admin_configuration_conflict() -> ProductSurfaceError {
@@ -3274,7 +3419,7 @@ pub async fn query_logs(
     Query(query): Query<RebornOperatorLogsQuery>,
 ) -> Result<Json<RebornLogQueryResponse>, WebUiV2HttpError> {
     // The public and operator HTTP query strings intentionally share fields;
-    // convert at the handler boundary so the facade can enforce public scope.
+    // convert at the handler boundary so the service can enforce public scope.
     let mut request = RebornLogQueryRequest {
         limit: query.limit,
         cursor: query.cursor,
@@ -3585,11 +3730,14 @@ pub struct SetSkillAutoActivateBody {
 }
 
 fn extension_package_ref_for_request(
-    package_ref: Result<LifecyclePackageRef, ProductWorkflowError>,
+    package_ref: Result<LifecyclePackageRef, impl std::fmt::Display>,
     field: &'static str,
 ) -> Result<LifecyclePackageRef, ProductSurfaceError> {
     package_ref
-        .and_then(LifecyclePackageRef::require_extension)
+        .map_err(|_| {
+            ProductSurfaceError::validation(field, ProductSurfaceValidationCode::InvalidId)
+        })?
+        .require_extension()
         .map_err(|_| {
             ProductSurfaceError::validation(field, ProductSurfaceValidationCode::InvalidId)
         })
@@ -3599,7 +3747,7 @@ fn extension_package_ref_for_request(
 ///
 /// WebSocket transport variant of [`stream_events`]. The handler
 /// accepts the WS upgrade, drains the same `ProductSurface::
-/// stream_events` facade as the SSE handler, and writes each event as
+/// stream_events` service as the SSE handler, and writes each event as
 /// a JSON text frame. Same lifetime + per-caller concurrency caps as
 /// SSE.
 ///
@@ -3673,7 +3821,7 @@ async fn ws_drain_loop(
                 ws_send_with_timeout(&mut socket, None, std::time::Duration::from_millis(0)).await;
             return;
         }
-        let facade_call = surface.stream_events(ironclaw_host_api::ProductSurfaceStreamRequest {
+        let service_call = surface.stream_events(ironclaw_host_api::ProductSurfaceStreamRequest {
             stream_id: Some(thread_id.clone()),
             after_cursor: after_cursor
                 .as_ref()
@@ -3685,7 +3833,7 @@ async fn ws_drain_loop(
                 let _ = socket.close().await;
                 return;
             }
-            // Peer close / socket error wins over the facade poll —
+            // Peer close / socket error wins over the service poll —
             // if the browser already dropped the connection we want
             // to free the slot immediately, not wait for stream_events
             // to return.
@@ -3699,7 +3847,7 @@ async fn ws_drain_loop(
                     Some(Ok(_)) => continue,
                 }
             }
-            facade = tokio::time::timeout(remaining, facade_call) => facade,
+            service = tokio::time::timeout(remaining, service_call) => service,
         };
         match outcome {
             Err(_elapsed) => {
@@ -3766,7 +3914,7 @@ async fn ws_drain_loop(
                 }
                 if had_events {
                     // Match SSE semantics: do not sleep after a delivered
-                    // batch, because the production facade waits on the live
+                    // batch, because the production service waits on the live
                     // projection subscription for the next item.
                     idle_polls = 0;
                     continue;
@@ -3779,7 +3927,7 @@ async fn ws_drain_loop(
                     return;
                 }
                 // Race the poll-interval sleep against socket close
-                // for the same reason as the facade call above: if
+                // for the same reason as the service call above: if
                 // the peer drops during the idle window, free the
                 // slot immediately.
                 tokio::select! {
@@ -3800,7 +3948,7 @@ async fn ws_drain_loop(
                 tracing::debug!(
                     target = "ironclaw_webui_v2::ws",
                     error = ?error,
-                    "facade rejected WS drain; closing stream",
+                    "service rejected WS drain; closing stream",
                 );
                 let payload = SseErrorPayload {
                     error: error.code,
@@ -3937,7 +4085,7 @@ mod tests {
     #[test]
     fn project_fs_list_path_defaults_root_for_missing_or_blank() {
         // Absent, empty, and whitespace-only all mean "list the workspace root"
-        // rather than forwarding a bogus path the facade would reject.
+        // rather than forwarding a bogus path the service would reject.
         assert_eq!(project_fs_list_path(None), PROJECT_FS_ROOT);
         assert_eq!(project_fs_list_path(Some(String::new())), PROJECT_FS_ROOT);
         assert_eq!(

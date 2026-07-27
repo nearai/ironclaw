@@ -6,9 +6,10 @@
 //! CORS, body limit, static security headers — is exercised end-to-end
 //! against the same axum `Router` `serve_webui_v2` binds at runtime.
 //! No TCP listener and no real Reborn runtime are required; the v2
-//! facade is mocked so the regression target stays the gateway-layer
+//! service is mocked so the regression target stays the gateway-layer
 //! composition.
 
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -18,20 +19,20 @@ use axum::body::{Body, to_bytes};
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use ironclaw_host_api::{
-    ActivityId, AgentId, NetworkMethod, Outcome, OutcomeRefs, ProductSurfaceCaller,
-    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind, ProjectId, Resolution,
-    ResultPreviewMeta, ResultProgress, ResultRef, SafeSummary, TenantId, TerminateHint, ThreadId,
-    ToolVerdict, UserId,
+    ActivityId, AgentId, InstallationState, NetworkMethod, Outcome, OutcomeRefs,
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    ProjectId, Resolution, ResultPreviewMeta, ResultProgress, ResultRef, SafeSummary, TenantId,
+    TerminateHint, ThreadId, ToolVerdict, UserId,
 };
 use ironclaw_host_ingress::{ProtectedRouteMount, PublicRouteMount};
 use ironclaw_product::{
     EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, LifecyclePackageKind,
-    LifecyclePackageRef, LifecyclePublicState, ProductCreateThreadRequest,
-    ProductListThreadsRequest, ProductResolveGateRequest, ProductSubmitTurnRequest,
-    RebornCancelRunResponse, RebornCreateThreadResponse, RebornDeleteThreadRequest,
-    RebornListThreadsResponse, RebornSetupExtensionResponse, RebornSubmitTurnResponse,
-    RebornTimelineResponse, RebornTraceCreditsResponse, RebornViewQuery,
-    THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_CREDITS_VIEW,
+    LifecyclePackageRef, ProductCreateThreadRequest, ProductListThreadsRequest,
+    ProductResolveGateRequest, ProductSubmitTurnRequest, RebornCancelRunResponse,
+    RebornCreateThreadResponse, RebornDeleteThreadRequest, RebornListThreadsResponse,
+    RebornSetupExtensionResponse, RebornSubmitTurnResponse, RebornTimelineResponse,
+    RebornTraceCreditsResponse, RebornViewQuery, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW,
+    TIMELINE_VIEW, TRACE_CREDITS_VIEW,
 };
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use ironclaw_turns::{EventCursor, RunProfileId, RunProfileVersion, TurnRunId, TurnStatus};
@@ -143,7 +144,7 @@ impl WebuiAuthenticator for MultiUserToken {
 /// `WebuiAuthenticator` resolving [`VALID_TOKEN`] to a fixed,
 /// test-supplied user id. The trace-credits tests use it so the
 /// authenticated caller's user id equals a unique per-test trace
-/// scope — the facade derives the scope from the caller only.
+/// scope — the service derives the scope from the caller only.
 struct FixedUserToken {
     user_id: String,
 }
@@ -210,10 +211,11 @@ fn trace_credits_response(caller: &ProductSurfaceCaller) -> RebornTraceCreditsRe
 fn extension_setup_response(package_ref: LifecyclePackageRef) -> RebornSetupExtensionResponse {
     RebornSetupExtensionResponse {
         package_ref,
-        phase: LifecyclePublicState::SetupNeeded,
+        phase: InstallationState::Unsupported,
         blockers: Vec::new(),
         payload: None,
         secrets: Vec::new(),
+        fields: Vec::new(),
         onboarding: None,
     }
 }
@@ -926,12 +928,12 @@ mod openai_compat_mount_tests {
 struct StubServices {
     create_thread_calls: Mutex<Vec<ProductSurfaceCaller>>,
     stream_events_calls: Mutex<Vec<ProductSurfaceCaller>>,
-    // Records the `gate_ref` value the facade observed on each
+    // Records the `gate_ref` value the service observed on each
     // `resolve_gate` call. Used by the JS-client contract tests to
     // assert axum's path extractor actually percent-decodes the gate
     // segment (e.g. `gate%3Aapproval` → `gate:approval`). The handler
     // overwrites `body.gate_ref` from the matched path param before
-    // calling the facade, so this captures whatever the path
+    // calling the service, so this captures whatever the path
     // extractor delivered.
     resolve_gate_refs: Mutex<Vec<Option<String>>>,
 }
@@ -1147,7 +1149,7 @@ fn build_app() -> (axum::Router, Arc<StubServices>) {
     // Match the host-installation pattern the CLI's `serve` command
     // uses: stamp trusted default agent_id / project_id onto the auth
     // layer. Without this, every authenticated v2 request would 400
-    // on the downstream facade.
+    // on the downstream service.
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         Arc::new(OnlyValidToken),
@@ -1184,6 +1186,10 @@ async fn read_body_string(response: axum::response::Response) -> String {
 
 async fn served_static_text(path: &str) -> String {
     let (app, _) = build_app();
+    served_static_text_from(app, path).await
+}
+
+async fn served_static_text_from(app: axum::Router, path: &str) -> String {
     let response = app
         .oneshot(
             Request::builder()
@@ -1201,12 +1207,43 @@ async fn served_static_text(path: &str) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-async fn served_app_javascript() -> String {
-    served_app_vite_asset(".js").await
+async fn served_bundled_javascript() -> String {
+    let (app, _) = build_app();
+    let shell = served_static_text_from(app.clone(), "/").await;
+    let app_asset_path = shell_vite_asset_path(&shell, ".js");
+    let app_javascript = served_static_text_from(app.clone(), &app_asset_path).await;
+    let chunk_paths = vite_javascript_asset_paths(&app_javascript);
+    let mut bundle = app_javascript;
+
+    // Vite records every statically imported and lazy-loaded JavaScript chunk
+    // in the app entry's preload table. Request those paths through the
+    // composed router so caller-level source-contract assertions cover the
+    // complete bundle graph without reaching into ironclaw_webui internals.
+    for path in chunk_paths {
+        bundle.push('\n');
+        bundle.push_str(&served_static_text_from(app.clone(), &path).await);
+    }
+
+    bundle
 }
 
 async fn served_app_stylesheet() -> String {
     served_app_vite_asset(".css").await
+}
+
+fn vite_javascript_asset_paths(app_javascript: &str) -> BTreeSet<String> {
+    app_javascript
+        .match_indices("assets/")
+        .filter_map(|(start, _)| {
+            let path = app_javascript[start..]
+                .chars()
+                .take_while(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '/' | '.' | '_' | '-')
+                })
+                .collect::<String>();
+            path.ends_with(".js").then(|| format!("/{path}"))
+        })
+        .collect()
 }
 
 async fn served_app_vite_asset(suffix: &str) -> String {
@@ -1237,7 +1274,7 @@ fn bundle_segment<'a>(body: &'a str, start: &str, end: &str) -> &'a str {
 // ─── tests ────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn bearer_happy_path_dispatches_to_facade_with_host_tenant() {
+async fn bearer_happy_path_dispatches_to_service_with_host_tenant() {
     let (app, services) = build_app();
     let response = app
         .oneshot(
@@ -1254,13 +1291,13 @@ async fn bearer_happy_path_dispatches_to_facade_with_host_tenant() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let calls = services.create_thread_calls.lock().expect("lock").clone();
-    assert_eq!(calls.len(), 1, "facade reached exactly once");
+    assert_eq!(calls.len(), 1, "service reached exactly once");
     assert_eq!(calls[0].tenant_id.as_str(), TENANT);
     assert_eq!(calls[0].user_id.as_str(), USER);
     // Regression: caller MUST carry the trusted default agent_id and
     // project_id stamped by `WebuiServeConfig::with_default_agent_id`
     // / `with_default_project_id`. Without those, the downstream
-    // facade rejects every mutation/read with 400 InvalidRequest
+    // service rejects every mutation/read with 400 InvalidRequest
     // because it cannot build `ThreadScope`.
     assert_eq!(
         calls[0].agent_id.as_ref().map(|a| a.as_str()),
@@ -1321,7 +1358,7 @@ async fn session_endpoint_reports_no_operator_capability_for_multi_user_authenti
 }
 
 #[tokio::test]
-async fn missing_bearer_returns_401_before_facade() {
+async fn missing_bearer_returns_401_before_service() {
     let (app, services) = build_app();
     let response = app
         .oneshot(
@@ -1365,7 +1402,7 @@ fn unique_trace_credits_user() -> String {
 
 #[tokio::test]
 async fn trace_credits_bearer_happy_path_returns_unenrolled_zero_state_for_fresh_scope() {
-    // Fresh, unique user scope: the facade derives the trace scope from
+    // Fresh, unique user scope: the service derives the trace scope from
     // the authenticated caller's user id only, so a uuid-suffixed user
     // guarantees no contributor-local state exists and the response is
     // the unenrolled zero-state — never an error.
@@ -1505,7 +1542,7 @@ async fn sse_query_token_authenticates_event_stream() {
         Some("text/event-stream"),
     );
     // The SSE handler runs on the background body task and polls the
-    // facade on a 1-second cadence. Pull one frame to drive the
+    // service on a 1-second cadence. Pull one frame to drive the
     // generator far enough to record at least the first poll, then
     // drop the body so the long-lived stream does not pin the test.
     let mut body = response.into_body();
@@ -1751,19 +1788,19 @@ async fn mutation_route_returns_429_after_descriptor_rate_limit_exhausted() {
     );
 
     // Auth ran but the rate-limit middleware short-circuited, so the
-    // facade only saw the 60 successful requests.
-    let facade_calls = services.create_thread_calls.lock().expect("lock").len();
+    // service only saw the 60 successful requests.
+    let service_calls = services.create_thread_calls.lock().expect("lock").len();
     assert_eq!(
-        facade_calls, 60,
+        service_calls, 60,
         "rate-limit must short-circuit BEFORE the v2 handler",
     );
 }
 
 #[tokio::test]
-async fn oversized_mutation_body_is_rejected_with_413_before_facade() {
+async fn oversized_mutation_body_is_rejected_with_413_before_service() {
     // `create_thread`'s descriptor caps the body at 16 KiB. Send 16 KiB
     // + 1 of JSON and expect 413 from the per-route body limit, with
-    // the facade untouched (the limit middleware sits in front of both
+    // the service untouched (the limit middleware sits in front of both
     // auth and the v2 handler).
     let (app, services) = build_app();
     let payload = format!(
@@ -1799,14 +1836,14 @@ async fn oversized_mutation_body_is_rejected_with_413_before_facade() {
             .lock()
             .expect("lock")
             .is_empty(),
-        "facade must not be reached on an oversized request",
+        "service must not be reached on an oversized request",
     );
 }
 
 #[tokio::test]
-async fn mutation_body_within_descriptor_cap_reaches_facade() {
+async fn mutation_body_within_descriptor_cap_reaches_service() {
     // Companion to the oversized test: a payload that fits inside the
-    // 16 KiB `create_thread` cap should pass through to the facade.
+    // 16 KiB `create_thread` cap should pass through to the service.
     // Locks the contract that the limit is "above max", not "above
     // some-fraction-of-max".
     let (app, services) = build_app();
@@ -1831,7 +1868,7 @@ async fn mutation_body_within_descriptor_cap_reaches_facade() {
     assert_eq!(
         services.create_thread_calls.lock().expect("lock").len(),
         1,
-        "facade should be reached for in-budget payload",
+        "service should be reached for in-budget payload",
     );
 }
 
@@ -2035,10 +2072,10 @@ async fn ws_upgrade_with_disallowed_origin_is_rejected_with_403() {
 }
 
 #[tokio::test]
-async fn list_threads_returns_facade_response_with_empty_default() {
+async fn list_threads_returns_service_response_with_empty_default() {
     // GET /api/webchat/v2/threads goes through the new list_threads
     // route — descriptor is NoBody + read rate limit. The stub
-    // facade returns an empty list which the handler serializes as
+    // service returns an empty list which the handler serializes as
     // `{ "threads": [], "next_cursor": null }`.
     let (app, _services) = build_app();
     let response = app
@@ -2061,7 +2098,7 @@ async fn list_threads_returns_facade_response_with_empty_default() {
 }
 
 #[tokio::test]
-async fn delete_thread_route_returns_facade_ack() {
+async fn delete_thread_route_returns_service_ack() {
     let (app, _services) = build_app();
     let response = app
         .oneshot(
@@ -2087,7 +2124,7 @@ async fn delete_thread_route_returns_facade_ack() {
 }
 
 #[tokio::test]
-async fn setup_extension_returns_lifecycle_projection_via_facade() {
+async fn setup_extension_returns_lifecycle_projection_via_service() {
     let (app, _services) = build_app();
     let response = app
         .oneshot(
@@ -2109,8 +2146,6 @@ async fn setup_extension_returns_lifecycle_projection_via_facade() {
         .expect("oneshot");
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_body_string(response).await;
-    // #6520 three-state lifecycle: the facade projects setup_needed for an
-    // extension awaiting configuration (the "unsupported" literal is retired).
     assert!(
         body.contains("\"phase\":\"setup_needed\""),
         "setup_extension must surface lifecycle phase, got: {body}",
@@ -2119,8 +2154,11 @@ async fn setup_extension_returns_lifecycle_projection_via_facade() {
         !body.contains("\"status\""),
         "setup_extension must not surface legacy status aliases, got: {body}",
     );
-    assert!(
-        body.contains("\"package_ref\":{\"kind\":\"extension\",\"id\":\"telegram\"}"),
+    let value: serde_json::Value =
+        serde_json::from_str(&body).expect("setup extension response is JSON");
+    assert_eq!(
+        value["package_ref"],
+        serde_json::json!({"kind": "extension", "id": "telegram"}),
         "setup_extension must echo the path-bound package ref, got: {body}",
     );
 }
@@ -2562,7 +2600,7 @@ async fn static_js_asset_returns_javascript_content_type() {
 
 #[tokio::test]
 async fn static_chat_oauth_card_exposes_https_only_authorization_link() {
-    let body = served_app_javascript().await;
+    let body = served_bundled_javascript().await;
 
     assert!(
         body.contains("new URL(e.authorizationUrl).protocol===`https:`"),
@@ -2584,7 +2622,7 @@ async fn static_chat_oauth_card_exposes_https_only_authorization_link() {
 
 #[tokio::test]
 async fn static_chat_hook_listens_for_oauth_callback_completion() {
-    let body = served_app_javascript().await;
+    let body = served_bundled_javascript().await;
 
     // The Vite app bundle must retain the shared OAuth completion transport and
     // the chat hook's gate-matching behavior. Source-level details for the
@@ -2620,7 +2658,7 @@ async fn static_chat_hook_listens_for_oauth_callback_completion() {
 
 #[tokio::test]
 async fn static_chat_events_clear_gate_when_run_resumes() {
-    let body = served_app_javascript().await;
+    let body = served_bundled_javascript().await;
 
     assert!(
         body.contains("blocked_auth")
@@ -2698,7 +2736,7 @@ async fn static_i18n_module_guards_locale_race_and_clears_failed_pack_cache() {
     // note below), so this locks the served bundle shape; a behavioral provider
     // test driving `setLang('es')` through an unloaded pack belongs in
     // the deferred JS/e2e scaffold.
-    let body = served_app_javascript().await;
+    let body = served_bundled_javascript().await;
     let loader_segment = bundle_segment(&body, "ironclaw_language", "createContext({lang:");
     let provider_segment = bundle_segment(&body, "createContext({lang:", "QueryClient");
 
@@ -2854,7 +2892,7 @@ async fn static_root_emits_a_fresh_nonce_per_request() {
 // doesn't currently own.
 
 #[tokio::test]
-async fn js_client_send_message_path_shape_reaches_facade() {
+async fn js_client_send_message_path_shape_reaches_service() {
     // api.ts → `sendMessage({threadId, content, clientActionId})`
     // builds `POST /api/webchat/v2/threads/{thread_id}/messages` with
     // body `{client_action_id, content}` (no thread_id in body —
@@ -2880,7 +2918,7 @@ async fn js_client_send_message_path_shape_reaches_facade() {
 }
 
 #[tokio::test]
-async fn js_client_cancel_run_path_shape_reaches_facade() {
+async fn js_client_cancel_run_path_shape_reaches_service() {
     // api.ts → `cancelRun({threadId, runId, reason, clientActionId})`
     // builds `POST /api/webchat/v2/threads/{thread_id}/runs/{run_id}/cancel`
     // with body `{client_action_id, reason}`.
@@ -2908,13 +2946,13 @@ async fn js_client_cancel_run_path_shape_reaches_facade() {
 }
 
 #[tokio::test]
-async fn js_client_resolve_gate_path_shape_dispatches_to_facade() {
+async fn js_client_resolve_gate_path_shape_dispatches_to_service() {
     // api.ts → `resolveGate({threadId, runId, gateRef, resolution, always, clientActionId})`
     // builds `POST /api/webchat/v2/threads/{thread_id}/runs/{run_id}/gates/{gate_ref}/resolve`
     // with body `{client_action_id, resolution, always}`.
     //
     // The stub's `resolve_gate` returns 500 by design; we only care
-    // that the path-params parsing succeeded and the facade was
+    // that the path-params parsing succeeded and the service was
     // reached. A routing-level regression (missing path segment,
     // wrong encoding) would surface as 404, not 500.
     let (app, services) = build_app();
@@ -2939,18 +2977,18 @@ async fn js_client_resolve_gate_path_shape_dispatches_to_facade() {
         )
         .await
         .expect("oneshot");
-    // 500 = facade reached and returned (stub returns Internal); 404
+    // 500 = service reached and returned (stub returns Internal); 404
     // would mean the path did not route. Anything else means contract
     // drift.
     assert_eq!(
         response.status(),
         StatusCode::INTERNAL_SERVER_ERROR,
-        "resolve_gate path must reach the stubbed facade (which returns 500)",
+        "resolve_gate path must reach the stubbed service (which returns 500)",
     );
     assert_eq!(
         services.resolve_gate_refs.lock().expect("lock").as_slice(),
         &[Some("gate-abc".to_string())],
-        "literal gate_ref must reach the facade unchanged",
+        "literal gate_ref must reach the service unchanged",
     );
 }
 
@@ -2959,7 +2997,7 @@ async fn js_client_resolve_gate_path_decodes_percent_encoded_gate_ref() {
     // Real gate refs can carry characters that require percent-encoding
     // in a URL segment (`:` in `gate:approval`, `/` in compound refs).
     // axum's path extractor must decode the segment before the handler
-    // assigns it to `body.gate_ref`, so the facade sees the literal
+    // assigns it to `body.gate_ref`, so the service sees the literal
     // ref the JS client built — dropping `encodeURIComponent` in
     // `api.ts` would otherwise either 404 (slash-bearing refs) or
     // silently mismatch (`%3A` left undecoded).
@@ -2989,12 +3027,12 @@ async fn js_client_resolve_gate_path_decodes_percent_encoded_gate_ref() {
     assert_eq!(
         response.status(),
         StatusCode::INTERNAL_SERVER_ERROR,
-        "path-decoded resolve_gate must reach the stubbed facade",
+        "path-decoded resolve_gate must reach the stubbed service",
     );
     assert_eq!(
         services.resolve_gate_refs.lock().expect("lock").as_slice(),
         &[Some("gate:approval".to_string())],
-        "facade must observe the decoded gate_ref, not the URL-encoded form",
+        "service must observe the decoded gate_ref, not the URL-encoded form",
     );
 }
 
@@ -3211,7 +3249,7 @@ fn public_route_mount_with_static_owned_root_namespace_fails_composition() {
 
 #[tokio::test]
 async fn static_automations_presenters_label_sub_hourly_schedules() {
-    let body = served_app_javascript().await;
+    let body = served_bundled_javascript().await;
 
     // The cadence labels are now localized: the presenter selects an i18n key
     // for each sub-hourly/hourly branch and the English copy lives in en.js.
@@ -3230,7 +3268,7 @@ async fn static_automations_presenters_label_sub_hourly_schedules() {
 
     // And the English pack must carry the human-readable copy for those keys,
     // so a clean install still reads "Every minute" / "Hourly at :MM".
-    let en_body = served_app_javascript().await;
+    let en_body = &body;
     assert!(
         en_body.contains("automations.schedule.everyMinute\":`Every minute`"),
         "en.js must label `* * * * *` as `Every minute` instead of `Custom schedule`"
@@ -3247,7 +3285,7 @@ async fn static_automations_presenters_label_sub_hourly_schedules() {
 
 #[tokio::test]
 async fn static_automations_summary_reflows_cards_and_shrinks_next_run() {
-    let body = served_app_javascript().await;
+    let body = served_bundled_javascript().await;
 
     assert!(
         body.contains("lg:grid-cols-3"),
@@ -3265,7 +3303,7 @@ async fn static_automations_summary_reflows_cards_and_shrinks_next_run() {
 
 #[tokio::test]
 async fn static_automations_run_row_spaces_action_button_icons() {
-    let body = served_app_javascript().await;
+    let body = served_bundled_javascript().await;
 
     assert!(
         body.contains("name:`chat`,className:`mr-1.5 h-4 w-4`"),
@@ -3279,7 +3317,7 @@ async fn static_automations_run_row_spaces_action_button_icons() {
 
 #[tokio::test]
 async fn static_automations_delivery_surfaces_save_error_and_gates_slack_hint() {
-    let body = served_app_javascript().await;
+    let body = served_bundled_javascript().await;
 
     assert!(
         body.contains("e.saveError&&!a"),

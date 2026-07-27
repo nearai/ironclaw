@@ -47,7 +47,7 @@ mod support;
 
 Import the binary-E2E family from `parity_qa_support::…`; the shared adopted
 core (`config`, `test_adapter`, `session_thread`, `harness` doubles,
-`filesystem`, `product_workflow`, …) stays under `reborn_support::…`.
+`filesystem`, `product_surface`, …) stays under `reborn_support::…`.
 
 ## Direction invariant (CI-enforced)
 

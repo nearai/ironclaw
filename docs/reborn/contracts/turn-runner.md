@@ -10,7 +10,7 @@
 
 `TurnRunner` is the trusted worker-side control plane for executable turn runs. It claims queued runs, maintains leases while model/tool work is active, records safe checkpoint/block/terminal transitions, and moves abandoned work to explicit recovery instead of blindly retrying side effects.
 
-Product adapters must continue to use `TurnCoordinator`. Runner transition APIs are trusted-worker APIs and remain under `ironclaw_turns::runner`. Driver-facing loop exits remain distinct from trusted runner outcomes; see [`loop-exit.md`](loop-exit.md).
+Channel adapters must continue to use `TurnCoordinator`. Runner transition APIs are trusted-worker APIs and remain under `ironclaw_turns::runner`. Driver-facing loop exits remain distinct from trusted runner outcomes; see [`loop-exit.md`](loop-exit.md).
 
 ---
 

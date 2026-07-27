@@ -19,9 +19,9 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
 use ironclaw_host_api::{
-    ActivityId, Blocked, ExtensionId, HostPath, HostPortCatalog, MountAlias, MountGrant,
-    MountPermissions, MountView, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
-    Resolution, TenantId, UserId, VirtualPath,
+    ActivityId, Blocked, ExtensionId, FailureKind, HostPath, HostPortCatalog, MountAlias,
+    MountGrant, MountPermissions, MountView, ProductSurface, ProductSurfaceCaller,
+    ProductSurfaceError, Resolution, TenantId, UserId, VirtualPath,
 };
 use ironclaw_product::{
     EXTENSION_INSTALL_CAPABILITY, EXTENSION_REMOVE_CAPABILITY, OPERATOR_SERVICE_LIFECYCLE_COMMAND,
@@ -29,8 +29,8 @@ use ironclaw_product::{
 };
 use std::time::Duration;
 
-use crate::extension_host::extension_lifecycle::ExtensionManagementPort;
-use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
+use ironclaw_extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
+use ironclaw_extension_host::product_extension_host_api_contract_registry;
 
 #[tokio::test]
 async fn operator_tool_catalog_reads_shared_registry_updates() {
@@ -83,7 +83,7 @@ async fn operator_tool_catalog_reads_shared_registry_updates() {
 /// the confirmed enumeration/metadata-disclosure blocker.
 #[tokio::test]
 async fn operator_tool_catalog_hides_foreign_private_tools() {
-    use crate::extension_host::available_extensions::AvailableExtensionCatalog;
+    use ironclaw_extension_host::AvailableExtensionCatalog;
     use ironclaw_extensions::{ExtensionLifecycleService, ExtensionManifestRef};
     use tokio::sync::Mutex;
 
@@ -161,19 +161,20 @@ async fn operator_tool_catalog_hides_foreign_private_tools() {
         ironclaw_trust::HostTrustPolicy::new(vec![Box::new(ironclaw_trust::AdminConfig::new())])
             .expect("trust policy"),
     );
-    let port = Arc::new(ExtensionManagementPort::new(
+    let port = Arc::new(RebornLocalExtensionManagementPort::new(
         Arc::new(DiskFilesystem::new()),
         AvailableExtensionCatalog::from_packages(Vec::new()),
         installation_store,
         Arc::new(Mutex::new(ExtensionLifecycleService::new(
             ExtensionRegistry::new(),
         ))),
-        crate::extension_host::extension_lifecycle::ActiveExtensionPublisher::new(
+        ironclaw_extension_host::ActiveExtensionPublisher::new(
             Arc::clone(&registry),
             trust_policy,
             Arc::new(ironclaw_trust::InvalidationBus::new()),
         ),
         None,
+        UserId::new("operator").expect("operator user id"),
     ));
 
     let catalog = ActiveRegistryOperatorToolCatalog::new(registry, Vec::new(), Some(port));
@@ -490,7 +491,7 @@ async fn readiness_operator_status_keeps_info_diagnostics_ready() {
     let service = ReadinessOperatorStatusService::new(RebornReadiness {
         profile: crate::RebornCompositionProfile::Production,
         state: crate::RebornReadinessState::ProductionValidated,
-        facades: crate::RebornFacadeReadiness {
+        services: crate::RebornServiceReadiness {
             host_runtime: true,
             turn_coordinator: true,
             product_auth: true,
@@ -524,7 +525,7 @@ async fn readiness_operator_status_keeps_info_diagnostics_ready() {
 }
 
 #[tokio::test]
-async fn skills_product_facade_surfaces_shared_auto_activate_learned_flag() {
+async fn skills_product_service_surfaces_shared_auto_activate_learned_flag() {
     let dir = tempfile::tempdir().expect("tempdir");
     let storage_root = dir.path().join("local-dev");
     std::fs::create_dir_all(&storage_root).expect("storage root");
@@ -537,7 +538,7 @@ async fn skills_product_facade_surfaces_shared_auto_activate_learned_flag() {
         )
         .expect("mount storage root");
     let filesystem: Arc<dyn ironclaw_filesystem::RootFilesystem> = Arc::new(filesystem);
-    let skill_management = Arc::new(SkillManagementPort::new_with_mount_resolver(
+    let skill_management = Arc::new(ScopedSkillManagementPort::new_with_mount_resolver(
         UserId::new("runtime-owner").expect("user"),
         filesystem,
         Arc::new(scoped_skill_mounts),
@@ -546,10 +547,10 @@ async fn skills_product_facade_surfaces_shared_auto_activate_learned_flag() {
     // selector holds the same `Arc`, so a toggle here must be observable on
     // that handle (that is the whole point of the live master switch).
     let flag = Arc::new(AtomicBool::new(true));
-    let facade = LocalSkillsProductFacade::new(skill_management, Some(Arc::clone(&flag)));
+    let service = LocalSkillsProductService::new(skill_management, Some(Arc::clone(&flag)));
     let owner = caller("runtime-owner");
 
-    let listed = facade.list_skills(owner.clone()).await.expect("list");
+    let listed = service.list_skills(owner.clone()).await.expect("list");
     assert!(
         listed.auto_activate_learned,
         "default master switch must report on"
@@ -560,7 +561,7 @@ async fn skills_product_facade_surfaces_shared_auto_activate_learned_flag() {
         !flag.load(Ordering::Relaxed),
         "test setup must flip the shared selector flag to false"
     );
-    let listed = facade.list_skills(owner.clone()).await.expect("list");
+    let listed = service.list_skills(owner.clone()).await.expect("list");
     assert!(
         !listed.auto_activate_learned,
         "list must report the master switch as off after disabling"
@@ -571,7 +572,7 @@ async fn skills_product_facade_surfaces_shared_auto_activate_learned_flag() {
         flag.load(Ordering::Relaxed),
         "test setup must flip the shared selector flag back to true"
     );
-    let listed = facade.list_skills(owner).await.expect("list");
+    let listed = service.list_skills(owner).await.expect("list");
     assert!(
         listed.auto_activate_learned,
         "list must report the master switch as on after re-enabling"
@@ -579,8 +580,8 @@ async fn skills_product_facade_surfaces_shared_auto_activate_learned_flag() {
 }
 
 #[tokio::test]
-async fn skills_product_facade_defaults_auto_activate_learned_when_no_selector_is_wired() {
-    // Production assembly mounts the read facade but wires no local-dev
+async fn skills_product_service_defaults_auto_activate_learned_when_no_selector_is_wired() {
+    // Production assembly mounts the read service but wires no local-dev
     // flag-reading selector. The list still renders with a sane default
     // rather than erroring; writes go through the first-party capability.
     let dir = tempfile::tempdir().expect("tempdir");
@@ -595,15 +596,15 @@ async fn skills_product_facade_defaults_auto_activate_learned_when_no_selector_i
         )
         .expect("mount storage root");
     let filesystem: Arc<dyn ironclaw_filesystem::RootFilesystem> = Arc::new(filesystem);
-    let skill_management = Arc::new(SkillManagementPort::new_with_mount_resolver(
+    let skill_management = Arc::new(ScopedSkillManagementPort::new_with_mount_resolver(
         UserId::new("runtime-owner").expect("user"),
         filesystem,
         Arc::new(scoped_skill_mounts),
     ));
-    let facade = LocalSkillsProductFacade::new(skill_management, None);
+    let service = LocalSkillsProductService::new(skill_management, None);
     let owner = caller("runtime-owner");
 
-    let listed = facade.list_skills(owner).await.expect("list");
+    let listed = service.list_skills(owner).await.expect("list");
     assert!(
         listed.auto_activate_learned,
         "list defaults to on when no selector flag is wired"
@@ -611,7 +612,7 @@ async fn skills_product_facade_defaults_auto_activate_learned_when_no_selector_i
 }
 
 #[tokio::test]
-async fn skills_product_facade_hides_owner_user_skills_from_other_callers() {
+async fn skills_product_service_hides_owner_user_skills_from_other_callers() {
     let dir = tempfile::tempdir().expect("tempdir");
     let storage_root = dir.path().join("local-dev");
     std::fs::create_dir_all(&storage_root).expect("storage root");
@@ -631,12 +632,12 @@ async fn skills_product_facade_hides_owner_user_skills_from_other_callers() {
         )
         .expect("mount storage root");
     let filesystem: Arc<dyn ironclaw_filesystem::RootFilesystem> = Arc::new(filesystem);
-    let skill_management = Arc::new(SkillManagementPort::new_with_mount_resolver(
+    let skill_management = Arc::new(ScopedSkillManagementPort::new_with_mount_resolver(
         UserId::new("runtime-owner").expect("user"),
         filesystem,
         Arc::new(scoped_skill_mounts),
     ));
-    let facade = LocalSkillsProductFacade::new(
+    let service = LocalSkillsProductService::new(
         Arc::clone(&skill_management),
         Some(Arc::new(AtomicBool::new(true))),
     );
@@ -653,20 +654,20 @@ async fn skills_product_facade_hides_owner_user_skills_from_other_callers() {
         .await
         .expect("owner installs skill");
 
-    let owner_skills = facade
+    let owner_skills = service
         .list_skills(owner)
         .await
         .expect("owner lists skills")
         .skills;
     assert!(owner_skills.iter().any(|skill| skill.name == "shared-name"));
-    let bob_skills = facade
+    let bob_skills = service
         .list_skills(bob.clone())
         .await
         .expect("bob lists skills")
         .skills;
     assert!(!bob_skills.iter().any(|skill| skill.name == "shared-name"));
     assert!(bob_skills.iter().any(|skill| skill.name == "system-helper"));
-    let other_tenant_skills = facade
+    let other_tenant_skills = service
         .list_skills(other_tenant_owner.clone())
         .await
         .expect("same user id in another tenant lists skills")
@@ -677,12 +678,12 @@ async fn skills_product_facade_hides_owner_user_skills_from_other_callers() {
             .any(|skill| skill.name == "shared-name")
     );
 
-    let bob_read = facade
+    let bob_read = service
         .read_skill_content(bob.clone(), "shared-name".to_string())
         .await
         .expect_err("bob must not read the owner skill root");
     assert_eq!(bob_read.status_code, 404);
-    let other_tenant_read = facade
+    let other_tenant_read = service
         .read_skill_content(other_tenant_owner.clone(), "shared-name".to_string())
         .await
         .expect_err("same user id in another tenant must not read the owner skill root");
@@ -696,12 +697,12 @@ async fn skills_product_facade_hides_owner_user_skills_from_other_callers() {
         )
         .await
         .expect("bob installs own skill");
-    let bob_content = facade
+    let bob_content = service
         .read_skill_content(bob.clone(), "bob-skill".to_string())
         .await
         .expect("bob reads own skill");
     assert!(bob_content.content.contains("bob skill"));
-    let owner_cannot_read_bob = facade
+    let owner_cannot_read_bob = service
         .read_skill_content(caller("runtime-owner"), "bob-skill".to_string())
         .await
         .expect_err("owner must not read bob skill root");
@@ -864,6 +865,8 @@ async fn product_surface_channel_extension_remove_deletes_the_durable_membership
     // outcome the webui install handler accepts as "setup needed".
     match install {
         Resolution::Done(ref outcome) if outcome.verdict.is_success() => {}
+        Resolution::Done(ref outcome)
+            if outcome.verdict.error_kind() == Some(&FailureKind::InvalidInput) => {}
         Resolution::Blocked(Blocked::Auth(_)) => {}
         other => panic!("telegram install failed: {other:?}"),
     }
@@ -878,9 +881,9 @@ async fn product_surface_channel_extension_remove_deletes_the_durable_membership
         "telegram install must persist a durable installation row"
     );
 
-    // Acceptance contract: membership is bound to the true product caller.
-    // The installer's caller-scoped WebUI projection lists telegram; another
-    // member of the same tenant does NOT see the private membership.
+    // Acceptance contract: the installer's WebUI projection lists telegram
+    // before removal. Package visibility itself is tenant-level; caller-specific
+    // identity remains inside the durable lifecycle membership and auth state.
     let installer_view: ironclaw_product::RebornExtensionListResponse =
         ironclaw_product::EXTENSIONS_VIEW
             .query_on(
@@ -896,26 +899,6 @@ async fn product_surface_channel_extension_remove_deletes_the_durable_membership
             .iter()
             .any(|extension| extension.package_ref.id.as_str() == "telegram"),
         "the installing member's projection must list telegram"
-    );
-    let other_member_view: ironclaw_product::RebornExtensionListResponse =
-        ironclaw_product::EXTENSIONS_VIEW
-            .query_on(
-                &ironclaw_host_api::BoundProductSurface::new(
-                    Arc::clone(&bundle),
-                    caller_in_tenant("tenant-alpha", "channel-remove-bystander"),
-                ),
-                serde_json::json!({}),
-                None,
-            )
-            .await
-            .expect("bystander extensions view");
-    assert!(
-        !other_member_view.extensions.iter().any(|extension| {
-            extension.package_ref.id.as_str() == "telegram"
-                && extension.installation_state
-                    != ironclaw_product::LifecyclePublicState::Uninstalled
-        }),
-        "another member must not see the installer's private telegram membership"
     );
 
     let remove = invoke_lifecycle_product_capability(

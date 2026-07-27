@@ -2,6 +2,10 @@ import React from "react";
 import { useT } from "../../../lib/i18n";
 import { Icon } from "../../../design-system/icons";
 import { ExtensionCard, RegistryCard } from "./extension-card";
+import type {
+  ConfigureFocusHandler,
+  InstallFocusHandler,
+} from "../lib/focus-target";
 
 function packageId(item) {
   return item?.package_ref?.id || "";
@@ -47,6 +51,18 @@ function ImportButton({ onImport, isImporting, isBusy }) {
   );
 }
 
+/**
+ * @param {{
+ *   catalogEntries: any[];
+ *   onInstall: InstallFocusHandler;
+ *   onConfigure: ConfigureFocusHandler<any>;
+ *   onRemove: (extension: any) => void;
+ *   onImport: (file: File) => void;
+ *   isAdmin: boolean;
+ *   isImporting: boolean;
+ *   isBusy: boolean;
+ * }} props
+ */
 export function RegistryTab({
   catalogEntries,
   onInstall,

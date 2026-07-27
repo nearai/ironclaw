@@ -30,7 +30,7 @@ NetworkHttpRequest { scope, method, url, headers, body, policy, response_body_li
   -> NetworkHttpResponse { body, NetworkUsage { request_bytes, response_bytes, resolved_ip } }
 ```
 
-This crate does not inject credentials, reserve resources, emit audit/events, make authorization/approval decisions, or execute product workflow. Runtime crates and host-runtime composition call this boundary instead of constructing their own HTTP clients, DNS logic, redirect handling, SSRF checks, or response-limit code.
+This crate does not inject credentials, reserve resources, emit audit/events, make authorization/approval decisions, or own product-surface orchestration. Runtime crates and host-runtime composition call this boundary instead of constructing their own HTTP clients, DNS logic, redirect handling, SSRF checks, or response-limit code.
 
 ---
 
@@ -139,7 +139,7 @@ This slice does not implement:
 - per-tenant persisted policy stores
 - OAuth/token refresh flows
 
-Those should be added as separate service/composition slices without moving runtime execution or product workflow semantics into this crate. Runtime adapters that wrap external protocol clients must fail closed unless the host-selected client explicitly uses this host-mediated egress boundary rather than ambient direct HTTP. Reborn MCP HTTP/SSE uses `ironclaw_mcp::McpHostHttpClient` with `McpRuntimeHttpAdapter<RuntimeHttpEgress>` plus a host-owned egress planner; only that fully host-mediated client may report `uses_host_mediated_http_egress() == true`. Reborn script execution remains ambient-network-disabled by default; any future script HTTP surface must translate into `ScriptRuntimeHttpAdapter<RuntimeHttpEgress>` requests instead of adding direct HTTP/DNS/private-IP logic to `ironclaw_scripts`.
+Those should be added as separate service/composition slices without moving runtime execution or product-surface orchestration semantics into this crate. Runtime adapters that wrap external protocol clients must fail closed unless the host-selected client explicitly uses this host-mediated egress boundary rather than ambient direct HTTP. Reborn MCP HTTP/SSE uses `ironclaw_mcp::McpHostHttpClient` with `McpRuntimeHttpAdapter<RuntimeHttpEgress>` plus a host-owned egress planner; only that fully host-mediated client may report `uses_host_mediated_http_egress() == true`. Reborn script execution remains ambient-network-disabled by default; any future script HTTP surface must translate into `ScriptRuntimeHttpAdapter<RuntimeHttpEgress>` requests instead of adding direct HTTP/DNS/private-IP logic to `ironclaw_scripts`.
 
 ---
 

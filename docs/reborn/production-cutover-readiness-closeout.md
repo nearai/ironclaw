@@ -4,7 +4,7 @@ Issues: #3026, #4621
 
 > **Superseded in part**: `src/` (the v1 legacy monolith referenced throughout
 > this note as "the legacy path") was deleted under Tier B
-> (`docs/plans/2026-07-02-reborn-internal-module-refactor.md` §8). Deploy
+> (the Reborn internal-module refactor). Deploy
 > configs (Railway, the GCP systemd unit, Docker CI) were repointed at Reborn
 > in the same change. The "keep the legacy v1 path as the serving path"
 > rollback note in this doc no longer applies — there is no v1 path to fall
@@ -62,7 +62,7 @@ layer.
 | Redacted stable readiness diagnostics | `readiness_diagnostics_do_not_carry_sensitive_detail_fields`, backend URL/secret redaction assertions, and operator observability backend contract requirements. |
 | AppBuilder/default startup stays clear | Reborn production composition remains in `ironclaw_reborn_composition`. (Historical: this was also guarded by `legacy_main_does_not_compose_reborn_runtime` against legacy `src/main.rs`, removed along with `src/` under Tier B.) |
 | Reborn binary remains thin bootstrap | `ironclaw` delegates to command modules and Reborn-owned factories; `reborn_binary_main_is_thin_bootstrap` guards this mechanically. |
-| WebUI/Product Workflow consume runtime/product APIs | `RebornRuntime::product_surface`, `ProductSurface`, product-live adapter tests, and crate guardrails in `crates/ironclaw_reborn_composition/CLAUDE.md`. |
+| WebUI/ProductSurface consume runtime/product APIs | `RebornRuntime::product_surface`, `ProductSurface`, product-live surface tests, and crate guardrails in `crates/ironclaw_reborn_composition/CLAUDE.md`. |
 | Required graph components included or diagnosed | Host-runtime `ProductionWiringReport`, Reborn readiness diagnostic component mapping, and #4620 backend-parity readiness tests. |
 | PostgreSQL/libSQL parity evidence | #4620 tests plus #4551/#4615 production storage/runtime launch work. |
 | No hidden legacy/Reborn dual writers | Reborn startup is separate from legacy `main.rs`; migration/compatibility writes remain under #3029 and are not silently performed by production readiness. |
@@ -73,9 +73,8 @@ layer.
 Before Reborn becomes default-on, rollback is profile/deployment based:
 
 1. Switch Reborn profile to `disabled`, or stop the standalone Reborn binary.
-2. Keep the legacy v1 path as the serving path.
-3. Do not run irreversible migration/backfill as part of this readiness gate.
-4. If `migration-dry-run` is used, treat its result as validation evidence only;
+2. Do not run irreversible migration/backfill as part of this readiness gate.
+3. If `migration-dry-run` is used, treat its result as validation evidence only;
    it must not start the live turn runner or accept product traffic.
 
 Any future bridge that writes both legacy and Reborn state must define its own

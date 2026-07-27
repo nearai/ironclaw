@@ -1208,6 +1208,7 @@ registerPack("de", {
   "common.pinned": "Angeheftet",
   "common.deleteChat": "Chat löschen",
   "chat.deleteFailed": "Diese Unterhaltung konnte nicht gelöscht werden.",
+  "chat.cancelFailed": "Dieser Lauf konnte nicht gestoppt werden. Er läuft möglicherweise noch. Versuchen Sie es erneut.",
   "chat.deleteBusy": "Eine laufende Unterhaltung kann nicht gelöscht werden. Stoppe sie zuerst und versuche es dann erneut.",
   "command.placeholder": "Geben Sie einen Befehl oder eine Suche ein ...",
   "routine.searchPlaceholder": "Routinename, Trigger oder Aktion suchen",
@@ -1363,6 +1364,11 @@ registerPack("de", {
 
 registerPack("de", {
   "app.checkingSession": "Sitzung wird geprüft...",
+  "app.loadingPage": "Seite wird geladen...",
+  "app.pageLoadFailedTitle": "Diese Seite konnte nicht geladen werden",
+  "app.pageLoadFailedDescription":
+    "Möglicherweise ist eine neue Version verfügbar oder die Verbindung wurde unterbrochen. Laden Sie die Seite neu, um es erneut zu versuchen.",
+  "app.reloadPage": "Seite neu laden",
   "app.sessionCheckFailedTitle": "Sitzung konnte nicht überprüft werden",
   "app.sessionCheckFailedDescription":
     "Ihre Sitzung konnte gerade nicht überprüft werden. Ihre Anmeldung bleibt gespeichert. Versuchen Sie es in Kürze erneut.",
@@ -1399,6 +1405,14 @@ registerPack("de", {
   "chat.copyMessage": "Nachricht kopieren",
   "chat.retryMessage": "Nachricht erneut versuchen",
   "chat.history.loadFailed": "Konversationsverlauf konnte nicht geladen werden.",
+  "chat.failure.connectionLost": "Die Verbindung zum Server wurde unterbrochen. Stelle die Verbindung wieder her und versuche es erneut.",
+  "chat.failure.request": "Die Anfrage ist fehlgeschlagen, bevor sie gesendet werden konnte.",
+  "chat.failure.requestDetail": "Die Anfrage ist fehlgeschlagen: {detail}.",
+  "chat.failure.runCategory": "Die Ausführung ist fehlgeschlagen: {detail}.",
+  "chat.failure.recoveryRequired": "Die Ausführung wartet auf Wiederherstellung; das Backend meldete `recovery_required`.",
+  "chat.failure.run": "Die Ausführung ist fehlgeschlagen, bevor eine Antwort erzeugt wurde.",
+  "chat.failure.streamRetryable": "Im Chat-Stream ist ein wiederholbarer Fehler aufgetreten: {detail}.",
+  "chat.failure.stream": "Der Chat-Stream ist fehlgeschlagen: {detail}.",
   "chat.finishPairingBeforeSend": "Schließe die Kanalverbindung ab, bevor du eine weitere Nachricht sendest.",
   "chat.resolveApprovalBeforeSend": "Bearbeite die Freigabeanforderung, bevor du eine weitere Nachricht sendest.",
   "chat.retryIn": "Erneut versuchen in {seconds}s",

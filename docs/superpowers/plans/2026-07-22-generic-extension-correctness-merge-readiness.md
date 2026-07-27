@@ -290,7 +290,7 @@ Every item in this section corresponds to a reported failure. Checking a box mea
 
 ## 5. Dedicated architecture-conformance audit
 
-This is an independent merge gate against `docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`, not a style review and not satisfied solely by `cargo test -p ironclaw_architecture`. The document describes a multi-slice end state: untouched pre-existing debt may be recorded as baseline, but this PR must not grow any frozen debt, and every new or substantially rewritten path must follow the target architecture now.
+This is an independent merge gate against the current host/product contracts, not a style review and not satisfied solely by `cargo test -p ironclaw_architecture`. The document describes a multi-slice end state: untouched pre-existing debt may be recorded as baseline, but this PR must not grow any frozen debt, and every new or substantially rewritten path must follow the target architecture now.
 
 ### 5.1 Audit setup and output
 

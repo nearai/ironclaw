@@ -235,15 +235,40 @@ routing, tool execution, and provider mutation together.
 The pinned `serrrfirat/emulate` fork adds the Google Calendar, Docs, Drive,
 Sheets, and Slides operations; Slack `search.messages`; and GitHub Contents,
 GraphQL review threads, and seeded Actions workflows used by the provider
-contract catalog. All 123 shipped static provider capabilities now have
-executable hermetic evidence: 119 cross the standalone Reborn + Emulate path,
-while `github.handle_webhook`, `nearai.web_search`,
+contract catalog. All 123 shipped static provider capabilities are classified
+and named in the inventory, and `github.handle_webhook`, `nearai.web_search`,
 `web-access.get_content`, and `web-access.search` use Reborn integration tests
 at their actual local-WASM or hosted-MCP seams. The inventory records the exact
 Cargo target, source, and test for those non-Emulate cases and fails if that
 evidence stops being executable. Manual QA rows that mention Telegram or
 Twitter/X remain model-replay-only unless paired with their own provider
 fixture.
+
+**Being classified `tested` is not the same as being fully covered, and the
+inventory now says so mechanically.** Coverage is counted per
+*capability × outcome class*, not per capability:
+
+- An `external_write` capability (the effect is declared in the shipped
+  manifest, so the read/write split is production-derived) may not be
+  evidenced by a harvested tool-call name. A recorded model response naming
+  `slack__send_message` proves tool *choice*; it proves nothing about whether
+  the provider committed the effect. Writes need a `ProviderOperationCase`
+  with provider readback, an `integration_evidence` entry, or a
+  `journey_evidence` entry naming the exact test *and* the assertion helper
+  that performs the readback.
+- A read capability needs both a seeded `success` case and an `empty`-result
+  case, so the runtime is proven to distinguish "no results" from "the call
+  failed". Status and transport failures stay with the reusable fault
+  profiles; `outcome_class` covers only the per-operation semantic outcomes no
+  fault profile can stand in for.
+
+Everything not yet meeting those rules is listed in `coverage_backlog` with an
+owner, reason, issue, and review condition. The backlog is a ratchet: entries
+must be removed as coverage lands, and the gate fails if an entry names a write
+that now has a case, or a read that now covers every required outcome class. As
+of this writing it holds no write capabilities and 48 read capabilities missing
+an empty-result case. That gap was previously invisible because a harvested
+tool-call name satisfied the old gate.
 
 ### Environment passed to ironclaw in tests
 

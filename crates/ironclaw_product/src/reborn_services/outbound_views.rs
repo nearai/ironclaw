@@ -25,7 +25,7 @@ where
         &self,
         caller: ProductSurfaceCaller,
     ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
-        self.outbound_preferences_facade
+        self.outbound_preferences_service
             .get_outbound_preferences(caller)
             .await
     }
@@ -34,7 +34,7 @@ where
         &self,
         caller: ProductSurfaceCaller,
     ) -> Result<RebornOutboundDeliveryTargetListResponse, ProductSurfaceError> {
-        self.outbound_preferences_facade
+        self.outbound_preferences_service
             .list_outbound_delivery_targets(caller)
             .await
     }

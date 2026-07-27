@@ -1,7 +1,10 @@
 # Unified Extension Runtime — Overview
 
-**Status:** Approved design.
-**Companions:** `implementation.md` (what changes, where), `checklist.md` (acceptance).
+**Status:** Current extension-runtime model.
+**Implementation source of truth:** `crates/ironclaw_extensions`,
+`crates/ironclaw_extension_host`, `crates/ironclaw_product`, and the first-party
+extension crates. The former implementation/checklist documents are historical
+migration records and are not current build instructions.
 **Baseline:** the unified extension taxonomy this branch already contains (extension as the only installable product object).
 
 This document is the complete mental model: the product shape, the manifest, the
@@ -619,7 +622,7 @@ sequenceDiagram
     participant V as Vendor
     participant R as Generic ingress router
     participant A as ChannelAdapter
-    participant W as Product workflow
+    participant W as Product surface
 
     V->>R: POST /webhooks/extensions/{ext}/{suffix}
     R->>R: match route, enforce method/body/rate/deadline
@@ -644,7 +647,7 @@ Sending a message decomposes into two halves, and the split is the design:
 - **Semantics and reliability** — which target, is it allowed, was it already
   sent, persist the attempt, retry with backoff, crash recovery, drain on
   shutdown. Identical for every channel → the **delivery coordinator**, one
-  host component in product workflow.
+  host component in product-surface orchestration.
 - **Vendor mechanics** — Block Kit vs plain text, message splitting, which API
   method, threading syntax, DM provisioning, vendor error mapping. Different
   per channel → the adapter's **`deliver()`**.
@@ -696,7 +699,7 @@ render. External targets pass through the coordinator and vendor adapter.
 
 This is a promotion, not an invention: the lower layer already exists
 (`ironclaw_outbound`: target policy, preferences, attempt types, stores; plus
-`outbound_delivery.rs` in product workflow). The coordinator unifies those
+`outbound_delivery.rs` in product-surface orchestration). The coordinator unifies those
 pieces and absorbs the generic halves of today's Slack-fused
 `slack_delivery.rs` — completing the decomposition that file's own header
 already tracks (#4818).
@@ -864,7 +867,7 @@ reintroduced without one.
 
 The abstraction pays for itself here:
 
-- **One conformance suite per adapter.** `ironclaw_product_adapters` exports a
+- **One conformance suite per adapter.** `ironclaw_host_api` exports the
   reusable channel-adapter conformance suite (inbound outcomes, deliver report
   shape, internal publish/cleanup idempotency against a scripted vendor server); each
   extension crate runs it in its tests. Tool adapters get the same treatment.

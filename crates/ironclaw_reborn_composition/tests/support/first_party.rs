@@ -13,12 +13,13 @@
 
 #![allow(dead_code)]
 
+use ironclaw_extension_host::{
+    FirstPartyPackageAsset, FirstPartyPackageBundle, FirstPartyPackageOnboarding,
+};
 use ironclaw_first_party_extensions::is_gsuite_extension_id;
 use ironclaw_first_party_extensions::packages::{PackageAssetContent, bundled_packages};
-use ironclaw_reborn_composition::{
-    ExtensionId, FirstPartyPackageAsset, FirstPartyPackageBundle, FirstPartyPackageOnboarding,
-    production_first_party_trust_policy,
-};
+use ironclaw_host_api::ExtensionId;
+use ironclaw_reborn_composition::production_first_party_trust_policy;
 use ironclaw_trust::HostTrustPolicy;
 
 const GSUITE_SEARCH_ALIASES: &[&str] = &[
@@ -68,8 +69,6 @@ pub(crate) fn test_first_party_bundles() -> Vec<FirstPartyPackageBundle> {
                     setup_url: copy.setup_url,
                     credential_next_step: copy.credential_next_step,
                 }),
-                // The source `PackageBundle` no longer carries a bespoke
-                // `oauth_setup` override (#6520 folded it into the manifest).
                 oauth_setup: None,
                 trust_effects: bundle.trust_effects,
                 search_aliases,

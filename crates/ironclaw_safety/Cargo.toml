@@ -26,6 +26,12 @@ urlencoding = "2"
 
 [dev-dependencies]
 criterion = "0.8"
+# Test-only: pins the sandbox_credential_placeholder leak pattern against
+# ironclaw_secrets::CREDENTIAL_PLACEHOLDER_PREFIX so the two can't silently
+# drift apart. Deliberately not a normal dependency — ironclaw_safety stays a
+# dependency-light substrate; see leak_detector.rs's
+# sandbox_credential_placeholder_prefix_matches_registry test.
+ironclaw_secrets = { path = "../ironclaw_secrets" }
 
 [[bench]]
 name = "safety_check"

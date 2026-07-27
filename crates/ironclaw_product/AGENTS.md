@@ -5,7 +5,7 @@
 - Read `CLAUDE.md` first; it is the crate-local guardrail file.
 - Read `Cargo.toml` for actual dependencies and feature shape.
 - Use these local contracts as the source of truth before changing behavior:
-- `tests/product_workflow_contract.rs`
+- `tests/product_surface_contract.rs`
 - `tests/approval_interaction_contract.rs`
 - `tests/inbound_turn_contract.rs`
 - `tests/product_surface_inbound_contract.rs`
@@ -15,7 +15,7 @@
 
 - Product-facing Reborn workflow orchestration between product adapters and host-layer services.
 - Binding resolution, inbound message staging, turn submission, idempotency, busy/deferred handling, gate routing, and product-safe acknowledgements.
-- The WebUI-facing Reborn facade over thread, turn, and projection ports.
+- The WebUI-facing Reborn service over thread, turn, and projection ports.
 - Crate-local public API, tests, and fakes needed to prove that ownership.
 
 ## Do Not Move In Here

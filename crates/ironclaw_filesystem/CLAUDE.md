@@ -9,9 +9,8 @@ engine state, settings, …) lives behind a single set of ops: `put` / `get` /
 `append` / `tail`.
 
 This supersedes the earlier "bytes mount; structured records stay typed"
-boundary recorded in
-`docs/reborn/2026-04-25-storage-catalog-and-placement.md`. The override is
-codified in `docs/reborn/2026-05-14-universal-fs-dispatch.md` (the new ADR).
+boundary. The current rule is codified in
+`docs/reborn/contracts/filesystem.md` and `docs/reborn/contracts/storage-placement.md`.
 
 ## What this crate owns
 

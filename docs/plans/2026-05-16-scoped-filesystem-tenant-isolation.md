@@ -305,7 +305,7 @@ async fn store_isolates_two_tenants_with_same_user_project_ids() {
 
 ## References
 
-- ADR: `docs/reborn/2026-05-14-universal-fs-dispatch.md` —
+- Contract: `docs/reborn/contracts/filesystem.md` —
   "Per-tenant routing is a mount table choice, not a code change."
 - `ironclaw_filesystem` CLAUDE.md invariant 7 — "Multi-tenant
   deployments rely on the path prefix to route to per-tenant mounts."

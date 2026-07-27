@@ -35,6 +35,23 @@ ALL_CLASSIFIED_CAPABILITY_IDS = (
 )
 
 
+COVERAGE_BACKLOG = tuple(INVENTORY.get("coverage_backlog", []))
+JOURNEY_EVIDENCE = tuple(INVENTORY.get("journey_evidence", []))
+JOURNEY_EVIDENCE_CAPABILITY_IDS = frozenset(
+    evidence["capability"] for evidence in JOURNEY_EVIDENCE
+)
+
+
+def backlogged_capabilities(rule: str) -> frozenset[str]:
+    """Capabilities with an owned, expiring exemption from `rule`."""
+    return frozenset(
+        capability
+        for entry in COVERAGE_BACKLOG
+        if entry.get("rule") == rule
+        for capability in entry.get("capabilities", [])
+    )
+
+
 def _production_extension_ids() -> set[str]:
     extension_ids = set()
     for manifest_path in sorted(ASSET_ROOT.glob("*/manifest.toml")):
@@ -43,6 +60,42 @@ def _production_extension_ids() -> set[str]:
         if manifest.get("tools"):
             extension_ids.add(manifest["id"])
     return extension_ids
+
+
+def _capability_operation_kinds() -> dict[str, str]:
+    """Read/write kind per capability, derived from shipped manifests.
+
+    The manifests already declare `external_write` in each tool's `effects`,
+    so the kind is production-derived like the capability denominator itself
+    rather than a hand-maintained list that can drift from what ships.
+    """
+    kinds: dict[str, str] = {}
+    for manifest_path in sorted(ASSET_ROOT.glob("*/manifest.toml")):
+        with manifest_path.open("rb") as manifest_file:
+            manifest = tomllib.load(manifest_file)
+        for tool in manifest.get("tools", []):
+            effects = tool.get("effects", [])
+            kinds[tool["id"]] = "write" if "external_write" in effects else "read"
+    return kinds
+
+
+CAPABILITY_OPERATION_KINDS = _capability_operation_kinds()
+WRITE_CAPABILITY_IDS = frozenset(
+    capability_id
+    for capability_id in TESTED_CAPABILITY_IDS
+    if CAPABILITY_OPERATION_KINDS.get(capability_id) == "write"
+)
+READ_CAPABILITY_IDS = frozenset(
+    capability_id
+    for capability_id in TESTED_CAPABILITY_IDS
+    if CAPABILITY_OPERATION_KINDS.get(capability_id) == "read"
+)
+
+# Epic #6524 workstream 5: "seeded success and empty-result tests for every
+# provider read operation". Transport and status faults stay in the reusable
+# fault profiles (#6589); these are the per-operation semantic outcomes that
+# no fault profile can stand in for.
+REQUIRED_READ_OUTCOME_CLASSES = frozenset({"success", "empty"})
 
 
 PROVIDER_WIRE_PREFIXES = tuple(

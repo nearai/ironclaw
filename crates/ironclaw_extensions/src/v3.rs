@@ -112,8 +112,8 @@ struct RawManifestV3 {
     /// Free-form authoring metadata, ignored (same exemption as v2's
     /// `metadata` root).
     #[serde(default)]
-    #[allow(dead_code)]
-    metadata: Option<toml::Value>,
+    #[serde(rename = "metadata")]
+    _metadata: Option<toml::Value>,
 }
 
 #[derive(Debug, Deserialize)]

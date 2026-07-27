@@ -9,7 +9,7 @@
 //! trait by design.
 //!
 //! The `Reborn*` request/response types are the stable HTTP wire contract the
-//! WebChat v2 admin routes serialize; both the facade and the route handlers
+//! WebChat v2 admin routes serialize; both the service and the route handlers
 //! import them from here.
 
 use std::collections::BTreeMap;
@@ -95,9 +95,9 @@ pub struct AdminCreatedUser {
 
 /// Failure modes of the admin user port. Deliberately coarse and free of
 /// backend detail — the composition adapter maps identity/secret errors into
-/// these, and the facade maps these into the sanitized `ProductSurfaceError`
+/// these, and the service maps these into the sanitized `ProductSurfaceError`
 /// wire taxonomy. Authorization and last-admin protection are enforced in the
-/// facade, not here, so they are not modeled as port errors.
+/// service, not here, so they are not modeled as port errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdminUserError {
     /// The targeted user id has no record.
@@ -117,7 +117,7 @@ pub enum AdminUserError {
 ///
 /// Every method is tenant-scoped from the trusted caller (never a request
 /// body). `get_user` must return `Ok(None)` — not `Err(NotFound)` — for a user
-/// that does not exist in the tenant, so the facade can distinguish "no such
+/// that does not exist in the tenant, so the service can distinguish "no such
 /// user" (404) from "exists but you may not" (403) at the authorization seam.
 /// Default page size for `list_users` when the caller omits `limit`.
 pub const ADMIN_USER_LIST_DEFAULT_LIMIT: usize = 100;
@@ -129,7 +129,7 @@ pub const ADMIN_USER_LIST_MAX_LIMIT: usize = 200;
 pub trait AdminUserService: Send + Sync {
     /// One bounded page of users in `tenant`, optionally filtered by `status`,
     /// ordered by `user_id` ascending and starting strictly after the `after`
-    /// cursor. At most `limit` records are returned; the facade derives the
+    /// cursor. At most `limit` records are returned; the service derives the
     /// next cursor from the last record when a full page comes back.
     async fn list_users(
         &self,

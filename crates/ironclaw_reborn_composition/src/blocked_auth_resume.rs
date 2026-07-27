@@ -14,7 +14,7 @@
 //!
 //! Ordering matters: the decorator runs at continuation-dispatch time, which
 //! is strictly after `complete_oauth_callback` committed the credential
-//! account, so resumed install/tool runs re-checking readiness find their
+//! account, so resumed runs re-running `extension_activate` find their
 //! requirements satisfied. Fan-out is idempotent per (flow, run), and an
 //! incomplete sweep returns an error so the durable continuation remains
 //! undispatched and a re-drive (flow reconcile / lifecycle cleanup) retries
@@ -28,14 +28,15 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_auth::{AuthContinuationEvent, AuthContinuationRef, AuthProductError};
+use ironclaw_auth::{
+    AuthContinuationEvent, AuthContinuationRef, AuthProductError, RebornAuthContinuationDispatcher,
+};
 use ironclaw_turns::{
     IdempotencyKey, ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator,
     TurnPersistenceSnapshot, TurnRunId, TurnStatus,
 };
 use uuid::Uuid;
 
-use crate::product_auth::api::auth::RebornAuthContinuationDispatcher;
 use crate::turn_run_snapshot::TurnRunSnapshotSource;
 
 /// Source of the durable turn-state snapshot the fan-out scans. Split out so
@@ -164,7 +165,7 @@ impl BlockedAuthResumeFanout {
                 reply_target_binding_ref: run.reply_target_binding_ref.clone(),
                 idempotency_key,
                 // No credential_ref: the resumed run re-runs its capability
-                // (the blocked install or extension tool), which re-checks requirement
+                // (extension_activate), which re-checks requirement
                 // satisfaction against the now-existing credential account —
                 // the same self-correcting shape the pairing redeem relied on.
                 precondition: ResumeTurnPrecondition::BlockedAuthGate,

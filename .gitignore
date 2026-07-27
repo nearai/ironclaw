@@ -99,3 +99,9 @@ test-tools/*/wasm-src/target/
 # (webui_v2, e2e, tooling, …) and stops the recurring accidental adds
 # (#6298/#6305).
 node_modules/
+
+# cargo-mutants writes its report tree (caught/missed/timeout lists, per-mutant
+# logs, and a copy of each mutated diff) next to the manifest it is run from.
+# It is a regenerable build artifact of a local audit, never source.
+mutants.out/
+mutants.out.old/

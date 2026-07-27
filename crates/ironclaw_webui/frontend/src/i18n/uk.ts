@@ -1208,6 +1208,7 @@ registerPack("uk", {
   "common.pinned": "Закріплено",
   "common.deleteChat": "Видалити чат",
   "chat.deleteFailed": "Не вдалося видалити цю розмову.",
+  "chat.cancelFailed": "Не вдалося зупинити цей запуск. Можливо, він усе ще виконується. Спробуйте ще раз.",
   "chat.deleteBusy": "Неможливо видалити розмову, поки вона виконується. Спочатку зупиніть її, а потім спробуйте ще раз.",
   "command.placeholder": "Введіть команду або пошук...",
   "routine.searchPlaceholder": "Назва процедури пошуку, тригер або дія",
@@ -1363,6 +1364,11 @@ registerPack("uk", {
 
 registerPack("uk", {
   "app.checkingSession": "Перевірка сеансу...",
+  "app.loadingPage": "Завантаження сторінки...",
+  "app.pageLoadFailedTitle": "Не вдалося завантажити цю сторінку",
+  "app.pageLoadFailedDescription":
+    "Можливо, доступна нова версія або з’єднання було перервано. Перезавантажте сторінку, щоб повторити спробу.",
+  "app.reloadPage": "Перезавантажити сторінку",
   "app.sessionCheckFailedTitle": "Не вдалося перевірити сеанс",
   "app.sessionCheckFailedDescription":
     "Зараз не вдалося перевірити ваш сеанс. Дані для входу залишаються збереженими. Повторіть спробу трохи пізніше.",
@@ -1399,6 +1405,14 @@ registerPack("uk", {
   "chat.copyMessage": "Копіювати повідомлення",
   "chat.retryMessage": "Повторити повідомлення",
   "chat.history.loadFailed": "Не вдалося завантажити історію розмови.",
+  "chat.failure.connectionLost": "З’єднання із сервером втрачено. Підключіться знову та повторіть спробу.",
+  "chat.failure.request": "Не вдалося надіслати запит.",
+  "chat.failure.requestDetail": "Запит завершився помилкою: {detail}.",
+  "chat.failure.runCategory": "Виконання завершилося помилкою: {detail}.",
+  "chat.failure.recoveryRequired": "Виконання очікує відновлення; сервер повідомив `recovery_required`.",
+  "chat.failure.run": "Виконання завершилося помилкою до створення відповіді.",
+  "chat.failure.streamRetryable": "У потоці чату сталася помилка, яку можна повторити: {detail}.",
+  "chat.failure.stream": "Потік чату завершився помилкою: {detail}.",
   "chat.finishPairingBeforeSend": "Завершіть підключення каналу перед надсиланням наступного повідомлення.",
   "chat.resolveApprovalBeforeSend": "Обробіть запит на схвалення перед надсиланням наступного повідомлення.",
   "chat.retryIn": "Повторити через {seconds}с",

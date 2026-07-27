@@ -61,7 +61,7 @@ agent-loop behavior, and kernel-mediated side effects.
 Product/API surface
   accepts messages and exposes replies/events
 
-Composition facade
+Composition service
   assembles storage, host runtime, drivers, workers, profiles, projections
 
 Turn coordination
@@ -186,7 +186,7 @@ policy.
 
 In crates, product-facing assembly currently enters through
 `ironclaw_reborn_composition::RebornRuntime`. CLI and WebUI code should treat
-that facade as the public runtime handle instead of wiring `TurnStateStore`,
+that service as the public runtime handle instead of wiring `TurnStateStore`,
 the `TurnRunScheduler`/`TurnRunExecutor` pair, `HostRuntimeServices`, or
 concrete drivers directly.
 
@@ -226,7 +226,7 @@ still passes through `CapabilityHost` and obligation handling before dispatch.
 ### Substrates
 
 Substrates are reusable service and storage primitives. They are deliberately
-less product-aware than the runtime facade and less behavior-aware than loops.
+less product-aware than the runtime service and less behavior-aware than loops.
 Examples include event logs, projection stores, filesystem roots, memory
 services, approval/run-state stores, resource governors, thread services, and
 runtime lanes.
@@ -241,16 +241,16 @@ Use this table when deciding where a new concern belongs.
 
 | Layer | May call | Must not call | Owns | Typical crates |
 | --- | --- | --- | --- | --- |
-| Products | Composition facade, product workflow, projection/read APIs | Raw stores, `RuntimeDispatcher`, concrete loop drivers, substrate internals | UX, transport normalization, user-visible replies/events, approval/auth UI | `ironclaw_reborn_cli`, `ironclaw_webui`, product adapters |
-| Composition | Turn coordinator, host runtime, loop driver registry, substrates through typed constructors | Product-specific branching in lower crates, test/dev escape hatches in production | Service graph, profile mode, readiness, facade handles | `ironclaw_reborn_composition`, `ironclaw_runner` |
+| Products | Composition service, product workflow, projection/read APIs | Raw stores, `RuntimeDispatcher`, concrete loop drivers, substrate internals | UX, transport normalization, user-visible replies/events, approval/auth UI | `ironclaw_reborn_cli`, `ironclaw_webui`, product adapters |
+| Composition | Turn coordinator, host runtime, loop driver registry, substrates through typed constructors | Product-specific branching in lower crates, test/dev escape hatches in production | Service graph, profile mode, readiness, service handles | `ironclaw_reborn_composition`, `ironclaw_runner` |
 | Userland loops | `AgentLoopDriverHost` ports only | `CapabilityHost`, `RuntimeDispatcher`, secret/network stores, product adapters | Prompt/model/tool strategy, retry/stop/gate decisions, loop-local checkpoints | `ironclaw_agent_loop`, loop families |
 | Kernel boundary | Substrates and runtime lanes through typed policy/authority APIs | Product UX decisions, loop strategy internals | Authorization, approvals, exact invocation leases, active locks, runner leases, validated exits, resource/process ownership | `ironclaw_turns`, `ironclaw_host_runtime`, `ironclaw_authorization`, `ironclaw_approvals` |
-| Substrates | Lower neutral contracts and storage backends | Product facade APIs, loop behavior, direct authority escalation | Durable records, files, memory, events, projections, threads, resource stores, runtime adapters | `ironclaw_filesystem`, `ironclaw_memory`, `ironclaw_events`, `ironclaw_threads`, runtime lane crates |
+| Substrates | Lower neutral contracts and storage backends | Product service APIs, loop behavior, direct authority escalation | Durable records, files, memory, events, projections, threads, resource stores, runtime adapters | `ironclaw_filesystem`, `ironclaw_memory`, `ironclaw_events`, `ironclaw_threads`, runtime lane crates |
 
 Short version:
 
 ```text
-Product -> Composition facade
+Product -> Composition service
 Composition -> Kernel boundary + substrates
 Loop -> AgentLoopDriverHost ports
 Kernel boundary -> Substrates and runtime lanes
@@ -337,11 +337,11 @@ flowchart TD
 
 | Crate | Owns | Does not own |
 | --- | --- | --- |
-| `ironclaw_reborn_composition` | Product-facing runtime assembly, facade handles, local/prod profiles, WebUI/runtime integration, projection services. | Low-level policy internals or direct product traffic bypassing Reborn adapters. |
+| `ironclaw_reborn_composition` | Product-facing runtime assembly, service handles, local/prod profiles, WebUI/runtime integration, projection services. | Low-level policy internals or direct product traffic bypassing Reborn adapters. |
 | `ironclaw_runner` | Trusted worker-side control plane: claiming/heartbeat scheduler (`TurnRunScheduler`), per-run executor (`RebornTurnRunExecutor`), concrete loop driver registry, planned/text driver adapters, loop host factory, and exit-applier wiring. | Loop strategy internals, neutral turn contracts, product idempotency/binding policy, or host-runtime service implementation. |
 | `ironclaw_turns` | Turn/run IDs, scopes, coordinator API, runner transition ports, state machine contracts, loop-exit DTOs, run profiles, checkpoint contracts. | Runtime dispatch, product adapters, raw prompts/tool inputs/secrets. |
 | `ironclaw_agent_loop` | Canonical executor, loop families, sealed strategy composition, resumable loop state. | Host services, runtime lanes, product transport, provider auth. |
-| `ironclaw_loop_host` | Reusable adapters that implement loop host ports over threads, model gateways, capabilities, skills, checkpoints, cancellation, subagents. | Product-facing runtime facade or durable turn state ownership. |
+| `ironclaw_loop_host` | Reusable adapters that implement loop host ports over threads, model gateways, capabilities, skills, checkpoints, cancellation, subagents. | Product-facing runtime service or durable turn state ownership. |
 | `ironclaw_host_runtime` | Kernel-facing host runtime services: capability host, dispatcher composition, approvals, resources, processes, secrets/network mediation. | Agent-loop planning or product conversation UX. |
 
 ## Dependency Direction
@@ -917,7 +917,7 @@ Composition mode changes which backends are legal, not the architecture:
 | --- | --- | --- |
 | Local dev / local single user | Local workspace, optional local host process, local-friendly approvals. | Local shortcuts must be explicit and must not leak into hosted production. |
 | Product-live | Production service graph with real host runtime handles, durable events/audit, cancellation, policy guards, budgets, and safety context. | Missing handles fail closed during readiness/build. |
-| Migration/dry-run | Reborn facade and stores used to validate compatibility without silently taking over live traffic. | No hidden bridge mode without migration contract. |
+| Migration/dry-run | Reborn service and stores used to validate compatibility without silently taking over live traffic. | No hidden bridge mode without migration contract. |
 | CLI / REPL | UX shell over `RebornRuntime`. | Must not import lower-level Reborn crates directly. |
 | WebUI | Route/transport layer over runtime/projection/auth/approval handles. | Must not bypass bearer/origin/rate/body/auth boundaries. |
 | Tests/harnesses | In-memory or fixture-backed ports for contract coverage. | Test escape hatches must be clearly named and not become production constructors. |
@@ -928,7 +928,7 @@ Use these routes for common changes:
 
 | Change | Start in | Also check | Avoid |
 | --- | --- | --- | --- |
-| Add product surface | Product adapter/WebUI/CLI crate, then `ironclaw_reborn_composition` facade if a new handle is needed. | Product workflow, projection/auth/approval APIs, e2e harness. | Direct store/worker/dispatcher imports from product code. |
+| Add product surface | Product adapter/WebUI/CLI crate, then `ironclaw_reborn_composition` service if a new handle is needed. | Product workflow, projection/auth/approval APIs, e2e harness. | Direct store/worker/dispatcher imports from product code. |
 | Add loop family | `ironclaw_agent_loop` family/planner/executor tests, then `ironclaw_runner` driver registration/profile wiring. | Checkpoint schema, run profile, loop-exit validation. | Exposing strategy slots or host runtime handles to loops. |
 | Add capability | Descriptor/extension registry, capability surface, host runtime/handler or runtime lane. | Authorization, approvals, obligations, resource estimates, redaction, architecture tests. | Calling dispatcher directly or treating visibility as authority. |
 | Add runtime lane | Owning runtime crate + `RuntimeDispatcher` adapter + host-runtime policy handoffs. | Network/secrets/resources/process/audit contracts. | Direct network/secrets/filesystem access inside the lane. |
@@ -943,7 +943,7 @@ slices visible in this branch. It is not a blanket product-complete claim.
 
 Implemented or strongly established:
 
-- product-facing `RebornRuntime` facade for local CLI/WebUI/harness usage;
+- product-facing `RebornRuntime` service for local CLI/WebUI/harness usage;
 - `TurnCoordinator`, turn state contracts, active locks, idempotency, runner
   leases, terminal lease-expiry semantics, and the legacy
   `RecoveryRequired` terminal variant;
@@ -977,7 +977,7 @@ Partial or evolving:
 - Run profiles select loop driver, checkpoint schema, model profile, capability
   surface, context policy, resource budget, and scheduling/concurrency class.
 - Personal context is opt-in by resolved run profile policy, not by channel.
-- Product-facing code enters Reborn through the composition facade, not by
+- Product-facing code enters Reborn through the composition service, not by
   importing low-level substrate handles.
 - Lower crates stay neutral; product/runtime composition depends downward.
 

@@ -9,7 +9,7 @@ use ironclaw_product::RebornLibSqlIdempotencyLedger;
 use ironclaw_product::RebornPostgresIdempotencyLedger;
 
 // Shared ledger test support was renamed on fold-in to avoid colliding with the
-// product_workflow crate's own `tests/support/` module.
+// product_surface crate's own `tests/support/` module.
 #[path = "durable_ledger_support/mod.rs"]
 mod support;
 

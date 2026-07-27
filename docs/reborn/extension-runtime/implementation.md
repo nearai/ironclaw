@@ -1,4 +1,9 @@
-# Unified Extension Runtime — Implementation
+# Unified Extension Runtime — Historical Implementation Plan
+
+> **Superseded.** This is a migration record, not current implementation
+> guidance. Use `docs/reborn/extension-runtime/overview.md` and the live crate
+> code under `crates/ironclaw_extensions`, `crates/ironclaw_extension_host`,
+> `crates/ironclaw_product`, and the first-party extension crates.
 
 **Companions:** `overview.md` (model — read it first), `checklist.md` (acceptance).
 **Baseline:** this branch. It already contains the pending unified-extension-taxonomy PR stack (eight PRs, merge chain ending in #5850) that must land on main before this work starts.
@@ -41,11 +46,11 @@ Not generic yet — the work:
 | Dispatcher selects package + runtime kind per invocation | `crates/ironclaw_dispatcher/src/lib.rs` |
 | Adapter trait duplicates manifest metadata (surface kind, capabilities, auth requirement, egress getters) | `crates/ironclaw_product_adapters/src/adapter.rs` |
 | Adapter registry projection is not the production path | `crates/ironclaw_product_adapter_registry/src/lib.rs` |
-| OAuth branches on Slack; providers multiplexed by string | `crates/ironclaw_reborn_composition/src/product_auth/serve/oauth.rs`, `.../credentials/product_auth_providers.rs`, `.../oauth/google_oauth.rs`, `src/slack/slack_personal_oauth.rs` |
-| Auth surfaces implicit (derived from tool credentials); provider specs are code constants | `crates/ironclaw_extensions/src/v2.rs`, composition `product_auth/**` |
+| OAuth branches on Slack; providers multiplexed by string | `crates/ironclaw_webui/src/product_auth/oauth.rs`, composition provider wiring in `crates/ironclaw_reborn_composition/src/factory.rs`, `crates/ironclaw_reborn_composition/src/slack/slack_personal_oauth.rs` |
+| Auth surfaces implicit (derived from tool credentials); provider specs are code constants | `crates/ironclaw_extensions/src/v2.rs`, `ironclaw_auth` recipe data + composition provider wiring |
 | Installed records persist raw TOML and reproject from it | `crates/ironclaw_extensions/src/installations.rs` |
 | Hosted MCP mutates capabilities from live `tools/list` | `crates/ironclaw_extensions/src/hosted_mcp_discovery.rs` |
-| Lifecycle emits Slack-specific connection copy; workflow has Slack cleanup literals | `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs`, `crates/ironclaw_product/src/reborn_services/extensions.rs` |
+| Lifecycle emits channel connection copy; workflow has cleanup literals | `crates/ironclaw_extension_host/src/product_lifecycle.rs`, `crates/ironclaw_product/src/reborn_services/extensions.rs` |
 | Slack-only frontend components and branches | `crates/ironclaw_webui/frontend/src/pages/extensions/components/{slack-setup-panel,slack-channel-picker,channels-tab,configure-modal}.tsx`, `lib/slack-{setup,channels}-api.ts`, `pages/chat/components/auth-oauth-card.tsx`, `lib/channel-connection-events.ts` |
 | Concrete channel formatting in LLM prompt construction | `crates/ironclaw_llm/src/reasoning.rs` |
 | Concrete channel variants in trace contributions | `crates/ironclaw_reborn_traces/src/contribution.rs` |
@@ -194,13 +199,13 @@ already exists.
     (adapter-supplied `Authorization` rejected where injection is declared),
     response size caps, redirect denial across hosts, private-IP/DNS-rebind
     denial (reuse existing network policy), deadlines.
-- Composition/CLI: CLI assembles `Vec<NativeExtensionFactory>` (Slack,
-  Telegram) and passes it into composition; composition constructs
-  `ExtensionHost` with stores + loaders and injects resolver handles into
-  dispatcher/workflow/engine/router. The existing
-  `extension_host/extension_lifecycle.rs` facade delegates to the new host and
-  shrinks to wiring; `slack_host_beta.rs` manual graph construction is deleted
-  in P6 after its callers cut over.
+- Composition/CLI: CLI assembles `Vec<NativeExtensionFactory>` and passes it
+  into composition; composition constructs `ExtensionHost` with stores +
+  loaders and injects resolver handles into dispatcher/workflow/engine/router.
+  `ironclaw_extension_host::ExtensionLifecycleManager` owns durable lifecycle
+  mutation; composition's `extension_host/extension_lifecycle.rs` module is the
+  product-auth cleanup adapter and compatibility alias. Manual channel graph
+  construction is deleted in P6 after its callers cut over.
 
 **Tests first:** `binding_contract.rs` (missing/extra/undeclared binding,
 declared-but-`None`, auth-never-binds); `lifecycle_contract.rs` (caller

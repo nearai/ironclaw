@@ -4,7 +4,7 @@
 //!
 //! These tests drive the HTTP routes end-to-end through `webui_v2_app` so the
 //! caller path (auth layer + body limit + rate limit + handler +
-//! `RebornProductAuthServices`) is exercised, not just the facade helpers.
+//! `RebornProductAuthServices`) is exercised, not just the service helpers.
 
 // arch-exempt: large_file, product-auth route contracts stay in one caller-level suite until the WebUI route split lands, plan #5985
 
@@ -19,16 +19,16 @@ use ironclaw_auth::{
     NewCredentialAccount,
 };
 use ironclaw_auth::{AuthProviderId, CredentialAccountId, CredentialAccountService};
+use ironclaw_auth::{RebornAuthContinuationDispatcher, RebornProductAuthServices};
 use ironclaw_host_api::{
     AgentId, InvocationId, ProductSurfaceCaller, ProductSurfaceError, ProjectId, ResourceScope,
     TenantId, UserId,
 };
 use ironclaw_product::rejecting_product_surface_error;
-use ironclaw_reborn_composition::{
-    ProductAuthRouteState, RebornAuthContinuationDispatcher, RebornProductAuthServices,
-    product_auth_route_mount,
+use ironclaw_webui::{
+    ProductAuthRouteState, WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig,
+    product_auth_route_mount, webui_v2_app,
 };
-use ironclaw_webui::{WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -1190,7 +1190,8 @@ async fn challenge_for_gate_returns_oauth_url_view_for_seeded_flow() {
         .await
         .expect("create flow");
 
-    let provider = product_auth.as_auth_challenge_provider().expect("provider");
+    let provider = ironclaw_reborn_composition::product_auth_challenge_provider(&product_auth)
+        .expect("provider");
     // Build a TurnScope matching the flow's tenant/agent/project/thread.
     let turn_scope = TurnScope::new(
         TenantId::new(TENANT).expect("tenant"),
@@ -1257,7 +1258,7 @@ fn auth_challenge_provider_absent_when_no_flow_record_source() {
         Arc::new(NoopAuthDispatcher::default()),
     ));
     assert!(
-        product_auth.as_auth_challenge_provider().is_none(),
+        ironclaw_reborn_composition::product_auth_challenge_provider(&product_auth).is_none(),
         "no flow_record_source → no AuthChallengeProvider"
     );
 }
@@ -1322,7 +1323,8 @@ async fn challenge_for_gate_cancelled_flow_returns_none() {
         .await
         .expect("cancel flow");
 
-    let provider = product_auth.as_auth_challenge_provider().expect("provider");
+    let provider = ironclaw_reborn_composition::product_auth_challenge_provider(&product_auth)
+        .expect("provider");
     let turn_scope = TurnScope::new(
         TenantId::new(TENANT).expect("tenant"),
         Some(AgentId::new(AGENT).expect("agent")),
@@ -1394,7 +1396,8 @@ async fn challenge_for_gate_threadless_flow_returns_none_for_thread_scope() {
         .await
         .expect("create flow");
 
-    let provider = product_auth.as_auth_challenge_provider().expect("provider");
+    let provider = ironclaw_reborn_composition::product_auth_challenge_provider(&product_auth)
+        .expect("provider");
     let turn_scope = TurnScope::new(
         TenantId::new(TENANT).expect("tenant"),
         Some(AgentId::new(AGENT).expect("agent")),
@@ -1470,7 +1473,8 @@ async fn challenge_for_gate_wrong_tenant_returns_none() {
         .await
         .expect("create flow");
 
-    let provider = product_auth.as_auth_challenge_provider().expect("provider");
+    let provider = ironclaw_reborn_composition::product_auth_challenge_provider(&product_auth)
+        .expect("provider");
 
     // Query with a DIFFERENT tenant — must return None even with same gate_ref.
     let other_turn_scope = TurnScope::new(
@@ -1548,7 +1552,8 @@ async fn challenge_for_gate_returns_manual_token_view_for_seeded_flow() {
         .await
         .expect("create flow");
 
-    let provider = product_auth.as_auth_challenge_provider().expect("provider");
+    let provider = ironclaw_reborn_composition::product_auth_challenge_provider(&product_auth)
+        .expect("provider");
     let turn_scope = TurnScope::new(
         TenantId::new(TENANT).expect("tenant"),
         Some(AgentId::new(AGENT).expect("agent")),
@@ -1626,7 +1631,8 @@ async fn challenge_for_gate_returns_other_kind_view_for_setup_required_flow() {
         .await
         .expect("create flow");
 
-    let provider = product_auth.as_auth_challenge_provider().expect("provider");
+    let provider = ironclaw_reborn_composition::product_auth_challenge_provider(&product_auth)
+        .expect("provider");
     let turn_scope = TurnScope::new(
         TenantId::new(TENANT).expect("tenant"),
         Some(AgentId::new(AGENT).expect("agent")),

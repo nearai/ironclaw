@@ -807,7 +807,7 @@ jobs:
         run: scripts/ci/check-reborn-qa-fixtures.sh
 
       - name: Run Reborn QA fixture contracts and replay
-        run: cargo test --test reborn_qa_recorded_behavior -- --nocapture
+        run: cargo test -p ironclaw_reborn_integration_tests --test reborn_qa_recorded_behavior -- --nocapture
 
   reborn-tests:
     name: Tests (Reborn)
