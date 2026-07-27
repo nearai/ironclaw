@@ -418,6 +418,15 @@ impl SandboxCredentialFirewall {
             return Err(SandboxCredentialFirewallError::LookupTimedOut);
         }
         let live: Vec<StagedCredentialObligation> = entries.values().cloned().collect();
+        // Re-check once more after materializing `live`: the clone above is
+        // itself real work done while `staged`'s lock is held (and the
+        // thread can be descheduled mid-clone), so a deadline that was still
+        // valid at the previous check can have passed by the time this
+        // returns — the doc above promises the deadline bounds the *whole
+        // call*, and a `Grant` must never be handed back once it has.
+        if Instant::now() >= deadline {
+            return Err(SandboxCredentialFirewallError::LookupTimedOut);
+        }
         Ok(SandboxCredentialDecision::Grant(live))
     }
 
