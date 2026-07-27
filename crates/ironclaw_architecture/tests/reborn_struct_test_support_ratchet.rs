@@ -307,12 +307,6 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
         category: "test-support",
         item_kind: "method",
-        path: "crates/ironclaw_process_sandbox/src/docker.rs",
-        count: 1,
-    },
-    FrozenPathCount {
-        category: "test-support",
-        item_kind: "method",
         path: "crates/ironclaw_product/src/inbound_turn.rs",
         count: 1,
     },
