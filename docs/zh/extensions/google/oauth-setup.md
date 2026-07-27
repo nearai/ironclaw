@@ -38,7 +38,7 @@ Google 对重定向 URI 进行**完全匹配** —— 协议、主机、端口�
 </Warning>
 
 <Note>
-浏览器会回调到您正在运行的 IronClaw 实例，因此完成授权时该地址必须可访问。Google 不会重定向到回环地址或无法解析的主机。
+IronClaw 的 product-auth 流程在网关 HTTP 路由上接收回调，因此这里必须填写您实例的地址，并且完成授权时该地址可访问。Google 本身也支持回环重定向地址，但 IronClaw 没有对应的监听器，请使用上面的托管回调地址。
 </Note>
 
 </Step>

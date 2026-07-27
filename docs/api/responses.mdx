@@ -61,7 +61,22 @@ You have two options:
       -H "Authorization: Bearer $ADMIN_TOKEN" \
       -H "Content-Type: application/json" \
       -d '{"email":"alice@example.com"}'
-    # → {"id":"...","api_token":"<shown ONCE>", ...}
+    ```
+
+    The token is top-level; the user's identity is nested under `user`:
+
+    ```json
+    {
+      "user": {
+        "user_id": "...",
+        "email": "alice@example.com",
+        "status": "active",
+        "role": "member",
+        "created_at": "2026-07-27T18:00:00Z",
+        "updated_at": "2026-07-27T18:00:00Z"
+      },
+      "api_token": "<shown ONCE>"
+    }
     ```
 
     Store the `api_token` when it is returned; it cannot be retrieved again. These tokens are scoped to one user and carry user identity only — they do not inherit operator configuration privileges.

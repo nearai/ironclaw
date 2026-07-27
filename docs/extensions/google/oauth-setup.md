@@ -40,9 +40,10 @@ with `redirect_uri_mismatch` before the consent screen appears.
 </Warning>
 
 <Note>
-The browser returns to your running IronClaw instance, so it must be reachable at that URL
-when you complete the flow. Google will not redirect to a loopback address or a host it
-cannot resolve.
+IronClaw's product-auth flow receives the callback on a gateway HTTP route, so this must be
+your instance's URL and the instance must be reachable there when you complete the flow.
+Google itself also supports loopback redirect URIs, but IronClaw has no listener for one —
+use the hosted callback above.
 </Note>
 
 </Step>
