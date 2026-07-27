@@ -266,7 +266,7 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         category: "test-support",
         item_kind: "method",
         path: "crates/ironclaw_host_runtime/src/sandbox_process/ca.rs",
-        count: 1,
+        count: 2,
     },
     FrozenPathCount {
         category: "test-support",

@@ -271,9 +271,21 @@ impl std::fmt::Debug for SandboxCredentialFirewall {
         // own `Debug` already redacts the secret handle within it). Expose
         // only an aggregate count, mirroring `SandboxCertificateAuthority`'s
         // manual `Debug` in `ca.rs`.
+        //
+        // `try_lock`, not `lock`: formatting must never block on the same
+        // mutex `stage`/`revoke`/`authorize` hold — mirrors
+        // `RuntimeSecretInjectionStore`'s `Debug` in `obligations.rs`, which
+        // also never locks its own store's mutex just to format. Under
+        // contention (or a poisoned lock) the count is reported as
+        // unavailable rather than blocking or panicking.
+        let staged_keys: Option<usize> = match self.staged.try_lock() {
+            Ok(staged) => Some(staged.len()),
+            Err(std::sync::TryLockError::Poisoned(poison)) => Some(poison.into_inner().len()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        };
         formatter
             .debug_struct("SandboxCredentialFirewall")
-            .field("staged_keys", &self.lock().len())
+            .field("staged_keys", &staged_keys)
             .finish_non_exhaustive()
     }
 }
@@ -395,6 +407,15 @@ impl SandboxCredentialFirewall {
         if entries.is_empty() {
             staged.remove(&key);
             return Ok(SandboxCredentialDecision::NoGrant);
+        }
+        // Re-check once more before materializing the grant: `retain` and
+        // the clone below are cheap in the common case but still do real
+        // work while `staged`'s lock is held, and the doc above promises the
+        // deadline bounds the *whole call* — a `Grant` must never be handed
+        // back once the deadline has already passed, even if only this last
+        // stretch of in-lock work crossed it.
+        if Instant::now() >= deadline {
+            return Err(SandboxCredentialFirewallError::LookupTimedOut);
         }
         let live: Vec<StagedCredentialObligation> = entries.values().cloned().collect();
         Ok(SandboxCredentialDecision::Grant(live))

@@ -768,3 +768,21 @@ fn firewall_debug_output_never_contains_staged_identity_or_secret_handles() {
     assert!(!debug_output.contains("user-a"));
     assert!(!debug_output.contains("github-token"));
 }
+
+#[test]
+fn firewall_debug_output_never_blocks_while_the_staging_lock_is_held() {
+    let firewall = SandboxCredentialFirewall::new();
+
+    // Hold `staged` directly (reachable here via `use super::*`) to
+    // simulate `Debug` being invoked while `stage`/`revoke`/`authorize`
+    // already hold the same lock — exactly the scenario a blocking `lock()`
+    // in `Debug` would stall or deadlock on. `try_lock` must report the
+    // count as unavailable instead.
+    let _guard = firewall.staged.lock().unwrap();
+    let debug_output = format!("{firewall:?}");
+
+    assert!(
+        debug_output.contains("staged_keys: None"),
+        "Debug must report the count as unavailable, not block, when the staging lock is already held: {debug_output}"
+    );
+}
