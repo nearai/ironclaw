@@ -16,9 +16,10 @@ mod path;
 mod safety;
 mod service;
 /// Provider-level contract suite every `MemoryService` impl wires; see the
-/// module docs. Test-only (zero bytes in production builds).
+/// module docs. Test-only (zero bytes in production builds; the
+/// `src/test_support.rs` name is the repo-wide feature-gated convention).
 #[cfg(any(test, feature = "test-support"))]
-pub mod service_contract_tests;
+pub mod test_support;
 
 pub use context::MemoryContext;
 pub use events::{

@@ -314,7 +314,7 @@ macro_rules! memory_service_contract_full {
 
             #[tokio::test]
             async fn scope_isolation_across_tenant_user_agent_project() {
-                $crate::service_contract_tests::scope_isolation_across_tenant_user_agent_project(
+                $crate::test_support::scope_isolation_across_tenant_user_agent_project(
                     $factory, $seed,
                 )
                 .await;
@@ -322,15 +322,12 @@ macro_rules! memory_service_contract_full {
 
             #[tokio::test]
             async fn retrieval_lanes_are_disjoint() {
-                $crate::service_contract_tests::retrieval_lanes_are_disjoint($factory, $seed).await;
+                $crate::test_support::retrieval_lanes_are_disjoint($factory, $seed).await;
             }
 
             #[tokio::test]
             async fn record_interaction_round_trips_into_retrieval() {
-                $crate::service_contract_tests::record_interaction_round_trips_into_retrieval(
-                    $factory,
-                )
-                .await;
+                $crate::test_support::record_interaction_round_trips_into_retrieval($factory).await;
             }
         }
     };
@@ -348,7 +345,7 @@ macro_rules! memory_service_contract_retrieval_only {
 
             #[tokio::test]
             async fn scope_isolation_across_tenant_user_agent_project() {
-                $crate::service_contract_tests::scope_isolation_across_tenant_user_agent_project(
+                $crate::test_support::scope_isolation_across_tenant_user_agent_project(
                     $factory, $seed,
                 )
                 .await;

@@ -1,5 +1,5 @@
 //! mem0's wiring of the shared provider contract suite
-//! (`ironclaw_memory::service_contract_tests`).
+//! (`ironclaw_memory::test_support`).
 //!
 //! mem0 declares only the long-term retrieval lane (no thread partitioning,
 //! no interaction recording), so it wires the retrieval-only suite: scope
