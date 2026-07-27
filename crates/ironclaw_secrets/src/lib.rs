@@ -20,7 +20,7 @@ pub use placeholder::{
 };
 pub use secret_store::{CredentialBroker, SecretStore};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Mutex;
 
@@ -572,12 +572,34 @@ pub struct InMemoryCredentialBroker {
     /// Secondary index for JIT minting: `(invocation, capability, account)` ->
     /// the session already minted for it, so re-use within the same dispatch
     /// does not mint a second session. See [`placeholder::JitMintKey`] and
-    /// [`InMemoryCredentialBroker::mint_on_first_use`].
+    /// [`InMemoryCredentialBroker::mint_on_first_use`]. Pruned (by session id)
+    /// on [`InMemoryCredentialBroker::revoke_session`] so a long-lived process
+    /// does not accumulate one entry per invocation forever.
     jit_minted: Mutex<HashMap<placeholder::JitMintKey, CredentialSessionId>>,
-    /// Secondary index the egress proxy (W6) will use: placeholder token ->
-    /// the session currently bound to it. See
-    /// [`InMemoryCredentialBroker::find_session_by_placeholder`].
-    sessions_by_placeholder: Mutex<HashMap<CredentialPlaceholderToken, CredentialSessionId>>,
+    /// Secondary index the egress proxy (W6-EGRESS-PROXY, not built yet) will
+    /// use: placeholder token -> the live session(s) currently bound to it.
+    /// Multi-valued because a placeholder is stable per `(tenant, user,
+    /// provider)` while sessions are minted per invocation/account, so more
+    /// than one live session can legitimately be bound to the same
+    /// placeholder at once (e.g. two overlapping invocations, or two
+    /// accounts under one provider) — a single-slot map would silently drop
+    /// one binding when the other was written. See
+    /// [`InMemoryCredentialBroker::find_session_by_placeholder`]. Choosing
+    /// among multiple scope-matching candidates by request target (e.g.
+    /// which of two same-provider accounts a specific outbound URL should
+    /// use) is the egress proxy's job, not this registry's — it is not built
+    /// yet, so `find_session_by_placeholder` returns the first scope-match it
+    /// finds. Pruned (by session id) on `revoke_session`.
+    sessions_by_placeholder:
+        Mutex<HashMap<CredentialPlaceholderToken, HashSet<CredentialSessionId>>>,
+    /// Outstanding-lease counter per JIT-minted session id. `mint_on_first_use`
+    /// can hand out more than one [`CredentialSessionLease`] for the *same*
+    /// session (its cache-hit path reuses a still-live session rather than
+    /// minting a second one), so revoking one lease must not revoke the
+    /// session out from under another lease still holding it — the session is
+    /// only actually revoked when the last outstanding lease releases it. See
+    /// [`InMemoryCredentialBroker::release_lease`].
+    lease_refcounts: Mutex<HashMap<CredentialSessionId, usize>>,
 }
 
 #[derive(Debug, Clone)]

@@ -614,6 +614,15 @@ fn default_patterns() -> Vec<LeakPattern> {
         // into model output, logs, or transcripts, so it is treated like any
         // other secret. Word boundaries keep this from matching `icsbx_` as a
         // substring of a longer identifier.
+        //
+        // The `icsbx_` literal here must stay in sync with
+        // `ironclaw_secrets::placeholder::CREDENTIAL_PLACEHOLDER_PREFIX`
+        // (crates/ironclaw_secrets/src/placeholder.rs), which is the actual
+        // owner of this prefix. `ironclaw_safety` deliberately does not take
+        // `ironclaw_secrets` as a normal dependency just to share one string
+        // constant — see `sandbox_credential_placeholder_prefix_matches_registry`
+        // below, a dev-dependency-only regression test that fails loudly if
+        // the two ever drift apart.
         LeakPattern {
             name: "sandbox_credential_placeholder".to_string(),
             regex: Regex::new(r"\bicsbx_[A-Za-z0-9]{16,}\b").unwrap(), // safety: hardcoded literal
@@ -1244,6 +1253,41 @@ mod tests {
         assert!(
             detector.scan_and_clean(content).is_err(),
             "scan_and_clean should block sandbox credential placeholder"
+        );
+    }
+
+    #[test]
+    fn sandbox_credential_placeholder_prefix_matches_registry() {
+        // `ironclaw_safety` deliberately does not take `ironclaw_secrets` as a
+        // normal dependency just to share the "icsbx_" prefix constant (it
+        // stays a dependency-light substrate). This dev-dependency-only test
+        // is the regression net instead: if the prefix is ever rotated in
+        // `ironclaw_secrets::placeholder::CREDENTIAL_PLACEHOLDER_PREFIX`
+        // without updating the hardcoded regex literal above, this fails
+        // loudly instead of the leak detector silently going stale.
+        assert_eq!(
+            ironclaw_secrets::CREDENTIAL_PLACEHOLDER_PREFIX,
+            "icsbx_",
+            "leak_detector's sandbox_credential_placeholder regex hardcodes 'icsbx_'; \
+             update both if this constant ever changes"
+        );
+
+        // Shape a registry-issued token actually has: the fixed prefix plus a
+        // UUIDv4 `simple()` suffix (32 lowercase hex chars, no dashes) — see
+        // `CredentialPlaceholderToken::generate()` in ironclaw_secrets.
+        let token = format!(
+            "{}{}",
+            ironclaw_secrets::CREDENTIAL_PLACEHOLDER_PREFIX,
+            "0123456789abcdef0123456789abcdef"
+        );
+        let detector = LeakDetector::new();
+        let result = detector.scan(&format!("leaked token: {token}"));
+        assert!(
+            result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "sandbox_credential_placeholder"),
+            "a realistically-shaped registry-issued placeholder token must be caught"
         );
     }
 

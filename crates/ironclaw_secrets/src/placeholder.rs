@@ -3,9 +3,9 @@
 //! The container running a sandboxed invocation never sees real secret
 //! material. Instead it is handed a **placeholder token** — an inert string
 //! that identifies "the credential for this tenant/user/provider" without
-//! granting anything on its own. The egress proxy (W6, not built yet) swaps
-//! the placeholder for a live [`CredentialSession`] at request time, host
-//! side only.
+//! granting anything on its own. The egress proxy (W6-EGRESS-PROXY, not built
+//! yet) swaps the placeholder for a live [`CredentialSession`] at request
+//! time, host side only.
 //!
 //! This module owns two host-side responsibilities:
 //!
@@ -24,7 +24,7 @@
 //!    leave a standing grant.
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use ironclaw_host_api::{CapabilityId, ExtensionId, InvocationId, TenantId, UserId};
 use uuid::Uuid;
@@ -36,10 +36,17 @@ use crate::{
 
 /// Fixed prefix for every placeholder token.
 ///
-/// A companion leak-detector pattern (owned elsewhere, see the sandbox
-/// credential firewall design doc) recognizes this prefix so a placeholder
-/// that somehow escapes the container is flagged the same way a real secret
-/// would be — even though, unlike a real secret, holding one grants nothing.
+/// The `sandbox_credential_placeholder` leak-detector pattern in
+/// `ironclaw_safety::leak_detector` (owned there, not here — see that
+/// crate's `default_patterns()`) independently recognizes this same prefix,
+/// so a placeholder that somehow escapes the container is flagged the same
+/// way a real secret would be, even though, unlike a real secret, holding one
+/// grants nothing. `ironclaw_safety` deliberately does not depend on this
+/// crate (it stays a dependency-light substrate), so the two patterns are
+/// pinned together by a regression test instead of a shared dependency: see
+/// `sandbox_credential_placeholder_prefix_matches_registry` in
+/// `ironclaw_safety/src/leak_detector.rs`. If this prefix ever changes,
+/// update the regex there too.
 pub const CREDENTIAL_PLACEHOLDER_PREFIX: &str = "icsbx_";
 
 /// Opaque, stable placeholder token for a `(tenant, user, provider)` triple.
@@ -60,21 +67,44 @@ impl CredentialPlaceholderToken {
         ))
     }
 
+    fn validate(value: &str) -> Result<(), CredentialBrokerError> {
+        if !value.starts_with(CREDENTIAL_PLACEHOLDER_PREFIX) {
+            return Err(CredentialBrokerError::InvalidPlaceholderToken {
+                value: value.to_string(),
+                reason: format!("must start with '{CREDENTIAL_PLACEHOLDER_PREFIX}'"),
+            });
+        }
+        Ok(())
+    }
+
     /// Parses a placeholder token received from the sandbox side (e.g. off an
     /// outbound request), rejecting anything that does not carry the fixed
     /// prefix.
     pub fn parse(value: impl Into<String>) -> Result<Self, CredentialBrokerError> {
         let value = value.into();
-        if !value.starts_with(CREDENTIAL_PLACEHOLDER_PREFIX) {
-            return Err(CredentialBrokerError::InvalidPlaceholderToken {
-                value,
-                reason: format!("must start with '{CREDENTIAL_PLACEHOLDER_PREFIX}'"),
-            });
-        }
+        Self::validate(&value)?;
         Ok(Self(value))
     }
 
     pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl TryFrom<String> for CredentialPlaceholderToken {
+    type Error = CredentialBrokerError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+
+impl AsRef<str> for CredentialPlaceholderToken {
+    fn as_ref(&self) -> &str {
         &self.0
     }
 }
@@ -99,14 +129,14 @@ impl fmt::Display for CredentialPlaceholderToken {
 pub struct CredentialPlaceholderOwner {
     pub tenant_id: TenantId,
     pub user_id: UserId,
-    pub provider_id: ExtensionId,
+    pub provider_or_extension_id: ExtensionId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CredentialPlaceholderOwnerKey {
     tenant_id: TenantId,
     user_id: UserId,
-    provider_id: ExtensionId,
+    provider_or_extension_id: ExtensionId,
 }
 
 /// Host-side registry mapping `(tenant, user, provider)` to a stable
@@ -142,7 +172,7 @@ impl CredentialPlaceholderRegistry {
         let key = CredentialPlaceholderOwnerKey {
             tenant_id: tenant_id.clone(),
             user_id: user_id.clone(),
-            provider_id: provider_id.clone(),
+            provider_or_extension_id: provider_id.clone(),
         };
         let mut by_owner =
             self.by_owner
@@ -166,7 +196,7 @@ impl CredentialPlaceholderRegistry {
                 CredentialPlaceholderOwner {
                     tenant_id: tenant_id.clone(),
                     user_id: user_id.clone(),
-                    provider_id: provider_id.clone(),
+                    provider_or_extension_id: provider_id.clone(),
                 },
             );
         Ok(token)
@@ -238,7 +268,7 @@ impl CredentialSessionLease {
     fn revoke_inner(&mut self) {
         if !self.revoked {
             self.revoked = true;
-            self.broker.revoke_session(self.session_id);
+            self.broker.release_lease(self.session_id);
         }
     }
 }
@@ -259,7 +289,13 @@ impl InMemoryCredentialBroker {
     /// again while its previous session is still live, the existing session
     /// is reused rather than minting a second one — staging every possible
     /// binding up front would itself be a standing grant, so callers must
-    /// only call this at actual first use.
+    /// only call this at actual first use. Because that reuse can hand out
+    /// more than one [`CredentialSessionLease`] for the identical session,
+    /// each lease only *releases* its own reference on drop/`revoke()`; the
+    /// session itself is revoked once the last outstanding lease releases it
+    /// (see [`InMemoryCredentialBroker::release_lease`]), so an earlier
+    /// caller finishing first can never pull the session out from under a
+    /// later caller still using it.
     pub fn mint_on_first_use(
         self: &Arc<Self>,
         placeholder: &CredentialPlaceholderToken,
@@ -277,6 +313,7 @@ impl InMemoryCredentialBroker {
                 .is_ok()
         {
             self.bind_placeholder_to_session(placeholder.clone(), session_id)?;
+            self.acquire_lease_refcount(session_id)?;
             return Ok(CredentialSessionLease {
                 broker: self.clone(),
                 session_id,
@@ -288,6 +325,7 @@ impl InMemoryCredentialBroker {
         let session_id = session.correlation_id();
         self.record_jit_mint(key, session_id)?;
         self.bind_placeholder_to_session(placeholder.clone(), session_id)?;
+        self.acquire_lease_refcount(session_id)?;
         Ok(CredentialSessionLease {
             broker: self.clone(),
             session_id,
@@ -295,38 +333,97 @@ impl InMemoryCredentialBroker {
         })
     }
 
-    /// Finds the live session currently bound to `placeholder`, if any.
+    /// Finds a live session currently bound to `placeholder`, if any.
     ///
     /// Returns `Ok(None)` — never an error — when the placeholder has no
     /// live session: an unminted, expired, use-exhausted, or already-revoked
-    /// binding all "grant nothing" the same way. The returned session is
-    /// additionally checked against `scope` so a placeholder can never
-    /// resolve to a session outside the caller's own tenant/user scope.
+    /// binding all "grant nothing" the same way. Every candidate session
+    /// bound to the placeholder is additionally checked against `scope` so a
+    /// placeholder can never resolve to a session outside the caller's own
+    /// tenant/user/invocation scope.
+    ///
+    /// More than one live session can be bound to the same placeholder at
+    /// once (e.g. two accounts under one provider, or two overlapping
+    /// invocations); this returns the first one whose scope matches. Picking
+    /// the *correct* one by request target when several match is the egress
+    /// proxy's job (not built yet), so a caller that needs to disambiguate
+    /// further must do so itself once it has the candidate.
     pub fn find_session_by_placeholder(
         &self,
         placeholder: &CredentialPlaceholderToken,
         scope: &ironclaw_host_api::ResourceScope,
     ) -> Result<Option<crate::CredentialSession>, CredentialBrokerError> {
-        let Some(session_id) = self.placeholder_session_id(placeholder)? else {
-            return Ok(None);
-        };
-        match self.validate_session(session_id, chrono::Utc::now()) {
-            Ok(session) if session.scope() == scope => Ok(Some(session)),
-            Ok(_) => Ok(None),
-            Err(CredentialBrokerError::UnknownSession { .. }) => Ok(None),
-            Err(CredentialBrokerError::SessionExpired { .. }) => Ok(None),
-            Err(CredentialBrokerError::SessionUseLimitExceeded { .. }) => Ok(None),
-            Err(other) => Err(other),
+        for session_id in self.placeholder_session_ids(placeholder)? {
+            match self.validate_session(session_id, chrono::Utc::now()) {
+                Ok(session) if session.scope() == scope => return Ok(Some(session)),
+                Ok(_) => continue,
+                Err(CredentialBrokerError::UnknownSession { .. }) => continue,
+                Err(CredentialBrokerError::SessionExpired { .. }) => continue,
+                Err(CredentialBrokerError::SessionUseLimitExceeded { .. }) => continue,
+                Err(other) => return Err(other),
+            }
         }
+        Ok(None)
     }
 
     /// Explicitly revokes a session, e.g. from
-    /// [`CredentialSessionLease`]'s success/error/drop paths. Idempotent:
-    /// revoking an already-unknown session is a no-op, since "no session" and
-    /// "revoked session" both mean the placeholder grants nothing.
+    /// [`CredentialSessionLease`]'s success/error/drop paths (by way of
+    /// [`InMemoryCredentialBroker::release_lease`]). Idempotent: revoking an
+    /// already-unknown session is a no-op, since "no session" and "revoked
+    /// session" both mean the placeholder grants nothing.
+    ///
+    /// Also prunes this session out of the `jit_minted` and
+    /// `sessions_by_placeholder` secondary indices so a long-lived process
+    /// does not accumulate stale entries for every invocation/binding that
+    /// has ever existed.
     pub fn revoke_session(&self, session_id: CredentialSessionId) {
-        if let Ok(mut sessions) = self.sessions.lock() {
-            sessions.remove(&session_id);
+        lock_or_recover(&self.sessions).remove(&session_id);
+        lock_or_recover(&self.jit_minted)
+            .retain(|_, minted_session_id| *minted_session_id != session_id);
+        lock_or_recover(&self.sessions_by_placeholder).retain(|_, session_ids| {
+            session_ids.remove(&session_id);
+            !session_ids.is_empty()
+        });
+        lock_or_recover(&self.lease_refcounts).remove(&session_id);
+    }
+
+    /// Registers one outstanding lease reference for `session_id`. See
+    /// [`InMemoryCredentialBroker::release_lease`] for the matching release
+    /// half of this pair.
+    fn acquire_lease_refcount(
+        &self,
+        session_id: CredentialSessionId,
+    ) -> Result<(), CredentialBrokerError> {
+        *lock_or_recover(&self.lease_refcounts)
+            .entry(session_id)
+            .or_insert(0) += 1;
+        Ok(())
+    }
+
+    /// Releases one outstanding lease reference for `session_id`, revoking
+    /// the underlying session only once the last outstanding reference is
+    /// released. See [`CredentialSessionLease::revoke_inner`] — every path
+    /// that drops or explicitly revokes a lease calls this instead of
+    /// `revoke_session` directly, so concurrent callers reusing the same
+    /// JIT-minted session (`mint_on_first_use`'s cache-hit path) cannot have
+    /// their still-live session revoked out from under them by an earlier
+    /// caller finishing first.
+    pub(crate) fn release_lease(&self, session_id: CredentialSessionId) {
+        let should_revoke = {
+            let mut counts = lock_or_recover(&self.lease_refcounts);
+            match counts.get_mut(&session_id) {
+                Some(count) if *count > 1 => {
+                    *count -= 1;
+                    false
+                }
+                _ => {
+                    counts.remove(&session_id);
+                    true
+                }
+            }
+        };
+        if should_revoke {
+            self.revoke_session(session_id);
         }
     }
 
@@ -368,14 +465,16 @@ impl InMemoryCredentialBroker {
             .map_err(|error| CredentialBrokerError::BrokerUnavailable {
                 reason: error.to_string(),
             })?
-            .insert(placeholder, session_id);
+            .entry(placeholder)
+            .or_default()
+            .insert(session_id);
         Ok(())
     }
 
-    fn placeholder_session_id(
+    fn placeholder_session_ids(
         &self,
         placeholder: &CredentialPlaceholderToken,
-    ) -> Result<Option<CredentialSessionId>, CredentialBrokerError> {
+    ) -> Result<Vec<CredentialSessionId>, CredentialBrokerError> {
         Ok(self
             .sessions_by_placeholder
             .lock()
@@ -383,8 +482,17 @@ impl InMemoryCredentialBroker {
                 reason: error.to_string(),
             })?
             .get(placeholder)
-            .copied())
+            .map(|session_ids| session_ids.iter().copied().collect())
+            .unwrap_or_default())
     }
+}
+
+/// Locks `mutex`, recovering the inner guard on poison rather than silently
+/// no-op'ing. A poisoned lock here must never be treated as "nothing to
+/// clean up" — that would let a revoke path fail open and leave a standing
+/// grant, contradicting this module's core invariant.
+fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 #[cfg(test)]
@@ -717,6 +825,88 @@ mod tests {
             broker.validate_session(session_id, Utc::now()),
             Err(CredentialBrokerError::UnknownSession { .. })
         ));
+    }
+
+    #[test]
+    fn reused_session_survives_the_first_of_two_leases_revoking() {
+        // Two mint_on_first_use calls for the identical (invocation,
+        // capability, account) binding — the documented cache-hit reuse path
+        // — must hand out two independent leases over the *same* session.
+        // Revoking the first-acquired lease must not revoke the session out
+        // from under the second lease still holding it; only releasing both
+        // should actually revoke it.
+        let broker = Arc::new(InMemoryCredentialBroker::new());
+        let registry = CredentialPlaceholderRegistry::new();
+        let (token, scope_a, account_id) = seeded(&broker, &registry, "user-refcount");
+
+        let first_lease = broker
+            .mint_on_first_use(
+                &token,
+                request(
+                    scope_a.clone(),
+                    account_id.clone(),
+                    "https://api.example.com/v1/x",
+                ),
+            )
+            .unwrap();
+        let second_lease = broker
+            .mint_on_first_use(
+                &token,
+                request(scope_a, account_id, "https://api.example.com/v1/x"),
+            )
+            .unwrap();
+        assert_eq!(
+            first_lease.session_id(),
+            second_lease.session_id(),
+            "cache-hit reuse must return the same underlying session"
+        );
+        let session_id = first_lease.session_id();
+
+        first_lease.revoke();
+        assert!(
+            broker.validate_session(session_id, Utc::now()).is_ok(),
+            "the second lease is still outstanding; revoking the first must not kill the shared session"
+        );
+
+        second_lease.revoke();
+        assert!(matches!(
+            broker.validate_session(session_id, Utc::now()),
+            Err(CredentialBrokerError::UnknownSession { .. })
+        ));
+    }
+
+    #[test]
+    fn revoke_prunes_secondary_indices_so_placeholder_no_longer_resolves() {
+        // Revoking a session must not just make validate_session fail — it
+        // must also stop the placeholder from resolving to it at all, and
+        // must not leave stale bookkeeping (jit_minted / sessions_by_placeholder)
+        // behind for the life of the process.
+        let broker = Arc::new(InMemoryCredentialBroker::new());
+        let registry = CredentialPlaceholderRegistry::new();
+        let (token, scope_a, account_id) = seeded(&broker, &registry, "user-prune");
+
+        let lease = broker
+            .mint_on_first_use(
+                &token,
+                request(scope_a.clone(), account_id, "https://api.example.com/v1/x"),
+            )
+            .unwrap();
+        assert!(
+            broker
+                .find_session_by_placeholder(&token, &scope_a)
+                .unwrap()
+                .is_some()
+        );
+
+        lease.revoke();
+
+        assert!(
+            broker
+                .find_session_by_placeholder(&token, &scope_a)
+                .unwrap()
+                .is_none(),
+            "placeholder must not resolve to a revoked session"
+        );
     }
 
     fn seeded(
