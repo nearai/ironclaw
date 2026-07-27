@@ -3,8 +3,12 @@
 //!
 //! - **macOS**: launchd user agent at
 //!   `~/Library/LaunchAgents/com.ironclaw.reborn.plist`.
-//! - **Linux**: systemd user unit at
+//! - **Linux (systemd)**: systemd user unit at
 //!   `~/.config/systemd/user/ironclaw-reborn.service`.
+//! - **Linux (container, no systemd)**: no unit to install — `serve` runs
+//!   as the container's own supervised process; `restart` signals it
+//!   directly and the container runtime's restart policy relaunches it.
+//!   See the `container` module doc.
 //!
 //! The installed service runs `<current_exe> serve`, restarting
 //! automatically on failure. Mirrors v1's `src/service.rs` shape with
@@ -14,8 +18,8 @@
 //! Platform dispatch happens once, in [`ServicePlatform::detect`], called
 //! a single time from [`ServiceCommand::execute`]. Each verb is a method
 //! on [`ServicePlatform`] that `match self`es to delegate into the
-//! OS-specific implementation (`launchd` or `systemd`), rather than every
-//! verb re-checking `cfg!(target_os)`.
+//! OS-specific implementation (`launchd`, `systemd`, or `container`),
+//! rather than every verb re-checking `cfg!(target_os)`.
 //!
 //! ## Canonical service identity, shared with the WebUI operator facade
 //!
@@ -50,6 +54,7 @@ use clap::{Args, Subcommand};
 use crate::context::RebornCliContext;
 use crate::serve_invocation::serve_invocation;
 
+mod container;
 mod launchd;
 mod systemd;
 
@@ -112,9 +117,16 @@ impl ServiceCommand {
 
 // ── Platform dispatch ───────────────────────────────────────────
 
-/// The two supported service-management targets. Detected once per
+/// The supported service-management targets. Detected once per
 /// invocation via [`ServicePlatform::detect`]; every verb dispatches
 /// off the resolved variant instead of re-checking `cfg!(target_os)`.
+///
+/// `Container` is Linux without systemd as the running init: hosted
+/// deployments where the image entrypoint `exec`s `ironclaw serve` as the
+/// container's main process and the container runtime's restart policy is
+/// the supervisor (see the `container` module doc). Before this variant,
+/// such hosts resolved to `Linux` and every verb died spawning the
+/// nonexistent `systemctl`.
 ///
 /// pub(super): `commands::status` queries [`Self::current_state`] to check
 /// whether the installed service is actually running, not just present.
@@ -122,16 +134,55 @@ impl ServiceCommand {
 pub(super) enum ServicePlatform {
     MacOs,
     Linux,
+    Container,
 }
+
+/// Production procfs root for [`ServicePlatform::Container`] dispatch.
+/// `container`'s functions take it as a parameter so tests can point them at
+/// a fake proc tree (see `container::tests`).
+const PROC_ROOT: &str = "/proc";
 
 impl ServicePlatform {
     pub(super) fn detect() -> Result<Self> {
         if cfg!(target_os = "macos") {
             Ok(Self::MacOs)
         } else if cfg!(target_os = "linux") {
-            Ok(Self::Linux)
+            Ok(Self::linux_platform(
+                systemd_booted(),
+                container_supervised_declared(),
+            ))
         } else {
             bail!(UNSUPPORTED_OS_MESSAGE);
+        }
+    }
+
+    /// The one runtime decision [`Self::detect`] makes on Linux. `Container`
+    /// requires BOTH signals — systemd absent AND `container_supervised`
+    /// explicitly declared — not systemd-absence alone: a Linux host can
+    /// lack systemd for reasons that have nothing to do with a managed
+    /// restart policy (WSL2, an OpenRC distro like Alpine/Gentoo, a
+    /// SysV-init host, a plain VM running `ironclaw onboard` directly, or
+    /// even a real Docker container started with no restart policy at all —
+    /// e.g. the documented `docker run --rm ...` local-run command in
+    /// `docs/reborn/deploy-reborn-cli-docker.md`, which is a real container
+    /// but has nothing to relaunch `serve` if `restart` kills it).
+    ///
+    /// `restart` in `Container` mode kills the running `serve` process and
+    /// trusts an external restart policy to relaunch it — no signal
+    /// observable from inside the container (not `/.dockerenv`, not a
+    /// cgroup, not any other ambient marker) can actually prove that policy
+    /// exists. Every container host, including Railway, must declare that
+    /// policy explicitly. When it is not declared, fall back to `Linux`: that
+    /// host gets the old systemd-manager path, which fails loud (a plain
+    /// `systemctl` ENOENT) rather than guessing and taking a destructive
+    /// action with no recovery guarantee.
+    fn linux_platform(systemd_booted: bool, container_supervised_declared: bool) -> Self {
+        if systemd_booted {
+            Self::Linux
+        } else if container_supervised_declared {
+            Self::Container
+        } else {
+            Self::Linux
         }
     }
 
@@ -155,6 +206,11 @@ impl ServicePlatform {
         context: &RebornCliContext,
         runner: &mut dyn ServiceCommandRunner,
     ) -> Result<Vec<String>> {
+        // Bail before preflight: warnings about onboarding/config are noise
+        // when there is no service manager to install into at all.
+        if matches!(self, Self::Container) {
+            container::unsupported_in_container("install")?;
+        }
         let warnings = preflight_warnings(context)?;
         for warning in &warnings {
             eprintln!("warning: {warning}");
@@ -167,6 +223,7 @@ impl ServicePlatform {
             Self::Linux => {
                 systemd::install_with_runner(context, &invocation, runner).map(|_replaced| ())?
             }
+            Self::Container => unreachable!("container installs bail before preflight"),
         }
         Ok(warnings)
     }
@@ -183,6 +240,7 @@ impl ServicePlatform {
         match self {
             Self::MacOs => launchd::start_with_runner(runner),
             Self::Linux => systemd::start_with_runner(runner),
+            Self::Container => container::unsupported_in_container("start"),
         }
     }
 
@@ -195,6 +253,7 @@ impl ServicePlatform {
         match self {
             Self::MacOs => launchd::stop_with_runner(runner),
             Self::Linux => systemd::stop_with_runner(runner),
+            Self::Container => container::unsupported_in_container("stop"),
         }
     }
 
@@ -204,9 +263,21 @@ impl ServicePlatform {
 
     /// Runner-injectable `restart` — see [`Self::start_with_runner`].
     fn restart_with_runner(&self, runner: &mut dyn ServiceCommandRunner) -> Result<()> {
+        self.restart_with_runner_at_proc_root(runner, Path::new(PROC_ROOT))
+    }
+
+    /// Testable restart dispatch with an injectable procfs root. Production
+    /// uses [`PROC_ROOT`]; tests use a fake process table to prove the
+    /// `Container` arm reaches the same signal command as a real restart.
+    fn restart_with_runner_at_proc_root(
+        &self,
+        runner: &mut dyn ServiceCommandRunner,
+        proc_root: &Path,
+    ) -> Result<()> {
         match self {
             Self::MacOs => launchd::restart_with_runner(runner),
             Self::Linux => systemd::restart_with_runner(runner),
+            Self::Container => container::restart_with_runner(runner, proc_root),
         }
     }
 
@@ -219,6 +290,7 @@ impl ServicePlatform {
         match self {
             Self::MacOs => launchd::status_with_runner(runner),
             Self::Linux => systemd::status_with_runner(runner),
+            Self::Container => container::status(Path::new(PROC_ROOT)),
         }
     }
 
@@ -231,6 +303,7 @@ impl ServicePlatform {
         match self {
             Self::MacOs => launchd::uninstall_with_runner(runner),
             Self::Linux => systemd::uninstall_with_runner(runner),
+            Self::Container => container::unsupported_in_container("uninstall"),
         }
     }
 
@@ -249,8 +322,45 @@ impl ServicePlatform {
         match self {
             Self::MacOs => launchd::current_state_with_runner(runner),
             Self::Linux => systemd::current_state_with_runner(runner),
+            Self::Container => container::current_state(Path::new(PROC_ROOT)),
         }
     }
+}
+
+/// systemd is the running init exactly when `/run/systemd/system` exists —
+/// the documented `sd_booted(3)` check. A Linux host where it is absent
+/// (hosted containers, minimal images) has no systemd to manage services
+/// with, regardless of what unit files are baked into the filesystem.
+fn systemd_booted() -> bool {
+    systemd_booted_under(Path::new("/"))
+}
+
+/// `systemd_booted`'s actual check, parameterized on the filesystem root so
+/// tests can point it at a fake tree instead of the host's real `/run`.
+fn systemd_booted_under(root: &Path) -> bool {
+    root.join("run/systemd/system").is_dir()
+}
+
+/// Env var a deployment sets to explicitly declare "I run under a managed
+/// restart policy". This deployment contract is provider-neutral: Docker,
+/// Railway, Kubernetes, and other container hosts must opt in explicitly.
+const CONTAINER_SUPERVISED_ENV_VAR: &str = "IRONCLAW_CONTAINER_SUPERVISE";
+
+/// Whether a deployment declares a managed restart policy. Combined with
+/// [`systemd_booted`] absence, this is [`ServicePlatform::linux_platform`]'s
+/// second signal for `Container` mode.
+fn container_supervised_declared() -> bool {
+    is_truthy_env(
+        std::env::var_os(CONTAINER_SUPERVISED_ENV_VAR)
+            .as_deref()
+            .and_then(std::ffi::OsStr::to_str),
+    )
+}
+
+/// Parses [`CONTAINER_SUPERVISED_ENV_VAR`] without mutating the process
+/// environment in tests.
+fn is_truthy_env(value: Option<&str>) -> bool {
+    matches!(value, Some("1" | "true" | "TRUE" | "yes" | "YES"))
 }
 
 /// Install then start the OS service in one call — used by `onboard`'s
@@ -611,6 +721,30 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RecordingServiceCommandRunner {
+        commands: Vec<(String, String, Vec<String>)>,
+    }
+
+    impl ServiceCommandRunner for RecordingServiceCommandRunner {
+        fn run_checked(&mut self, label: &str, command: &mut Command) -> Result<()> {
+            self.commands.push((
+                label.to_string(),
+                command.get_program().to_string_lossy().into_owned(),
+                command
+                    .get_args()
+                    .map(|arg| arg.to_string_lossy().into_owned())
+                    .collect(),
+            ));
+            Ok(())
+        }
+
+        fn run_capture_checked(&mut self, label: &str, command: &mut Command) -> Result<String> {
+            self.run_checked(label, command)?;
+            Ok(String::new())
+        }
+    }
+
     #[test]
     fn status_label_covers_running_stopped_and_not_installed() {
         assert_eq!(status_label(false, false), "not installed");
@@ -621,13 +755,131 @@ mod tests {
 
     #[test]
     fn detect_returns_a_supported_platform_on_this_test_host() {
-        // This test only runs in CI/dev on macOS or Linux, so detect()
-        // must resolve to one of the two supported variants, never bail.
+        // This test only runs in CI/dev on macOS or Linux (possibly inside a
+        // systemd-less container), so detect() must resolve to one of the
+        // supported variants, never bail.
         let platform = ServicePlatform::detect().expect("detect must resolve on macOS/Linux");
         assert!(matches!(
             platform,
-            ServicePlatform::MacOs | ServicePlatform::Linux
+            ServicePlatform::MacOs | ServicePlatform::Linux | ServicePlatform::Container
         ));
+    }
+
+    #[test]
+    fn linux_without_systemd_and_with_supervision_declared_resolves_to_container() {
+        // Regression: hosted containers (image entrypoint execs `ironclaw
+        // serve`, PID 1 = docker-init, no systemctl binary) used to resolve
+        // to `Linux`, so every service verb died spawning `systemctl`
+        // ("failed to spawn command for systemctl show unit state") and
+        // `restart` reported "Service not installed" — while the setup docs
+        // tell users to finish with `ironclaw service restart`.
+        assert_eq!(
+            ServicePlatform::linux_platform(false, true),
+            ServicePlatform::Container
+        );
+        assert_eq!(
+            ServicePlatform::linux_platform(true, true),
+            ServicePlatform::Linux
+        );
+        assert_eq!(
+            ServicePlatform::linux_platform(true, false),
+            ServicePlatform::Linux
+        );
+    }
+
+    #[test]
+    fn linux_without_systemd_and_without_supervision_declared_falls_back_to_linux() {
+        // Systemd-absence alone must NOT resolve to Container: a host that
+        // is neither systemd-managed nor has explicitly declared a managed
+        // restart policy (WSL2, an OpenRC distro, a SysV-init host, a plain
+        // VM running `ironclaw onboard` directly, or even a real Docker
+        // container started with no restart policy at all — e.g. the
+        // documented `docker run --rm ...` local-run command) must NOT get
+        // Container's destructive restart (kill + trust an external restart
+        // policy) — it falls back to the old Linux/systemd path, which
+        // fails loud (a plain `systemctl` ENOENT) instead of guessing and
+        // taking a destructive action with no recovery guarantee.
+        assert_eq!(
+            ServicePlatform::linux_platform(false, false),
+            ServicePlatform::Linux
+        );
+    }
+
+    #[test]
+    fn container_supervision_requires_an_explicit_truthy_declaration() {
+        for truthy in ["1", "true", "TRUE", "yes", "YES"] {
+            assert!(is_truthy_env(Some(truthy)), "{truthy} must opt in");
+        }
+        for falsey in [None, Some(""), Some("false"), Some("railway")] {
+            assert!(
+                !is_truthy_env(falsey),
+                "{falsey:?} must not opt in without an explicit truthy value"
+            );
+        }
+    }
+
+    #[test]
+    fn container_restart_dispatches_the_serve_signal_through_the_runner() {
+        let proc = tempfile::tempdir().expect("tempdir");
+        let serve_dir = proc.path().join("71");
+        std::fs::create_dir_all(&serve_dir).expect("create fake proc entry");
+        std::fs::write(
+            serve_dir.join("cmdline"),
+            b"/usr/local/bin/ironclaw\0serve\0--host\0",
+        )
+        .expect("write fake serve command line");
+        let mut runner = RecordingServiceCommandRunner::default();
+
+        ServicePlatform::Container
+            .restart_with_runner_at_proc_root(&mut runner, proc.path())
+            .expect("container restart must dispatch through the runner");
+
+        assert_eq!(
+            runner.commands,
+            vec![(
+                "terminate serve process".to_string(),
+                "sh".to_string(),
+                vec!["-c".to_string(), "kill -TERM 71".to_string()],
+            )]
+        );
+    }
+
+    #[test]
+    fn systemd_booted_under_reads_run_systemd_system_from_the_given_root() {
+        // The detection tests above exercise only the pre-computed bools;
+        // this proves the actual filesystem check that feeds one of them
+        // (the real bug-fix logic) reads the right path and both directions.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert!(
+            !systemd_booted_under(tmp.path()),
+            "no run/systemd/system dir must read as not booted"
+        );
+        std::fs::create_dir_all(tmp.path().join("run/systemd/system"))
+            .expect("create run/systemd/system");
+        assert!(
+            systemd_booted_under(tmp.path()),
+            "run/systemd/system dir must read as booted"
+        );
+    }
+
+    #[test]
+    fn is_truthy_env_matches_entrypoint_sh_is_truthy_exactly() {
+        // Must stay in sync with docker/reborn/entrypoint.sh's is_truthy():
+        // a value the entrypoint treats as true (e.g. when auto-declaring
+        // supervision on Railway) must read as true here too.
+        for truthy in ["1", "true", "TRUE", "yes", "YES"] {
+            assert!(is_truthy_env(Some(truthy)), "{truthy} must be truthy");
+        }
+        for falsy in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("false"),
+            Some("no"),
+            Some("garbage"),
+        ] {
+            assert!(!is_truthy_env(falsy), "{falsy:?} must not be truthy");
+        }
     }
 
     #[test]
@@ -764,6 +1016,37 @@ mod tests {
                 "{verb_name} must reach the injected runner, not bail out before calling it"
             );
         }
+    }
+
+    #[test]
+    fn container_platform_dispatches_service_manager_verbs_into_container_module() {
+        // Covers the install/start/stop/uninstall match arms only — these
+        // reject unconditionally with no I/O, so they're safe to drive
+        // directly against `ServicePlatform::Container` here. Proves wiring
+        // only: `container::unsupported_verbs_share_one_actionable_message`
+        // already pins the message content; this just proves each arm
+        // actually reaches `container::` instead of falling through to
+        // launchd/systemd, and that the runner is never touched.
+        //
+        // NOT covered here: the restart/status/current_state match arms,
+        // which route through the hardcoded `PROC_ROOT = "/proc"` constant
+        // and so aren't independently fakeable at this dispatch layer
+        // without threading a proc root through `ServicePlatform` itself.
+        // Their underlying logic is fully covered directly against a fake
+        // proc tree in `container::tests`; only the one-line match arms
+        // that route to it are unverified here.
+        let (_tmp, context) = RebornCliContext::test_context();
+        let platform = ServicePlatform::Container;
+        let mut runner = SuccessfulServiceCommandRunner::default();
+        for result in [
+            platform.install_with_runner(&context, &mut runner).err(),
+            platform.start_with_runner(&mut runner).err(),
+            platform.stop_with_runner(&mut runner).err(),
+            platform.uninstall_with_runner(&mut runner).err(),
+        ] {
+            assert!(result.is_some_and(|e| e.to_string().contains("container runtime")));
+        }
+        assert!(runner.labels.is_empty(), "must never reach the runner");
     }
 
     #[cfg(unix)]
