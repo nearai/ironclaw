@@ -48,6 +48,7 @@ enum CapabilityMode {
     ApprovalThenEcho,
     SpawnAuthThenApprovalThenEcho,
     InvocationError,
+    RecoverablePortError,
     InvalidInputThenEcho,
 }
 
@@ -58,6 +59,15 @@ impl RecordingTestCapabilityPort {
 
     pub fn no_progress() -> Self {
         Self::new(CapabilityMode::NoProgress, false, false)
+    }
+
+    /// Every capability invocation returns a scripted **caller-shaped** port
+    /// error (`InvalidInvocation`). Before #6284's capability-stage fix, any
+    /// non-`Cancelled` port error ended the run; now caller-shaped kinds
+    /// surface model-visibly and the run continues. Pairs with
+    /// [`Self::invocation_error`], which uses a kind that is still terminal.
+    pub fn recoverable_port_error() -> Self {
+        Self::new(CapabilityMode::RecoverablePortError, false, false)
     }
 
     /// Every capability invocation fails with a scripted TERMINAL host fault
@@ -292,6 +302,20 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Unavailable,
                 "scripted capability invocation failure",
+            ));
+        }
+        if matches!(self.mode, CapabilityMode::RecoverablePortError) {
+            // Caller-shaped host fault: the model can act on it, so the
+            // executor surfaces it as a tool error and the run continues.
+            //
+            // `InvalidInvocation` (not `Unauthorized`) on purpose: the summary
+            // prefix for `Authorization` is "capability failed with
+            // authorization: ", and "authorization:" is a banned marker in the
+            // loop-safe validator, so that kind fail-softs to the redacted
+            // fallback and would hide the very kind this test asserts on.
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "scripted caller-shaped capability port failure",
             ));
         }
         if matches!(self.mode, CapabilityMode::InvalidInputThenEcho)
