@@ -379,7 +379,7 @@
             "id": "call_b4d5b1ea6b4b4d3184b1d227",
             "name": "routine_fire",
             "arguments": {
-              "name": "{{call_657a9167a2d74cdd88556b34.name}}"
+              "name": {"$trace_result":{"tool_call_id":"call_657a9167a2d74cdd88556b34","pointer":"/name"}}
             }
           }
         ],
@@ -406,7 +406,7 @@
             "id": "call_7febebee51a647b38f1187a2",
             "name": "routine_history",
             "arguments": {
-              "name": "{{call_657a9167a2d74cdd88556b34.name}}"
+              "name": {"$trace_result":{"tool_call_id":"call_657a9167a2d74cdd88556b34","pointer":"/name"}}
             }
           }
         ],
@@ -433,7 +433,7 @@
             "id": "call_23968adef6b64abb9ccd2090",
             "name": "job_status",
             "arguments": {
-              "job_id": "{{call_b4d5b1ea6b4b4d3184b1d227.thread_id}}"
+              "job_id": {"$trace_result":{"tool_call_id":"call_b4d5b1ea6b4b4d3184b1d227","pointer":"/thread_id"}}
             }
           }
         ],
@@ -509,7 +509,7 @@
             "id": "call_4e9e7350c1f84d73b3b2baee",
             "name": "routine_history",
             "arguments": {
-              "name": "{{call_657a9167a2d74cdd88556b34.name}}"
+              "name": {"$trace_result":{"tool_call_id":"call_657a9167a2d74cdd88556b34","pointer":"/name"}}
             }
           }
         ],
@@ -650,7 +650,7 @@
             "id": "call_a3f00734525c4707a0edbfdc",
             "name": "routine_update",
             "arguments": {
-              "name": "{{call_4e9e7350c1f84d73b3b2baee.name}}",
+              "name": {"$trace_result":{"tool_call_id":"call_4e9e7350c1f84d73b3b2baee","pointer":"/name"}},
               "prompt": "Fetch the current Bitcoin price using the http tool. Call: http(method=\"GET\", url=\"https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd\"). Parse the response to extract the bitcoin.usd price and report it clearly in a formatted message like \"Bitcoin Price: $XXX,XXX USD\"."
             }
           }
@@ -678,7 +678,7 @@
             "id": "call_05c529ff62ea4620aeca7165",
             "name": "routine_fire",
             "arguments": {
-              "name": "{{call_4e9e7350c1f84d73b3b2baee.name}}"
+              "name": {"$trace_result":{"tool_call_id":"call_4e9e7350c1f84d73b3b2baee","pointer":"/name"}}
             }
           }
         ],
@@ -705,7 +705,7 @@
             "id": "call_17e42824f0994356914beb8f",
             "name": "routine_history",
             "arguments": {
-              "name": "{{call_657a9167a2d74cdd88556b34.name}}"
+              "name": {"$trace_result":{"tool_call_id":"call_657a9167a2d74cdd88556b34","pointer":"/name"}}
             }
           }
         ],
@@ -753,7 +753,7 @@
             "id": "call_ac9051b4a2ed4d6ba6e0c5eb",
             "name": "job_status",
             "arguments": {
-              "job_id": "{{call_05c529ff62ea4620aeca7165.thread_id}}"
+              "job_id": {"$trace_result":{"tool_call_id":"call_05c529ff62ea4620aeca7165","pointer":"/thread_id"}}
             }
           }
         ],
@@ -845,7 +845,7 @@
             "id": "call_e023cfbd1ff94b33968678ef",
             "name": "routine_history",
             "arguments": {
-              "name": "{{call_657a9167a2d74cdd88556b34.name}}"
+              "name": {"$trace_result":{"tool_call_id":"call_657a9167a2d74cdd88556b34","pointer":"/name"}}
             }
           }
         ],

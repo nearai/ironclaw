@@ -183,6 +183,8 @@ pub struct RebornIntegrationHarnessBuilder {
     /// Threaded into
     /// `RebornIntegrationGroupBuilder::with_lease_recovery_interval_for_test`.
     lease_recovery_interval: Option<Duration>,
+    /// Test-only canonical-loop iteration limit override.
+    planned_default_iteration_limit: Option<std::num::NonZeroU32>,
 }
 
 impl RebornIntegrationHarnessBuilder {
@@ -339,6 +341,20 @@ impl RebornIntegrationHarnessBuilder {
     /// `RebornIntegrationGroupBuilder::with_lease_recovery_interval_for_test`.
     pub fn with_lease_recovery_interval_for_test(mut self, interval: Duration) -> Self {
         self.lease_recovery_interval = Some(interval);
+        self
+    }
+
+    /// Set a non-zero iteration limit on the production-planned runtime used by
+    /// this harness so terminal recovery can be reached without a long script.
+    pub fn with_iteration_limit_for_test(mut self, limit: std::num::NonZeroU32) -> Self {
+        self.planned_default_iteration_limit = Some(limit);
+        self
+    }
+
+    /// Replace the default echo with a deterministic no-progress echo. This is
+    /// a test seam; the same canonical stop strategy and runtime wiring run.
+    pub fn with_no_progress_echo_for_test(mut self) -> Self {
+        self.capability = RebornCapabilityBackend::NoProgressEcho;
         self
     }
 
@@ -623,6 +639,9 @@ impl RebornIntegrationHarnessBuilder {
         if let Some(interval) = self.lease_recovery_interval {
             group_builder = group_builder.with_lease_recovery_interval_for_test(interval);
         }
+        if let Some(limit) = self.planned_default_iteration_limit {
+            group_builder = group_builder.with_iteration_limit_for_test(limit);
+        }
         let group: RebornIntegrationGroup = group_builder
             .build_with_capability(group_capability)
             .await?;
@@ -737,6 +756,7 @@ impl RebornIntegrationHarness {
             park_tool_gate: None,
             runner_lease_ttl: None,
             lease_recovery_interval: None,
+            planned_default_iteration_limit: None,
         }
     }
 
@@ -1221,6 +1241,29 @@ impl RebornIntegrationHarness {
             .map(|invocation| invocation.capability_id.as_str())
             .collect();
         Err(format!("capability {capability_id:?} was not invoked; saw {seen:?}").into())
+    }
+
+    /// Assert the named capability was invoked exactly `expected` times through
+    /// the real capability path. Uses the same per-thread delta as
+    /// [`Self::assert_tool_invoked`].
+    pub async fn assert_tool_invocation_count(
+        &self,
+        capability_id: &str,
+        expected: usize,
+    ) -> HarnessResult<()> {
+        let all = self.capability_recorder.invocations();
+        let delta = &all[self.baseline_invocation_count..];
+        let actual = delta
+            .iter()
+            .filter(|invocation| invocation.capability_id.as_str() == capability_id)
+            .count();
+        if actual == expected {
+            return Ok(());
+        }
+        Err(format!(
+            "expected capability {capability_id:?} to be invoked {expected} time(s), saw {actual}"
+        )
+        .into())
     }
 
     /// Assert the named capability was NOT invoked through the real
@@ -1727,7 +1770,7 @@ impl RebornIntegrationHarness {
         }
         let harness = match &self._shared.capability {
             GroupCapability::HostRuntime(arc) => arc,
-            GroupCapability::Recording => {
+            GroupCapability::Recording | GroupCapability::RecordingNoProgress => {
                 return Err(
                     "no host-runtime capability backend to seed a github credential account".into(),
                 );
@@ -1774,7 +1817,7 @@ impl RebornIntegrationHarness {
     ) -> HarnessResult<()> {
         let harness = match &self._shared.capability {
             GroupCapability::HostRuntime(arc) => arc,
-            GroupCapability::Recording => {
+            GroupCapability::Recording | GroupCapability::RecordingNoProgress => {
                 return Err(
                     "no host-runtime capability backend to seed a credential account".into(),
                 );
@@ -1801,7 +1844,7 @@ impl RebornIntegrationHarness {
     pub async fn revoke_capability_credential_accounts(&self, provider: &str) -> HarnessResult<()> {
         let harness = match &self._shared.capability {
             GroupCapability::HostRuntime(arc) => arc,
-            GroupCapability::Recording => {
+            GroupCapability::Recording | GroupCapability::RecordingNoProgress => {
                 return Err(
                     "no host-runtime capability backend to revoke credential accounts".into(),
                 );

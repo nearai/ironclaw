@@ -120,6 +120,85 @@ echo "▶ F. a missing report is a loud error, not an empty queue"
 check "queue fails when missed.txt is absent" \
   bash -c "! python3 '$queue' --report-dir '$work/absent' --output '$work/x.md' 2>/dev/null"
 
+echo "▶ G. the audit hands the generator the directory cargo-mutants wrote to"
+# Sections D-F drive the generator directly with hand-built fixtures, so they
+# all passed while every real audit failed at its final step: cargo-mutants
+# creates mutants.out *inside* --output, and the script was reading $MUT_OUT
+# itself. Testing the helper proved nothing about the caller wiring it — the
+# gap .claude/rules/testing.md calls "test through the caller".
+#
+# A stub cargo reproduces that layout without compiling anything.
+stub_bin="$work/stub-bin"
+mkdir -p "$stub_bin"
+for tool in bash sed grep python3 mktemp rm dirname cat mkdir; do
+  src="$(command -v "$tool" 2>/dev/null || true)"
+  [ -n "$src" ] && ln -sf "$src" "$stub_bin/$tool"
+done
+: >"$stub_bin/cargo-mutants"
+chmod +x "$stub_bin/cargo-mutants"
+cat >"$stub_bin/cargo" <<'STUB'
+#!/usr/bin/env bash
+# Mimic the one behaviour under test: `--output DIR` yields DIR/mutants.out.
+out="."
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --output) out="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+mkdir -p "$out/mutants.out"
+echo 'crates/demo/src/lib.rs:12:5: replace add with ()' >"$out/mutants.out/missed.txt"
+: >"$out/mutants.out/caught.txt"
+STUB
+chmod +x "$stub_bin/cargo"
+
+audit_out="$work/audit-out"
+check "audit completes and writes the queue where cargo-mutants wrote results" \
+  bash -c "PATH='$stub_bin' MUT_OUT='$audit_out' '$audit' -p demo >/dev/null 2>&1 \
+    && [ -f '$audit_out/mutants.out/triage-queue.md' ]"
+check "the generated queue carries the survivor, not an empty shell" \
+  grep -q 'replace add with ()' "$audit_out/mutants.out/triage-queue.md"
+
+echo "▶ H. an audit that tests nothing is an error, not a pass"
+# Found in the field: crates/ironclaw_reborn_composition/src/extension_host/
+# channel_outbound_targets.rs moved to crates/ironclaw_extension_host/ in #6669.
+# The old command line still ran, cargo-mutants filtered to zero mutants, and
+# the audit exited 0 with an empty queue — a clean bill of health for a file it
+# never opened. cargo-mutants only WARNs in that case, so the script must judge.
+check "audit rejects a file path that does not exist" \
+  bash -c "! PATH='$stub_bin' MUT_OUT='$work/stale' '$audit' -p demo crates/gone/src/nope.rs 2>/dev/null"
+check "audit says the path may have moved" \
+  bash -c "PATH='$stub_bin' MUT_OUT='$work/stale' '$audit' -p demo crates/gone/src/nope.rs 2>&1 | grep -q 'may have moved'"
+
+empty_bin="$work/empty-bin"
+mkdir -p "$empty_bin"
+for tool in bash sed grep python3 mktemp rm dirname cat mkdir; do
+  src="$(command -v "$tool" 2>/dev/null || true)"
+  [ -n "$src" ] && ln -sf "$src" "$empty_bin/$tool"
+done
+: >"$empty_bin/cargo-mutants"
+chmod +x "$empty_bin/cargo-mutants"
+cat >"$empty_bin/cargo" <<'STUB'
+#!/usr/bin/env bash
+# A run that generated no mutants at all: report files exist but are empty.
+out="."
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --output) out="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+mkdir -p "$out/mutants.out"
+: >"$out/mutants.out/missed.txt"
+: >"$out/mutants.out/caught.txt"
+STUB
+chmod +x "$empty_bin/cargo"
+
+check "audit rejects a run that produced zero mutants" \
+  bash -c "! PATH='$empty_bin' MUT_OUT='$work/zero' '$audit' -p demo 2>/dev/null"
+check "audit explains that an empty result is not a passing audit" \
+  bash -c "PATH='$empty_bin' MUT_OUT='$work/zero' '$audit' -p demo 2>&1 | grep -q 'not a passing audit'"
+
 echo
 if [ "$failures" -eq 0 ]; then
   echo "all mutation-harness self-tests passed"

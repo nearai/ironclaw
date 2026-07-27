@@ -45,6 +45,7 @@ pub struct RecordingTestCapabilityPort {
 #[derive(Debug, Clone, Copy)]
 enum CapabilityMode {
     Echo,
+    NoProgress,
     ApprovalThenEcho,
     SpawnAuthThenApprovalThenEcho,
     InvocationError,
@@ -54,6 +55,10 @@ enum CapabilityMode {
 impl RecordingTestCapabilityPort {
     pub fn echo() -> Self {
         Self::new(CapabilityMode::Echo, false, false)
+    }
+
+    pub fn no_progress() -> Self {
+        Self::new(CapabilityMode::NoProgress, false, false)
     }
 
     /// Every capability invocation fails with a scripted host invocation error
@@ -167,11 +172,16 @@ impl RecordingTestCapabilityPort {
 
     fn completed_result(&self) -> Resolution {
         let ordinal = self.next_result.fetch_add(1, Ordering::SeqCst);
+        let progress = if matches!(self.mode, CapabilityMode::NoProgress) {
+            ironclaw_turns::run_profile::CapabilityProgress::NoChange
+        } else {
+            ironclaw_turns::run_profile::CapabilityProgress::MadeProgress
+        };
         resolution::completed(
             ironclaw_turns::LoopResultRef::new(format!("result:test-echo-{ordinal}"))
                 .expect("valid result ref"),
             "echo: hi".to_string(),
-            ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            progress,
             false,
             0,
             None,

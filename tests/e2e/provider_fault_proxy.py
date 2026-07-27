@@ -107,6 +107,38 @@ PROVIDER_FAULT_PROFILES = {
         body=_json_error(503, "Service Unavailable"),
         headers={"Retry-After": "1"},
     ),
+    # Provider-originated credential faults. A bare http_401 says only
+    # "rejected"; the RFC 6750 challenge distinguishes an expired token from
+    # one that lacks the required scope. Missing credentials are intentionally
+    # absent: host auth preflight blocks them before provider dispatch.
+    "expired_credential": ProviderFaultProfile(
+        name="expired_credential",
+        action="respond",
+        status=401,
+        body=_json_error(401, "Bad credentials"),
+        headers={
+            "WWW-Authenticate": (
+                'Bearer realm="provider", error="invalid_token", '
+                'error_description="The access token expired"'
+            )
+        },
+    ),
+    # Authenticated, but not for this operation. The scope headers mirror what
+    # GitHub returns, so a client can see both what it has and what it needed.
+    "wrong_scope": ProviderFaultProfile(
+        name="wrong_scope",
+        action="respond",
+        status=403,
+        body=_json_error(403, "Resource not accessible by integration"),
+        headers={
+            "WWW-Authenticate": (
+                'Bearer realm="provider", error="insufficient_scope", '
+                'scope="repo"'
+            ),
+            "X-Accepted-OAuth-Scopes": "repo",
+            "X-OAuth-Scopes": "read:user",
+        },
+    ),
     "timeout": ProviderFaultProfile(
         name="timeout",
         action="delay_before_disconnect",
