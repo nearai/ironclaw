@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
+use crate::{AutomationName, AutomationProductService, RebornAutomationState};
 use ironclaw_host_api::UserId;
-use ironclaw_product::{AutomationName, AutomationProductService, RebornAutomationState};
 use ironclaw_triggers::{InMemoryTriggerRepository, TriggerId, TriggerRepository, TriggerState};
 
 use super::{caller, make_record, now, service_over};

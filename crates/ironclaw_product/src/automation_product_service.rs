@@ -1,14 +1,14 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use ironclaw_host_api::{
-    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind, ThreadId, Timestamp,
-};
-use ironclaw_product::{
+use crate::{
     AutomationListRequest, AutomationName, AutomationProductService, ProductAgentBoundCaller,
     RebornAutomationActiveHold, RebornAutomationHoldReason, RebornAutomationInfo,
     RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
     RebornAutomationState, TriggerRunThreadScope,
+};
+use ironclaw_host_api::{
+    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind, ThreadId, Timestamp,
 };
 use ironclaw_triggers::{
     ActiveHoldProjection, ActiveHoldReason, TriggerActiveRunLookup, TriggerError, TriggerId,
@@ -57,7 +57,7 @@ impl std::fmt::Debug for RebornAutomationProductService {
 }
 
 impl RebornAutomationProductService {
-    pub(crate) fn new(
+    pub fn new(
         trigger_repository: Arc<dyn TriggerRepository>,
         active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
     ) -> Self {
@@ -71,23 +71,9 @@ impl RebornAutomationProductService {
 
     /// Set whether the background trigger poller (scheduler) is running. Wired
     /// by WebUI composition from runtime readiness.
-    pub(crate) fn with_scheduler_enabled(mut self, scheduler_enabled: bool) -> Self {
+    pub fn with_scheduler_enabled(mut self, scheduler_enabled: bool) -> Self {
         self.scheduler_enabled = scheduler_enabled;
         self
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_backend_timeout(
-        trigger_repository: Arc<dyn TriggerRepository>,
-        active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
-        backend_timeout: Duration,
-    ) -> Self {
-        Self {
-            trigger_repository,
-            active_run_lookup,
-            backend_timeout,
-            scheduler_enabled: true,
-        }
     }
 
     /// Batch-resolve active-run states for records holding an active fire and

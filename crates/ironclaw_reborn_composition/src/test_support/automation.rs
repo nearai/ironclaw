@@ -1,6 +1,6 @@
-//! Test-support constructor for [`crate::RebornAutomationProductService`]
-//! (W5-WEBUI-API-1 Enabler B.2). Constructor is `pub(crate)` in production;
-//! this same-crate wrapper builds the real service over the harness's shared
+//! Test-support constructor for
+//! [`ironclaw_product::RebornAutomationProductService`] (W5-WEBUI-API-1
+//! Enabler B.2). This wrapper builds the real service over the harness's shared
 //! repository instead of a hand-rolled double duplicating its filter/join logic.
 
 use std::sync::Arc;
@@ -30,12 +30,10 @@ where
     let active_run_lookup = Arc::new(SnapshotActiveRunLookup::new(
         turn_state as Arc<dyn TurnRunSnapshotSource>,
     ));
-    Arc::new(
-        crate::automation::service::RebornAutomationProductService::new(
-            trigger_repository,
-            active_run_lookup,
-        ),
-    )
+    Arc::new(ironclaw_product::RebornAutomationProductService::new(
+        trigger_repository,
+        active_run_lookup,
+    ))
 }
 
 /// Build the raw [`TriggerActiveRunLookup`] the production automation panel

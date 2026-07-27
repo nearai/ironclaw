@@ -31,6 +31,7 @@ mod approval_prompt;
 mod auth_continuation;
 mod auth_interaction;
 mod auth_prompt;
+mod automation_product_service;
 mod automation_thread_metadata;
 mod binding;
 mod binding_ref;
@@ -100,6 +101,7 @@ pub use auth_prompt::{
     AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller, BlockedAuthPromptRequest,
     auth_prompt_view_for_blocked_auth,
 };
+pub use automation_product_service::RebornAutomationProductService;
 pub use automation_thread_metadata::{
     AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, automation_trigger_thread_metadata_json,
     thread_metadata_is_automation_trigger,

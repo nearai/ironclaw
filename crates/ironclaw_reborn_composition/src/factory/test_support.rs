@@ -351,7 +351,8 @@ impl RebornRuntimeStores {
         &self,
         wiring: ChannelHostAssemblyTestWiring,
     ) -> Option<Arc<ironclaw_extension_host::channel_host::GenericChannelHostAssembly>> {
-        crate::extension_host_assembly::ExtensionHostAssemblyBuilder::new(self)?.start_channel_host(
+        crate::extension_host_assembly::start_channel_host_from_stores(
+            self,
             crate::extension_host_assembly::ChannelHostAssemblyWiring {
                 thread_service: wiring.thread_service,
                 turn_coordinator: wiring.turn_coordinator,

@@ -66,7 +66,6 @@ mod trigger_poller_assembly;
 mod turn_run_snapshot;
 
 pub use admin_token::AdminApiTokenMinter;
-pub use automation::service::RebornAutomationProductService;
 pub use automation::trigger_poller::PostSubmitDeliveryHook;
 pub use error::RebornBuildError;
 #[cfg(feature = "test-support")]

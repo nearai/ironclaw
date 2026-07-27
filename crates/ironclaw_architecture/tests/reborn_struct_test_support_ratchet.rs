@@ -355,12 +355,6 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
         category: "test-support",
         item_kind: "method",
-        path: "crates/ironclaw_reborn_composition/src/automation/service.rs",
-        count: 1,
-    },
-    FrozenPathCount {
-        category: "test-support",
-        item_kind: "method",
         path: "crates/ironclaw_reborn_composition/src/builtin_capability_policy.rs",
         count: 1,
     },

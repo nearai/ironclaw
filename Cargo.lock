@@ -4180,6 +4180,7 @@ dependencies = [
  "ironclaw_safety",
  "ironclaw_telegram_extension",
  "ironclaw_threads",
+ "ironclaw_triggers",
  "ironclaw_trust",
  "ironclaw_turns",
  "libsql",

@@ -6,10 +6,10 @@
 
 use std::{sync::Arc, time::Duration};
 
+use crate::{AutomationProductService, ProductAgentBoundCaller};
 use async_trait::async_trait;
 use ironclaw_host_api::ProductSurfaceErrorCode;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
-use ironclaw_product::{AutomationProductService, ProductAgentBoundCaller};
 use ironclaw_triggers::{
     ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClearActiveFireRequest,
     FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
@@ -20,7 +20,6 @@ use ironclaw_triggers::{
 use ironclaw_turns::TurnRunId;
 
 use super::service_over;
-use crate::automation::service::RebornAutomationProductService;
 
 // ---------------------------------------------------------------------------
 // Shared test helpers
@@ -428,7 +427,7 @@ async fn resolve_run_thread_scope_returns_none_for_trigger_with_no_agent_id() {
 
 #[tokio::test]
 async fn resolve_run_thread_scope_timeout_maps_to_unavailable() {
-    let service = RebornAutomationProductService::with_backend_timeout(
+    let service = super::service_with_backend_timeout(
         Arc::new(FailingThreadLookupRepository(HangOrFail::Hang)),
         super::missing_lookup(),
         Duration::from_millis(10),

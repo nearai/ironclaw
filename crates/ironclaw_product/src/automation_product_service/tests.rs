@@ -4,14 +4,10 @@ mod resolver_tests;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
-use async_trait::async_trait;
-use ironclaw_host_api::{
-    AgentId, ApprovalRequestId, CapabilityId, ProductSurfaceCaller, ProductSurfaceErrorCode,
-    ProductSurfaceErrorKind, ProjectId, TenantId, ThreadId, Timestamp, UserId,
-};
-use ironclaw_product::{
+use crate::{
     ApprovalInteractionActionView, ApprovalInteractionScope, ApprovalInteractionService,
     AutomationListRequest, AutomationProductService, ListPendingApprovalsRequest,
     ListPendingApprovalsResponse, PendingApprovalInteractionView, ProductAgentBoundCaller,
@@ -20,6 +16,11 @@ use ironclaw_product::{
     RebornAutomationState, RebornListThreadsResponse, RebornServices,
     ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse, THREADS_VIEW,
     approval_gate_ref, automation_trigger_thread_metadata_json,
+};
+use async_trait::async_trait;
+use ironclaw_host_api::{
+    AgentId, ApprovalRequestId, CapabilityId, ProductSurfaceCaller, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind, ProjectId, TenantId, ThreadId, Timestamp, UserId,
 };
 use ironclaw_threads::{
     EnsureThreadRequest, InMemorySessionThreadService, SessionThreadService, ThreadScope,
@@ -46,6 +47,16 @@ use super::RebornAutomationProductService;
 /// construct the service with a scripted lookup instead.
 fn service_over(repo: Arc<dyn TriggerRepository>) -> RebornAutomationProductService {
     RebornAutomationProductService::new(repo, missing_lookup())
+}
+
+fn service_with_backend_timeout(
+    trigger_repository: Arc<dyn TriggerRepository>,
+    active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
+    backend_timeout: Duration,
+) -> RebornAutomationProductService {
+    let mut service = RebornAutomationProductService::new(trigger_repository, active_run_lookup);
+    service.backend_timeout = backend_timeout;
+    service
 }
 
 fn missing_lookup() -> Arc<dyn ironclaw_triggers::TriggerActiveRunLookup> {
@@ -841,7 +852,7 @@ async fn automation_service_maps_backend_error_to_unavailable() {
 
 #[tokio::test]
 async fn automation_service_times_out_stalled_repository() {
-    let service = RebornAutomationProductService::with_backend_timeout(
+    let service = service_with_backend_timeout(
         Arc::new(ScriptedRepository {
             scoped: ScriptedOutcome::Hang,
             batch: ScriptedOutcome::Hang,
@@ -910,7 +921,7 @@ async fn automation_service_times_out_stalled_run_history_batch() {
         "Daily task",
         "0 9 * * *",
     );
-    let service = RebornAutomationProductService::with_backend_timeout(
+    let service = service_with_backend_timeout(
         Arc::new(ScriptedRepository {
             scoped: ScriptedOutcome::Records(vec![record]),
             batch: ScriptedOutcome::Hang,
@@ -1352,7 +1363,7 @@ async fn automation_service_stalled_hold_lookup_does_not_starve_run_history() {
     let mut runs_by_trigger = HashMap::new();
     runs_by_trigger.insert(id, vec![run]);
 
-    let service = RebornAutomationProductService::with_backend_timeout(
+    let service = service_with_backend_timeout(
         Arc::new(ScriptedRepository {
             scoped: ScriptedOutcome::Records(vec![record]),
             batch: ScriptedOutcome::Runs(runs_by_trigger),

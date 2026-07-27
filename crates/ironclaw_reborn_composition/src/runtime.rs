@@ -1045,33 +1045,34 @@ impl RebornRuntime {
             identity,
             run_delivery_settings,
         } = wiring;
-        crate::extension_host_assembly::extension_host_assembly_builder_from_source(
-            crate::extension_host_assembly::ChannelHostAssemblySource {
-                generic_host: self.extension_management.generic_host()?,
-                ingress_registry: Arc::clone(&self.extension_ingress.as_ref()?.registry),
-                workflow_filesystem: self.extension_filesystem.clone(),
-                delivery_coordinator: self.delivery_coordinator.clone(),
-                outbound_state: Arc::clone(&self.outbound_state),
-                delivered_gate_routes: Arc::clone(&self.delivered_gate_routes),
-                outbound_preferences: Arc::clone(&self.outbound_preferences),
-                identity_lookup: Arc::clone(&self.channel_identity_store)
-                    as Arc<dyn ironclaw_host_api::RebornUserIdentityLookup>,
-                deployment_channels: Arc::clone(&self.deployment_channels),
-                channel_config: Arc::clone(&self.channel_config_service),
-                channel_pairing: self.channel_pairing.clone(),
+        let source = crate::extension_host_assembly::ChannelHostAssemblySource {
+            generic_host: self.extension_management.generic_host()?,
+            ingress_registry: Arc::clone(&self.extension_ingress.as_ref()?.registry),
+            workflow_filesystem: self.extension_filesystem.clone(),
+            delivery_coordinator: self.delivery_coordinator.clone(),
+            outbound_state: Arc::clone(&self.outbound_state),
+            delivered_gate_routes: Arc::clone(&self.delivered_gate_routes),
+            outbound_preferences: Arc::clone(&self.outbound_preferences),
+            identity_lookup: Arc::clone(&self.channel_identity_store)
+                as Arc<dyn ironclaw_host_api::RebornUserIdentityLookup>,
+            deployment_channels: Arc::clone(&self.deployment_channels),
+            channel_config: Arc::clone(&self.channel_config_service),
+            channel_pairing: self.channel_pairing.clone(),
+        };
+        Some(crate::extension_host_assembly::start_channel_host(
+            &source,
+            crate::extension_host_assembly::ChannelHostAssemblyWiring {
+                thread_service,
+                turn_coordinator,
+                approval_interaction: None,
+                auth_interaction: None,
+                identity,
+                approval_context: None,
+                blocked_auth_prompts: None,
+                auth_flow_cancel: None,
+                run_delivery_settings,
             },
-        )
-        .start_channel_host(crate::extension_host_assembly::ChannelHostAssemblyWiring {
-            thread_service,
-            turn_coordinator,
-            approval_interaction: None,
-            auth_interaction: None,
-            identity,
-            approval_context: None,
-            blocked_auth_prompts: None,
-            auth_flow_cancel: None,
-            run_delivery_settings,
-        })
+        ))
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -3740,27 +3741,21 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         projection_services
     };
 
-    let channel_host_assembly =
-        match crate::extension_host_assembly::ExtensionHostAssemblyBuilder::new(&services) {
-            Some(builder) => {
-                builder
-                    .build_runtime(
-                        crate::extension_host_assembly::RuntimeExtensionHostAssemblyWiring {
-                            thread_service: Arc::clone(&thread_service),
-                            turn_coordinator: Arc::clone(&planned_turn_coordinator),
-                            approval_interaction: Arc::clone(&approval_interaction_service),
-                            auth_interaction: Arc::clone(&auth_interaction_service),
-                            thread_scope: &thread_scope,
-                            actor_user_id: actor_user_id.clone(),
-                            auth_challenges,
-                            outbound_delivery_targets: outbound_delivery_target_registry.as_ref(),
-                            local_runtime,
-                        },
-                    )
-                    .await
-            }
-            None => None,
-        };
+    let channel_host_assembly = crate::extension_host_assembly::build_runtime_channel_host(
+        &services,
+        crate::extension_host_assembly::RuntimeExtensionHostAssemblyWiring {
+            thread_service: Arc::clone(&thread_service),
+            turn_coordinator: Arc::clone(&planned_turn_coordinator),
+            approval_interaction: Arc::clone(&approval_interaction_service),
+            auth_interaction: Arc::clone(&auth_interaction_service),
+            thread_scope: &thread_scope,
+            actor_user_id: actor_user_id.clone(),
+            auth_challenges,
+            outbound_delivery_targets: outbound_delivery_target_registry.as_ref(),
+            local_runtime,
+        },
+    )
+    .await;
 
     // `trigger_poller_handle`, `post_submit_hook_slot`, and the test-support
     // `trigger_conversation_pairing_value` are produced atomically inside

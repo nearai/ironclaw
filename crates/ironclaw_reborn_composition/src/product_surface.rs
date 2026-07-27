@@ -14,10 +14,10 @@ use ironclaw_host_api::{
 use ironclaw_operator::OperatorServiceLifecycle;
 use ironclaw_product::ProjectionStream;
 use ironclaw_product::{
-    ChannelConnectionService, OperatorStatusService, RebornOperatorStatusCheck,
-    RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
-    RebornServices as ProductRebornServices, RebornSkillContentResponse, RebornSkillInfo,
-    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    ChannelConnectionService, OperatorStatusService, RebornAutomationProductService,
+    RebornOperatorStatusCheck, RebornOperatorStatusResponse, RebornOperatorStatusSeverity,
+    RebornOperatorStatusState, RebornServices as ProductRebornServices, RebornSkillContentResponse,
+    RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
     RebornSkillTrustLevel, SkillsProductService,
 };
 
@@ -26,8 +26,8 @@ use ironclaw_triggers::TriggerRepository;
 use crate::operator_tool_catalog::ActiveRegistryOperatorToolCatalog;
 use crate::product_capability::RuntimeProductCapabilityInvoker;
 use crate::{
-    RebornAutomationProductService, RebornBuildError, RebornReadiness, RebornReadinessDiagnostic,
-    RebornReadinessDiagnosticStatus, RebornRuntime,
+    RebornBuildError, RebornReadiness, RebornReadinessDiagnostic, RebornReadinessDiagnosticStatus,
+    RebornRuntime,
     outbound::{
         OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistry,
         RebornOutboundPreferencesService, outbound_delivery_synthetic_provider,
