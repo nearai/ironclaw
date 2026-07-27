@@ -67,11 +67,39 @@ impl CredentialPlaceholderToken {
         ))
     }
 
+    /// Minimum length of the suffix after [`CREDENTIAL_PLACEHOLDER_PREFIX`],
+    /// matching the shortest suffix the `sandbox_credential_placeholder` leak
+    /// pattern (`ironclaw_safety::leak_detector`) will recognize and the
+    /// shape [`CredentialPlaceholderToken::generate`] actually produces (a
+    /// 32-character UUIDv4 `simple()` suffix).
+    const MIN_SUFFIX_LEN: usize = 16;
+
     fn validate(value: &str) -> Result<(), CredentialBrokerError> {
-        if !value.starts_with(CREDENTIAL_PLACEHOLDER_PREFIX) {
+        let Some(suffix) = value.strip_prefix(CREDENTIAL_PLACEHOLDER_PREFIX) else {
             return Err(CredentialBrokerError::InvalidPlaceholderToken {
                 value: value.to_string(),
                 reason: format!("must start with '{CREDENTIAL_PLACEHOLDER_PREFIX}'"),
+            });
+        };
+        // Mirror `validate_credential_id`'s charset discipline (this crate's
+        // established convention for opaque id newtypes) rather than
+        // accepting an arbitrary suffix: this token is designed to sit in a
+        // container's environment/config and a human or log line may see it
+        // (see the type doc comment), so malformed input — including control
+        // characters or shell metacharacters an attacker-controlled sandbox
+        // side might send back through `parse` — must fail closed here
+        // instead of propagating downstream.
+        if suffix.len() < Self::MIN_SUFFIX_LEN
+            || !suffix
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric())
+        {
+            return Err(CredentialBrokerError::InvalidPlaceholderToken {
+                value: value.to_string(),
+                reason: format!(
+                    "must be '{CREDENTIAL_PLACEHOLDER_PREFIX}' followed by at least {} ASCII alphanumeric characters",
+                    Self::MIN_SUFFIX_LEN
+                ),
             });
         }
         Ok(())
@@ -308,29 +336,89 @@ impl InMemoryCredentialBroker {
         };
 
         if let Some(session_id) = self.jit_minted_session_id(&key)?
-            && self
-                .validate_session(session_id, chrono::Utc::now())
-                .is_ok()
+            && self.try_join_live_lease(session_id, chrono::Utc::now())?
         {
-            self.bind_placeholder_to_session(placeholder.clone(), session_id)?;
-            self.acquire_lease_refcount(session_id)?;
-            return Ok(CredentialSessionLease {
-                broker: self.clone(),
-                session_id,
-                revoked: false,
-            });
+            return self.finish_lease(placeholder, session_id);
         }
 
         let session = self.create_session(request)?;
         let session_id = session.correlation_id();
         self.record_jit_mint(key, session_id)?;
+        // This session_id was just minted and is not yet published to
+        // `jit_minted`/`sessions_by_placeholder`, so no concurrent caller can
+        // reference it yet: registering the first lease reference here can't
+        // race a concurrent `release_lease` the way the reuse path above can.
+        self.acquire_lease_refcount(session_id);
+        self.finish_lease(placeholder, session_id)
+    }
+
+    /// Common tail shared by both `mint_on_first_use` branches: binds
+    /// `session_id` to `placeholder` and hands back the RAII lease.
+    fn finish_lease(
+        self: &Arc<Self>,
+        placeholder: &CredentialPlaceholderToken,
+        session_id: CredentialSessionId,
+    ) -> Result<CredentialSessionLease, CredentialBrokerError> {
         self.bind_placeholder_to_session(placeholder.clone(), session_id)?;
-        self.acquire_lease_refcount(session_id)?;
         Ok(CredentialSessionLease {
             broker: self.clone(),
             session_id,
             revoked: false,
         })
+    }
+
+    /// Attempts to join an existing lease on `session_id`, returning whether
+    /// it succeeded.
+    ///
+    /// The refcount increment and the liveness check are deliberately ordered
+    /// increment-then-validate, not validate-then-increment: incrementing
+    /// first only succeeds if `lease_refcounts` still has a live entry for
+    /// `session_id`, and [`InMemoryCredentialBroker::release_lease`] only
+    /// removes that entry (making the session eligible for revoke) while
+    /// holding the very same `lease_refcounts` lock. So once this call has
+    /// incremented the count, a concurrent `release_lease` on the
+    /// last-outstanding prior lease cannot have already revoked the session
+    /// — the two operations serialize on `lease_refcounts` instead of racing
+    /// across separate lock acquisitions. Validating the *other* way
+    /// (validate, then increment) would leave a window where a concurrent
+    /// revoke could land in between, handing back a lease for an
+    /// already-dead session.
+    ///
+    /// If the count was joined but the session turns out to be expired or
+    /// use-exhausted, the just-acquired reference is released again (via
+    /// [`InMemoryCredentialBroker::release_lease`], which revokes if that
+    /// makes this the last reference) so this method never leaves a
+    /// dangling refcount behind on its own failure path.
+    fn try_join_live_lease(
+        &self,
+        session_id: CredentialSessionId,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, CredentialBrokerError> {
+        let joined = {
+            let mut counts = lock_or_recover(&self.lease_refcounts);
+            match counts.get_mut(&session_id) {
+                Some(count) => {
+                    *count += 1;
+                    true
+                }
+                None => false,
+            }
+        };
+        if !joined {
+            return Ok(false);
+        }
+        match self.validate_session(session_id, now) {
+            Ok(_) => Ok(true),
+            Err(error) => {
+                self.release_lease(session_id);
+                match error {
+                    CredentialBrokerError::UnknownSession { .. }
+                    | CredentialBrokerError::SessionExpired { .. }
+                    | CredentialBrokerError::SessionUseLimitExceeded { .. } => Ok(false),
+                    other => Err(other),
+                }
+            }
+        }
     }
 
     /// Finds a live session currently bound to `placeholder`, if any.
@@ -387,17 +475,18 @@ impl InMemoryCredentialBroker {
         lock_or_recover(&self.lease_refcounts).remove(&session_id);
     }
 
-    /// Registers one outstanding lease reference for `session_id`. See
-    /// [`InMemoryCredentialBroker::release_lease`] for the matching release
-    /// half of this pair.
-    fn acquire_lease_refcount(
-        &self,
-        session_id: CredentialSessionId,
-    ) -> Result<(), CredentialBrokerError> {
+    /// Registers one outstanding lease reference for a freshly-minted
+    /// `session_id`. See [`InMemoryCredentialBroker::release_lease`] for the
+    /// matching release half of this pair, and
+    /// [`InMemoryCredentialBroker::try_join_live_lease`] for the
+    /// increment-then-validate variant used when *reusing* an
+    /// already-published session id (this fresh-mint variant can't fail —
+    /// `lock_or_recover` never leaves poison unresolved — so unlike
+    /// `try_join_live_lease` it returns no `Result`).
+    fn acquire_lease_refcount(&self, session_id: CredentialSessionId) {
         *lock_or_recover(&self.lease_refcounts)
             .entry(session_id)
             .or_insert(0) += 1;
-        Ok(())
     }
 
     /// Releases one outstanding lease reference for `session_id`, revoking
@@ -515,7 +604,7 @@ mod tests {
 
     use super::{CredentialPlaceholderRegistry, CredentialPlaceholderToken};
 
-    fn scope(tenant: &str, user: &str) -> ResourceScope {
+    fn sample_scope(tenant: &str, user: &str) -> ResourceScope {
         ResourceScope {
             tenant_id: TenantId::new(tenant).unwrap(),
             user_id: UserId::new(user).unwrap(),
@@ -527,7 +616,7 @@ mod tests {
         }
     }
 
-    fn account(
+    fn sample_account(
         scope: ResourceScope,
         id: CredentialAccountId,
         handle: SecretHandle,
@@ -551,7 +640,7 @@ mod tests {
         }
     }
 
-    fn request(
+    fn session_request(
         scope: ResourceScope,
         account_id: CredentialAccountId,
         url: &str,
@@ -615,12 +704,28 @@ mod tests {
 
     #[test]
     fn placeholder_token_requires_fixed_prefix() {
-        assert!(CredentialPlaceholderToken::parse("icsbx_abc").is_ok());
+        assert!(
+            CredentialPlaceholderToken::parse("icsbx_0123456789abcdef0123456789abcdef").is_ok()
+        );
         let err = CredentialPlaceholderToken::parse("not_a_placeholder").unwrap_err();
         assert!(matches!(
             err,
             CredentialBrokerError::InvalidPlaceholderToken { .. }
         ));
+    }
+
+    #[test]
+    fn placeholder_token_parse_rejects_malformed_suffix() {
+        // Empty string: no prefix at all.
+        assert!(CredentialPlaceholderToken::parse("").is_err());
+        // Bare prefix with no suffix carries no identifying material.
+        assert!(CredentialPlaceholderToken::parse("icsbx_").is_err());
+        // Suffix shorter than the registry ever produces.
+        assert!(CredentialPlaceholderToken::parse("icsbx_ab").is_err());
+        // Non-alphanumeric suffix characters (control chars / shell
+        // metacharacters) must fail closed rather than being accepted and
+        // potentially propagated into a log line or env var downstream.
+        assert!(CredentialPlaceholderToken::parse("icsbx_0123456789abcdef\n; rm -rf /").is_err());
     }
 
     #[test]
@@ -633,7 +738,7 @@ mod tests {
         let token = registry.get_or_create(&tenant, &user, &provider).unwrap();
 
         let found = broker
-            .find_session_by_placeholder(&token, &scope("tenant-a", "user-a"))
+            .find_session_by_placeholder(&token, &sample_scope("tenant-a", "user-a"))
             .unwrap();
         assert!(found.is_none());
     }
@@ -647,10 +752,10 @@ mod tests {
         let provider = ExtensionId::new("google").unwrap();
         let token = registry.get_or_create(&tenant, &user, &provider).unwrap();
 
-        let caller_scope = scope("tenant-a", "user-a");
+        let caller_scope = sample_scope("tenant-a", "user-a");
         let account_id = CredentialAccountId::new("google_prod").unwrap();
         broker
-            .put_account(account(
+            .put_account(sample_account(
                 caller_scope.clone(),
                 account_id.clone(),
                 SecretHandle::new("google_key").unwrap(),
@@ -660,7 +765,7 @@ mod tests {
         // Out-of-policy request (wrong path) must be rejected, not minted.
         let rejected = broker.mint_on_first_use(
             &token,
-            request(
+            session_request(
                 caller_scope.clone(),
                 account_id.clone(),
                 "https://api.example.com/v2/x",
@@ -681,7 +786,7 @@ mod tests {
         let lease = broker
             .mint_on_first_use(
                 &token,
-                request(
+                session_request(
                     caller_scope.clone(),
                     account_id,
                     "https://api.example.com/v1/x",
@@ -705,10 +810,10 @@ mod tests {
         let user_a = UserId::new("user-a").unwrap();
         let token_a = registry.get_or_create(&tenant, &user_a, &provider).unwrap();
 
-        let scope_a = scope("tenant-a", "user-a");
+        let scope_a = sample_scope("tenant-a", "user-a");
         let account_id = CredentialAccountId::new("google_prod").unwrap();
         broker
-            .put_account(account(
+            .put_account(sample_account(
                 scope_a.clone(),
                 account_id.clone(),
                 SecretHandle::new("google_key").unwrap(),
@@ -717,12 +822,12 @@ mod tests {
         let lease = broker
             .mint_on_first_use(
                 &token_a,
-                request(scope_a, account_id, "https://api.example.com/v1/x"),
+                session_request(scope_a, account_id, "https://api.example.com/v1/x"),
             )
             .unwrap();
 
         // User B's scope must never see user A's session through the placeholder.
-        let other_scope = scope("tenant-a", "user-b");
+        let other_scope = sample_scope("tenant-a", "user-b");
         let found = broker
             .find_session_by_placeholder(&token_a, &other_scope)
             .unwrap();
@@ -739,7 +844,7 @@ mod tests {
         let lease = broker
             .mint_on_first_use(
                 &token,
-                request(scope_a, account_id, "https://api.example.com/v1/x"),
+                session_request(scope_a, account_id, "https://api.example.com/v1/x"),
             )
             .unwrap();
         let session_id = lease.session_id();
@@ -759,7 +864,7 @@ mod tests {
         let lease = broker
             .mint_on_first_use(
                 &token,
-                request(scope_a, account_id, "https://api.example.com/v1/x"),
+                session_request(scope_a, account_id, "https://api.example.com/v1/x"),
             )
             .unwrap();
         let session_id = lease.session_id();
@@ -783,7 +888,7 @@ mod tests {
         let lease = broker
             .mint_on_first_use(
                 &token,
-                request(scope_a, account_id, "https://api.example.com/v1/x"),
+                session_request(scope_a, account_id, "https://api.example.com/v1/x"),
             )
             .unwrap();
         let session_id = lease.session_id();
@@ -810,7 +915,7 @@ mod tests {
         let lease = broker
             .mint_on_first_use(
                 &token,
-                request(scope_a, account_id, "https://api.example.com/v1/x"),
+                session_request(scope_a, account_id, "https://api.example.com/v1/x"),
             )
             .unwrap();
         let session_id = lease.session_id();
@@ -842,7 +947,7 @@ mod tests {
         let first_lease = broker
             .mint_on_first_use(
                 &token,
-                request(
+                session_request(
                     scope_a.clone(),
                     account_id.clone(),
                     "https://api.example.com/v1/x",
@@ -852,7 +957,7 @@ mod tests {
         let second_lease = broker
             .mint_on_first_use(
                 &token,
-                request(scope_a, account_id, "https://api.example.com/v1/x"),
+                session_request(scope_a, account_id, "https://api.example.com/v1/x"),
             )
             .unwrap();
         assert_eq!(
@@ -888,7 +993,7 @@ mod tests {
         let lease = broker
             .mint_on_first_use(
                 &token,
-                request(scope_a.clone(), account_id, "https://api.example.com/v1/x"),
+                session_request(scope_a.clone(), account_id, "https://api.example.com/v1/x"),
             )
             .unwrap();
         assert!(
@@ -909,6 +1014,126 @@ mod tests {
         );
     }
 
+    #[test]
+    fn find_session_by_placeholder_iterates_multiple_distinct_sessions_for_same_placeholder() {
+        // A placeholder can legitimately have more than one *distinct*
+        // session bound to it at once (e.g. two different accounts under
+        // one provider) — not just the same session reused, which is all
+        // the refcount tests above exercise. This pins that the
+        // scope-matching loop in `find_session_by_placeholder` actually
+        // walks past a non-matching candidate to find the right one.
+        let broker = Arc::new(InMemoryCredentialBroker::new());
+        let registry = CredentialPlaceholderRegistry::new();
+        let tenant = TenantId::new("tenant-a").unwrap();
+        let provider = ExtensionId::new("google").unwrap();
+        let user_a = UserId::new("user-multi-a").unwrap();
+        let token = registry.get_or_create(&tenant, &user_a, &provider).unwrap();
+
+        let scope_a = sample_scope("tenant-a", "user-multi-a");
+        let scope_b = sample_scope("tenant-a", "user-multi-b");
+        let account_a = CredentialAccountId::new("google_account_a").unwrap();
+        let account_b = CredentialAccountId::new("google_account_b").unwrap();
+        broker
+            .put_account(sample_account(
+                scope_a.clone(),
+                account_a.clone(),
+                SecretHandle::new("key_a").unwrap(),
+            ))
+            .unwrap();
+        broker
+            .put_account(sample_account(
+                scope_b.clone(),
+                account_b.clone(),
+                SecretHandle::new("key_b").unwrap(),
+            ))
+            .unwrap();
+
+        // Two distinct (invocation, capability, account) bindings mint two
+        // distinct sessions, both bound to the same placeholder token.
+        let lease_a = broker
+            .mint_on_first_use(
+                &token,
+                session_request(scope_a.clone(), account_a, "https://api.example.com/v1/x"),
+            )
+            .unwrap();
+        let lease_b = broker
+            .mint_on_first_use(
+                &token,
+                session_request(scope_b.clone(), account_b, "https://api.example.com/v1/x"),
+            )
+            .unwrap();
+        assert_ne!(
+            lease_a.session_id(),
+            lease_b.session_id(),
+            "two different accounts must mint two distinct sessions"
+        );
+
+        // Regardless of HashSet iteration order, querying with a specific
+        // scope must find that scope's session, not the other one bound to
+        // the same placeholder.
+        let found_b = broker
+            .find_session_by_placeholder(&token, &scope_b)
+            .unwrap()
+            .expect("scope_b's session must be found among the placeholder's bound sessions");
+        assert_eq!(found_b.correlation_id(), lease_b.session_id());
+
+        let found_a = broker
+            .find_session_by_placeholder(&token, &scope_a)
+            .unwrap()
+            .expect("scope_a's session must be found among the placeholder's bound sessions");
+        assert_eq!(found_a.correlation_id(), lease_a.session_id());
+
+        lease_a.revoke();
+        lease_b.revoke();
+    }
+
+    #[test]
+    fn mint_on_first_use_remints_when_prior_jit_session_is_expired() {
+        // The jit_minted cache remembers a session id per (invocation,
+        // capability, account) key so re-use doesn't mint twice — but only
+        // while that session is still live. This pins the fallthrough
+        // branch: a cached key whose session has since expired must not be
+        // handed back; a fresh session must be minted instead.
+        let broker = Arc::new(InMemoryCredentialBroker::new());
+        let registry = CredentialPlaceholderRegistry::new();
+        let (token, scope_a, account_id) = seeded(&broker, &registry, "user-remint");
+
+        let mut first_request = session_request(
+            scope_a.clone(),
+            account_id.clone(),
+            "https://api.example.com/v1/x",
+        );
+        first_request.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        let first_lease = broker.mint_on_first_use(&token, first_request).unwrap();
+        let first_session_id = first_lease.session_id();
+        assert!(
+            broker
+                .validate_session(first_session_id, Utc::now())
+                .is_err(),
+            "sanity: the first session must already be expired"
+        );
+
+        // The jit_minted cache entry still points at the now-expired
+        // session; a second call for the identical key must not hand back a
+        // lease for the dead session — it must remint.
+        let second_request = session_request(scope_a, account_id, "https://api.example.com/v1/x");
+        let second_lease = broker.mint_on_first_use(&token, second_request).unwrap();
+        assert_ne!(
+            first_session_id,
+            second_lease.session_id(),
+            "an expired jit-cached session must not be reused"
+        );
+        assert!(
+            broker
+                .validate_session(second_lease.session_id(), Utc::now())
+                .is_ok(),
+            "the reminted session must be live"
+        );
+
+        first_lease.revoke();
+        second_lease.revoke();
+    }
+
     fn seeded(
         broker: &Arc<InMemoryCredentialBroker>,
         registry: &CredentialPlaceholderRegistry,
@@ -924,10 +1149,10 @@ mod tests {
         let token = registry
             .get_or_create(&tenant, &user_id, &provider)
             .unwrap();
-        let caller_scope = scope("tenant-a", user);
+        let caller_scope = sample_scope("tenant-a", user);
         let account_id = CredentialAccountId::new("google_prod").unwrap();
         broker
-            .put_account(account(
+            .put_account(sample_account(
                 caller_scope.clone(),
                 account_id.clone(),
                 SecretHandle::new("google_key").unwrap(),

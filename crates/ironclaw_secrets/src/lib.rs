@@ -1243,6 +1243,14 @@ mod tests {
             .stable_reason(),
             "BackendMisconfigured"
         );
+        assert_eq!(
+            CredentialBrokerError::InvalidPlaceholderToken {
+                value: "bad".to_string(),
+                reason: "must start with 'icsbx_'".to_string(),
+            }
+            .stable_reason(),
+            "MissingCredential"
+        );
     }
 
     #[test]
