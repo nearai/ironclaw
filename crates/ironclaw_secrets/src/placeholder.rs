@@ -393,36 +393,51 @@ impl InMemoryCredentialBroker {
             && self.try_join_live_lease(session_id, chrono::Utc::now())?
         {
             drop(jit_minted);
-            return self.finish_lease(placeholder, session_id);
+            return Ok(self.finish_lease(placeholder, session_id));
         }
 
         let session = self.create_session(request)?;
         let session_id = session.correlation_id();
         jit_minted.insert(key, session_id);
-        // This session_id was just minted and is not yet published to
-        // `sessions_by_placeholder`, and its `jit_minted` slot was just
-        // (re)written under the lock we are still holding, so no concurrent
-        // caller can reference it yet: registering the first lease reference
-        // here can't race a concurrent `release_lease` the way the reuse
-        // path above can.
+        // This session_id's `jit_minted` slot was just (re)written under the
+        // lock we are still holding — not yet published to
+        // `sessions_by_placeholder`, but already published to `jit_minted` —
+        // so no concurrent caller can observe "nothing minted yet" for this
+        // key: registering the first lease reference here can't race a
+        // concurrent `release_lease` the way the reuse path above can.
         self.acquire_lease_refcount(session_id);
         drop(jit_minted);
-        self.finish_lease(placeholder, session_id)
+        Ok(self.finish_lease(placeholder, session_id))
     }
 
-    /// Common tail shared by both `mint_on_first_use` branches: binds
-    /// `session_id` to `placeholder` and hands back the RAII lease.
+    /// Common tail shared by both `mint_on_first_use` branches: hands back
+    /// the RAII lease for `session_id`, binding it to `placeholder` along the
+    /// way.
+    ///
+    /// The lease is constructed *before* the placeholder bind, not after:
+    /// both callers have already taken a reference on `session_id`
+    /// (`acquire_lease_refcount` on the mint path, the increment inside
+    /// `try_join_live_lease` on the reuse path) before reaching this method.
+    /// If the bind step returned early, an already-referenced session with
+    /// no lease ever constructed to drop and release that reference would be
+    /// exactly the standing-grant leak this module's header rules out.
+    /// Building the lease first means any early return still drops it and
+    /// releases the reference through the normal `Drop` path. (Today
+    /// `bind_placeholder_to_session` uses [`lock_or_recover`] and cannot
+    /// itself fail, but this ordering is the correct shape regardless — it
+    /// does not depend on that method staying infallible.)
     fn finish_lease(
         self: &Arc<Self>,
         placeholder: &CredentialPlaceholderToken,
         session_id: CredentialSessionId,
-    ) -> Result<CredentialSessionLease, CredentialBrokerError> {
-        self.bind_placeholder_to_session(placeholder.clone(), session_id)?;
-        Ok(CredentialSessionLease {
+    ) -> CredentialSessionLease {
+        let lease = CredentialSessionLease {
             broker: self.clone(),
             session_id,
             revoked: false,
-        })
+        };
+        self.bind_placeholder_to_session(placeholder.clone(), session_id);
+        lease
     }
 
     /// Attempts to join an existing lease on `session_id`, returning whether
@@ -510,7 +525,7 @@ impl InMemoryCredentialBroker {
         placeholder: &CredentialPlaceholderToken,
         scope: &ironclaw_host_api::ResourceScope,
     ) -> Result<Option<crate::CredentialSession>, CredentialBrokerError> {
-        for session_id in self.placeholder_session_ids(placeholder)? {
+        for session_id in self.placeholder_session_ids(placeholder) {
             match self.validate_session(session_id, chrono::Utc::now()) {
                 Ok(session) if session.scope() == scope => return Ok(Some(session)),
                 Ok(_) => continue,
@@ -619,31 +634,21 @@ impl InMemoryCredentialBroker {
         &self,
         placeholder: CredentialPlaceholderToken,
         session_id: CredentialSessionId,
-    ) -> Result<(), CredentialBrokerError> {
-        self.sessions_by_placeholder
-            .lock()
-            .map_err(|error| CredentialBrokerError::BrokerUnavailable {
-                reason: error.to_string(),
-            })?
+    ) {
+        lock_or_recover(&self.sessions_by_placeholder)
             .entry(placeholder)
             .or_default()
             .insert(session_id);
-        Ok(())
     }
 
     fn placeholder_session_ids(
         &self,
         placeholder: &CredentialPlaceholderToken,
-    ) -> Result<Vec<CredentialSessionId>, CredentialBrokerError> {
-        Ok(self
-            .sessions_by_placeholder
-            .lock()
-            .map_err(|error| CredentialBrokerError::BrokerUnavailable {
-                reason: error.to_string(),
-            })?
+    ) -> Vec<CredentialSessionId> {
+        lock_or_recover(&self.sessions_by_placeholder)
             .get(placeholder)
             .map(|session_ids| session_ids.iter().copied().collect())
-            .unwrap_or_default())
+            .unwrap_or_default()
     }
 }
 
@@ -1216,6 +1221,72 @@ mod tests {
 
         first_lease.revoke();
         second_lease.revoke();
+    }
+
+    #[test]
+    fn finish_lease_recovers_from_poisoned_placeholder_index_without_leaking_session() {
+        // Regression test for the critical leak: `bind_placeholder_to_session`
+        // used to be the one index write in this module that didn't use
+        // `lock_or_recover`, so a poisoned `sessions_by_placeholder` mutex
+        // made it return `Err` — and `finish_lease` used to construct the
+        // `CredentialSessionLease` only *after* that fallible bind, so the
+        // `?` propagated with the session already refcounted by the caller
+        // (`acquire_lease_refcount`) but no lease ever constructed to drop
+        // and release that reference: a standing grant nobody could revoke.
+        //
+        // Both halves of the fix are exercised here: `bind_placeholder_to_session`
+        // now uses `lock_or_recover` (so a poisoned lock is recovered instead
+        // of failing the whole mint), and `finish_lease` constructs the lease
+        // before the bind regardless, so the ordering invariant holds even if
+        // the bind step becomes fallible again in the future. Poisoning the
+        // real mutex and confirming the returned lease still fully revokes
+        // proves there is no leaked live session and no dangling refcount.
+        let broker = Arc::new(InMemoryCredentialBroker::new());
+        let registry = CredentialPlaceholderRegistry::new();
+        let (token, scope_a, account_id) = seeded(&broker, &registry, "user-poison");
+
+        // Poison `sessions_by_placeholder` by panicking while holding its lock.
+        let poison_broker = Arc::clone(&broker);
+        let _ = std::panic::catch_unwind(AssertUnwindSafe(move || {
+            let _guard = poison_broker.sessions_by_placeholder.lock().unwrap();
+            panic!("deliberately poison sessions_by_placeholder for regression test");
+        }));
+
+        let lease = broker
+            .mint_on_first_use(
+                &token,
+                session_request(scope_a.clone(), account_id, "https://api.example.com/v1/x"),
+            )
+            .expect(
+                "mint_on_first_use must recover from a poisoned placeholder index, not fail closed \
+                 with an already-referenced, un-leased session",
+            );
+        let session_id = lease.session_id();
+
+        assert!(
+            broker
+                .find_session_by_placeholder(&token, &scope_a)
+                .unwrap()
+                .is_some(),
+            "recovery from the poisoned lock must still actually bind the session"
+        );
+
+        // Revoking the lease must fully release it: no standing grant left behind.
+        lease.revoke();
+        assert!(
+            matches!(
+                broker.validate_session(session_id, Utc::now()),
+                Err(CredentialBrokerError::UnknownSession { .. })
+            ),
+            "the session must be genuinely revocable, not stranded past lease drop"
+        );
+        assert!(
+            broker
+                .find_session_by_placeholder(&token, &scope_a)
+                .unwrap()
+                .is_none(),
+            "no dangling sessions_by_placeholder entry may survive revoke"
+        );
     }
 
     #[test]
