@@ -23,8 +23,8 @@ use ironclaw_auth::{
 };
 use ironclaw_auth::{RebornAuthContinuationDispatcher, RebornProductAuthServices};
 use ironclaw_host_api::{
-    AgentId, InstallationState, InvocationId, ProductSurfaceCaller, ProductSurfaceError, ProjectId,
-    ResourceScope, SecretHandle, TenantId, UserId,
+    AgentId, InstallationState, InvocationId, LifecyclePublicState, ProductSurfaceCaller,
+    ProductSurfaceError, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
 };
 use ironclaw_product::{
     EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, LifecyclePackageKind, LifecyclePackageRef,
@@ -257,15 +257,10 @@ impl UnusedServices {
                     display_name: (*package_id).to_string(),
                     runtime: "wasm".to_string(),
                     description: "test installed extension".to_string(),
-                    authenticated: false,
-                    active: false,
                     tools: Vec::new(),
-                    needs_setup: true,
-                    has_auth: true,
-                    installation_state: InstallationState::Installed,
+                    installation_state: LifecyclePublicState::SetupNeeded,
                     activation_error: None,
                     version: None,
-                    onboarding_state: None,
                     onboarding: None,
                     auth_accounts: Vec::new(),
                     surfaces: Vec::new(),

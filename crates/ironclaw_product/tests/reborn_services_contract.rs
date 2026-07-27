@@ -33,8 +33,8 @@ use ironclaw_host_api::{
     TerminateHint, ThreadId, ToolVerdict, UserId,
 };
 use ironclaw_host_api::{
-    CapabilitySurfaceKind, InstallationState, ProductSurface, ProductSurfaceCaller,
-    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    CapabilitySurfaceKind, InstallationState, LifecyclePublicState, ProductSurface,
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
     ProductSurfaceValidationCode,
 };
 use ironclaw_product::{
@@ -89,41 +89,40 @@ use ironclaw_product::{
     RebornAutomationSource, RebornAutomationState, RebornChannelConfigField,
     RebornChannelConnectAction, RebornChannelConnectStrategy, RebornCreateProjectRequest,
     RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornExtensionListResponse,
-    RebornExtensionOnboardingState, RebornExtensionSurface, RebornFsListRequest,
-    RebornFsListResponse, RebornFsMountsRequest, RebornFsMountsResponse, RebornFsStatRequest,
-    RebornFsStatResponse, RebornGetProjectRequest, RebornGetRunStateRequest,
-    RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse, RebornListAutomationsResponse,
-    RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
-    RebornListProjectsResponse, RebornListThreadsResponse, RebornLogLevel, RebornLogQueryRequest,
-    RebornLogQueryResponse, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigGetResponse,
-    RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
-    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery, RebornOperatorSetupRequest,
-    RebornOperatorSetupStatus, RebornOperatorStatusCheck, RebornOperatorStatusResponse,
-    RebornOperatorStatusSeverity, RebornOperatorStatusState, RebornOperatorSurfaceStatus,
-    RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornOutboundDeliveryModality,
-    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetDescription,
-    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
-    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
-    RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsStatRequest,
-    RebornProjectFsStatResponse, RebornProjectInfo, RebornProjectMemberInfo,
-    RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole, RebornProjectState,
-    RebornRemoveMemberRequest, RebornRenameAutomationProductRequest, RebornResolveGateResponse,
-    RebornRunArtifact, RebornRunArtifactRequest, RebornServiceLifecycleAction,
-    RebornServiceLifecycleRequest, RebornServiceLifecycleResponse, RebornServiceLifecycleState,
-    RebornServices, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
-    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
-    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, RebornTraceCreditsResponse, RebornUpdateMemberRoleRequest,
-    RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
-    ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW, SKILL_SEARCH_VIEW, SKILLS_VIEW,
-    SetActiveLlmRequest, SkillsProductService, StaticOperatorStatusService,
-    THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW,
-    TRACE_CREDITS_VIEW, TriggerRunThreadScope, UpsertLlmProviderRequest, approval_gate_ref,
-    automation_trigger_thread_metadata_json,
+    RebornExtensionSurface, RebornFsListRequest, RebornFsListResponse, RebornFsMountsRequest,
+    RebornFsMountsResponse, RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest,
+    RebornGetRunStateRequest, RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse,
+    RebornListAutomationsResponse, RebornListMembersRequest, RebornListMembersResponse,
+    RebornListProjectsRequest, RebornListProjectsResponse, RebornListThreadsResponse,
+    RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
+    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnosticSeverity,
+    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
+    RebornOperatorSetupRequest, RebornOperatorSetupStatus, RebornOperatorStatusCheck,
+    RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
+    RebornOperatorSurfaceStatus, RebornOperatorToolCatalog, RebornOperatorToolInfo,
+    RebornOutboundDeliveryModality, RebornOutboundDeliveryTargetCapabilities,
+    RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetId,
+    RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
+    RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
+    RebornOutboundPreferencesResponse, RebornProjectFsListRequest, RebornProjectFsListResponse,
+    RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectInfo,
+    RebornProjectMemberInfo, RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole,
+    RebornProjectState, RebornRemoveMemberRequest, RebornRenameAutomationProductRequest,
+    RebornResolveGateResponse, RebornRunArtifact, RebornRunArtifactRequest,
+    RebornServiceLifecycleAction, RebornServiceLifecycleRequest, RebornServiceLifecycleResponse,
+    RebornServiceLifecycleState, RebornServices, RebornSetOutboundPreferencesRequest,
+    RebornSetupExtensionResponse, RebornSkillContentResponse, RebornSkillInfo,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    RebornSkillTrustLevel, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
+    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW,
+    SKILL_SEARCH_VIEW, SKILLS_VIEW, SetActiveLlmRequest, SkillsProductService,
+    StaticOperatorStatusService, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW,
+    TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, TriggerRunThreadScope, UpsertLlmProviderRequest,
+    approval_gate_ref, automation_trigger_thread_metadata_json,
 };
 use ironclaw_product::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
@@ -5930,8 +5929,8 @@ async fn list_extensions_projects_onboarding_payload_through_reborn_services() {
 
     assert_eq!(extension.tools, vec!["github.read", "github.write"]);
     assert_eq!(
-        extension.onboarding_state,
-        Some(RebornExtensionOnboardingState::SetupRequired)
+        extension.installation_state,
+        LifecyclePublicState::SetupNeeded
     );
     let onboarding = extension.onboarding.as_ref().expect("onboarding payload");
     assert_eq!(
@@ -6038,6 +6037,12 @@ async fn list_extensions_projects_channel_surface_with_directions_and_connection
             phase: InstallationState::Active,
             install_scope: None,
         },
+    }))
+    // The caller has connected this OAuth channel. Without it the extension is
+    // correctly `setup_needed` (that is the unpaired-channel contract), so the
+    // connected signal is what this test's `active` assertion depends on.
+    .with_channel_connection_service(Arc::new(ConnectedChannelConnectionService {
+        connections: std::collections::HashMap::from([("slack".to_string(), true)]),
     }));
 
     let response = query_extensions(&services, caller())
@@ -6071,7 +6076,7 @@ async fn list_extensions_projects_channel_surface_with_directions_and_connection
     // so the frontend never derives a label from the channel id.
     assert_eq!(connection.display_name, "Slack");
     // §6.1 installation-state enum replaces the activation_status string.
-    assert_eq!(info.installation_state, InstallationState::Active);
+    assert_eq!(info.installation_state, LifecyclePublicState::Active);
 }
 
 /// A caller-scoped channel-connection service that reports a fixed set of
@@ -6155,7 +6160,7 @@ async fn list_extensions_golden_wire_multi_surface_extension_freezes_accounts_li
         .expect("multi-surface extension listed");
 
     // §6.1 installation-state enum on the wire (replaces the activation_status string).
-    assert_eq!(info.installation_state, InstallationState::Active);
+    assert_eq!(info.installation_state, LifecyclePublicState::Active);
 
     // §6.4 / ADR 0001 accounts list — the frozen shape, named field for field.
     // A live grant backfills to `connected` (MIG-1); one account per vendor,
@@ -6361,14 +6366,16 @@ async fn list_extensions_surfaces_failed_state_expired_account_and_activation_er
         .find(|extension| extension.package_ref.id.as_str() == "acme")
         .expect("extension listed");
 
-    // (a) The terminal §6.1 `Failed` state projects distinctly — NOT collapsed
-    // to Installed/Active.
+    // (a) An internal activation failure stays a redacted diagnostic attached
+    // to the one caller-visible setup state; it never creates a third public
+    // lifecycle state (overview.md §6.1). The distinguishing signal is
+    // `activation_error` below, not a bespoke wire state.
     assert_eq!(
         info.installation_state,
-        InstallationState::Failed,
-        "a Failed extension must project its own installation_state",
+        LifecyclePublicState::SetupNeeded,
+        "a failed internal activation checkpoint must remain setup_needed",
     );
-    assert_ne!(info.installation_state, InstallationState::Installed);
+    assert_ne!(info.installation_state, LifecyclePublicState::Active);
 
     // (c) The redacted activation error reaches the DTO with its reason (the
     // frontend card renders this slot; it was fed `None` before).

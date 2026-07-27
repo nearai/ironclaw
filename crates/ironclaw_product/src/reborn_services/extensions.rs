@@ -5,10 +5,12 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures::{StreamExt, TryStreamExt, stream};
-use ironclaw_auth::{CredentialAccountStatus, project_auth_account_state};
+use ironclaw_auth::{
+    AuthAccountLastError, AuthAccountState, CredentialAccountStatus, project_auth_account_state,
+};
 use ironclaw_host_api::{
-    CapabilitySurfaceKind, ExtensionId, InstallationState, ProductSurfaceCaller,
-    ProductSurfaceError, ProductSurfaceValidationCode,
+    CapabilitySurfaceKind, ExtensionId, InstallationState, LifecyclePublicState,
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceValidationCode,
 };
 
 use crate::{
@@ -16,9 +18,8 @@ use crate::{
     LifecycleInstalledExtensionSummary, LifecycleProductAction, LifecycleProductContext,
     LifecycleProductPayload, LifecycleProductResponse, LifecycleProductService,
     LifecycleProductSurfaceContext, ProductView, RebornAccountBindingSource, RebornAuthAccount,
-    RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionOnboardingState,
-    RebornExtensionRegistryEntry, RebornExtensionRegistryResponse, RebornExtensionSurface,
-    RebornVendorAuthAccounts,
+    RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionRegistryEntry,
+    RebornExtensionRegistryResponse, RebornExtensionSurface, RebornVendorAuthAccounts,
 };
 
 use super::{
@@ -253,36 +254,12 @@ fn extension_info(
     activation_errors: &HashMap<String, String>,
 ) -> RebornExtensionInfo {
     let phase = installed.phase;
-    let has_auth = !installed.summary.credential_requirements.is_empty();
-    let lifecycle_authenticated = matches!(
-        phase,
-        InstallationState::Active | InstallationState::Configured
-    );
-    let authenticated = match readiness {
-        ExtensionCredentialReadiness::NotRequired => lifecycle_authenticated,
-        ExtensionCredentialReadiness::Configured => true,
-        ExtensionCredentialReadiness::MissingRequired => false,
-        ExtensionCredentialReadiness::Unknown => lifecycle_authenticated,
-    };
     let onboarding =
         extension_onboarding::for_installed_with_credential_status(&installed, readiness);
     let install_scope = installed.install_scope;
     let summary = installed.summary;
     let has_external_channel_surface = has_external_channel_surface(&summary);
     let runtime = summary.runtime_kind.runtime_wire_name().to_string();
-    let channel_unconnected = has_external_channel_surface
-        && connections.get(summary.package_ref.id.as_str()) == Some(&false);
-    // A channel extension the calling user has not personally connected (via
-    // the vendor's OAuth) surfaces as `setup_required` so the WebUI shows the same
-    // Configure affordance as a credential-gated extension. The per-user
-    // connections map only contains channels with that concept; a connected
-    // channel (value `true`) keeps its normal onboarding state, and this is
-    // intentionally distinct from the admin Channels tab's `pairing_required`.
-    let onboarding_state = if channel_unconnected {
-        Some(RebornExtensionOnboardingState::SetupRequired)
-    } else {
-        onboarding.state
-    };
     let connected = if has_external_channel_surface {
         connections.get(summary.package_ref.id.as_str()).copied()
     } else {
@@ -295,7 +272,30 @@ fn extension_info(
     let activation_error = activation_errors
         .get(summary.package_ref.id.as_str())
         .cloned();
-    let auth_accounts = vendor_auth_accounts(&summary, connected, account_state);
+    // A channel extension the calling user has not personally connected — via
+    // the vendor's OAuth or a pairing/proof-code binding — is not ready for
+    // that caller, whatever the host record says. Absence of a connection
+    // signal is NOT consent: a pairing/OAuth channel with no binding row reads
+    // as unconnected (`connected != Some(true)`), because the generic
+    // connections map is populated per discovered channel and a missing entry
+    // means "no proof this caller connected", not "connected".
+    let requires_personal_account = channel_requires_personal_account(&summary);
+    let requires_personal_binding = channel_requires_personal_binding(&summary);
+    let projected_account = if requires_personal_account || requires_personal_binding {
+        projected_channel_account(
+            connected,
+            requires_personal_account.then_some(account_state).flatten(),
+        )
+    } else {
+        None
+    };
+    let channel_unconnected = has_external_channel_surface
+        && ((requires_personal_binding && connected != Some(true))
+            || (requires_personal_account
+                && projected_account
+                    .as_ref()
+                    .is_some_and(|(state, _)| *state != AuthAccountState::Connected)));
+    let auth_accounts = vendor_auth_accounts(&summary, projected_account);
     let resolved_account_id = auth_accounts
         .first()
         .and_then(|vendor| vendor.accounts.first())
@@ -306,22 +306,15 @@ fn extension_info(
         display_name: summary.name,
         runtime,
         description: summary.description,
-        authenticated: authenticated && !channel_unconnected,
-        active: phase == InstallationState::Active,
         tools: summary.visible_capability_ids,
-        needs_setup: channel_unconnected
-            || readiness == ExtensionCredentialReadiness::MissingRequired
-            || matches!(
-                phase,
-                InstallationState::Installed
-                    | InstallationState::Configured
-                    | InstallationState::Failed
-            ),
-        has_auth,
-        installation_state: wire_installation_state(phase, readiness),
+        installation_state: caller_public_state(
+            phase,
+            readiness,
+            channel_unconnected,
+            activation_error.is_some(),
+        ),
         activation_error,
         version: Some(summary.version),
-        onboarding_state,
         onboarding: onboarding.onboarding,
         auth_accounts,
         surfaces,
@@ -371,22 +364,61 @@ fn has_external_channel_surface(summary: &LifecycleExtensionSummary) -> bool {
         .contains(&CapabilitySurfaceKind::Channel)
 }
 
-/// The wire installation state (§6.1): the composition-projected state,
-/// refined to `Configured` when the caller's required credentials are present
-/// but the extension is only `Installed` (not yet active). The composition
-/// projection already yields `Active` / `Disabled` / `Failed`; this adds the
-/// derived `Configured` distinction the product layer can prove from
-/// credential readiness.
-fn wire_installation_state(
-    projected: InstallationState,
+/// Does this channel bind a personal product-auth *account* (an OAuth grant or
+/// a required personal credential)? Only those recipes have an account whose
+/// §6.3 state can say `expired` / `refresh-failed`.
+fn channel_requires_personal_account(summary: &LifecycleExtensionSummary) -> bool {
+    summary
+        .credential_requirements
+        .iter()
+        .any(|requirement| requirement.required)
+        || summary
+            .channel_connection
+            .as_ref()
+            .is_some_and(|connection| {
+                connection.strategy == crate::RebornChannelConnectStrategy::OAuth
+            })
+}
+
+/// Does this channel bind a personal *identity binding* (pairing proof code or
+/// OAuth)? Host-generated-code channels such as a proof-code pairing lane have
+/// no product-auth account at all — their readiness is the binding alone, so
+/// they must not be judged by the account reader (which has no row for them).
+fn channel_requires_personal_binding(summary: &LifecycleExtensionSummary) -> bool {
+    summary
+        .channel_connection
+        .as_ref()
+        .is_some_and(|connection| {
+            matches!(
+                connection.strategy,
+                crate::RebornChannelConnectStrategy::WebGeneratedCode
+                    | crate::RebornChannelConnectStrategy::OAuth
+            )
+        })
+}
+
+/// The caller-scoped public lifecycle verdict (§6.1).
+///
+/// The host checkpoint is only one input. An extension is `active` for *this*
+/// caller only when the host is serving it AND the caller's required
+/// credentials are present AND the caller has connected/paired every channel
+/// surface that needs it AND activation did not fail. Anything else is
+/// `setup_needed`, which is what drives the Configure/Connect affordance.
+///
+/// Fails closed: every unproven input yields `setup_needed`, never `active`.
+fn caller_public_state(
+    phase: InstallationState,
     readiness: ExtensionCredentialReadiness,
-) -> InstallationState {
-    if projected == InstallationState::Installed
-        && readiness == ExtensionCredentialReadiness::Configured
-    {
-        InstallationState::Configured
-    } else {
-        projected
+    channel_unconnected: bool,
+    activation_failed: bool,
+) -> LifecyclePublicState {
+    let caller_ready = readiness != ExtensionCredentialReadiness::MissingRequired
+        && !channel_unconnected
+        && !activation_failed;
+    match LifecyclePublicState::from_host_checkpoint(phase) {
+        LifecyclePublicState::Active if caller_ready => LifecyclePublicState::Active,
+        LifecyclePublicState::Uninstalled => LifecyclePublicState::Uninstalled,
+        _ => LifecyclePublicState::SetupNeeded,
     }
 }
 
@@ -403,8 +435,9 @@ fn channel_auth_vendor(summary: &LifecycleExtensionSummary) -> String {
 
 /// Per-vendor accounts list for the extensions wire (overview §6.4, ADR 0001).
 /// One vendor, at most one account today; the list shape is frozen so the
-/// post-P7 multi-account follow-up lands without a wire break. `None`
-/// connection signal (no per-caller connection concept) yields no vendor entry.
+/// post-P7 multi-account follow-up lands without a wire break. When neither
+/// the connection backfill nor a durable account/flow signal exists, there is
+/// no per-caller account concept and therefore no vendor entry.
 ///
 /// The account's state is the shared §6.3 machine, projected by
 /// [`project_auth_account_state`] from the caller's durable auth-account signal
@@ -415,20 +448,12 @@ fn channel_auth_vendor(summary: &LifecycleExtensionSummary) -> String {
 /// and projects `connected`.
 fn vendor_auth_accounts(
     summary: &LifecycleExtensionSummary,
-    connected: Option<bool>,
-    account_state: Option<&ChannelAuthAccountState>,
+    projected_account: Option<(AuthAccountState, Option<AuthAccountLastError>)>,
 ) -> Vec<RebornVendorAuthAccounts> {
-    let Some(is_connected) = connected else {
+    let Some((state, last_error)) = projected_account else {
         return Vec::new();
     };
     let vendor = channel_auth_vendor(summary);
-    // Prefer the service's durable credential-account status; fall back to the
-    // connection bool (a live grant backfills to `configured` → `connected`).
-    let account_status = account_state
-        .and_then(|state| state.account_status)
-        .or(is_connected.then_some(CredentialAccountStatus::Configured));
-    let active_flow_status = account_state.and_then(|state| state.active_flow_status);
-    let (state, last_error) = project_auth_account_state(account_status, active_flow_status);
     vec![RebornVendorAuthAccounts {
         vendor: vendor.clone(),
         // One account per vendor today; its id is the vendor id until the
@@ -441,6 +466,33 @@ fn vendor_auth_accounts(
             is_default: true,
         }],
     }]
+}
+
+/// Project the caller's channel account onto the shared §6.3 state machine.
+/// `None` when there is no per-caller account concept at all (neither a
+/// connection signal nor a durable account/flow row) — that is distinct from a
+/// known-disconnected account and must not fabricate a vendor entry.
+fn projected_channel_account(
+    connected: Option<bool>,
+    account_state: Option<&ChannelAuthAccountState>,
+) -> Option<(AuthAccountState, Option<AuthAccountLastError>)> {
+    if connected.is_none() && account_state.is_none() {
+        return None;
+    }
+    let account_status = account_state
+        .and_then(|state| state.account_status)
+        .or_else(|| {
+            // MIG-1 backfill: a live grant with no richer durable status reads
+            // as a `configured` account. Only applied when the service carried
+            // no account row at all, so a real `expired` status always wins.
+            (account_state.is_none() && connected == Some(true))
+                .then_some(CredentialAccountStatus::Configured)
+        });
+    let active_flow_status = account_state.and_then(|state| state.active_flow_status);
+    Some(project_auth_account_state(
+        account_status,
+        active_flow_status,
+    ))
 }
 
 #[cfg(test)]
@@ -460,12 +512,12 @@ mod tests {
     use super::*;
     use crate::reborn_services::StaticChannelConnectionService;
     use crate::{
-        ChannelConnectionService, ExtensionCredentialStatusRequest,
+        ChannelConnectionRequirement, ChannelConnectionService, ExtensionCredentialStatusRequest,
         ExtensionCredentialSubmitRequest, LifecycleExtensionCredentialRequirement,
         LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding,
         LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
         LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
-        LifecycleSearchExtensionSummary, RebornExtensionOnboardingState,
+        LifecycleSearchExtensionSummary, RebornChannelConnectStrategy,
     };
     use ironclaw_host_api::{
         ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
@@ -539,15 +591,10 @@ mod tests {
         .expect("list extensions");
         let extension = response.extensions.first().expect("one extension");
 
-        assert!(extension.active, "lifecycle activation remains visible");
-        assert!(
-            !extension.authenticated,
-            "credential readiness must be evaluated for the current caller"
-        );
-        assert!(extension.needs_setup);
         assert_eq!(
-            extension.onboarding_state,
-            Some(RebornExtensionOnboardingState::SetupRequired)
+            extension.installation_state,
+            LifecyclePublicState::SetupNeeded,
+            "credential readiness must be evaluated for the current caller"
         );
 
         let requests = credentials.status_requests.lock().expect("lock");
@@ -582,13 +629,11 @@ mod tests {
         .expect("list extensions");
         let extension = response.extensions.first().expect("one extension");
 
-        assert!(extension.active);
-        assert!(
-            extension.authenticated,
-            "retryable status outages should not be projected as missing credentials"
+        assert_eq!(
+            extension.installation_state,
+            LifecyclePublicState::Active,
+            "retryable status outages should not be projected as missing credentials",
         );
-        assert!(!extension.needs_setup);
-        assert!(extension.onboarding_state.is_none());
     }
 
     #[tokio::test]
@@ -613,11 +658,7 @@ mod tests {
         .expect("list extensions");
         let extension = response.extensions.first().expect("one extension");
 
-        assert!(extension.active);
-        assert!(extension.authenticated);
-        assert!(!extension.needs_setup);
-        assert!(!extension.has_auth);
-        assert!(extension.onboarding_state.is_none());
+        assert_eq!(extension.installation_state, LifecyclePublicState::Active);
         assert!(extension.onboarding.is_none());
         assert!(
             credentials.status_requests.lock().expect("lock").is_empty(),
@@ -743,42 +784,101 @@ mod tests {
             extension.surfaces
         );
 
-        let mut unconnected_summary = summary_with_onboarding();
-        unconnected_summary.runtime_kind = LifecycleExtensionRuntimeKind::FirstParty;
-        unconnected_summary.surface_kinds = vec![CapabilitySurfaceKind::Channel];
-        unconnected_summary.credential_requirements = Vec::new();
-        let unconnected = list_extensions(
-            Arc::new(ListingService {
-                extension: LifecycleInstalledExtensionSummary {
-                    summary: unconnected_summary,
-                    phase: InstallationState::Active,
-                    install_scope: None,
-                },
-            }),
-            None,
-            channel_connections(&[("fixture", false)]),
-            caller(),
-        )
-        .await
-        .expect("list extensions");
-        assert_eq!(
-            unconnected
-                .extensions
-                .first()
-                .expect("one")
-                .onboarding_state,
-            Some(RebornExtensionOnboardingState::SetupRequired),
-            "an unconnected channel must surface as setup_required for the Configure flow",
-        );
-        let unconnected_extension = unconnected.extensions.first().expect("one");
-        assert!(
-            !unconnected_extension.authenticated,
-            "an unconnected channel must not look authenticated for the caller"
-        );
-        assert!(
-            unconnected_extension.needs_setup,
-            "an unconnected channel must keep the setup affordance visible"
-        );
+        // Both personal-connection recipes: the vendor-OAuth channel and the
+        // host-generated proof-code (pairing) channel Telegram uses. Each takes
+        // a different branch of the `channel_unconnected` predicate, and both
+        // must keep the caller in `setup_needed` until they connect.
+        for strategy in [
+            RebornChannelConnectStrategy::OAuth,
+            RebornChannelConnectStrategy::WebGeneratedCode,
+        ] {
+            let mut unconnected_summary = summary_with_onboarding();
+            unconnected_summary.runtime_kind = LifecycleExtensionRuntimeKind::FirstParty;
+            unconnected_summary.surface_kinds = vec![CapabilitySurfaceKind::Channel];
+            unconnected_summary.credential_requirements = Vec::new();
+            unconnected_summary.channel_connection = Some(test_channel_connection(strategy));
+            let unconnected = list_extensions(
+                Arc::new(ListingService {
+                    extension: LifecycleInstalledExtensionSummary {
+                        summary: unconnected_summary,
+                        // The host is serving the extension: only the caller's
+                        // missing personal connection separates this from ready.
+                        phase: InstallationState::Active,
+                        install_scope: None,
+                    },
+                }),
+                None,
+                channel_connections(&[("fixture", false)]),
+                caller(),
+            )
+            .await
+            .expect("list extensions");
+            let unconnected_extension = unconnected.extensions.first().expect("one");
+            assert_eq!(
+                unconnected_extension.installation_state,
+                LifecyclePublicState::SetupNeeded,
+                "an unconnected {strategy:?} channel must keep the setup affordance visible",
+            );
+            // The Extensions card reads exactly one field — `installation_state`
+            // (`extension-actions.ts::extensionLifecycleState`, pinned by
+            // `assets.rs::extension_configuration_uses_only_the_public_lifecycle_states`).
+            // Asserted on the serialized wire form because that is the contract
+            // the browser actually consumes. #6616 regressed this to `active`,
+            // which rendered an unpaired Telegram card as ready to use.
+            assert_eq!(
+                serde_json::to_value(unconnected_extension)
+                    .expect("extension info serializes")
+                    .get("installation_state")
+                    .and_then(serde_json::Value::as_str),
+                Some("setup_needed"),
+                "an unpaired {strategy:?} channel extension must not be presented \
+                 to the user as ready to use",
+            );
+
+            // ...and once the caller connects, the same extension goes active.
+            let mut connected_summary = summary_with_onboarding();
+            connected_summary.runtime_kind = LifecycleExtensionRuntimeKind::FirstParty;
+            connected_summary.surface_kinds = vec![CapabilitySurfaceKind::Channel];
+            connected_summary.credential_requirements = Vec::new();
+            connected_summary.channel_connection = Some(test_channel_connection(strategy));
+            let connected = list_extensions(
+                Arc::new(ListingService {
+                    extension: LifecycleInstalledExtensionSummary {
+                        summary: connected_summary,
+                        phase: InstallationState::Active,
+                        install_scope: None,
+                    },
+                }),
+                None,
+                channel_connections(&[("fixture", true)]),
+                caller(),
+            )
+            .await
+            .expect("list extensions");
+            assert_eq!(
+                connected
+                    .extensions
+                    .first()
+                    .expect("one")
+                    .installation_state,
+                LifecyclePublicState::Active,
+                "a connected {strategy:?} channel must project active",
+            );
+        }
+    }
+
+    fn test_channel_connection(
+        strategy: RebornChannelConnectStrategy,
+    ) -> ChannelConnectionRequirement {
+        ChannelConnectionRequirement {
+            channel: "fixture".to_string(),
+            display_name: "Fixture Messenger".to_string(),
+            strategy,
+            instructions: "Connect Fixture Messenger.".to_string(),
+            input_placeholder: String::new(),
+            submit_label: "Connect".to_string(),
+            error_message: "Connection failed.".to_string(),
+        }
     }
 
     #[tokio::test]

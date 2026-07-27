@@ -10,7 +10,10 @@ use std::fmt;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::Value;
 
-use crate::{CapabilitySurfaceKind, ChannelPresentation, HostApiError, InstallationState};
+use crate::{
+    CapabilitySurfaceKind, ChannelPresentation, HostApiError, InstallationState,
+    LifecyclePublicState,
+};
 
 pub const LIFECYCLE_ID_MAX_BYTES: usize = 256;
 const LIFECYCLE_REF_MAX_BYTES: usize = 512;
@@ -532,12 +535,10 @@ pub fn project_public_lifecycle_states(value: &mut Value) {
 }
 
 fn public_lifecycle_state(state: &str) -> Option<&'static str> {
-    match state {
-        "active" => Some("active"),
-        "removed" => Some("uninstalled"),
-        "installed" | "configured" | "disabled" | "failed" | "unsupported" => Some("setup_needed"),
-        _ => None,
-    }
+    // One definition of the checkpoint→public collapse: `LifecyclePublicState`.
+    // This string form exists only to re-project already-serialized payloads.
+    InstallationState::from_wire(state)
+        .map(|state| LifecyclePublicState::from_host_checkpoint(state).as_str())
 }
 
 impl LifecycleProductResponse {
