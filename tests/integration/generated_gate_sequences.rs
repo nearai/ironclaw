@@ -72,17 +72,14 @@ enum GateAction {
     Approve,
     Deny,
     Cancel,
-    /// Resolve the same gate a second time with the same ref — the shape a
-    /// double-clicked approve button produces.
-    ApproveAgain,
 }
 
-const ALPHABET: [GateAction; 4] = [
-    GateAction::Approve,
-    GateAction::Deny,
-    GateAction::Cancel,
-    GateAction::ApproveAgain,
-];
+// Deliberately three actions, not four. An earlier `ApproveAgain` variant
+// meant to model a double-clicked approve button, but it dispatched the
+// identical call with the identical gate ref -- so `[Approve, Approve]`
+// already produces that exact shape, and the variant only multiplied the
+// sequence space. Depth 2 drops from 20 sequences to 12.
+const ALPHABET: [GateAction; 3] = [GateAction::Approve, GateAction::Deny, GateAction::Cancel];
 
 /// Every ordering of `ALPHABET` up to `max_len`, shortest first.
 fn sequences(max_len: usize) -> Vec<Vec<GateAction>> {
@@ -109,19 +106,31 @@ struct Observed {
 
 impl Observed {
     fn record(&mut self, status: TurnStatus, sequence: &[GateAction], step: usize) {
-        if let Some(previous) = self.statuses.last().copied() {
-            // (1) terminal is absorbing.
-            assert!(
-                !previous.is_terminal() || status.is_terminal(),
-                "{sequence:?} step {step}: {previous:?} -> {status:?} left a terminal state"
-            );
-        }
+        // (2) is checked BEFORE (1) on purpose. Equality below subsumes it,
+        // so leaving (1) first made this assertion unreachable and its
+        // self-test failed on the other rule's message -- an assertion that
+        // can never fire is worse than no assertion, because it reads as
+        // coverage.
+        //
         // (2) cancellation is not silently overridden by a later completion.
         if self.statuses.contains(&TurnStatus::Cancelled) {
             assert_ne!(
                 status,
                 TurnStatus::Completed,
                 "{sequence:?} step {step}: a cancelled run reported Completed"
+            );
+        }
+        if let Some(previous) = self.statuses.last().copied() {
+            // (1) terminal is absorbing -- meaning the status stops changing,
+            // not merely that it stays somewhere in the terminal set. The
+            // weaker `status.is_terminal()` form accepted `Completed -> Failed`
+            // and `Failed -> Cancelled`, which are as illegal as returning to
+            // an active state: all four statuses are terminal, and a run that
+            // finished does not finish differently later.
+            assert!(
+                !previous.is_terminal() || status == previous,
+                "{sequence:?} step {step}: {previous:?} -> {status:?} changed \
+                 after reaching a terminal state"
             );
         }
         self.statuses.push(status);
@@ -175,7 +184,7 @@ async fn run_sequence(sequence: &[GateAction]) -> usize {
         // allowed to be an error. What must never happen is the run coming
         // back to life, which `record` checks below.
         match action {
-            GateAction::Approve | GateAction::ApproveAgain => {
+            GateAction::Approve => {
                 let _ = h.approve_gate(run_id, &gate_ref).await;
             }
             GateAction::Deny => {
@@ -199,15 +208,19 @@ async fn run_sequence(sequence: &[GateAction]) -> usize {
         .wait_for_terminal(run_id)
         .await
         .unwrap_or_else(|err| panic!("{sequence:?} never reached a terminal state: {err:?}"));
-    assert!(
-        final_state.status.is_terminal(),
-        "{sequence:?} settled on {:?}",
-        final_state.status
-    );
+    // Through `record`, not asserted directly. This is the status the
+    // invariants most need to see: a run cancelled mid-sequence that settles
+    // `Completed` afterwards -- the late-arriving resume -- is exactly what
+    // invariant (2) exists for, and it used to reach this point untouched
+    // because the checks live in `record`.
+    //
+    // Asserting `is_terminal()` here would be tautological: `wait_for_terminal`
+    // only returns on a terminal status.
+    observed.record(final_state.status, sequence, sequence.len());
 
     // (4) no duplicate confirmed effect. The gated capability writes a file;
     // resolving the same gate twice must not write it twice. This is the
-    // invariant the ApproveAgain action exists to attack, and status alone
+    // invariant a repeated approve attacks, and status alone
     // cannot express it — a double dispatch still ends Completed.
     // Counted by RESULTS, not invocations: the gated attempt that raised the
     // gate is itself recorded as an invocation, so a single approve shows two
@@ -227,7 +240,7 @@ async fn run_sequence(sequence: &[GateAction]) -> usize {
     // A sequence that never approves must not perform the effect at all.
     let approved = sequence
         .iter()
-        .any(|action| matches!(action, GateAction::Approve | GateAction::ApproveAgain));
+        .any(|action| matches!(action, GateAction::Approve));
     if !approved {
         assert_eq!(
             effects, 0,
@@ -254,11 +267,16 @@ fn sequence_depth() -> usize {
             let depth: usize = raw.trim().parse().unwrap_or_else(|err| {
                 panic!("{SEQUENCE_DEPTH_ENV}={raw:?} is not a number: {err}")
             });
+            // `sequences` accumulates every level, so depth n is
+            // sum(len^1..=len^n), not len^n. The old message named a count the
+            // enumerator never produces.
+            let sequences_at_depth =
+                |n: u32| -> usize { (1..=n).map(|level| ALPHABET.len().pow(level)).sum() };
             assert!(
                 (1..=4).contains(&depth),
                 "{SEQUENCE_DEPTH_ENV}={depth} is out of range; depth 0 would \
-                 test nothing and above 4 is {} sequences",
-                ALPHABET.len().pow(5)
+                 test nothing and depth 5 is already {} sequences",
+                sequences_at_depth(5)
             );
             depth
         }
@@ -316,7 +334,7 @@ mod invariant_checker {
     }
 
     #[test]
-    #[should_panic(expected = "left a terminal state")]
+    #[should_panic(expected = "changed after reaching a terminal state")]
     fn rejects_a_terminal_run_becoming_active_again() {
         observed_with(&[TurnStatus::Cancelled, TurnStatus::Running]);
     }
@@ -326,9 +344,20 @@ mod invariant_checker {
     /// is the thing that fires. Pinned so a future split into a separate
     /// assertion does not quietly create an unreachable one.
     #[test]
-    #[should_panic(expected = "left a terminal state")]
+    #[should_panic(expected = "changed after reaching a terminal state")]
     fn rejects_a_finished_run_returning_to_a_gate() {
         observed_with(&[TurnStatus::Completed, TurnStatus::BlockedApproval]);
+    }
+
+    /// The case the earlier `status.is_terminal()` form accepted.
+    ///
+    /// `Completed -> Failed` keeps the run inside the terminal set, so the
+    /// weaker invariant passed it. A run that finished does not finish
+    /// differently later, and this is the regression test for that.
+    #[test]
+    #[should_panic(expected = "changed after reaching a terminal state")]
+    fn rejects_one_terminal_state_becoming_another() {
+        observed_with(&[TurnStatus::Completed, TurnStatus::Failed]);
     }
 
     #[test]
@@ -436,7 +465,7 @@ async fn generated_actions_on_one_actor_never_disturb_another() {
 
         // Act on A only.
         match action {
-            GateAction::Approve | GateAction::ApproveAgain => {
+            GateAction::Approve => {
                 let _ = a.approve_gate(run_a, &gate_a).await;
             }
             GateAction::Deny => {
@@ -532,7 +561,7 @@ async fn concurrent_runs_resolve_independently() {
         );
 
         match action {
-            GateAction::Approve | GateAction::ApproveAgain => {
+            GateAction::Approve => {
                 let _ = first.approve_gate(run_one, &gate_one).await;
             }
             GateAction::Deny => {

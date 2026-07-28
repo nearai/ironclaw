@@ -1734,9 +1734,13 @@ mod ingress_properties {
             &install(),
             &trigger_policy(),
         );
+        // Asserting only "not UnauthenticatedPayload" would be satisfied by
+        // BodyTooLarge, or by any other parse error -- including the size
+        // rejection this test exists to rule out. Pin the success instead.
         assert!(
-            !matches!(outcome, Err(PayloadParseError::UnauthenticatedPayload)),
-            "a large body must still be judged on content, not rejected as unauthenticated"
+            outcome.is_ok(),
+            "a large body must still be judged on content, not rejected on \
+             size or authentication; got {outcome:?}"
         );
     }
 }

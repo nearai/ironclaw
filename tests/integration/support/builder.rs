@@ -1251,9 +1251,6 @@ impl RebornIntegrationHarness {
         Err(format!("capability {capability_id:?} was not invoked; saw {seen:?}").into())
     }
 
-    /// Assert the named capability was invoked exactly `expected` times through
-    /// the real capability path. Uses the same per-thread delta as
-    /// [`Self::assert_tool_invoked`].
     /// How many times `capability_id` was dispatched through the real
     /// capability path since this thread's baseline.
     ///
@@ -1270,6 +1267,9 @@ impl RebornIntegrationHarness {
             .count())
     }
 
+    /// Assert the named capability was invoked exactly `expected` times through
+    /// the real capability path. Uses the same per-thread delta as
+    /// [`Self::assert_tool_invoked`].
     pub async fn assert_tool_invocation_count(
         &self,
         capability_id: &str,
@@ -1328,14 +1328,6 @@ impl RebornIntegrationHarness {
         .into())
     }
 
-    /// S2 seam: assert the named capability produced EXACTLY `expected`
-    /// recorded RESULTS (`captured_capability_results`) — the proof that a
-    /// gate resume dispatched the gated capability's real execution once,
-    /// not zero (lost gate) or twice (double-execution on resume). Reads the
-    /// result-write recorder, NOT `invocations()`: a gated call is recorded
-    /// as an invocation attempt before the gate parks the run (no result is
-    /// written yet), so `invocations()` legitimately counts 2 for any
-    /// gate-then-resume flow — that is not a double-execution signal.
     /// How many recorded RESULTS `capability_id` produced.
     ///
     /// Distinct from `tool_invocation_count`, and the distinction matters for
@@ -1352,6 +1344,14 @@ impl RebornIntegrationHarness {
             .count())
     }
 
+    /// S2 seam: assert the named capability produced EXACTLY `expected`
+    /// recorded RESULTS (`captured_capability_results`) — the proof that a
+    /// gate resume dispatched the gated capability's real execution once,
+    /// not zero (lost gate) or twice (double-execution on resume). Reads the
+    /// result-write recorder, NOT `invocations()`: a gated call is recorded
+    /// as an invocation attempt before the gate parks the run (no result is
+    /// written yet), so `invocations()` legitimately counts 2 for any
+    /// gate-then-resume flow — that is not a double-execution signal.
     pub async fn assert_capability_result_count(
         &self,
         capability_id: &str,

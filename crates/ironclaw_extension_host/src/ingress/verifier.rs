@@ -374,6 +374,14 @@ header = "X-Vendor-Secret-Token"
         }
     }
 
+    /// Length of the signatures `sign_acme` produces: `v0=` plus a SHA-256
+    /// digest as 64 hex characters.
+    ///
+    /// Prefix-truncation properties derive their range from this, so a
+    /// forged signature sharing any prefix length is generated -- not just
+    /// the short ones a round-number bound happens to cover.
+    pub(super) const SIGNATURE_LEN: usize = 3 + 64;
+
     pub(super) fn sign_acme(secret: &[u8], timestamp: &str, body: &[u8]) -> String {
         let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("hmac key");
         mac.update(format!("v0:{timestamp}:").as_bytes());
@@ -877,7 +885,7 @@ signed_payload = [ { body = true } ]
 /// to say anything about the shapes nobody thought to write down.
 #[cfg(test)]
 mod verifier_properties {
-    use super::tests::{NOW, acme_recipe, candidate, headers, sign_acme};
+    use super::tests::{NOW, SIGNATURE_LEN, acme_recipe, candidate, headers, sign_acme};
     use super::*;
     use proptest::prelude::*;
 
@@ -981,10 +989,20 @@ mod verifier_properties {
         #[test]
         fn a_signature_matching_only_a_prefix_never_verifies(
             body in proptest::collection::vec(any::<u8>(), 0..128),
-            keep in 1usize..40,
+            keep in 1usize..SIGNATURE_LEN,
         ) {
             let timestamp = NOW.to_string();
             let real = sign_acme(SECRET, &timestamp, &body);
+            // The bound is the signature's own length, not a round number.
+            // `keep in 1..40` left prefixes 40..67 ungenerated, so a
+            // comparison truncated anywhere in that range would authenticate a
+            // forged signature while this property still passed -- the exact
+            // failure it exists to catch.
+            assert_eq!(
+                real.len(),
+                SIGNATURE_LEN,
+                "the prefix range is derived from this length; update both together"
+            );
             prop_assume!(keep < real.len());
 
             // Same leading `keep` characters, different tail.
