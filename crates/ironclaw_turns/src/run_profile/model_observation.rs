@@ -1,7 +1,5 @@
-use ironclaw_host_api::{DispatchInputIssueCode, HostRemediation};
+use ironclaw_host_api::{DispatchInputIssueCode, FailureKind, HostRemediation};
 use serde::{Deserialize, Serialize};
-
-use super::host::CapabilityFailureKind;
 const MODEL_OBSERVATION_SUMMARY_MAX_BYTES: usize = 512;
 const MODEL_OBSERVATION_ARTIFACTS_MAX: usize = 16;
 const MODEL_OBSERVATION_REPAIRS_MAX: usize = 16;
@@ -102,7 +100,7 @@ pub enum ToolObservationDetail {
         issues: Vec<CapabilityInputIssue>,
     },
     GenericFailure {
-        failure_kind: CapabilityFailureKind,
+        failure_kind: FailureKind,
         /// Bounded, secret-scrubbed raw cause shown to the model alongside the
         /// fixed-template summary. Validated leniently — path and payload
         /// delimiters are allowed; only NUL/control chars and length are
@@ -478,7 +476,7 @@ mod tests {
             status: ToolObservationStatus::Error,
             summary: "Capability failed with missing_runtime.".to_string(),
             detail: ToolObservationDetail::GenericFailure {
-                failure_kind: CapabilityFailureKind::MissingRuntime,
+                failure_kind: FailureKind::MissingRuntime,
                 detail: Some(path.to_string()),
             },
             artifacts: Vec::new(),
@@ -514,7 +512,21 @@ mod tests {
         assert!(matches!(
             detail,
             ToolObservationDetail::GenericFailure {
-                failure_kind: CapabilityFailureKind::Backend,
+                failure_kind: FailureKind::Backend,
+                detail: None
+            }
+        ));
+        // A retired coarse tag decodes through `from_tag`'s historical alias.
+        let aliased = serde_json::json!({
+            "kind": "generic_failure",
+            "failure_kind": "invalid_input"
+        });
+        let detail: ToolObservationDetail =
+            serde_json::from_value(aliased).expect("aliased legacy tag deserializes");
+        assert!(matches!(
+            detail,
+            ToolObservationDetail::GenericFailure {
+                failure_kind: FailureKind::InputEncode,
                 detail: None
             }
         ));

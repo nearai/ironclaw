@@ -37,8 +37,8 @@ use ironclaw_host_runtime::FirstPartyCapabilityError;
 use ironclaw_reborn_config::HostRemediationText;
 use ironclaw_threads::{ToolResultReferenceEnvelope, ToolResultSafeSummary};
 use ironclaw_turns::run_profile::{
-    CapabilityFailureDetail, CapabilityFailureKind, ModelVisibleToolObservation, ObservationTrust,
-    ToolObservationDetail, ToolObservationStatus, resolution,
+    CapabilityFailureDetail, ModelVisibleToolObservation, ObservationTrust, ToolObservationDetail,
+    ToolObservationStatus, resolution,
 };
 
 /// The exact string a degraded remediation collapses to. Asserted ABSENT
@@ -52,7 +52,7 @@ fn placeholder() -> String {
 /// reaches the verdict.
 fn text_through_host_api_hop(detail: CapabilityFailureDetail) -> Option<String> {
     match resolution::failed(
-        CapabilityFailureKind::Backend,
+        ironclaw_host_api::FailureKind::Backend,
         "tool failed".to_string(),
         Some(detail),
     ) {
@@ -75,7 +75,7 @@ fn persists_to_thread_history(text: &str, trust: ObservationTrust) -> Result<(),
         status: ToolObservationStatus::Error,
         summary: "the tool call failed".to_string(),
         detail: ToolObservationDetail::GenericFailure {
-            failure_kind: CapabilityFailureKind::Backend,
+            failure_kind: ironclaw_host_api::FailureKind::Backend,
             detail: Some(text.to_string()),
         },
         artifacts: Vec::new(),

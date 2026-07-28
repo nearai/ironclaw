@@ -12,12 +12,12 @@ use ironclaw_approvals::{
 use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStorePort as _};
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext,
-    ExtensionId, GrantConstraints, MountView, NetworkPolicy, NetworkTargetPattern, Principal,
-    ResourceEstimate, ResourceScope, RunId, RuntimeKind, ThreadId, TrustClass, UserId,
+    ExtensionId, FailureKind, GrantConstraints, MountView, NetworkPolicy, NetworkTargetPattern,
+    Principal, ResourceEstimate, ResourceScope, RunId, RuntimeKind, ThreadId, TrustClass, UserId,
 };
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, ECHO_CAPABILITY_ID,
-    RuntimeApprovalGate, RuntimeCapabilityOutcome, RuntimeFailureKind, SHELL_CAPABILITY_ID,
+    RuntimeApprovalGate, RuntimeCapabilityOutcome, SHELL_CAPABILITY_ID,
 };
 use ironclaw_run_state::{ApprovalRequestStorePort as _, ApprovalStatus};
 
@@ -818,7 +818,7 @@ async fn local_dev_denied_shell_approval_does_not_issue_resume_lease() {
     let RuntimeCapabilityOutcome::Failed(failure) = resumed else {
         panic!("denied approval must not resume successfully, got {resumed:?}");
     };
-    assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
+    assert_eq!(failure.kind, FailureKind::Authorization); // safety: test-only assertion.
     assert!(
         runtime_surfaces
             .capability_leases_for_test()

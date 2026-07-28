@@ -277,10 +277,11 @@ async fn reborn_inflight_model_cancelled_preserves_interrupted_unexpectedly() {
     harness.shutdown().await;
 }
 
-/// The first run reaches the capability stage and the capability host returns a
-/// permanent invocation error. The runner must still fail the run with a
-/// retryable capability-stage category, preserve the checkpoint, and allow a
-/// retry to resume to a final answer.
+/// The first run reaches the capability stage and the capability host returns
+/// a terminal host fault (`Unavailable` — caller-shaped port errors now
+/// recover in-loop by fate instead of ending the run). The runner must still
+/// fail the run with a retryable capability-stage category, preserve the
+/// checkpoint, and allow a retry to resume to a final answer.
 #[tokio::test]
 async fn reborn_capability_failure_is_retryable_and_retry_resumes_to_completion() {
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([

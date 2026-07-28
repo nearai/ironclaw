@@ -3,8 +3,8 @@
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, HostApiError, ProviderToolName,
-    Resolution, ResolutionBatch, RuntimeKind,
+    ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, FailureKind, HostApiError,
+    ProviderToolName, Resolution, ResolutionBatch, RuntimeKind,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -450,7 +450,7 @@ pub struct CapabilityResultMessage {
 /// Loop-internal working vocabulary, no longer a wire/producer DTO.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityFailure {
-    pub error_kind: CapabilityFailureKind,
+    pub error_kind: FailureKind,
     pub safe_summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<CapabilityFailureDetail>,
@@ -512,128 +512,6 @@ impl<'de> Deserialize<'de> for CapabilityDeniedReasonKind {
         let value = String::deserialize(deserializer)?;
         match value.as_str() {
             "empty_surface" => Ok(Self::EmptySurface),
-            _ => Self::unknown(value).map_err(serde::de::Error::custom),
-        }
-    }
-}
-
-// Deliberately NOT `#[non_exhaustive]`: the `Unknown(CapabilityFailureKindValue)`
-// variant is the forward-compat / open-set escape hatch (a newer producer's
-// unrecognized wire string deserializes into `Unknown`), and the manual
-// `Serialize`/`Deserialize` impls below route every value through `as_str()` /
-// that variant. Leaving the attribute on would force callers — notably the
-// recovery classifier `capability_error_class` — to keep a wildcard `_ =>` arm,
-// which silently buckets any newly-added *named* variant (e.g. a future
-// `QuotaExceeded`) into a run-aborting class. Without the attribute, those
-// classifiers match exhaustively, so a new named variant fails to compile until
-// it is deliberately classified. See
-// `docs/plans/2026-06-28-reborn-error-recoverability-audit.md` §6.1.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum CapabilityFailureKind {
-    Authorization,
-    Backend,
-    Cancelled,
-    Dispatcher,
-    GateDeclined,
-    InvalidInput,
-    InvalidOutput,
-    MissingRuntime,
-    Network,
-    OperationFailed,
-    OutputTooLarge,
-    PolicyDenied,
-    Process,
-    Resource,
-    Transient,
-    Unavailable,
-    Internal,
-    Permanent,
-    Unknown(CapabilityFailureKindValue),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct CapabilityFailureKindValue(String);
-
-impl CapabilityFailureKindValue {
-    pub fn new(value: impl Into<String>) -> Result<Self, String> {
-        validate_loop_safe_identifier(value.into(), "capability failure kind", 128).map(Self)
-    }
-
-    pub fn as_str(&self) -> &str {
-        self.0.as_str()
-    }
-}
-
-impl CapabilityFailureKind {
-    pub fn unknown(value: impl Into<String>) -> Result<Self, String> {
-        CapabilityFailureKindValue::new(value).map(Self::Unknown)
-    }
-
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::Authorization => "authorization",
-            Self::Backend => "backend",
-            Self::Cancelled => "cancelled",
-            Self::Dispatcher => "dispatcher",
-            Self::GateDeclined => "gate_declined",
-            Self::InvalidInput => "invalid_input",
-            Self::InvalidOutput => "invalid_output",
-            Self::MissingRuntime => "missing_runtime",
-            Self::Network => "network",
-            Self::OperationFailed => "operation_failed",
-            Self::OutputTooLarge => "output_too_large",
-            Self::PolicyDenied => "policy_denied",
-            Self::Process => "process",
-            Self::Resource => "resource",
-            Self::Transient => "transient",
-            Self::Unavailable => "unavailable",
-            Self::Internal => "internal",
-            Self::Permanent => "permanent",
-            Self::Unknown(value) => value.as_str(),
-        }
-    }
-}
-
-impl std::fmt::Display for CapabilityFailureKind {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-impl Serialize for CapabilityFailureKind {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for CapabilityFailureKind {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        match value.as_str() {
-            "authorization" => Ok(Self::Authorization),
-            "backend" => Ok(Self::Backend),
-            "cancelled" => Ok(Self::Cancelled),
-            "dispatcher" => Ok(Self::Dispatcher),
-            "gate_declined" => Ok(Self::GateDeclined),
-            "invalid_input" => Ok(Self::InvalidInput),
-            "invalid_output" => Ok(Self::InvalidOutput),
-            "missing_runtime" => Ok(Self::MissingRuntime),
-            "network" => Ok(Self::Network),
-            "operation_failed" => Ok(Self::OperationFailed),
-            "output_too_large" => Ok(Self::OutputTooLarge),
-            "policy_denied" => Ok(Self::PolicyDenied),
-            "process" => Ok(Self::Process),
-            "resource" => Ok(Self::Resource),
-            "transient" => Ok(Self::Transient),
-            "unavailable" => Ok(Self::Unavailable),
-            "internal" => Ok(Self::Internal),
-            "permanent" => Ok(Self::Permanent),
             _ => Self::unknown(value).map_err(serde::de::Error::custom),
         }
     }
