@@ -19,20 +19,20 @@ use ironclaw_turns::{
     InMemoryRunProfileResolver, InMemoryTurnEventSink, LifecyclePublicationErrorPort,
     LifecyclePublishingTurnStateStore, LoopBlockedKind, LoopCheckpointStateRef, LoopExitMapping,
     LoopGateRef, ProductTurnContext, ReplyTargetBindingRef, ResolvedRunProfile, ResumeTurnRequest,
-    RetryTurnRequest, RetryTurnResponse, RunOriginAdapter, RunProfileId, RunProfileRequest,
-    RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
-    SanitizedCancelReason, SanitizedFailure, SourceBindingRef, StaticTurnAdmissionLimitProvider,
-    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
-    TurnAdmissionAxisKind, TurnAdmissionBucketKind, TurnAdmissionBucketScope,
-    TurnAdmissionCapacityDenial, TurnAdmissionClass, TurnAdmissionPolicy, TurnCapacityResource,
-    TurnCheckpointId, TurnCommittedEventObserver, TurnCoordinator, TurnError, TurnErrorCategory,
-    TurnEventKind, TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
-    TurnEventProjectionService, TurnEventSink, TurnIdempotencyErrorReplay,
-    TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind, TurnIdempotencyRecord,
-    TurnIdempotencyReplay, TurnLeaseToken, TurnLifecycleEvent, TurnLifecycleEventBus,
-    TurnLockVersion, TurnOriginKind, TurnOwner, TurnRunId, TurnRunProfile, TurnRunState,
-    TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnRunnerId, TurnScope,
-    TurnSpawnTreePort, TurnSpawnTreeStateStore, TurnStateRowStore, TurnStateStore,
+    ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse, RunOriginAdapter, RunProfileId,
+    RunProfileRequest, RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver,
+    RunProfileVersion, SanitizedCancelReason, SanitizedFailure, SourceBindingRef,
+    StaticTurnAdmissionLimitProvider, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse,
+    ThreadBusy, TurnActor, TurnAdmissionAxisKind, TurnAdmissionBucketKind,
+    TurnAdmissionBucketScope, TurnAdmissionCapacityDenial, TurnAdmissionClass, TurnAdmissionPolicy,
+    TurnCapacityResource, TurnCheckpointId, TurnCommittedEventObserver, TurnCoordinator, TurnError,
+    TurnErrorCategory, TurnEventKind, TurnEventProjectionCursor, TurnEventProjectionError,
+    TurnEventProjectionRequest, TurnEventProjectionService, TurnEventSink,
+    TurnIdempotencyErrorReplay, TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind,
+    TurnIdempotencyRecord, TurnIdempotencyReplay, TurnLeaseToken, TurnLifecycleEvent,
+    TurnLifecycleEventBus, TurnLockVersion, TurnOriginKind, TurnOwner, TurnRunId, TurnRunProfile,
+    TurnRunState, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnRunnerId,
+    TurnScope, TurnSpawnTreePort, TurnSpawnTreeStateStore, TurnStateRowStore, TurnStateStore,
     TurnStateStoreLimits, TurnStatus, TurnSurfaceType,
     events::EventCursor,
     run_profile::{LoopGateKind, LoopModelRouteSnapshot, LoopModelUsage},
@@ -868,6 +868,7 @@ async fn blocked_dependent_run_can_resume_and_cancel_directly() {
 
     let resumed = coordinator
         .resume_turn(ResumeTurnRequest {
+            attestation: None,
             scope: scope("thread-dependent"),
             actor: actor(),
             run_id,
@@ -1042,6 +1043,7 @@ async fn blocked_run_persists_to_sink_and_rehydrates_across_restart() {
     // Resuming the approval gate moves the run back to Queued, durably.
     let resumed = coordinator
         .resume_turn(ResumeTurnRequest {
+            attestation: None,
             scope: scope("thread-gate"),
             actor: actor(),
             run_id,
@@ -1158,6 +1160,7 @@ async fn block_resume_complete_reports_cumulative_usage_without_double_counting(
     // Resume the approval gate; the run re-queues for a fresh claim.
     coordinator
         .resume_turn(ResumeTurnRequest {
+            attestation: None,
             scope: scope("thread-usage"),
             actor: actor(),
             run_id,
@@ -1279,6 +1282,7 @@ async fn rehydrated_blocked_run_persists_terminal_state_after_resume() {
     // Resume the recovered gate, then claim + complete it.
     restored
         .resume_turn(ResumeTurnRequest {
+            attestation: None,
             scope: scope("thread-recover"),
             actor: actor(),
             run_id,
@@ -1376,6 +1380,7 @@ async fn rehydrated_resumed_run_persists_terminal_state() {
         .unwrap();
     origin
         .resume_turn(ResumeTurnRequest {
+            attestation: None,
             scope: scope("thread-resumed-recover"),
             actor: actor(),
             run_id,
@@ -1574,6 +1579,7 @@ async fn default_turn_coordinator_dedupes_idempotency_replay_events_by_cursor() 
     .await
     .unwrap();
     let resume = ResumeTurnRequest {
+        attestation: None,
         scope: scope("thread-event-replay-resume"),
         actor: actor(),
         run_id: resume_run_id,
@@ -2316,6 +2322,7 @@ async fn lifecycle_publishing_store_propagates_required_observer_error_on_resume
     notifier.clear();
     let error = coordinator
         .resume_turn(ResumeTurnRequest {
+            attestation: None,
             scope: scope("thread-required-resume-error"),
             actor: actor(),
             run_id,
@@ -2518,6 +2525,7 @@ async fn turn_lifecycle_projection_replays_submit_block_resume_complete_without_
         .unwrap();
     coordinator
         .resume_turn(ResumeTurnRequest {
+            attestation: None,
             scope: request.scope.clone(),
             actor: actor(),
             run_id,
@@ -3156,6 +3164,7 @@ async fn resume_turn_wakes_runner_for_same_run_after_requeue() {
 
     let resumed = coordinator
         .resume_turn(ResumeTurnRequest {
+            attestation: None,
             scope: scope("thread-a"),
             actor: actor(),
             run_id,
@@ -3283,6 +3292,7 @@ async fn resume_turn_ignores_wake_notification_panic_after_requeue() {
 
     let resumed = coordinator
         .resume_turn(ResumeTurnRequest {
+            attestation: None,
             scope: scope("thread-a"),
             actor: actor(),
             run_id,
@@ -4524,6 +4534,7 @@ async fn blocked_resume_then_recovery_failure_releases_admission_reservation() {
 
     let resumed = coordinator
         .resume_turn(ResumeTurnRequest {
+            attestation: None,
             scope: scope("thread-a"),
             actor: actor(),
             run_id,
@@ -4835,6 +4846,7 @@ async fn resume_updates_persisted_run_binding_refs_and_replay_envelope() {
         .await
         .unwrap();
     let resume_request = ResumeTurnRequest {
+        attestation: None,
         scope: scope("thread-a"),
         actor: actor(),
         run_id,
@@ -5184,6 +5196,7 @@ async fn idempotency_persistence_snapshot_retains_each_operation_kind_capacity()
         .unwrap();
     coordinator
         .resume_turn(ResumeTurnRequest {
+            attestation: None,
             scope: scope("thread-a"),
             actor: actor(),
             run_id,
@@ -5281,6 +5294,7 @@ async fn idempotency_replay_helpers_require_matching_operation_kind() {
         .unwrap();
     coordinator
         .resume_turn(ResumeTurnRequest {
+            attestation: None,
             scope: scope("thread-a"),
             actor: actor(),
             run_id,
@@ -6091,6 +6105,7 @@ async fn blocked_run_persists_checkpoint_and_keeps_same_thread_lock_until_resume
     assert!(matches!(busy, TurnError::ThreadBusy(_)));
 
     let resume_request = ResumeTurnRequest {
+        attestation: None,
         scope: scope("thread-a"),
         actor: actor(),
         run_id,
@@ -6107,7 +6122,22 @@ async fn blocked_run_persists_checkpoint_and_keeps_same_thread_lock_until_resume
         .unwrap();
     let event_count_after_resume = store.events().await.unwrap().len();
     let duplicate = coordinator.resume_turn(resume_request).await.unwrap();
-    assert_eq!(duplicate, resumed);
+    // Idempotent replay returns the same outcome, but MUST be distinguishable
+    // from the fresh transition: a caller that drives a one-shot side effect off
+    // a successful resume (the attested signer continuation) gates on
+    // `replayed == false` so it cannot fire twice.
+    assert!(!resumed.replayed, "first resume is a fresh transition");
+    assert!(
+        duplicate.replayed,
+        "duplicate resume must be marked replayed"
+    );
+    assert_eq!(
+        ResumeTurnResponse {
+            replayed: false,
+            ..duplicate.clone()
+        },
+        resumed
+    );
     assert_eq!(
         store.events().await.unwrap().len(),
         event_count_after_resume
@@ -6152,6 +6182,7 @@ async fn resume_turn_rejects_unexpected_blocked_status_without_requeueing_run() 
 
     let err = coordinator
         .resume_turn(ResumeTurnRequest {
+            attestation: None,
             scope: scope("thread-a"),
             actor: actor(),
             run_id,
@@ -6220,6 +6251,7 @@ async fn resume_turn_from_foreign_actor_is_denied_without_requeueing_run() {
 
     let err = coordinator
         .resume_turn(ResumeTurnRequest {
+            attestation: None,
             scope: scope("thread-a"),
             actor: TurnActor::new(UserId::new("user2").unwrap()),
             run_id,
@@ -6363,6 +6395,7 @@ async fn resume_turn_with_wrong_gate_resolution_ref_is_invalid_request() {
 
     let err = coordinator
         .resume_turn(ResumeTurnRequest {
+            attestation: None,
             scope: scope("thread-a"),
             actor: actor(),
             run_id,
@@ -6801,6 +6834,7 @@ async fn any_blocked_gate_resume_does_not_resume_dependent_run_gate() {
 
     let err = coordinator
         .resume_turn(ResumeTurnRequest {
+            attestation: None,
             scope: scope("thread-dependent-resume"),
             actor: actor(),
             run_id,
@@ -7438,12 +7472,15 @@ fn event_from_state_for_recording(state: &TurnRunState) -> TurnLifecycleEvent {
         | TurnStatus::BlockedAuth
         | TurnStatus::BlockedResource
         | TurnStatus::BlockedDependentRun
-        | TurnStatus::BlockedExternalTool => TurnEventKind::Blocked,
+        | TurnStatus::BlockedExternalTool
+        | TurnStatus::BlockedAttested => TurnEventKind::Blocked,
         TurnStatus::Completed => TurnEventKind::Completed,
         TurnStatus::Cancelled => TurnEventKind::Cancelled,
         TurnStatus::Failed => TurnEventKind::Failed,
         TurnStatus::RecoveryRequired => TurnEventKind::RecoveryRequired,
-        TurnStatus::Queued | TurnStatus::CancelRequested => TurnEventKind::RunnerHeartbeat,
+        TurnStatus::AttestedResolved | TurnStatus::Queued | TurnStatus::CancelRequested => {
+            TurnEventKind::RunnerHeartbeat
+        }
     };
     let sanitized_reason = state
         .failure
@@ -8280,6 +8317,7 @@ async fn resume_turn_resume_disposition_is_persisted_and_visible_on_claim() {
     let denied_disposition = ironclaw_turns::GateResumeDisposition::Denied;
     coordinator
         .resume_turn(ResumeTurnRequest {
+            attestation: None,
             scope: scope("thread-auth-deny-persist"),
             actor: actor(),
             run_id,
@@ -8331,6 +8369,7 @@ async fn resume_turn_resume_disposition_is_persisted_and_visible_on_claim() {
     // Resume again, this time with no disposition.
     coordinator
         .resume_turn(ResumeTurnRequest {
+            attestation: None,
             scope: scope("thread-auth-deny-persist"),
             actor: actor(),
             run_id,

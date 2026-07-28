@@ -536,6 +536,7 @@ impl TurnCoordinator for FakeTurnCoordinator {
     ) -> Result<ResumeTurnResponse, TurnError> {
         self.resumptions.lock().expect("lock").push(request);
         Ok(ResumeTurnResponse {
+            replayed: false,
             run_id: TurnRunId::new(),
             status: TurnStatus::Queued,
             event_cursor: EventCursor(11),
@@ -755,6 +756,7 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
         Ok(match decision {
             ApprovalInteractionDecision::ApproveOnce | ApprovalInteractionDecision::AlwaysAllow => {
                 ResolveApprovalInteractionResponse::Approved(ResumeTurnResponse {
+                    replayed: false,
                     run_id,
                     status: TurnStatus::Queued,
                     event_cursor: EventCursor(19),
@@ -762,6 +764,7 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
             }
             ApprovalInteractionDecision::Deny => {
                 ResolveApprovalInteractionResponse::Resumed(ResumeTurnResponse {
+                    replayed: false,
                     run_id,
                     status: TurnStatus::Queued,
                     event_cursor: EventCursor(23),
@@ -890,6 +893,7 @@ impl AuthInteractionService for RecordingAuthInteractionService {
             AuthInteractionDecision::CredentialProvided { .. }
             | AuthInteractionDecision::CallbackCompleted { .. } => {
                 ResolveAuthInteractionResponse::Resumed(ResumeTurnResponse {
+                    replayed: false,
                     run_id,
                     status: TurnStatus::Queued,
                     event_cursor: EventCursor(29),
@@ -5400,6 +5404,7 @@ impl AuthInteractionService for DeniedResumedAuthInteractionService {
         let run_id = request.run_id_hint.expect("webui passes run_id");
         Ok(ResolveAuthInteractionResponse::Resumed(
             ResumeTurnResponse {
+                replayed: false,
                 run_id,
                 status: TurnStatus::Queued,
                 event_cursor: EventCursor(37),

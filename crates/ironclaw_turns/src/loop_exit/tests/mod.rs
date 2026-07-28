@@ -1080,6 +1080,8 @@ fn terminal_statuses_release_lock_and_non_terminal_keep_it() {
             TurnStatus::BlockedApproval => (false, true),
             TurnStatus::BlockedAuth => (false, true),
             TurnStatus::BlockedResource => (false, true),
+            TurnStatus::BlockedAttested => (false, true),
+            TurnStatus::AttestedResolved => (false, true),
             TurnStatus::BlockedDependentRun => (false, true),
             TurnStatus::BlockedExternalTool => (false, true),
             TurnStatus::CancelRequested => (false, true),

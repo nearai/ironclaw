@@ -7,6 +7,7 @@
 #![warn(unreachable_pub)]
 
 mod admission;
+mod attested_resume;
 mod block_persistence;
 mod checkpoint_state;
 mod coordinator;
@@ -35,6 +36,7 @@ pub use admission::{
     TurnAdmissionCapacityDenial, TurnAdmissionClass, TurnAdmissionLimit,
     TurnAdmissionLimitProvider, TurnAdmissionLimitUnavailable, TurnAdmissionReservationRecord,
 };
+pub use attested_resume::{AttestedResumePort, AttestedResumeRejection, AttestedResumeRequest};
 pub use block_persistence::TurnStateBlockPersistence;
 pub use checkpoint_state::{
     CheckpointStateMatchMetadata, CheckpointStateRecord, CheckpointStateStorePort,
@@ -60,10 +62,10 @@ pub use external_tool_catalog::{
     InMemoryExternalToolCatalog, PendingExternalCall,
 };
 pub use ids::{
-    AcceptedMessageRef, CapabilityActivityId, GateRef, IdempotencyKey, LoopDiagnosticRef,
-    LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef, ReplyTargetBindingRef, RunProfileId,
-    RunProfileRequest, RunProfileVersion, SourceBindingRef, TurnCheckpointId, TurnId,
-    TurnLeaseToken, TurnRunId, TurnRunnerId,
+    AcceptedMessageRef, ApprovedTxHashRef, AttestationClaimRef, CapabilityActivityId, GateRef,
+    IdempotencyKey, LoopDiagnosticRef, LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef,
+    ReplyTargetBindingRef, RunProfileId, RunProfileRequest, RunProfileVersion, SourceBindingRef,
+    TurnCheckpointId, TurnId, TurnLeaseToken, TurnRunId, TurnRunnerId,
 };
 pub use ironclaw_host_api::{
     ModelInvalidOutputDetailReason, SanitizedCancelReason, SanitizedFailure, TurnOwner,

@@ -222,6 +222,11 @@ pub struct TurnRunRecord {
     pub model_usage: Option<crate::run_profile::LoopModelUsage>,
     pub checkpoint_id: Option<TurnCheckpointId>,
     pub gate_ref: Option<GateRef>,
+    /// Opaque approved-tx-hash binding for a run parked on an attested-signing
+    /// gate. Persisted at raise so the crypto-free resume can hand it to the
+    /// injected verifier. Serde-additive: absent on every non-attested row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_tx_hash: Option<crate::ApprovedTxHashRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_activity_id: Option<CapabilityActivityId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -571,6 +576,7 @@ mod tests {
         TurnRunRecord {
             run_id: TurnRunId::new(),
             turn_id: crate::TurnId::new(),
+            expected_tx_hash: None,
             scope,
             accepted_message_ref: AcceptedMessageRef::new("accepted-store-test").unwrap(),
             source_binding_ref: SourceBindingRef::new("source-store-test").unwrap(),
