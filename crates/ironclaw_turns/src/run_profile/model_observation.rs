@@ -9,7 +9,7 @@ pub const MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION: u32 = 1;
 
 /// Maximum size of a model-visible free-text diagnostic. Larger than the
 /// summary cap because the diagnostic carries raw (secret-scrubbed) error text.
-pub const MODEL_OBSERVATION_DETAIL_MAX_BYTES: usize = 4096;
+pub const MODEL_OBSERVATION_DETAIL_MAX_BYTES: usize = ironclaw_host_api::MODEL_DIAGNOSTIC_MAX_BYTES;
 
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,8 +30,14 @@ pub enum CapabilityFailureDetail {
     /// `String` (unlike its siblings) precisely so PROVENANCE travels with the
     /// value: a producer cannot land text on this arm without going through the
     /// host-only constructor and its credential-value guard. Untrusted
-    /// capability output stays on [`Self::Diagnostic`] and keeps collapsing to
-    /// the safe-summary placeholder.
+    /// capability output stays on [`Self::Diagnostic`], which now **preserves**
+    /// the scrubbed cause (paths, schema refs, codes) instead of collapsing to
+    /// the safe-summary placeholder — it fails closed to the fixed
+    /// `ModelDiagnostic::unavailable()` sentence only when a credential-shaped
+    /// value reaches the typed boundary. The distinction this arm exists for is
+    /// therefore PROVENANCE, not redaction strength: host-authored remediation
+    /// must survive intact even when it names a `config set` key or console URL,
+    /// which the untrusted arm's scrub would still rewrite.
     HostRemediation {
         text: HostRemediation,
     },

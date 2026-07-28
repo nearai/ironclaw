@@ -1041,39 +1041,56 @@ async fn malformed_spawn_subagent_input_is_model_repairable_through_the_gateway(
         );
     }
 
-    // Control: the same armed registration error with a WELL-FORMED payload
-    // must not reject. Without this, the assertions above would pass on a port
-    // double that rejects unconditionally — proving error routing, not that the
-    // missing `mission` field is what triggers the rejection.
-    let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
-        id: "call_1".to_string(),
-        name: "builtin__spawn_subagent".to_string(),
-        arguments: serde_json::json!({"flavor": "explorer", "mission": "survey the repo"}),
-        reasoning: None,
-        signature: None,
-        arguments_parse_error: None,
-    }]));
-    let gateway = LlmProviderModelGateway::with_provider_identity(
-        STATIC_PROVIDER_ID,
-        Arc::clone(&provider),
-        LlmModelProfilePolicy::new()
-            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
-    );
-    let capabilities = Arc::new(
-        GatewayCapabilityPort::with_spawn_subagent_surface()
-            .with_provider_tool_registration_error(AgentLoopHostErrorKind::InvalidInvocation),
-    );
+    // Control: the same armed errors with a WELL-FORMED payload must not
+    // reject — at BOTH stages. Without this, either double could reject
+    // unconditionally and every assertion above would still pass, proving
+    // error routing rather than malformed-input handling.
+    for (stage, port) in [
+        (
+            "validation",
+            GatewayCapabilityPort::with_spawn_subagent_surface()
+                .with_provider_tool_validation_error(AgentLoopHostErrorKind::InvalidInvocation),
+        ),
+        (
+            "registration",
+            GatewayCapabilityPort::with_spawn_subagent_surface()
+                .with_provider_tool_registration_error(AgentLoopHostErrorKind::InvalidInvocation),
+        ),
+    ] {
+        let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
+            id: "call_1".to_string(),
+            name: "builtin__spawn_subagent".to_string(),
+            arguments: serde_json::json!({"flavor": "explorer", "mission": "survey the repo"}),
+            reasoning: None,
+            signature: None,
+            arguments_parse_error: None,
+        }]));
+        let gateway = LlmProviderModelGateway::with_provider_identity(
+            STATIC_PROVIDER_ID,
+            Arc::clone(&provider),
+            LlmModelProfilePolicy::new()
+                .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+        );
+        let capabilities = Arc::new(port);
 
-    gateway
-        .stream_model_with_capabilities(model_request(interactive_model()), capabilities.clone())
-        .await
-        .expect("a well-formed spawn payload must register even with the error armed");
+        gateway
+            .stream_model_with_capabilities(
+                model_request(interactive_model()),
+                capabilities.clone(),
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{stage}: a well-formed spawn payload must pass with the error armed: {error:?}"
+                )
+            });
 
-    assert_eq!(
-        capabilities.registered.lock().unwrap().len(),
-        1,
-        "a well-formed spawn payload must reach registration"
-    );
+        assert_eq!(
+            capabilities.registered.lock().unwrap().len(),
+            1,
+            "{stage}: a well-formed spawn payload must reach registration"
+        );
+    }
 }
 
 fn repair_request_messages(
@@ -2376,6 +2393,47 @@ async fn gateway_rejects_unknown_finish_reason_provider_responses() {
         .unwrap_err();
 
     assert_eq!(error.kind, HostManagedModelErrorKind::Unavailable);
+}
+
+/// An explicitly-failed provider response must not dispatch its tool calls.
+///
+/// Gemini reports `MALFORMED_FUNCTION_CALL` / `UNEXPECTED_TOOL_CALL` — both
+/// `FinishReason::Unknown` — on responses that *do* carry function-call parts.
+/// `ironclaw_llm` refuses to refine those into `ToolUse`; this pins the other
+/// half of the contract: when a response reaches the gateway as `Unknown`, the
+/// parsed tool calls are never registered as capability activity, however
+/// well-formed and advertised they look.
+#[tokio::test]
+async fn gateway_does_not_register_capability_calls_for_unknown_finish_reason() {
+    let provider = Arc::new(ToolAwareProvider::tool_calls_with_finish_reason(
+        vec![ToolCall {
+            id: "call_malformed".to_string(),
+            name: "demo__echo".to_string(),
+            arguments: serde_json::json!({"message":"hello"}),
+            reasoning: None,
+            signature: None,
+            arguments_parse_error: None,
+        }],
+        FinishReason::Unknown,
+    ));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_tool_surface());
+
+    let error = gateway
+        .stream_model_with_capabilities(model_request(interactive_model()), capabilities.clone())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, HostManagedModelErrorKind::Unavailable);
+    assert!(
+        capabilities.registered.lock().unwrap().is_empty(),
+        "an explicitly-failed provider response must not dispatch its tool calls"
+    );
 }
 
 #[tokio::test]
@@ -4177,6 +4235,23 @@ impl ToolAwareProvider {
         })
     }
 
+    fn tool_calls_with_finish_reason(
+        tool_calls: Vec<ToolCall>,
+        finish_reason: FinishReason,
+    ) -> Self {
+        Self::tool_response(ToolCompletionResponse {
+            content: None,
+            tool_calls,
+            input_tokens: 1,
+            output_tokens: 1,
+            finish_reason,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            reasoning: None,
+            reasoning_details: None,
+        })
+    }
+
     fn tool_stop_reply(content: &str) -> Self {
         Self::tool_response(ToolCompletionResponse {
             content: Some(content.to_string()),
@@ -4427,7 +4502,14 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
         &self,
         tool_call: &ProviderToolCall,
     ) -> Result<(), ironclaw_turns::run_profile::AgentLoopHostError> {
-        if let Some(kind) = self.validation_error {
+        // Payload-sensitive for the same reason as the registration stage
+        // below: an unconditional rejection would prove that an injected error
+        // maps correctly, while saying nothing about the malformed input the
+        // spawn test is named for. A well-formed `mission` must pass.
+        if let Some(kind) = self
+            .validation_error
+            .filter(|_| tool_call.arguments.get("mission").is_none())
+        {
             return Err(ironclaw_turns::run_profile::AgentLoopHostError::new(
                 kind,
                 "provider tool output was structurally invalid",
