@@ -1,7 +1,5 @@
-// arch-exempt: large_file, bounded retry timing stays with row transaction helpers, plan #6696
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
 
@@ -28,7 +26,6 @@ use keys::{
 
 const MATERIALIZED_PREFIX: &str = "/processes/materialized";
 const MATERIALIZED_KIND: &str = "process_materialized";
-static TRANSACTION_RETRY_TICKET: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "row_type", rename_all = "snake_case")]
@@ -91,17 +88,7 @@ pub(super) fn retryable_transaction_error(error: &ironclaw_filesystem::Filesyste
 }
 
 pub(super) async fn retry_transaction(attempt: usize) {
-    let ticket = TRANSACTION_RETRY_TICKET.fetch_add(1, Ordering::Relaxed);
-    tokio::time::sleep(retry_transaction_delay(attempt, ticket)).await;
-}
-
-fn retry_transaction_delay(attempt: usize, ticket: u64) -> Duration {
-    let base_ms = 1_u64 << attempt.min(6);
-    // Concurrent writers used to wake in lockstep and repeatedly invalidate
-    // one another's CAS snapshots. A process-wide ticket supplies bounded
-    // jitter without a random-number dependency or unbounded delay.
-    let jitter_ms = ticket % base_ms;
-    Duration::from_millis(base_ms + jitter_ms)
+    tokio::time::sleep(Duration::from_millis(1_u64 << attempt.min(6))).await;
 }
 
 pub(super) async fn ensure_indexes<F>(

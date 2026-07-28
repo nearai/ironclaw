@@ -2198,7 +2198,7 @@ pub(crate) async fn start_postgres_testcontainer() -> HarnessResult<(
     ))
 }
 
-const POSTGRES_TEST_POOL_MAX_SIZE: usize = 16;
+const POSTGRES_TEST_POOL_MAX_SIZE: usize = 64;
 
 pub(crate) fn postgres_pool(database_url: &str) -> HarnessResult<deadpool_postgres::Pool> {
     let config: tokio_postgres::Config = database_url
@@ -2207,8 +2207,8 @@ pub(crate) fn postgres_pool(database_url: &str) -> HarnessResult<deadpool_postgr
     let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
     deadpool_postgres::Pool::builder(manager)
         // A full integration group runs the product, scheduler, process, and
-        // extension stores over this one production filesystem. Four
-        // connections can leave ingress waiting behind background journal
+        // extension stores over this one production filesystem. A small pool
+        // can leave ingress waiting behind background journal and checkpoint
         // work until the product timeout fires on instrumented CI runners.
         .max_size(POSTGRES_TEST_POOL_MAX_SIZE)
         .build()
