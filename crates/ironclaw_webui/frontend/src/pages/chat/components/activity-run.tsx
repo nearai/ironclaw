@@ -2,7 +2,10 @@ import { Icon } from "../../../design-system/icons";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import { summarizeActivity } from "../lib/activity-summary";
-import type { ChatMessage } from "../lib/message-types";
+import {
+  messageBelongsToActiveRun,
+  type ChatMessage,
+} from "../lib/message-types";
 import { MarkdownRenderer } from "./markdown-renderer";
 import { ToolActivity } from "./tool-activity";
 
@@ -72,8 +75,7 @@ export function ActivityRun({ activity, activeRunId = null }: ActivityRunProps) 
 function ActivityItem({ item, activeRunId }: ActivityItemProps) {
   if (item.role === "thinking") {
     const isStreaming =
-      typeof activeRunId === "string" &&
-      item.turnRunId === activeRunId;
+      messageBelongsToActiveRun(item, activeRunId);
     return (
       <ReasoningItem
         content={item.content}

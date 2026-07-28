@@ -23,6 +23,7 @@ import { useChat } from "./hooks/useChat";
 import { channelConnectionDisplayName } from "../../lib/channel-connection-events";
 import { channelConnectionFromGate } from "./lib/gates";
 import { NEW_DRAFT_KEY } from "./lib/draft-store";
+import { messageBelongsToActiveRun } from "./lib/message-types";
 import { buildRuntimeContext } from "./lib/runtime-context";
 import { buildScopedLogsPath } from "../logs/lib/logs-data";
 import { useInterfacePreferences } from "../../lib/interface-preferences";
@@ -52,7 +53,7 @@ function hasVisibleStreamingAssistantText(messages, activeRunId) {
     message.isFinalReply === false &&
     typeof message.content === "string" &&
     message.content.length > 0 &&
-    (!activeRunId || message.turnRunId === activeRunId)
+    messageBelongsToActiveRun(message, activeRunId)
   );
 }
 

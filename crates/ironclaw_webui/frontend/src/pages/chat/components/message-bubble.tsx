@@ -11,6 +11,7 @@ import { fetchRunArtifact } from "../../../lib/api";
 import { saveBlob } from "../../../lib/download";
 import {
   CHAT_MESSAGE_ROLES,
+  messageBelongsToActiveRun,
   type ChatAttachment,
   type ChatMessage,
 } from "../lib/message-types";
@@ -104,11 +105,11 @@ function MessageBubbleImpl({
       : undefined;
   const isStreamingAssistantReply =
     role === CHAT_MESSAGE_ROLES.ASSISTANT &&
-    message.isFinalReply === false;
+    message.isFinalReply === false &&
+    messageBelongsToActiveRun(message, activeRunId);
   const isStreamingThinking =
     role === CHAT_MESSAGE_ROLES.THINKING &&
-    typeof activeRunId === "string" &&
-    message.turnRunId === activeRunId;
+    messageBelongsToActiveRun(message, activeRunId);
   const failureCategory =
     role === CHAT_MESSAGE_ROLES.ERROR &&
     typeof message.failureCategory === "string"
