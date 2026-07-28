@@ -15,7 +15,7 @@
 - Service-shaped production composition root for Reborn.
 - Top-level factories for runtime/profile inputs, storage substrate wiring, and LLM catalog wiring: `build_runtime` (`src/runtime.rs`), `RebornHostBindings`/`RebornBuildError` (`src/input.rs`, `src/error.rs`), and the feature-gated LLM catalog resolvers (`llm_admin::llm_catalog`).
 - The `RebornRuntime` conversation-level service (`RebornRuntime`/`build_reborn_runtime`, `AssistantReply`, `ConversationId`, `RebornRuntimeError`) owns the composed `HostRuntime`, `TurnCoordinator`, readiness, and runtime inputs (`RebornRuntimeInput`/`RebornRuntimeIdentity`, `TurnRunnerSettings`/`PollSettings`, heartbeat/poll-interval defaults).
-- Product-live adapter wiring (`product_live_adapters`): `ProductLivePlannedRuntimeAdapters`, capability authority/IO/model-route settings, `capability_allowlist`, `visible_capability_request_for_run`; and the WebUI service (`webui`).
+- Test-support-only ProductLive adapter fixtures, plus production WebUI service wiring.
 - Production and migration-dry-run profile validation for required handles (`profile`, `readiness`).
 
 ## Do Not Move In Here

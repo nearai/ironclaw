@@ -525,6 +525,13 @@ pub struct TurnPersistenceSnapshot {
     pub spawn_tree_reservations: Vec<SpawnTreeReservation>,
 }
 
+/// Backend-neutral source for readers that need one coherent durable turn/run
+/// snapshot without depending on a concrete row-store backend.
+#[async_trait]
+pub trait TurnRunSnapshotSource: Send + Sync {
+    async fn turn_run_snapshot(&self) -> Result<TurnPersistenceSnapshot, crate::TurnError>;
+}
+
 impl TurnPersistenceSnapshot {
     pub fn set_runs(mut self, runs: Vec<TurnRunRecord>) -> Self {
         self.runs = runs;

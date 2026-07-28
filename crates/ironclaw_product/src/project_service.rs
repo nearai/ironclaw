@@ -9,9 +9,7 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use ironclaw_host_api::{ProjectId, TenantId, UserId};
-use ironclaw_product::{
+use crate::{
     ProjectCaller, ProjectService, ProjectServiceError, RebornAddMemberRequest,
     RebornCreateProjectRequest, RebornDeleteProjectRequest, RebornGetProjectRequest,
     RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
@@ -19,6 +17,8 @@ use ironclaw_product::{
     RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole, RebornProjectState,
     RebornRemoveMemberRequest, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
 };
+use async_trait::async_trait;
+use ironclaw_host_api::{ProjectId, TenantId, UserId};
 use ironclaw_projects::{
     ProjectError, ProjectMemberRecord, ProjectMemberStatus, ProjectRecord, ProjectRepository,
     ProjectRole, ProjectState,
@@ -30,12 +30,12 @@ const DEFAULT_PROJECT_LIST_LIMIT: usize = 200;
 const MAX_PROJECT_LIST_LIMIT: usize = 500;
 
 /// Access-controlled [`ProjectService`] backed by a [`ProjectRepository`].
-pub(crate) struct RebornProjectService {
+pub struct RebornProjectService {
     repository: Arc<dyn ProjectRepository>,
 }
 
 impl RebornProjectService {
-    pub(crate) fn new(repository: Arc<dyn ProjectRepository>) -> Self {
+    pub fn new(repository: Arc<dyn ProjectRepository>) -> Self {
         Self { repository }
     }
 

@@ -35,8 +35,10 @@ mod automation_product_service;
 mod automation_thread_metadata;
 mod binding;
 mod binding_ref;
+mod blocked_auth_resume;
 mod command_dispatch;
 mod commands;
+mod communication_context;
 mod conversation_binding;
 mod error;
 mod extension_account_setup;
@@ -56,6 +58,7 @@ mod policy;
 mod product_auth_prompt;
 mod product_surface_inbound;
 mod project_create_capability;
+mod project_service;
 pub mod projection;
 mod reborn_services;
 mod run_delivery;
@@ -63,6 +66,7 @@ mod workflow;
 
 pub use product_auth_prompt::{blocked_auth_flow_canceller, product_auth_challenge_provider};
 pub use project_create_capability::{PROJECT_CREATE_CAPABILITY_ID, project_create_capability};
+pub use project_service::RebornProjectService;
 
 pub use action::{
     ActionDispatchKind, ActionFingerprintKey, ActionPhase, AuthRequestRef, LinkedThreadActionId,
@@ -110,6 +114,7 @@ pub use binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
     ResolvedBinding, route_kind_for_inbound_payload,
 };
+pub use blocked_auth_resume::BlockedAuthResumeFanout;
 pub use command_dispatch::{
     ProductCommandAdmission, ProductCommandAdmissionService, ProductCommandContext,
     RejectingProductCommandAdmissionService,
@@ -119,6 +124,7 @@ pub use commands::{
     ProductCommandDescriptor, ProductLifecycleCommandInput, ProductModelCommand,
     ProductModelCommandInput, product_command_descriptors,
 };
+pub use communication_context::RuntimeCommunicationContextProvider;
 pub use conversation_binding::{
     ProductActorBindingPolicy, ProductActorUserResolutionRequest, ProductActorUserResolver,
     ProductConversationBindingService, ProductConversationRouteKey,

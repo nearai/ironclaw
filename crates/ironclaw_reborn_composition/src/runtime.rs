@@ -1153,7 +1153,7 @@ impl RebornRuntime {
             let (turn_coordinator, turn_state, tenant_id) = turn_world;
             let continuation = crate::factory::auth_continuation_dispatcher(
                 turn_coordinator,
-                Some(turn_state as Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>),
+                Some(turn_state as Arc<dyn ironclaw_turns::TurnRunSnapshotSource>),
             );
             service
                 .dispatch_pairing_completion_with_for_test(user_id, tenant_id, continuation)
@@ -3459,7 +3459,7 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
                 .with_extension_management(Arc::clone(&local_runtime.extension_management))
                 .with_channel_config(Arc::clone(&local_runtime.channel_config_service));
             Some(Arc::new(
-                crate::root::communication_context::RuntimeCommunicationContextProvider::new(
+                ironclaw_product::RuntimeCommunicationContextProvider::new(
                     outbound_preferences_facade,
                 )
                 .with_lifecycle_service(Arc::new(lifecycle_service)),

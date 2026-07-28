@@ -32,51 +32,23 @@ use ironclaw_auth::{
     AuthContinuationEvent, AuthContinuationRef, AuthProductError, RebornAuthContinuationDispatcher,
 };
 use ironclaw_turns::{
-    IdempotencyKey, ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator,
-    TurnPersistenceSnapshot, TurnRunId, TurnStatus,
+    IdempotencyKey, ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator, TurnRunId,
+    TurnRunSnapshotSource, TurnStatus,
 };
 use uuid::Uuid;
 
-use crate::turn_run_snapshot::TurnRunSnapshotSource;
-
-/// Source of the durable turn-state snapshot the fan-out scans. Split out so
-/// tests can hand-build snapshots without a filesystem-backed store.
-#[async_trait]
-pub(crate) trait BlockedAuthSnapshotSource: Send + Sync {
-    async fn snapshot(&self) -> Option<TurnPersistenceSnapshot>;
-}
-
-#[async_trait]
-impl<T> BlockedAuthSnapshotSource for T
-where
-    T: TurnRunSnapshotSource + ?Sized,
-{
-    async fn snapshot(&self) -> Option<TurnPersistenceSnapshot> {
-        match self.turn_run_snapshot().await {
-            Ok(snapshot) => Some(snapshot),
-            Err(error) => {
-                tracing::debug!(
-                    %error,
-                    "blocked-auth fan-out could not read the turn persistence snapshot"
-                );
-                None
-            }
-        }
-    }
-}
-
 /// Decorates the single-run continuation dispatcher with the caller-wide
 /// blocked-run fan-out described in the module docs.
-pub(crate) struct BlockedAuthResumeFanout {
+pub struct BlockedAuthResumeFanout {
     inner: Arc<dyn RebornAuthContinuationDispatcher>,
-    snapshot_source: Arc<dyn BlockedAuthSnapshotSource>,
+    snapshot_source: Arc<dyn TurnRunSnapshotSource>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
 }
 
 impl BlockedAuthResumeFanout {
-    pub(crate) fn new(
+    pub fn new(
         inner: Arc<dyn RebornAuthContinuationDispatcher>,
-        snapshot_source: Arc<dyn BlockedAuthSnapshotSource>,
+        snapshot_source: Arc<dyn TurnRunSnapshotSource>,
         turn_coordinator: Arc<dyn TurnCoordinator>,
     ) -> Self {
         Self {
@@ -95,13 +67,18 @@ impl BlockedAuthResumeFanout {
     /// dispatcher settles idempotently on a no-longer-blocked gate.
     async fn fan_out(&self, event: &AuthContinuationEvent) -> Result<(), AuthProductError> {
         let primary_run_id = primary_run_id(&event.continuation);
-        let Some(snapshot) = self.snapshot_source.snapshot().await else {
-            tracing::warn!(
-                flow_id = %event.flow_id,
-                "blocked-auth fan-out could not read the turn snapshot; keeping the continuation retryable"
-            );
-            return Err(AuthProductError::BackendUnavailable);
-        };
+        let snapshot = self
+            .snapshot_source
+            .turn_run_snapshot()
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    flow_id = %event.flow_id,
+                    %error,
+                    "blocked-auth fan-out could not read the turn snapshot; keeping the continuation retryable"
+                );
+                AuthProductError::BackendUnavailable
+            })?;
         let tenant_id = &event.scope.resource.tenant_id;
         let user_id = &event.scope.resource.user_id;
         let mut resumed = 0usize;
@@ -262,7 +239,7 @@ mod tests {
         ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint, RunProfileId,
         RunProfileVersion, RuntimeProfileConstraints, SchedulingClass, SourceBindingRef,
         SteeringPolicy, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnError, TurnId,
-        TurnRecord, TurnRunProfile, TurnRunState, TurnScope,
+        TurnPersistenceSnapshot, TurnRecord, TurnRunProfile, TurnRunState, TurnScope,
     };
 
     struct RecordingInnerDispatcher {
@@ -292,9 +269,11 @@ mod tests {
     }
 
     #[async_trait]
-    impl BlockedAuthSnapshotSource for StaticSnapshotSource {
-        async fn snapshot(&self) -> Option<TurnPersistenceSnapshot> {
-            Some(self.snapshot.clone())
+    impl TurnRunSnapshotSource for StaticSnapshotSource {
+        async fn turn_run_snapshot(
+            &self,
+        ) -> Result<TurnPersistenceSnapshot, ironclaw_turns::TurnError> {
+            Ok(self.snapshot.clone())
         }
     }
 

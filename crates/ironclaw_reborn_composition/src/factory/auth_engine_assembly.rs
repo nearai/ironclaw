@@ -536,9 +536,7 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
 
 pub(crate) fn auth_continuation_dispatcher(
     turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
-    blocked_auth_snapshot_source: Option<
-        Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>,
-    >,
+    blocked_auth_snapshot_source: Option<Arc<dyn ironclaw_turns::TurnRunSnapshotSource>>,
 ) -> Arc<dyn RebornAuthContinuationDispatcher> {
     let single_run: Arc<dyn RebornAuthContinuationDispatcher> = Arc::new(
         ProductAuthTurnGateResumeDispatcher::new(Arc::clone(&turn_coordinator)),
@@ -548,13 +546,11 @@ pub(crate) fn auth_continuation_dispatcher(
         // provider-blocked runs (pair/authorize once, all waiting chats
         // continue). Production-shaped builders pass None until their
         // turn-state snapshot source is wired.
-        Some(snapshot_source) => {
-            Arc::new(crate::blocked_auth_resume::BlockedAuthResumeFanout::new(
-                single_run,
-                snapshot_source,
-                turn_coordinator,
-            ))
-        }
+        Some(snapshot_source) => Arc::new(ironclaw_product::BlockedAuthResumeFanout::new(
+            single_run,
+            snapshot_source,
+            turn_coordinator,
+        )),
         None => single_run,
     }
 }
@@ -562,8 +558,7 @@ pub(crate) fn auth_continuation_dispatcher(
 pub(super) struct ProductAuthServicesCompositionInput {
     pub(super) ports: RebornProductAuthServicePorts,
     pub(super) turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
-    pub(super) blocked_auth_snapshot_source:
-        Option<Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>>,
+    pub(super) blocked_auth_snapshot_source: Option<Arc<dyn ironclaw_turns::TurnRunSnapshotSource>>,
     pub(super) provider_composition: OAuthProviderComposition,
     pub(super) security_audit_sink: Option<Arc<dyn ironclaw_events::SecurityAuditSink>>,
     pub(super) secret_store: Arc<dyn SecretStorePort>,

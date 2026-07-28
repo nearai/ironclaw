@@ -22,13 +22,9 @@
 //! this shared substrate trait picking a consumer's error type.
 
 use async_trait::async_trait;
+pub(crate) use ironclaw_turns::TurnRunSnapshotSource;
 use ironclaw_turns::{TurnError, TurnPersistenceSnapshot};
 use std::sync::{Arc, RwLock};
-
-#[async_trait]
-pub(crate) trait TurnRunSnapshotSource: Send + Sync {
-    async fn turn_run_snapshot(&self) -> Result<TurnPersistenceSnapshot, TurnError>;
-}
 
 pub(crate) struct RebindableTurnRunSnapshotSource {
     source: Arc<RwLock<Arc<dyn TurnRunSnapshotSource>>>,
@@ -49,19 +45,5 @@ impl TurnRunSnapshotSource for RebindableTurnRunSnapshotSource {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
         source.turn_run_snapshot().await
-    }
-}
-
-// The one turn-state store. Generic over any `RootFilesystem` backend, so the
-// composition row store and a caller's own row store (for example
-// `RebornIntegrationGroup`'s `TurnStateRowStore<HarnessTurnBackend>`)
-// implement this identically.
-#[async_trait]
-impl<F> TurnRunSnapshotSource for ironclaw_turns::TurnStateRowStore<F>
-where
-    F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
-{
-    async fn turn_run_snapshot(&self) -> Result<TurnPersistenceSnapshot, TurnError> {
-        self.persistence_snapshot().await
     }
 }

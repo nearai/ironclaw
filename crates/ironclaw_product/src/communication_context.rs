@@ -1,11 +1,11 @@
 use std::{sync::Arc, time::Duration};
 
-use ironclaw_host_api::{CapabilitySurfaceKind, InstallationState, ProductSurfaceCaller};
-use ironclaw_product::{
+use crate::{
     LifecycleProductAction, LifecycleProductContext, LifecycleProductPayload,
     LifecycleProductService, LifecycleProductSurfaceContext, OutboundPreferencesProductService,
     RebornOutboundDeliveryTargetStatus,
 };
+use ironclaw_host_api::{CapabilitySurfaceKind, InstallationState, ProductSurfaceCaller};
 use ironclaw_turns::{
     run_profile::{
         CommunicationContextFetch, CommunicationContextProvider, CommunicationRuntimeContext,
@@ -23,7 +23,7 @@ use tokio::time::timeout;
 /// to `Unknown`.
 const COMMUNICATION_CONTEXT_FETCH_TIMEOUT: Duration = Duration::from_millis(500);
 
-pub(crate) struct RuntimeCommunicationContextProvider {
+pub struct RuntimeCommunicationContextProvider {
     outbound_preferences: Arc<dyn OutboundPreferencesProductService>,
     /// Optional lifecycle service used to populate connected channels.
     /// When None the slice always renders `Connected channels: unknown.`
@@ -31,14 +31,14 @@ pub(crate) struct RuntimeCommunicationContextProvider {
 }
 
 impl RuntimeCommunicationContextProvider {
-    pub(crate) fn new(outbound_preferences: Arc<dyn OutboundPreferencesProductService>) -> Self {
+    pub fn new(outbound_preferences: Arc<dyn OutboundPreferencesProductService>) -> Self {
         Self {
             outbound_preferences,
             lifecycle_service: None,
         }
     }
 
-    pub(crate) fn with_lifecycle_service(
+    pub fn with_lifecycle_service(
         mut self,
         lifecycle_service: Arc<dyn LifecycleProductService>,
     ) -> Self {
@@ -216,9 +216,7 @@ async fn fetch_communication_context(
 ///
 /// Checks the projected `surface_kinds` for `ExternalChannel`, the surface kind
 /// that maps to a connected chat channel.
-fn extension_is_channel_surface(
-    extension: &ironclaw_product::LifecycleInstalledExtensionSummary,
-) -> bool {
+fn extension_is_channel_surface(extension: &crate::LifecycleInstalledExtensionSummary) -> bool {
     extension
         .summary
         .surface_kinds
@@ -229,13 +227,7 @@ fn extension_is_channel_surface(
 mod tests {
     use std::sync::Arc;
 
-    use async_trait::async_trait;
-    use ironclaw_host_api::{
-        AgentId, CapabilitySurfaceKind, InstallationState, ProductSurfaceCaller,
-        ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind, ProjectId, TenantId,
-        UserId,
-    };
-    use ironclaw_product::{
+    use crate::{
         LifecycleExtensionRuntimeKind, LifecycleExtensionSource, LifecycleExtensionSummary,
         LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
         LifecycleProductAction, LifecycleProductContext, LifecycleProductPayload,
@@ -243,6 +235,12 @@ mod tests {
         RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
         RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
         RebornOutboundPreferencesResponse, RebornSetOutboundPreferencesRequest,
+    };
+    use async_trait::async_trait;
+    use ironclaw_host_api::{
+        AgentId, CapabilitySurfaceKind, InstallationState, ProductSurfaceCaller,
+        ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind, ProjectId, TenantId,
+        UserId,
     };
     use ironclaw_turns::{
         run_profile::{CommunicationContextProvider, ConnectedChannelsState, DeliveryTargetState},

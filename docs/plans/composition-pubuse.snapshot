@@ -95,6 +95,7 @@ pub use readiness::{
     RebornReadinessDiagnosticReason, RebornReadinessDiagnosticStatus, RebornReadinessState,
     RebornServiceReadiness, RebornWorkerReadiness,
 };
+#[cfg(any(test, feature = "test-support"))]
 pub use root::product_live_adapters::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
     ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,

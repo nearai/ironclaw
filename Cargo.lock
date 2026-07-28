@@ -4173,6 +4173,7 @@ dependencies = [
  "ironclaw_loop_host",
  "ironclaw_outbound",
  "ironclaw_product",
+ "ironclaw_projects",
  "ironclaw_reborn_composition",
  "ironclaw_reborn_traces",
  "ironclaw_run_state",

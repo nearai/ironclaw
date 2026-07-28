@@ -111,8 +111,8 @@ pub use store::{
     SpawnTreeReservation, SpawnTreeReservationKey, TurnActiveLockKey, TurnActiveLockRecord,
     TurnCheckpointRecord, TurnIdempotencyErrorReplay, TurnIdempotencyOperationKind,
     TurnIdempotencyOutcomeKind, TurnIdempotencyRecord, TurnIdempotencyReplay, TurnLockVersion,
-    TurnPersistenceSnapshot, TurnRecord, TurnRunRecord, TurnSpawnTreeStateStore, TurnStateStore,
-    active_run_ref_state,
+    TurnPersistenceSnapshot, TurnRecord, TurnRunRecord, TurnRunSnapshotSource,
+    TurnSpawnTreeStateStore, TurnStateStore, active_run_ref_state,
 };
 pub use turn_state_row_store::{
     FilesystemTurnStateBlockPersistence, TurnStateRowStore, TurnStateStoreLimits,

@@ -54,7 +54,6 @@ use crate::standalone_bootstrap_assembly::bootstrap_standalone_host;
 use crate::standalone_bootstrap_assembly::{
     LEGACY_SKILLS_BACKFILL_MARKER, backfill_legacy_user_skills,
 };
-use crate::support::fs::RebornProjectService;
 use crate::{
     RebornBuildError, RebornCompositionProfile, RebornHostBindings, RebornReadiness,
     RebornServiceReadiness, RebornWorkerReadiness,
@@ -158,6 +157,7 @@ use ironclaw_outbound::{
     DeliveredGateRouteStore, OutboundStateStorePort, TriggeredRunDeliveryStore,
 };
 use ironclaw_processes::ProcessServices;
+use ironclaw_product::RebornProjectService;
 use ironclaw_product::{
     ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
     ExtensionAccountSetupRegistry, LifecycleProductSurfaceContext,

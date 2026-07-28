@@ -646,8 +646,9 @@ pub(super) async fn build_backend_production(
         compose_product_auth_services(ProductAuthServicesCompositionInput {
             ports: product_auth_ports,
             turn_coordinator: turn_coordinator.clone(),
-            blocked_auth_snapshot_source: Some(Arc::clone(&turn_state)
-                as Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>),
+            blocked_auth_snapshot_source: Some(
+                Arc::clone(&turn_state) as Arc<dyn ironclaw_turns::TurnRunSnapshotSource>
+            ),
             provider_composition,
             security_audit_sink,
             secret_store: Arc::clone(&secret_store),

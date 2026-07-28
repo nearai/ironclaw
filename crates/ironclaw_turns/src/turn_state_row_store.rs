@@ -28,7 +28,7 @@ use async_trait::async_trait;
 use ironclaw_filesystem::{CasExpectation, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::ResourceScope;
 
-use crate::{TurnError, TurnPersistenceSnapshot};
+use crate::{TurnError, TurnPersistenceSnapshot, TurnRunSnapshotSource};
 
 mod io;
 mod profile_resolver;
@@ -40,6 +40,16 @@ pub(crate) mod turn_state_engine;
 use io::{deserialize_snapshot, fs_error, snapshot_entry, snapshot_path};
 
 pub use row_store::TurnStateRowStore;
+
+#[async_trait::async_trait]
+impl<F> TurnRunSnapshotSource for TurnStateRowStore<F>
+where
+    F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
+{
+    async fn turn_run_snapshot(&self) -> Result<TurnPersistenceSnapshot, TurnError> {
+        self.persistence_snapshot().await
+    }
+}
 pub use turn_state_engine::TurnStateStoreLimits;
 
 /// Legacy filesystem-backed durable sink for a full [`TurnPersistenceSnapshot`].
