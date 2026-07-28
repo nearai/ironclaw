@@ -112,6 +112,11 @@ pub(crate) enum StorageReopen {
     },
     Postgres {
         database_url: String,
+        // PostgreSQL-backed matrix cases are serialized within one test
+        // binary. Instrumented coverage runs otherwise start several
+        // containers at once and make later cases fail transiently under
+        // runner resource pressure.
+        _serialization_permit: tokio::sync::OwnedSemaphorePermit,
         // Boxed: the container handle dwarfs the other variants
         // (clippy::large_enum_variant) and is only held for its Drop.
         _container: Box<
@@ -2118,6 +2123,10 @@ pub(crate) async fn build_storage_composite(
             }
         }
         StorageMode::Postgres => {
+            let serialization_permit = Arc::clone(postgres_test_semaphore())
+                .acquire_owned()
+                .await
+                .map_err(|error| format!("Postgres test semaphore closed unexpectedly: {error}"))?;
             let (container, database_url) = start_postgres_testcontainer().await?;
             let filesystem = Arc::new(ironclaw_filesystem::PostgresRootFilesystem::new(
                 postgres_pool(&database_url)?,
@@ -2132,11 +2141,17 @@ pub(crate) async fn build_storage_composite(
             )?;
             StorageReopen::Postgres {
                 database_url,
+                _serialization_permit: serialization_permit,
                 _container: Box::new(container),
             }
         }
     };
     Ok((Arc::new(composite), reopen))
+}
+
+fn postgres_test_semaphore() -> &'static Arc<tokio::sync::Semaphore> {
+    static SEMAPHORE: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    SEMAPHORE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1)))
 }
 
 /// Start a per-`build()` PostgreSQL testcontainer. A provisioning failure is
