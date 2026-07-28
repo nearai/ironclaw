@@ -12,7 +12,7 @@ test-support = []
 
 [dependencies]
 async-trait = "0.1"
-base64 = "0.22.1"
+base64 = "0.23.0"
 bollard = "0.18"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 chrono-tz = "0.10"
@@ -52,7 +52,7 @@ ironclaw_trust = { path = "../ironclaw_trust" }
 ironclaw_turns = { path = "../ironclaw_turns" }
 ironclaw_wasm = { path = "../ironclaw_wasm" }
 libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
-jsonschema = { version = "0.46", default-features = false }
+jsonschema = { version = "0.49", default-features = false }
 libc = "0.2"
 # Internal per-tenant CA for the sandbox egress proxy (W5, design doc
 # 2026-07-26-sandbox-credential-firewall-design.md §4). Generates the root
