@@ -382,8 +382,8 @@ fn slice_text_by_offset(text: &str, offset: u32, length: u32) -> Option<&str> {
 
 /// One host-verified Telegram webhook update, normalized for the generic
 /// channel-adapter contract: an ignored (but authenticated) update or one
-/// plain user message. Bot-command reclassification is a host-sink concern;
-/// the message text carries the command verbatim.
+/// plain user message. Recognized bot commands are rewritten into generic
+/// command form so host classification does not need Telegram username syntax.
 #[derive(Debug)]
 pub enum TelegramInboundEvent {
     Ignore,
@@ -424,14 +424,7 @@ pub fn normalize_telegram_update(
     let actor = build_actor_ref(message.from.as_ref())?;
     let conversation = build_conversation_ref(&message)?;
     let attachments = collect_attachments(&message)?;
-    let text = strip_leading_mention(
-        message
-            .text
-            .clone()
-            .or_else(|| message.caption.clone())
-            .unwrap_or_default(),
-        group_trigger_policy,
-    );
+    let text = normalize_forwarded_text(&message, group_trigger_policy);
     let attachments = attachments
         .into_iter()
         .map(|descriptor| AttachmentRef {
@@ -454,6 +447,24 @@ pub fn normalize_telegram_update(
             reply_context: None,
         },
     )))
+}
+
+fn normalize_forwarded_text(message: &TelegramMessage, policy: &GroupTriggerPolicy) -> String {
+    if let Some((command, arguments)) = extract_first_bot_command(message, policy) {
+        if arguments.is_empty() {
+            return format!("/{command}");
+        }
+        return format!("/{command} {arguments}");
+    }
+
+    strip_leading_mention(
+        message
+            .text
+            .clone()
+            .or_else(|| message.caption.clone())
+            .unwrap_or_default(),
+        policy,
+    )
 }
 
 #[cfg(test)]
@@ -940,6 +951,58 @@ mod tests {
             bot_user_id: 9000,
             recognized_commands: vec!["start".into(), "help".into()],
         }
+    }
+
+    #[test]
+    fn normalized_bot_qualified_command_uses_generic_command_text() {
+        let payload = include_bytes!("../tests/fixtures/group_command.json");
+        let event =
+            normalize_telegram_update(payload, &install_id(), &policy()).expect("normalizes");
+        let TelegramInboundEvent::Message(message) = event else {
+            panic!("recognized group command must be forwarded");
+        };
+        assert_eq!(message.text, "/help");
+        assert_eq!(message.trigger, ProductTriggerReason::BotCommand);
+    }
+
+    #[test]
+    fn normalized_bot_command_preserves_arguments() {
+        let payload = br#"{
+            "update_id": 501,
+            "message": {
+                "message_id": 71,
+                "date": 1700000000,
+                "from": {"id": 777, "is_bot": false, "first_name": "Alice"},
+                "chat": {"id": -42, "type": "supergroup"},
+                "text": "/help@ironclaw_bot verbose now",
+                "entities": [{"type": "bot_command", "offset": 0, "length": 18}]
+            }
+        }"#;
+        let event =
+            normalize_telegram_update(payload, &install_id(), &policy()).expect("normalizes");
+        let TelegramInboundEvent::Message(message) = event else {
+            panic!("recognized group command must be forwarded");
+        };
+        assert_eq!(message.text, "/help verbose now");
+    }
+
+    #[test]
+    fn command_for_another_bot_remains_ignored_in_groups() {
+        let payload = br#"{
+            "update_id": 502,
+            "message": {
+                "message_id": 72,
+                "date": 1700000000,
+                "from": {"id": 777, "is_bot": false, "first_name": "Alice"},
+                "chat": {"id": -42, "type": "supergroup"},
+                "text": "/help@other_bot",
+                "entities": [{"type": "bot_command", "offset": 0, "length": 15}]
+            }
+        }"#;
+        assert!(matches!(
+            normalize_telegram_update(payload, &install_id(), &policy()).expect("normalizes"),
+            TelegramInboundEvent::Ignore
+        ));
     }
 
     #[test]
