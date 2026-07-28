@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     sync::{
         Arc, Mutex as StdMutex,
         atomic::{AtomicBool, Ordering},
@@ -9,7 +10,8 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_filesystem::{
-    CasExpectation, FilesystemError, Filter, Page, RootFilesystem, ScopedFilesystem, SeqNo,
+    CasExpectation, FileType, FilesystemError, Filter, Page, RootFilesystem, ScopedFilesystem,
+    SeqNo,
 };
 use ironclaw_host_api::{ProcessId, ResourceScope, ScopedPath};
 use serde::{Deserialize, Serialize};
@@ -38,11 +40,13 @@ use crate::journal::{
 use crate::types::{invalid_path, same_scope_owner};
 
 mod command;
+mod migration;
 mod observer;
 mod rows;
 mod state;
 mod validation;
 use command::StoredProcessCommand;
+use migration::legacy_turn_record_contains_data;
 use observer::RegisteredProcessObserver;
 use state::ProcessJournalMaterializedState;
 use validation::{
@@ -456,12 +460,7 @@ where
     }
 
     async fn deployed_legacy_authority_present(&self) -> Result<bool, ProcessJournalStoreError> {
-        for raw in [
-            "/turns/state.json",
-            "/turns/rows/v1/meta/state.json",
-            "/turns/rows/v1/runs",
-            "/run-state",
-        ] {
+        for raw in ["/turns/state.json", "/turns/rows/v1/meta/state.json"] {
             let path = ScopedPath::new(raw)
                 .map_err(|error| ProcessJournalStoreError::InvalidPath(error.to_string()))?;
             // Test and narrow-purpose mount views may intentionally expose only
@@ -475,18 +474,95 @@ where
                 continue;
             }
             match self.filesystem.get(&ResourceScope::system(), &path).await {
-                Ok(Some(_)) => return Ok(true),
+                Ok(Some(versioned))
+                    if legacy_turn_record_contains_data(raw, &versioned.entry.body)? =>
+                {
+                    tracing::debug!(path = raw, "detected deployed legacy turn authority");
+                    return Ok(true);
+                }
+                Ok(Some(_)) => {}
                 Ok(None) | Err(FilesystemError::NotFound { .. }) => {}
                 Err(error) => return Err(error.into()),
             }
-            match self
+        }
+
+        let runs_path = ScopedPath::new("/turns/rows/v1/runs")
+            .map_err(|error| ProcessJournalStoreError::InvalidPath(error.to_string()))?;
+        if self
+            .filesystem
+            .resolve(&ResourceScope::system(), &runs_path)
+            .is_ok()
+            && !self
                 .filesystem
-                .list_dir(&ResourceScope::system(), &path)
+                .list_dir_bounded(&ResourceScope::system(), &runs_path, 1)
+                .await
+                .or_else(|error| match error {
+                    FilesystemError::NotFound { .. } => Ok(Vec::new()),
+                    error => Err(error),
+                })?
+                .is_empty()
+        {
+            tracing::debug!(
+                path = %runs_path,
+                "detected deployed legacy turn run rows"
+            );
+            return Ok(true);
+        }
+        self.deployed_run_state_records_present().await
+    }
+
+    async fn deployed_run_state_records_present(&self) -> Result<bool, ProcessJournalStoreError> {
+        let root = ScopedPath::new("/run-state")
+            .map_err(|error| ProcessJournalStoreError::InvalidPath(error.to_string()))?;
+        if self
+            .filesystem
+            .resolve(&ResourceScope::system(), &root)
+            .is_err()
+        {
+            return Ok(false);
+        }
+
+        // Only populated scope-relative `runs` directories are legacy evidence;
+        // other current records can legitimately share this mount.
+        let mut pending = VecDeque::from([(root, 0_u8)]);
+        while let Some((path, depth)) = pending.pop_front() {
+            let entries = match self
+                .filesystem
+                .list_dir_bounded(&ResourceScope::system(), &path, Page::MAX_LIMIT as usize)
                 .await
             {
-                Ok(entries) if !entries.is_empty() => return Ok(true),
-                Ok(_) | Err(FilesystemError::NotFound { .. }) => {}
+                Ok(entries) => entries,
+                Err(FilesystemError::NotFound { .. }) => continue,
                 Err(error) => return Err(error.into()),
+            };
+            for entry in entries {
+                if entry.file_type != FileType::Directory {
+                    continue;
+                }
+                let child = ScopedPath::new(format!(
+                    "{}/{}",
+                    path.as_str().trim_end_matches('/'),
+                    entry.name
+                ))
+                .map_err(|error| ProcessJournalStoreError::InvalidPath(error.to_string()))?;
+                if entry.name == "runs" {
+                    if !self
+                        .filesystem
+                        .list_dir_bounded(&ResourceScope::system(), &child, 1)
+                        .await?
+                        .is_empty()
+                    {
+                        tracing::debug!(
+                            path = %child,
+                            "detected deployed legacy run-state rows"
+                        );
+                        return Ok(true);
+                    }
+                    continue;
+                }
+                if depth < 8 {
+                    pending.push_back((child, depth.saturating_add(1)));
+                }
             }
         }
         Ok(false)

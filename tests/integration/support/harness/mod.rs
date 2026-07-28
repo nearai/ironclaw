@@ -2204,7 +2204,7 @@ fn turn_state_root_filesystem(
             BackendKind::MemoryDocuments,
             StorageClass::StructuredRecords,
             ContentKind::StructuredRecord,
-            IndexPolicy::NotIndexed,
+            IndexPolicy::BackendDefined,
             backend.capabilities(),
         )?,
         backend,

@@ -517,7 +517,7 @@ async fn normal_process_request_cannot_hide_deployed_turn_authority() {
         .put(
             &ResourceScope::system(),
             &ScopedPath::new("/turns/state.json").expect("legacy turn state path"),
-            Entry::bytes(b"{\"runs\":[]}".to_vec()),
+            Entry::bytes(b"{\"runs\":[{\"legacy\":\"present\"}]}".to_vec()),
             CasExpectation::Absent,
         )
         .await
