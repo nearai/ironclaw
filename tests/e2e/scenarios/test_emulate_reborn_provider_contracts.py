@@ -97,9 +97,18 @@ async def test_emulate_google_covers_reborn_gsuite_read_inputs(emulate_google_se
         )
         events_response.raise_for_status()
         events = events_response.json()["items"]
-        assert any(event["summary"] == "Reborn planning sync" for event in events)
+        # Match on the provider-issued event id from the seed fixture
+        # (fixtures/emulate/google_gmail.yaml), not the human-readable
+        # summary: two events with the same summary would otherwise be
+        # indistinguishable here.
         assert any(
-            event["summary"] == "PepsiCo procurement sync"
+            event["id"] == "evt_reborn_planning_sync"
+            and event["summary"] == "Reborn planning sync"
+            for event in events
+        )
+        assert any(
+            event["id"] == "evt_pepsico_procurement_sync"
+            and event["summary"] == "PepsiCo procurement sync"
             and any(
                 attendee["email"] == "buyer@pepsico.example"
                 for attendee in event.get("attendees", [])
@@ -640,7 +649,10 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
             "/repos/nearai/ironclaw/issues",
             params={"state": "open"},
         )
-        assert any(item["title"] == issue_title for item in issues)
+        # Match on the provider-issued issue number, not the title: a
+        # second issue created with the same title elsewhere in the repo
+        # would otherwise satisfy this assertion for the wrong resource.
+        assert any(item["number"] == issue["number"] for item in issues)
 
         issue_search = await github_json(
             client,
