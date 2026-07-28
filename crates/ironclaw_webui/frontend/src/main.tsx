@@ -19,10 +19,24 @@ if (pathname === "/v2" || pathname.startsWith("/v2/")) {
   window.history.replaceState(null, "", `${stripped}${search}${hash}`);
 }
 
-createRoot(document.getElementById("v2-root")).render((
-  <I18nProvider>
-    <QueryClientProvider client={queryClient}>
-      <App />
-    </QueryClientProvider>
-  </I18nProvider>
-));
+async function bootstrap() {
+  // Hosted workspace demo: a static deploy built with VITE_IRONCLAW_DEMO=1
+  // installs an in-browser mock backend before the first render so the
+  // authenticated workspace works with no server (see src/demo/). The
+  // condition is a build-time constant — production builds tree-shake the
+  // demo chunk away entirely.
+  if (import.meta.env.VITE_IRONCLAW_DEMO === "1") {
+    const { installDemoBackend } = await import("./demo/mock-backend");
+    installDemoBackend();
+  }
+
+  createRoot(document.getElementById("v2-root")).render((
+    <I18nProvider>
+      <QueryClientProvider client={queryClient}>
+        <App />
+      </QueryClientProvider>
+    </I18nProvider>
+  ));
+}
+
+void bootstrap();
