@@ -53,6 +53,15 @@ const MAX_ATTEMPTS: u32 = 4;
 /// Base backoff between attempts; doubles each retry attempt.
 const BASE_BACKOFF: Duration = Duration::from_millis(250);
 
+/// Per-attempt bound on a single connect (dial + `ping()`).
+///
+/// A Docker daemon that has accepted a TCP/unix-socket connection but hasn't
+/// answered `ping()` within a few seconds is not healthy — waiting longer
+/// than this just delays the inevitable retry (or failure). This is also the
+/// client-side request timeout handed to `bollard::Docker::connect_with_*`,
+/// so the two mechanisms agree on the same bound.
+const CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Outcome of a Docker daemon readiness probe, surfaced as a boot
 /// diagnostic.
 ///
@@ -84,9 +93,11 @@ async fn connect_once() -> Result<Docker, RuntimeProcessError> {
         for socket in unix_socket_candidates() {
             if socket.exists() {
                 let socket = socket.to_string_lossy();
-                if let Ok(docker) =
-                    Docker::connect_with_socket(&socket, 120, bollard::API_DEFAULT_VERSION)
-                    && docker.ping().await.is_ok()
+                if let Ok(docker) = Docker::connect_with_socket(
+                    &socket,
+                    CONNECT_ATTEMPT_TIMEOUT.as_secs(),
+                    bollard::API_DEFAULT_VERSION,
+                ) && docker.ping().await.is_ok()
                 {
                     return Ok(docker);
                 }
@@ -104,12 +115,16 @@ async fn connect_once() -> Result<Docker, RuntimeProcessError> {
 /// otherwise as an HTTP(S) address.
 async fn connect_override(host: &str) -> Result<Docker, RuntimeProcessError> {
     if host.starts_with("unix://") || host.starts_with('/') {
-        let docker =
-            Docker::connect_with_socket(host, 120, bollard::API_DEFAULT_VERSION).map_err(|e| {
-                RuntimeProcessError::ExecutionFailed(format!(
-                    "{DOCKER_HOST_ENV} unix socket connect failed for {host}: {e}"
-                ))
-            })?;
+        let docker = Docker::connect_with_socket(
+            host,
+            CONNECT_ATTEMPT_TIMEOUT.as_secs(),
+            bollard::API_DEFAULT_VERSION,
+        )
+        .map_err(|e| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "{DOCKER_HOST_ENV} unix socket connect failed for {host}: {e}"
+            ))
+        })?;
         docker.ping().await.map_err(|e| {
             RuntimeProcessError::ExecutionFailed(format!(
                 "{DOCKER_HOST_ENV} unix socket ping failed for {host}: {e}"
@@ -118,12 +133,16 @@ async fn connect_override(host: &str) -> Result<Docker, RuntimeProcessError> {
         return Ok(docker);
     }
 
-    let docker =
-        Docker::connect_with_http(host, 120, bollard::API_DEFAULT_VERSION).map_err(|e| {
-            RuntimeProcessError::ExecutionFailed(format!(
-                "{DOCKER_HOST_ENV} http connect failed for {host}: {e}"
-            ))
-        })?;
+    let docker = Docker::connect_with_http(
+        host,
+        CONNECT_ATTEMPT_TIMEOUT.as_secs(),
+        bollard::API_DEFAULT_VERSION,
+    )
+    .map_err(|e| {
+        RuntimeProcessError::ExecutionFailed(format!(
+            "{DOCKER_HOST_ENV} http connect failed for {host}: {e}"
+        ))
+    })?;
     docker.ping().await.map_err(|e| {
         RuntimeProcessError::ExecutionFailed(format!(
             "{DOCKER_HOST_ENV} http ping failed for {host}: {e}"
@@ -185,14 +204,33 @@ where
 }
 
 /// Connect to the Docker daemon with a bounded retry loop (exponential
-/// backoff, capped total wait of a few seconds).
+/// backoff between attempts).
+///
+/// Worst-case wall-clock bound: `MAX_ATTEMPTS` (4) attempts, each capped at
+/// `CONNECT_ATTEMPT_TIMEOUT` (5s), plus cumulative doubling backoff between
+/// attempts (250ms + 500ms + 1000ms = 1.75s, none after the last attempt) —
+/// about 21.75s, comfortably under 30s. `connect_once` tries local-default
+/// discovery first, which uses Bollard's own internal client timeout rather
+/// than a parameter this module controls; each attempt is wrapped in
+/// [`tokio::time::timeout`] so that path is bounded too, regardless of what
+/// Bollard does internally. `retry_worst_case_wall_clock_is_bounded` (below)
+/// pins this arithmetic so a future change to the constants can't silently
+/// blow the bound back out.
 ///
 /// CRITICAL: on retry exhaustion this returns `Err`, which callers MUST
 /// propagate as a hard failure. There is no fallback to running the sandbox
 /// command unsandboxed on the host — see module docs and
 /// `docs/safety-and-sandbox.md`.
 pub async fn connect_docker_with_retry() -> Result<Docker, RuntimeProcessError> {
-    run_with_retry(MAX_ATTEMPTS, BASE_BACKOFF, connect_once).await
+    run_with_retry(MAX_ATTEMPTS, BASE_BACKOFF, || async {
+        match tokio::time::timeout(CONNECT_ATTEMPT_TIMEOUT, connect_once()).await {
+            Ok(result) => result,
+            Err(_elapsed) => Err(RuntimeProcessError::ExecutionFailed(format!(
+                "docker connect attempt timed out after {CONNECT_ATTEMPT_TIMEOUT:?}"
+            ))),
+        }
+    })
+    .await
 }
 
 /// Boot-time Docker daemon readiness probe.
@@ -374,5 +412,41 @@ mod tests {
                 );
             }
         }
+    }
+
+    // Pins the worst-case wall-clock bound documented on
+    // `connect_docker_with_retry`. A real end-to-end timing test would need
+    // a Docker daemon that accepts the connection but never answers
+    // `ping()` (not reproducible without a mock Docker client, which was
+    // rejected by design review for this module) and would be flaky under
+    // CI scheduling jitter regardless. Pinning the constants' arithmetic
+    // instead makes any future change to MAX_ATTEMPTS, CONNECT_ATTEMPT_TIMEOUT,
+    // or BASE_BACKOFF that blows the documented bound back out fail loudly
+    // and deterministically.
+    #[test]
+    fn retry_worst_case_wall_clock_is_bounded() {
+        let mut worst_case = Duration::ZERO;
+        let mut backoff = BASE_BACKOFF;
+        for attempt in 0..MAX_ATTEMPTS {
+            worst_case += CONNECT_ATTEMPT_TIMEOUT;
+            if attempt + 1 < MAX_ATTEMPTS {
+                worst_case += backoff;
+                backoff *= 2;
+            }
+        }
+
+        assert_eq!(
+            worst_case,
+            Duration::from_millis(21_750),
+            "connect_docker_with_retry's worst-case wall clock changed; if \
+             intentional, update this pin AND the doc comment on \
+             connect_docker_with_retry",
+        );
+        assert!(
+            worst_case <= Duration::from_secs(30),
+            "connect_docker_with_retry's worst-case wall clock ({worst_case:?}) \
+             no longer matches its documented \"about 21.75s, comfortably \
+             under 30s\" bound",
+        );
     }
 }
