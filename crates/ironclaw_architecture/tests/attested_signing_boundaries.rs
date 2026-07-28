@@ -157,15 +157,6 @@ const WALLET_EXTERNAL_FORBIDDEN_DEPENDENCY_PREFIXES: &[&str] = &[
 
 #[test]
 fn wallet_external_crate_has_no_chain_sdk_secrets_or_chain_signing_dependency() {
-/// `ironclaw_chain_signing` (PR6) is the ONE crate in the substrate that is
-/// *allowed* to carry chain SDKs and secrets — it is the custodial signing
-/// layer. This test is the inverse of the purity tests above: it asserts the
-/// chain crate actually depends on at least one chain SDK and on
-/// `ironclaw_secrets`, so a regression that accidentally moved chain/secret
-/// code OUT of this crate (e.g. up into the pure attestation core) would be
-/// caught from both directions.
-#[test]
-fn chain_signing_crate_carries_chain_sdk_and_secrets() {
     let metadata = cargo_metadata();
     let packages = metadata["packages"]
         .as_array()
@@ -177,10 +168,6 @@ fn chain_signing_crate_carries_chain_sdk_and_secrets() {
         .expect(
             "ironclaw_wallet_external must be a workspace member; add it to the root \
              Cargo.toml `workspace.members` (see attested-signing PR7)",
-        .find(|package| package["name"] == "ironclaw_chain_signing")
-        .expect(
-            "ironclaw_chain_signing must be a workspace member; add it to the root \
-             Cargo.toml `workspace.members` (see attested-signing PR6)",
         );
 
     let dependencies = package["dependencies"]
@@ -208,32 +195,6 @@ fn chain_signing_crate_carries_chain_sdk_and_secrets() {
          found:\n{}\nSee docs/plans/2026-05-23-attested-signing-substrate.md.",
         violations.join("\n")
     );
-    let dep_names: Vec<&str> = dependencies
-        .iter()
-        .filter_map(|d| d["name"].as_str())
-        .collect();
-
-    // It must depend on ironclaw_secrets (custodial keys are secrets).
-    assert!(
-        dep_names.contains(&"ironclaw_secrets"),
-        "ironclaw_chain_signing must depend on ironclaw_secrets (custodial keys are secrets); \
-         deps: {dep_names:?}"
-    );
-
-    // It must depend on at least one chain SDK (the whole point of the crate).
-    let chain_sdk_prefixes = ["alloy", "k256", "solana", "near-", "ed25519-dalek"];
-    assert!(
-        dep_names.iter().any(|name| chain_sdk_prefixes
-            .iter()
-            .any(|p| *name == *p || name.starts_with(p))),
-        "ironclaw_chain_signing must carry a chain SDK / signing primitive; deps: {dep_names:?}"
-    );
-
-    // And it must build on the lower substrate crates.
-    for required in ["ironclaw_signing_provider", "ironclaw_attestation"] {
-        assert!(
-            dep_names.contains(&required),
-            "ironclaw_chain_signing must depend on {required}; deps: {dep_names:?}"
 
     // Positive assertion (PR9): the openssl-free WalletConnect relay fork IS a
     // dependency of the external-wallet crate. This guards against the WC deps
@@ -305,6 +266,61 @@ fn workspace_graph_is_openssl_free() {
             stderr.contains("did not match any packages"),
             "cargo tree failed unexpectedly while checking for openssl-sys:\nstdout: {stdout}\n\
              stderr: {stderr}"
+        );
+    }
+}
+
+/// `ironclaw_chain_signing` (PR6) is the ONE crate in the substrate that is
+/// *allowed* to carry chain SDKs and secrets — it is the custodial signing
+/// layer. This test is the inverse of the purity tests above: it asserts the
+/// chain crate actually depends on at least one chain SDK and on
+/// `ironclaw_secrets`, so a regression that accidentally moved chain/secret
+/// code OUT of this crate (e.g. up into the pure attestation core) would be
+/// caught from both directions.
+#[test]
+fn chain_signing_crate_carries_chain_sdk_and_secrets() {
+    let metadata = cargo_metadata();
+    let packages = metadata["packages"]
+        .as_array()
+        .expect("cargo metadata must include packages");
+
+    let package = packages
+        .iter()
+        .find(|package| package["name"] == "ironclaw_chain_signing")
+        .expect(
+            "ironclaw_chain_signing must be a workspace member; add it to the root \
+             Cargo.toml `workspace.members` (see attested-signing PR6)",
+        );
+
+    let dependencies = package["dependencies"]
+        .as_array()
+        .expect("package dependencies must be an array");
+    let dep_names: Vec<&str> = dependencies
+        .iter()
+        .filter_map(|d| d["name"].as_str())
+        .collect();
+
+    // It must depend on ironclaw_secrets (custodial keys are secrets).
+    assert!(
+        dep_names.contains(&"ironclaw_secrets"),
+        "ironclaw_chain_signing must depend on ironclaw_secrets (custodial keys are secrets); \
+         deps: {dep_names:?}"
+    );
+
+    // It must depend on at least one chain SDK (the whole point of the crate).
+    let chain_sdk_prefixes = ["alloy", "k256", "solana", "near-", "ed25519-dalek"];
+    assert!(
+        dep_names.iter().any(|name| chain_sdk_prefixes
+            .iter()
+            .any(|p| *name == *p || name.starts_with(p))),
+        "ironclaw_chain_signing must carry a chain SDK / signing primitive; deps: {dep_names:?}"
+    );
+
+    // And it must build on the lower substrate crates.
+    for required in ["ironclaw_signing_provider", "ironclaw_attestation"] {
+        assert!(
+            dep_names.contains(&required),
+            "ironclaw_chain_signing must depend on {required}; deps: {dep_names:?}"
         );
     }
 }

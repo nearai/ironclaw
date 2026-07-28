@@ -70,6 +70,7 @@ pub use near_redirect::{
     NearAccessKeyScope, NearBoundOperation, NearRedirectProofPayload, NearRedirectSigningProvider,
     NearRedirectState, decode_near_redirect_proof, decode_state, derive_state,
     encode_near_redirect_proof, encode_state, verify_state,
+};
 pub use walletconnect::{
     Caip2ChainId, Caip10Account, ChainFamily, PinnedScope, ProjectId, ProposedScope,
     SessionBinding, SessionBindingStore, WalletConnectProofPayload, WalletConnectSigningProvider,

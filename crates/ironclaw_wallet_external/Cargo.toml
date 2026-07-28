@@ -16,6 +16,13 @@ publish = false
 [package.metadata.dist]
 dist = false
 
+[package.metadata.ironclaw]
+# External-wallet providers: injected, NEAR redirect, WalletConnect. Holds no
+# key material — the user's wallet does — so it carries signer-recovery
+# primitives but never ironclaw_secrets or the chain SDKs, which the boundary
+# suite pins. Depends only on contracts and substrates.
+layer = "substrates"
+
 [dependencies]
 tracing = "0.1"
 async-trait = "0.1"
