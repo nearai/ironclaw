@@ -21,6 +21,7 @@ chrono = { version = "0.4", features = ["serde"] }
 futures-util = "0.3"
 glob = "0.3"
 ironclaw_auth = { path = "../ironclaw_auth" }
+ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_extractors = { path = "../ironclaw_extractors" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
@@ -32,6 +33,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 similar = "3"
 thiserror = "2"
+toml = "1.1"
 tokio = { version = "1", features = ["rt", "sync"] }
 tracing = "0.1"
 unicode-normalization = "0.1"

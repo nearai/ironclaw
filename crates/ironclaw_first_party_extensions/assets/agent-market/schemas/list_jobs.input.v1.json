@@ -1,0 +1,13 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "offset": {
+      "type": "integer",
+      "description": "Job index to start from (default 0). Pass next_offset to page older jobs.",
+      "minimum": 0
+    }
+  },
+  "required": [],
+  "additionalProperties": false
+}

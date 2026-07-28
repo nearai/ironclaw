@@ -139,6 +139,22 @@ tested = [
 live_only = []
 unsupported = []
 
+[[waivers]]
+owner = "@kirikov"
+reason = "New bundled extension (agent.market marketplace). Verified today by the marketplace's own staging E2E (hire -> per-hire dispatch -> submit round-trip against a production-profile deployment), not yet by an in-repo executable case. The static tools are the pre-discovery fallback; live tools/list discovery replaces them per installation."
+issue = "#6758"
+review_condition = "Add integration_evidence through the bundled hosted-MCP path against a marketplace test double: (1) search_agents dispatch mirroring nearai.web_search's reborn_integration_mcp case; (2) provider READ-BACK for every write — hire_agent/create_job confirmed via list_jobs, cancel_job via the job's status flip, marketplace__submit_deliverable via get_job_result returning the submitted content. Until the double exists these writes stay waived (they spend/settle real funds on a live marketplace, so no live-lane case is possible); the read-back contract is exercised today only by the marketplace's own staging E2E."
+capabilities = [
+  "agent-market.search_agents",
+  "agent-market.hire_agent",
+  "agent-market.create_job",
+  "agent-market.get_job_result",
+  "agent-market.marketplace__submit_deliverable",
+  "agent-market.read_messages",
+  "agent-market.list_jobs",
+  "agent-market.cancel_job",
+]
+
 [[integration_evidence]]
 capability = "github.handle_webhook"
 target = "reborn_integration_tool_call"

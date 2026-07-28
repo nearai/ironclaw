@@ -445,7 +445,6 @@ pub(crate) fn parse_v3(
         let raw_capability = match (&mcp, &mcp_template_credentials) {
             (Some(mcp), Some(template_credentials)) => {
                 if !tool.credentials.is_empty()
-                    || !tool.effects.is_empty()
                     || tool.resource_profile.is_some()
                     || !tool.network_targets.is_empty()
                     || tool.max_egress_bytes.is_some()
@@ -454,19 +453,47 @@ pub(crate) fn parse_v3(
                     return Err(ManifestV3Error::Invalid {
                         reason: format!(
                             "static tool `{}` on an [mcp] manifest inherits the server \
-                             connection template; remove its credentials, effects, \
+                             connection template; remove its credentials, \
                              network_targets, max_egress_bytes, output_schema_ref, and \
                              resource_profile",
                             tool.id
                         ),
                     });
                 }
+                // A static tool may declare ADDITIVE effects on top of the
+                // connection template — e.g. a marketplace hire tool marks
+                // itself `financial` so the host's hard approval floor gates
+                // it, while sibling read tools stay at the template set. It
+                // must be a strict superset: dropping a template effect here
+                // would understate what every call through the shared
+                // connection can do.
+                if !tool.effects.is_empty() {
+                    if let Some(missing) = mcp
+                        .effects
+                        .iter()
+                        .find(|effect| !tool.effects.contains(effect))
+                    {
+                        return Err(ManifestV3Error::Invalid {
+                            reason: format!(
+                                "static tool `{}` narrows the [mcp] template effects \
+                                 (missing {missing:?}); per-tool effects may only ADD \
+                                 to the template",
+                                tool.id
+                            ),
+                        });
+                    }
+                }
+                let tool_effects = if tool.effects.is_empty() {
+                    mcp.effects.clone()
+                } else {
+                    tool.effects.clone()
+                };
                 RawCapabilityV2 {
                     id: tool.id,
                     network_targets: Vec::new(),
                     max_egress_bytes: None,
                     description: tool.description,
-                    effects: with_dispatch_effect(mcp.effects.clone()),
+                    effects: with_dispatch_effect(tool_effects),
                     default_permission: tool.default_permission,
                     visibility: tool.visibility,
                     input_schema_ref: tool.input_schema_ref,

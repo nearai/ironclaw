@@ -1,0 +1,114 @@
+# agent-market — hosted-MCP extension for the agent.market marketplace.
+#
+# `[mcp].server` ships with a MARKET_PUBLIC_HOST placeholder; the package
+# builder (`packages/agent_market.rs`) substitutes it from AGENT_MARKET_MCP_URL
+# at startup. That single substitution is sufficient: the connection
+# credential's audience is DERIVED from the server host by the v3 normalizer
+# (there is no separate audience field on `[[mcp.credentials]]` to keep in
+# sync).
+#
+# The credential is declared once on `[[mcp.credentials]]`; static tools
+# inherit the server connection template. Users receive the bearer through
+# POST /extensions/agent-market/setup (the `[auth.agent-market]` recipe), which
+# stores it agent-scoped — where capability dispatch resolves secrets.
+#
+# Tool naming: the marketplace MCP endpoint serves a different catalog per
+# authenticated principal — concierge bearers get the bare-named tools below;
+# worker bearers get `marketplace__`-prefixed tools plus the hirer's connector
+# tools. Live tools/list discovery at activation replaces this static set with
+# the caller's real catalog; the static entries are the pre-discovery fallback
+# and use the concierge surface's names, plus `marketplace__submit_deliverable`
+# (its live worker-surface name) so a worker that raced a failed discovery can
+# still deliver its job.
+
+schema_version = "reborn.extension_manifest.v3"
+id = "agent-market"
+name = "Agent Market"
+version = "0.3.0"
+description = "Marketplace concierge tools: search agents, hire one on the user's behalf, post open job listings, read delivered job results, and list or cancel the user's jobs."
+trust = "third_party"
+
+[mcp]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+server = "https://MARKET_PUBLIC_HOST/mcp"
+namespace = "agent-market"
+max_tools = 16
+# The marketplace enforces the real spend gates server-side (pick-scope,
+# connector gate, duplicate guards, server-set pricing); a per-call approval
+# prompt would only break the autonomous-hire UX.
+default_permission = "allow"
+effects = ["network", "use_secret", "external_write"]
+
+[[mcp.credentials]]
+handle = "agent-market-token"
+vendor = "agent-market"
+scopes = []
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "agent-market.search_agents"
+description = "Search the agent marketplace for services that can do a task. Returns agents with name, category, rating, and pricing; also frames the task as a job_title + job_description used to prefill a hire."
+default_permission = "allow"
+input_schema_ref = "schemas/search_agents.input.v1.json"
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "agent-market.hire_agent"
+# Spends the user's money: `financial` invokes the host's hard approval floor
+# (an explicit approval every time — never auto-approved, never satisfied by a
+# stored always-allow grant), regardless of default_permission. The template
+# effects must be repeated: per-tool effects are additive-superset.
+effects = ["network", "use_secret", "external_write", "financial"]
+description = "Hire ONE agent from a prior search_agents result to do a task on the user's behalf. Pricing is automatic and server-set. Call for one agent at a time."
+default_permission = "allow"
+input_schema_ref = "schemas/hire_agent.input.v1.json"
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "agent-market.create_job"
+description = "Post an open job listing on the user's behalf so marketplace agents can bid on it. Nothing is charged now. Use only when a search found no suitable agent."
+default_permission = "allow"
+input_schema_ref = "schemas/create_job.input.v1.json"
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "agent-market.get_job_result"
+description = "Read a hired job's delivered result by job_id, paged via next_offset when long."
+default_permission = "allow"
+input_schema_ref = "schemas/get_job_result.input.v1.json"
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "agent-market.marketplace__submit_deliverable"
+description = "Submit the completed deliverable for a managed job. Call this as your FINAL action when the work is done. The platform identifies which assignment to update from the session context — do NOT include assignment or job IDs in the arguments."
+default_permission = "allow"
+input_schema_ref = "schemas/submit_deliverable.input.v1.json"
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "agent-market.read_messages"
+description = "Read a page of a job's requester-worker message thread (oldest first) by job_id, paged via next_offset when long. Only the job's parties (or the dispute resolver while a dispute is under review) can read it."
+default_permission = "allow"
+input_schema_ref = "schemas/read_messages.input.v1.json"
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "agent-market.list_jobs"
+description = "List the user's own marketplace jobs (newest first, paged via next_offset), each with live assignment counts { cancellable, running, in_review } — use to answer what is happening with the user's jobs or to find a job_id before cancelling."
+default_permission = "allow"
+input_schema_ref = "schemas/list_jobs.input.v1.json"
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "agent-market.cancel_job"
+description = "Cancel one of the user's own jobs by job_id, ONLY on the user's explicit ask. Closes it to new bids and refunds assignments not yet started or past their SLA deadline; started-in-window or submitted work finishes on the closed job. The server refuses with job_in_progress / result_in_review when nothing is refundable."
+default_permission = "allow"
+input_schema_ref = "schemas/cancel_job.input.v1.json"
+
+[auth.agent-market]
+method = "api_key"
+display_name = "Agent Market token"
+fields = [
+  { handle = "agent-market-token", label = "Marketplace token", secret = true },
+]

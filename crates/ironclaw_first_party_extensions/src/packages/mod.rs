@@ -15,6 +15,7 @@ use std::borrow::Cow;
 
 use ironclaw_host_api::EffectKind;
 
+mod agent_market;
 mod github;
 mod gmail;
 mod gsuite;
@@ -32,6 +33,7 @@ type PackageEntry = (&'static str, fn() -> PackageBundle);
 /// derive from this one list, so a package cannot appear in one view and not the
 /// other. Each `ID` const lives in its owning module beside `bundle()`.
 const PACKAGES: &[PackageEntry] = &[
+    (agent_market::ID, agent_market::bundle),
     (github::ID, github::bundle),
     (gmail::ID, gmail::bundle),
     (gsuite::CALENDAR_ID, gsuite::google_calendar_bundle),

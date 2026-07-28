@@ -1,0 +1,15 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "job_id": {
+      "type": "string",
+      "description": "The job to cancel — from a hire receipt or a list_jobs row.",
+      "maxLength": 64
+    }
+  },
+  "required": [
+    "job_id"
+  ],
+  "additionalProperties": false
+}

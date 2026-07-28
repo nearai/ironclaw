@@ -160,6 +160,42 @@ pub fn env_or_override(key: &str) -> Option<String> {
     None
 }
 
+/// Like [`env_or_override`], but a SET-but-empty value is returned as
+/// `Some("")` instead of being folded into "unset". For configuration whose
+/// mere presence is a deployment decision (e.g. an endpoint override), the
+/// caller must see the difference so a blank value can fail loudly instead of
+/// silently selecting the unconfigured default. A runtime mask still reads as
+/// unset — masking exists to simulate absence.
+pub fn env_or_override_present(key: &str) -> Option<String> {
+    {
+        let overrides = runtime_overrides()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(RuntimeEnvOverride::Mask) = overrides.get(key) {
+            return None;
+        }
+    }
+
+    if let Ok(val) = std::env::var(key) {
+        return Some(val);
+    }
+
+    let runtime_value = {
+        let overrides = runtime_overrides()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match overrides.get(key) {
+            Some(RuntimeEnvOverride::Value(value)) => Some(value.clone()),
+            _ => None,
+        }
+    };
+    if runtime_value.is_some() {
+        return runtime_value;
+    }
+
+    SECONDARY_FALLBACK.get().and_then(|fallback| fallback(key))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

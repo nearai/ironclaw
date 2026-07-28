@@ -184,6 +184,7 @@ const BUNDLED_EXTENSION_MANIFEST_ASSET_DIRS: &[&str] = &[
     "google-slides",
     "nearai-mcp",
     "notion-mcp",
+    "agent-market",
 ];
 
 /// Real capability ids declared by every non-github bundled first-party

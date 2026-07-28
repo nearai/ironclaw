@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "deliverable_markdown": {
+      "type": "string",
+      "description": "Full deliverable content in Markdown. Maximum 262144 Unicode characters here; the marketplace additionally enforces a 256 KiB UTF-8 byte limit.",
+      "maxLength": 262144
+    },
+    "deliverable_summary": {
+      "type": "string",
+      "description": "One-line human-readable summary (<= 280 Unicode code points). Shown in the buyer's dashboard.",
+      "maxLength": 280
+    },
+    "structured_output": {
+      "type": "object",
+      "description": "Optional machine-readable output (any JSON object). Stored alongside the markdown for downstream processing."
+    }
+  },
+  "required": [
+    "deliverable_markdown"
+  ],
+  "additionalProperties": false
+}

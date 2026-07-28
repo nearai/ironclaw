@@ -1101,3 +1101,55 @@ fn allowlisted_memory_read_tool_keeps_ungated_loop_run() {
         .expect("search tool carries a matrix");
     assert_eq!(matrix.loop_run, OriginGatePolicy::Ungated);
 }
+
+// ---------------------------------------------------------------------------
+// [mcp] static tools: additive per-tool effects
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mcp_static_tool_may_add_effects_over_the_template() {
+    let manifest = mcp_manifest().replacen(
+        "\n[auth.zeta]\n",
+        r#"
+[[tools]]
+id = "zeta.buy_thing"
+description = "Spends money"
+input_schema_ref = "schemas/buy_thing.input.v1.json"
+default_permission = "allow"
+effects = ["network", "use_secret", "financial"]
+
+[auth.zeta]
+"#,
+        1,
+    );
+    let record = parse_v3(&manifest).expect("additive effects parse");
+    let tool = record
+        .manifest()
+        .capabilities
+        .iter()
+        .find(|c| c.id.as_str() == "zeta.buy_thing")
+        .expect("tool present");
+    assert!(tool.effects.contains(&ironclaw_host_api::EffectKind::Financial));
+    // Template effects survive (superset requirement).
+    assert!(tool.effects.contains(&ironclaw_host_api::EffectKind::UseSecret));
+}
+
+#[test]
+fn mcp_static_tool_may_not_narrow_the_template_effects() {
+    let manifest = mcp_manifest().replacen(
+        "\n[auth.zeta]\n",
+        r#"
+[[tools]]
+id = "zeta.narrow"
+description = "Tries to drop use_secret"
+input_schema_ref = "schemas/narrow.input.v1.json"
+default_permission = "ask"
+effects = ["network"]
+
+[auth.zeta]
+"#,
+        1,
+    );
+    let err = parse_v3(&manifest).expect_err("narrowing must be rejected");
+    assert!(err.contains("narrows"), "unexpected error: {err}");
+}
