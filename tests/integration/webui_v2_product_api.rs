@@ -734,11 +734,8 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
     )
     .expect("orphan manifest parses");
     store
-        .upsert_manifest(orphan_manifest)
-        .await
-        .expect("write orphan manifest");
-    store
-        .upsert_installation(
+        .upsert_manifest_and_installation(
+            orphan_manifest,
             ExtensionInstallation::new(
                 ExtensionInstallationId::new("orphan-migrated").expect("valid installation id"),
                 orphan_extension_id.clone(),
@@ -753,7 +750,7 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
             .expect("orphan installation row"),
         )
         .await
-        .expect("write orphan installation row");
+        .expect("write orphan manifest and installation rows");
     drop(store);
 
     let rebuilt_input = ironclaw_reborn_composition::local_dev_build_input(

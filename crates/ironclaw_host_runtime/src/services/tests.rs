@@ -97,6 +97,23 @@ async fn production_wiring_reports_local_only_persistent_approval_policies() {
     ));
 }
 
+// `registered_runtime_backends()` has no Sandbox backend field: there is no
+// production Sandbox runtime to wire up yet. A `RuntimeKind::Sandbox` entry in
+// `required_runtime_backends` must therefore surface as `UnsupportedRequirement`
+// — exactly like `RuntimeKind::System` — rather than being silently accepted by
+// the safe-runtimes catch-all arm.
+#[tokio::test]
+async fn production_wiring_reports_unsupported_sandbox_runtime_requirement() {
+    let report = test_services()
+        .validate_production_wiring(&ProductionWiringConfig::new([RuntimeKind::Sandbox]))
+        .expect_err("Sandbox runtime requirement is not production-wired");
+
+    assert!(report.contains(
+        ProductionWiringComponent::RuntimeBackend,
+        ProductionWiringIssueKind::UnsupportedRequirement
+    ));
+}
+
 #[tokio::test]
 async fn product_auth_provider_runtime_ports_returns_none_without_egress() {
     let services = test_services();
