@@ -8,11 +8,11 @@ use std::{
 use chrono::Utc;
 use ironclaw_extensions::{
     CapabilityProviderHostApiContract, ExtensionCredentialBinding, ExtensionCredentialHandle,
-    ExtensionHealthMessage, ExtensionHealthSnapshot, ExtensionHealthStatus, ExtensionInstallation,
-    ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationPersistedParts,
-    ExtensionInstallationStore, ExtensionInstallationStorePort, ExtensionManifestRecord,
-    ExtensionManifestRef, HostApiContractRegistry, InstallationOwner, MANIFEST_SCHEMA_VERSION,
-    ManifestHash, ManifestSource, ManifestV2Error, MembershipDeactivation,
+    ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationId,
+    ExtensionInstallationPersistedParts, ExtensionInstallationStore,
+    ExtensionInstallationStorePort, ExtensionManifestRecord, ExtensionManifestRef,
+    HostApiContractRegistry, InstallationOwner, MANIFEST_SCHEMA_VERSION, ManifestHash,
+    ManifestSource, ManifestV2Error, MembershipDeactivation,
 };
 use ironclaw_filesystem::{
     CasExpectation, Fault, FaultInjecting, FilesystemOperation, Filter, InMemoryBackend,
@@ -285,12 +285,21 @@ async fn missing_installation_mutations_return_not_found() {
     let store = installation_store().await;
     let missing = installation_id("missing-prod");
 
-    let health_err = store
-        .update_health(&missing, ExtensionHealthSnapshot::healthy())
+    let join_err = store
+        .activate_membership(&missing, &UserId::new("alice").unwrap())
         .await
         .unwrap_err();
     assert!(matches!(
-        health_err,
+        join_err,
+        ExtensionInstallationError::InstallationNotFound { .. }
+    ));
+
+    let leave_err = store
+        .deactivate_membership(&missing, &UserId::new("alice").unwrap())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        leave_err,
         ExtensionInstallationError::InstallationNotFound { .. }
     ));
 }
@@ -333,51 +342,33 @@ async fn manifest_hash_presence_mismatch_is_rejected() {
     ));
 }
 
+/// The released aggregate row carries a diagnostic `health` object that this
+/// store does not model — extension failure state is owned by the host's
+/// activation record. `ExtensionInstallation` denies unknown fields, so an
+/// upgrade booting against an existing storage root only works while that
+/// field is explicitly accepted and discarded. Without this, every legacy row
+/// fails to deserialize and the whole extension catalog disappears on upgrade.
 #[test]
-fn extension_health_message_redacts_public_renderings() {
-    let message = ExtensionHealthMessage::new("provider stack trace with /host/path secret-token");
-    let snapshot = ExtensionHealthSnapshot::new(
-        ExtensionHealthStatus::Degraded,
-        Some(message),
-        chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc),
-    );
-
-    assert_eq!(
-        format!("{:?}", snapshot.message().unwrap()),
-        ExtensionHealthMessage::placeholder()
-    );
-    assert_eq!(
-        snapshot.message().unwrap().to_string(),
-        ExtensionHealthMessage::placeholder()
-    );
-    let json = serde_json::to_string(&snapshot).unwrap();
-    assert!(json.contains(ExtensionHealthMessage::placeholder()));
-    assert!(!json.contains("secret-token"));
-    assert!(!json.contains("/host/path"));
-}
-
-#[test]
-fn extension_health_message_round_trip_stays_redacted() {
+fn released_aggregate_rows_carrying_health_still_deserialize() {
     let json = r#"
 {
-  "status": "degraded",
-  "message": "provider stack trace with /host/path secret-token",
-  "checked_at": "2026-01-01T00:00:00Z"
+  "installation_id": "acme-tools",
+  "extension_id": "acme-tools",
+  "manifest_ref": { "extension_id": "acme-tools", "manifest_hash": "sha256:abc" },
+  "credential_bindings": [],
+  "health": { "status": "healthy", "message": null, "checked_at": "2026-01-01T00:00:00Z" },
+  "updated_at": "2026-01-01T00:00:00Z",
+  "owner": { "kind": "users", "user_ids": ["alice"] }
 }
 "#;
 
-    let snapshot: ExtensionHealthSnapshot = serde_json::from_str(json).unwrap();
+    let installation: ExtensionInstallation = serde_json::from_str(json).unwrap();
+    assert_eq!(installation.extension_id().as_str(), "acme-tools");
     assert_eq!(
-        snapshot.message().unwrap().to_string(),
-        ExtensionHealthMessage::placeholder()
+        installation.owner().members().unwrap(),
+        &BTreeSet::from([UserId::new("alice").unwrap()]),
+        "membership must survive an upgrade from the released row shape"
     );
-
-    let serialized = serde_json::to_string(&snapshot).unwrap();
-    assert!(serialized.contains(ExtensionHealthMessage::placeholder()));
-    assert!(!serialized.contains("secret-token"));
-    assert!(!serialized.contains("/host/path"));
 }
 
 #[test]
@@ -406,41 +397,11 @@ fn extension_installation_identifiers_reject_empty_and_control_chars() {
 }
 
 #[test]
-fn new_installation_uses_updated_at_for_initial_health_timestamp() {
-    let updated_at = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
-        .unwrap()
-        .with_timezone(&Utc);
-
-    let installation = ExtensionInstallation::new(
-        installation_id("acme-tools-prod"),
-        extension_id("acme-tools"),
-        ExtensionManifestRef::new(
-            extension_id("acme-tools"),
-            Some(manifest_hash("sha256:abc")),
-        ),
-        vec![],
-        updated_at,
-        InstallationOwner::Tenant,
-    )
-    .unwrap();
-
-    assert_eq!(installation.health().checked_at(), updated_at);
-}
-
-#[test]
-fn persisted_reconstruction_preserves_health_timestamp_and_bindings() {
+fn persisted_reconstruction_preserves_timestamp_and_bindings() {
     let extension_id = extension_id("acme-tools");
-    let checked_at = chrono::DateTime::parse_from_rfc3339("2026-01-02T00:00:00Z")
-        .unwrap()
-        .with_timezone(&Utc);
     let updated_at = chrono::DateTime::parse_from_rfc3339("2026-01-03T00:00:00Z")
         .unwrap()
         .with_timezone(&Utc);
-    let health = ExtensionHealthSnapshot::new(
-        ExtensionHealthStatus::Degraded,
-        Some(ExtensionHealthMessage::new("redacted diagnostic")),
-        checked_at,
-    );
     let binding = ExtensionCredentialBinding::new(
         ExtensionCredentialHandle::new("api").unwrap(),
         SecretHandle::new("api-secret").unwrap(),
@@ -453,13 +414,11 @@ fn persisted_reconstruction_preserves_health_timestamp_and_bindings() {
             extension_id: extension_id.clone(),
             manifest_ref: ExtensionManifestRef::new(extension_id, None),
             credential_bindings: vec![binding.clone()],
-            health: health.clone(),
             updated_at,
             owner: owner.clone(),
         })
         .unwrap();
 
-    assert_eq!(installation.health(), &health);
     assert_eq!(installation.updated_at(), updated_at);
     assert_eq!(installation.credential_bindings(), &[binding]);
     assert_eq!(installation.owner(), &owner);
@@ -598,7 +557,6 @@ async fn normalized_v2_layout_separates_mutable_extension_state_and_reopens_the_
             "credential-bindings",
             "extension_credential_binding_record_v2",
         ),
-        ("health", "extension_health_record_v2"),
     ];
     for (collection, expected_kind) in collection_rows {
         let rows = filesystem
@@ -706,7 +664,7 @@ async fn normalized_v2_layout_separates_mutable_extension_state_and_reopens_the_
         )
         .await
         .unwrap();
-    assert_eq!(all_v2_rows.len(), 4);
+    assert_eq!(all_v2_rows.len(), 3);
     assert!(
         all_v2_rows
             .iter()
@@ -767,7 +725,6 @@ async fn normalized_v2_soft_removal_preserves_records_and_allows_reactivation() 
         ("installations", true),
         ("memberships", true),
         ("credential-bindings", true),
-        ("health", false),
     ] {
         let rows = filesystem
             .query(
@@ -899,7 +856,7 @@ async fn normalized_v2_bootstrap_imports_legacy_rows_and_repairs_compatibility_v
         )
         .await
         .unwrap();
-    assert_eq!(v2_rows.len(), 4, "legacy aggregate must expand into v2");
+    assert_eq!(v2_rows.len(), 3, "legacy aggregate must expand into v2");
 
     let compatibility_rows = target_filesystem
         .query(
@@ -1021,7 +978,7 @@ async fn interrupted_active_aggregate_update_rolls_back_before_readers_resume() 
     let backend = Arc::new(
         FaultInjecting::new(InMemoryBackend::new()).with_fault(
             Fault::on(FilesystemOperation::WriteFile)
-                .path("/v2/health/")
+                .path("/v2/credential-bindings/")
                 .nth(2)
                 .backend("interrupt an active aggregate update after membership writes"),
         ),
@@ -1052,7 +1009,7 @@ async fn interrupted_active_aggregate_update_rolls_back_before_readers_resume() 
     store
         .upsert_installation(updated)
         .await
-        .expect_err("the injected health failure must interrupt the aggregate update");
+        .expect_err("the injected binding failure must interrupt the aggregate update");
 
     let visible = store
         .get_installation(installed.installation_id())
@@ -1674,88 +1631,6 @@ async fn aggregate_projection_write_failure_does_not_fail_a_committed_v2_install
     );
 }
 
-/// Review finding: a health update is a diagnostic write and must never
-/// rewrite the installation core — a read-then-rewrite of the whole aggregate
-/// can race a final removal and resurrect a removed core. The core row must
-/// stay byte- and version-identical across a health update, and a health
-/// update against a removed installation reports it as missing.
-#[tokio::test]
-async fn update_health_mutates_only_the_health_row() {
-    let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
-    let root = VirtualPath::new("/system/extensions/.installations/health-isolated").unwrap();
-    let store = ExtensionInstallationStore::load_at(
-        Arc::clone(&filesystem),
-        root.clone(),
-        HostPortCatalog::empty(),
-        contracts(),
-    )
-    .await
-    .unwrap();
-    let installed = normalized_installation("sha256:abc");
-    store
-        .upsert_manifest_and_installation(manifest("sha256:abc"), installed.clone())
-        .await
-        .unwrap();
-    let core_path = VirtualPath::new(format!("{}/v2/installations", root.as_str())).unwrap();
-    let core_before = filesystem
-        .query(&core_path, &Filter::All, Page::first(10))
-        .await
-        .unwrap();
-    assert_eq!(core_before.len(), 1);
-
-    let degraded = ExtensionHealthSnapshot::new(
-        ExtensionHealthStatus::Unhealthy,
-        Some(ExtensionHealthMessage::new("activation failed")),
-        Utc::now(),
-    );
-    store
-        .update_health(installed.installation_id(), degraded.clone())
-        .await
-        .unwrap();
-
-    let core_after = filesystem
-        .query(&core_path, &Filter::All, Page::first(10))
-        .await
-        .unwrap();
-    assert_eq!(
-        core_after[0].version, core_before[0].version,
-        "a health update must not rewrite the installation core row"
-    );
-    let refreshed = store
-        .get_installation(installed.installation_id())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(refreshed.health().status(), degraded.status());
-    assert_eq!(refreshed.health().checked_at(), degraded.checked_at());
-    assert_eq!(
-        refreshed.health().message().unwrap().to_string(),
-        ExtensionHealthMessage::placeholder(),
-        "persisted health messages stay redacted"
-    );
-
-    store
-        .delete_installation(installed.installation_id())
-        .await
-        .unwrap();
-    assert!(matches!(
-        store
-            .update_health(installed.installation_id(), degraded)
-            .await
-            .unwrap_err(),
-        ExtensionInstallationError::InstallationNotFound { .. }
-    ));
-    let core_removed = filesystem
-        .query(&core_path, &Filter::All, Page::first(10))
-        .await
-        .unwrap();
-    let body: serde_json::Value = core_removed[0].entry.parse_json().unwrap();
-    assert!(
-        body["removed_at"].is_string(),
-        "a health update must never resurrect a removed record: {body}"
-    );
-}
-
 /// A removal that has not converged keeps the extension's definition
 /// authoritative: `delete_installation` leaves a cleanup-pending tombstone
 /// whose manifest stays visible (so removal retries work without the catalog
@@ -1946,7 +1821,7 @@ async fn interrupted_update_without_compatibility_snapshot_stays_live_on_reopen(
             )
             .with_fault(
                 Fault::on(FilesystemOperation::WriteFile)
-                    .path("/v2/health/")
+                    .path("/v2/credential-bindings/")
                     .nth(2)
                     .backend("interrupt the aggregate update forward pass"),
             )

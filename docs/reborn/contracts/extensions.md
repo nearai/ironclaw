@@ -63,7 +63,6 @@ record rows under:
   installations/<hashed_installation_id>.json
   memberships/<hashed_installation_id>/<hashed_user_id>.json
   credential-bindings/<hashed_installation_id>/<hashed_credential_handle>.json
-  health/<hashed_installation_id>.json
 ```
 
 Each row has an explicit record kind, `extension_state.v2` schema version,
@@ -73,8 +72,10 @@ embeds the validated, hash-carrying manifest wire for the installed
 definition. That embedded definition is not an availability or policy
 declaration — what *can* be installed lives in the available-extension
 catalog — and a definition never exists outside an installation record. User
-membership, credential bindings, and health are independently mutable
-records. Lifecycle state is derived, not stored: a record with `removed_at`
+membership and credential bindings are independently mutable records.
+Extension failure state is not stored here: the host's activation record owns
+it, so this store has no second, divergent answer to "is this extension
+broken". Lifecycle state is derived, not stored: a record with `removed_at`
 set is a tombstone, a record with a `lease` is mid-mutation, and a record
 with neither is live. A tombstone additionally carries
 `removal_cleanup_pending` until `delete_manifest` marks the removal
@@ -105,9 +106,7 @@ sets, including creation and reactivation, which hold no lease. Under the
 single-writer-per-root contract an omitted-but-active row can only be debris
 from an earlier failed write — an interrupted install's membership row, a
 crashed update's leftovers — and merging it in would grant membership to a
-user whose install never succeeded. A health update
-writes only the health row — never the installation record — so it cannot
-race a removal into resurrecting a tombstone. A mutation's outcome is
+user whose install never succeeded. A mutation's outcome is
 decided by the v2 records alone: once they commit, a failed
 compatibility-projection write does not fail the operation; startup repair
 converges the projection.
@@ -130,8 +129,7 @@ contracts) and
 These are `VirtualPath` keys, not a promise of literal host directories.
 `RootFilesystem` may route them to disk, libSQL, PostgreSQL, or another
 compatible backend while retaining the same partitioning and typed store API.
-Health metadata is diagnostic, not lifecycle authority. These records do not
-own administrator configuration.
+These records do not own administrator configuration.
 
 During the v2 transition, the previous aggregate paths remain compatibility
 views:

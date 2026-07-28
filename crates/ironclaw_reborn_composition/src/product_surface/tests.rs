@@ -12,10 +12,10 @@ use super::*;
 use async_trait::async_trait;
 use ironclaw_extensions::InstallationOwner;
 use ironclaw_extensions::{
-    ExtensionHealthSnapshot, ExtensionInstallation, ExtensionInstallationError,
-    ExtensionInstallationId, ExtensionInstallationStore, ExtensionInstallationStorePort,
-    ExtensionManifest, ExtensionManifestRecord, ExtensionPackage, ExtensionRegistry,
-    ManifestSource, MembershipDeactivation,
+    ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationId,
+    ExtensionInstallationStore, ExtensionInstallationStorePort, ExtensionManifest,
+    ExtensionManifestRecord, ExtensionPackage, ExtensionRegistry, ManifestSource,
+    MembershipDeactivation,
 };
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
 use ironclaw_host_api::{
@@ -351,14 +351,6 @@ impl ExtensionInstallationStorePort for OwnerReadFailingStore {
         extension_id: &ExtensionId,
     ) -> Result<(), ExtensionInstallationError> {
         self.inner.delete_manifest(extension_id).await
-    }
-
-    async fn update_health(
-        &self,
-        installation_id: &ExtensionInstallationId,
-        health: ExtensionHealthSnapshot,
-    ) -> Result<(), ExtensionInstallationError> {
-        self.inner.update_health(installation_id, health).await
     }
 }
 

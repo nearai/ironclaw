@@ -2,8 +2,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use ironclaw_extensions::{
-    ExtensionCredentialBinding, ExtensionCredentialHandle, ExtensionHealthMessage,
-    ExtensionHealthSnapshot, ExtensionHealthStatus, ExtensionInstallation,
+    ExtensionCredentialBinding, ExtensionCredentialHandle, ExtensionInstallation,
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
     ExtensionInstallationStorePort, ExtensionManifestRecord, ExtensionManifestRef,
     InstallationOwner, MANIFEST_SCHEMA_VERSION, ManifestSource,
@@ -379,39 +378,4 @@ async fn arc_store_delegation_works() {
 
     let installed = arc_store.list_installations().await.unwrap();
     assert_eq!(installed.len(), 1);
-}
-
-#[tokio::test]
-async fn update_health_uses_redacted_string() {
-    let store = filesystem_store().await;
-    store
-        .upsert_manifest_and_installation(
-            manifest("telegram_bot_token", "sha256:abc123"),
-            installation(),
-        )
-        .await
-        .unwrap();
-
-    let health = ExtensionHealthSnapshot::new(
-        ExtensionHealthStatus::Degraded,
-        Some(ExtensionHealthMessage::new("timeout after 5s")),
-        Utc::now(),
-    );
-    store
-        .update_health(&installation_id(), health)
-        .await
-        .unwrap();
-
-    let inst = store
-        .get_installation(&installation_id())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(inst.health().status(), ExtensionHealthStatus::Degraded);
-    // ExtensionHealthMessage Debug impl should redact the value.
-    let debug = format!("{:?}", inst.health().message().unwrap());
-    assert!(
-        !debug.contains("timeout after 5s"),
-        "ExtensionHealthMessage should redact the message in Debug output"
-    );
 }

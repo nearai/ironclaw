@@ -16,7 +16,7 @@ use ironclaw_host_api::{
     ExtensionId, HostPortCatalog, MountAlias, MountGrant, MountPermissions, MountView,
     ResourceScope, ScopedPath, SecretHandle, UserId, VirtualPath, sha256_digest_token,
 };
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 use crate::resolved::ResolvedExtensionManifest;
@@ -378,100 +378,6 @@ impl ExtensionManifestRef {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExtensionHealthSnapshot {
-    status: ExtensionHealthStatus,
-    message: Option<ExtensionHealthMessage>,
-    checked_at: DateTime<Utc>,
-}
-
-const REDACTED_PLACEHOLDER: &str = "<redacted>";
-
-#[derive(Clone, PartialEq, Eq)]
-pub struct ExtensionHealthMessage(String);
-
-impl ExtensionHealthMessage {
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
-    pub fn placeholder() -> &'static str {
-        REDACTED_PLACEHOLDER
-    }
-}
-
-impl fmt::Debug for ExtensionHealthMessage {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(REDACTED_PLACEHOLDER)
-    }
-}
-
-impl fmt::Display for ExtensionHealthMessage {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(REDACTED_PLACEHOLDER)
-    }
-}
-
-impl Serialize for ExtensionHealthMessage {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(REDACTED_PLACEHOLDER)
-    }
-}
-
-impl<'de> Deserialize<'de> for ExtensionHealthMessage {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        String::deserialize(deserializer).map(|_| Self(REDACTED_PLACEHOLDER.to_string()))
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExtensionHealthStatus {
-    Healthy,
-    Degraded,
-    Unhealthy,
-}
-
-impl ExtensionHealthSnapshot {
-    pub fn healthy() -> Self {
-        Self {
-            status: ExtensionHealthStatus::Healthy,
-            message: None,
-            checked_at: Utc::now(),
-        }
-    }
-
-    pub fn new(
-        status: ExtensionHealthStatus,
-        message: Option<ExtensionHealthMessage>,
-        checked_at: DateTime<Utc>,
-    ) -> Self {
-        Self {
-            status,
-            message,
-            checked_at,
-        }
-    }
-
-    pub fn status(&self) -> ExtensionHealthStatus {
-        self.status
-    }
-
-    pub fn message(&self) -> Option<&ExtensionHealthMessage> {
-        self.message.as_ref()
-    }
-
-    pub fn checked_at(&self) -> DateTime<Utc> {
-        self.checked_at
-    }
-}
-
 /// The caller-membership axis of an installation.
 ///
 /// `Users` is the only owner shape created by current lifecycle operations:
@@ -635,7 +541,6 @@ pub struct ExtensionInstallation {
     extension_id: ExtensionId,
     manifest_ref: ExtensionManifestRef,
     credential_bindings: Vec<ExtensionCredentialBinding>,
-    health: ExtensionHealthSnapshot,
     updated_at: DateTime<Utc>,
     // `Tenant` is a read-only compatibility shape for records written before
     // caller-scoped installations. Restore narrows it to the configured
@@ -645,14 +550,13 @@ pub struct ExtensionInstallation {
 }
 
 /// All persisted fields needed to reconstruct an installation without
-/// inventing fresh health or timestamp state.
+/// inventing fresh timestamp state.
 #[derive(Debug)]
 pub struct ExtensionInstallationPersistedParts {
     pub installation_id: ExtensionInstallationId,
     pub extension_id: ExtensionId,
     pub manifest_ref: ExtensionManifestRef,
     pub credential_bindings: Vec<ExtensionCredentialBinding>,
-    pub health: ExtensionHealthSnapshot,
     pub updated_at: DateTime<Utc>,
     pub owner: InstallationOwner,
 }
@@ -671,7 +575,6 @@ impl ExtensionInstallation {
             extension_id,
             manifest_ref,
             credential_bindings,
-            health: ExtensionHealthSnapshot::new(ExtensionHealthStatus::Healthy, None, updated_at),
             updated_at,
             owner,
         })
@@ -679,10 +582,9 @@ impl ExtensionInstallation {
 
     /// Reconstruct an installation with all state read from persistence.
     ///
-    /// The ordinary [`Self::new`] constructor starts a fresh installation with
-    /// a healthy snapshot. Persistence adapters use this neutral constructor
-    /// when they need to preserve an existing health snapshot and timestamp
-    /// while changing the canonical installation identity.
+    /// Persistence adapters use this neutral constructor when they need to
+    /// preserve an existing timestamp while changing the canonical
+    /// installation identity.
     pub fn from_persisted_parts(
         parts: ExtensionInstallationPersistedParts,
     ) -> Result<Self, ExtensionInstallationError> {
@@ -698,7 +600,6 @@ impl ExtensionInstallation {
             extension_id: parts.extension_id,
             manifest_ref: parts.manifest_ref,
             credential_bindings: parts.credential_bindings,
-            health: parts.health,
             updated_at: parts.updated_at,
             owner: parts.owner,
         })
@@ -718,10 +619,6 @@ impl ExtensionInstallation {
 
     pub fn credential_bindings(&self) -> &[ExtensionCredentialBinding] {
         &self.credential_bindings
-    }
-
-    pub fn health(&self) -> &ExtensionHealthSnapshot {
-        &self.health
     }
 
     pub fn updated_at(&self) -> DateTime<Utc> {
@@ -753,7 +650,13 @@ impl<'de> Deserialize<'de> for ExtensionInstallation {
             extension_id: ExtensionId,
             manifest_ref: ExtensionManifestRef,
             credential_bindings: Vec<ExtensionCredentialBinding>,
-            health: ExtensionHealthSnapshot,
+            // The released aggregate row carries a diagnostic `health`
+            // object. It is not modelled here -- the host's activation record
+            // already owns extension failure state -- so it is accepted and
+            // discarded rather than failing `deny_unknown_fields` on a row
+            // written by the previous release.
+            #[serde(default)]
+            health: serde::de::IgnoredAny,
             updated_at: DateTime<Utc>,
             // Legacy records predate the owner field; they were all
             // tenant-visible, so absent == Tenant is behavior-preserving.
@@ -770,12 +673,12 @@ impl<'de> Deserialize<'de> for ExtensionInstallation {
             ));
         }
         validate_bindings_unique(&wire.credential_bindings).map_err(serde::de::Error::custom)?;
+        let _ = wire.health;
         Ok(Self {
             installation_id: wire.installation_id,
             extension_id: wire.extension_id,
             manifest_ref: wire.manifest_ref,
             credential_bindings: wire.credential_bindings,
-            health: wire.health,
             updated_at: wire.updated_at,
             owner: wire.owner,
         })
@@ -785,7 +688,7 @@ impl<'de> Deserialize<'de> for ExtensionInstallation {
 /// Generic extension installation state store.
 ///
 /// Implementations own product-agnostic manifest records, installation
-/// activation state, opaque credential bindings, health snapshots, and
+/// activation state, opaque credential bindings, and
 /// manifest-hash consistency. Domain crates validate domain-specific binding
 /// semantics when projecting their host-api sections from these records.
 #[async_trait]
@@ -848,12 +751,6 @@ pub trait ExtensionInstallationStorePort: Send + Sync {
     async fn delete_manifest(
         &self,
         extension_id: &ExtensionId,
-    ) -> Result<(), ExtensionInstallationError>;
-
-    async fn update_health(
-        &self,
-        installation_id: &ExtensionInstallationId,
-        health: ExtensionHealthSnapshot,
     ) -> Result<(), ExtensionInstallationError>;
 }
 
@@ -949,14 +846,6 @@ where
     ) -> Result<(), ExtensionInstallationError> {
         (**self).delete_manifest(extension_id).await
     }
-
-    async fn update_health(
-        &self,
-        installation_id: &ExtensionInstallationId,
-        health: ExtensionHealthSnapshot,
-    ) -> Result<(), ExtensionInstallationError> {
-        (**self).update_health(installation_id, health).await
-    }
 }
 
 const DEFAULT_INSTALLATION_STATE_PATH: &str = "/system/extensions/.installations";
@@ -966,7 +855,6 @@ const EXTENSION_STATE_V2_SCHEMA: &str = "extension_state.v2";
 const INSTALLATION_RECORD_KIND_V2: &str = "extension_installation_record_v2";
 const MEMBERSHIP_RECORD_KIND_V2: &str = "extension_membership_record_v2";
 const CREDENTIAL_BINDING_RECORD_KIND_V2: &str = "extension_credential_binding_record_v2";
-const HEALTH_RECORD_KIND_V2: &str = "extension_health_record_v2";
 const FILESYSTEM_CAS_RETRIES: usize = 5;
 
 /// An exclusive mutation lease on an installation record — the cross-process
@@ -1087,19 +975,10 @@ impl V2CredentialBindingRecord {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct V2HealthRecord {
-    schema_version: String,
-    installation_id: ExtensionInstallationId,
-    health: ExtensionHealthSnapshot,
-    updated_at: DateTime<Utc>,
-}
-
 /// Filesystem-backed extension installation state store.
 ///
-/// Manifests, installation identity, user memberships, credential bindings,
-/// and health are persisted as separate typed record rows under the configured
+/// Manifests, installation identity, user memberships, and credential
+/// bindings are persisted as separate typed record rows under the configured
 /// root path. Secondary indexes are declared on the row prefixes so scans that
 /// gate lifecycle behavior can use the filesystem query API instead of loading
 /// or rewriting a monolithic state snapshot.
@@ -1211,11 +1090,6 @@ impl ExtensionInstallationStore {
             (
                 self.v2_credential_bindings_root()?,
                 "extension_v2_bindings_by_installation_id",
-                "installation_id",
-            ),
-            (
-                self.v2_health_root()?,
-                "extension_v2_health_by_installation_id",
                 "installation_id",
             ),
         ] {
@@ -1331,10 +1205,6 @@ impl ExtensionInstallationStore {
         child_path(&self.v2_root()?, "credential-bindings")
     }
 
-    fn v2_health_root(&self) -> Result<VirtualPath, ExtensionInstallationError> {
-        child_path(&self.v2_root()?, "health")
-    }
-
     fn manifest_path(
         &self,
         extension_id: &ExtensionId,
@@ -1425,16 +1295,6 @@ impl ExtensionInstallationStore {
         child_path(
             &self.v2_credential_binding_root(installation_id)?,
             &format!("{}.json", row_token(credential_handle.as_str())),
-        )
-    }
-
-    fn v2_health_path(
-        &self,
-        installation_id: &ExtensionInstallationId,
-    ) -> Result<VirtualPath, ExtensionInstallationError> {
-        child_path(
-            &self.v2_health_root()?,
-            &format!("{}.json", row_token(installation_id.as_str())),
         )
     }
 
@@ -1631,28 +1491,6 @@ impl ExtensionInstallationStore {
         Ok(Some((record, entry.version)))
     }
 
-    async fn require_visible_v2_core(
-        &self,
-        installation_id: &ExtensionInstallationId,
-    ) -> Result<V2InstallationRecord, ExtensionInstallationError> {
-        let Some((core, _)) = self.load_v2_installation_record(installation_id).await? else {
-            return Err(ExtensionInstallationError::InstallationNotFound {
-                installation_id: installation_id.clone(),
-            });
-        };
-        if core.is_removed() {
-            return Err(ExtensionInstallationError::InstallationNotFound {
-                installation_id: installation_id.clone(),
-            });
-        }
-        if core.lease.is_some() {
-            return Err(ExtensionInstallationError::MembershipMutationInProgress {
-                installation_id: installation_id.clone(),
-            });
-        }
-        Ok(core)
-    }
-
     /// Write the full aggregate. `manifest: Some` re-pins the embedded
     /// definition (install/update); `None` carries the existing row's
     /// definition forward (reactivation, restore, plain aggregate rewrites).
@@ -1763,13 +1601,6 @@ impl ExtensionInstallationStore {
             }
         }
 
-        let health = V2HealthRecord {
-            schema_version: EXTENSION_STATE_V2_SCHEMA.to_string(),
-            installation_id: installation.installation_id().clone(),
-            health: installation.health().clone(),
-            updated_at: installation.updated_at(),
-        };
-        self.write_v2_health(&health).await?;
         self.put_v2_installation_core(installation, manifest)
             .await
             .map(|_| ())
@@ -2358,37 +2189,6 @@ impl ExtensionInstallationStore {
         .map_err(|error| map_extension_state_cas_error(error, "credential binding"))
     }
 
-    async fn write_v2_health(
-        &self,
-        health: &V2HealthRecord,
-    ) -> Result<(), ExtensionInstallationError> {
-        let path = self.v2_scoped_path(&self.v2_health_path(&health.installation_id)?)?;
-        let health = health.clone();
-        cas_update(
-            self.scoped_filesystem.as_ref(),
-            &ResourceScope::system(),
-            &path,
-            decode_v2_health_body,
-            entry_for_v2_health,
-            move |current: Option<V2HealthRecord>| {
-                let health = health.clone();
-                async move {
-                    if current
-                        .as_ref()
-                        .is_some_and(|record| record.installation_id != health.installation_id)
-                    {
-                        return Err(invalid_installation_error(
-                            "v2 health body identity did not match its key",
-                        ));
-                    }
-                    Ok(CasApply::new(health, ()))
-                }
-            },
-        )
-        .await
-        .map_err(|error| map_extension_state_cas_error(error, "health"))
-    }
-
     async fn query_v2_memberships(
         &self,
         installation_id: &ExtensionInstallationId,
@@ -2529,35 +2329,15 @@ impl ExtensionInstallationStore {
                 )
             })
             .collect::<Vec<_>>();
-        let health_path = self.v2_health_path(&core.installation_id)?;
-        let health = self
-            .filesystem
-            .get(&health_path)
-            .await
-            .map_err(store_unavailable("load v2 extension health row"))?
-            .ok_or_else(|| {
-                invalid_installation_error(format!(
-                    "active v2 installation {} has no health row",
-                    core.installation_id
-                ))
-            })
-            .and_then(|entry| parse_v2_health_entry(entry.entry, &health_path))?;
-        if health.installation_id != core.installation_id {
-            return Err(invalid_installation_error(
-                "v2 health row installation id did not match its key",
-            ));
-        }
         let updated_at = membership_updated_at
             .into_iter()
             .chain(binding_updated_at)
-            .chain(std::iter::once(health.updated_at))
             .fold(core.updated_at, std::cmp::max);
         ExtensionInstallation::from_persisted_parts(ExtensionInstallationPersistedParts {
             installation_id: core.installation_id.clone(),
             extension_id: core.extension_id.clone(),
             manifest_ref: core.manifest_ref(),
             credential_bindings,
-            health: health.health,
             updated_at,
             owner,
         })
@@ -3200,39 +2980,6 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
         }
         Ok(())
     }
-
-    async fn update_health(
-        &self,
-        installation_id: &ExtensionInstallationId,
-        health: ExtensionHealthSnapshot,
-    ) -> Result<(), ExtensionInstallationError> {
-        // Health is a diagnostic record isolated from lifecycle state: write
-        // only the health row, never the installation record. Rewriting the
-        // aggregate here could race a final removal and resurrect a removed
-        // record.
-        self.require_visible_v2_core(installation_id).await?;
-        let record = V2HealthRecord {
-            schema_version: EXTENSION_STATE_V2_SCHEMA.to_string(),
-            installation_id: installation_id.clone(),
-            health,
-            updated_at: Utc::now(),
-        };
-        self.write_v2_health(&record).await?;
-        // Re-check after the write: if a removal landed in between, the row
-        // above is an orphaned diagnostic on a tombstoned record (harmless
-        // and invisible) and the installation must be reported as gone rather
-        // than projected back into the compatibility view.
-        let core = self.require_visible_v2_core(installation_id).await?;
-        let installation = self.reconstruct_v2_installation(&core).await?;
-        // silent-ok: v2 is authoritative and committed; the compatibility
-        // projection is repaired from v2 at the next startup if this write
-        // fails, and failing the operation here would misreport a committed
-        // health update.
-        let _ = self
-            .put_installation(&installation, CasExpectation::Any)
-            .await;
-        Ok(())
-    }
 }
 
 #[derive(Debug)]
@@ -3448,17 +3195,6 @@ fn entry_for_v2_credential_binding(
     )
 }
 
-fn entry_for_v2_health(record: &V2HealthRecord) -> Result<Entry, ExtensionInstallationError> {
-    entry_for_v2_record(
-        HEALTH_RECORD_KIND_V2,
-        record,
-        [(
-            "installation_id",
-            IndexValue::Text(record.installation_id.as_str().to_string()),
-        )],
-    )
-}
-
 fn entry_for_v2_record<T, const N: usize>(
     kind: &'static str,
     record: &T,
@@ -3514,21 +3250,10 @@ fn parse_v2_credential_binding_entry(
     )
 }
 
-fn parse_v2_health_entry(
-    entry: Entry,
-    path: &VirtualPath,
-) -> Result<V2HealthRecord, ExtensionInstallationError> {
-    parse_v2_entry(entry, path, HEALTH_RECORD_KIND_V2, "health")
-}
-
 fn decode_v2_credential_binding_body(
     body: &[u8],
 ) -> Result<V2CredentialBindingRecord, ExtensionInstallationError> {
     decode_v2_record_body(body, "credential binding")
-}
-
-fn decode_v2_health_body(body: &[u8]) -> Result<V2HealthRecord, ExtensionInstallationError> {
-    decode_v2_record_body(body, "health")
 }
 
 fn decode_v2_record_body<T>(

@@ -5,7 +5,7 @@
 
 **Goal:** Replace the extension store's aggregate filesystem row as the
 canonical representation with typed, independently mutable manifest,
-installation, membership, credential-binding, and health records, while
+installation, membership, and credential-binding records, while
 keeping package bytes file-shaped and preserving the existing typed store API.
 
 **Architecture:** `ExtensionInstallationStorePort` remains the only public
@@ -32,7 +32,6 @@ The v2 domain-owned paths are:
   installations/{installation_token}.json
   memberships/{installation_token}/{user_token}.json
   credential-bindings/{installation_token}/{binding_token}.json
-  health/{installation_token}.json
 ```
 
 Each body carries `schema_version = "extension_state.v2"` and its canonical
@@ -43,15 +42,16 @@ are locators and never independent identity.
   removed lifecycle status.
 - Installation record: installation ID, extension ID, manifest reference,
   active or removed status, timestamps, and the legacy-tenant compatibility
-  bit. It contains no member set, binding list, health snapshot, or package
-  bytes.
+  bit. It contains no member set, binding list, or package bytes.
 - Membership record: one `(installation_id, user_id)` row with active or
   removed status and install/remove timestamps.
 - Credential-binding record: one `(installation_id, credential_handle)` row
   with active or removed status and an opaque `SecretHandle`; never secret
   material.
-- Health record: one diagnostic snapshot per installation, isolated from
-  membership and binding writes.
+
+Extension failure state is deliberately not persisted here. The host's
+activation record already records it and surfaces it to callers, so a second
+durable copy could only diverge.
 
 The pre-v2 `manifests/` and `installations/` rows are compatibility projections,
 not a second authority. Store startup imports IDs absent from v2, then repairs
@@ -71,8 +71,7 @@ aggregate-only binary a safe rollback target after v2 mutations.
 Add tests that use a real `InMemoryBackend` and assert:
 
 1. one install produces exactly one row in each applicable v2 collection;
-2. installation core JSON contains no `owner`, `credential_bindings`, or
-   `health`;
+2. installation core JSON contains no `owner` or `credential_bindings`;
 3. membership and binding paths are nested under the hashed installation
    token and bodies repeat the canonical IDs;
 4. row kinds and indexed projections are distinct and typed;
@@ -92,7 +91,7 @@ Expected: FAIL because the v2 collections and record kinds do not exist.
 Add tests that assert:
 
 - deleting an installation hides it from `get`/`list` but leaves a removed v2
-  core, removed membership tombstones, binding rows, and health row;
+  core, removed membership tombstones, and binding rows;
 - re-upserting the captured aggregate reactivates the same record identities;
 - deleting a manifest soft-removes the v2 manifest after no active
   installation remains;
@@ -122,10 +121,9 @@ For one active installation core:
 
 1. query active membership rows by installation ID;
 2. query active credential-binding rows by installation ID;
-3. load the health row;
-4. rebuild `InstallationOwner::Users` or the legacy tenant owner;
-5. calculate aggregate `updated_at` as the maximum durable component update;
-6. call `ExtensionInstallation::from_persisted_parts`.
+3. rebuild `InstallationOwner::Users` or the legacy tenant owner;
+4. calculate aggregate `updated_at` as the maximum durable component update;
+5. call `ExtensionInstallation::from_persisted_parts`.
 
 An active non-legacy core with no active memberships is corrupt and fails
 closed. Removed cores are invisible to normal `get`/`list`.
@@ -133,7 +131,7 @@ closed. Removed cores are invisible to normal `get`/`list`.
 **Step 3: Implement aggregate upsert and soft removal**
 
 `upsert_installation` activates desired membership and binding rows, marks
-previously active omitted rows removed, writes health, and commits the core
+previously active omitted rows removed, and commits the core
 last. Existing active cores first enter a CAS-protected `removing` reservation,
 which keeps partial child updates out of reads and makes the compatibility
 aggregate a bounded rollback snapshot. It never hard-deletes v2 domain rows.
@@ -312,7 +310,6 @@ Replace the two-row layout with the five v2 collections. State explicitly:
 - package files remain file/blob data outside lifecycle records;
 - membership/install removal is a status/timestamp transition;
 - bindings contain handles only;
-- health is diagnostic and independently mutable;
 - old and new binaries must not write concurrently during cutover;
 - rollback after v2 mutations requires a data backup or a v2-aware binary;
   stopping writers does not make an aggregate-only binary safe.

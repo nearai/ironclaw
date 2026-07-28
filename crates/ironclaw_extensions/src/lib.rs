@@ -431,8 +431,7 @@ pub type CapabilityManifest = CapabilityDeclV2;
 
 pub use canonicalization::canonicalize_installation_rows;
 pub use installations::{
-    ExtensionCredentialBinding, ExtensionCredentialHandle, ExtensionHealthMessage,
-    ExtensionHealthSnapshot, ExtensionHealthStatus, ExtensionInstallation,
+    ExtensionCredentialBinding, ExtensionCredentialHandle, ExtensionInstallation,
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationPersistedParts,
     ExtensionInstallationStore, ExtensionInstallationStorePort, ExtensionManifestRecord,
     ExtensionManifestRef, ExtensionRemovalChannelId, ExtensionRemovalCleanupAdapterId,
