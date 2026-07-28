@@ -382,7 +382,20 @@ fn model_failure_diagnostic(
         CapabilityFailureDetail::Diagnostic { text } => {
             let text = match ModelDiagnostic::truncating(text) {
                 Ok(text) => text,
-                Err(_) => ModelDiagnostic::unavailable(),
+                // silent-ok: the model-visible diagnostic boundary fails closed
+                // to a fixed sentence rather than failing the turn — the
+                // producer is responsible for scrubbing before text reaches
+                // here. Reaching this arm means it did not, which an operator
+                // wants to see; `debug!` because `info!`/`warn!` corrupt the
+                // REPL/TUI (repo CLAUDE.md).
+                Err(error) => {
+                    tracing::debug!(
+                        %error,
+                        "model-visible diagnostic rejected at the sanitized \
+                         resolution boundary; substituting the fixed fallback"
+                    );
+                    ModelDiagnostic::unavailable()
+                }
             };
             Some(ModelFailureDiagnostic::Diagnostic { text })
         }

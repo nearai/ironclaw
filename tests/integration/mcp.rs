@@ -302,7 +302,6 @@ async fn mcp_tool_call_error_cause_is_scrubbed_and_bounded_in_next_model_request
             .is_err(),
         "diagnostic text beyond the shared byte cap must not reach the model"
     );
-        .expect("MCP client cause reached the next captured model request");
     h.assert_reply_contains("done")
         .await
         .expect("run recovered and finalized (not terminal driver_unavailable)");
