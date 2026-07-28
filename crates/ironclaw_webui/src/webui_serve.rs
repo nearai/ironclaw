@@ -46,7 +46,7 @@ use ironclaw_host_ingress::{
     ProtectedRouteMount, PublicRouteDrains, PublicRouteMount, SplitRouteMount,
 };
 use tower_http::catch_panic::CatchPanicLayer;
-use tower_http::cors::{AllowHeaders, CorsLayer};
+use tower_http::cors::{AllowHeaders, AllowOrigin, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 
@@ -72,6 +72,10 @@ pub(crate) const DEFAULT_WEBUI_MAX_BODY_BYTES: usize = 14 * 1024 * 1024;
 /// fronts an HTML SPA on the same listener.
 pub(crate) const DEFAULT_WEBUI_CSP: &str =
     "default-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'";
+
+fn cors_origin_allowed(origin: &HeaderValue, configured: &[HeaderValue]) -> bool {
+    configured.iter().any(|entry| entry == origin)
+}
 
 const REBORN_HEALTH_PATH: &str = "/api/health";
 
@@ -506,8 +510,11 @@ pub fn webui_v2_app_with_lifecycle(
             .map_err(|err| WebuiServeError::InvalidCspHeader(err.to_string()))
     })?;
 
+    let allowed_origins = config.allowed_origins.clone();
     let cors = CorsLayer::new()
-        .allow_origin(config.allowed_origins.clone())
+        .allow_origin(AllowOrigin::predicate(move |origin, _| {
+            cors_origin_allowed(origin, &allowed_origins)
+        }))
         .allow_methods([
             Method::GET,
             Method::POST,

@@ -523,6 +523,69 @@ async fn callback_preserves_legacy_v2_redirect_after_through_ticket_exchange() {
     );
 }
 
+#[tokio::test]
+async fn callback_returns_mobile_login_ticket_only_to_product_callback() {
+    let store = session_store();
+    let provider = StubProvider::google_with_profile(alice_profile());
+    let router = build_router(vec![provider as Arc<dyn OAuthProvider>], store.clone());
+
+    let login = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(
+                    "/auth/login/google?redirect_after=ironclaw-development%3A%2F%2Fauth%2Fcallback",
+                )
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    let state = state_from_location(
+        login
+            .headers()
+            .get(header::LOCATION)
+            .expect("Location")
+            .to_str()
+            .expect("utf-8"),
+    );
+
+    let callback = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/auth/callback/google?code=mobile-code&state={}",
+                    urlencoding::encode(&state)
+                ))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(callback.status(), StatusCode::SEE_OTHER);
+    let landing = callback
+        .headers()
+        .get(header::LOCATION)
+        .expect("Location")
+        .to_str()
+        .expect("utf-8");
+    assert!(
+        landing.starts_with("ironclaw-development://auth/callback?login_ticket="),
+        "mobile callback must receive only a one-time ticket; got {landing}",
+    );
+    assert!(!landing.contains("Bearer "));
+
+    let ticket = ticket_from_landing(landing);
+    let bearer = redeem_ticket(router, &ticket).await;
+    assert!(
+        store.lookup(&bearer).await.expect("lookup").is_some(),
+        "mobile landing ticket must exchange for a live session",
+    );
+}
+
 fn ticket_from_landing(landing: &str) -> String {
     let query = landing.split_once('?').expect("query").1;
     let query = query.split_once('#').map(|(q, _)| q).unwrap_or(query);

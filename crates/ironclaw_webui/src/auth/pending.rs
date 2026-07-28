@@ -236,10 +236,11 @@ fn mint_state_token() -> String {
     hex::encode(bytes)
 }
 
-/// Sanitize a caller-supplied `redirect_after` value: must start with
-/// `/`, must not start with `//` or `/\` (protocol-relative), must
-/// contain only RFC-3986 path/query characters, and must NOT contain
-/// a `#` fragment marker.
+/// Sanitize a caller-supplied `redirect_after` value. Browser targets must
+/// start with `/`, must not start with `//` or `/\` (protocol-relative), must
+/// contain only RFC-3986 path/query characters, and must NOT contain a `#`
+/// fragment marker. The two product-owned mobile callback URIs are also
+/// accepted exactly; arbitrary custom schemes remain blocked.
 ///
 /// `#` is deliberately rejected because the OAuth success redirect
 /// appends `?login_ticket=<ticket>` / `&login_ticket=<ticket>` to the
@@ -252,6 +253,12 @@ pub(crate) fn sanitize_redirect(input: Option<String>) -> Option<String> {
 }
 
 pub(crate) fn is_safe_redirect(url: &str) -> bool {
+    if matches!(
+        url,
+        "ironclaw://auth/callback" | "ironclaw-development://auth/callback"
+    ) {
+        return true;
+    }
     if !check_redirect_chars(url) {
         return false;
     }
@@ -472,6 +479,18 @@ mod tests {
             Some("/".to_string())
         );
         assert_eq!(sanitize_redirect(Some("//attacker".to_string())), None);
+        assert_eq!(
+            sanitize_redirect(Some("ironclaw://auth/callback".to_string())),
+            Some("ironclaw://auth/callback".to_string())
+        );
+        assert_eq!(
+            sanitize_redirect(Some("ironclaw-development://auth/callback".to_string())),
+            Some("ironclaw-development://auth/callback".to_string())
+        );
+        assert_eq!(
+            sanitize_redirect(Some("attacker://auth/callback".to_string())),
+            None
+        );
         assert_eq!(
             sanitize_redirect(Some("/v2#token=fake".to_string())),
             None,

@@ -1693,6 +1693,31 @@ async fn cors_allows_configured_origin() {
 }
 
 #[tokio::test]
+async fn cors_rejects_unconfigured_localhost_port() {
+    let (app, _services) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::OPTIONS)
+                .uri("/api/webchat/v2/threads")
+                .header("origin", "http://localhost:8081")
+                .header("access-control-request-method", "POST")
+                .header("access-control-request-headers", "authorization")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        response
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|v| v.to_str().ok()),
+        None,
+    );
+}
+
+#[tokio::test]
 async fn malformed_user_id_from_authenticator_rejects_with_401() {
     // If a host authenticator returns a user id that doesn't satisfy
     // `UserId`'s grammar at construction time it never reaches the
