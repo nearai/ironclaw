@@ -81,18 +81,18 @@ const SKILL_NAME: &str = "reborn-skill-e2e";
 const TRACE_COMMONS_TEST_CHILD: &str = "IRONCLAW_TRACE_COMMONS_TEST_CHILD";
 
 fn isolated_trace_commons_base_dir(test_name: &str) -> Option<std::path::PathBuf> {
-    if std::env::var_os(TRACE_COMMONS_TEST_CHILD).is_some() {
-        return Some(
-            std::env::var_os("IRONCLAW_BASE_DIR")
-                .expect("child IRONCLAW_BASE_DIR")
-                .into(),
-        );
+    if let (Some(marker), Some(base_dir)) = (
+        std::env::var_os(TRACE_COMMONS_TEST_CHILD),
+        std::env::var_os("IRONCLAW_BASE_DIR"),
+    ) && marker == base_dir
+    {
+        return Some(base_dir.into());
     }
 
     let dir = tempfile::tempdir().expect("tempdir for IRONCLAW_BASE_DIR");
     let status = std::process::Command::new(std::env::current_exe().expect("current test binary"))
         .args(["--exact", test_name, "--nocapture"])
-        .env(TRACE_COMMONS_TEST_CHILD, "1")
+        .env(TRACE_COMMONS_TEST_CHILD, dir.path())
         .env("IRONCLAW_BASE_DIR", dir.path())
         .status()
         .expect("run isolated Trace Commons test process");
