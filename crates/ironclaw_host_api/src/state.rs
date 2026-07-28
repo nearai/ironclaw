@@ -169,6 +169,19 @@ mod tests {
                 serde_json::to_value(state).unwrap(),
                 serde_json::Value::String(expected.to_string())
             );
+            // The doc comment on `from_wire` claims this test pins the
+            // inverse. It did not until now -- only `as_str` and the serde
+            // form were asserted, so `from_wire` could drift from either.
+            assert_eq!(
+                InstallationState::from_wire(expected),
+                Some(state),
+                "from_wire must invert as_str for {expected}"
+            );
         }
+        assert_eq!(
+            InstallationState::from_wire("not_a_state"),
+            None,
+            "an unknown wire value must not resolve to a checkpoint"
+        );
     }
 }
