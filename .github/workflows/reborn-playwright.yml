@@ -48,8 +48,7 @@ jobs:
             },
             {
               "group": "legacy-settings-extensions",
-              "files": "tests/e2e/scenarios/test_reborn_webui_v2_legacy_extensions.py tests/e2e/scenarios/test_reborn_webui_v2_legacy_settings_search.py tests/e2e/scenarios/test_reborn_webui_v2_legacy_skills.py tests/e2e/scenarios/test_reborn_webui_v2_legacy_tool_permissions.py tests/e2e/scenarios/test_reborn_webui_v2_legacy_projects.py",
-              "pytest_args": "-k 'not test_reborn_legacy_always_approve_survives_reborn_restart'"
+              "files": "tests/e2e/scenarios/test_reborn_webui_v2_legacy_extensions.py tests/e2e/scenarios/test_reborn_webui_v2_legacy_settings_search.py tests/e2e/scenarios/test_reborn_webui_v2_legacy_skills.py tests/e2e/scenarios/test_reborn_webui_v2_legacy_tool_permissions.py tests/e2e/scenarios/test_reborn_webui_v2_legacy_projects.py"
             },
             {
               "group": "legacy-runtime",
@@ -163,15 +162,20 @@ jobs:
           playwright install --with-deps chromium
 
       - name: Run Reborn Playwright shard
+        env:
+          IRONCLAW_E2E_ARTIFACT_DIR: tests/e2e/artifacts/${{ matrix.group }}
         run: pytest ${{ matrix.files }} ${{ matrix.pytest_args }} -v --timeout=120 --durations=25
 
-      - name: Upload screenshots on failure
+      - name: Upload diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: reborn-playwright-screenshots-${{ matrix.group }}
-          path: tests/e2e/screenshots/
+          name: reborn-playwright-diagnostics-${{ matrix.group }}
+          path: |
+            tests/e2e/artifacts/${{ matrix.group }}/
+            tests/e2e/screenshots/
           if-no-files-found: ignore
+          retention-days: 7
 
   reborn-playwright:
     name: Reborn Playwright

@@ -10,6 +10,7 @@ scenarios exercise the real Reborn binary without duplicating process plumbing.
 import asyncio
 import json
 import os
+import re
 import signal
 import socket
 import uuid
@@ -17,6 +18,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from playwright.async_api import Error as PlaywrightError
 
 from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2, wait_for_ready
 
@@ -32,6 +34,66 @@ ACCEPTED_SEND_OUTCOMES = {"submitted", "already_submitted"}
 # be present in the process env before start — see
 # reborn_v2_private_installs_yolo_server below.
 MARKET_DATA_DEV_SECRET = "e2e-market-data-shared-key"
+
+
+class _ArtifactContext:
+    """Browser context that persists diagnostics when CI requests them."""
+
+    def __init__(self, context, artifact_dir: Path):
+        self._context = context
+        self._artifact_dir = artifact_dir
+        self._closed = False
+
+    def __getattr__(self, name):
+        return getattr(self._context, name)
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+
+        for index, page in enumerate(self._context.pages, start=1):
+            if page.is_closed():
+                continue
+            try:
+                await page.screenshot(
+                    path=str(self._artifact_dir / f"page-{index}.png"),
+                    full_page=True,
+                )
+            except PlaywrightError:
+                pass
+
+        try:
+            await self._context.tracing.stop(
+                path=str(self._artifact_dir / "trace.zip")
+            )
+        except PlaywrightError:
+            pass
+        await self._context.close()
+
+
+class _ArtifactBrowser:
+    """Browser proxy that records each context under a unique artifact path."""
+
+    def __init__(self, browser, artifact_root: Path):
+        self._browser = browser
+        self._artifact_root = artifact_root
+
+    def __getattr__(self, name):
+        return getattr(self._browser, name)
+
+    async def new_context(self, *args, **kwargs):
+        node_id = os.environ.get("PYTEST_CURRENT_TEST", "browser-context").split(
+            " (", 1
+        )[0]
+        readable_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", node_id).strip("-")[-160:]
+        context_name = f"{readable_name}-{uuid.uuid4().hex[:8]}"
+        artifact_dir = self._artifact_root / "browser" / context_name
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        kwargs.setdefault("record_video_dir", str(artifact_dir / "videos"))
+        context = await self._browser.new_context(*args, **kwargs)
+        await context.tracing.start(screenshots=True, snapshots=True, sources=True)
+        return _ArtifactContext(context, artifact_dir)
 
 
 def find_free_port() -> int:
@@ -116,8 +178,11 @@ async def start_reborn_webui_v2_server(
     extra_env: dict[str, str] | None = None,
 ) -> tuple[object, str]:
     """Start ``ironclaw serve`` and return ``(process, base_url)``."""
+    binary_path = str(Path(ironclaw_reborn_binary).resolve())
     reborn_home = home_dir / "reborn-home"
     reborn_home.mkdir(parents=True, exist_ok=True)
+    workspace_dir = home_dir / "workspace"
+    workspace_dir.mkdir(parents=True, exist_ok=True)
     write_config_toml(
         reborn_home / "config.toml",
         mock_llm_server,
@@ -132,8 +197,14 @@ async def start_reborn_webui_v2_server(
     for attempt in range(1, 4):
         port = find_free_port()
         last_port = port
-        stdout_path = home_dir / f"{log_prefix}-attempt-{attempt}.stdout.log"
-        stderr_path = home_dir / f"{log_prefix}-attempt-{attempt}.stderr.log"
+        artifact_root = os.environ.get("IRONCLAW_E2E_ARTIFACT_DIR", "").strip()
+        if artifact_root:
+            log_dir = Path(artifact_root).resolve() / "server-logs" / home_dir.name
+            log_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            log_dir = home_dir
+        stdout_path = log_dir / f"{log_prefix}-attempt-{attempt}.stdout.log"
+        stderr_path = log_dir / f"{log_prefix}-attempt-{attempt}.stderr.log"
 
         env = {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -153,7 +224,7 @@ async def start_reborn_webui_v2_server(
         forward_coverage_env(env)
 
         args = [
-            ironclaw_reborn_binary,
+            binary_path,
             "serve",
             "--host",
             "127.0.0.1",
@@ -170,6 +241,7 @@ async def start_reborn_webui_v2_server(
                 stdout=out,
                 stderr=err,
                 env=env,
+                cwd=workspace_dir,
             )
         base_url = f"http://127.0.0.1:{port}"
 
@@ -363,7 +435,6 @@ async def reborn_v2_vision_server(ironclaw_reborn_binary, mock_llm_server, tmp_p
 @pytest.fixture(scope="module")
 async def reborn_v2_browser():
     """Chromium instance for Reborn v2 tests, independent of the legacy gateway."""
-    from playwright.async_api import Error as PlaywrightError
     from playwright.async_api import async_playwright
 
     headless = os.environ.get("HEADED", "").strip() not in ("1", "true")
@@ -377,7 +448,11 @@ async def reborn_v2_browser():
                 if attempt == 2:
                     raise
                 await asyncio.sleep(1)
-        yield browser
+        artifact_root = os.environ.get("IRONCLAW_E2E_ARTIFACT_DIR", "").strip()
+        if artifact_root:
+            yield _ArtifactBrowser(browser, Path(artifact_root).resolve())
+        else:
+            yield browser
         await browser.close()
 
 
