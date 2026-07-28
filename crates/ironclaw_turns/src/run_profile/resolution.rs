@@ -614,16 +614,156 @@ fn safe_summary_or_placeholder(raw: String) -> SafeSummary {
 /// spells a `DenyReason` snake_case tag is honored, and everything else — every
 /// loop-originated denial — buckets into the model-visible catch-all
 /// [`DenyReason::PolicyDenied`].
+/// Map a denial's producer-side reason onto the model-visible [`DenyReason`].
+///
+/// This was a serde parse over `DenyReason`'s snake_case tags, which silently
+/// fell back to `PolicyDenied`. Twelve of the thirteen reason strings
+/// production actually mints are not `DenyReason` tags, so nearly every denial
+/// reached the model as a flat "policy denied" — *no capabilities are
+/// available to you*, *a hook blocked this*, *you need to authenticate*, and
+/// *an approval is waiting for a human* were all indistinguishable. Only
+/// `network_denied` happened to coincide with a tag and survive.
+///
+/// The distinction the model needs is **what would unlock the call** (#6284
+/// item 4): a permanent block, a missing credential, and a pending approval
+/// call for three different next actions, and collapsing them leaves the model
+/// guessing. This is an explicit table so a new reason has to choose, rather
+/// than defaulting into the flattest answer available.
 fn deny_reason_from_kind(kind: &CapabilityDeniedReasonKind) -> DenyReason {
-    use serde::{
-        Deserialize,
-        de::{IntoDeserializer, value::StrDeserializer},
-    };
-    // Deserialize straight from the &str (no JSON Value/String allocation);
-    // DenyReason's snake_case serde tags are the match vocabulary.
-    let deserializer: StrDeserializer<'_, serde::de::value::Error> =
-        kind.as_str().into_deserializer();
-    DenyReason::deserialize(deserializer).unwrap_or(DenyReason::PolicyDenied)
+    match kind.as_str() {
+        // Named a capability that is not in this caller's view: nothing to
+        // unlock, and retrying the same call cannot succeed.
+        //
+        // `empty_surface` deliberately stays `PolicyDenied` below rather than
+        // joining these. An empty surface is normally a profile/policy outcome
+        // ("this loop is configured without tools"), and two existing tests pin
+        // that reading — `deny_record_reason_maps_best_effort_with_policy_fallback`
+        // names it outright. Reclassifying it is arguable but unproven, so the
+        // pinned decision stands.
+        "model_view_denied" | "outside_visible_surface" => DenyReason::UnknownCapability,
+        // A credential is missing or refused: an auth flow is the unlock.
+        "auth_denied" => DenyReason::UnknownSecret,
+        // A human approval is pending or was refused — re-asking can succeed.
+        "outbound_delivery_approval_required" | "expected_approval" => DenyReason::ApprovalDenied,
+        // Egress refused by network policy.
+        "network_denied" => DenyReason::NetworkDenied,
+        // Host-side invariant broke; not the caller's doing and not unlockable
+        // by them.
+        "hook_gate_ref_unavailable" => DenyReason::InternalInvariantViolation,
+        // Model-supplied input the model itself can correct.
+        "invalid_spawn_input" => DenyReason::MissingGrant,
+        // Genuine policy refusals: nothing the caller does unlocks these.
+        "host_policy_denied" | "hook_denied" | "surface_profile_denied" => DenyReason::PolicyDenied,
+        // An unrecognised reason is a *new* one, and the honest answer is the
+        // conservative one — but it is now reachable only by a reason nobody
+        // has classified, not by every reason in the product.
+        _ => DenyReason::PolicyDenied,
+    }
+}
+
+#[cfg(test)]
+mod deny_reason_tests {
+    use super::*;
+
+    fn reason(tag: &str) -> CapabilityDeniedReasonKind {
+        CapabilityDeniedReasonKind::unknown(tag).expect("valid reason tag")
+    }
+
+    /// Denials must tell the model *what would unlock the call*.
+    ///
+    /// The previous serde parse matched `DenyReason`'s own tags, and twelve of
+    /// the thirteen reasons production mints are not among them — so a missing
+    /// credential, a pending human approval, a blocked egress and a genuine
+    /// policy block all arrived as `PolicyDenied`. Each of those wants a
+    /// different next action from the model, and it had no way to tell them
+    /// apart. This pins that they stay distinguishable.
+    #[test]
+    fn denials_distinguish_what_would_unlock_the_call() {
+        // Not your capability — nothing to unlock, but not a policy refusal.
+        for tag in ["model_view_denied", "outside_visible_surface"] {
+            assert_eq!(
+                deny_reason_from_kind(&reason(tag)),
+                DenyReason::UnknownCapability,
+                "{tag} should read as an absent capability"
+            );
+        }
+        // A credential unlocks this one.
+        assert_eq!(
+            deny_reason_from_kind(&reason("auth_denied")),
+            DenyReason::UnknownSecret,
+            "auth_denied should point at an auth flow"
+        );
+        // A human unlocks these.
+        for tag in ["outbound_delivery_approval_required", "expected_approval"] {
+            assert_eq!(
+                deny_reason_from_kind(&reason(tag)),
+                DenyReason::ApprovalDenied,
+                "{tag} should read as approvable, not forbidden"
+            );
+        }
+        // Nothing the caller does unlocks these. `empty_surface` is here
+        // deliberately: existing tests pin it as a policy outcome, and
+        // reclassifying it is arguable but unproven.
+        for tag in [
+            "host_policy_denied",
+            "hook_denied",
+            "surface_profile_denied",
+            "empty_surface",
+        ] {
+            assert_eq!(
+                deny_reason_from_kind(&reason(tag)),
+                DenyReason::PolicyDenied,
+                "{tag} is a genuine policy refusal"
+            );
+        }
+        assert_eq!(
+            deny_reason_from_kind(&reason("network_denied")),
+            DenyReason::NetworkDenied
+        );
+        assert_eq!(
+            deny_reason_from_kind(&reason("hook_gate_ref_unavailable")),
+            DenyReason::InternalInvariantViolation
+        );
+    }
+
+    /// The conservative fallback must remain reachable only by a reason nobody
+    /// has classified — not by the whole product, as before.
+    #[test]
+    fn an_unclassified_reason_still_falls_back_conservatively() {
+        assert_eq!(
+            deny_reason_from_kind(&reason("some_future_reason")),
+            DenyReason::PolicyDenied
+        );
+    }
+
+    /// Guard against the collapse returning: if every distinct production
+    /// reason maps to one value again, this fails.
+    #[test]
+    fn production_denial_reasons_do_not_collapse_to_one_value() {
+        let produced = [
+            "empty_surface",
+            "model_view_denied",
+            "outside_visible_surface",
+            "auth_denied",
+            "outbound_delivery_approval_required",
+            "network_denied",
+            "hook_gate_ref_unavailable",
+            "invalid_spawn_input",
+            "host_policy_denied",
+            "hook_denied",
+            "surface_profile_denied",
+        ];
+        let distinct: std::collections::HashSet<DenyReason> = produced
+            .iter()
+            .map(|tag| deny_reason_from_kind(&reason(tag)))
+            .collect();
+        assert!(
+            distinct.len() >= 6,
+            "denial reasons collapsed to {} distinct values; the model cannot \
+             tell an auth prompt from a permanent block",
+            distinct.len()
+        );
+    }
 }
 
 #[cfg(test)]
