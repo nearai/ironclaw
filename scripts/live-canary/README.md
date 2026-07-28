@@ -53,6 +53,11 @@ Run commands from the repository root.
 
 - `reborn-webui-v2-live-qa`
 
+PR-targeted runs execute the reviewed PR binary with live integration secrets.
+They must pass the `reborn-live-canary-pr` GitHub environment gate and have an
+approving review for the exact PR head commit from a collaborator with write
+access. Scheduled and manual default-branch runs do not require this PR gate.
+
 ## Local Commands
 
 Run the public live smoke lane:
@@ -138,6 +143,18 @@ Artifacts are written under:
 ```text
 artifacts/live-canary/<lane>/<provider>/<timestamp>/
 ```
+
+Before upload, strict scrubbing removes only bundled system-skill copies whose
+managed marker, stable content hash, file set, and bytes match the
+source-controlled bundle from the tested commit. Unverified or unmanaged system
+skills and all other run-specific artifacts remain present and are scanned for
+secret material. Non-strict scrubbing is report-only and does not prune them.
+Strict scrubbing also removes source-byte-verified first-party extension
+manifests, whose static credential schema fields otherwise look like live
+secrets. The dynamically rendered NEAR AI manifest is instead verified against
+a trusted runtime template after normalizing only the repository-owned
+`cloud-api.near.ai` and `private.near.ai` MCP endpoints. Changed or unrecognized
+manifests remain subject to the fail-closed scanner.
 
 ## Secrets And Account Material
 

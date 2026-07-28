@@ -188,9 +188,11 @@ pub struct SessionThreadRecord {
     /// before activity timestamps existed; such records sort oldest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
-    /// Last time the thread saw activity (a message was appended). Drives
-    /// the sidebar "Recent" ordering — newest activity first. Bumped on
-    /// every append; `None` for legacy records (sorts oldest).
+    /// Last time the thread saw durable user-visible transcript activity.
+    /// Drives the sidebar "Recent" ordering — newest activity first. Writers
+    /// that touch both a message and the thread activity stamp reuse one
+    /// timestamp for that logical change; pure idempotent replays remain
+    /// side-effect-free. `None` for legacy records (sorts oldest).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<DateTime<Utc>>,
 }
@@ -203,6 +205,16 @@ pub struct ThreadMessageRecord {
     pub sequence: u64,
     pub kind: MessageKind,
     pub status: MessageStatus,
+    /// When this message row was first persisted. `None` for legacy records
+    /// written before per-message timestamps existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
+    /// Last time the message row was materially changed. Draft finalization
+    /// updates this so UI refreshes can show the reply completion time instead
+    /// of the browser refresh time. Writers capture one timestamp per logical
+    /// message mutation so related message/thread stamps stay atomic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<DateTime<Utc>>,
     pub actor_id: Option<String>,
     pub source_binding_id: Option<String>,
     pub reply_target_binding_id: Option<String>,
@@ -220,6 +232,51 @@ pub struct ThreadMessageRecord {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<AttachmentRef>,
     pub redaction_ref: Option<String>,
+}
+
+/// New transcript rows must carry durable timestamps. Legacy rows persisted
+/// before this field existed still deserialize with `None` and remain readable,
+/// but all current writers should fail loudly if they try to append a fresh
+/// row without both stamps.
+pub(crate) fn validate_new_message_timestamps(
+    message: &ThreadMessageRecord,
+    context: &'static str,
+) -> Result<(), crate::error::SessionThreadError> {
+    if message.created_at.is_none() || message.updated_at.is_none() {
+        return Err(crate::error::SessionThreadError::InvalidMessageTimestamp {
+            message_id: message.message_id,
+            context,
+            violation: crate::error::TimestampViolation::MissingDurableTimestamps,
+        });
+    }
+    Ok(())
+}
+
+/// Existing timestamp values are append-only metadata: once a row has either
+/// stamp, mutation paths may update it but must not erase it. This keeps
+/// legacy `None` values compatible while catching accidental nullification of
+/// newly-written rows.
+/// Lightweight timestamp-only variant for hot mutation paths. Callers usually
+/// already hold a mutable message and should not clone large payloads just to
+/// prove timestamp metadata was not erased.
+pub(crate) fn validate_message_timestamp_fields_not_cleared(
+    message_id: ThreadMessageId,
+    before_created_at: Option<DateTime<Utc>>,
+    before_updated_at: Option<DateTime<Utc>>,
+    after_created_at: Option<DateTime<Utc>>,
+    after_updated_at: Option<DateTime<Utc>>,
+    context: &'static str,
+) -> Result<(), crate::error::SessionThreadError> {
+    let created_at_cleared = before_created_at.is_some() && after_created_at.is_none();
+    let updated_at_cleared = before_updated_at.is_some() && after_updated_at.is_none();
+    if created_at_cleared || updated_at_cleared {
+        return Err(crate::error::SessionThreadError::InvalidMessageTimestamp {
+            message_id,
+            context,
+            violation: crate::error::TimestampViolation::ClearedDurableTimestamps,
+        });
+    }
+    Ok(())
 }
 
 /// Summary artifact over a stable transcript sequence range.
@@ -387,6 +444,65 @@ pub struct UpdateToolResultReferenceRequest {
     pub turn_run_id: String,
     pub result_ref: String,
     pub safe_summary: ToolResultSafeSummary,
+}
+
+/// Durable, opaque capability output associated with one transcript result reference.
+///
+/// The bytes are not transcript content. They are only recovered through a
+/// thread-scoped result reader that enforces its own response bound.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PutToolResultRecordRequest {
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+    pub result_ref: String,
+    pub content: Vec<u8>,
+}
+
+/// Maximum byte window returned by one durable tool-result read, and the
+/// inline first-look preview size (`local_dev.rs`'s
+/// `LOCAL_DEV_RESULT_PREVIEW_MAX_BYTES` mirrors this so a model paging past
+/// `next_offset` sees no gap or overlap). PR #5902 (fixing #5838's
+/// context-compaction crash) originally set this to 2,048 bytes -- a 49x cut
+/// from the pre-fix 100,000-byte inline cap that left most tool results
+/// requiring dozens of manual `result_read` calls to recover, which tanked
+/// agent benchmark performance. Raised to 24KB: still per-call bounded (the
+/// property #5838 actually needed -- unbounded *accumulation* of large
+/// results in the compacted transcript, not single-call size, caused the
+/// crash) and far below the pre-fix 100,000-byte constant, while making most
+/// tool outputs recoverable in 1-2 calls instead of ~49.
+/// `tool_result_reference.rs`'s `MAX_MODEL_OBSERVATION_BYTES` is derived from
+/// this value; raising it here raises that ceiling too.
+pub const TOOL_RESULT_RECORD_READ_MAX_BYTES: usize = 24 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadToolResultRecordRequest {
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+    pub result_ref: String,
+    pub offset: u64,
+    pub max_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolResultRecordChunk {
+    pub content: Vec<u8>,
+    pub total_bytes: u64,
+    pub next_offset: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateToolResultRecordRequest {
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+    pub result_ref: String,
+    pub content: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteToolResultRecordRequest {
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+    pub result_ref: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -583,6 +699,29 @@ mod tests {
         }
     }
 
+    fn sample_message() -> ThreadMessageRecord {
+        let now = Utc::now();
+        ThreadMessageRecord {
+            message_id: ThreadMessageId::new(),
+            thread_id: ThreadId::new("thread-contract").unwrap(),
+            sequence: 1,
+            kind: MessageKind::User,
+            status: MessageStatus::Accepted,
+            created_at: Some(now),
+            updated_at: Some(now),
+            actor_id: Some("actor-a".to_string()),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            turn_id: None,
+            turn_run_id: None,
+            tool_result_ref: None,
+            tool_result_provider_call: None,
+            content: Some("hello".to_string()),
+            attachments: Vec::new(),
+            redaction_ref: None,
+        }
+    }
+
     #[test]
     fn text_constructor_carries_no_attachments() {
         let content = MessageContent::text("hello");
@@ -633,6 +772,50 @@ mod tests {
         let mut at_cap = sample_ref();
         at_cap.extracted_text = Some("x".repeat(MAX_EXTRACTED_TEXT_CHARS));
         assert!(validate_attachment_refs(&[at_cap]).is_ok());
+    }
+
+    #[test]
+    fn validate_new_message_timestamps_rejects_missing_stamps() {
+        let mut message = sample_message();
+        message.created_at = None;
+
+        let err = validate_new_message_timestamps(&message, "test message")
+            .expect_err("new messages without created_at must be rejected");
+
+        assert!(matches!(
+            err,
+            crate::error::SessionThreadError::InvalidMessageTimestamp {
+                context: "test message",
+                violation: crate::error::TimestampViolation::MissingDurableTimestamps,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_message_timestamp_fields_not_cleared_rejects_nullification() {
+        let before = sample_message();
+        let mut after = before.clone();
+        after.updated_at = None;
+
+        let err = validate_message_timestamp_fields_not_cleared(
+            after.message_id,
+            before.created_at,
+            before.updated_at,
+            after.created_at,
+            after.updated_at,
+            "test update",
+        )
+        .expect_err("message updates must not clear existing timestamps");
+
+        assert!(matches!(
+            err,
+            crate::error::SessionThreadError::InvalidMessageTimestamp {
+                context: "test update",
+                violation: crate::error::TimestampViolation::ClearedDurableTimestamps,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -717,6 +900,8 @@ mod tests {
         }"#;
         let record: ThreadMessageRecord = serde_json::from_str(json).unwrap();
         assert!(record.attachments.is_empty());
+        assert_eq!(record.created_at, None);
+        assert_eq!(record.updated_at, None);
         assert_eq!(record.content.as_deref(), Some("legacy row"));
     }
 }

@@ -12,8 +12,8 @@
 - Chat Completions and Responses API DTOs used by the migration slices.
 - A sanitized OpenAI-compatible error envelope.
 - Feature-gated axum route fragments for host composition to mount.
-- ProductWorkflow-backed Chat Completions and Responses route adapters when
-  host composition injects workflow state.
+- ProductSurface-backed Chat Completions and Responses route adapters when
+  host composition injects product state.
 - OpenAI-compatible SSE translation for projection-backed streaming slices.
 
 ## Do Not Move In Here
@@ -26,6 +26,6 @@
 
 ## Validation
 
-- `cargo test -p ironclaw_reborn_openai_compat --features openai-compat-beta`
+- `cargo test -p ironclaw_reborn_openai_compat`
 - `cargo clippy -p ironclaw_reborn_openai_compat --all-targets --all-features -- -D warnings`
 - `cargo test -p ironclaw_architecture reborn_crate_dependency_boundaries_hold`

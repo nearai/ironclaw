@@ -21,26 +21,25 @@ use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{ProcessId, ResourceReservation, ResourceScope};
 
 use crate::cancellation::ProcessCancellationRegistry;
-use crate::filesystem_store::{FilesystemProcessResultStore, FilesystemProcessStore};
 use crate::host::ProcessHost;
-use crate::memory_store::{InMemoryProcessResultStore, InMemoryProcessStore};
+use crate::process_store::{ProcessResultStore, ProcessStore};
 use crate::types::{
     ProcessError, ProcessExecutionRequest, ProcessExecutor, ProcessManager, ProcessRecord,
-    ProcessResultStore, ProcessStart, ProcessStatus, ProcessStore,
+    ProcessResultStorePort, ProcessStart, ProcessStatus, ProcessStorePort,
 };
 
 /// Stage at which a background task failed to persist state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackgroundFailureStage {
-    /// `ProcessStore::get` failed during the post-execution status probe.
+    /// `ProcessStorePort::get` failed during the post-execution status probe.
     StoreLookup,
-    /// `ProcessStore::complete` failed when promoting to `Completed`.
+    /// `ProcessStorePort::complete` failed when promoting to `Completed`.
     StoreComplete,
-    /// `ProcessStore::fail` failed when promoting to `Failed`.
+    /// `ProcessStorePort::fail` failed when promoting to `Failed`.
     StoreFail,
-    /// `ProcessResultStore::complete` failed.
+    /// `ProcessResultStorePort::complete` failed.
     ResultStoreComplete,
-    /// `ProcessResultStore::fail` failed.
+    /// `ProcessResultStorePort::fail` failed.
     ResultStoreFail,
 }
 
@@ -63,8 +62,8 @@ pub type BackgroundErrorHandler = dyn Fn(BackgroundFailure) + Send + Sync;
 
 pub struct ProcessServices<S, R>
 where
-    S: ProcessStore + 'static,
-    R: ProcessResultStore + 'static,
+    S: ProcessStorePort + 'static,
+    R: ProcessResultStorePort + 'static,
 {
     process_store: Arc<S>,
     result_store: Arc<R>,
@@ -73,8 +72,8 @@ where
 
 impl<S, R> Clone for ProcessServices<S, R>
 where
-    S: ProcessStore + 'static,
-    R: ProcessResultStore + 'static,
+    S: ProcessStorePort + 'static,
+    R: ProcessResultStorePort + 'static,
 {
     fn clone(&self) -> Self {
         Self {
@@ -87,8 +86,8 @@ where
 
 impl<S, R> ProcessServices<S, R>
 where
-    S: ProcessStore + 'static,
-    R: ProcessResultStore + 'static,
+    S: ProcessStorePort + 'static,
+    R: ProcessResultStorePort + 'static,
 {
     pub fn new(process_store: Arc<S>, result_store: Arc<R>) -> Self {
         Self::from_parts(
@@ -138,39 +137,47 @@ where
     }
 }
 
-impl ProcessServices<InMemoryProcessStore, InMemoryProcessResultStore> {
-    pub fn in_memory() -> Self {
-        Self::new(
-            Arc::new(InMemoryProcessStore::new()),
-            Arc::new(InMemoryProcessResultStore::new()),
-        )
-    }
-}
-
-impl<F> ProcessServices<FilesystemProcessStore<F>, FilesystemProcessResultStore<F>>
+impl<F> ProcessServices<ProcessStore<F>, ProcessResultStore<F>>
 where
     F: RootFilesystem + 'static,
 {
     pub fn filesystem(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
         Self::new(
-            Arc::new(FilesystemProcessStore::from_arc(Arc::clone(&filesystem))),
-            Arc::new(FilesystemProcessResultStore::from_arc(filesystem)),
+            Arc::new(ProcessStore::from_arc(Arc::clone(&filesystem))),
+            Arc::new(ProcessResultStore::from_arc(filesystem)),
         )
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+impl
+    ProcessServices<
+        ProcessStore<ironclaw_filesystem::InMemoryBackend>,
+        ProcessResultStore<ironclaw_filesystem::InMemoryBackend>,
+    >
+{
+    /// In-memory-backed process services for tests — the production
+    /// [`filesystem`](Self::filesystem) store pair over one fresh
+    /// `InMemoryBackend` `/processes` mount (arch-simplification §4.3).
+    /// Replaces the deleted bespoke `InMemory*Store` pair; the two stores
+    /// share one backend so externalized output (`output_ref`) reads back.
+    pub fn in_memory() -> Self {
+        Self::filesystem(crate::test_support::in_memory_backed_processes_filesystem())
+    }
+}
+
 pub struct BackgroundProcessManager {
-    store: Arc<dyn ProcessStore>,
+    store: Arc<dyn ProcessStorePort>,
     executor: Arc<dyn ProcessExecutor + 'static>,
     cancellation_registry: Option<Arc<ProcessCancellationRegistry>>,
-    result_store: Option<Arc<dyn ProcessResultStore>>,
+    result_store: Option<Arc<dyn ProcessResultStorePort>>,
     error_handler: Option<Arc<BackgroundErrorHandler>>,
 }
 
 impl BackgroundProcessManager {
     pub fn new<S, E>(store: Arc<S>, executor: Arc<E>) -> Self
     where
-        S: ProcessStore + 'static,
+        S: ProcessStorePort + 'static,
         E: ProcessExecutor + 'static,
     {
         Self {
@@ -192,7 +199,7 @@ impl BackgroundProcessManager {
 
     pub fn with_result_store<S>(mut self, store: Arc<S>) -> Self
     where
-        S: ProcessResultStore + 'static,
+        S: ProcessResultStorePort + 'static,
     {
         self.result_store = Some(store);
         self
@@ -254,12 +261,14 @@ impl ProcessManager for BackgroundProcessManager {
             process_id: record.process_id,
             invocation_id: record.invocation_id,
             scope: record.scope.clone(),
+            authenticated_actor_user_id: record.authenticated_actor_user_id.clone(),
             extension_id: record.extension_id.clone(),
             capability_id: record.capability_id.clone(),
             runtime: record.runtime,
             estimate: record.estimated_resources.clone(),
             mounts: record.mounts.clone(),
             resource_reservation,
+            authorized_continuation: record.authorized_continuation.clone(),
             input,
             cancellation,
         };

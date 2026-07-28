@@ -55,14 +55,6 @@ impl SanitizedReason {
         Self(text.to_string())
     }
 
-    /// Construct from an already-host-sanitized owned string. Reserved for
-    /// the predicate evaluator and the WASM-hook sink, which build reason
-    /// strings dynamically from manifest-declared static prefixes.
-    #[allow(dead_code)]
-    pub(crate) fn from_owned(text: String) -> Self {
-        Self(text)
-    }
-
     pub fn as_str(&self) -> &str {
         &self.0
     }

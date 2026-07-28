@@ -2,24 +2,22 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_approvals::ToolPermissionOverride;
-use ironclaw_authorization::{CapabilityLeaseError, CapabilityLeaseStatus, CapabilityLeaseStore};
+use ironclaw_authorization::{CapabilityLeaseError, CapabilityLeaseStatus};
 use ironclaw_host_api::{
     Action, ApprovalRequest, ApprovalRequestId, CapabilityGrantId, CapabilityId, CorrelationId,
-    InvocationFingerprint, InvocationId, Principal, ResourceEstimate, ResourceScope, UserId,
+    FailureKind, GateRecord, GateRef, InvocationFingerprint, InvocationId, Principal,
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, Resolution,
+    ResourceEstimate, ResourceScope, SafeSummary, UserId,
 };
-use ironclaw_loop_support::CapabilityResultWrite;
-use ironclaw_product_workflow::{
-    OutboundPreferencesProductFacade, RebornOutboundDeliveryTargetId, RebornServicesError,
-    RebornServicesErrorCode, WebUiAuthenticatedCaller,
-};
-use ironclaw_run_state::{ApprovalRequestStore, ApprovalStatus, RunStateError};
+use ironclaw_loop_host::{CapabilityResultWrite, DurablePersistence};
+use ironclaw_product::{OutboundPreferencesProductService, RebornOutboundDeliveryTargetId};
+use ironclaw_run_state::{ApprovalStatus, RunStateError};
 use ironclaw_turns::{
     LoopGateRef,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityDenied,
-        CapabilityDeniedReasonKind, CapabilityFailure, CapabilityFailureKind, CapabilityInputRef,
-        CapabilityOutcome, CapabilityProgress, CapabilityResultMessage, CapabilityResumeToken,
-        ConcurrencyHint, LoopRunContext,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume,
+        CapabilityDeniedReasonKind, CapabilityInputRef, CapabilityProgress, CapabilityResumeToken,
+        ConcurrencyHint, LoopRunContext, resolution,
     },
 };
 
@@ -34,21 +32,27 @@ use crate::outbound::{
 };
 use crate::profile_approval_authorization::ApprovalSettingsProvider;
 use crate::runtime::local_dev::synthetic_capability::{
-    LocalDevSyntheticCapability, LocalDevSyntheticCapabilityDescriptor,
-    LocalDevSyntheticCapabilityHandler, LocalDevSyntheticCapabilityInvocation,
+    SyntheticCapability, SyntheticCapabilityDescriptor, SyntheticCapabilityHandler,
+    SyntheticCapabilityInvocation,
 };
 
+// Synthetic outbound handler now also carries the host-private replay-payload
+// store it persists at its approval-gate raise and reconstitutes from on resume.
+// arch-exempt: too_many_args, outbound handler carries the replay-payload store (§5.3 Stage 2a-i), plan #6175
+#[allow(clippy::too_many_arguments)]
 pub(super) fn outbound_delivery_capabilities(
-    facade: Arc<dyn OutboundPreferencesProductFacade>,
+    service: Arc<dyn OutboundPreferencesProductService>,
     fallback_user_id: UserId,
-    approval_requests: Arc<dyn ApprovalRequestStore>,
-    capability_leases: Arc<dyn CapabilityLeaseStore>,
+    approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>,
+    capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStorePort>,
     target_set_requires_approval: bool,
     approval_settings: Arc<dyn ApprovalSettingsProvider>,
-) -> Result<Vec<LocalDevSyntheticCapability>, AgentLoopHostError> {
+    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort>,
+    gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort>,
+) -> Result<Vec<SyntheticCapability>, AgentLoopHostError> {
     Ok(vec![
-        LocalDevSyntheticCapability::new(
-            LocalDevSyntheticCapabilityDescriptor::new(
+        SyntheticCapability::new(
+            SyntheticCapabilityDescriptor::new(
                 OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
                 OUTBOUND_DELIVERY_TARGETS_LIST_PROVIDER_TOOL_NAME,
                 OUTBOUND_DELIVERY_TARGETS_LIST_DESCRIPTION,
@@ -56,12 +60,12 @@ pub(super) fn outbound_delivery_capabilities(
                 outbound_delivery_targets_list_input_schema(),
             )?,
             Arc::new(OutboundDeliveryTargetsListHandler {
-                facade: Arc::clone(&facade),
+                service: Arc::clone(&service),
                 fallback_user_id: fallback_user_id.clone(),
             }),
         ),
-        LocalDevSyntheticCapability::new(
-            LocalDevSyntheticCapabilityDescriptor::new(
+        SyntheticCapability::new(
+            SyntheticCapabilityDescriptor::new(
                 OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
                 OUTBOUND_DELIVERY_TARGET_SET_PROVIDER_TOOL_NAME,
                 OUTBOUND_DELIVERY_TARGET_SET_DESCRIPTION,
@@ -69,79 +73,26 @@ pub(super) fn outbound_delivery_capabilities(
                 outbound_delivery_target_set_input_schema(),
             )?,
             Arc::new(OutboundDeliveryTargetSetHandler {
-                facade,
+                service,
                 fallback_user_id,
                 approval_requests,
                 capability_leases,
                 requires_approval: target_set_requires_approval,
                 approval_settings,
+                replay_payload_store,
+                gate_record_store,
             }),
         ),
     ])
 }
 
-/// Test-only bridge (C-SYNTH outbound seam): wrap `inner` with just the two
-/// `outbound_delivery_*` local-dev synthetic capabilities, so the Reborn
-/// integration-test harness can inject them onto its host-runtime capability
-/// port the same way production does
-/// (`RefreshingLocalDevCapabilityPort::build_inner`). Reuses the real
-/// `outbound_delivery_capabilities` + `wrap_local_dev_synthetic_capabilities`,
-/// so the test path never hand-mirrors the production wrap; builds the same
-/// `StoreApprovalSettingsProvider` production wires so the settings-decision
-/// (`Allow`/`Ask`/`Deny`) route is exercised for real. Mirrors
-/// `wrap_project_create_capability_for_test`. Tests only.
-#[cfg(feature = "test-support")]
-pub(crate) fn wrap_outbound_delivery_capabilities_for_test(
-    inner: Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
-    parts: crate::test_support::OutboundDeliveryCapabilityTestParts,
-) -> Result<Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>, AgentLoopHostError> {
-    let crate::test_support::OutboundDeliveryCapabilityTestParts {
-        facade,
-        fallback_user_id,
-        approval_requests,
-        capability_leases,
-        tool_permission_overrides,
-        auto_approve,
-        persistent_policies,
-        target_set_requires_approval,
-        run_context,
-        input_resolver,
-        result_writer,
-    } = parts;
-
-    let approval_settings: Arc<dyn ApprovalSettingsProvider> = Arc::new(
-        crate::local_dev_authorization::StoreApprovalSettingsProvider::new(
-            tool_permission_overrides,
-            auto_approve,
-            persistent_policies,
-        ),
-    );
-    let capabilities = outbound_delivery_capabilities(
-        facade,
-        fallback_user_id,
-        approval_requests,
-        capability_leases,
-        target_set_requires_approval,
-        approval_settings,
-    )?;
-    super::synthetic_capability::wrap_local_dev_synthetic_capabilities(
-        inner,
-        capabilities,
-        run_context,
-        input_resolver,
-        result_writer,
-        // trajectory_observer: None — not wired in the integration-test harness.
-        None,
-    )
-}
-
 struct OutboundDeliveryTargetsListHandler {
-    facade: Arc<dyn OutboundPreferencesProductFacade>,
+    service: Arc<dyn OutboundPreferencesProductService>,
     fallback_user_id: UserId,
 }
 
 #[async_trait]
-impl LocalDevSyntheticCapabilityHandler for OutboundDeliveryTargetsListHandler {
+impl SyntheticCapabilityHandler for OutboundDeliveryTargetsListHandler {
     fn validate_provider_arguments(
         &self,
         arguments: &serde_json::Value,
@@ -153,13 +104,13 @@ impl LocalDevSyntheticCapabilityHandler for OutboundDeliveryTargetsListHandler {
 
     async fn invoke(
         &self,
-        invocation: LocalDevSyntheticCapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        invocation: SyntheticCapabilityInvocation,
+    ) -> Result<Resolution, AgentLoopHostError> {
         let input =
             parse_outbound_delivery_targets_list_input(&invocation.input).map_err(input_error)?;
         let caller = caller_for_run(&invocation, &self.fallback_user_id);
         let response =
-            match list_outbound_delivery_targets_for_model(self.facade.as_ref(), caller, input)
+            match list_outbound_delivery_targets_for_model(self.service.as_ref(), caller, input)
                 .await
             {
                 Ok(response) => response,
@@ -189,11 +140,28 @@ impl LocalDevSyntheticCapabilityHandler for OutboundDeliveryTargetsListHandler {
     }
 }
 
+/// Host-authored, model-independent summary for the outbound-delivery approval
+/// gate. Shared by the persisted [`GateRecord`] and the loop-facing outcome so
+/// the record the approver renders (§5.2.9) and the loop's summary never drift.
+const APPROVAL_GATE_SUMMARY: &str = "changing the outbound delivery target requires approval";
+
 struct OutboundDeliveryTargetSetHandler {
-    facade: Arc<dyn OutboundPreferencesProductFacade>,
+    service: Arc<dyn OutboundPreferencesProductService>,
     fallback_user_id: UserId,
-    approval_requests: Arc<dyn ApprovalRequestStore>,
-    capability_leases: Arc<dyn CapabilityLeaseStore>,
+    approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStorePort>,
+    capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStorePort>,
+    /// Host-private replay-payload store: this synthetic capability raises its own
+    /// approval gate, so it persists {input, estimate} at the raise and
+    /// reconstitutes them on resume host-side (§5.3 Stage 2a-i) rather than
+    /// round-tripping raw tool args through the loop checkpoint.
+    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort>,
+    /// Durable model-visible gate-record store. Because this synthetic capability
+    /// raises its own approval gate OUTSIDE the loop-host persist seam
+    /// (`HostRuntimeLoopCapabilityPort::persist_gate_record_for_mapped`), it must
+    /// persist the [`GateRecord`] itself at the raise — keyed by the canonical
+    /// [`GateRef::for_approval_request`] the product read model re-derives — so the
+    /// approver-facing gate rendering (§5.2.9) has a record to read (§5.3 Stage 0).
+    gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort>,
     requires_approval: bool,
     approval_settings: Arc<dyn ApprovalSettingsProvider>,
 }
@@ -208,10 +176,10 @@ struct ApprovedDispatchLease {
 /// `Approved` carries the claimed lease to consume; `Denied` carries a
 /// model-visible denial so the run continues and the user can re-request
 /// approval, instead of a terminal `Err(AgentLoopHostError)` that would end the
-/// run (see .claude/rules/agent-loop-capabilities.md, Invariant 1).
+/// run (see the capability-access contract).
 enum ApprovedResumeDecision {
     Approved(ApprovedDispatchLease),
-    Denied(CapabilityDenied),
+    Denied(Resolution),
 }
 
 enum OutboundDeliveryApprovalSettingsDecision {
@@ -221,7 +189,7 @@ enum OutboundDeliveryApprovalSettingsDecision {
 }
 
 #[async_trait]
-impl LocalDevSyntheticCapabilityHandler for OutboundDeliveryTargetSetHandler {
+impl SyntheticCapabilityHandler for OutboundDeliveryTargetSetHandler {
     fn validate_provider_arguments(
         &self,
         arguments: &serde_json::Value,
@@ -233,8 +201,8 @@ impl LocalDevSyntheticCapabilityHandler for OutboundDeliveryTargetSetHandler {
 
     async fn invoke(
         &self,
-        invocation: LocalDevSyntheticCapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        invocation: SyntheticCapabilityInvocation,
+    ) -> Result<Resolution, AgentLoopHostError> {
         if invocation.request.auth_resume.is_some() {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
@@ -259,7 +227,7 @@ impl LocalDevSyntheticCapabilityHandler for OutboundDeliveryTargetSetHandler {
                     {
                         ApprovedResumeDecision::Approved(lease) => Some(lease),
                         ApprovedResumeDecision::Denied(denied) => {
-                            return Ok(CapabilityOutcome::Denied(denied));
+                            return Ok(denied);
                         }
                     }
                 }
@@ -271,11 +239,12 @@ impl LocalDevSyntheticCapabilityHandler for OutboundDeliveryTargetSetHandler {
                             .await;
                     }
                     OutboundDeliveryApprovalSettingsDecision::Deny => {
-                        return Ok(CapabilityOutcome::Failed(CapabilityFailure {
-                            error_kind: CapabilityFailureKind::PolicyDenied,
-                            safe_summary: "outbound delivery target setter is disabled by tool approval settings".to_string(),
-                            detail: None,
-                        }));
+                        return Ok(resolution::failed(
+                            FailureKind::PolicyDenied,
+                            "outbound delivery target setter is disabled by tool approval settings"
+                                .to_string(),
+                            None,
+                        ));
                     }
                 },
             }
@@ -291,7 +260,7 @@ impl LocalDevSyntheticCapabilityHandler for OutboundDeliveryTargetSetHandler {
 
         let caller = caller_for_run(&invocation, &self.fallback_user_id);
         let response = match set_outbound_delivery_target_for_model(
-            self.facade.as_ref(),
+            self.service.as_ref(),
             caller,
             target_input,
         )
@@ -314,7 +283,7 @@ impl LocalDevSyntheticCapabilityHandler for OutboundDeliveryTargetSetHandler {
             {
                 Ok(_) => {}
                 Err(error) => match approval_lease_outcome("consume_approval_lease", error) {
-                    Ok(denied) => return Ok(CapabilityOutcome::Denied(denied)),
+                    Ok(denied) => return Ok(denied),
                     Err(host_error) => return Err(host_error),
                 },
             }
@@ -329,7 +298,7 @@ impl LocalDevSyntheticCapabilityHandler for OutboundDeliveryTargetSetHandler {
         // `target_id`: a delimiter (`/ < > [ ] { } ` + "`" + ` \`) trips
         // `ToolResultSafeSummary` validation in `append_capability_result_ref`,
         // which surfaces as a terminal `HostUnavailable` that kills the whole
-        // turn (see .claude/rules/agent-loop-capabilities.md, Invariant 2). The
+        // turn (see the capability-access contract). The
         // model still gets the target id from the result `output`; the summary
         // stays a fixed, delimiter-free string.
         write_completed_result(invocation, output, "set delivery target".to_string()).await
@@ -339,7 +308,7 @@ impl LocalDevSyntheticCapabilityHandler for OutboundDeliveryTargetSetHandler {
 impl OutboundDeliveryTargetSetHandler {
     async fn settings_decision(
         &self,
-        invocation: &LocalDevSyntheticCapabilityInvocation,
+        invocation: &SyntheticCapabilityInvocation,
         capability_id: &CapabilityId,
     ) -> Result<OutboundDeliveryApprovalSettingsDecision, AgentLoopHostError> {
         let scope = settings_scope_for_run(&invocation.run_context, &self.fallback_user_id);
@@ -370,10 +339,10 @@ impl OutboundDeliveryTargetSetHandler {
 
     async fn request_approval(
         &self,
-        invocation: &LocalDevSyntheticCapabilityInvocation,
+        invocation: &SyntheticCapabilityInvocation,
         input: &serde_json::Value,
         target_id: &RebornOutboundDeliveryTargetId,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         let capability_id = outbound_delivery_target_set_capability_id()?;
         let approval_request_id = ApprovalRequestId::new();
         let correlation_id = CorrelationId::new();
@@ -385,6 +354,29 @@ impl OutboundDeliveryTargetSetHandler {
             invocation_id,
         );
         let fingerprint = approval_fingerprint(&scope, &capability_id, &estimate, input)?;
+        // Persist the host-private replay payload BEFORE returning the gate: a later
+        // resume reconstitutes {input, estimate} from it host-side (§5.3 Stage
+        // 2a-i) instead of the loop checkpoint carrying raw tool args. Keyed by the
+        // freshly-minted invocation id (write-once). Scoped by the run's owner axes
+        // (invocation id in the scope is ignored by the store) so raise and resume
+        // agree regardless of run.
+        self.replay_payload_store
+            .save(
+                super::local_dev_resource_scope_for_run(
+                    &invocation.run_context,
+                    &self.fallback_user_id,
+                ),
+                invocation_id,
+                ironclaw_capabilities::ReplayPayload {
+                    input: input.clone(),
+                    estimate: estimate.clone(),
+                    prior_approval: None,
+                    input_ref: invocation.request.input_ref.clone(),
+                    correlation_id,
+                },
+            )
+            .await
+            .map_err(replay_payload_store_error)?;
         self.approval_requests
             .save_pending(
                 scope,
@@ -407,41 +399,90 @@ impl OutboundDeliveryTargetSetHandler {
             .await
             .map_err(|error| approval_store_error("save_pending_approval", error))?;
 
-        Ok(CapabilityOutcome::ApprovalRequired {
-            gate_ref: approval_gate_ref(approval_request_id)?,
-            safe_summary: "changing the outbound delivery target requires approval".to_string(),
-            approval_resume: Some(CapabilityApprovalResume {
+        // Persist the model-visible gate record BEFORE returning the gate. This
+        // synthetic producer raises its own gate outside the loop-host persist
+        // seam, so without this the approver-facing gate rendering (§5.2.9) would
+        // have no record to read (§5.3 Stage 0). Keyed by the canonical
+        // `GateRef::for_approval_request` the product read model re-derives from
+        // the routing `gate:approval-{id}` ref, in the run's resource-owner scope
+        // (the same owner axes the replay payload uses, so raise and read agree).
+        let gate_summary = SafeSummary::new(APPROVAL_GATE_SUMMARY).map_err(|error| {
+            ironclaw_loop_host::raw_agent_loop_host_error(
+                "local_dev_outbound_delivery",
+                "gate_record_summary",
+                AgentLoopHostErrorKind::Internal,
+                "outbound delivery gate summary is not renderable",
+                error,
+            )
+        })?;
+        self.gate_record_store
+            .save(
+                super::local_dev_resource_scope_for_run(
+                    &invocation.run_context,
+                    &self.fallback_user_id,
+                ),
+                GateRef::for_approval_request(approval_request_id),
+                GateRecord::Approval {
+                    summary: gate_summary,
+                },
+            )
+            .await
+            .map_err(|error| approval_store_error("save_gate_record", error))?;
+
+        Ok(resolution::approval_required(
+            approval_gate_ref(approval_request_id)?,
+            APPROVAL_GATE_SUMMARY.to_string(),
+            Some(CapabilityApprovalResume {
                 approval_request_id,
                 resume_token: resume_token_from_invocation_id(invocation_id)?,
                 correlation_id,
                 input_ref: invocation.request.input_ref.clone(),
-                input: input.clone(),
-                estimate,
             }),
-        })
+        )
+        .resolution)
     }
 
     async fn verify_approved_resume(
         &self,
-        invocation: &LocalDevSyntheticCapabilityInvocation,
+        invocation: &SyntheticCapabilityInvocation,
         resume: &CapabilityApprovalResume,
         input: &serde_json::Value,
     ) -> Result<ApprovedResumeDecision, AgentLoopHostError> {
-        if resume.input != *input {
+        let capability_id = outbound_delivery_target_set_capability_id()?;
+        let invocation_id = invocation_id_from_resume_token(&resume.resume_token)?;
+        // Reconstitute the raw replay payload persisted at the gate raise; a
+        // missing payload is a sanitized terminal failure (fail closed), never a
+        // silent mismatch (§5.3 Stage 2a-i). The estimate feeds the approval
+        // fingerprint that MUST match the one saved at raise; the input the
+        // decorator already reconstituted (`invocation.input`) is cross-checked
+        // against the persisted payload here as anti-tamper.
+        let replay_scope = super::local_dev_resource_scope_for_run(
+            &invocation.run_context,
+            &self.fallback_user_id,
+        );
+        let replay = self
+            .replay_payload_store
+            .load(&replay_scope, invocation_id)
+            .await
+            .map_err(replay_payload_store_error)?
+            .ok_or_else(|| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Unavailable,
+                    "outbound delivery target approval replay payload is unavailable",
+                )
+            })?;
+        if replay.input != *input {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
                 "outbound delivery target approval resume input does not match",
             ));
         }
-
-        let capability_id = outbound_delivery_target_set_capability_id()?;
-        let invocation_id = invocation_id_from_resume_token(&resume.resume_token)?;
         let scope = resource_scope_for_run(
             &invocation.run_context,
             &self.fallback_user_id,
             invocation_id,
         );
-        let fingerprint = approval_fingerprint(&scope, &capability_id, &resume.estimate, input)?;
+        let fingerprint = approval_fingerprint(&scope, &capability_id, &replay.estimate, input)?;
         // A missing or not-yet-granted approval record is recoverable: the user
         // can re-request approval. Surface `Denied` so the run continues rather
         // than ending it with a terminal `Err(Unauthorized)`.
@@ -463,7 +504,15 @@ impl OutboundDeliveryTargetSetHandler {
                 "outbound delivery target approval has not been granted; re-request approval",
             )?));
         }
-        if approval_record.request.correlation_id != resume.correlation_id {
+        // Correlation identity is reconstituted host-side from the replay payload
+        // persisted at the gate raise (§5.3 Stage 2a-i), NOT read from
+        // `resume.correlation_id`: post-flip the loop-facing gate channel no longer
+        // carries the original correlation id, so the executor mints a fresh
+        // advisory one when it reconstructs the resume from the gate ref. The
+        // authoritative value — the one this approval record was minted under — is
+        // the one persisted alongside {input, estimate} in the replay payload, the
+        // same source of truth the loop-host runtime path reconstitutes from.
+        if approval_record.request.correlation_id != replay.correlation_id {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
                 "outbound delivery target approval correlation does not match",
@@ -528,10 +577,10 @@ impl OutboundDeliveryTargetSetHandler {
 }
 
 async fn write_completed_result(
-    invocation: LocalDevSyntheticCapabilityInvocation,
+    invocation: SyntheticCapabilityInvocation,
     output: serde_json::Value,
     safe_summary: String,
-) -> Result<CapabilityOutcome, AgentLoopHostError> {
+) -> Result<Resolution, AgentLoopHostError> {
     let write_result = invocation
         .result_writer
         .write_capability_result(CapabilityResultWrite {
@@ -541,31 +590,43 @@ async fn write_completed_result(
             capability_id: &invocation.request.capability_id,
             output,
             display_preview: None,
+            durable_persistence: DurablePersistence::Persist,
         })
         .await?;
-    Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
-        result_ref: write_result.result_ref,
+    Ok(resolution::completed(
+        write_result.result_ref,
         safe_summary,
-        progress: CapabilityProgress::MadeProgress,
-        terminate_hint: false,
-        byte_len: write_result.byte_len,
-        output_digest: write_result.output_digest,
-    }))
+        CapabilityProgress::MadeProgress,
+        false,
+        write_result.byte_len,
+        write_result.output_digest,
+        write_result.model_observation,
+    ))
 }
 
-fn invocation_replay_input(
-    invocation: &LocalDevSyntheticCapabilityInvocation,
-) -> &serde_json::Value {
-    invocation
-        .request
-        .approval_resume
-        .as_ref()
-        .map(|resume| &resume.input)
-        .unwrap_or(&invocation.input)
+/// The input a synthetic invocation dispatches from. The decorator already
+/// reconstitutes the replayed input into `invocation.input` on an approval resume
+/// (loading it from the host-private replay-payload store, §5.3 Stage 2a-i), so
+/// this is simply that value on both fresh and resume dispatch.
+fn invocation_replay_input(invocation: &SyntheticCapabilityInvocation) -> &serde_json::Value {
+    &invocation.input
+}
+
+/// Map a replay-payload store failure to a fail-closed host error; the bound
+/// cause (which may carry a host path) is logged server-side and never surfaced
+/// to the model (mirrors the loop-host seam mapper).
+fn replay_payload_store_error(
+    error: ironclaw_capabilities::ReplayPayloadStoreError,
+) -> AgentLoopHostError {
+    tracing::warn!(error = %error, "failed to access outbound-delivery replay payload");
+    AgentLoopHostError::new(
+        AgentLoopHostErrorKind::Unavailable,
+        "failed to access capability replay payload",
+    )
 }
 
 fn invocation_effective_input_ref(
-    invocation: &LocalDevSyntheticCapabilityInvocation,
+    invocation: &SyntheticCapabilityInvocation,
 ) -> &CapabilityInputRef {
     invocation
         .request
@@ -576,10 +637,10 @@ fn invocation_effective_input_ref(
 }
 
 fn caller_for_run(
-    invocation: &LocalDevSyntheticCapabilityInvocation,
+    invocation: &SyntheticCapabilityInvocation,
     fallback_user_id: &UserId,
-) -> WebUiAuthenticatedCaller {
-    WebUiAuthenticatedCaller::new(
+) -> ProductSurfaceCaller {
+    ProductSurfaceCaller::new(
         invocation.run_context.scope.tenant_id.clone(),
         effective_user_id(&invocation.run_context, fallback_user_id),
         invocation.run_context.scope.agent_id.clone(),
@@ -713,65 +774,59 @@ fn input_error(error: OutboundDeliveryCapabilityInputError) -> AgentLoopHostErro
 /// limits, and transient unavailability are all surfaced to the model instead of
 /// killing the turn.
 ///
-/// Safe summaries stay fixed and host-authored: `RebornServicesError` carries a
+/// Safe summaries stay fixed and host-authored: `ProductSurfaceError` carries a
 /// free-form `field` that could contain a forbidden delimiter/marker and remap a
 /// recoverable arm into a terminal `HostUnavailable` (Invariant 2).
-fn outbound_delivery_outcome(
-    error: RebornServicesError,
-) -> Result<CapabilityOutcome, AgentLoopHostError> {
+fn outbound_delivery_outcome(error: ProductSurfaceError) -> Result<Resolution, AgentLoopHostError> {
     match error.code {
-        RebornServicesErrorCode::InvalidRequest | RebornServicesErrorCode::NotFound => {
-            Ok(CapabilityOutcome::Failed(CapabilityFailure {
-                error_kind: CapabilityFailureKind::InvalidInput,
-                safe_summary: "invalid outbound delivery request".to_string(),
-                detail: None,
-            }))
+        ProductSurfaceErrorCode::InvalidRequest | ProductSurfaceErrorCode::NotFound => {
+            Ok(resolution::failed(
+                FailureKind::InputEncode,
+                "invalid outbound delivery request".to_string(),
+                None,
+            ))
         }
-        RebornServicesErrorCode::Unauthenticated | RebornServicesErrorCode::Forbidden => {
-            Ok(CapabilityOutcome::Denied(approval_denied(
-                "not permitted to change the outbound delivery target",
-            )?))
+        ProductSurfaceErrorCode::Unauthenticated | ProductSurfaceErrorCode::Forbidden => {
+            approval_denied("not permitted to change the outbound delivery target")
         }
-        RebornServicesErrorCode::Conflict => Ok(CapabilityOutcome::Failed(CapabilityFailure {
-            error_kind: CapabilityFailureKind::OperationFailed,
-            safe_summary: "outbound delivery target operation conflicted".to_string(),
-            detail: None,
-        })),
-        RebornServicesErrorCode::RateLimited => Ok(CapabilityOutcome::Failed(CapabilityFailure {
-            error_kind: CapabilityFailureKind::Resource,
-            safe_summary: "outbound delivery target operation rate limited".to_string(),
-            detail: None,
-        })),
-        RebornServicesErrorCode::Unavailable => Ok(CapabilityOutcome::Failed(CapabilityFailure {
-            error_kind: CapabilityFailureKind::Unavailable,
-            safe_summary: "outbound delivery service temporarily unavailable".to_string(),
-            detail: None,
-        })),
-        RebornServicesErrorCode::Internal => Err(AgentLoopHostError::new(
+        ProductSurfaceErrorCode::Conflict => Ok(resolution::failed(
+            FailureKind::OperationFailed,
+            "outbound delivery target operation conflicted".to_string(),
+            None,
+        )),
+        ProductSurfaceErrorCode::RateLimited => Ok(resolution::failed(
+            FailureKind::Resource,
+            "outbound delivery target operation rate limited".to_string(),
+            None,
+        )),
+        ProductSurfaceErrorCode::Unavailable => Ok(resolution::failed(
+            FailureKind::Unavailable,
+            "outbound delivery service temporarily unavailable".to_string(),
+            None,
+        )),
+        ProductSurfaceErrorCode::Internal => Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::Internal,
             "outbound delivery target operation failed",
         )),
     }
 }
 
-/// Build a model-visible `CapabilityDenied` with a fixed, host-authored summary.
+/// Build a model-visible denial `Resolution` with a fixed, host-authored summary.
 /// The reason kind is a charset-safe identifier, so it never trips
 /// safe-summary/identifier validation.
-fn approval_denied(safe_summary: &str) -> Result<CapabilityDenied, AgentLoopHostError> {
-    Ok(CapabilityDenied {
-        reason_kind: CapabilityDeniedReasonKind::unknown("outbound_delivery_approval_required")
-            .map_err(|reason| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::Internal,
-                    format!("outbound delivery denial reason kind is invalid: {reason}"),
-                )
-            })?,
-        safe_summary: safe_summary.to_string(),
-    })
+fn approval_denied(safe_summary: &str) -> Result<Resolution, AgentLoopHostError> {
+    let reason_kind = CapabilityDeniedReasonKind::unknown("outbound_delivery_approval_required")
+        .map_err(|reason| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Internal,
+                format!("outbound delivery denial reason kind is invalid: {reason}"),
+            )
+        })?;
+    Ok(resolution::denied(reason_kind, safe_summary.to_string()).resolution)
 }
 
 fn approval_store_error(operation: &'static str, error: RunStateError) -> AgentLoopHostError {
-    ironclaw_loop_support::raw_agent_loop_host_error(
+    ironclaw_loop_host::raw_agent_loop_host_error(
         "local_dev_outbound_delivery",
         operation,
         AgentLoopHostErrorKind::Unavailable,
@@ -786,12 +841,12 @@ fn approval_store_error(operation: &'static str, error: RunStateError) -> AgentL
 /// Lease-state arms (unknown / expired / exhausted / unclaimed-fingerprint /
 /// fingerprint-mismatch / inactive) describe a lost or stale approval lease,
 /// which the model can recover from by re-requesting approval — so they return
-/// `Ok(CapabilityDenied)`. Genuine infra faults (lease persistence, version
+/// a denial `Resolution`. Genuine infra faults (lease persistence, version
 /// mismatch, CAS exhaustion) stay terminal `Err(AgentLoopHostError)`.
 fn approval_lease_outcome(
     operation: &'static str,
     error: CapabilityLeaseError,
-) -> Result<CapabilityDenied, AgentLoopHostError> {
+) -> Result<Resolution, AgentLoopHostError> {
     match error {
         CapabilityLeaseError::UnknownLease { .. }
         | CapabilityLeaseError::ExpiredLease { .. }
@@ -803,28 +858,27 @@ fn approval_lease_outcome(
         ),
         CapabilityLeaseError::Persistence { .. }
         | CapabilityLeaseError::VersionMismatch
-        | CapabilityLeaseError::CasExhausted => {
-            Err(ironclaw_loop_support::raw_agent_loop_host_error(
-                "local_dev_outbound_delivery",
-                operation,
-                AgentLoopHostErrorKind::Unavailable,
-                "outbound delivery approval lease operation failed",
-                error,
-            ))
-        }
+        | CapabilityLeaseError::CasExhausted => Err(ironclaw_loop_host::raw_agent_loop_host_error(
+            "local_dev_outbound_delivery",
+            operation,
+            AgentLoopHostErrorKind::Unavailable,
+            "outbound delivery approval lease operation failed",
+            error,
+        )),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_product_workflow::RebornServicesErrorKind;
+    use crate::runtime::local_dev::assert_recoverable_failure;
+    use ironclaw_host_api::ProductSurfaceErrorKind;
     use ironclaw_turns::run_profile::LoopSafeSummary;
 
-    fn service_error(code: RebornServicesErrorCode) -> RebornServicesError {
-        RebornServicesError {
+    fn service_error(code: ProductSurfaceErrorCode) -> ProductSurfaceError {
+        ProductSurfaceError {
             code,
-            kind: RebornServicesErrorKind::Internal,
+            kind: ProductSurfaceErrorKind::Internal,
             status_code: 500,
             retryable: false,
             // A free-form `field` carrying a forbidden delimiter is the exact
@@ -841,98 +895,79 @@ mod tests {
         }
     }
 
-    #[test]
-    fn invalid_request_is_a_recoverable_tool_failure_not_terminal() {
-        let outcome =
-            outbound_delivery_outcome(service_error(RebornServicesErrorCode::InvalidRequest))
-                .expect("invalid request must be a model-visible failure, not terminal");
-
-        match outcome {
-            CapabilityOutcome::Failed(failure) => {
-                assert_eq!(failure.error_kind, CapabilityFailureKind::InvalidInput);
-                LoopSafeSummary::new(failure.safe_summary)
-                    .expect("safe summary must satisfy the loop validator");
-            }
-            other => panic!("expected CapabilityOutcome::Failed, got {other:?}"),
+    /// The model-visible summary carried on a recoverable failure / denial.
+    fn recoverable_summary(resolution: &Resolution) -> String {
+        match resolution {
+            Resolution::Done(outcome) => outcome.summary.as_str().to_string(),
+            Resolution::Denied(denial) => denial
+                .summary
+                .as_ref()
+                .map(|summary| summary.as_str().to_string())
+                .unwrap_or_default(),
+            other => panic!("expected a recoverable outcome, got {other:?}"),
         }
     }
 
     #[test]
-    fn not_found_is_a_recoverable_tool_failure_not_terminal() {
-        let outcome = outbound_delivery_outcome(service_error(RebornServicesErrorCode::NotFound))
-            .expect("not found must be a model-visible failure, not terminal");
+    fn invalid_request_is_a_recoverable_tool_failure_not_terminal() {
+        let outcome =
+            outbound_delivery_outcome(service_error(ProductSurfaceErrorCode::InvalidRequest))
+                .expect("invalid request must be a model-visible failure, not terminal");
+        assert_recoverable_failure(&outcome, ironclaw_host_api::FailureKind::InputEncode);
+        LoopSafeSummary::new(recoverable_summary(&outcome))
+            .expect("safe summary must satisfy the loop validator");
+    }
 
-        assert!(matches!(
-            outcome,
-            CapabilityOutcome::Failed(failure)
-                if failure.error_kind == CapabilityFailureKind::InvalidInput
-        ));
+    #[test]
+    fn not_found_is_a_recoverable_tool_failure_not_terminal() {
+        let outcome = outbound_delivery_outcome(service_error(ProductSurfaceErrorCode::NotFound))
+            .expect("not found must be a model-visible failure, not terminal");
+        assert_recoverable_failure(&outcome, ironclaw_host_api::FailureKind::InputEncode);
     }
 
     #[test]
     fn unauthenticated_is_a_recoverable_denial_not_terminal() {
         let outcome =
-            outbound_delivery_outcome(service_error(RebornServicesErrorCode::Unauthenticated))
+            outbound_delivery_outcome(service_error(ProductSurfaceErrorCode::Unauthenticated))
                 .expect("unauthenticated must be a model-visible denial, not terminal");
-
-        match outcome {
-            CapabilityOutcome::Denied(denied) => {
-                LoopSafeSummary::new(denied.safe_summary)
-                    .expect("safe summary must satisfy the loop validator");
-            }
-            other => panic!("expected CapabilityOutcome::Denied, got {other:?}"),
-        }
+        assert!(matches!(outcome, Resolution::Denied(_)));
+        LoopSafeSummary::new(recoverable_summary(&outcome))
+            .expect("safe summary must satisfy the loop validator");
     }
 
     #[test]
     fn forbidden_is_a_recoverable_denial_not_terminal() {
-        let outcome = outbound_delivery_outcome(service_error(RebornServicesErrorCode::Forbidden))
+        let outcome = outbound_delivery_outcome(service_error(ProductSurfaceErrorCode::Forbidden))
             .expect("forbidden must be a model-visible denial, not terminal");
-
-        assert!(matches!(outcome, CapabilityOutcome::Denied(_)));
+        assert!(matches!(outcome, Resolution::Denied(_)));
     }
 
     #[test]
     fn conflict_is_a_recoverable_tool_failure_not_terminal() {
-        let outcome = outbound_delivery_outcome(service_error(RebornServicesErrorCode::Conflict))
+        let outcome = outbound_delivery_outcome(service_error(ProductSurfaceErrorCode::Conflict))
             .expect("conflict must be a model-visible failure, not terminal");
-
-        assert!(matches!(
-            outcome,
-            CapabilityOutcome::Failed(failure)
-                if failure.error_kind == CapabilityFailureKind::OperationFailed
-        ));
+        assert_recoverable_failure(&outcome, ironclaw_host_api::FailureKind::OperationFailed);
     }
 
     #[test]
     fn rate_limited_is_a_recoverable_tool_failure_not_terminal() {
         let outcome =
-            outbound_delivery_outcome(service_error(RebornServicesErrorCode::RateLimited))
+            outbound_delivery_outcome(service_error(ProductSurfaceErrorCode::RateLimited))
                 .expect("rate limited must be a model-visible failure, not terminal");
-
-        assert!(matches!(
-            outcome,
-            CapabilityOutcome::Failed(failure)
-                if failure.error_kind == CapabilityFailureKind::Resource
-        ));
+        assert_recoverable_failure(&outcome, ironclaw_host_api::FailureKind::Resource);
     }
 
     #[test]
     fn unavailable_is_a_recoverable_tool_failure_not_terminal() {
         let outcome =
-            outbound_delivery_outcome(service_error(RebornServicesErrorCode::Unavailable))
+            outbound_delivery_outcome(service_error(ProductSurfaceErrorCode::Unavailable))
                 .expect("transient unavailability must not kill the run");
-
-        assert!(matches!(
-            outcome,
-            CapabilityOutcome::Failed(failure)
-                if failure.error_kind == CapabilityFailureKind::Unavailable
-        ));
+        assert_recoverable_failure(&outcome, ironclaw_host_api::FailureKind::Unavailable);
     }
 
     #[test]
     fn internal_service_error_stays_terminal() {
-        let error = outbound_delivery_outcome(service_error(RebornServicesErrorCode::Internal))
+        let error = outbound_delivery_outcome(service_error(ProductSurfaceErrorCode::Internal))
             .expect_err("internal bugs must stay terminal");
 
         assert_eq!(error.kind, AgentLoopHostErrorKind::Internal);
@@ -945,21 +980,17 @@ mod tests {
         // still pass the loop safe-summary validator that fires at
         // `append_capability_result_ref` (the terminal-failure boundary).
         for code in [
-            RebornServicesErrorCode::InvalidRequest,
-            RebornServicesErrorCode::NotFound,
-            RebornServicesErrorCode::Unauthenticated,
-            RebornServicesErrorCode::Forbidden,
-            RebornServicesErrorCode::Conflict,
-            RebornServicesErrorCode::RateLimited,
-            RebornServicesErrorCode::Unavailable,
+            ProductSurfaceErrorCode::InvalidRequest,
+            ProductSurfaceErrorCode::NotFound,
+            ProductSurfaceErrorCode::Unauthenticated,
+            ProductSurfaceErrorCode::Forbidden,
+            ProductSurfaceErrorCode::Conflict,
+            ProductSurfaceErrorCode::RateLimited,
+            ProductSurfaceErrorCode::Unavailable,
         ] {
             let outcome = outbound_delivery_outcome(service_error(code))
                 .unwrap_or_else(|_| panic!("{code:?} must be recoverable"));
-            let summary = match outcome {
-                CapabilityOutcome::Failed(failure) => failure.safe_summary,
-                CapabilityOutcome::Denied(denied) => denied.safe_summary,
-                other => panic!("expected a recoverable outcome, got {other:?}"),
-            };
+            let summary = recoverable_summary(&outcome);
             assert!(
                 !summary.contains("slack/<channel>"),
                 "summary must not interpolate the service error field: {summary}"
@@ -993,7 +1024,8 @@ mod tests {
         let denied = approval_lease_outcome("claim_approval_lease", lease_error_unknown())
             .expect("an expired approval lease must be a model-visible denial, not terminal");
 
-        LoopSafeSummary::new(denied.safe_summary)
+        assert!(matches!(denied, Resolution::Denied(_)));
+        LoopSafeSummary::new(recoverable_summary(&denied))
             .expect("denial safe summary must satisfy the loop validator");
     }
 

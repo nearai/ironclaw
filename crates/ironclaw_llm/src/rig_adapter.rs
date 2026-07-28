@@ -1,3 +1,4 @@
+// arch-exempt: large_file, Rig provider bridge keeps streaming and non-streaming conversions co-located until provider adapter decomposition, plan #6175
 //! Generic adapter that bridges rig-core's `CompletionModel` trait to IronClaw's `LlmProvider`.
 //!
 //! This lets us use any rig-core provider (OpenAI, Anthropic, Ollama, etc.) as an
@@ -5,9 +6,10 @@
 
 use crate::config::CacheRetention;
 use async_trait::async_trait;
+use futures::StreamExt;
 use rig::OneOrMany;
 use rig::completion::{
-    AssistantContent, CompletionModel, CompletionRequest as RigRequest,
+    AssistantContent, CompletionModel, CompletionRequest as RigRequest, GetTokenUsage,
     ToolDefinition as RigToolDefinition, Usage as RigUsage,
 };
 use rig::message::{
@@ -15,6 +17,7 @@ use rig::message::{
     ToolChoice as RigToolChoice, ToolFunction, ToolResult as RigToolResult, ToolResultContent,
     UserContent,
 };
+use rig::streaming::{StreamedAssistantContent, StreamingCompletionResponse};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::Serialize;
@@ -24,18 +27,18 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::str::FromStr;
 
-use crate::costs;
 use crate::error::LlmError;
 use crate::provider::{
-    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider,
-    ReasoningDetail as IronReasoningDetail, ReasoningDetails as IronReasoningDetails,
+    ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, FinishReason,
+    LlmProvider, ReasoningDetail as IronReasoningDetail, ReasoningDetails as IronReasoningDetails,
     ToolCall as IronToolCall, ToolCompletionRequest, ToolCompletionResponse,
-    ToolDefinition as IronToolDefinition, strip_unsupported_completion_params,
-    strip_unsupported_tool_params,
+    ToolDefinition as IronToolDefinition, map_provider_finish_token, normalized_model_override,
+    resolve_finish_reason, strip_unsupported_completion_params, strip_unsupported_tool_params,
 };
 use crate::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
 #[cfg(test)]
 use crate::tool_schema::{normalize_schema_strict, serialize_json_capped};
+use ironclaw_common::llm_costs as costs;
 
 /// Adapter that wraps a rig-core `CompletionModel` and implements `LlmProvider`.
 pub struct RigAdapter<M: CompletionModel> {
@@ -319,6 +322,80 @@ impl<M: CompletionModel> RigAdapter<M> {
     /// Strip unsupported fields from a `ToolCompletionRequest` in place.
     fn strip_unsupported_tool_params(&self, req: &mut ToolCompletionRequest) {
         strip_unsupported_tool_params(&self.unsupported_params, req);
+    }
+
+    async fn drain_streaming_response(
+        &self,
+        mut stream: StreamingCompletionResponse<M::StreamingResponse>,
+        sink: std::sync::Arc<dyn CompletionStreamSink>,
+    ) -> Result<DrainedStreamingResponse, LlmError> {
+        let mut streamed_reasoning = StreamedReasoningAccumulator::default();
+        while let Some(chunk) = stream.next().await {
+            match chunk.map_err(|e| map_rig_error(&self.model_name, e))? {
+                StreamedAssistantContent::Text(text) if !text.text.is_empty() => {
+                    sink.text_delta(text.text).await;
+                }
+                StreamedAssistantContent::Reasoning(reasoning) => {
+                    streamed_reasoning.push_reasoning(&reasoning);
+                }
+                StreamedAssistantContent::ReasoningDelta { id, reasoning } => {
+                    streamed_reasoning.push_delta(id, reasoning);
+                }
+                _ => {}
+            }
+        }
+
+        // rig-core sets `stream.response` only when the provider yields its
+        // terminal frame. Its absence means the stream simply stopped
+        // producing items — a dropped connection or an aborted generation —
+        // which is the crate's established incomplete-stream condition, not a
+        // completed call. Raising it here, before a response object exists,
+        // is what lets retry and failover see a failure instead of a success.
+        //
+        // What this actually detects, in rig-core 0.33: **Ollama only**. Its
+        // stream yields `FinalResponse` solely inside `if response.done`
+        // (`providers/ollama.rs:706`), so a stream that stops early genuinely
+        // leaves `stream.response` unset. OpenAI
+        // (`providers/openai/completion/streaming.rs:330`), Anthropic
+        // (`providers/anthropic/streaming.rs:333`), Gemini
+        // (`providers/gemini/streaming.rs:233`), OpenRouter
+        // (`providers/openrouter/streaming.rs:323`) and DeepSeek
+        // (`providers/deepseek.rs:862`) all yield a usage-only `FinalResponse`
+        // unconditionally after the SSE loop — including after the plain
+        // `Err(StreamEnded) => break` arm — so on those five a server that
+        // closes mid-answer still sets `stream.response` and this check does
+        // not fire. Catching that needs a terminal-observed signal rig-core
+        // does not carry; it is a known limitation of this adapter, not a
+        // claim it makes.
+        let Some(terminal_frame) = stream.response.as_ref() else {
+            return Err(LlmError::InvalidResponse {
+                provider: self.model_name.clone(),
+                reason: "stream ended before the provider's terminal frame".to_string(),
+            });
+        };
+        let usage = terminal_frame.token_usage().unwrap_or_default();
+        let raw_terminal_frame = serialize_raw_response(terminal_frame);
+        let cache_creation_input_tokens = extract_cache_creation(raw_terminal_frame.as_ref());
+        let provider_finish = extract_finish_reason(raw_terminal_frame.as_ref());
+        // Note: in rig-core 0.33 only Ollama's terminal frame still carries a
+        // finish reason (`done_reason`). The other five define
+        // `StreamingResponse` as usage-only, so their per-chunk
+        // `finish_reason`/`stop_reason` is dropped before it reaches this
+        // adapter and `provider_finish` is `None` — shape inference is the
+        // documented fallback there.
+        let (text, tool_calls, finish, reasoning, reasoning_details) =
+            extract_response(&stream.choice, &usage, provider_finish);
+        let (streamed_reasoning, streamed_reasoning_details) = streamed_reasoning.finish();
+
+        Ok(DrainedStreamingResponse {
+            text,
+            tool_calls,
+            finish,
+            reasoning: reasoning.or(streamed_reasoning),
+            reasoning_details: reasoning_details.or(streamed_reasoning_details),
+            usage,
+            cache_creation_input_tokens,
+        })
     }
 }
 
@@ -681,6 +758,7 @@ fn rig_reasoning_to_iron(reasoning: &rig::message::Reasoning) -> Option<IronReas
 fn extract_response(
     choice: &OneOrMany<AssistantContent>,
     _usage: &RigUsage,
+    provider_finish: Option<FinishReason>,
 ) -> (
     Option<String>,
     Vec<IronToolCall>,
@@ -750,13 +828,66 @@ fn extract_response(
         })
     };
 
-    let finish = if !tool_calls.is_empty() {
-        FinishReason::ToolUse
-    } else {
-        FinishReason::Stop
-    };
+    let finish = resolve_finish_reason(provider_finish, !tool_calls.is_empty());
 
     (text, tool_calls, finish, reasoning, typed_reasoning)
+}
+
+#[derive(Default)]
+struct StreamedReasoningAccumulator {
+    parts: Vec<String>,
+    details: Vec<IronReasoningDetail>,
+    id: Option<String>,
+}
+
+impl StreamedReasoningAccumulator {
+    fn push_reasoning(&mut self, reasoning: &rig::message::Reasoning) {
+        if self.id.is_none() {
+            self.id = reasoning.id.clone();
+        }
+        if let Some(details) = rig_reasoning_to_iron(reasoning) {
+            if let Some(display_text) = details.display_text() {
+                self.parts.push(display_text);
+            }
+            self.details.extend(details.content);
+        }
+    }
+
+    fn push_delta(&mut self, id: Option<String>, reasoning: String) {
+        if self.id.is_none() {
+            self.id = id;
+        }
+        if !reasoning.trim().is_empty() {
+            self.parts.push(reasoning);
+        }
+    }
+
+    fn finish(self) -> (Option<String>, Option<IronReasoningDetails>) {
+        let reasoning = if self.parts.is_empty() {
+            None
+        } else {
+            Some(self.parts.join("\n"))
+        };
+        let details = if self.details.is_empty() {
+            None
+        } else {
+            Some(IronReasoningDetails {
+                id: self.id,
+                content: self.details,
+            })
+        };
+        (reasoning, details)
+    }
+}
+
+struct DrainedStreamingResponse {
+    text: Option<String>,
+    tool_calls: Vec<IronToolCall>,
+    finish: FinishReason,
+    reasoning: Option<String>,
+    reasoning_details: Option<IronReasoningDetails>,
+    usage: RigUsage,
+    cache_creation_input_tokens: u32,
 }
 
 /// Saturate u64 to u32 for token counts.
@@ -780,17 +911,112 @@ fn supports_prompt_cache(name: &str) -> bool {
         || model.starts_with("claude-haiku")
 }
 
-/// Extract `cache_creation_input_tokens` from the raw provider response.
+/// Serialize the raw provider response to JSON **once** per completion.
+///
+/// rig-core's unified types drop fields we need (`cache_creation_input_tokens`,
+/// the provider's own finish reason), so both are read back out of the raw
+/// body. Serializing the whole response — generated text, tool payloads and
+/// all — is response-sized work, so every call site does it once and lends the
+/// resulting `Value` to each extractor rather than each extractor serializing
+/// for itself.
+///
+/// silent-ok: serializing a body rig already deserialized from the provider
+/// cannot fail in practice. If it ever does, the extractors fall back to their
+/// documented defaults rather than failing an otherwise-good response — but the
+/// branch is logged, because it silently re-enables the guess this machinery
+/// removes: a truncated response would then report `Stop`.
+fn serialize_raw_response<T: Serialize>(raw: &T) -> Option<serde_json::Value> {
+    match serde_json::to_value(raw) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            tracing::debug!(
+                %error,
+                "raw provider response would not serialize; falling back to \
+                 response-shape inference and zero cache-creation tokens"
+            );
+            None
+        }
+    }
+}
+
+/// Extract `cache_creation_input_tokens` from the serialized provider response.
 ///
 /// Rig-core's unified `Usage` does not surface this field, but Anthropic's raw
-/// response includes it at `usage.cache_creation_input_tokens`. We serialize the
-/// raw response to JSON and attempt to read the value.
-fn extract_cache_creation<T: Serialize>(raw: &T) -> u32 {
-    serde_json::to_value(raw)
-        .ok()
-        .and_then(|v| v.get("usage")?.get("cache_creation_input_tokens")?.as_u64())
+/// response includes it at `usage.cache_creation_input_tokens`.
+fn extract_cache_creation(raw: Option<&serde_json::Value>) -> u32 {
+    raw.and_then(|v| v.get("usage")?.get("cache_creation_input_tokens")?.as_u64())
         .map(|n| n.min(u32::MAX as u64) as u32)
         .unwrap_or(0)
+}
+
+/// Extract the provider's own finish/stop reason from the serialized response.
+///
+/// rig-core's unified `AssistantContent` says nothing about *why* generation
+/// stopped, so a `max_tokens` truncation and a content-filter refusal used to
+/// be indistinguishable from a clean answer. Every provider states it in its
+/// raw body, so read the field the provider actually emits.
+///
+/// Returns `None` when the response carries no finish-reason field at all
+/// (unknown or older provider shape); callers then fall back to inferring it
+/// from the response shape. See [`resolve_finish_reason`].
+fn extract_finish_reason(raw: Option<&serde_json::Value>) -> Option<FinishReason> {
+    let token = provider_finish_token(raw?)?;
+    map_provider_finish_token(token)
+}
+
+/// Locate the provider's finish-reason field across the response shapes rig fronts.
+///
+/// Paths verified against rig-core 0.33:
+/// - OpenAI-shaped (`openai`, `openai_compatible`, `tinfoil`, `azure`,
+///   `deepseek`, `openrouter`): `choices[0].finish_reason`
+/// - Anthropic-by-key: `stop_reason`
+/// - Ollama: `done_reason`
+/// - Gemini by API key: `candidates[0].finishReason`, falling back to
+///   `promptFeedback.blockReason`
+///
+/// Gemini blocks in two different places. A candidate's `finishReason` means
+/// the *output* was cut off mid-generation. `promptFeedback.blockReason` means
+/// the *input* prompt was rejected before generation, and rig's own
+/// `GenerateContentResponse` documents the consequence: it returns no
+/// candidates at all only when something was wrong with the prompt. Reading
+/// just the candidate path therefore found nothing for a blocked prompt and
+/// left the caller to infer a clean `Stop` from the response shape. The
+/// candidate's own reason still wins when both are present.
+fn provider_finish_token(value: &serde_json::Value) -> Option<&str> {
+    let openai = value
+        .get("choices")
+        .and_then(|choices| choices.as_array())
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("finish_reason"))
+        .and_then(|reason| reason.as_str());
+    if openai.is_some() {
+        return openai;
+    }
+    if let Some(anthropic) = value.get("stop_reason").and_then(|r| r.as_str()) {
+        return Some(anthropic);
+    }
+    if let Some(ollama) = value.get("done_reason").and_then(|r| r.as_str()) {
+        return Some(ollama);
+    }
+    let gemini_candidate = value
+        .get("candidates")
+        .and_then(|candidates| candidates.as_array())
+        .and_then(|candidates| candidates.first())
+        .and_then(|candidate| candidate.get("finishReason"))
+        .and_then(|reason| reason.as_str());
+    if gemini_candidate.is_some() {
+        return gemini_candidate;
+    }
+    // `blockReason` speaks the same `SCREAMING_SNAKE_CASE` vocabulary as
+    // `finishReason`, so the shared table classifies it without a second
+    // mapping: `SAFETY` / `BLOCKLIST` / `PROHIBITED_CONTENT` / `IMAGE_SAFETY` /
+    // `MODEL_ARMOR` are content blocks, `OTHER` and `BLOCK_REASON_UNSPECIFIED`
+    // are unknown. An absent `blockReason` still means the provider said
+    // nothing, which is the documented shape-inference fallback.
+    value
+        .get("promptFeedback")
+        .and_then(|feedback| feedback.get("blockReason"))
+        .and_then(|reason| reason.as_str())
 }
 
 /// Merge default additional parameters into the rig-core request.
@@ -870,31 +1096,13 @@ fn build_rig_request(
     })
 }
 
-/// Inject a per-request model override into the rig request's `additional_params`.
+/// Inject a per-request model override into the typed rig request field.
 ///
-/// Rig-core bakes the model name at construction time inside each provider's
-/// `CompletionModel` implementation. This helper inserts a top-level `"model"`
-/// key into `additional_params`, which rig-core flattens into the provider's
-/// request payload via `#[serde(flatten)]`.
-///
-/// Whether the override takes effect depends on the downstream API server's
-/// handling of duplicate JSON keys (most Python/Go servers use last-key-wins,
-/// but this is not guaranteed by the JSON spec). The `effective_model_name()`
-/// trait method should be consulted to determine the model actually used.
+/// Rig-core providers use this field in preference to their configured model.
+/// Keeping it out of flattened `additional_params` ensures the serialized JSON
+/// request has exactly one top-level `model` key.
 fn inject_model_override(rig_req: &mut RigRequest, model_override: Option<&str>) {
-    let Some(model) = model_override else {
-        return;
-    };
-    match rig_req.additional_params {
-        Some(ref mut params) => {
-            if let Some(obj) = params.as_object_mut() {
-                obj.insert("model".to_string(), serde_json::json!(model));
-            }
-        }
-        None => {
-            rig_req.additional_params = Some(serde_json::json!({ "model": model }));
-        }
-    }
+    rig_req.model = model_override.map(str::to_owned);
 }
 
 #[async_trait]
@@ -967,8 +1175,10 @@ where
             .await
             .map_err(|e| map_rig_error(&self.model_name, e))?;
 
+        let raw_response = serialize_raw_response(&response.raw_response);
+        let provider_finish = extract_finish_reason(raw_response.as_ref());
         let (text, _tool_calls, finish, _reasoning, _reasoning_details) =
-            extract_response(&response.choice, &response.usage);
+            extract_response(&response.choice, &response.usage, provider_finish);
 
         let resp = CompletionResponse {
             content: text.unwrap_or_default(),
@@ -977,7 +1187,63 @@ where
             finish_reason: finish,
             reasoning: None,
             cache_read_input_tokens: saturate_u32(response.usage.cached_input_tokens),
-            cache_creation_input_tokens: extract_cache_creation(&response.raw_response),
+            cache_creation_input_tokens: extract_cache_creation(raw_response.as_ref()),
+        };
+
+        if resp.cache_read_input_tokens > 0 {
+            tracing::debug!(
+                model = %self.model_name,
+                input = resp.input_tokens,
+                output = resp.output_tokens,
+                cache_read = resp.cache_read_input_tokens,
+                "prompt cache hit",
+            );
+        }
+
+        Ok(resp)
+    }
+
+    async fn complete_streaming(
+        &self,
+        mut request: CompletionRequest,
+        sink: std::sync::Arc<dyn CompletionStreamSink>,
+    ) -> Result<CompletionResponse, LlmError> {
+        let model_override = request.take_model_override();
+
+        self.strip_unsupported_completion_params(&mut request);
+
+        let mut messages = request.messages;
+        crate::provider::sanitize_tool_messages(&mut messages);
+        let (preamble, history) = convert_messages(&messages);
+
+        let mut rig_req = build_rig_request(
+            preamble,
+            history,
+            Vec::new(),
+            None,
+            request.temperature,
+            request.max_tokens,
+            self.cache_retention,
+        )?;
+
+        merge_additional_params(&mut rig_req, self.default_additional_params.as_ref());
+        inject_model_override(&mut rig_req, model_override.as_deref());
+
+        let stream = self
+            .model
+            .stream(rig_req)
+            .await
+            .map_err(|e| map_rig_error(&self.model_name, e))?;
+        let drained = self.drain_streaming_response(stream, sink).await?;
+
+        let resp = CompletionResponse {
+            content: drained.text.unwrap_or_default(),
+            input_tokens: saturate_u32(drained.usage.input_tokens),
+            output_tokens: saturate_u32(drained.usage.output_tokens),
+            finish_reason: drained.finish,
+            reasoning: drained.reasoning,
+            cache_read_input_tokens: saturate_u32(drained.usage.cached_input_tokens),
+            cache_creation_input_tokens: drained.cache_creation_input_tokens,
         };
 
         if resp.cache_read_input_tokens > 0 {
@@ -1029,8 +1295,10 @@ where
             .await
             .map_err(|e| map_rig_error(&self.model_name, e))?;
 
+        let raw_response = serialize_raw_response(&response.raw_response);
+        let provider_finish = extract_finish_reason(raw_response.as_ref());
         let (text, mut tool_calls, finish, reasoning, reasoning_details) =
-            extract_response(&response.choice, &response.usage);
+            extract_response(&response.choice, &response.usage, provider_finish);
 
         // Normalize tool call names: some proxies prepend "proxy_" prefixes.
         for tc in &mut tool_calls {
@@ -1062,9 +1330,91 @@ where
             output_tokens: saturate_u32(response.usage.output_tokens),
             finish_reason: finish,
             cache_read_input_tokens: saturate_u32(response.usage.cached_input_tokens),
-            cache_creation_input_tokens: extract_cache_creation(&response.raw_response),
+            cache_creation_input_tokens: extract_cache_creation(raw_response.as_ref()),
             reasoning,
             reasoning_details,
+        };
+
+        if resp.cache_read_input_tokens > 0 {
+            tracing::debug!(
+                model = %self.model_name,
+                input = resp.input_tokens,
+                output = resp.output_tokens,
+                cache_read = resp.cache_read_input_tokens,
+                "prompt cache hit",
+            );
+        }
+
+        Ok(resp)
+    }
+
+    async fn complete_with_tools_streaming(
+        &self,
+        mut request: ToolCompletionRequest,
+        sink: std::sync::Arc<dyn CompletionStreamSink>,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        let model_override = request.take_model_override();
+
+        self.strip_unsupported_tool_params(&mut request);
+
+        let known_tool_names: HashSet<String> =
+            request.tools.iter().map(|t| t.name.clone()).collect();
+
+        let mut messages = request.messages;
+        crate::provider::sanitize_tool_messages(&mut messages);
+        let (preamble, history) = convert_messages(&messages);
+        let tools = convert_tools(&request.tools);
+        let tool_choice = convert_tool_choice(request.tool_choice.as_deref());
+
+        let mut rig_req = build_rig_request(
+            preamble,
+            history,
+            tools,
+            tool_choice,
+            request.temperature,
+            request.max_tokens,
+            self.cache_retention,
+        )?;
+
+        merge_additional_params(&mut rig_req, self.default_additional_params.as_ref());
+        inject_model_override(&mut rig_req, model_override.as_deref());
+
+        let stream = self
+            .model
+            .stream(rig_req)
+            .await
+            .map_err(|e| map_rig_error(&self.model_name, e))?;
+        let mut drained = self.drain_streaming_response(stream, sink).await?;
+
+        // Normalize tool call names: some proxies prepend "proxy_" prefixes.
+        for tc in &mut drained.tool_calls {
+            let normalized = normalize_tool_name(&tc.name, &known_tool_names);
+            if normalized != tc.name {
+                tracing::debug!(
+                    original = %tc.name,
+                    normalized = %normalized,
+                    "Normalized tool call name from provider",
+                );
+                tc.name = normalized;
+            }
+        }
+
+        crate::tool_schema::strip_unset_optional_fields(
+            &mut drained.tool_calls,
+            &request.tools,
+            crate::tool_schema::PlaceholderStrippingMode::NullOnly,
+        );
+
+        let resp = ToolCompletionResponse {
+            content: drained.text,
+            tool_calls: drained.tool_calls,
+            input_tokens: saturate_u32(drained.usage.input_tokens),
+            output_tokens: saturate_u32(drained.usage.output_tokens),
+            finish_reason: drained.finish,
+            cache_read_input_tokens: saturate_u32(drained.usage.cached_input_tokens),
+            cache_creation_input_tokens: drained.cache_creation_input_tokens,
+            reasoning: drained.reasoning,
+            reasoning_details: drained.reasoning_details,
         };
 
         if resp.cache_read_input_tokens > 0 {
@@ -1084,8 +1434,10 @@ where
         self.model_name.clone()
     }
 
-    fn effective_model_name(&self, _requested_model: Option<&str>) -> String {
-        self.active_model_name()
+    fn effective_model_name(&self, requested_model: Option<&str>) -> String {
+        normalized_model_override(requested_model)
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.active_model_name())
     }
 
     fn set_model(&self, _model: &str) -> Result<(), LlmError> {
@@ -1178,7 +1530,226 @@ fn normalize_tool_name(name: &str, known_tools: &HashSet<String>) -> String {
 mod tests {
     use super::*;
     use rig::completion::CompletionError;
-    use rig::streaming::StreamingCompletionResponse;
+    use rig::streaming::{RawStreamingChoice, RawStreamingToolCall, StreamingCompletionResponse};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::{mpsc, oneshot};
+
+    const LOOPBACK_CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
+
+    async fn capture_one_http_request() -> (String, oneshot::Receiver<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback capture server");
+        let addr = listener.local_addr().expect("capture server address");
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let read = socket.read(&mut buffer).await.expect("read request");
+                if read == 0 {
+                    return;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers =
+                    std::str::from_utf8(&request[..header_end]).expect("request headers are UTF-8");
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then_some(value.trim())
+                    })
+                    .expect("content length header")
+                    .parse::<usize>()
+                    .expect("content length is numeric");
+                let body_start = header_end + 4;
+                if request.len() < body_start + content_length {
+                    continue;
+                }
+                tx.send(
+                    String::from_utf8(request[body_start..body_start + content_length].to_vec())
+                        .expect("request body is UTF-8"),
+                )
+                .expect("test receives captured request");
+                socket
+                    .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+                    .await
+                    .expect("write test response");
+                return;
+            }
+        });
+        (format!("http://{addr}/v1"), rx)
+    }
+
+    fn tool_request_with_model_override() -> ToolCompletionRequest {
+        ToolCompletionRequest::new(
+            vec![ChatMessage::user("use the echo tool")],
+            vec![IronToolDefinition {
+                name: "echo".to_string(),
+                description: "Echo the supplied text".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": { "text": { "type": "string" } },
+                    "required": ["text"]
+                }),
+            }],
+        )
+        .with_model("override-model")
+    }
+
+    fn assert_single_model_override(body: &str) {
+        assert_eq!(
+            body.match_indices("\"model\":").count(),
+            1,
+            "the raw JSON body must have exactly one top-level model key: {body}",
+        );
+        assert!(
+            body.contains("\"model\":\"override-model\""),
+            "the one serialized model must preserve the request override: {body}",
+        );
+    }
+
+    async fn captured_request_body(captured_body: oneshot::Receiver<String>) -> String {
+        tokio::time::timeout(LOOPBACK_CAPTURE_TIMEOUT, captured_body)
+            .await
+            .expect("request capture timed out")
+            .expect("captured request body")
+    }
+
+    #[tokio::test]
+    async fn tool_completion_request_serializes_the_model_once() {
+        use rig::client::CompletionClient;
+        use rig::providers::openai;
+
+        let (base_url, captured_body) = capture_one_http_request().await;
+        let client = openai::Client::builder()
+            .api_key("test-key")
+            .base_url(&base_url)
+            .build()
+            .expect("build OpenAI-compatible client")
+            .completions_api();
+        let adapter = RigAdapter::new(
+            client.completion_model("configured-model"),
+            "configured-model",
+        );
+        adapter
+            .complete_with_tools(tool_request_with_model_override())
+            .await
+            .expect_err("capture server intentionally rejects the request");
+
+        let body = captured_request_body(captured_body).await;
+        assert_single_model_override(&body);
+    }
+
+    #[derive(Clone)]
+    struct CacheableCompletionModel;
+
+    impl CompletionModel for CacheableCompletionModel {
+        type Response = serde_json::Value;
+        type StreamingResponse = ();
+        type Client = ();
+
+        fn make(_client: &Self::Client, _model: impl Into<String>) -> Self {
+            Self
+        }
+
+        async fn completion(
+            &self,
+            _request: RigRequest,
+        ) -> Result<rig::completion::CompletionResponse<Self::Response>, CompletionError> {
+            Ok(rig::completion::CompletionResponse {
+                choice: OneOrMany::one(AssistantContent::text("cached response")),
+                usage: RigUsage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    total_tokens: 2,
+                    cached_input_tokens: 0,
+                },
+                raw_response: serde_json::json!({}),
+                message_id: None,
+            })
+        }
+
+        async fn stream(
+            &self,
+            _request: RigRequest,
+        ) -> Result<StreamingCompletionResponse<Self::StreamingResponse>, CompletionError> {
+            Err(CompletionError::ProviderError(
+                "stream unsupported".to_string(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn cached_provider_separates_normalized_rig_model_overrides() {
+        use crate::response_cache::{CachedProvider, ResponseCacheConfig};
+
+        let adapter = Arc::new(RigAdapter::new(
+            CacheableCompletionModel,
+            "configured-model",
+        ));
+        let cached = CachedProvider::new(adapter, ResponseCacheConfig::default());
+
+        cached
+            .complete(
+                CompletionRequest::new(vec![ChatMessage::user("same prompt")])
+                    .with_model(" override-a "),
+            )
+            .await
+            .expect("first completion succeeds");
+        cached
+            .complete(
+                CompletionRequest::new(vec![ChatMessage::user("same prompt")])
+                    .with_model("override-b"),
+            )
+            .await
+            .expect("second completion succeeds");
+        cached
+            .complete(
+                CompletionRequest::new(vec![ChatMessage::user("same prompt")])
+                    .with_model("override-a"),
+            )
+            .await
+            .expect("normalized override reuses its cache entry");
+
+        assert_eq!(cached.len(), 2);
+        assert_eq!(cached.total_hits(), 1);
+    }
+
+    #[tokio::test]
+    async fn deepseek_tool_completion_request_serializes_the_model_once() {
+        use rig::client::CompletionClient;
+        use rig::providers::deepseek;
+
+        let (base_url, captured_body) = capture_one_http_request().await;
+        let client = deepseek::Client::builder()
+            .api_key("test-key")
+            .base_url(&base_url)
+            .build()
+            .expect("build DeepSeek client");
+        let adapter = RigAdapter::new(
+            client.completion_model("configured-model"),
+            "configured-model",
+        );
+        adapter
+            .complete_with_tools(tool_request_with_model_override())
+            .await
+            .expect_err("capture server intentionally rejects the request");
+
+        let body = captured_request_body(captured_body).await;
+        assert_single_model_override(&body);
+    }
 
     #[test]
     fn map_rig_error_auth_401_unauthorized() {
@@ -1369,6 +1940,251 @@ mod tests {
             ))
         }
     }
+
+    /// A rig model that replays a caller-supplied raw provider body alongside
+    /// a fixed assistant choice, so the adapter's public entry points can be
+    /// driven against a real provider payload.
+    #[derive(Clone)]
+    struct ReplayingCompletionModel {
+        choice: OneOrMany<AssistantContent>,
+        raw_response: serde_json::Value,
+    }
+
+    impl CompletionModel for ReplayingCompletionModel {
+        type Response = serde_json::Value;
+        type StreamingResponse = StubStreamingResponse;
+        type Client = ();
+
+        fn make(_client: &Self::Client, _model: impl Into<String>) -> Self {
+            unimplemented!("constructed directly in tests")
+        }
+
+        async fn completion(
+            &self,
+            _request: RigRequest,
+        ) -> Result<rig::completion::CompletionResponse<Self::Response>, CompletionError> {
+            Ok(rig::completion::CompletionResponse {
+                choice: self.choice.clone(),
+                usage: RigUsage::new(),
+                raw_response: self.raw_response.clone(),
+                message_id: None,
+            })
+        }
+
+        async fn stream(
+            &self,
+            _request: RigRequest,
+        ) -> Result<StreamingCompletionResponse<Self::StreamingResponse>, CompletionError> {
+            Err(CompletionError::ProviderError(
+                "streaming path must not be used".to_string(),
+            ))
+        }
+    }
+
+    /// Test through the caller, not just the helper: a `max_tokens` truncation
+    /// that still emitted a (possibly cut-off) tool call must reach
+    /// `complete_with_tools`' return value as `Length`. Before #6284 item 8 the
+    /// adapter reported `ToolUse` and the loop executed the truncated call.
+    #[tokio::test]
+    async fn complete_with_tools_reports_provider_truncation_not_tool_use() {
+        let adapter = RigAdapter::new(
+            ReplayingCompletionModel {
+                choice: OneOrMany::one(AssistantContent::tool_call(
+                    "call_1",
+                    "search",
+                    serde_json::json!({"q": "tru"}),
+                )),
+                raw_response: serde_json::json!({
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": null},
+                        "finish_reason": "length",
+                    }],
+                }),
+            },
+            "gpt-4o",
+        );
+        let request = ToolCompletionRequest::new(
+            vec![ChatMessage::user("search for something")],
+            vec![IronToolDefinition {
+                name: "search".to_string(),
+                description: "Search".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            }],
+        );
+
+        let response = adapter
+            .complete_with_tools(request)
+            .await
+            .expect("adapter returns the provider response");
+
+        assert_eq!(
+            response.finish_reason,
+            FinishReason::Length,
+            "a max_tokens truncation must not be laundered into ToolUse",
+        );
+    }
+
+    /// The same seam for a content-policy block on the plain `complete` path.
+    #[tokio::test]
+    async fn complete_reports_provider_content_filter() {
+        let adapter = RigAdapter::new(
+            ReplayingCompletionModel {
+                choice: OneOrMany::one(AssistantContent::text("I can't help with that.")),
+                raw_response: serde_json::json!({
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "I can't help with that."},
+                        "finish_reason": "content_filter",
+                    }],
+                }),
+            },
+            "gpt-4o",
+        );
+
+        let response = adapter
+            .complete(CompletionRequest::new(vec![ChatMessage::user("hi")]))
+            .await
+            .expect("adapter returns the provider response");
+
+        assert_eq!(
+            response.finish_reason,
+            FinishReason::ContentFilter,
+            "a provider refusal must not be reported as a clean stop",
+        );
+    }
+
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    struct StubStreamingResponse {
+        input_tokens: u64,
+        output_tokens: u64,
+    }
+
+    impl GetTokenUsage for StubStreamingResponse {
+        fn token_usage(&self) -> Option<RigUsage> {
+            Some(RigUsage {
+                input_tokens: self.input_tokens,
+                output_tokens: self.output_tokens,
+                total_tokens: self.input_tokens + self.output_tokens,
+                cached_input_tokens: 0,
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct StreamingOnlyCompletionModel;
+
+    impl CompletionModel for StreamingOnlyCompletionModel {
+        type Response = serde_json::Value;
+        type StreamingResponse = StubStreamingResponse;
+        type Client = ();
+
+        fn make(_client: &Self::Client, _model: impl Into<String>) -> Self {
+            Self
+        }
+
+        async fn completion(
+            &self,
+            _request: RigRequest,
+        ) -> Result<rig::completion::CompletionResponse<Self::Response>, CompletionError> {
+            Err(CompletionError::ProviderError(
+                "non-streaming path must not be used".to_string(),
+            ))
+        }
+
+        async fn stream(
+            &self,
+            _request: RigRequest,
+        ) -> Result<StreamingCompletionResponse<Self::StreamingResponse>, CompletionError> {
+            let stream = futures::stream::iter(vec![
+                Ok(RawStreamingChoice::Message("Hel".to_string())),
+                Ok(RawStreamingChoice::ReasoningDelta {
+                    id: Some("rsn-stream".to_string()),
+                    reasoning: "thinking".to_string(),
+                }),
+                Ok(RawStreamingChoice::Message("lo".to_string())),
+                Ok(RawStreamingChoice::ToolCall(RawStreamingToolCall::new(
+                    "call-1".to_string(),
+                    "search".to_string(),
+                    serde_json::json!({"query": "ironclaw"}),
+                ))),
+                Ok(RawStreamingChoice::FinalResponse(StubStreamingResponse {
+                    input_tokens: 3,
+                    output_tokens: 4,
+                })),
+            ]);
+            Ok(StreamingCompletionResponse::stream(Box::pin(stream)))
+        }
+    }
+
+    struct RecordingCompletionStreamSink {
+        sender: mpsc::UnboundedSender<String>,
+    }
+
+    #[async_trait]
+    impl CompletionStreamSink for RecordingCompletionStreamSink {
+        async fn text_delta(&self, delta: String) {
+            let _ = self.sender.send(delta);
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_streaming_preserves_reasoning_deltas() {
+        let adapter = RigAdapter::new(StreamingOnlyCompletionModel, "streaming-only");
+        let request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
+        let (delta_tx, mut delta_rx) = mpsc::unbounded_channel();
+        let sink = Arc::new(RecordingCompletionStreamSink { sender: delta_tx });
+
+        let response = adapter
+            .complete_streaming(request, sink)
+            .await
+            .expect("streaming completion succeeds");
+
+        assert_eq!(delta_rx.try_recv().expect("first delta"), "Hel");
+        assert_eq!(delta_rx.try_recv().expect("second delta"), "lo");
+        assert_eq!(response.content, "Hello");
+        assert_eq!(response.reasoning.as_deref(), Some("thinking"));
+        assert_eq!(response.input_tokens, 3);
+        assert_eq!(response.output_tokens, 4);
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_streaming_uses_rig_stream_and_emits_deltas() {
+        let adapter = RigAdapter::new(StreamingOnlyCompletionModel, "streaming-only");
+        let request = ToolCompletionRequest::new(
+            vec![ChatMessage::user("search")],
+            vec![IronToolDefinition {
+                name: "search".to_string(),
+                description: "Search the index".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                }),
+            }],
+        );
+        let (delta_tx, mut delta_rx) = mpsc::unbounded_channel();
+        let sink = Arc::new(RecordingCompletionStreamSink { sender: delta_tx });
+
+        let response = adapter
+            .complete_with_tools_streaming(request, sink)
+            .await
+            .expect("streaming completion succeeds");
+
+        assert_eq!(delta_rx.try_recv().expect("first delta"), "Hel");
+        assert_eq!(delta_rx.try_recv().expect("second delta"), "lo");
+        assert_eq!(response.content.as_deref(), Some("Hello"));
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].name, "search");
+        assert_eq!(response.reasoning.as_deref(), Some("thinking"));
+        assert_eq!(response.input_tokens, 3);
+        assert_eq!(response.output_tokens, 4);
+    }
+
+    // The finish-reason conformance suite — provider fixtures, payload
+    // builders, and the matrix itself — lives in its own file so this one
+    // stays readable: `src/rig_adapter/tests/finish_reason_tests.rs`.
+    mod finish_reason_tests;
 
     #[test]
     fn test_round_f32_to_f64_no_precision_artifacts() {
@@ -2294,7 +3110,7 @@ mod tests {
         let content = OneOrMany::one(AssistantContent::text("Hello world"));
         let usage = RigUsage::new();
         let (text, calls, finish, _reasoning, _reasoning_details) =
-            extract_response(&content, &usage);
+            extract_response(&content, &usage, None);
         assert_eq!(text, Some("Hello world".to_string()));
         assert!(calls.is_empty());
         assert_eq!(finish, FinishReason::Stop);
@@ -2306,7 +3122,7 @@ mod tests {
         let content = OneOrMany::one(tc);
         let usage = RigUsage::new();
         let (text, calls, finish, _reasoning, _reasoning_details) =
-            extract_response(&content, &usage);
+            extract_response(&content, &usage, None);
         assert!(text.is_none());
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "search");
@@ -2958,18 +3774,16 @@ mod tests {
     }
 
     #[test]
-    fn test_inject_model_override_creates_params_when_none() {
+    fn test_inject_model_override_sets_typed_request_model() {
         let mut req = make_rig_request(None);
         inject_model_override(&mut req, Some("test-model"));
 
-        let params = req
-            .additional_params
-            .expect("additional_params should be Some");
-        assert_eq!(params, serde_json::json!({ "model": "test-model" }));
+        assert_eq!(req.model.as_deref(), Some("test-model"));
+        assert!(req.additional_params.is_none());
     }
 
     #[test]
-    fn test_inject_model_override_preserves_existing_params() {
+    fn test_inject_model_override_preserves_existing_additional_params() {
         let mut req = make_rig_request(Some(serde_json::json!({
             "cache_control": { "type": "ephemeral" },
         })));
@@ -2981,7 +3795,8 @@ mod tests {
             obj.get("cache_control"),
             Some(&serde_json::json!({ "type": "ephemeral" }))
         );
-        assert_eq!(obj.get("model"), Some(&serde_json::json!("override-model")));
+        assert!(obj.get("model").is_none());
+        assert_eq!(req.model.as_deref(), Some("override-model"));
     }
 
     #[test]
@@ -3161,7 +3976,7 @@ mod tests {
         .unwrap();
         let usage = RigUsage::new();
         let (text, tool_calls, finish, reasoning, reasoning_details) =
-            extract_response(&rig_response, &usage);
+            extract_response(&rig_response, &usage, None);
 
         assert_eq!(finish, FinishReason::ToolUse);
         assert_eq!(text, None);
@@ -3269,7 +4084,7 @@ mod tests {
 
         let usage = RigUsage::new();
         let (text, tool_calls, _finish, reasoning, reasoning_details) =
-            extract_response(&rig_response, &usage);
+            extract_response(&rig_response, &usage, None);
 
         assert_eq!(text, None);
         assert_eq!(reasoning.as_deref(), Some("safe summary"));

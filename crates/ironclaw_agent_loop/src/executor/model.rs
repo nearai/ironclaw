@@ -9,7 +9,7 @@ use ironclaw_turns::{
 use tracing::debug;
 
 use crate::{
-    state::{CheckpointKind, LoopExecutionState},
+    state::{CheckpointKind, LoopExecutionState, PendingModelRetryDirective},
     strategies::{
         GateKind, ModelErrorSummary, RecoveryOutcome, RetryAlteration, RetryScope,
         model_error_to_failure_kind,
@@ -19,9 +19,9 @@ use crate::{
 use super::prompt::build_prompt_bundle_for_surface;
 use super::{
     AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, FailedExitDetails,
-    HostStage, MAX_MODEL_RETRIES, StageContext, exit_id, failed_exit, honor_retry_alteration,
-    loop_gate_kind, model_error_class, model_error_failure_category, model_preference_to_host,
-    sanitized_strategy_summary,
+    HostStage, StageContext, exit_id, failed_exit, honor_retry_alteration, loop_gate_kind,
+    model_error_class, model_error_failure_summary, model_preference_to_host,
+    sanitized_strategy_summary_or_fallback,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -95,9 +95,24 @@ impl ExecutorStage<ModelInput> for ModelStage {
         );
 
         let mut recorded_failure = false;
-        for _ in 0..MAX_MODEL_RETRIES {
-            match ctx.host.stream_model(request.clone()).await {
+        // The retry guard is derived from the composed recovery strategy so
+        // every accepted retry budget can reach the strategy's own Abort
+        // (failure kind + diagnostics). The fall-through below only fires on
+        // a strategy contract bug: retrying past its declared ceiling.
+        let max_model_attempts = ctx.planner.recovery().max_total_model_attempts().max(1);
+        let mut last_error_summary: Option<ModelErrorSummary> = None;
+        let mut last_error_detail: Option<String> = None;
+        for _ in 0..max_model_attempts {
+            let model_result = ctx.host.stream_model(request.clone()).await;
+            match model_result {
                 Ok(response) => {
+                    // A successful response proves the provider saw this
+                    // request. Consume the pending controls only now; a
+                    // gate-shaped error below happens before provider dispatch
+                    // and must preserve them for the approved retry.
+                    state.pending_model_error_observation = None;
+                    state.pending_model_retry_directive = None;
+                    state.terminal_warning_state.mark_delivered();
                     match &response.output {
                         ironclaw_turns::run_profile::ParentLoopOutput::AssistantReply(reply) => {
                             debug!(
@@ -128,13 +143,36 @@ impl ExecutorStage<ModelInput> for ModelStage {
                     {
                         return budget_approval_blocked_exit(ctx, state, gate_ref).await;
                     }
+                    // Non-gate errors were returned after the request crossed
+                    // the model boundary. Do not leave stale model-error
+                    // controls pending in a later prompt. A terminal warning,
+                    // however, remains pending until a successful response
+                    // proves the model received its recovery turn.
+                    state.pending_model_error_observation = None;
+                    state.pending_model_retry_directive = None;
                     let Some(class) = model_error_class(&error) else {
-                        let detail = error.detail.clone();
+                        let raw_summary = error.safe_summary;
+                        let (safe_summary, rejected_summary_detail) =
+                            match LoopSafeSummary::new(raw_summary.clone()) {
+                                Ok(summary) => (summary, None),
+                                Err(validation_error) => {
+                                    debug!(
+                                        validation_error = %validation_error,
+                                        "model host error summary rejected; using fallback"
+                                    );
+                                    (
+                                    LoopSafeSummary::model_gateway_failed(),
+                                    Some(ironclaw_turns::run_profile::sanitize_model_visible_text(
+                                        raw_summary,
+                                    )),
+                                )
+                                }
+                            };
+                        let detail = error.detail.or(rejected_summary_detail);
                         return Err(AgentLoopExecutorError::HostUnavailableWithDiagnostics {
                             stage: HostStage::Model,
                             kind: error.kind,
-                            safe_summary: LoopSafeSummary::new(error.safe_summary)
-                                .unwrap_or_else(|_| LoopSafeSummary::model_gateway_failed()),
+                            safe_summary,
                             reason_kind: error.reason_kind,
                             diagnostic_ref: error.diagnostic_ref,
                             detail,
@@ -146,62 +184,37 @@ impl ExecutorStage<ModelInput> for ModelStage {
                             .push(model_error_to_failure_kind(class));
                         recorded_failure = true;
                     }
+                    let upstream_detail = error.detail;
+                    let (safe_summary, rejected_summary_detail) =
+                        sanitized_strategy_summary_or_fallback(
+                            error.safe_summary,
+                            "model gateway failed",
+                        );
+                    let model_failure_detail = upstream_detail.or(rejected_summary_detail);
                     let summary = ModelErrorSummary {
                         class,
-                        safe_summary: sanitized_strategy_summary(error.safe_summary)?,
+                        safe_summary,
                         diagnostic_ref: error.diagnostic_ref,
                     };
-                    match ctx
+                    last_error_summary = Some(summary.clone());
+                    last_error_detail.clone_from(&model_failure_detail);
+                    let recovery_outcome = ctx
                         .planner
                         .recovery()
                         .on_model_error(&state, &summary)
-                        .await
-                    {
+                        .await;
+                    let (recovery, scope, alter, observation) = match recovery_outcome {
                         RecoveryOutcome::Retry {
                             recovery,
                             scope,
                             alter,
-                        } => {
-                            state.recovery_state = recovery;
-                            match CheckpointStage.cancel_if_requested(ctx, state).await? {
-                                CancelCheck::Continue(next) => state = *next,
-                                CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
-                            }
-                            let retry_action =
-                                apply_model_retry_alteration(&mut state, scope, alter.as_ref())
-                                    .await?;
-                            CheckpointStage
-                                .emit_progress(
-                                    ctx,
-                                    LoopProgressEvent::driver_note(
-                                        LoopDriverNoteKind::Retrying,
-                                        "retrying model request",
-                                    )
-                                    .map_err(|_| {
-                                        AgentLoopExecutorError::PlannerContract {
-                                            detail: "retry progress summary was invalid",
-                                        }
-                                    })?,
-                                )
-                                .await;
-                            if retry_action == ModelRetryAction::RetryIteration {
-                                return Ok(ModelStep::RetryIteration(Box::new(state)));
-                            }
-                            let bundle = build_prompt_bundle_for_surface(
-                                ctx,
-                                &state,
-                                surface_version.clone(),
-                                capability_view.clone(),
-                                alter.as_ref(),
-                            )
-                            .await?;
-                            request.inline_messages = bundle.inline_messages();
-                            match CheckpointStage.cancel_if_requested(ctx, state).await? {
-                                CancelCheck::Continue(next) => state = *next,
-                                CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
-                            }
-                            request.messages = bundle.into_model_messages(&mut state);
-                        }
+                        } => (recovery, scope, alter, None),
+                        RecoveryOutcome::ModelErrorObservation {
+                            recovery,
+                            scope,
+                            alter,
+                            observation,
+                        } => (recovery, scope, alter, Some(observation)),
                         RecoveryOutcome::ToolErrorResult { .. } => {
                             return Err(AgentLoopExecutorError::PlannerContract {
                                 detail: "ToolErrorResult on model error",
@@ -220,6 +233,10 @@ impl ExecutorStage<ModelInput> for ModelStage {
                             let checked = CheckpointStage
                                 .write(ctx, state, CheckpointKind::Final)
                                 .await?;
+                            let mut safe_failure = model_error_failure_summary(&summary)?;
+                            if let Some(detail) = model_failure_detail {
+                                safe_failure = safe_failure.with_detail(detail);
+                            }
                             return Ok(ModelStep::Exit(failed_exit(
                                 ctx.host,
                                 checked.state,
@@ -227,19 +244,90 @@ impl ExecutorStage<ModelInput> for ModelStage {
                                 Some(checked.checkpoint_id),
                                 FailedExitDetails {
                                     diagnostic_ref: summary.diagnostic_ref.clone(),
-                                    safe_summary: Some(model_error_failure_category(
-                                        summary.class,
-                                    )?),
+                                    safe_summary: Some(safe_failure),
                                     explanation_message_ref: None,
                                 },
                             )?));
                         }
+                    };
+                    state.recovery_state = recovery;
+                    state.pending_model_error_observation = observation;
+                    match CheckpointStage.cancel_if_requested(ctx, state).await? {
+                        CancelCheck::Continue(next) => state = *next,
+                        CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
                     }
+                    let retry_action =
+                        prepare_model_retry_alteration(&mut state, scope, alter.as_ref())?;
+                    // Persist the consumed retry/observation budget before the
+                    // next model attempt. Otherwise a worker restart reloads
+                    // the pre-error BeforeModel checkpoint and grants the
+                    // same recovery attempt again. For iteration retries this
+                    // also makes the compaction request and pending
+                    // observation survive the restart window.
+                    state = CheckpointStage
+                        .write(ctx, state, CheckpointKind::BeforeModel)
+                        .await?
+                        .state;
+                    wait_for_model_retry_backoff(ctx, alter.as_ref()).await;
+                    // A cancel request can wake the backoff sleep early;
+                    // observe it here so cancellation exits at this boundary
+                    // instead of issuing another call.
+                    match CheckpointStage.cancel_if_requested(ctx, state).await? {
+                        CancelCheck::Continue(next) => state = *next,
+                        CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
+                    }
+                    CheckpointStage
+                        .emit_progress(
+                            ctx,
+                            LoopProgressEvent::driver_note(
+                                LoopDriverNoteKind::Retrying,
+                                "retrying model request",
+                            )
+                            .map_err(|_| {
+                                AgentLoopExecutorError::PlannerContract {
+                                    detail: "retry progress summary was invalid",
+                                }
+                            })?,
+                        )
+                        .await;
+                    if retry_action == ModelRetryAction::RetryIteration {
+                        return Ok(ModelStep::RetryIteration(Box::new(state)));
+                    }
+                    let bundle = build_prompt_bundle_for_surface(
+                        ctx,
+                        &state,
+                        surface_version.clone(),
+                        capability_view.clone(),
+                    )
+                    .await?;
+                    request.inline_messages = bundle.inline_messages();
+                    match CheckpointStage.cancel_if_requested(ctx, state).await? {
+                        CancelCheck::Continue(next) => state = *next,
+                        CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
+                    }
+                    request.messages = bundle.into_model_messages(&mut state);
                 }
             }
         }
 
+        // Contract-bug fall-through: the strategy kept returning Retry past
+        // its own declared attempt ceiling. Still surface the last observed
+        // model error's diagnostics rather than a bare generic failure.
         state.recent_failure_kinds.push(LoopFailureKind::ModelError);
+        let details = match &last_error_summary {
+            Some(summary) => {
+                let mut safe_failure = model_error_failure_summary(summary)?;
+                if let Some(detail) = last_error_detail {
+                    safe_failure = safe_failure.with_detail(detail);
+                }
+                FailedExitDetails {
+                    diagnostic_ref: summary.diagnostic_ref.clone(),
+                    safe_summary: Some(safe_failure),
+                    explanation_message_ref: None,
+                }
+            }
+            None => FailedExitDetails::default(),
+        };
         let checked = CheckpointStage
             .write(ctx, state, CheckpointKind::Final)
             .await?;
@@ -248,7 +336,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
             checked.state,
             LoopFailureKind::ModelError,
             Some(checked.checkpoint_id),
-            FailedExitDetails::default(),
+            details,
         )?))
     }
 }
@@ -286,16 +374,15 @@ async fn budget_approval_blocked_exit(
     })))
 }
 
-async fn apply_model_retry_alteration(
+fn prepare_model_retry_alteration(
     state: &mut LoopExecutionState,
     scope: RetryScope,
     alteration: Option<&RetryAlteration>,
 ) -> Result<ModelRetryAction, AgentLoopExecutorError> {
     honor_retry_alteration(alteration)?;
+    state.pending_model_retry_directive = None;
     match alteration {
-        Some(RetryAlteration::Backoff { delay_ms }) => {
-            tokio::time::sleep(std::time::Duration::from_millis(delay_ms.as_u64())).await;
-        }
+        Some(RetryAlteration::Backoff { .. }) => {}
         Some(RetryAlteration::ShrinkContext) => {
             if scope != RetryScope::Iteration {
                 return Err(AgentLoopExecutorError::PlannerContract {
@@ -311,6 +398,8 @@ async fn apply_model_retry_alteration(
                     detail: "invalid model output repair retry requires call scope",
                 });
             }
+            state.pending_model_retry_directive =
+                Some(PendingModelRetryDirective::RepairInvalidOutput);
         }
         Some(RetryAlteration::AdvanceFallback) | None => {}
     }
@@ -319,4 +408,21 @@ async fn apply_model_retry_alteration(
         RetryScope::Call => ModelRetryAction::RetryCall,
         RetryScope::Iteration => ModelRetryAction::RetryIteration,
     })
+}
+
+async fn wait_for_model_retry_backoff(ctx: StageContext<'_>, alteration: Option<&RetryAlteration>) {
+    let Some(RetryAlteration::Backoff { delay_ms }) = alteration else {
+        return;
+    };
+    // Availability backoffs run up to 60s. The retry transition is already
+    // durable at this point, and cancellation wakes the delay so the caller's
+    // next boundary check can produce the cancelled exit promptly.
+    let sleep = tokio::time::sleep(std::time::Duration::from_millis(delay_ms.as_u64()));
+    tokio::pin!(sleep);
+    let cancellation = ctx.host.cancellation_requested();
+    tokio::pin!(cancellation);
+    tokio::select! {
+        () = &mut sleep => {}
+        _signal = &mut cancellation => {}
+    }
 }

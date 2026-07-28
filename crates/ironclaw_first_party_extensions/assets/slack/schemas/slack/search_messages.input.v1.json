@@ -1,0 +1,14 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Slack search_messages",
+  "description": "Search across all messages you can see.",
+  "type": "object",
+  "required": ["query"],
+  "properties": {
+    "query": { "type": "string", "description": "Search query. Supports Slack operators: use from:me for your own messages (NOT from:@me), plus from:@username, in:#channel, after:2024-01-01, has:link. Combine with keywords." },
+    "count": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum matches to return (default 20)." },
+    "sort": { "type": "string", "enum": ["score", "timestamp"], "description": "Sort by relevance (score, default) or recency (timestamp)." },
+    "page": { "type": "integer", "minimum": 1, "description": "Result page to fetch (1-based) when the total exceeds count." }
+  },
+  "additionalProperties": false
+}

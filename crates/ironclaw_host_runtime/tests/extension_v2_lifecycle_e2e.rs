@@ -4,21 +4,22 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_dispatcher::{
-    CapabilityDispatcher, DispatchError, RuntimeAdapter, RuntimeAdapterRequest,
-    RuntimeAdapterResult, RuntimeDispatchErrorKind, RuntimeDispatcher,
+use ironclaw_capabilities::{
+    BoundCapabilityAdapter, CapabilityDispatchRequest, CapabilityDispatcher, DispatchError,
+    ResolvedCapability, RuntimeAdapterResult, RuntimeDispatchErrorKind, RuntimeDispatcher,
+    ToolResolver,
 };
 use ironclaw_extensions::{
     CapabilityVisibility, ExtensionError, ExtensionLifecycleService, ExtensionManifest,
     ExtensionPackage, ExtensionRegistry, ExtensionRuntime, ManifestSource, ManifestV2Error,
 };
-use ironclaw_filesystem::LocalFilesystem;
+use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, ExtensionId, HostPath, MountView, NetworkScheme,
-    NetworkTargetPattern, PermissionMode, ReservationStatus, ResourceEstimate,
-    ResourceReservationId, ResourceScope, ResourceUsage, RuntimeCredentialAccountProviderId,
-    RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeKind, SecretHandle,
-    TenantId, UserId, VirtualPath,
+    ActivityId, Actor, Authorized, CapabilityId, CorrelationId, EffectKind, ExtensionId, HostPath,
+    Invocation, InvocationOrigin, MountView, NetworkScheme, NetworkTargetPattern, PermissionMode,
+    ProcessId, ProductKind, ReservationStatus, ResourceEstimate, ResourceReservationId,
+    ResourceScope, ResourceUsage, RuntimeCredentialRequirementSource, RuntimeCredentialTarget,
+    RuntimeKind, RuntimeLane, SecretHandle, TenantId, Timestamp, UserId, VendorId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     default_host_api_contract_registry, default_host_port_catalog,
@@ -72,48 +73,69 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_host
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let scope = sample_scope();
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
-    let estimate = ResourceEstimate {
-        concurrency_slots: Some(1),
-        process_count: Some(1),
-        output_bytes: Some(10_000),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default()
+        .set_concurrency_slots(1)
+        .set_process_count(1)
+        .set_output_bytes(10_000);
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_concurrency_slots: Some(1),
-                max_process_count: Some(1),
-                max_output_bytes: Some(10_000),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_concurrency_slots(1)
+                .set_max_process_count(1)
+                .set_max_output_bytes(10_000),
         )
         .unwrap();
     let adapter = Arc::new(RecordingAdapter::new(
         RuntimeKind::Script,
         json!({"message":"script ok"}),
+        Arc::clone(&governor),
     ));
-    let dispatcher =
-        RuntimeDispatcher::from_arcs(Arc::new(discovered), Arc::new(fs), Arc::clone(&governor))
-            .with_runtime_adapter_arc(RuntimeKind::Script, Arc::clone(&adapter));
+    // The registry-lane resolver's selection semantics are pinned in
+    // `ironclaw_host_runtime::services` tests; this e2e drives the dispatch
+    // flow through a binding scripted from the discovered descriptor.
+    let descriptor = discovered
+        .get_capability(&CapabilityId::new("script.echo").unwrap())
+        .unwrap();
+    let resolver: Arc<dyn ToolResolver> = Arc::new(SingleCapabilityResolver {
+        capability_id: descriptor.id.clone(),
+        resolved: ResolvedCapability {
+            provider: descriptor.provider.clone(),
+            runtime: descriptor.runtime,
+            adapter: Arc::clone(&adapter) as Arc<dyn BoundCapabilityAdapter>,
+        },
+    });
+    let dispatcher = RuntimeDispatcher::from_arcs(resolver, Arc::clone(&governor));
     let dispatch_port: &dyn CapabilityDispatcher = &dispatcher;
     let reservation = governor.reserve(scope.clone(), estimate.clone()).unwrap();
     let reservation_id = reservation.id;
     assert_eq!(governor.reserved_for(&account).concurrency_slots, 1);
 
     let result = dispatch_port
-        .dispatch_json(ironclaw_host_api::CapabilityDispatchRequest {
-            capability_id: CapabilityId::new("script.echo").unwrap(),
-            scope: scope.clone(),
-            estimate: estimate.clone(),
-            mounts: None,
-            resource_reservation: Some(reservation),
-            input: json!({"message":"hello"}),
-        })
+        .dispatch_json(Authorized::seal_for_test(
+            Invocation {
+                activity_id: ActivityId::new(),
+                capability: CapabilityId::new("script.echo").unwrap(),
+                input: json!({"message":"hello"}),
+                scope: scope.clone(),
+                actor: Actor::System,
+                origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
+                estimate: estimate.clone(),
+                correlation_id: CorrelationId::new(),
+                process_id: Some(ProcessId::new()),
+                parent_process_id: None,
+            },
+            RuntimeLane::Process,
+            MountView::default(),
+            Some(reservation),
+            Timestamp::MAX_UTC,
+        ))
         .await
         .unwrap();
 
     assert_eq!(result.output, json!({"message":"script ok"}));
+    assert_eq!(result.provider, extension_id);
+    assert_eq!(result.runtime, RuntimeKind::Script);
     assert_eq!(result.receipt.id, reservation_id);
     assert_eq!(result.receipt.status, ReservationStatus::Reconciled);
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
@@ -121,15 +143,13 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_host
 
     let requests = adapter.requests();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].provider, extension_id);
     assert_eq!(
         requests[0].capability_id,
         CapabilityId::new("script.echo").unwrap()
     );
-    assert_eq!(requests[0].runtime, RuntimeKind::Script);
     assert_eq!(requests[0].scope, scope);
     assert_eq!(requests[0].estimate, estimate);
-    assert_eq!(requests[0].mounts, None);
+    assert_eq!(requests[0].mounts, Some(MountView::default()));
     assert_eq!(requests[0].resource_reservation_id, Some(reservation_id));
     assert_eq!(requests[0].input, json!({"message":"hello"}));
 }
@@ -140,13 +160,17 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
     assert!(github_asset_root.join("wasm-src/Cargo.toml").is_file());
 
     let (_storage, fs) = mounted_github_package_fs();
-    let manifest = ExtensionManifest::parse_with_host_api_contracts(
-        &std::fs::read_to_string(github_asset_root.join("manifest.toml")).unwrap(),
+    // Parse through the single record entry point (the github asset is a
+    // manifest v3 document).
+    let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
+        std::fs::read_to_string(github_asset_root.join("manifest.toml")).unwrap(),
         ManifestSource::HostBundled,
         &default_host_port_catalog().unwrap(),
+        None,
         &default_host_api_contract_registry().unwrap(),
     )
     .unwrap();
+    let manifest = ExtensionManifest::try_from(record.manifest().clone()).unwrap();
     let package = ExtensionPackage::from_manifest(
         manifest,
         VirtualPath::new("/system/extensions/github").unwrap(),
@@ -205,13 +229,14 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
         "github.trigger_workflow",
         "github.get_workflow_runs",
         "github.get_workflow_run_jobs",
+        "github.get_job_logs",
         "github.get_workflow_run_artifacts",
         "github.rerun_failed_workflow_run_jobs",
         "github.rerun_workflow_job",
         "github.fork_repo",
         "github.handle_webhook",
     ];
-    assert_eq!(expected_github_capability_ids.len(), 48);
+    assert_eq!(expected_github_capability_ids.len(), 49);
     assert_eq!(
         package
             .capabilities
@@ -245,7 +270,13 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
     for (capability_id, expected_effects, expected_permission, expects_github_api_access) in [
         (
             "github.get_repo",
-            vec![EffectKind::Network, EffectKind::UseSecret],
+            // The v3 normalizer adds the dispatch effect uniformly (v2
+            // declared it inconsistently across the github tools).
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::Network,
+                EffectKind::UseSecret,
+            ],
             PermissionMode::Allow,
             true,
         ),
@@ -293,7 +324,7 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
             assert_eq!(
                 credential.source,
                 RuntimeCredentialRequirementSource::ProductAuthAccount {
-                    provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                    provider: VendorId::new("github").unwrap(),
                     setup: Default::default(),
                 }
             );
@@ -331,7 +362,7 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
             .as_slice(),
         expected_github_capability_ids
     );
-    assert_eq!(hot_catalog.capabilities.len(), 48);
+    assert_eq!(hot_catalog.capabilities.len(), 49);
 
     let search = hot_catalog
         .get(&CapabilityId::new("github.search_issues").unwrap())
@@ -342,14 +373,9 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
         search.descriptor.parameters_schema["properties"]["query"]["type"],
         json!("string")
     );
-    assert_eq!(
-        search.output_schema["title"],
-        json!("GitHub raw API output")
-    );
-    assert_eq!(
-        search.output_schema["type"],
-        json!(["object", "array", "string", "null"])
-    );
+    // Manifest v3 declares no output schema; the hot catalog treats the
+    // output as unconstrained.
+    assert_eq!(search.output_schema, json!({}));
     assert!(
         search
             .prompt_doc
@@ -373,10 +399,7 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
         get_issue.descriptor.parameters_schema["properties"]["owner"]["not"]["pattern"],
         json!("\\.\\.")
     );
-    assert_eq!(
-        get_issue.output_schema["title"],
-        json!("GitHub raw API output")
-    );
+    assert_eq!(get_issue.output_schema, json!({}));
     assert!(
         get_issue
             .prompt_doc
@@ -402,10 +425,7 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
             EffectKind::ExternalWrite,
         ]
     );
-    assert_eq!(
-        comment_issue.output_schema["title"],
-        json!("GitHub raw API output")
-    );
+    assert_eq!(comment_issue.output_schema, json!({}));
     assert!(comment_issue.prompt_doc.as_deref().is_some_and(|doc| {
         doc.contains("github.comment_issue")
             && doc.contains("external write")
@@ -426,11 +446,15 @@ async fn extension_v2_lifecycle_fails_closed_before_install_for_unknown_required
     .await
     .unwrap_err();
 
+    // The capability-provider contract preserves typed manifest errors
+    // (`HostApiSectionError::Manifest` unwraps back to the precise variant),
+    // so the unknown port surfaces as `UnknownHostPort`, still fail-closed
+    // before install.
     assert!(
         matches!(
             err,
-            ExtensionError::ManifestV2(ManifestV2Error::HostApiSectionRejected { ref reason, .. })
-                if reason.contains("unknown host port 'host.runtime.not_supported'")
+            ExtensionError::ManifestV2(ManifestV2Error::UnknownHostPort { ref port, .. })
+                if port.as_str() == "host.runtime.not_supported"
         ),
         "unexpected error: {err:?}"
     );
@@ -442,14 +466,16 @@ async fn extension_v2_lifecycle_fails_closed_before_install_for_unknown_required
 struct RecordingAdapter {
     runtime: RuntimeKind,
     output: Value,
+    governor: Arc<InMemoryResourceGovernor>,
     requests: Arc<Mutex<Vec<RecordedAdapterRequest>>>,
 }
 
 impl RecordingAdapter {
-    fn new(runtime: RuntimeKind, output: Value) -> Self {
+    fn new(runtime: RuntimeKind, output: Value, governor: Arc<InMemoryResourceGovernor>) -> Self {
         Self {
             runtime,
             output,
+            governor,
             requests: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -461,9 +487,7 @@ impl RecordingAdapter {
 
 #[derive(Debug, Clone, PartialEq)]
 struct RecordedAdapterRequest {
-    provider: ExtensionId,
     capability_id: CapabilityId,
-    runtime: RuntimeKind,
     scope: ResourceScope,
     estimate: ResourceEstimate,
     mounts: Option<MountView>,
@@ -471,16 +495,25 @@ struct RecordedAdapterRequest {
     input: Value,
 }
 
+struct SingleCapabilityResolver {
+    capability_id: CapabilityId,
+    resolved: ResolvedCapability,
+}
+
+impl ToolResolver for SingleCapabilityResolver {
+    fn resolve(&self, capability_id: &CapabilityId) -> Option<ResolvedCapability> {
+        (capability_id == &self.capability_id).then(|| self.resolved.clone())
+    }
+}
+
 #[async_trait]
-impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingAdapter {
+impl BoundCapabilityAdapter for RecordingAdapter {
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
+        request: CapabilityDispatchRequest,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         self.requests.lock().unwrap().push(RecordedAdapterRequest {
-            provider: request.package.id.clone(),
             capability_id: request.capability_id.clone(),
-            runtime: request.descriptor.runtime,
             scope: request.scope.clone(),
             estimate: request.estimate.clone(),
             mounts: request.mounts.clone(),
@@ -492,24 +525,22 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingAdap
         });
 
         let output_bytes = serde_json::to_vec(&self.output).unwrap().len() as u64;
-        let usage = ResourceUsage {
-            output_bytes,
-            process_count: u32::from(matches!(
+        let usage = ResourceUsage::default()
+            .set_output_bytes(output_bytes)
+            .set_process_count(u32::from(matches!(
                 self.runtime,
                 RuntimeKind::Script | RuntimeKind::Mcp
-            )),
-            ..ResourceUsage::default()
-        };
+            )));
         let reservation = match request.resource_reservation {
             Some(reservation) => reservation,
-            None => request
+            None => self
                 .governor
                 .reserve(request.scope, request.estimate)
                 .map_err(|_| {
                     dispatch_error_for_runtime(self.runtime, RuntimeDispatchErrorKind::Resource)
                 })?,
         };
-        let receipt = request
+        let receipt = self
             .governor
             .reconcile(reservation.id, usage.clone())
             .map_err(|_| {
@@ -531,9 +562,18 @@ fn dispatch_error_for_runtime(
     kind: RuntimeDispatchErrorKind,
 ) -> DispatchError {
     match runtime {
-        RuntimeKind::Script => DispatchError::Script { kind },
-        RuntimeKind::Wasm => DispatchError::Wasm { kind },
-        RuntimeKind::Mcp => DispatchError::Mcp { kind },
+        RuntimeKind::Script => DispatchError::Script {
+            kind,
+            model_visible_cause: None,
+        },
+        RuntimeKind::Wasm => DispatchError::Wasm {
+            kind,
+            model_visible_cause: None,
+        },
+        RuntimeKind::Mcp => DispatchError::Mcp {
+            kind,
+            model_visible_cause: None,
+        },
         RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::UnsupportedRuntime {
             capability: CapabilityId::new("system.unsupported").unwrap(),
             runtime,
@@ -541,7 +581,7 @@ fn dispatch_error_for_runtime(
     }
 }
 
-fn mounted_extension_fs(id: &str, manifest: &str) -> (tempfile::TempDir, LocalFilesystem) {
+fn mounted_extension_fs(id: &str, manifest: &str) -> (tempfile::TempDir, DiskFilesystem) {
     let storage = tempdir().unwrap();
     let extension_root = storage.path().join(id);
     std::fs::create_dir_all(extension_root.join("schemas/script")).unwrap();
@@ -563,7 +603,7 @@ fn mounted_extension_fs(id: &str, manifest: &str) -> (tempfile::TempDir, LocalFi
     )
     .unwrap();
 
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/system/extensions").unwrap(),
         HostPath::from_path_buf(storage.path().to_path_buf()),
@@ -572,7 +612,7 @@ fn mounted_extension_fs(id: &str, manifest: &str) -> (tempfile::TempDir, LocalFi
     (storage, fs)
 }
 
-fn mounted_github_package_fs() -> (tempfile::TempDir, LocalFilesystem) {
+fn mounted_github_package_fs() -> (tempfile::TempDir, DiskFilesystem) {
     let storage = tempdir().unwrap();
     let source_root = github_first_party_asset_root();
     let package_root = storage.path().join("github");
@@ -587,7 +627,7 @@ fn mounted_github_package_fs() -> (tempfile::TempDir, LocalFilesystem) {
         &package_root.join("prompts/github"),
     );
 
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/system/extensions").unwrap(),
         HostPath::from_path_buf(storage.path().to_path_buf()),

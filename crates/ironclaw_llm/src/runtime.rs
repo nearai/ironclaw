@@ -31,8 +31,8 @@ use rust_decimal::Decimal;
 
 use crate::error::LlmError;
 use crate::provider::{
-    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, ToolCompletionRequest,
-    ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, CompletionStreamSink, LlmProvider, ModelMetadata,
+    ToolCompletionRequest, ToolCompletionResponse,
 };
 
 /// Maximum number of distinct model names interned over a process lifetime.
@@ -193,11 +193,29 @@ impl LlmProvider for SwappableLlmProvider {
         self.current().complete(request).await
     }
 
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<CompletionResponse, LlmError> {
+        self.current().complete_streaming(request, sink).await
+    }
+
     async fn complete_with_tools(
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
         self.current().complete_with_tools(request).await
+    }
+
+    async fn complete_with_tools_streaming(
+        &self,
+        request: ToolCompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.current()
+            .complete_with_tools_streaming(request, sink)
+            .await
     }
 
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
@@ -315,8 +333,11 @@ impl LlmReloadHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::{CompletionRequest, ToolCompletionRequest};
+    use crate::provider::{
+        ChatMessage, CompletionRequest, FinishReason, ToolCompletionRequest, ToolDefinition,
+    };
     use std::sync::RwLock as StdRwLock;
+    use tokio::sync::mpsc;
 
     /// Simple stub that supports `set_model()` so we can exercise the
     /// snapshot-refresh path and the "override is lost on swap" behaviour.
@@ -387,6 +408,138 @@ mod tests {
         fn cache_read_discount(&self) -> Decimal {
             self.cache_read
         }
+    }
+
+    struct RecordingCompletionStreamSink {
+        sender: mpsc::UnboundedSender<String>,
+    }
+
+    #[async_trait]
+    impl CompletionStreamSink for RecordingCompletionStreamSink {
+        async fn text_delta(&self, delta: String) {
+            let _ = self.sender.send(delta);
+        }
+    }
+
+    #[derive(Debug)]
+    struct StreamingProvider;
+
+    #[async_trait]
+    impl LlmProvider for StreamingProvider {
+        fn model_name(&self) -> &str {
+            "streaming-provider"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            Err(LlmError::RequestFailed {
+                provider: "streaming-provider".to_string(),
+                reason: "non-streaming path should not be used".to_string(),
+            })
+        }
+
+        async fn complete_streaming(
+            &self,
+            _request: CompletionRequest,
+            sink: Arc<dyn CompletionStreamSink>,
+        ) -> Result<CompletionResponse, LlmError> {
+            sink.text_delta("Hel".to_string()).await;
+            sink.text_delta("lo".to_string()).await;
+            Ok(CompletionResponse {
+                content: "Hello".to_string(),
+                finish_reason: FinishReason::Stop,
+                input_tokens: 1,
+                output_tokens: 2,
+                reasoning: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            Err(LlmError::RequestFailed {
+                provider: "streaming-provider".to_string(),
+                reason: "non-streaming tool path should not be used".to_string(),
+            })
+        }
+
+        async fn complete_with_tools_streaming(
+            &self,
+            _request: ToolCompletionRequest,
+            sink: Arc<dyn CompletionStreamSink>,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            sink.text_delta("Too".to_string()).await;
+            sink.text_delta("ls".to_string()).await;
+            Ok(ToolCompletionResponse {
+                content: Some("Tools".to_string()),
+                tool_calls: Vec::new(),
+                finish_reason: FinishReason::Stop,
+                input_tokens: 3,
+                output_tokens: 4,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                reasoning: None,
+                reasoning_details: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn swappable_provider_forwards_text_streaming_to_current_inner() {
+        let wrapper = SwappableLlmProvider::new(Arc::new(StreamingProvider));
+        let (delta_tx, mut delta_rx) = mpsc::unbounded_channel();
+        let sink = Arc::new(RecordingCompletionStreamSink { sender: delta_tx });
+
+        let response = wrapper
+            .complete_streaming(
+                CompletionRequest::new(vec![ChatMessage::user("hello")]),
+                sink,
+            )
+            .await
+            .expect("streaming response");
+
+        assert_eq!(delta_rx.recv().await.as_deref(), Some("Hel"));
+        assert_eq!(delta_rx.recv().await.as_deref(), Some("lo"));
+        assert_eq!(response.content, "Hello");
+    }
+
+    #[tokio::test]
+    async fn swappable_provider_forwards_tool_streaming_to_current_inner() {
+        let wrapper = SwappableLlmProvider::new(Arc::new(StreamingProvider));
+        let (delta_tx, mut delta_rx) = mpsc::unbounded_channel();
+        let sink = Arc::new(RecordingCompletionStreamSink { sender: delta_tx });
+
+        let response = wrapper
+            .complete_with_tools_streaming(
+                ToolCompletionRequest::new(
+                    vec![ChatMessage::user("hello")],
+                    vec![ToolDefinition {
+                        name: "noop".to_string(),
+                        description: "No-op test tool".to_string(),
+                        parameters: serde_json::json!({
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": false,
+                        }),
+                    }],
+                ),
+                sink,
+            )
+            .await
+            .expect("streaming tool response");
+
+        assert_eq!(delta_rx.recv().await.as_deref(), Some("Too"));
+        assert_eq!(delta_rx.recv().await.as_deref(), Some("ls"));
+        assert_eq!(response.content.as_deref(), Some("Tools"));
     }
 
     #[test]

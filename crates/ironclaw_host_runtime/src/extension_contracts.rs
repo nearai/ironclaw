@@ -6,34 +6,45 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostApiError, HostPortCatalog, HostPortCatalogEntry,
-    HostPortId, VirtualPath,
+    HOST_EVENTS_AUDIT_PORT_ID, HOST_RUNTIME_HTTP_EGRESS_PORT_ID,
+    HOST_STORAGE_SQL_TRANSACTION_FIRST_PARTY_PORT_ID, HostApiError, HostPortCatalog,
+    HostPortCatalogEntry, HostPortId, VirtualPath,
 };
-use ironclaw_product_adapter_registry::ProductAdapterHostApiContract;
 
 /// Build the host-runtime default set of Extension Manifest v2 host API contracts.
 ///
-/// This is composition-only: contracts validate and project manifest declarations,
-/// but do not execute runtime code, resolve schema files, or publish hot surfaces.
+/// These contracts validate host-owned manifest declarations but do not execute
+/// runtime code, resolve schema files, or publish hot surfaces. Product-specific
+/// contracts are added by the composition layer that owns those products.
 pub fn default_host_api_contract_registry() -> Result<HostApiContractRegistry, ManifestV2Error> {
     let mut registry = HostApiContractRegistry::new();
     registry.register(Arc::new(CapabilityProviderHostApiContract::new()?))?;
-    let product_adapter_contract =
-        ProductAdapterHostApiContract::new().map_err(|error| ManifestV2Error::Invalid {
-            reason: format!("product adapter host API contract registration failed: {error}"),
-        })?;
-    registry.register(Arc::new(product_adapter_contract))?;
     Ok(registry)
 }
 
 /// Build the host-runtime default host-port validation catalog.
 ///
 /// The catalog is validation vocabulary only. It does not grant authority or
-/// construct the concrete runtime HTTP egress adapter.
+/// construct the concrete runtime HTTP egress / storage / audit adapters; those
+/// live in host/runtime service crates and are scoped into a `HostPortView`
+/// after authorization. Registering a port here only allows a manifest to
+/// *declare* it without failing closed on an unknown-port error.
+///
+/// The memory ports (`host.storage.sql_transaction.first_party`,
+/// `host.events.audit`) are future storage/audit vocabulary for the deferred
+/// SQL-backed memory milestone (issue #3537, ADR 0002), not a live backing
+/// today: the bundled `ironclaw.memory` extension is filesystem-backed
+/// and declares no host ports (see `native_memory_declares_no_host_ports`).
+/// Cataloguing them here only lets a manifest *declare* them without failing
+/// closed on an unknown-port error.
 pub fn default_host_port_catalog() -> Result<HostPortCatalog, HostApiError> {
-    HostPortCatalog::new(vec![HostPortCatalogEntry::new(HostPortId::new(
-        HOST_RUNTIME_HTTP_EGRESS_PORT_ID,
-    )?)])
+    HostPortCatalog::new(vec![
+        HostPortCatalogEntry::new(HostPortId::new(HOST_RUNTIME_HTTP_EGRESS_PORT_ID)?),
+        HostPortCatalogEntry::new(HostPortId::new(
+            HOST_STORAGE_SQL_TRANSACTION_FIRST_PARTY_PORT_ID,
+        )?),
+        HostPortCatalogEntry::new(HostPortId::new(HOST_EVENTS_AUDIT_PORT_ID)?),
+    ])
 }
 
 /// Discover installed extensions through host-runtime's default host API
@@ -88,15 +99,49 @@ pub async fn discover_extensions_tolerant_bounded<F>(
 where
     F: RootFilesystem,
 {
-    let host_port_catalog = default_host_port_catalog()?;
     let contracts = default_host_api_contract_registry()?;
+    discover_extensions_tolerant_bounded_with_contracts(fs, root, &contracts, max_extensions).await
+}
+
+/// Tolerant + bounded discovery through caller-supplied host API contracts.
+///
+/// The host-port catalog remains host-owned, while composition layers can add
+/// product contracts without teaching host runtime about those products.
+pub async fn discover_extensions_tolerant_bounded_with_contracts<F>(
+    fs: &F,
+    root: &VirtualPath,
+    contracts: &HostApiContractRegistry,
+    max_extensions: usize,
+) -> Result<TolerantBoundedDiscovery, ExtensionError>
+where
+    F: RootFilesystem,
+{
+    let host_port_catalog = default_host_port_catalog()?;
     ExtensionDiscovery::discover_with_manifest_contracts_tolerant_bounded(
         fs,
         root,
         ironclaw_extensions::ManifestSource::InstalledLocal,
         &host_port_catalog,
-        &contracts,
+        contracts,
         max_extensions,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_catalog_registers_egress_storage_and_audit_ports() {
+        let catalog = default_host_port_catalog().expect("default host port catalog must build");
+        for id in [
+            HOST_RUNTIME_HTTP_EGRESS_PORT_ID,
+            HOST_STORAGE_SQL_TRANSACTION_FIRST_PARTY_PORT_ID,
+            HOST_EVENTS_AUDIT_PORT_ID,
+        ] {
+            let port = HostPortId::new(id).expect("port id must validate");
+            assert!(catalog.contains(&port), "default catalog must contain {id}");
+        }
+    }
 }

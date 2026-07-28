@@ -9,6 +9,9 @@ license = "MIT OR Apache-2.0"
 homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
 
+[package.metadata.ironclaw]
+layer = "loops"
+
 [package.metadata.dist]
 dist = false
 
@@ -43,5 +46,7 @@ urlencoding = { version = "2", optional = true }
 tempfile = { version = "3", optional = true }
 
 [dev-dependencies]
+# FaultInjecting decorator: test store fault paths through the real store.
+ironclaw_filesystem = { path = "../ironclaw_filesystem", features = ["test-support"] }
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }

@@ -14,11 +14,6 @@
     "near-intents",
     "crypto"
   ],
-  "source": {
-    "dir": "tools-src/portfolio",
-    "capabilities": "portfolio-tool.capabilities.json",
-    "crate_name": "portfolio-tool"
-  },
   "artifacts": {
     "wasm32-wasip2": {
       "sha256": "99d0ef6522735a99d41116bfdeed06e5b6107193905173050abf6b140d4215a9",

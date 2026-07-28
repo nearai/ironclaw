@@ -27,7 +27,7 @@ Every model call ships all ~91 tool JSON schemas + system prompt (identity files
 - NEAR AI takes tools via the API `tools=` array (OpenAI function-schema). Caching, if any, is **automatic server-side prefix KV-cache** (vLLM/SGLang-style), eviction-driven and replica-dependent. **Prefix stability is necessary but not sufficient** for a cache hit. We do not assume `cached_tokens` is reported — it is an *empirical gate* (§7).
 - "LLM data is never deleted" — compression edits only the prompt *view*; the full transcript is always reconstructable from the DB.
 - Every tool execution routes through `ToolDispatcher::dispatch()`; bridge tools must be provably equivalent to direct dispatch.
-- Changes contained to: agent-loop prompt assembly (`crates/ironclaw_agent_loop/src/executor/prompt.rs`, `model.rs`), the model gateway (`crates/ironclaw_reborn/src/model_gateway.rs`), a new tool catalog/index, a new prompt-view compressor, and a new artifact store.
+- Changes contained to: agent-loop prompt assembly (`crates/ironclaw_agent_loop/src/executor/prompt.rs`, `model.rs`), the model gateway (`crates/ironclaw_runner/src/model_gateway.rs`), a new tool catalog/index, a new prompt-view compressor, and a new artifact store.
 - All thresholds below are **config defaults / rollout knobs** (`src/config/`), to be tuned from production traces — not baked constants. They land as **named constants on one config surface** (not scattered across the compressor/disclosure/cache modules) so canary tuning has a single home: `4k` per-result and `16k` aggregate cheap-prune triggers, the `~50%` input-budget dominant gate, the `24-tool / 12k-schema-token` advertise cap, and promotion `N=2`.
 
 ## 4. Final design
@@ -64,7 +64,7 @@ No `cache_control`; we optimize exact-prefix stability and raw size. Assemble th
 1. **Stable session prefix** — identity files (AGENTS/SOUL/USER/IDENTITY), static guidance, frozen skills index, session-frozen snippets. Built once per session / run-profile epoch into a cached `Arc<str>`, reused verbatim.
 2. **Stable tool list** — canonical, append-only `tools=` from §4.1. In deferred steady state this is core + bridges + promoted, stable across turns.
 3. **Stable context** — committed transcript + summaries in sequence order, never re-edited above the compaction watermark.
-4. **Volatile (last)** — timestamp, memory-recall snippets, loop-control/repeat warnings, the final-answer nudge, current user turn + recent tail.
+4. **Volatile (last)** — timestamp, memory-recall snippets, loop-control/repeat warnings, terminal/completion recovery controls, current user turn + recent tail.
 
 Each tier carries a fingerprint (`stable_prefix_digest`, `tool_list_digest`, `context_digest`, `volatile_digest`) + estimated tokens, logged per call. Canonical JSON (sorted keys), integer token estimates, name tie-breaks — determinism everywhere in tiers 1–3.
 

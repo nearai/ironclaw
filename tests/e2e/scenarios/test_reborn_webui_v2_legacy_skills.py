@@ -135,7 +135,7 @@ async def _open_mocked_skills_page(reborn_v2_server, reborn_v2_browser, *, initi
         await route.continue_()
 
     await page.route("**/api/webchat/v2/skills**", handle_skills)
-    await page.goto(f"{reborn_v2_server}/v2/settings/skills?token={REBORN_V2_AUTH_TOKEN}")
+    await page.goto(f"{reborn_v2_server}/settings/skills?token={REBORN_V2_AUTH_TOKEN}")
     await expect(page.get_by_text("Add skill")).to_be_visible(timeout=15000)
 
     return {

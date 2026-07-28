@@ -1,61 +1,16 @@
+//! Contract pins for the OAuth protocol helpers that survive the recipe
+//! engine: hash helpers, PKCE challenge construction, validated OAuth value
+//! newtypes, callback-state encode/decode, and the redacted token-response
+//! projection. Authorization-URL construction is engine behavior, pinned by
+//! `crates/ironclaw_auth/tests/auth_engine_contract.rs`.
+
 use super::common::*;
 use ironclaw_auth::{
-    AuthFlowId, GOOGLE_AUTHORIZATION_ENDPOINT, GOOGLE_CALENDAR_EVENTS_SCOPE,
-    GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE, GoogleOAuthCallbackState,
-    GoogleOAuthRouteConfig, OAuthAuthorizationCode, OAuthAuthorizationEndpoint,
-    OAuthAuthorizeUrlRequest, OAuthClientId, OAuthExtraParam, OAuthRedirectUri, OAuthState,
-    OAuthTokenResponse, PkceCodeChallenge, PkceVerifierSecret, ProviderScope,
-    build_authorization_url, build_google_authorization_url, opaque_state_hash,
-    pkce_s256_challenge, pkce_verifier_hash, scope_text,
+    AuthFlowId, OAuthAuthorizationCode, OAuthCallbackState, OAuthCallbackStateKind, OAuthClientId,
+    OAuthRedirectUri, OAuthState, OAuthTokenResponse, PkceVerifierSecret, ProviderScope,
+    opaque_state_hash, pkce_s256_challenge, pkce_verifier_hash, scope_text,
 };
 use secrecy::ExposeSecret;
-
-fn verifier_challenge() -> PkceCodeChallenge {
-    let verifier = PkceVerifierSecret::new(secret("raw-pkce-verifier")).unwrap();
-    pkce_s256_challenge(&verifier)
-}
-
-fn valid_scopes() -> Vec<ProviderScope> {
-    provider_scopes(&[GOOGLE_CALENDAR_READONLY_SCOPE])
-}
-
-struct ValidAuthorizationRequest {
-    authorization_endpoint: OAuthAuthorizationEndpoint,
-    client_id: OAuthClientId,
-    redirect_uri: OAuthRedirectUri,
-    state: OAuthState,
-    code_challenge: PkceCodeChallenge,
-    scopes: Vec<ProviderScope>,
-    extra_params: Vec<OAuthExtraParam>,
-}
-
-impl ValidAuthorizationRequest {
-    fn new(scopes: Vec<ProviderScope>, extra_params: Vec<OAuthExtraParam>) -> Self {
-        Self {
-            authorization_endpoint: OAuthAuthorizationEndpoint::new(GOOGLE_AUTHORIZATION_ENDPOINT)
-                .unwrap(),
-            client_id: OAuthClientId::new("client-id.apps.googleusercontent.com").unwrap(),
-            redirect_uri: OAuthRedirectUri::new("http://127.0.0.1:5555/oauth/callback/google")
-                .unwrap(),
-            state: OAuthState::new("opaque-state").unwrap(),
-            code_challenge: verifier_challenge(),
-            scopes,
-            extra_params,
-        }
-    }
-
-    fn request(&self) -> OAuthAuthorizeUrlRequest<'_> {
-        OAuthAuthorizeUrlRequest {
-            authorization_endpoint: &self.authorization_endpoint,
-            client_id: &self.client_id,
-            redirect_uri: &self.redirect_uri,
-            state: &self.state,
-            code_challenge: &self.code_challenge,
-            scopes: &self.scopes,
-            extra_params: &self.extra_params,
-        }
-    }
-}
 
 fn assert_invalid_request<T>(result: Result<T, ironclaw_auth::AuthProductError>) {
     let error = result.err().expect("request should be invalid");
@@ -92,180 +47,34 @@ fn pkce_s256_challenge_uses_url_safe_base64_without_padding() {
 }
 
 #[test]
-fn authorization_url_builder_sets_core_oauth_parameters() {
-    let scopes = provider_scopes(&[GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE]);
-    let request = ValidAuthorizationRequest::new(
-        scopes,
-        vec![OAuthExtraParam::new("access_type", "offline").unwrap()],
-    );
+fn recipe_callback_state_round_trips_and_rejects_foreign_prefixes() {
+    let scope = auth_scope();
+    let label = account_label("acct");
+    let flow_id = AuthFlowId::new();
+    let scopes = provider_scopes(&["items:read"]);
 
-    let url = build_authorization_url(request.request()).unwrap();
-    let parsed = url::Url::parse(url.as_str()).unwrap();
-
-    assert_eq!(parsed.scheme(), "https");
-    assert_eq!(parsed.host_str(), Some("accounts.google.com"));
-    let query = parsed.query_pairs().collect::<Vec<_>>();
-    assert!(query.iter().any(|(name, value)| {
-        name == "scope"
-            && value == "https://www.googleapis.com/auth/calendar.readonly https://www.googleapis.com/auth/gmail.send"
-    }));
-    assert!(
-        query
-            .iter()
-            .any(|(name, value)| name == "code_challenge"
-                && value == request.code_challenge.as_str())
-    );
-    assert!(
-        query
-            .iter()
-            .any(|(name, value)| name == "code_challenge_method" && value == "S256")
-    );
-}
-
-#[test]
-fn google_authorization_url_includes_google_offline_consent_defaults() {
-    let verifier = PkceVerifierSecret::new(secret("raw-pkce-verifier")).unwrap();
-    let challenge = pkce_s256_challenge(&verifier);
-    let scopes = provider_scopes(&[GOOGLE_GMAIL_SEND_SCOPE]);
-
-    let url = build_google_authorization_url(
-        "client-id.apps.googleusercontent.com",
-        "http://127.0.0.1:5555/oauth/callback/google",
-        "opaque-state",
-        &challenge,
-        &scopes,
-        Some("near.ai"),
-    )
-    .unwrap();
-    let parsed = url::Url::parse(url.as_str()).unwrap();
-    let query = parsed.query_pairs().collect::<Vec<_>>();
-
-    assert!(
-        query
-            .iter()
-            .any(|(name, value)| name == "access_type" && value == "offline")
-    );
-    assert!(
-        query
-            .iter()
-            .any(|(name, value)| name == "prompt" && value == "consent")
-    );
-    assert!(
-        query
-            .iter()
-            .any(|(name, value)| name == "include_granted_scopes" && value == "true")
-    );
-    assert!(
-        query
-            .iter()
-            .any(|(name, value)| name == "hd" && value == "near.ai")
-    );
-}
-
-#[test]
-fn google_authorization_url_omits_hd_when_hosted_domain_is_none() {
-    let verifier = PkceVerifierSecret::new(secret("raw-pkce-verifier")).unwrap();
-    let challenge = pkce_s256_challenge(&verifier);
-    let scopes = provider_scopes(&[GOOGLE_GMAIL_SEND_SCOPE]);
-
-    let url = build_google_authorization_url(
-        "client-id.apps.googleusercontent.com",
-        "http://127.0.0.1:5555/oauth/callback/google",
-        "opaque-state",
-        &challenge,
-        &scopes,
-        None,
-    )
-    .unwrap();
-    let parsed = url::Url::parse(url.as_str()).unwrap();
-
-    assert!(!parsed.query_pairs().any(|(name, _)| name == "hd"));
-}
-
-#[test]
-fn google_route_config_validates_and_hides_hosted_domain_hint() {
-    let config = GoogleOAuthRouteConfig::new(
-        "client-id.apps.googleusercontent.com",
-        "http://127.0.0.1:5555/oauth/callback/google",
+    let encoded = OAuthCallbackState::new(
+        OAuthCallbackStateKind::RECIPE,
+        flow_id,
+        scope,
+        label.clone(),
+        scopes.clone(),
     )
     .unwrap()
-    .with_hosted_domain_hint("near.ai")
+    .encode()
     .unwrap();
 
-    assert_eq!(
-        config.client_id().as_str(),
-        "client-id.apps.googleusercontent.com"
-    );
-    assert_eq!(
-        config.redirect_uri().as_str(),
-        "http://127.0.0.1:5555/oauth/callback/google"
-    );
-    assert_eq!(config.hosted_domain_hint(), Some("near.ai"));
-
-    let debug = format!("{config:?}");
-    assert!(!debug.contains("near.ai"));
-    assert!(debug.contains("[REDACTED]"));
-
-    assert_invalid_request(
-        GoogleOAuthRouteConfig::new(
-            "client-id.apps.googleusercontent.com",
-            "http://127.0.0.1:5555/oauth/callback/google",
-        )
-        .unwrap()
-        .with_hosted_domain_hint("near.ai\nexample.com"),
-    );
-}
-
-#[test]
-fn google_callback_state_round_trips_through_validated_encoded_state() {
-    let flow_id = AuthFlowId::new();
-    let owner_scope = scope("alice");
-    let account_label = label("work google");
-    let requested_scopes =
-        provider_scopes(&[GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_CALENDAR_EVENTS_SCOPE]);
-
-    let state = GoogleOAuthCallbackState::new(
-        flow_id,
-        owner_scope.clone(),
-        account_label.clone(),
-        requested_scopes.clone(),
-    )
-    .unwrap();
-    let encoded = state.encode().unwrap();
-    let decoded = GoogleOAuthCallbackState::decode(encoded.as_str()).unwrap();
-    let mut expected_scope =
-        AuthProductScope::new(owner_scope.resource.clone(), AuthSurface::Callback);
-    if let Some(session_id) = owner_scope.session_id.clone() {
-        expected_scope = expected_scope.with_session_id(session_id);
-    }
-
+    assert!(encoded.as_str().starts_with("icr1."));
+    let decoded =
+        OAuthCallbackState::decode(OAuthCallbackStateKind::RECIPE, encoded.as_str()).unwrap();
     assert_eq!(decoded.flow_id(), flow_id);
-    assert_eq!(decoded.scope(), &expected_scope);
-    assert_eq!(decoded.account_label(), &account_label);
-    assert_eq!(decoded.requested_scopes(), requested_scopes.as_slice());
-    assert!(!format!("{encoded:?}").contains("work google"));
-}
+    assert_eq!(decoded.account_label(), &label);
+    assert_eq!(decoded.requested_scopes(), scopes.as_slice());
 
-#[test]
-fn google_callback_state_rejects_unapproved_requested_scopes() {
-    // `gmail.insert` is a real, sensitive Gmail scope deliberately kept out of
-    // the approved GSuite set (`is_allowed_google_scope`). The approved set grew
-    // to include the Drive/Docs/Sheets/Slides scopes in #4326, so this guards the
-    // boundary with a scope that is still outside it.
-    let invalid_scope = ProviderScope::new("https://www.googleapis.com/auth/gmail.insert").unwrap();
-
-    assert_invalid_request(GoogleOAuthCallbackState::new(
-        AuthFlowId::new(),
-        scope("alice"),
-        label("work google"),
-        Vec::new(),
-    ));
-    assert_invalid_request(GoogleOAuthCallbackState::new(
-        AuthFlowId::new(),
-        scope("alice"),
-        label("work google"),
-        vec![invalid_scope],
-    ));
+    // Values without the recipe prefix must not decode.
+    let error = OAuthCallbackState::decode(OAuthCallbackStateKind::RECIPE, "icg1.someoldstate")
+        .unwrap_err();
+    assert_eq!(error.code(), AuthErrorCode::MalformedCallback);
 }
 
 #[test]
@@ -273,7 +82,7 @@ fn token_response_projects_scopes_and_redacts_debug() {
     let response = OAuthTokenResponse::new(
         secret("access-token"),
         Some(secret("refresh-token")),
-        Some("https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/calendar.readonly"),
+        Some("vendor.scope.one vendor.scope.two"),
         Some(3600),
     )
     .unwrap();
@@ -281,7 +90,7 @@ fn token_response_projects_scopes_and_redacts_debug() {
     assert_eq!(response.access_token.expose_secret(), "access-token");
     assert_eq!(
         scope_text(&response.scopes),
-        "https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/calendar.readonly"
+        "vendor.scope.one vendor.scope.two"
     );
     let debug = format!("{response:?}");
     assert!(!debug.contains("access-token"));
@@ -316,112 +125,19 @@ fn token_response_rejects_invalid_scope() {
 }
 
 #[test]
-fn authorization_url_request_debug_redacts_sensitive_fields() {
-    let request = ValidAuthorizationRequest::new(
-        valid_scopes(),
-        vec![OAuthExtraParam::new("login_hint", "ada@example.com").unwrap()],
-    );
-    let authorize_request = request.request();
-
-    let debug = format!("{authorize_request:?}");
-
-    assert!(!debug.contains("client-id.apps.googleusercontent.com"));
-    assert!(!debug.contains("opaque-state"));
-    assert!(!debug.contains(request.code_challenge.as_str()));
-    assert!(!debug.contains("ada@example.com"));
-    assert!(debug.contains("login_hint"));
-    assert!(debug.contains("[REDACTED]"));
-}
-
-#[test]
-fn build_authorization_url_rejects_empty_client_id() {
+fn oauth_value_newtypes_reject_empty_and_control_values() {
     assert_invalid_request(OAuthClientId::new(""));
-}
-
-#[test]
-fn build_authorization_url_rejects_empty_redirect_uri() {
     assert_invalid_request(OAuthRedirectUri::new(""));
-}
-
-#[test]
-fn build_authorization_url_rejects_empty_state() {
     assert_invalid_request(OAuthState::new(""));
-}
-
-#[test]
-fn build_authorization_url_rejects_invalid_endpoint() {
-    assert_invalid_request(OAuthAuthorizationEndpoint::new("not a url"));
-}
-
-#[test]
-fn authorization_url_builder_rejects_non_https_scheme() {
-    assert_invalid_request(OAuthAuthorizationEndpoint::new(
-        "http://accounts.google.com/o/oauth2/v2/auth",
-    ));
-}
-
-#[test]
-fn build_authorization_url_rejects_missing_host() {
-    assert_invalid_request(OAuthAuthorizationEndpoint::new("https://"));
-}
-
-#[test]
-fn build_authorization_url_rejects_userinfo_endpoint() {
-    assert_invalid_request(OAuthAuthorizationEndpoint::new(
-        "https://user:pass@accounts.google.com/o/oauth2/v2/auth",
-    ));
-}
-
-#[test]
-fn build_authorization_url_rejects_reserved_endpoint_query_param() {
-    assert_invalid_request(OAuthAuthorizationEndpoint::new(
-        "https://accounts.google.com/o/oauth2/v2/auth?state=predefined",
-    ));
-}
-
-#[test]
-fn build_authorization_url_rejects_empty_param_name() {
-    assert_invalid_request(OAuthExtraParam::new("", "value"));
-}
-
-#[test]
-fn build_authorization_url_rejects_empty_param_value() {
-    assert_invalid_request(OAuthExtraParam::new("login_hint", ""));
-}
-
-#[test]
-fn validate_authorize_fragment_rejects_control_chars() {
-    assert_invalid_request(OAuthExtraParam::new("login_hint", "bad\u{0000}value"));
-}
-
-#[test]
-fn authorization_url_builder_rejects_control_characters() {
     assert_invalid_request(OAuthState::new("opaque\nstate"));
 }
 
 #[test]
-fn build_authorization_url_rejects_reserved_extra_param_name() {
-    assert_invalid_request(OAuthExtraParam::new("state", "override"));
-    assert_invalid_request(OAuthExtraParam::new(
-        "redirect_uri",
-        "https://attacker.example/callback",
-    ));
-}
-
-#[test]
-fn authorization_url_builder_handles_empty_scopes_and_extra_params() {
-    let request = ValidAuthorizationRequest::new(Vec::new(), Vec::new());
-
-    let url = build_authorization_url(request.request()).unwrap();
-    let parsed = url::Url::parse(url.as_str()).unwrap();
-    let query = parsed.query_pairs().collect::<Vec<_>>();
-
-    assert!(
-        query
-            .iter()
-            .any(|(name, value)| name == "scope" && value.is_empty())
-    );
-    assert!(!query.iter().any(|(name, _)| name == "access_type"));
+fn oauth_value_newtypes_redact_debug() {
+    let client_id = OAuthClientId::new("client-id.apps.example").unwrap();
+    let state = OAuthState::new("opaque-state").unwrap();
+    assert_eq!(format!("{client_id:?}"), "[REDACTED]");
+    assert_eq!(format!("{state:?}"), "[REDACTED]");
 }
 
 #[test]
@@ -429,17 +145,28 @@ fn scope_text_returns_empty_string_for_empty_scopes() {
     assert!(scope_text(&[]).is_empty());
 }
 
-#[test]
-fn google_authorization_url_rejects_invalid_hosted_domain() {
-    let challenge = verifier_challenge();
-    let scopes = valid_scopes();
+fn auth_scope() -> ironclaw_auth::AuthProductScope {
+    ironclaw_auth::AuthProductScope::new(
+        ironclaw_host_api::ResourceScope {
+            tenant_id: ironclaw_host_api::TenantId::new("tenant-a").unwrap(),
+            user_id: ironclaw_host_api::UserId::new("user-a").unwrap(),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: ironclaw_host_api::InvocationId::new(),
+        },
+        ironclaw_auth::AuthSurface::Callback,
+    )
+}
 
-    assert_invalid_request(build_google_authorization_url(
-        "client-id.apps.googleusercontent.com",
-        "http://127.0.0.1:5555/oauth/callback/google",
-        "opaque-state",
-        &challenge,
-        &scopes,
-        Some("near.ai\nexample.com"),
-    ));
+fn account_label(value: &str) -> ironclaw_auth::CredentialAccountLabel {
+    ironclaw_auth::CredentialAccountLabel::new(value).unwrap()
+}
+
+fn provider_scopes(values: &[&str]) -> Vec<ProviderScope> {
+    values
+        .iter()
+        .map(|value| ProviderScope::new(value.to_string()).unwrap())
+        .collect()
 }

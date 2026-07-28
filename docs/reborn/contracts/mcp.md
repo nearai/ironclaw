@@ -42,6 +42,7 @@ pub struct McpExecutionRequest<'a> {
     pub capability_id: &'a CapabilityId,
     pub scope: ResourceScope,
     pub estimate: ResourceEstimate,
+    pub resource_reservation: Option<ResourceReservation>,
     pub invocation: McpInvocation,
 }
 ```
@@ -66,8 +67,16 @@ The dispatcher then maps this into `CapabilityDispatchResult` with `runtime = Ru
 ```rust
 #[async_trait]
 pub trait McpClient: Send + Sync {
-    async fn call_tool(&self, request: McpClientRequest) -> Result<McpClientOutput, String>;
-    async fn discover_tools(&self, request: McpClientRequest) -> Result<McpToolDiscoveryOutput, String>;
+    async fn call_tool(
+        &self,
+        request: McpClientRequest,
+    ) -> Result<McpClientOutput, McpClientError>;
+
+    async fn discover_tools(
+        &self,
+        request: McpClientRequest,
+        max_tools: u32,
+    ) -> Result<McpToolDiscoveryOutput, McpClientError>;
 }
 ```
 
@@ -83,8 +92,15 @@ pub struct McpClientRequest {
     pub args: Vec<String>,
     pub url: Option<String>,
     pub input: serde_json::Value,
+    pub max_output_bytes: u64,
 }
 ```
+
+`McpClientError` separates retryable transport/session failures from an
+`InvalidToolCatalog` result. The latter means `tools/list` completed but the
+advertised catalog violated the provider-neutral bounded-shape contract; the
+lifecycle treats that generation as permanently invalid instead of repeatedly
+reauthorizing a valid credential.
 
 Important boundaries:
 
@@ -173,13 +189,22 @@ Transport-specific policy is a host adapter responsibility:
 The protocol client parses the server result into bounded `McpDiscoveredTool`
 records:
 
-- tool names must be directly publishable as Reborn capability suffixes
+- tool names are capped at 128 bytes and must be directly publishable as
+  Reborn capability suffixes
   (lowercase ASCII name segments separated by dots); unsupported names are
   rejected rather than normalized so discovery cannot create ambiguous or
   colliding capability IDs
-- descriptions are bounded and control-character-free
+- descriptions are capped at 2,048 bytes and control-character-free
   except for normal formatting whitespace (`\n`, `\r`, `\t`)
 - `inputSchema` must be an object-shaped JSON schema
+- the host accepts schemas up to depth 32, 8,192 JSON nodes, and 16 KiB per
+  string; these are host safety ceilings, not provider-specific rules
+- the complete `tools/list` response body is independently capped at 2 MiB
+- the manifest's `[mcp].max_tools` is authoritative up to the host ceiling of
+  1,024 tools; the client does not substitute a hidden catalog-size default
+- catalog acceptance is atomic: one malformed or over-limit entry rejects the
+  new generation with a stable `mcp_invalid_tool_list: <cause>` diagnostic,
+  rather than silently publishing a partial provider surface
 - MCP annotations are parsed as behavior hints. `destructiveHint` and
   `sideEffectsHint` mark the discovered capability as `external_write`;
   `readOnlyHint` suppresses that effect when no stronger write hint is present.
@@ -190,14 +215,47 @@ records:
 - staged product-auth credentials are allowed for `tools/list` when the host
   planner supplies them
 
-Extension activation must choose an explicit activation mode. Static activation
-publishes the bundled package; hosted MCP discovery activation performs
-discovery before lifecycle state is committed. The discovery call runs outside
-the lifecycle operation lock, then activation reacquires the lock and verifies
-the installed package did not change before publishing. Successful discovery
-replaces the provider package's capability declarations in the active
-`SharedExtensionRegistry`; failed discovery fails activation instead of
-publishing stale bundled schema guesses.
+The internal lifecycle reconciliation command selects hosted MCP discovery and
+performs it before lifecycle state is committed. The discovery call runs
+outside the lifecycle operation lock. Before the call, composition captures a
+snapshot of the existing typed, non-secret inputs the current loader actually
+consumes: the base package projection, a digest of the installed raw manifest,
+the resolved `[mcp].max_tools` ceiling, and the selected redacted
+`CredentialAccount` records. No composition-specific authority DTO is created.
+Credential accounts are captured after staging because staging may refresh the
+selection. Administrator configuration is not currently a hosted-MCP discovery
+input; if a future loader consumes it, its revision becomes a mandatory member
+of this comparison rather than an unchecked side read.
+
+After discovery, reconciliation reacquires the operation lock, rechecks caller
+membership, and re-reads the package, manifest, ceiling, account setup, and
+credential accounts. It publishes only when every captured value still
+matches. A mismatch discards the discovered generation and returns a retryable
+refresh error; stale-authority discovery can never become the active catalog.
+Successful discovery atomically replaces the provider package's capability
+declarations in the active `SharedExtensionRegistry`.
+
+The published hosted-MCP catalog is provider-global runtime state; callable
+authority is caller-scoped product state. Before projecting any discovered
+definition, capability grant, provider trust, one-shot approval lease, or
+persistent approval eligibility, the host reads the exact caller's canonical
+extension-list projection and retains only packages whose public lifecycle
+state is `active`. Installation membership with missing, revoked, or expired
+personal setup remains `setup_needed` and receives none of that authority,
+even when another ready member has already published—or later replaces—the
+provider-global catalog. Catalog replacement therefore changes schema, never
+caller readiness.
+
+Failure has two distinct snapshot outcomes:
+
+- If no catalog has ever published, failed, empty, or stale-authority discovery
+  leaves membership retryable in `setup_needed` and exposes no callable tools.
+- If a catalog is already active, a failed or stale refresh returns a separate
+  typed refresh error while retaining the previously published catalog,
+  callable tool set, and `active` public projection. Refresh is an atomic swap,
+  never a destructive pre-unpublish.
+
+Neither outcome publishes bundled schema guesses as a live catalog.
 
 Discovered packages are built through the extension package constructor for
 host-bundled inline dynamic schemas. The published descriptors carry inline

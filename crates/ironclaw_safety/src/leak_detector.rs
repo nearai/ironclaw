@@ -293,6 +293,28 @@ impl LeakDetector {
             .unwrap_or_else(|| content.to_string()))
     }
 
+    /// Redact every detected secret VALUE in `content`, preserving the
+    /// surrounding descriptive text.
+    ///
+    /// Unlike [`Self::scan_and_clean`], this never returns an error: a
+    /// `Block`-severity match is redacted in place rather than blocking the
+    /// whole string, and lower-severity (`Redact`/`Warn`) matches are redacted
+    /// too. Intended for the model-visible error `detail` channel, where the
+    /// descriptive cause (paths, status codes, schema refs) must survive so the
+    /// model can retry or explain, but no secret value may reach the model.
+    ///
+    /// Returns the redacted string and whether any redaction was applied.
+    pub fn redact_all_secrets(&self, content: &str) -> (String, bool) {
+        let result = self.scan(content);
+        if result.matches.is_empty() {
+            return (content.to_string(), false);
+        }
+        // `apply_redactions` coalesces overlapping/adjacent ranges itself, so a
+        // single value always redacts to one `[REDACTED]`.
+        let ranges: Vec<Range<usize>> = result.matches.iter().map(|m| m.location.clone()).collect();
+        (apply_redactions(content, &ranges), true)
+    }
+
     /// Scan an outbound HTTP request for potential secret leakage.
     ///
     /// This MUST be called before executing any HTTP request from WASM
@@ -368,10 +390,36 @@ fn mask_secret(secret: &str) -> String {
 }
 
 /// Apply redaction ranges to content.
+/// Sort and coalesce match ranges so overlapping or adjacent spans of one
+/// secret (different patterns matching the same value, e.g. `bearer_token` and
+/// `bare_jwt` over one `Bearer <jwt>`) collapse into a single disjoint range.
+fn merge_ranges(ranges: &[Range<usize>]) -> Vec<Range<usize>> {
+    let mut ranges: Vec<Range<usize>> = ranges.to_vec();
+    ranges.sort_by_key(|range| range.start);
+    let mut merged: Vec<Range<usize>> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        match merged.last_mut() {
+            Some(last) if range.start <= last.end => {
+                if range.end > last.end {
+                    last.end = range.end;
+                }
+            }
+            _ => merged.push(range),
+        }
+    }
+    merged
+}
+
 fn apply_redactions(content: &str, ranges: &[Range<usize>]) -> String {
     if ranges.is_empty() {
         return content.to_string();
     }
+
+    // Coalesce first: callers pass raw per-pattern ranges that can overlap, and
+    // emitting one `[REDACTED]` per raw range double-redacts a single secret
+    // (e.g. `Bearer eyJ…` -> `[REDACTED][REDACTED]`). Merging here keeps every
+    // caller correct without each having to pre-merge.
+    let ranges = merge_ranges(ranges);
 
     let mut result = String::with_capacity(content.len());
     let mut last_end = 0;
@@ -507,6 +555,15 @@ fn default_patterns() -> Vec<LeakPattern> {
             severity: LeakSeverity::High,
             action: LeakAction::Block,
         },
+        // Bare JSON Web Tokens. Keep every segment bounded away from ordinary
+        // dotted identifiers while accepting base64url without padding.
+        LeakPattern {
+            name: "bare_jwt".to_string(),
+            regex: Regex::new(r"\b[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}\b")
+                .unwrap(), // safety: hardcoded literal
+            severity: LeakSeverity::High,
+            action: LeakAction::Redact,
+        },
         // Bearer tokens (redact instead of block, might be intentional)
         LeakPattern {
             name: "bearer_token".to_string(),
@@ -547,6 +604,37 @@ fn default_patterns() -> Vec<LeakPattern> {
         LeakPattern {
             name: "groq_api_key".to_string(),
             regex: Regex::new(r"\bgsk_[A-Za-z0-9]{30,}").unwrap(), // safety: hardcoded literal
+            severity: LeakSeverity::Critical,
+            action: LeakAction::Block,
+        },
+        // Sandbox credential placeholder (icsbx_<identifier>). The credential
+        // firewall injects these inert placeholders into the sandbox in place
+        // of real secrets; the egress proxy swaps them for the real credential
+        // at request time. A placeholder must never cross the trust boundary
+        // into model output, logs, or transcripts, so it is treated like any
+        // other secret.
+        //
+        // Deliberately NO `\b` word boundaries here: `_` is a word character,
+        // so a boundary assertion does not fire next to it, meaning a single
+        // leading or trailing character (`_icsbx_...`, `icsbx_..._x`) would
+        // otherwise slip past the one pattern standing between a placeholder
+        // and model output/logs. `icsbx_` plus 16+ alphanumerics is a
+        // distinctive shape that does not occur naturally, so a bare
+        // substring match carries no realistic false-positive risk — and
+        // over-matching here fails *safe*, whereas under-matching would not.
+        // Do not "helpfully" restore the word boundaries.
+        //
+        // The `icsbx_` literal here must stay in sync with
+        // `ironclaw_secrets::placeholder::CREDENTIAL_PLACEHOLDER_PREFIX`
+        // (crates/ironclaw_secrets/src/placeholder.rs), which is the actual
+        // owner of this prefix. `ironclaw_safety` deliberately does not take
+        // `ironclaw_secrets` as a normal dependency just to share one string
+        // constant — see `sandbox_credential_placeholder_prefix_matches_registry`
+        // below, a dev-dependency-only regression test that fails loudly if
+        // the two ever drift apart.
+        LeakPattern {
+            name: "sandbox_credential_placeholder".to_string(),
+            regex: Regex::new(r"icsbx_[A-Za-z0-9]{16,}").unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
         },
@@ -720,6 +808,115 @@ mod tests {
         let result = detector.scan_and_clean(content);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), content);
+    }
+
+    #[test]
+    fn redact_all_secrets_masks_block_severity_without_dropping_cause() {
+        // The model-visible detail channel must keep the descriptive cause
+        // (path, status code) while masking every secret value — even
+        // Block-severity tokens that `scan_and_clean` would refuse outright.
+        let detector = LeakDetector::new();
+        let content = concat!(
+            "auth failed at /workspace/config using ghp",
+            "_012345678901234567890123456789012345",
+            " \
+             and AKIAIOSFODNN7EXAMPLE (HTTP 401)"
+        );
+
+        let (redacted, changed) = detector.redact_all_secrets(content);
+
+        assert!(
+            changed,
+            "a leak was present, so redaction must report a change"
+        );
+        assert!(
+            !redacted.contains(concat!("ghp", "_012345678901234567890123456789012345", "")),
+            "github token must be redacted: {redacted}"
+        );
+        assert!(
+            !redacted.contains("AKIAIOSFODNN7EXAMPLE"),
+            "aws access key must be redacted: {redacted}"
+        );
+        // Descriptive cause survives so the model can act on it.
+        assert!(
+            redacted.contains("/workspace/config"),
+            "path must survive: {redacted}"
+        );
+        assert!(
+            redacted.contains("HTTP 401"),
+            "status code must survive: {redacted}"
+        );
+        assert!(redacted.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redact_all_secrets_masks_sandbox_credential_placeholder_without_dropping_context() {
+        // Detection of `icsbx_` placeholders is covered elsewhere; this pins
+        // that *redaction* actually removes the token value from
+        // model-visible output while the surrounding diagnostic context
+        // (path, status code) survives — a redaction that nuked the whole
+        // string would "pass" a detection-only test while destroying the
+        // output's diagnostic value.
+        let detector = LeakDetector::new();
+        // Realistic shape: registry-generated placeholders are `icsbx_` plus
+        // exactly 32 lowercase hex characters (a simple-form UUID).
+        let token = "icsbx_0123456789abcdef0123456789abcdef";
+        let content = format!("auth failed at /workspace/config using {token} (HTTP 401)");
+
+        let (redacted, changed) = detector.redact_all_secrets(&content);
+
+        assert!(
+            changed,
+            "a placeholder was present, so redaction must report a change"
+        );
+        assert!(
+            !redacted.contains(token),
+            "placeholder token must be redacted: {redacted}"
+        );
+        assert!(
+            redacted.contains("/workspace/config"),
+            "path must survive: {redacted}"
+        );
+        assert!(
+            redacted.contains("HTTP 401"),
+            "status code must survive: {redacted}"
+        );
+        assert!(redacted.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redact_all_secrets_leaves_clean_text_untouched() {
+        let detector = LeakDetector::new();
+        let content = "read_file failed at /workspace/x (HTTP 404)";
+
+        let (redacted, changed) = detector.redact_all_secrets(content);
+
+        assert!(!changed);
+        assert_eq!(redacted, content);
+    }
+
+    #[test]
+    fn redact_all_secrets_masks_bare_jwt() {
+        let detector = LeakDetector::new();
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature123";
+
+        let (redacted, changed) = detector.redact_all_secrets(jwt);
+
+        assert!(changed);
+        assert_eq!(redacted, "[REDACTED]");
+    }
+
+    #[test]
+    fn redact_all_secrets_merges_overlapping_matches() {
+        let detector = LeakDetector::new();
+        let token = "abcdefghijklmnopqrstuvwxyz123456";
+        let content = format!("Authorization: Bearer {token}");
+
+        let (redacted, changed) = detector.redact_all_secrets(&content);
+
+        assert!(changed);
+        assert_eq!(redacted, "[REDACTED]");
+        assert_eq!(redacted.matches("[REDACTED]").count(), 1);
     }
 
     #[test]
@@ -1050,6 +1247,178 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_detect_sandbox_credential_placeholder() {
+        let detector = LeakDetector::new();
+        let content = "found in ~/.git-credentials: icsbx_7f3a9b2c1d4e5f60";
+        let result = detector.scan(content);
+        assert!(result.should_block, "sandbox placeholder not detected");
+        assert!(
+            result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "sandbox_credential_placeholder")
+        );
+    }
+
+    #[test]
+    fn test_sandbox_credential_placeholder_short_suffix_passes() {
+        let detector = LeakDetector::new();
+        let content = "icsbx_ab";
+        let result = detector.scan(content);
+        assert!(
+            !result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "sandbox_credential_placeholder"),
+            "short suffix should not match placeholder pattern"
+        );
+    }
+
+    #[test]
+    fn test_sandbox_credential_placeholder_substring_of_longer_word_is_flagged() {
+        // Deliberately flipped from "should not match" to "should match":
+        // the pattern has no `\b` word boundaries (see the comment on the
+        // pattern definition), so a single leading/trailing character next
+        // to `icsbx_` no longer defeats detection. Over-matching here is the
+        // intended fail-safe behavior — a leaked placeholder embedded in a
+        // longer identifier must still be caught.
+        let detector = LeakDetector::new();
+        let content = "myicsbx_7f3a9b2c1d4e5f60prefix";
+        let result = detector.scan(content);
+        assert!(
+            result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "sandbox_credential_placeholder"),
+            "icsbx_ substring inside a longer word must still be flagged (fail-safe over-match)"
+        );
+    }
+
+    #[test]
+    fn test_sandbox_credential_placeholder_leading_underscore_is_flagged() {
+        // A single leading `_` used to defeat the old `\bicsbx_...\b`
+        // pattern outright, since `_` is a word character and `\b` does not
+        // fire next to it.
+        let detector = LeakDetector::new();
+        let content = "_icsbx_0123456789abcdef0123456789abcdef";
+        let result = detector.scan(content);
+        assert!(
+            result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "sandbox_credential_placeholder"),
+            "leading underscore must not defeat placeholder detection"
+        );
+    }
+
+    #[test]
+    fn test_sandbox_credential_placeholder_trailing_underscore_is_flagged() {
+        let detector = LeakDetector::new();
+        let content = "icsbx_0123456789abcdef0123456789abcdef_x";
+        let result = detector.scan(content);
+        assert!(
+            result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "sandbox_credential_placeholder"),
+            "trailing underscore must not defeat placeholder detection"
+        );
+    }
+
+    #[test]
+    fn test_sandbox_credential_placeholder_leading_letter_is_flagged() {
+        let detector = LeakDetector::new();
+        let content = "xicsbx_0123456789abcdef0123456789abcdef";
+        let result = detector.scan(content);
+        assert!(
+            result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "sandbox_credential_placeholder"),
+            "leading letter must not defeat placeholder detection"
+        );
+    }
+
+    #[test]
+    fn test_scan_and_clean_blocks_sandbox_credential_placeholder() {
+        let detector = LeakDetector::new();
+        let content = "icsbx_7f3a9b2c1d4e5f60";
+        assert!(
+            detector.scan_and_clean(content).is_err(),
+            "scan_and_clean should block sandbox credential placeholder"
+        );
+    }
+
+    #[test]
+    fn sandbox_credential_placeholder_prefix_matches_registry() {
+        // `ironclaw_safety` deliberately does not take `ironclaw_secrets` as a
+        // normal dependency just to share the "icsbx_" prefix constant (it
+        // stays a dependency-light substrate). This dev-dependency-only test
+        // is the regression net instead: if the prefix is ever rotated in
+        // `ironclaw_secrets::placeholder::CREDENTIAL_PLACEHOLDER_PREFIX`
+        // without updating the hardcoded regex literal above, this fails
+        // loudly instead of the leak detector silently going stale.
+        assert_eq!(
+            ironclaw_secrets::CREDENTIAL_PLACEHOLDER_PREFIX,
+            "icsbx_",
+            "leak_detector's sandbox_credential_placeholder regex hardcodes 'icsbx_'; \
+             update both if this constant ever changes"
+        );
+
+        // Pin the length half of the shared contract too, not just the
+        // prefix: the regex requires 16+ alphanumeric characters after the
+        // prefix (`{16,}`), so the registry's own required suffix length must
+        // never drop below that floor, or shorter-but-valid placeholders
+        // would silently stop matching.
+        const {
+            assert!(
+                ironclaw_secrets::CREDENTIAL_PLACEHOLDER_SUFFIX_LEN >= 16,
+                "leak_detector's sandbox_credential_placeholder regex requires 16+ alphanumeric \
+                 characters after the prefix; the registry's required suffix length must stay at \
+                 or above that floor"
+            );
+        }
+
+        // Better than asserting a bare number: construct a minimum-shaped
+        // token through the registry's own public API (not just a literal
+        // matching today's expected length) and assert the detector actually
+        // flags it. This pins behavior, not a number.
+        let minimum_shaped_token = ironclaw_secrets::CredentialPlaceholderToken::parse(format!(
+            "{}{}",
+            ironclaw_secrets::CREDENTIAL_PLACEHOLDER_PREFIX,
+            "a".repeat(ironclaw_secrets::CREDENTIAL_PLACEHOLDER_SUFFIX_LEN)
+        ))
+        .expect("a suffix of exactly CREDENTIAL_PLACEHOLDER_SUFFIX_LEN alphanumeric characters must be accepted by the registry's own public API");
+        let detector = LeakDetector::new();
+        let result = detector.scan(&format!("leaked token: {minimum_shaped_token}"));
+        assert!(
+            result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "sandbox_credential_placeholder"),
+            "a minimum-shaped, registry-accepted placeholder token must be caught by the leak detector"
+        );
+
+        // Shape a registry-issued token actually has: the fixed prefix plus a
+        // UUIDv4 `simple()` suffix (32 lowercase hex chars, no dashes) — see
+        // `CredentialPlaceholderToken::generate()` in ironclaw_secrets.
+        let token = format!(
+            "{}{}",
+            ironclaw_secrets::CREDENTIAL_PLACEHOLDER_PREFIX,
+            "0123456789abcdef0123456789abcdef"
+        );
+        let detector = LeakDetector::new();
+        let result = detector.scan(&format!("leaked token: {token}"));
+        assert!(
+            result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "sandbox_credential_placeholder"),
+            "a realistically-shaped registry-issued placeholder token must be caught"
+        );
+    }
+
     /// Adversarial tests for leak detector regex patterns and masking.
     /// See <https://github.com/nearai/ironclaw/issues/1025>.
     mod adversarial {
@@ -1070,7 +1439,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "openai_key pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1088,7 +1457,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "high_entropy_hex pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1106,7 +1475,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "bearer_token pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1124,7 +1493,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "authorization pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1142,7 +1511,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "anthropic_api_key pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1160,7 +1529,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "aws_access_key pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1178,7 +1547,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "github_token pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1196,7 +1565,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "github_fine_grained_pat pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1214,7 +1583,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "stripe_api_key pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1232,7 +1601,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "nearai_session pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1250,7 +1619,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "pem_private_key pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1268,7 +1637,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "ssh_private_key pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1286,7 +1655,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "google_api_key pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1304,7 +1673,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "slack_token pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1322,7 +1691,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "twilio_api_key pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1340,7 +1709,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "sendgrid_api_key pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1356,7 +1725,7 @@ mod tests {
             let result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "full scan took {}ms on 100KB clean text",
                 elapsed.as_millis()
             );

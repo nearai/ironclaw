@@ -20,12 +20,13 @@ pub(super) fn completed_exit(
     } else {
         LoopCompletionKind::NoReply
     };
+    let model_usage = state.cumulative_model_usage;
     Ok(LoopExit::Completed(LoopCompleted {
         completion_kind,
         reply_message_refs: state.assistant_refs,
         result_refs: state.result_refs,
         final_checkpoint_id,
-        usage_summary_ref: None,
+        model_usage,
         exit_id: exit_id(host, "completed")?,
     }))
 }
@@ -37,10 +38,11 @@ pub(super) fn failed_exit(
     checkpoint_id: Option<ironclaw_turns::TurnCheckpointId>,
     details: FailedExitDetails,
 ) -> Result<LoopExit, AgentLoopExecutorError> {
+    let model_usage = state.cumulative_model_usage;
     Ok(LoopExit::Failed(LoopFailed {
         reason_kind,
         checkpoint_id,
-        usage_summary_ref: None,
+        model_usage,
         diagnostic_ref: details.diagnostic_ref,
         exit_id: exit_id(host, "failed")?,
         explanation_message_refs: failure_message_refs(&state, details.explanation_message_ref),

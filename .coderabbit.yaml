@@ -131,7 +131,7 @@ reviews:
         Verify URLs point at expected upstreams, artifact references carry checksums, and no
         un-audited prebuilt WASM is introduced (root build.rs documents committed WASM as a
         supply-chain risk).
-    - path: "{src/sandbox/**,src/secrets/**,src/safety/**,src/gate/**,src/pairing/**,src/auth/**,crates/ironclaw_safety/**,crates/ironclaw_secrets/**,crates/ironclaw_network/**,crates/ironclaw_trust/**,crates/ironclaw_authorization/**,crates/ironclaw_capabilities/**,crates/ironclaw_process_sandbox/**,crates/ironclaw_prompt_envelope/**,crates/ironclaw_reborn_webui_ingress/**}"
+    - path: "{src/sandbox/**,src/secrets/**,src/safety/**,src/gate/**,src/pairing/**,src/auth/**,crates/ironclaw_safety/**,crates/ironclaw_secrets/**,crates/ironclaw_network/**,crates/ironclaw_trust/**,crates/ironclaw_authorization/**,crates/ironclaw_capabilities/**,crates/ironclaw_process_sandbox/**,crates/ironclaw_prompt_envelope/**,crates/ironclaw_webui/**}"
       instructions: |
         Kernel/safety boundary — review track C (2 approvals + rollback plan). Hold the line
         on: no weakening of bearer/webhook auth, CORS/origin checks, body/rate limits or

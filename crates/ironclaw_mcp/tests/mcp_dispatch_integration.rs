@@ -14,10 +14,7 @@ use serde_json::json;
 async fn mcp_lane_executes_manifest_transport_and_reconciles_resources() {
     let client = RecordingMcpClient::new(Ok(McpClientOutput {
         output: json!({"items":["issue-1"]}),
-        usage: ResourceUsage {
-            wall_clock_ms: 9,
-            ..ResourceUsage::default()
-        },
+        usage: ResourceUsage::default().set_wall_clock_ms(9),
         output_bytes: None,
     }));
     let runtime = McpRuntime::new(McpRuntimeConfig::for_testing(), client.clone());
@@ -66,6 +63,24 @@ async fn mcp_lane_client_failure_releases_reservation() {
 }
 
 #[tokio::test]
+async fn mcp_lane_invalid_tool_catalog_remains_typed_and_releases_reservation() {
+    let client = RecordingMcpClient::new(Err(McpClientError::invalid_tool_catalog(
+        "tools/list response violated the bounded catalog contract",
+    )));
+    let runtime = McpRuntime::new(McpRuntimeConfig::for_testing(), client);
+    let (governor, account) = mcp_governor();
+
+    let error = runtime
+        .execute_extension_json(&governor, mcp_request(json!({"query":"fail"})))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, McpError::InvalidToolCatalog { .. }));
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+    assert_eq!(governor.usage_for(&account), ResourceTally::default());
+}
+
+#[tokio::test]
 async fn mcp_lane_auth_failure_returns_manifest_credential_context_and_releases_reservation() {
     let client = RecordingMcpClient::new(Err(McpClientError::AuthRequired));
     let runtime = McpRuntime::new(McpRuntimeConfig::for_testing(), client);
@@ -88,7 +103,7 @@ async fn mcp_lane_auth_failure_returns_manifest_credential_context_and_releases_
             assert_eq!(credential_requirements.len(), 1);
             assert_eq!(
                 credential_requirements[0].provider,
-                RuntimeCredentialAccountProviderId::new("github").unwrap()
+                VendorId::new("github").unwrap()
             );
             assert_eq!(
                 credential_requirements[0].requester_extension,
@@ -171,7 +186,7 @@ fn mcp_governor() -> (InMemoryResourceGovernor, ResourceAccount) {
 }
 
 fn package_from_manifest(manifest: &str) -> ExtensionPackage {
-    let manifest = ExtensionManifest::parse_with_optional_host_api_contracts(
+    let manifest = ExtensionManifest::parse(
         manifest,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
@@ -195,12 +210,10 @@ fn governor_with_default_limit(account: ResourceAccount) -> InMemoryResourceGove
     governor
         .set_limit(
             account,
-            ResourceLimits {
-                max_concurrency_slots: Some(10),
-                max_process_count: Some(10),
-                max_output_bytes: Some(100_000),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_concurrency_slots(10)
+                .set_max_process_count(10)
+                .set_max_output_bytes(100_000),
         )
         .unwrap();
     governor
@@ -220,12 +233,10 @@ fn mcp_request_from_manifest(
         package,
         capability_id,
         scope: sample_scope(),
-        estimate: ResourceEstimate {
-            concurrency_slots: Some(1),
-            process_count: Some(1),
-            output_bytes: Some(10_000),
-            ..ResourceEstimate::default()
-        },
+        estimate: ResourceEstimate::default()
+            .set_concurrency_slots(1)
+            .set_process_count(1)
+            .set_output_bytes(10_000),
         resource_reservation: None,
         invocation: McpInvocation { input },
     }

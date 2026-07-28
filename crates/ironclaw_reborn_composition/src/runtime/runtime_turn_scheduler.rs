@@ -1,4 +1,4 @@
-use ironclaw_host_runtime::{SchedulerTurnRunWakeNotifier, TurnRunSchedulerHandle};
+use ironclaw_runner::turn_scheduler::{SchedulerTurnRunWakeNotifier, TurnRunSchedulerHandle};
 use ironclaw_turns::{TurnRunWake, TurnRunWakeNotifier};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -49,7 +49,9 @@ impl RuntimeTurnScheduler {
 
     /// Fire-and-forget wake nudge to the scheduler.
     pub(super) fn notify(&self, wake: TurnRunWake) {
-        let _ = self.notifier.notify_queued_run(wake);
+        if let Err(error) = self.notifier.notify_queued_run(wake) {
+            tracing::debug!(?error, "best-effort scheduler wake nudge failed");
+        }
     }
 
     /// Graceful shutdown. Sets `stopped` BEFORE draining the handle so any

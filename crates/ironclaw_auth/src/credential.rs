@@ -9,8 +9,8 @@ use tokio::sync::OwnedMutexGuard;
 
 use crate::{
     AuthProductError, AuthProviderClient, CredentialAccountId, CredentialAccountLabel,
-    OAuthProviderRefreshRequest, ProviderScope, Timestamp, ids::AuthProviderId,
-    scope::AuthProductScope, scope_matches,
+    OAuthProviderIdentity, OAuthProviderRefreshRequest, ProviderScope, Timestamp,
+    ids::AuthProviderId, scope::AuthProductScope, scope_matches,
 };
 
 /// Credential account status projected to product surfaces.
@@ -51,6 +51,8 @@ pub struct CredentialAccount {
     pub access_secret: Option<SecretHandle>,
     pub refresh_secret: Option<SecretHandle>,
     pub scopes: Vec<ProviderScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_identity: Option<OAuthProviderIdentity>,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
 }
@@ -76,6 +78,7 @@ impl fmt::Debug for CredentialAccount {
                 &self.refresh_secret.as_ref().map(|_| "[REDACTED]"),
             )
             .field("scopes", &self.scopes)
+            .field("provider_identity", &self.provider_identity)
             .field("created_at", &self.created_at)
             .field("updated_at", &self.updated_at)
             .finish()
@@ -1093,6 +1096,7 @@ mod tests {
             access_secret: None,
             refresh_secret: None,
             scopes: vec![ProviderScope::new("read").unwrap()],
+            provider_identity: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

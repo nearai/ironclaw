@@ -1,22 +1,24 @@
-//! In-process `OutboundPreferencesProductFacade` double for the C-SYNTH seam
+//! In-process `OutboundPreferencesProductService` double for the C-SYNTH seam
 //! (`ironclaw_reborn_composition::runtime::local_dev::outbound_delivery`). Fixed
 //! in-memory inventory: succeeds for a known target, `NotFound` otherwise — one
 //! double drives both the happy path and the reject route without per-test
 //! config. Distinct from `delivery::RecordingOutboundDeliverySink` (the
-//! final-reply delivery sink; this is the delivery-*preference* facade).
+//! final-reply delivery sink; this is the delivery-*preference* service).
 
 #![allow(dead_code)]
 
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_product_workflow::{
-    OutboundPreferencesProductFacade, RebornOutboundDeliveryModality,
+use ironclaw_host_api::{
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+};
+use ironclaw_product::{
+    OutboundPreferencesProductService, RebornOutboundDeliveryModality,
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
     RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
-    RebornOutboundPreferencesResponse, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, WebUiAuthenticatedCaller,
+    RebornOutboundPreferencesResponse, RebornSetOutboundPreferencesRequest,
 };
 
 /// Bundled behind ONE mutex (not two) so a reader never observes `set_calls`
@@ -27,16 +29,16 @@ struct FakeOutboundState {
     last_accepted: Option<RebornOutboundDeliveryTargetSummary>,
 }
 
-/// Fixed in-memory `OutboundPreferencesProductFacade` double. Stateful:
+/// Fixed in-memory `OutboundPreferencesProductService` double. Stateful:
 /// `set_outbound_preferences` updates `last_accepted`, and
 /// `get_outbound_preferences` reads it back — proves a `set` persisted via a
-/// different facade method, not just an echo.
-pub(crate) struct FakeOutboundPreferencesFacade {
+/// different service method, not just an echo.
+pub(crate) struct FakeOutboundPreferencesService {
     targets: Vec<RebornOutboundDeliveryTargetOption>,
     state: Mutex<FakeOutboundState>,
 }
 
-impl FakeOutboundPreferencesFacade {
+impl FakeOutboundPreferencesService {
     /// Seed a double whose inventory carries two Slack targets. A `target_set`
     /// call for either id resolves; any other id surfaces as `NotFound`.
     pub(crate) fn with_default_targets() -> Arc<Self> {
@@ -44,13 +46,17 @@ impl FakeOutboundPreferencesFacade {
             targets: vec![
                 target_option("slack:dm:alpha", "Slack DM Alpha"),
                 target_option("slack:channel:beta", "Slack Channel Beta"),
+                target_option(
+                    ironclaw_outbound::WEB_APP_OUTBOUND_DELIVERY_TARGET_ID,
+                    "Web App",
+                ),
             ],
             state: Mutex::new(FakeOutboundState::default()),
         })
     }
 
     /// Target ids passed to `set_outbound_preferences`, in call order — proves a
-    /// `Completed` outcome reached the facade (a no-op set would leave this empty).
+    /// `Completed` outcome reached the service (a no-op set would leave this empty).
     pub(crate) fn recorded_set_target_ids(&self) -> Vec<String> {
         self.state
             .lock()
@@ -73,11 +79,11 @@ impl FakeOutboundPreferencesFacade {
 }
 
 #[async_trait]
-impl OutboundPreferencesProductFacade for FakeOutboundPreferencesFacade {
+impl OutboundPreferencesProductService for FakeOutboundPreferencesService {
     async fn get_outbound_preferences(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        _caller: ProductSurfaceCaller,
+    ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
         let last_accepted = self
             .state
             .lock()
@@ -96,9 +102,9 @@ impl OutboundPreferencesProductFacade for FakeOutboundPreferencesFacade {
 
     async fn set_outbound_preferences(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         request: RebornSetOutboundPreferencesRequest,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+    ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
         let Some(target_id) = request.final_reply_target_id else {
             return Err(target_not_found());
         };
@@ -122,8 +128,8 @@ impl OutboundPreferencesProductFacade for FakeOutboundPreferencesFacade {
 
     async fn list_outbound_delivery_targets(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
+        _caller: ProductSurfaceCaller,
+    ) -> Result<RebornOutboundDeliveryTargetListResponse, ProductSurfaceError> {
         Ok(RebornOutboundDeliveryTargetListResponse {
             targets: self.targets.clone(),
             next_cursor: None,
@@ -151,10 +157,10 @@ fn target_option(target_id: &str, display_name: &str) -> RebornOutboundDeliveryT
 /// The `NotFound` the production handler maps to `Failed(InvalidInput)` — see
 /// `OutboundDeliveryTargetSetHandler`'s `NotFound` arm in
 /// `runtime/local_dev/outbound_delivery.rs`.
-fn target_not_found() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::NotFound,
-        kind: RebornServicesErrorKind::NotFound,
+fn target_not_found() -> ProductSurfaceError {
+    ProductSurfaceError {
+        code: ProductSurfaceErrorCode::NotFound,
+        kind: ProductSurfaceErrorKind::NotFound,
         status_code: 404,
         retryable: false,
         field: None,

@@ -89,6 +89,10 @@ pub struct AuthContinuationEvent {
     pub flow_id: AuthFlowId,
     pub scope: AuthProductScope,
     pub continuation: AuthContinuationRef,
+    /// Provider of the completed flow, so dispatchers can fan the completion
+    /// out to other runs blocked on the same provider's credentials without
+    /// re-reading the flow record.
+    pub provider: AuthProviderId,
     pub credential_account_id: Option<CredentialAccountId>,
     pub emitted_at: Timestamp,
 }
@@ -199,7 +203,7 @@ pub struct NewAuthFlow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderCallbackOutcome {
     Authorized {
-        exchange: crate::OAuthProviderExchange,
+        exchange: Box<crate::OAuthProviderExchange>,
     },
     Denied,
 }
@@ -249,6 +253,16 @@ pub struct OAuthCallbackClaimRequest {
 
 #[async_trait]
 pub trait AuthFlowManager: Send + Sync {
+    /// Mint a new durable auth flow.
+    ///
+    /// Contract: when the request's continuation is setup-class
+    /// ([`is_setup_class_continuation`]), creation itself supersedes — it
+    /// cancels every prior non-terminal setup-class flow for the same owner
+    /// root + provider before the new flow becomes visible,
+    /// so "≤1 live setup-class flow per owner+provider" holds structurally and
+    /// no start route can forget it. `TurnGateResume`/`ProductActionResume`
+    /// creations supersede nothing and are never superseded: a parked
+    /// turn/action must outlive an unrelated setup start.
     async fn create_flow(&self, request: NewAuthFlow) -> Result<AuthFlowRecord, AuthProductError>;
 
     async fn get_flow(
@@ -305,6 +319,57 @@ pub trait AuthFlowManager: Send + Sync {
         scope: &AuthProductScope,
         flow_id: AuthFlowId,
     ) -> Result<AuthFlowRecord, AuthProductError>;
+
+    /// Terminalize a completed OAuth flow whose typed continuation dispatch
+    /// failed terminally.
+    ///
+    /// The honest extension state machine treats a failed lifecycle activation
+    /// as terminal: the completed flow must not remain re-dispatchable, so a
+    /// `Completed` flow whose continuation has not yet been acknowledged
+    /// (`continuation_emitted_at` is `None`) transitions to `Failed` carrying
+    /// `error`. A flow that already acknowledged its continuation, or that is
+    /// already terminal in another state, returns
+    /// [`AuthProductError::FlowAlreadyTerminal`] and is left untouched — the
+    /// call is safe to race against a concurrent completion.
+    async fn fail_completed_continuation(
+        &self,
+        scope: &AuthProductScope,
+        flow_id: AuthFlowId,
+        error: AuthErrorCode,
+    ) -> Result<AuthFlowRecord, AuthProductError>;
+}
+
+/// Whether a continuation belongs to the setup surface — the class a new setup
+/// start supersedes. `SetupOnly` is the plain web connect button;
+/// `LifecycleActivation` is the extension card's connect button, which
+/// `start_setup_oauth_flow` receives verbatim. Both mean "the user is
+/// (re-)connecting this provider from a settings surface", so a fresh start
+/// replaces them. `TurnGateResume` and `ProductActionResume` have a parked
+/// turn/action waiting on them and must outlive an unrelated setup start.
+pub fn is_setup_class_continuation(continuation: &AuthContinuationRef) -> bool {
+    matches!(
+        continuation,
+        AuthContinuationRef::SetupOnly | AuthContinuationRef::LifecycleActivation { .. }
+    )
+}
+
+/// Owner-root match for supersede-on-start: two auth scopes share a setup-flow
+/// root iff they carry the same owner (tenant/user/agent/project), surface, and
+/// session — the exact granularity of the durable flow-root path, which omits
+/// the transient thread/mission/invocation axes. Full scope equality would miss
+/// a prior setup flow started under a different per-request invocation.
+pub fn flow_shares_setup_owner_root(
+    flow_scope: &AuthProductScope,
+    scope: &AuthProductScope,
+) -> bool {
+    let flow_resource = &flow_scope.resource;
+    let resource = &scope.resource;
+    flow_resource.tenant_id == resource.tenant_id
+        && flow_resource.user_id == resource.user_id
+        && flow_resource.agent_id == resource.agent_id
+        && flow_resource.project_id == resource.project_id
+        && flow_scope.surface == scope.surface
+        && flow_scope.session_id == scope.session_id
 }
 
 /// Read-only auth-flow projection source for product interaction views.

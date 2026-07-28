@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use crate::state::{IndexedMessageKind, LoopExecutionState, MessageIndexEntry};
+use crate::state::{
+    CompactionEffectivenessBaseline, IndexedMessageKind, LoopExecutionState, MessageIndexEntry,
+};
 use ironclaw_host_api::CapabilityId;
 use ironclaw_turns::run_profile::{CompactionInitiator, LoopRunContext, PromptContextTokenBudget};
 
@@ -29,6 +31,13 @@ pub(crate) enum CompactionDecision {
         drop_through_seq: u64,
         preserve_tail_tokens: u64,
         deadline_ms: u64,
+        /// Trigger-kind-specific yardstick for circuit-breaker accounting.
+        /// The executor compares the refreshed post-compaction prompt
+        /// estimate against it to decide whether the compaction was
+        /// effective: threshold-triggered compactions carry the transcript
+        /// threshold, forced compactions carry the pre-compaction prompt
+        /// estimate.
+        effectiveness_baseline: CompactionEffectivenessBaseline,
     },
 }
 
@@ -51,15 +60,38 @@ impl DefaultCompactionStrategy {
         if threshold <= self.preserve_tail_tokens {
             return false;
         }
-        state.compaction_state.force_compact_on_next_iteration
-            || state.compaction_prompt.observed_prompt_tokens >= threshold
+        // Forced/recovery compactions (context-overflow retry, byte-cap
+        // overflow) bypass the circuit breaker: they are the loop's only
+        // mechanism for shrinking an oversized prompt before a retry, so
+        // suppressing them would silently rebuild the same prompt until the
+        // retry budget aborts. The breaker only gates automatic
+        // threshold-triggered compaction.
+        if state.compaction_state.force_compact_on_next_iteration {
+            return true;
+        }
+        !state.compaction_state.compaction_circuit_open
+            && state.compaction_prompt.observed_prompt_tokens >= threshold
     }
 
-    pub(super) fn trigger_at(&self, drop_through_seq: u64) -> CompactionDecision {
+    pub(super) fn trigger_at(
+        &self,
+        state: &LoopExecutionState,
+        drop_through_seq: u64,
+    ) -> CompactionDecision {
+        let effectiveness_baseline = if state.compaction_state.force_compact_on_next_iteration {
+            CompactionEffectivenessBaseline::PreCompactionPromptTokens {
+                tokens: state.compaction_prompt.observed_prompt_tokens,
+            }
+        } else {
+            CompactionEffectivenessBaseline::TriggerThresholdTokens {
+                tokens: self.prompt_context_budget.visible_transcript_tokens(),
+            }
+        };
         CompactionDecision::Trigger {
             drop_through_seq,
             preserve_tail_tokens: self.preserve_tail_tokens,
             deadline_ms: self.deadline_ms,
+            effectiveness_baseline,
         }
     }
 }
@@ -86,7 +118,7 @@ impl CompactionStrategy for DefaultCompactionStrategy {
         let prompt_fingerprint = state.compaction_prompt.fingerprint();
         if state.compaction_state.force_compact_on_next_iteration {
             return latest_eligible_user_boundary(state, prompt_fingerprint)
-                .map(|sequence| self.trigger_at(sequence))
+                .map(|sequence| self.trigger_at(state, sequence))
                 .unwrap_or(CompactionDecision::Skip);
         }
 
@@ -97,7 +129,7 @@ impl CompactionStrategy for DefaultCompactionStrategy {
             0,
             |_| true,
         )
-        .map(|sequence| self.trigger_at(sequence))
+        .map(|sequence| self.trigger_at(state, sequence))
         .unwrap_or(CompactionDecision::Skip)
     }
 }
@@ -244,8 +276,8 @@ impl CompactionForceStrategy for ByteCapStrategy {
 mod tests {
     use super::*;
     use crate::state::{
-        CompactionPromptSnapshot, CompactionStrategyState, DeferredCompactionWatermark,
-        LoopExecutionState, MessageIndexEntry,
+        CompactionEffectivenessBaseline, CompactionPromptSnapshot, CompactionStrategyState,
+        DeferredCompactionWatermark, LoopExecutionState, MessageIndexEntry,
     };
     use ironclaw_host_api::CapabilityId;
     use ironclaw_turns::run_profile::PromptContextTokenBudget;
@@ -377,6 +409,9 @@ mod tests {
                 drop_through_seq: 1,
                 preserve_tail_tokens: 60,
                 deadline_ms: 7,
+                effectiveness_baseline: CompactionEffectivenessBaseline::TriggerThresholdTokens {
+                    tokens: 90,
+                },
             }
         );
     }
@@ -410,6 +445,9 @@ mod tests {
                 drop_through_seq: 1,
                 preserve_tail_tokens: 60,
                 deadline_ms: 7,
+                effectiveness_baseline: CompactionEffectivenessBaseline::TriggerThresholdTokens {
+                    tokens: 90,
+                },
             }
         );
     }
@@ -492,6 +530,8 @@ mod tests {
                 drop_through_seq: 1,
                 preserve_tail_tokens: 1,
                 deadline_ms: 7,
+                effectiveness_baseline:
+                    CompactionEffectivenessBaseline::PreCompactionPromptTokens { tokens: 30 },
             }
         );
     }
@@ -539,6 +579,9 @@ mod tests {
                 drop_through_seq: 1,
                 preserve_tail_tokens: 60,
                 deadline_ms: 7,
+                effectiveness_baseline: CompactionEffectivenessBaseline::TriggerThresholdTokens {
+                    tokens: 90,
+                },
             }
         );
     }
@@ -613,6 +656,8 @@ mod tests {
                 drop_through_seq: 3,
                 preserve_tail_tokens: 1,
                 deadline_ms: 7,
+                effectiveness_baseline:
+                    CompactionEffectivenessBaseline::PreCompactionPromptTokens { tokens: 30 },
             }
         );
     }
@@ -665,6 +710,8 @@ mod tests {
                 drop_through_seq: 5,
                 preserve_tail_tokens: 1,
                 deadline_ms: 7,
+                effectiveness_baseline:
+                    CompactionEffectivenessBaseline::PreCompactionPromptTokens { tokens: 50 },
             }
         );
     }
@@ -697,6 +744,9 @@ mod tests {
                 drop_through_seq: 1,
                 preserve_tail_tokens: 1,
                 deadline_ms: 7,
+                effectiveness_baseline: CompactionEffectivenessBaseline::TriggerThresholdTokens {
+                    tokens: 70,
+                },
             }
         );
     }
@@ -737,6 +787,76 @@ mod tests {
         );
 
         assert_eq!(boundary, Some(1));
+    }
+
+    #[test]
+    fn evaluate_skips_threshold_trigger_when_circuit_is_open() {
+        let context = crate::test_support::test_run_context("compaction-strategy-circuit-open");
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.compaction_state.compaction_circuit_open = true;
+        state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
+            MessageIndexEntry {
+                sequence: 1,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: 100,
+            },
+            MessageIndexEntry {
+                sequence: 2,
+                kind: IndexedMessageKind::Assistant,
+                estimated_tokens: 100,
+            },
+        ]);
+        let strategy = DefaultCompactionStrategy {
+            prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
+            preserve_tail_tokens: 1,
+            deadline_ms: 7,
+        };
+
+        assert_eq!(
+            strategy.should_compact(&state, &context),
+            CompactionDecision::Skip
+        );
+    }
+
+    #[test]
+    fn evaluate_triggers_forced_compaction_even_when_circuit_is_open() {
+        // BUG B1 regression: force_compact_on_next_iteration is how
+        // context-overflow recovery and byte-cap overflow request a shrink.
+        // An open breaker must not suppress it — only automatic
+        // threshold-triggered compaction is gated.
+        let context =
+            crate::test_support::test_run_context("compaction-strategy-circuit-open-forced");
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.compaction_state.compaction_circuit_open = true;
+        state.compaction_state.force_compact_on_next_iteration = true;
+        state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
+            MessageIndexEntry {
+                sequence: 1,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: 100,
+            },
+            MessageIndexEntry {
+                sequence: 2,
+                kind: IndexedMessageKind::Assistant,
+                estimated_tokens: 100,
+            },
+        ]);
+        let strategy = DefaultCompactionStrategy {
+            prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
+            preserve_tail_tokens: 1,
+            deadline_ms: 7,
+        };
+
+        assert_eq!(
+            strategy.should_compact(&state, &context),
+            CompactionDecision::Trigger {
+                drop_through_seq: 1,
+                preserve_tail_tokens: 1,
+                deadline_ms: 7,
+                effectiveness_baseline:
+                    CompactionEffectivenessBaseline::PreCompactionPromptTokens { tokens: 200 },
+            }
+        );
     }
 
     // --- ByteCapStrategy tests ---

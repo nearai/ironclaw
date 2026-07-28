@@ -10,9 +10,13 @@
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
+use ironclaw_host_runtime::{MEMORY_SEARCH_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID};
 use serde_json::json;
 
 pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+    // Positive control for the Disabled-binding scenario: with the default
+    // (native-shaped) registration, the memory tools ARE on the model's tool
+    // surface. Asserted after the writer turn below.
     // ── Thread A: writer ────────────────────────────────────────────────────
     // Seed a short, distinctive sentence so the FTS snippet returned by search
     // contains the marker token verbatim.
@@ -20,7 +24,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .thread("conv-memory-search-writer")
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.memory_write",
+                MEMORY_WRITE_CAPABILITY_ID,
                 json!({
                     "target": "memory",
                     "content": "remember that the staging rollback codename is osprey-meridian-7",
@@ -32,7 +36,14 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .build()
         .await?;
     writer.submit_turn("note the rollback codename").await?;
-    writer.assert_tool_invoked("builtin.memory_write").await?;
+    writer
+        .assert_tool_invoked(MEMORY_WRITE_CAPABILITY_ID)
+        .await?;
+    // Positive control for `scenario_disabled_binding_offers_no_memory_tools`:
+    // with the default (native-shaped) registration the memory tools ARE on
+    // the model's tool surface, so the Disabled scenario's absence assertions
+    // discriminate rather than pass vacuously.
+    writer.assert_model_tool_offered("ironclaw__memory__search")?;
 
     // ── Thread B: searcher (DIFFERENT conversation, SAME shared store) ──────
     // Query overlaps the seeded sentence; the matched chunk's snippet must
@@ -41,7 +52,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .thread("conv-memory-searcher")
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.memory_search",
+                MEMORY_SEARCH_CAPABILITY_ID,
                 json!({"query": "staging rollback codename", "limit": 5}),
             ),
             RebornScriptedReply::text("found"),
@@ -52,7 +63,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .submit_turn("what is the rollback codename")
         .await?;
     searcher
-        .assert_tool_invoked("builtin.memory_search")
+        .assert_tool_invoked(MEMORY_SEARCH_CAPABILITY_ID)
         .await?;
     // The hit's snippet includes the marker → search located the seeded doc.
     searcher

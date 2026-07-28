@@ -2,9 +2,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AcceptedMessageRef, GateRef, IdempotencyKey, ProductTurnContext, ReplyTargetBindingRef,
-    RunProfileRequest, SanitizedCancelReason, SourceBindingRef, TurnActor, TurnRunId, TurnScope,
-    TurnStatus,
+    AcceptedMessageRef, GateKind, GateRef, IdempotencyKey, ProductTurnContext,
+    ReplyTargetBindingRef, RunProfileRequest, SanitizedCancelReason, SourceBindingRef, TurnActor,
+    TurnRunId, TurnScope, TurnStatus,
 };
 
 pub type TurnTimestamp = DateTime<Utc>;
@@ -18,6 +18,15 @@ pub enum GateResumeDisposition {
     ///
     /// New variants (e.g. `Deferred`) may be added here as needs arise.
     Denied,
+}
+
+impl GateResumeDisposition {
+    /// Stable snake_case value shared with the serde wire representation.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Denied => "denied",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,15 +48,21 @@ impl ResumeTurnPrecondition {
         matches!(self, Self::AnyBlockedGate)
     }
 
-    pub fn required_status(&self) -> Option<TurnStatus> {
+    /// The gate kind this precondition requires, or `None` for the default
+    /// `AnyBlockedGate` (which accepts any blocked-gate status).
+    pub fn gate_kind(&self) -> Option<GateKind> {
         match self {
             Self::AnyBlockedGate => None,
-            Self::BlockedApprovalGate => Some(TurnStatus::BlockedApproval),
-            Self::BlockedAuthGate => Some(TurnStatus::BlockedAuth),
-            Self::BlockedResourceGate => Some(TurnStatus::BlockedResource),
-            Self::BlockedDependentRunGate => Some(TurnStatus::BlockedDependentRun),
-            Self::BlockedExternalToolGate => Some(TurnStatus::BlockedExternalTool),
+            Self::BlockedApprovalGate => Some(GateKind::Approval),
+            Self::BlockedAuthGate => Some(GateKind::Auth),
+            Self::BlockedResourceGate => Some(GateKind::Resource),
+            Self::BlockedDependentRunGate => Some(GateKind::AwaitDependentRun),
+            Self::BlockedExternalToolGate => Some(GateKind::ExternalTool),
         }
+    }
+
+    pub fn required_status(&self) -> Option<TurnStatus> {
+        self.gate_kind().map(GateKind::blocked_status)
     }
 }
 
@@ -59,6 +74,11 @@ pub struct SubmitTurnRequest {
     pub source_binding_ref: SourceBindingRef,
     pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub requested_run_profile: Option<RunProfileRequest>,
+    /// Caller-requested model for this turn. A hint the coordinator resolves to a
+    /// concrete per-run model route when the operator has it configured; when it
+    /// can't be resolved the run falls back to the deployment's active model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_model: Option<String>,
     pub idempotency_key: IdempotencyKey,
     pub received_at: TurnTimestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -171,7 +191,8 @@ mod tests {
     fn gate_resume_disposition_denied_round_trips() {
         let disposition = GateResumeDisposition::Denied;
         let json = serde_json::to_string(&disposition).expect("serialize");
-        assert!(json.contains("denied"), "wire value is snake_case: {json}");
+        assert_eq!(disposition.as_str(), "denied");
+        assert_eq!(json, format!("\"{}\"", disposition.as_str()));
         let decoded: GateResumeDisposition = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(disposition, decoded);
     }

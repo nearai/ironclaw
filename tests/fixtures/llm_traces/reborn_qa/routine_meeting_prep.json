@@ -76,58 +76,12 @@
         {
           "tool_call_id": "toolu_013ddSGUqroQQEAaXQaGesQ8",
           "name": "builtin__extension_search",
-          "content": " object payload object count 1 extensions array object credential_requirements array object name google_calendar_account provider google required true setup object kind oauth scopes array https:  www.googleapis.com auth calendar.events https:  www.googleapis.com auth calendar.readonly description First-party Google Calendar capabilities for Reborn. name Google Calendar onboarding object credential_instructions Authorize the Google account that IronClaw should use for Google Calendar. credential_next_step After authorization completes, activate Google Calendar to publish its tools. instructions Google Calendar needs Google OAuth authorization before calendar tools can run. package_ref object id google-calendar kind extension runtime_kind first_party source host_bundled version 0.1.0 visible_capability_ids array google-calendar.list_calendars google-calendar.list_events google-calendar.get_event google-calendar.find_free_slots google-calendar.create_event google-calendar.update_event google-calendar.delete_event google-calendar.add_attendees google-calendar.set_reminder visible_read_only_capability_ids array google-calendar.list_calendars google-calendar.list_events google-calendar.get_event google-calendar.find_free_slots kind extension_search phase discovered"
+          "content": " object payload object count 1 extensions array object credential_requirements array object name google_calendar_account provider google required true setup object kind oauth scopes array https:  www.googleapis.com auth calendar.events https:  www.googleapis.com auth calendar.readonly description First-party Google Calendar capabilities for Reborn. name Google Calendar onboarding object credential_instructions Authorize the Google account that IronClaw should use for Google Calendar. credential_next_step After authorization completes, IronClaw finishes Google Calendar installation automatically and publishes its tools. instructions Google Calendar needs Google OAuth authorization before calendar tools can run. package_ref object id google-calendar kind extension runtime_kind first_party source host_bundled version 0.1.0 visible_capability_ids array google-calendar.list_calendars google-calendar.list_events google-calendar.get_event google-calendar.find_free_slots google-calendar.create_event google-calendar.update_event google-calendar.delete_event google-calendar.add_attendees google-calendar.set_reminder visible_read_only_capability_ids array google-calendar.list_calendars google-calendar.list_events google-calendar.get_event google-calendar.find_free_slots kind extension_search phase discovered"
         },
         {
           "tool_call_id": "toolu_01PdBYsv9ng8W178g2ThTqzU",
           "name": "builtin__extension_search",
           "content": " object payload object count 1 extensions array object credential_requirements array object name google_runtime_token provider google required true setup object kind oauth scopes array https:  www.googleapis.com auth drive https:  www.googleapis.com auth drive.readonly description Google Drive capabilities for searching, accessing, uploading, sharing, and organizing files and folders. name Google Drive package_ref object id google-drive kind extension runtime_kind wasm_tool source host_bundled version 0.1.0 visible_capability_ids array google-drive.list_files google-drive.get_file google-drive.download_file google-drive.upload_file google-drive.update_file google-drive.create_folder google-drive.delete_file google-drive.trash_file google-drive.share_file google-drive.list_permissions google-drive.remove_permission google-drive.list_shared_drives visible_read_only_capability_ids array google-drive.list_files google-drive.get_file google-drive.download_file google-drive.list_permissions google-drive.list_shared_drives kind extension_search phase discovered"
-        }
-      ]
-    },
-    {
-      "request_hint": {
-        "last_user_message_contains": "Every 30 minutes in UTC, use my Google Calendar to find the company for my next ",
-        "min_message_count": 9
-      },
-      "response": {
-        "type": "tool_calls",
-        "tool_calls": [
-          {
-            "id": "toolu_01CCgM8mYVdFoRoezPjw1eCP",
-            "name": "builtin__extension_activate",
-            "arguments": {
-              "extension_id": "google-calendar"
-            }
-          },
-          {
-            "id": "toolu_01XY4SJcxPQDjFZpRBVvdGfg",
-            "name": "builtin__extension_activate",
-            "arguments": {
-              "extension_id": "google-drive"
-            }
-          },
-          {
-            "id": "toolu_01NWp4dNE9mm44rhrm1awvV6",
-            "name": "builtin__outbound_delivery_target_set",
-            "arguments": {
-              "target_id": "email:qa-trace-inbox"
-            }
-          }
-        ],
-        "input_tokens": 13742,
-        "output_tokens": 155
-      },
-      "expected_tool_results": [
-        {
-          "tool_call_id": "toolu_01KjLX7NJxhv6mUvhFaEbQPG",
-          "name": "builtin__extension_install",
-          "content": " object package_ref object id google-calendar kind extension payload object installed true kind extension_install next_step Call builtin.extension_activate now with input  \"extension_id\":\"google-calendar\" . Activation publishes the tools and opens the auth gate if credentials are missing. visible_capability_ids array google-calendar.list_calendars google-calendar.list_events google-calendar.get_event google-calendar.find_free_slots google-calendar.create_event google-calendar.update_event google-calendar.delete_event google-calendar.add_attendees google-calendar.set_reminder phase installed"
-        },
-        {
-          "tool_call_id": "toolu_01VuMjxD5MBKVCvzL6S6KPdf",
-          "name": "builtin__extension_install",
-          "content": " object package_ref object id google-drive kind extension payload object installed true kind extension_install next_step Call builtin.extension_activate now with input  \"extension_id\":\"google-drive\" . Activation publishes the tools and opens the auth gate if credentials are missing. visible_capability_ids array google-drive.list_files google-drive.get_file google-drive.download_file google-drive.upload_file google-drive.update_file google-drive.create_folder google-drive.delete_file google-drive.trash_file google-drive.share_file google-drive.list_permissions google-drive.remove_permission google-drive.list_shared_drives phase installed"
         }
       ]
     },
@@ -145,7 +99,11 @@
             "arguments": {
               "name": "Meeting Prep Summary (every 30 min)",
               "prompt": "You are running an automated meeting-prep routine. Follow every step below completely before sending the email.\n\n## Step 1 — Find the next upcoming meeting\nUse google-calendar.list_calendars to get all calendars, then google-calendar.list_events on the primary calendar with time_min = now (UTC ISO-8601) and time_max = 24 hours from now, max_results = 10. Pick the single next upcoming event (earliest start time in the future). Extract:\n- Meeting title\n- Start/end time\n- Attendees and their organizations (infer company from email domains; exclude your own domain)\n- Meeting description / notes\n\nIf no upcoming meetings are found in the next 24 hours, do nothing — do not send an email.\n\n## Step 2 — Identify the company\nFrom the attendees' email domains and the meeting title/description, identify the primary external company name. If multiple external companies are present, pick the most prominent one.\n\n## Step 3 — Search Google Drive for relevant files\nUse google-drive.list_files with search queries targeting the company name and meeting context. Try at least two queries:\n1. fullText contains '\"COMPANY_NAME\"'\n2. name contains 'COMPANY_NAME'\nDownload (google-drive.download_file) the top 3 most relevant files and extract key facts: deal status, open issues, last contact, pricing, contracts, notes, etc.\n\n## Step 4 — Fetch latest web news\nUse builtin.http to fetch recent news about the company. Try:\n- https://news.google.com/rss/search?q=COMPANY_NAME&hl=en-US&gl=US&ceid=US:en\nParse the RSS XML for the top 5 headlines (title + source + pubDate + link).\n\n## Step 5 — Compose and send the meeting-prep email\nSend (via your configured Email delivery target) a well-structured HTML-friendly email with these sections:\n\n**Subject:** Meeting Prep: [Meeting Title] with [Company] — [Date & Time UTC]\n\n**Body sections:**\n1. 📅 **Meeting Overview** — title, time, attendees\n2. 🏢 **Company Snapshot** — what you know about this company from Drive files (deal stage, key contacts, context, open items)\n3. 📰 **Latest News** — top 5 headlines with links, source, and date\n4. ✅ **Suggested Talking Points** — 3–5 bullet points synthesized from the Drive context and news\n5. 📁 **Source Files** — list the Drive files referenced with their names\n\nBe concise, professional, and actionable. Use clear section headers.",
-              "schedule": { "kind": "cron", "expression": "*/30 * * * *", "timezone": "UTC" }
+              "schedule": {
+                "kind": "cron",
+                "expression": "*/30 * * * *",
+                "timezone": "UTC"
+              }
             }
           }
         ],
@@ -153,16 +111,6 @@
         "output_tokens": 752
       },
       "expected_tool_results": [
-        {
-          "tool_call_id": "toolu_01CCgM8mYVdFoRoezPjw1eCP",
-          "name": "builtin__extension_activate",
-          "content": " object message Extension activation succeeded and its tools are now available. No additional authorization or configuration is needed unless a later tool call reports auth_required. package_ref object id google-calendar kind extension payload object activated true kind extension_activate visible_capability_ids array google-calendar.list_calendars google-calendar.list_events google-calendar.get_event google-calendar.find_free_slots google-calendar.create_event google-calendar.update_event google-calendar.delete_event google-calendar.add_attendees google-calendar.set_reminder phase active"
-        },
-        {
-          "tool_call_id": "toolu_01XY4SJcxPQDjFZpRBVvdGfg",
-          "name": "builtin__extension_activate",
-          "content": " object message Extension activation succeeded and its tools are now available. No additional authorization or configuration is needed unless a later tool call reports auth_required. package_ref object id google-drive kind extension payload object activated true kind extension_activate visible_capability_ids array google-drive.list_files google-drive.get_file google-drive.download_file google-drive.upload_file google-drive.update_file google-drive.create_folder google-drive.delete_file google-drive.trash_file google-drive.share_file google-drive.list_permissions google-drive.remove_permission google-drive.list_shared_drives phase active"
-        },
         {
           "tool_call_id": "toolu_01NWp4dNE9mm44rhrm1awvV6",
           "name": "builtin__outbound_delivery_target_set",

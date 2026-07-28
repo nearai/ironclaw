@@ -226,6 +226,26 @@ Returns a `ToolCompletionResponse` with `FinishReason::ToolUse`. The agent loop 
 | `name` | string | Must match a registered tool name (e.g. `echo`, `write_file`, `read_file`, `memory_write`, `shell`). |
 | `arguments` | object | Tool parameters as JSON. Must conform to the tool's `parameters_schema()`. |
 
+#### Binding a later call to an earlier tool result
+
+When a provider creates a fresh resource, later calls must use the ID returned
+by the current replay—not the stale ID captured during recording. Reference
+the exact tool call and an RFC 6901 JSON Pointer into its result:
+
+```json
+{
+  "file_id": {
+    "$trace_result": {
+      "tool_call_id": "call_upload_1",
+      "pointer": "/file/id"
+    }
+  }
+}
+```
+
+Missing call IDs or pointers fail loudly. Replay never searches by tool name
+or guesses among similarly named fields.
+
 #### `user_input` -- user message marker (recording only)
 
 ```json
@@ -332,12 +352,7 @@ llm_traces/
     memory_save_recall.json # Memory write -> memory search -> confirm
     robust_correct_tool.json
   coverage/                 # Broader tool and feature coverage
-    shell_echo.json         # Shell command execution
-    list_dir.json           # Directory listing
-    apply_patch_chain.json  # File patching workflow
-    json_operations.json    # JSON tool usage
     injection_in_echo.json  # Prompt injection in tool output
-    memory_full_cycle.json  # Full memory write/search/read cycle
     status_events_tool_chain.json
     approval_yes.json              # Approval round-trip: user approves -> tool runs
     approval_no.json               # Approval round-trip: user denies -> tool skipped

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use ironclaw_host_api::CapabilityId;
 use ironclaw_turns::run_profile::CompactionInitiator;
@@ -32,6 +32,94 @@ pub struct CompactionStrategyState {
     /// instead of falling back to `Auto`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub force_compact_initiator: Option<CompactionInitiator>,
+    /// Consecutive completed compactions whose refreshed prompt token
+    /// estimate stayed at or above their effectiveness baseline —
+    /// compaction ran but did not relieve context pressure, so it would fire
+    /// again immediately. Reset to zero by any effective compaction.
+    #[serde(default)]
+    pub consecutive_ineffective_compactions: u32,
+    /// One-way circuit breaker: opened by `PromptCompactionStep` after
+    /// [`Self::INEFFECTIVE_COMPACTION_TRIP_LIMIT`] consecutive ineffective
+    /// compactions. While open, compaction strategies skip *automatic
+    /// threshold-triggered* compaction for the remainder of the run so a
+    /// doomed compact-recompact loop cannot keep burning summarization
+    /// inference on a prompt it can never shrink. Forced/recovery
+    /// compactions (`force_compact_on_next_iteration` — context-overflow
+    /// retry, byte-cap overflow) bypass the breaker: they are the loop's
+    /// only way to shrink an oversized prompt before a retry.
+    #[serde(default)]
+    pub compaction_circuit_open: bool,
+    /// Effectiveness baseline for a compaction that completed but whose
+    /// post-compaction prompt (including the injected summary) has not been
+    /// rebuilt yet. Set by `PromptCompactionStep` when a compaction
+    /// completes; consumed by the executor once the prompt bundle is next
+    /// rebuilt and `compaction_prompt.observed_prompt_tokens` reflects the
+    /// summary, at which point the effectiveness comparison runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_effectiveness_baseline: Option<CompactionEffectivenessBaseline>,
+}
+
+impl CompactionStrategyState {
+    /// Consecutive ineffective compactions tolerated before the circuit opens.
+    pub const INEFFECTIVE_COMPACTION_TRIP_LIMIT: u32 = 3;
+
+    /// Returns a new slot value with one completed compaction's effectiveness
+    /// recorded.
+    ///
+    /// `post_compaction_prompt_tokens` is the executor's refreshed prompt
+    /// token estimate after the compaction (summary included); `baseline` is
+    /// the trigger-kind-specific yardstick stamped on the compaction
+    /// decision. Staying at or above the baseline counts as ineffective;
+    /// dropping below it resets the consecutive counter. Once the circuit
+    /// opens it never closes for the rest of the run.
+    pub fn with_compaction_effectiveness_observed(
+        &self,
+        post_compaction_prompt_tokens: u64,
+        baseline: CompactionEffectivenessBaseline,
+    ) -> Self {
+        let mut next = self.clone();
+        if post_compaction_prompt_tokens >= baseline.tokens() {
+            next.consecutive_ineffective_compactions =
+                self.consecutive_ineffective_compactions.saturating_add(1);
+            if next.consecutive_ineffective_compactions >= Self::INEFFECTIVE_COMPACTION_TRIP_LIMIT {
+                next.compaction_circuit_open = true;
+            }
+        } else {
+            next.consecutive_ineffective_compactions = 0;
+        }
+        next
+    }
+}
+
+/// Trigger-kind-specific yardstick for judging whether a completed compaction
+/// relieved context pressure.
+///
+/// A threshold-triggered compaction is only useful if it brings the prompt
+/// back below the trigger threshold. A forced compaction (context-overflow
+/// recovery, byte-cap overflow) is triggered independently of the transcript
+/// threshold, so it is judged against the prompt size it started from: it
+/// helped iff the prompt actually shrank.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionEffectivenessBaseline {
+    /// Automatic threshold-triggered compaction: effective iff the refreshed
+    /// post-compaction prompt estimate drops below the visible-transcript
+    /// threshold that triggered it.
+    TriggerThresholdTokens { tokens: u64 },
+    /// Forced compaction: effective iff the refreshed post-compaction prompt
+    /// estimate drops below the pre-compaction prompt estimate.
+    PreCompactionPromptTokens { tokens: u64 },
+}
+
+impl CompactionEffectivenessBaseline {
+    /// Token count the refreshed post-compaction prompt is compared against;
+    /// staying at or above it marks the compaction ineffective.
+    pub fn tokens(&self) -> u64 {
+        match self {
+            Self::TriggerThresholdTokens { tokens }
+            | Self::PreCompactionPromptTokens { tokens } => *tokens,
+        }
+    }
 }
 
 /// Records the deferred cut point and prompt snapshot fingerprint for a
@@ -190,6 +278,81 @@ mod tests {
         assert_eq!(first.fingerprint(), second.fingerprint());
     }
 
+    fn threshold_baseline(tokens: u64) -> CompactionEffectivenessBaseline {
+        CompactionEffectivenessBaseline::TriggerThresholdTokens { tokens }
+    }
+
+    #[test]
+    fn compaction_effectiveness_trips_circuit_after_consecutive_ineffective_runs() {
+        let mut state = CompactionStrategyState::default();
+
+        // Two ineffective compactions: counter grows, circuit stays closed.
+        for expected in 1..CompactionStrategyState::INEFFECTIVE_COMPACTION_TRIP_LIMIT {
+            state = state.with_compaction_effectiveness_observed(100, threshold_baseline(90));
+            assert_eq!(state.consecutive_ineffective_compactions, expected);
+            assert!(!state.compaction_circuit_open);
+        }
+
+        // Third consecutive ineffective compaction opens the circuit.
+        state = state.with_compaction_effectiveness_observed(90, threshold_baseline(90));
+        assert_eq!(
+            state.consecutive_ineffective_compactions,
+            CompactionStrategyState::INEFFECTIVE_COMPACTION_TRIP_LIMIT
+        );
+        assert!(state.compaction_circuit_open);
+
+        // The circuit never closes, even after an effective compaction.
+        state = state.with_compaction_effectiveness_observed(10, threshold_baseline(90));
+        assert_eq!(state.consecutive_ineffective_compactions, 0);
+        assert!(state.compaction_circuit_open);
+    }
+
+    #[test]
+    fn compaction_effectiveness_resets_counter_when_tokens_drop_below_threshold() {
+        let state = CompactionStrategyState::default()
+            .with_compaction_effectiveness_observed(100, threshold_baseline(90))
+            .with_compaction_effectiveness_observed(100, threshold_baseline(90))
+            .with_compaction_effectiveness_observed(89, threshold_baseline(90));
+
+        assert_eq!(state.consecutive_ineffective_compactions, 0);
+        assert!(!state.compaction_circuit_open);
+    }
+
+    #[test]
+    fn forced_compaction_effectiveness_judges_against_pre_compaction_prompt() {
+        // BUG B3 regression: a forced compaction is judged against the prompt
+        // size it started from, not the unrelated transcript threshold. A
+        // prompt that shrank (140 < 260) is effective even though it would
+        // still be over a 90-token threshold; a prompt that did not shrink is
+        // ineffective even if it sits below that threshold.
+        let shrank = CompactionStrategyState::default()
+            .with_compaction_effectiveness_observed(100, threshold_baseline(90))
+            .with_compaction_effectiveness_observed(
+                140,
+                CompactionEffectivenessBaseline::PreCompactionPromptTokens { tokens: 260 },
+            );
+        assert_eq!(shrank.consecutive_ineffective_compactions, 0);
+
+        let did_not_shrink = CompactionStrategyState::default()
+            .with_compaction_effectiveness_observed(
+                80,
+                CompactionEffectivenessBaseline::PreCompactionPromptTokens { tokens: 80 },
+            );
+        assert_eq!(did_not_shrink.consecutive_ineffective_compactions, 1);
+    }
+
+    #[test]
+    fn compaction_state_deserializes_without_circuit_breaker_fields() {
+        // Pre-breaker checkpoints must rehydrate with the breaker closed.
+        let state: CompactionStrategyState =
+            serde_json::from_str(r#"{"force_compact_on_next_iteration":true}"#).expect("decode");
+
+        assert!(state.force_compact_on_next_iteration);
+        assert_eq!(state.consecutive_ineffective_compactions, 0);
+        assert!(!state.compaction_circuit_open);
+        assert_eq!(state.pending_effectiveness_baseline, None);
+    }
+
     #[test]
     fn fingerprint_changes_when_order_or_entries_change() {
         let baseline =
@@ -218,13 +381,20 @@ pub struct GoalRefreshStrategyState {
 
 /// Per-error-class attempt counters for the recovery strategy.
 ///
-/// Semantics: the retry budget is *not* durable across resume — on rehydration
-/// from a `BeforeSideEffect` checkpoint, counters reset to 0 so a fresh
-/// retry budget is granted post-resume.
+/// Retry counters and one-shot observation attempts are serialized into
+/// checkpoints so resume/rebase cannot silently grant an unbounded fresh
+/// recovery budget. Successful and ordinary non-retry decisions clear the
+/// slot; retry-exhaustion terminal checkpoints retain it as evidence of
+/// consumed attempts.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RecoveryStrategyState {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub attempts_by_class: BTreeMap<RecoveryAttemptClass, u32>,
+    /// Model-error classes that have already received their one
+    /// observation-assisted repair attempt. This bound prevents a recovery
+    /// observation from turning exhaustion into an infinite retry loop.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub observation_attempted_by_class: BTreeSet<ModelErrorObservationClass>,
 }
 
 impl RecoveryStrategyState {
@@ -241,13 +411,29 @@ impl RecoveryStrategyState {
     pub fn with_incremented_attempts_for(&self, class: RecoveryAttemptClass) -> Self {
         let mut attempts_by_class = self.attempts_by_class.clone();
         attempts_by_class.insert(class, self.attempts_for(class).saturating_add(1));
-        Self { attempts_by_class }
+        Self {
+            attempts_by_class,
+            observation_attempted_by_class: self.observation_attempted_by_class.clone(),
+        }
     }
 
     pub fn with_attempts_for(class: RecoveryAttemptClass, attempts: u32) -> Self {
         let mut attempts_by_class = BTreeMap::new();
         attempts_by_class.insert(class, attempts);
-        Self { attempts_by_class }
+        Self {
+            attempts_by_class,
+            observation_attempted_by_class: BTreeSet::new(),
+        }
+    }
+
+    pub fn observation_attempted_for(&self, class: ModelErrorObservationClass) -> bool {
+        self.observation_attempted_by_class.contains(&class)
+    }
+
+    pub fn with_observation_attempted_for(&self, class: ModelErrorObservationClass) -> Self {
+        let mut next = self.clone();
+        next.observation_attempted_by_class.insert(class);
+        next
     }
 
     /// Clears retry accounting after a terminal or non-retry decision so it
@@ -270,6 +456,23 @@ pub enum RecoveryAttemptClass {
     ModelInvalidOutput,
     ModelUnavailable,
     ModelInternal,
+    ModelStaleRequest,
+}
+
+/// Model-error classes eligible for one observation-assisted repair attempt.
+///
+/// This is deliberately separate from [`RecoveryAttemptClass`]: it is stored
+/// only in the newly defaulted `observation_attempted_by_class` field, so an
+/// older binary can ignore the whole field after rollback without encountering
+/// an unknown key in the pre-existing `attempts_by_class` map.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelErrorObservationClass {
+    ContextOverflow,
+    ContentFiltered,
+    InvalidOutput,
 }
 
 /// Persistent state owned by `ReplyAdmissionStrategy`.

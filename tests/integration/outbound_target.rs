@@ -1,16 +1,16 @@
 //! C-SYNTH outbound seam: the `outbound_target_tools` group surfaces the two
 //! local-dev synthetic `outbound_delivery_*` capabilities, dispatched through
 //! the REAL production synthetic-capability wrap over an injected
-//! `FakeOutboundPreferencesFacade` at the production-wired facade trait seam.
+//! `FakeOutboundPreferencesService` at the production-wired service trait seam.
 //!
 //! Covers the reachable model-visible routes: `targets_list` happy path (its
-//! only reachable route — every facade error is `driver_unavailable`);
-//! `target_set` happy path; settings-`Deny` → `Failed{policy_denied}`; facade
-//! `NotFound` → `Failed{invalid_input}`; approval gate `Ask` → approve applies
+//! only reachable route — every service error is `driver_unavailable`);
+//! `target_set` happy path; settings-`Deny` → `Failed{policy_denied}`; service
+//! `NotFound` → `Failed{input_encode}`; approval gate `Ask` → approve applies
 //! the preference / deny leaves it unchanged.
 //!
-//! Read-back through the SAME facade double (`recorded_set_target_ids`) proves
-//! a `Completed`/applied outcome actually reached the facade seam — a no-op set
+//! Read-back through the SAME service double (`recorded_set_target_ids`) proves
+//! a `Completed`/applied outcome actually reached the service seam — a no-op set
 //! that still fabricated a success payload would leave it empty.
 
 #[allow(dead_code)]
@@ -66,10 +66,13 @@ async fn targets_list_capability_dispatches_and_returns_targets() {
     let targets = output["targets"]
         .as_array()
         .expect("targets_list output carries a `targets` array");
+    // #6520: the fake facade mirrors production's always-present host-owned
+    // WebApp destination, so the inventory is the two seeded Slack targets
+    // plus web_app.
     assert_eq!(
         targets.len(),
-        2,
-        "expected exactly the two seeded targets; saw {output}"
+        3,
+        "expected the two seeded targets plus the host-owned web_app; saw {output}"
     );
     let target_ids: Vec<&str> = targets
         .iter()
@@ -87,10 +90,14 @@ async fn targets_list_capability_dispatches_and_returns_targets() {
         target_ids.contains(&"slack:channel:beta"),
         "expected the second seeded target in the returned targets; saw {target_ids:?}"
     );
+    assert!(
+        target_ids.contains(&"builtin:web_app"),
+        "expected the host-owned web_app destination in the returned targets; saw {target_ids:?}"
+    );
 }
 
 #[tokio::test]
-async fn target_set_capability_applies_preference_through_facade() {
+async fn target_set_capability_applies_preference_through_service() {
     let group = RebornIntegrationGroup::outbound_target_tools()
         .await
         .expect("outbound-target-tools group builds");
@@ -116,9 +123,9 @@ async fn target_set_capability_applies_preference_through_facade() {
         .assert_tool_invoked("builtin.outbound_delivery_target_set")
         .await
         .expect("target_set dispatched through the synthetic-capability port");
-    // Assert the model-visible payload itself, not just the facade double's
+    // Assert the model-visible payload itself, not just the service double's
     // log — proves the preference round-tripped through the capability's own
-    // serialized response, not merely that the facade was called.
+    // serialized response, not merely that the service was called.
     let output = harness
         .tool_result_output("builtin.outbound_delivery_target_set")
         .await
@@ -133,20 +140,20 @@ async fn target_set_capability_applies_preference_through_facade() {
         serde_json::json!("available"),
         "tool result must report the applied target as available; saw {output}"
     );
-    let facade = group
+    let service = group
         .capability_harness()
         .expect("outbound_target_tools always uses HostRuntime")
-        .outbound_preferences_facade_for_test()
-        .expect("outbound_target_tools always wires a facade double");
+        .outbound_preferences_service_for_test()
+        .expect("outbound_target_tools always wires a service double");
     assert_eq!(
-        facade.recorded_set_target_ids(),
+        service.recorded_set_target_ids(),
         vec![KNOWN_TARGET_ID.to_string()],
-        "the applied preference must reach the facade set seam exactly once"
+        "the applied preference must reach the service set seam exactly once"
     );
 }
 
 #[tokio::test]
-async fn target_set_unknown_target_routes_to_invalid_input() {
+async fn target_set_unknown_target_routes_to_input_encode() {
     let group = RebornIntegrationGroup::outbound_target_tools()
         .await
         .expect("outbound-target-tools group builds");
@@ -173,65 +180,70 @@ async fn target_set_unknown_target_routes_to_invalid_input() {
         .await
         .expect("target_set dispatched through the synthetic-capability port");
     harness
-        .assert_tool_error(ToolErrorClass::Failed, "invalid_input")
+        .assert_tool_error(ToolErrorClass::Failed, "input_encode")
         .await
-        .expect("an unknown target surfaces as Failed(InvalidInput)");
+        .expect("an unknown target surfaces as Failed(InputEncode)");
 }
 
-#[tokio::test]
-async fn target_set_disabled_by_settings_routes_to_policy_denied() {
-    let group = RebornIntegrationGroup::outbound_target_tools()
-        .await
-        .expect("outbound-target-tools group builds");
-    let harness = group
-        .thread("conv-outbound-set-denied")
-        .script([
-            RebornScriptedReply::tool_call(
-                "builtin.outbound_delivery_target_set",
-                serde_json::json!({ "target_id": KNOWN_TARGET_ID }),
-            ),
-            RebornScriptedReply::text("that tool is disabled"),
-        ])
-        .build()
-        .await
-        .expect("thread builds");
+#[test]
+fn target_set_disabled_by_settings_routes_to_policy_denied() {
+    run_async_test_with_stack(
+        "target_set_disabled_by_settings_routes_to_policy_denied",
+        || async {
+            let group = RebornIntegrationGroup::outbound_target_tools()
+                .await
+                .expect("outbound-target-tools group builds");
+            let harness = group
+                .thread("conv-outbound-set-denied")
+                .script([
+                    RebornScriptedReply::tool_call(
+                        "builtin.outbound_delivery_target_set",
+                        serde_json::json!({ "target_id": KNOWN_TARGET_ID }),
+                    ),
+                    RebornScriptedReply::text("that tool is disabled"),
+                ])
+                .build()
+                .await
+                .expect("thread builds");
 
-    // Persist a `Disabled` per-tool override for the run's effective dispatch
-    // user (the thread binding actor), driving the settings decision to Deny.
-    group
-        .capability_harness()
-        .expect("outbound_target_tools always uses HostRuntime")
-        .disable_outbound_target_set_tool(
-            harness.binding.tenant_id.clone(),
-            harness.binding.actor_user_id.clone(),
-        )
-        .await
-        .expect("tool override persists");
+            // Persist a `Disabled` per-tool override for the run's effective dispatch
+            // user (the thread binding actor), driving the settings decision to Deny.
+            group
+                .capability_harness()
+                .expect("outbound_target_tools always uses HostRuntime")
+                .disable_outbound_target_set_tool(
+                    harness.binding.tenant_id.clone(),
+                    harness.binding.actor_user_id.clone(),
+                )
+                .await
+                .expect("tool override persists");
 
-    harness
-        .submit_turn("send my replies to slack dm alpha")
-        .await
-        .expect("turn completes despite the policy-denied target_set");
+            harness
+                .submit_turn("send my replies to slack dm alpha")
+                .await
+                .expect("turn completes despite the policy-denied target_set");
 
-    harness
-        .assert_tool_invoked("builtin.outbound_delivery_target_set")
-        .await
-        .expect("target_set dispatched through the synthetic-capability port");
-    harness
-        .assert_tool_error(ToolErrorClass::Failed, "policy_denied")
-        .await
-        .expect("a disabled tool surfaces as Failed(PolicyDenied)");
-    // A policy-denied dispatch must short-circuit before ever reaching the
-    // facade set seam — proves the deny happened at the settings-decision gate,
-    // not merely that the model observed a policy_denied error string.
-    let facade = group
-        .capability_harness()
-        .expect("outbound_target_tools always uses HostRuntime")
-        .outbound_preferences_facade_for_test()
-        .expect("outbound_target_tools always wires a facade double");
-    assert!(
-        facade.recorded_set_target_ids().is_empty(),
-        "a policy-denied target_set must not reach the facade set seam"
+            harness
+                .assert_tool_invoked("builtin.outbound_delivery_target_set")
+                .await
+                .expect("target_set dispatched through the synthetic-capability port");
+            harness
+                .assert_tool_error(ToolErrorClass::Failed, "policy_denied")
+                .await
+                .expect("a disabled tool surfaces as Failed(PolicyDenied)");
+            // A policy-denied dispatch must short-circuit before ever reaching the
+            // service set seam — proves the deny happened at the settings-decision gate,
+            // not merely that the model observed a policy_denied error string.
+            let service = group
+                .capability_harness()
+                .expect("outbound_target_tools always uses HostRuntime")
+                .outbound_preferences_service_for_test()
+                .expect("outbound_target_tools always wires a service double");
+            assert!(
+                service.recorded_set_target_ids().is_empty(),
+                "a policy-denied target_set must not reach the service set seam"
+            );
+        },
     );
 }
 
@@ -279,15 +291,15 @@ async fn target_set_approval_gate_approve_applies_preference() {
         .await
         .expect("post-resume tool result must reflect the approved target");
 
-    let facade = group
+    let service = group
         .capability_harness()
         .expect("outbound_target_tools always uses HostRuntime")
-        .outbound_preferences_facade_for_test()
-        .expect("outbound_target_tools always wires a facade double");
+        .outbound_preferences_service_for_test()
+        .expect("outbound_target_tools always wires a service double");
     assert_eq!(
-        facade.recorded_set_target_ids(),
+        service.recorded_set_target_ids(),
         vec![KNOWN_TARGET_ID.to_string()],
-        "the approved preference must reach the facade set seam after resume"
+        "the approved preference must reach the service set seam after resume"
     );
 }
 
@@ -337,15 +349,36 @@ async fn target_set_approval_gate_deny_leaves_preference_unchanged() {
         .await
         .expect("a denied approval gate surfaces a model-visible gate-declined failure");
 
-    // A denied gate must short-circuit BEFORE the facade set — the preference is
+    // A denied gate must short-circuit BEFORE the service set — the preference is
     // never applied.
-    let facade = group
+    let service = group
         .capability_harness()
         .expect("outbound_target_tools always uses HostRuntime")
-        .outbound_preferences_facade_for_test()
-        .expect("outbound_target_tools always wires a facade double");
+        .outbound_preferences_service_for_test()
+        .expect("outbound_target_tools always wires a service double");
     assert!(
-        facade.recorded_set_target_ids().is_empty(),
-        "a denied target_set must not reach the facade set seam"
+        service.recorded_set_target_ids().is_empty(),
+        "a denied target_set must not reach the service set seam"
     );
+}
+
+fn run_async_test_with_stack<F, Fut>(name: &'static str, test: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio test runtime")
+                .block_on(test());
+        })
+        .expect("spawn stack-sized test thread");
+    if let Err(panic) = handle.join() {
+        std::panic::resume_unwind(panic);
+    }
 }

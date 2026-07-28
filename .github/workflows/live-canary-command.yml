@@ -119,6 +119,7 @@ jobs:
           HEAD_SHA: ${{ steps.parse.outputs.head_sha }}
           PR: ${{ github.event.issue.number }}
           REPO: ${{ github.repository }}
+          TRIGGER_ACTOR: ${{ github.event.comment.user.login }}
           TRIGGER_CONTEXT: ${{ steps.parse.outputs.trigger_context }}
         run: |
           set -euo pipefail
@@ -130,6 +131,7 @@ jobs:
             -f target_ref="$HEAD_SHA" \
             -f target_branch="$HEAD_REF" \
             -f target_pr="$PR" \
+            -f trigger_actor="$TRIGGER_ACTOR" \
             -f trigger_context="$TRIGGER_CONTEXT"
 
       - name: Post started comment

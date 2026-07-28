@@ -6,7 +6,7 @@
 //!
 //! Run:
 //!   LIVE_CANARY_GITHUB_TOKEN=<pat> \
-//!     cargo test -p ironclaw --test reborn_live_github_pat_contract -- --ignored
+//!     cargo test --test reborn_live_github_pat_contract -- --ignored
 
 use reqwest::{Client, StatusCode};
 use serde_json::Value;

@@ -487,7 +487,7 @@ mod tests {
             let _result = validator.validate(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "validate() took {}ms on 100KB input",
                 elapsed.as_millis()
             );
@@ -502,7 +502,7 @@ mod tests {
             let result = validator.validate(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "repetition check took {}ms on 100KB",
                 elapsed.as_millis()
             );
@@ -529,7 +529,7 @@ mod tests {
             let _result = validator.validate_tool_params(&value);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "tool_params validation took {}ms on wide JSON",
                 elapsed.as_millis()
             );

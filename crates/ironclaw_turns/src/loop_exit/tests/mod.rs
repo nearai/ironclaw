@@ -132,7 +132,7 @@ fn completed_ask_user_exit_maps_to_trusted_completed_outcome_without_final_check
         reply_message_refs: vec![message_ref("msg:assistant-question")],
         result_refs: vec![],
         final_checkpoint_id: None,
-        usage_summary_ref: None,
+        model_usage: None,
         exit_id: exit_id.clone(),
     })
     .validate(LoopExitValidationPolicy {
@@ -157,7 +157,7 @@ fn completed_exit_without_durable_refs_maps_to_protocol_failure_or_recovery() {
         reply_message_refs: vec![],
         result_refs: vec![],
         final_checkpoint_id: None,
-        usage_summary_ref: None,
+        model_usage: None,
         exit_id: exit_id("exit:missing-refs"),
     });
 
@@ -173,7 +173,9 @@ fn completed_exit_without_durable_refs_maps_to_protocol_failure_or_recovery() {
     assert_eq!(
         safe_decision.mapping,
         TurnRunnerOutcome::Failed {
-            failure: SanitizedFailure::new("driver_protocol_violation").unwrap(),
+            failure: SanitizedFailure::new("driver_protocol_violation")
+                .unwrap()
+                .with_detail("loop exit violation: missing_completion_reference"),
         }
         .into()
     );
@@ -207,7 +209,7 @@ fn completed_exit_requires_host_verified_completion_refs_before_trusted_mapping(
         reply_message_refs: vec![message_ref("msg:assistant-final")],
         result_refs: vec![],
         final_checkpoint_id: None,
-        usage_summary_ref: None,
+        model_usage: None,
         exit_id: exit_id("exit:unverified-completion"),
     });
 
@@ -239,7 +241,7 @@ fn final_checkpoint_policy_rejects_terminal_exit_without_checkpoint() {
             reply_message_refs: vec![message_ref("msg:assistant-final")],
             result_refs: vec![],
             final_checkpoint_id: None,
-            usage_summary_ref: None,
+            model_usage: None,
             exit_id: exit_id("exit:no-final-checkpoint-completed"),
         }),
         LoopExit::Cancelled(LoopCancelled {
@@ -272,7 +274,9 @@ fn final_checkpoint_policy_rejects_terminal_exit_without_checkpoint() {
         assert_eq!(
             decision.mapping,
             TurnRunnerOutcome::Failed {
-                failure: SanitizedFailure::new("driver_protocol_violation").unwrap(),
+                failure: SanitizedFailure::new("driver_protocol_violation")
+                    .unwrap()
+                    .with_detail("loop exit violation: missing_final_checkpoint"),
             }
             .into()
         );
@@ -292,7 +296,9 @@ fn validation_policy_requires_final_checkpoint_only_when_configured() {
             true,
             Some(LoopExitViolationKind::MissingFinalCheckpoint),
             TurnRunnerOutcome::Failed {
-                failure: SanitizedFailure::new("driver_protocol_violation").unwrap(),
+                failure: SanitizedFailure::new("driver_protocol_violation")
+                    .unwrap()
+                    .with_detail("loop exit violation: missing_final_checkpoint"),
             }
             .into(),
             "strict policy should reject terminal exits without a final checkpoint",
@@ -305,7 +311,7 @@ fn validation_policy_requires_final_checkpoint_only_when_configured() {
             reply_message_refs: vec![message_ref("msg:assistant-final")],
             result_refs: vec![],
             final_checkpoint_id: None,
-            usage_summary_ref: None,
+            model_usage: None,
             exit_id: exit_id("exit:checkpoint-policy"),
         })
         .validate(LoopExitValidationPolicy {
@@ -415,7 +421,9 @@ fn cancelled_exit_requires_observed_host_cancellation() {
     assert_eq!(
         rejected.mapping,
         TurnRunnerOutcome::Failed {
-            failure: SanitizedFailure::new("interrupted_unexpectedly").unwrap(),
+            failure: SanitizedFailure::new("interrupted_unexpectedly")
+                .unwrap()
+                .with_detail("loop exit violation: cancellation_not_observed"),
         }
         .into()
     );
@@ -443,10 +451,7 @@ fn iteration_limit_failure_maps_to_stable_sanitized_runner_failure_after_host_ve
         LoopFailureKind::IterationLimit,
         exit_id("exit:max-iterations"),
     )
-    .validate(LoopExitValidationPolicy {
-        failure_evidence_verified: true,
-        ..LoopExitValidationPolicy::default()
-    });
+    .validate(LoopExitValidationPolicy::default().with_host_verified_failure_evidence());
 
     assert_eq!(
         decision.mapping,
@@ -462,7 +467,6 @@ fn loop_failed_legacy_payload_deserializes_and_empty_new_fields_serialize_to_leg
     let legacy = json!({
         "reason_kind": "iteration_limit",
         "checkpoint_id": null,
-        "usage_summary_ref": null,
         "diagnostic_ref": null,
         "exit_id": "exit:legacy-failed"
     });
@@ -483,7 +487,7 @@ fn verified_failed_exit_carries_safe_summary() {
     let decision = LoopExit::Failed(LoopFailed {
         reason_kind: LoopFailureKind::ModelError,
         checkpoint_id: Some(final_checkpoint_id),
-        usage_summary_ref: None,
+        model_usage: None,
         diagnostic_ref: None,
         exit_id: exit_id("exit:verified-failed"),
         explanation_message_refs: vec![explanation_ref.clone()],
@@ -507,7 +511,7 @@ fn verified_failed_exit_does_not_reuse_final_checkpoint_as_resume_checkpoint() {
     let decision = LoopExit::Failed(LoopFailed {
         reason_kind: LoopFailureKind::IterationLimit,
         checkpoint_id: Some(final_checkpoint_id),
-        usage_summary_ref: None,
+        model_usage: None,
         diagnostic_ref: None,
         exit_id: exit_id("exit:final-only-failed"),
         explanation_message_refs: Vec::new(),
@@ -530,7 +534,7 @@ fn unverified_failed_exit_drops_explanation_refs_and_keeps_existing_violation_be
     let decision = LoopExit::Failed(LoopFailed {
         reason_kind: LoopFailureKind::ModelError,
         checkpoint_id: Some(TurnCheckpointId::new()),
-        usage_summary_ref: None,
+        model_usage: None,
         diagnostic_ref: None,
         exit_id: exit_id("exit:unverified-failed"),
         explanation_message_refs: vec![message_ref("msg:unverified-explanation")],
@@ -545,7 +549,9 @@ fn unverified_failed_exit_drops_explanation_refs_and_keeps_existing_violation_be
     assert_eq!(
         decision.mapping,
         TurnRunnerOutcome::Failed {
-            failure: SanitizedFailure::new("driver_protocol_violation").unwrap(),
+            failure: SanitizedFailure::new("driver_protocol_violation")
+                .unwrap()
+                .with_detail("loop exit violation: unverified_failure_evidence"),
         }
         .into()
     );
@@ -557,7 +563,7 @@ fn strict_final_checkpoint_policy_trusts_failed_exit_only_after_verification() {
     let exit = LoopExit::Failed(LoopFailed {
         reason_kind: LoopFailureKind::IterationLimit,
         checkpoint_id: Some(checkpoint_id),
-        usage_summary_ref: None,
+        model_usage: None,
         diagnostic_ref: None,
         exit_id: exit_id("exit:strict-failed-checkpoint"),
         explanation_message_refs: Vec::new(),
@@ -566,11 +572,11 @@ fn strict_final_checkpoint_policy_trusts_failed_exit_only_after_verification() {
 
     // Before the final checkpoint is host-verified the failed exit is a
     // protocol violation.
-    let rejected = exit.clone().validate(LoopExitValidationPolicy {
-        require_final_checkpoint: true,
-        failure_evidence_verified: true,
-        ..LoopExitValidationPolicy::default()
-    });
+    let rejected = exit.clone().validate(
+        LoopExitValidationPolicy::default()
+            .require_final_checkpoint()
+            .with_host_verified_failure_evidence(),
+    );
     assert_eq!(
         rejected.violation.as_ref().map(LoopExitViolation::kind),
         Some(LoopExitViolationKind::MissingFinalCheckpoint)
@@ -578,19 +584,21 @@ fn strict_final_checkpoint_policy_trusts_failed_exit_only_after_verification() {
     assert_eq!(
         rejected.mapping,
         TurnRunnerOutcome::Failed {
-            failure: SanitizedFailure::new("driver_protocol_violation").unwrap(),
+            failure: SanitizedFailure::new("driver_protocol_violation")
+                .unwrap()
+                .with_detail("loop exit violation: missing_final_checkpoint"),
         }
         .into()
     );
 
     // After verification, the trusted failed outcome surfaces the sanitized
     // failure category.
-    let accepted = exit.validate(LoopExitValidationPolicy {
-        require_final_checkpoint: true,
-        final_checkpoint_verified: true,
-        failure_evidence_verified: true,
-        ..LoopExitValidationPolicy::default()
-    });
+    let accepted = exit.validate(
+        LoopExitValidationPolicy::default()
+            .require_final_checkpoint()
+            .with_host_verified_final_checkpoint()
+            .with_host_verified_failure_evidence(),
+    );
     assert_eq!(accepted.violation, None);
     assert_eq!(
         accepted.mapping,
@@ -624,7 +632,6 @@ fn loop_exit_wire_shape_rejects_raw_payload_fields_and_recovery_required_variant
             "reply_message_refs": ["msg:assistant-final"],
             "result_refs": [],
             "final_checkpoint_id": null,
-            "usage_summary_ref": null,
             "exit_id": "exit:raw",
             "raw_reply_text": "secret prompt-adjacent content"
         }
@@ -656,7 +663,6 @@ fn loop_exit_rejects_oversized_or_duplicate_ref_vectors() {
             "reply_message_refs": oversized_messages,
             "result_refs": [],
             "final_checkpoint_id": null,
-            "usage_summary_ref": null,
             "exit_id": "exit:oversized"
         }
     });
@@ -668,7 +674,6 @@ fn loop_exit_rejects_oversized_or_duplicate_ref_vectors() {
             "reply_message_refs": ["msg:dup", "msg:dup"],
             "result_refs": [],
             "final_checkpoint_id": null,
-            "usage_summary_ref": null,
             "exit_id": "exit:duplicates"
         }
     });
@@ -709,7 +714,7 @@ fn no_reply_with_empty_refs_requires_explicit_policy_permission() {
         reply_message_refs: vec![],
         result_refs: vec![],
         final_checkpoint_id: None,
-        usage_summary_ref: None,
+        model_usage: None,
         exit_id: exit_id("exit:no-reply-empty"),
     });
 
@@ -730,7 +735,9 @@ fn no_reply_with_empty_refs_requires_explicit_policy_permission() {
     assert_eq!(
         decision.mapping,
         TurnRunnerOutcome::Failed {
-            failure: SanitizedFailure::new("driver_protocol_violation").unwrap(),
+            failure: SanitizedFailure::new("driver_protocol_violation")
+                .unwrap()
+                .with_detail("loop exit violation: no_reply_not_allowed"),
         }
         .into()
     );
@@ -743,7 +750,7 @@ fn no_reply_with_empty_refs_maps_to_completed_when_policy_allows_it() {
         reply_message_refs: vec![],
         result_refs: vec![],
         final_checkpoint_id: None,
-        usage_summary_ref: None,
+        model_usage: None,
         exit_id: exit_id("exit:no-reply-allowed"),
     })
     .validate(LoopExitValidationPolicy {
@@ -767,7 +774,7 @@ fn delegated_result_with_result_refs_maps_to_trusted_completed() {
         reply_message_refs: vec![],
         result_refs: vec![result_ref("result:delegated-job-1")],
         final_checkpoint_id: None,
-        usage_summary_ref: None,
+        model_usage: None,
         exit_id: exit_id("exit:delegated"),
     })
     .validate(LoopExitValidationPolicy {
@@ -791,7 +798,7 @@ fn result_only_with_result_refs_maps_to_trusted_completed() {
         reply_message_refs: vec![],
         result_refs: vec![result_ref("result:tool-output-1")],
         final_checkpoint_id: None,
-        usage_summary_ref: None,
+        model_usage: None,
         exit_id: exit_id("exit:result-only"),
     })
     .validate(LoopExitValidationPolicy {
@@ -857,7 +864,7 @@ fn completion_kind_must_match_durable_reference_shape() {
             reply_message_refs,
             result_refs,
             final_checkpoint_id: None,
-            usage_summary_ref: None,
+            model_usage: None,
             exit_id: exit_id("exit:mismatched-completion-kind"),
         })
         .validate(policy);
@@ -870,7 +877,12 @@ fn completion_kind_must_match_durable_reference_shape() {
         assert_eq!(
             decision.mapping,
             TurnRunnerOutcome::Failed {
-                failure: SanitizedFailure::new("driver_protocol_violation").unwrap(),
+                failure: SanitizedFailure::new("driver_protocol_violation")
+                    .unwrap()
+                    .with_detail(format!(
+                        "loop exit violation: {}",
+                        expected_violation.category()
+                    )),
             }
             .into()
         );
@@ -900,10 +912,7 @@ fn blocked_variants_map_to_correct_blocked_reason() {
             state_ref: state_ref.clone(),
             exit_id: exit_id("exit:blocked-variant"),
         })
-        .validate(LoopExitValidationPolicy {
-            blocked_evidence_verified: true,
-            ..LoopExitValidationPolicy::default()
-        });
+        .validate(LoopExitValidationPolicy::default().with_host_verified_blocked_evidence());
 
         let expected_reason = match kind {
             LoopBlockedKind::Approval => BlockedReason::Approval { gate_ref },
@@ -996,12 +1005,8 @@ fn all_failure_kinds_produce_stable_sanitized_category_strings() {
     }
 
     for (kind, expected_category) in variants {
-        let decision = LoopExit::failed(*kind, exit_id("exit:failure-variant")).validate(
-            LoopExitValidationPolicy {
-                failure_evidence_verified: true,
-                ..LoopExitValidationPolicy::default()
-            },
-        );
+        let decision = LoopExit::failed(*kind, exit_id("exit:failure-variant"))
+            .validate(LoopExitValidationPolicy::default().with_host_verified_failure_evidence());
 
         assert_eq!(
             decision.violation, None,
@@ -1046,10 +1051,8 @@ fn cancelled_with_checkpoint_and_interrupted_refs_maps_to_cancelled_outcome() {
         exit_id: exit_id("exit:cancelled-with-checkpoint"),
     });
 
-    let decision = exit.validate(LoopExitValidationPolicy {
-        host_cancellation_observed: true,
-        ..LoopExitValidationPolicy::default()
-    });
+    let decision =
+        exit.validate(LoopExitValidationPolicy::default().with_host_cancellation_observed());
 
     assert_eq!(decision.violation, None);
     assert_eq!(decision.mapping, TurnRunnerOutcome::Cancelled.into());
@@ -1095,6 +1098,62 @@ fn terminal_statuses_release_lock_and_non_terminal_keep_it() {
             status.keeps_active_lock(),
             expected_keeps_lock,
             "{status:?} lock retention changed"
+        );
+    }
+}
+
+/// Every rejected loop exit must persist WHICH protocol rule the driver broke:
+/// the coarse failure category (`driver_protocol_violation` /
+/// `interrupted_unexpectedly`) stays the wire-stable user-facing signal, and
+/// the specific `LoopExitViolationKind` rides the sanitized failure `detail`
+/// (durable on the run record + `TurnLifecycleEvent.detail`, and visible to the
+/// failure explainer). Exhaustive over all eight kinds so a new violation kind
+/// cannot ship without a durable detail.
+#[test]
+fn invalid_exit_decisions_persist_specific_violation_kind_on_failure_detail() {
+    let kinds = [
+        LoopExitViolationKind::MissingCompletionReference,
+        LoopExitViolationKind::MismatchedCompletionReferenceKind,
+        LoopExitViolationKind::UnverifiedCompletionReference,
+        LoopExitViolationKind::MissingFinalCheckpoint,
+        LoopExitViolationKind::UnverifiedBlockedEvidence,
+        LoopExitViolationKind::UnverifiedFailureEvidence,
+        LoopExitViolationKind::CancellationNotObserved,
+        LoopExitViolationKind::NoReplyNotAllowed,
+    ];
+    // Exhaustiveness guard: adding a LoopExitViolationKind variant breaks this
+    // match (same-crate), forcing the new variant into the table above.
+    let _guard = |kind: LoopExitViolationKind| match kind {
+        LoopExitViolationKind::MissingCompletionReference
+        | LoopExitViolationKind::MismatchedCompletionReferenceKind
+        | LoopExitViolationKind::UnverifiedCompletionReference
+        | LoopExitViolationKind::MissingFinalCheckpoint
+        | LoopExitViolationKind::UnverifiedBlockedEvidence
+        | LoopExitViolationKind::UnverifiedFailureEvidence
+        | LoopExitViolationKind::CancellationNotObserved
+        | LoopExitViolationKind::NoReplyNotAllowed => (),
+    };
+
+    for kind in kinds {
+        let decision = invalid_exit_decision(exit_id("exit:violation-detail"), kind);
+        let LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Failed { failure }) =
+            decision.mapping
+        else {
+            panic!("{kind:?}: invalid exit must map to a failed runner outcome");
+        };
+        let expected_category = match kind {
+            LoopExitViolationKind::CancellationNotObserved => "interrupted_unexpectedly",
+            _ => "driver_protocol_violation",
+        };
+        assert_eq!(failure.category(), expected_category, "{kind:?} category");
+        assert_eq!(
+            failure.detail(),
+            Some(format!("loop exit violation: {}", kind.category()).as_str()),
+            "{kind:?} must persist its specific violation kind on the failure detail"
+        );
+        assert_eq!(
+            decision.violation.map(|violation| violation.kind()),
+            Some(kind)
         );
     }
 }

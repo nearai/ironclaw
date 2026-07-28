@@ -5,17 +5,20 @@ description: GitHub API integration via HTTP tool with automatic credential inje
 activation:
   keywords:
     - "github"
-    - "issues"
     - "pull request"
-    - "repository"
-    - "commit"
-    - "branch"
+    - "github issue"
+    - "github repo"
+    - "pr comment"
+    - "open a pr"
+    - "create a pr"
+    - "my prs"
   exclude_keywords:
     - "gitlab"
     - "bitbucket"
   patterns:
-    - "(?i)(list|show|get|fetch|open|close|create|file|merge)\\s.*(issue|PR|pull request|repo)"
+    - "(?i)(list|show|get|fetch|open|close|create|file|merge|comment on)\\s.*(pull request|\\bPR\\b)"
     - "(?i)github\\.com"
+    - "(?i)[a-z0-9._-]+/[a-z0-9._-]+#\\d+"
   tags:
     - "git"
     - "code-review"

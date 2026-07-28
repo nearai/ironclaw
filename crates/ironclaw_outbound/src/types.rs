@@ -187,22 +187,21 @@ pub struct AdvanceSubscriptionCursorRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutboundDeliveryStatus {
+    /// Coordinator lifecycle: the attempt is persisted, no vendor egress has
+    /// happened yet (crash here → safe to retry).
+    Prepared,
+    /// Coordinator lifecycle: vendor egress is in flight. An attempt found in
+    /// this state after a crash becomes [`Self::Unknown`] — never blindly
+    /// resent (the vendor may have accepted the message).
+    Sending,
+    /// Legacy pre-coordinator state (kept for persisted rows).
     Pending,
     Delivered,
     Failed,
+    /// Terminal-ambiguous: the process died after possible vendor success.
+    /// Resend only when a vendor idempotency key makes it provably safe.
+    Unknown,
     DeadLettered,
-}
-
-#[allow(dead_code)] // retained for future debug/log surfaces — not yet wired
-impl OutboundDeliveryStatus {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Delivered => "delivered",
-            Self::Failed => "failed",
-            Self::DeadLettered => "dead_lettered",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -334,4 +333,25 @@ pub struct UpdateDeliveryStatusRequest {
     pub status: OutboundDeliveryStatus,
     pub updated_at: Timestamp,
     pub failure_kind: Option<DeliveryFailureKind>,
+}
+
+/// Atomic ownership claim for the sole vendor-egress writer of a prepared
+/// delivery. Stores transition `Prepared -> Sending` exactly once and return
+/// `false` for replays or already-terminal attempts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimDeliveryAttemptForSendRequest {
+    pub delivery_id: OutboundDeliveryId,
+    pub scope: TurnScope,
+}
+
+/// Guarded crash-recovery transition for an interrupted send. The store
+/// re-reads the attempt inside its own CAS and transitions `Sending -> Unknown`
+/// only when it is still `Sending`. A stale recovery snapshot therefore cannot
+/// overwrite a terminal result (`Delivered`/`Failed`) that a different worker
+/// wrote after completing egress. Mirrors the `Prepared`-guard on
+/// [`ClaimDeliveryAttemptForSendRequest`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoverInterruptedDeliveryRequest {
+    pub delivery_id: OutboundDeliveryId,
+    pub scope: TurnScope,
 }

@@ -92,13 +92,14 @@ where
             "input_schema_ref",
         )
         .await?;
-        let output_schema = read_json_ref(
-            fs,
-            &package.root,
-            &declaration.output_schema_ref,
-            "output_schema_ref",
-        )
-        .await?;
+        let output_schema = match &declaration.output_schema_ref {
+            Some(reference) => {
+                read_json_ref(fs, &package.root, reference, "output_schema_ref").await?
+            }
+            // No declared output schema (manifest v3): any output shape is
+            // allowed.
+            None => Value::Object(serde_json::Map::new()),
+        };
         let prompt_doc = match &declaration.prompt_doc_ref {
             Some(prompt_ref) => Some(read_text_ref(fs, &package.root, prompt_ref).await?),
             None => None,

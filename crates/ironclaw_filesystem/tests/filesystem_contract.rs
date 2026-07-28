@@ -14,7 +14,7 @@ async fn scoped_read_resolves_mount_view_and_reads_bytes() {
     )
     .unwrap();
 
-    let mut root = LocalFilesystem::new();
+    let mut root = DiskFilesystem::new();
     root.mount_local(
         VirtualPath::new("/projects").unwrap(),
         HostPath::from_path_buf(storage.path().to_path_buf()),
@@ -48,7 +48,7 @@ async fn bounded_read_returns_none_without_materializing_oversized_local_file() 
     std::fs::create_dir_all(storage.path().join("project1")).unwrap();
     std::fs::write(storage.path().join("project1/schema.json"), b"abcdef").unwrap();
 
-    let mut root = LocalFilesystem::new();
+    let mut root = DiskFilesystem::new();
     root.mount_local(
         VirtualPath::new("/projects").unwrap(),
         HostPath::from_path_buf(storage.path().to_path_buf()),
@@ -69,7 +69,7 @@ async fn local_put_absent_rejects_existing_file_without_overwrite() {
     let storage = tempdir().unwrap();
     std::fs::create_dir_all(storage.path().join("project1")).unwrap();
 
-    let mut root = LocalFilesystem::new();
+    let mut root = DiskFilesystem::new();
     root.mount_local(
         VirtualPath::new("/projects").unwrap(),
         HostPath::from_path_buf(storage.path().to_path_buf()),
@@ -105,7 +105,7 @@ async fn scoped_write_is_denied_on_read_only_mount() {
     let storage = tempdir().unwrap();
     std::fs::create_dir_all(storage.path().join("project1")).unwrap();
 
-    let mut root = LocalFilesystem::new();
+    let mut root = DiskFilesystem::new();
     root.mount_local(
         VirtualPath::new("/projects").unwrap(),
         HostPath::from_path_buf(storage.path().to_path_buf()),
@@ -277,7 +277,7 @@ async fn list_requires_list_permission_through_scoped_api() {
     let storage = tempdir().unwrap();
     std::fs::create_dir_all(storage.path().join("project1/src")).unwrap();
 
-    let mut root = LocalFilesystem::new();
+    let mut root = DiskFilesystem::new();
     root.mount_local(
         VirtualPath::new("/projects").unwrap(),
         HostPath::from_path_buf(storage.path().to_path_buf()),
@@ -325,7 +325,7 @@ async fn longest_backend_virtual_mount_wins() {
     std::fs::write(broad.path().join("project1/value.txt"), b"broad").unwrap();
     std::fs::write(narrow.path().join("value.txt"), b"narrow").unwrap();
 
-    let mut root = LocalFilesystem::new();
+    let mut root = DiskFilesystem::new();
     root.mount_local(
         VirtualPath::new("/projects").unwrap(),
         HostPath::from_path_buf(broad.path().to_path_buf()),
@@ -348,7 +348,7 @@ async fn longest_backend_virtual_mount_wins() {
 #[tokio::test]
 async fn unknown_scoped_alias_fails_closed_through_filesystem_api() {
     let storage = tempdir().unwrap();
-    let mut root = LocalFilesystem::new();
+    let mut root = DiskFilesystem::new();
     root.mount_local(
         VirtualPath::new("/projects").unwrap(),
         HostPath::from_path_buf(storage.path().to_path_buf()),
@@ -372,7 +372,7 @@ async fn unknown_scoped_alias_fails_closed_through_filesystem_api() {
 async fn artifact_write_is_confined_to_approved_virtual_mount() {
     let artifacts = tempdir().unwrap();
 
-    let mut root = LocalFilesystem::new();
+    let mut root = DiskFilesystem::new();
     root.mount_local(
         VirtualPath::new("/engine/tmp/invocations/inv1/artifacts").unwrap(),
         HostPath::from_path_buf(artifacts.path().to_path_buf()),
@@ -407,7 +407,7 @@ async fn artifact_write_is_confined_to_approved_virtual_mount() {
 #[tokio::test]
 async fn display_errors_do_not_leak_raw_host_paths() {
     let storage = tempdir().unwrap();
-    let mut root = LocalFilesystem::new();
+    let mut root = DiskFilesystem::new();
     root.mount_local(
         VirtualPath::new("/projects").unwrap(),
         HostPath::from_path_buf(storage.path().to_path_buf()),
@@ -440,7 +440,7 @@ async fn local_backend_denies_symlink_escape() {
     )
     .unwrap();
 
-    let mut root = LocalFilesystem::new();
+    let mut root = DiskFilesystem::new();
     root.mount_local(
         VirtualPath::new("/projects").unwrap(),
         HostPath::from_path_buf(storage.path().to_path_buf()),
@@ -612,7 +612,7 @@ async fn workspace_write_creates_parent_directories() {
 #[tokio::test]
 async fn duplicate_backend_mount_is_rejected() {
     let storage = tempdir().unwrap();
-    let mut root = LocalFilesystem::new();
+    let mut root = DiskFilesystem::new();
     root.mount_local(
         VirtualPath::new("/projects").unwrap(),
         HostPath::from_path_buf(storage.path().to_path_buf()),
@@ -633,7 +633,7 @@ async fn duplicate_backend_mount_is_rejected() {
 async fn nonexistent_backend_mount_root_fails_without_leaking_host_path() {
     let storage = tempdir().unwrap();
     let missing = storage.path().join("missing-root");
-    let mut root = LocalFilesystem::new();
+    let mut root = DiskFilesystem::new();
 
     let err = root
         .mount_local(
@@ -766,8 +766,8 @@ async fn local_backend_denies_write_through_symlinked_parent_escape() {
     assert!(!outside.path().join("new.txt").exists());
 }
 
-fn local_root_with_projects_mount(path: &std::path::Path) -> LocalFilesystem {
-    let mut root = LocalFilesystem::new();
+fn local_root_with_projects_mount(path: &std::path::Path) -> DiskFilesystem {
+    let mut root = DiskFilesystem::new();
     root.mount_local(
         VirtualPath::new("/projects").unwrap(),
         HostPath::from_path_buf(path.to_path_buf()),
@@ -779,7 +779,7 @@ fn local_root_with_projects_mount(path: &std::path::Path) -> LocalFilesystem {
 fn scoped_project_fs(
     path: &std::path::Path,
     permissions: MountPermissions,
-) -> ScopedFilesystem<LocalFilesystem> {
+) -> ScopedFilesystem<DiskFilesystem> {
     ScopedFilesystem::with_fixed_view(
         Arc::new(local_root_with_projects_mount(path)),
         MountView::new(vec![MountGrant::new(

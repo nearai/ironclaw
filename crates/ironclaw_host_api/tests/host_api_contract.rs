@@ -292,6 +292,7 @@ fn dispatch_errors_preserve_typed_failure_kind() {
     assert_eq!(
         DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Guest,
+            model_visible_cause: None,
         }
         .failure_kind(),
         DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest)
@@ -784,11 +785,9 @@ fn principal_agent_serializes_as_first_class_principal() {
 fn invocation_fingerprint_is_stable_and_input_hashed() {
     let ctx = sample_context();
     let capability = CapabilityId::new("echo.say").unwrap();
-    let estimate = ResourceEstimate {
-        concurrency_slots: Some(1),
-        output_bytes: Some(10_000),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default()
+        .set_concurrency_slots(1)
+        .set_output_bytes(10_000);
     let input = json!({"message": "secret payload"});
     let mut reordered = serde_json::Map::new();
     reordered.insert("z".to_string(), json!(1));
@@ -916,20 +915,14 @@ fn invocation_fingerprint_changes_when_authorized_invocation_changes() {
 fn actions_and_decisions_serialize_with_stable_snake_case_tags() {
     let action = Action::Dispatch {
         capability: CapabilityId::new("github.search_issues").unwrap(),
-        estimated_resources: ResourceEstimate {
-            usd: Some(dec!(0.01)),
-            ..ResourceEstimate::default()
-        },
+        estimated_resources: ResourceEstimate::default().set_usd(dec!(0.01)),
     };
     let json = serde_json::to_value(&action).unwrap();
     assert_eq!(json["type"], "dispatch");
 
     let spawn = Action::SpawnCapability {
         capability: CapabilityId::new("github.watch_issues").unwrap(),
-        estimated_resources: ResourceEstimate {
-            concurrency_slots: Some(1),
-            ..ResourceEstimate::default()
-        },
+        estimated_resources: ResourceEstimate::default().set_concurrency_slots(1),
     };
     let json = serde_json::to_value(&spawn).unwrap();
     assert_eq!(json["type"], "spawn_capability");
@@ -1342,39 +1335,8 @@ fn host_port_catalog_equality_is_order_independent() {
 }
 
 #[test]
-fn capability_profile_contract_equality_is_order_independent() {
-    let profile_id = CapabilityProfileId::new("memory.context_retrieval.v1").unwrap();
-    let op1 = CapabilityProfileOperationContract::new(
-        CapabilityProfileOperationId::new("memory.context.retrieve.v1").unwrap(),
-        "schemas/memory/context-retrieve.input.v1.json",
-        "schemas/memory/context-retrieve.output.v1.json",
-    )
-    .unwrap();
-    let op2 = CapabilityProfileOperationContract::new(
-        CapabilityProfileOperationId::new("memory.context.touch.v1").unwrap(),
-        "schemas/memory/context-touch.input.v1.json",
-        "schemas/memory/context-touch.output.v1.json",
-    )
-    .unwrap();
-
-    let a =
-        CapabilityProfileContract::new(profile_id.clone(), vec![op1.clone(), op2.clone()]).unwrap();
-    let b = CapabilityProfileContract::new(profile_id, vec![op2, op1]).unwrap();
-
-    assert_eq!(a, b);
-    assert_eq!(
-        serde_json::to_value(&a).unwrap(),
-        serde_json::to_value(&b).unwrap(),
-    );
-}
-
-#[test]
 fn host_api_contract_types_reject_unknown_fields_on_deserialize() {
     let storage = "host.storage.sql_transaction.first_party";
-    let op_id = "memory.context.retrieve.v1";
-    let profile_id = "memory.context_retrieval.v1";
-    let in_ref = "schemas/memory/context-retrieve.input.v1.json";
-    let out_ref = "schemas/memory/context-retrieve.output.v1.json";
     let ingress_policy = json!({
         "listener_class": "local_gateway",
         "auth": {
@@ -1397,7 +1359,7 @@ fn host_api_contract_types_reject_unknown_fields_on_deserialize() {
         "streaming": "none",
         "audit": "user_action",
         "effect_path": {
-            "type": "product_workflow",
+            "type": "product_surface",
         },
     });
 
@@ -1410,25 +1372,6 @@ fn host_api_contract_types_reject_unknown_fields_on_deserialize() {
     );
     assert!(
         serde_json::from_value::<HostPortView>(json!({ "grants": [{ "id": storage }] })).is_ok()
-    );
-    assert!(
-        serde_json::from_value::<CapabilityProfileOperationContract>(json!({
-            "id": op_id,
-            "input_schema_ref": in_ref,
-            "output_schema_ref": out_ref,
-        }))
-        .is_ok()
-    );
-    assert!(
-        serde_json::from_value::<CapabilityProfileContract>(json!({
-            "id": profile_id,
-            "required_operations": [{
-                "id": op_id,
-                "input_schema_ref": in_ref,
-                "output_schema_ref": out_ref,
-            }],
-        }))
-        .is_ok()
     );
     assert!(serde_json::from_value::<IngressPolicy>(ingress_policy.clone()).is_ok());
     assert!(
@@ -1472,27 +1415,6 @@ fn host_api_contract_types_reject_unknown_fields_on_deserialize() {
     assert!(
         serde_json::from_value::<HostPortView>(json!({ "grants": [{ "id": storage, "oops": 1 }] }))
             .is_err()
-    );
-    assert!(
-        serde_json::from_value::<CapabilityProfileOperationContract>(json!({
-            "id": op_id,
-            "input_schema_ref": in_ref,
-            "output_schema_ref": out_ref,
-            "oops": 1,
-        }))
-        .is_err()
-    );
-    assert!(
-        serde_json::from_value::<CapabilityProfileContract>(json!({
-            "id": profile_id,
-            "required_operations": [{
-                "id": op_id,
-                "input_schema_ref": in_ref,
-                "output_schema_ref": out_ref,
-            }],
-            "oops": 1,
-        }))
-        .is_err()
     );
     assert!(serde_json::from_value::<IngressPolicy>(ingress_policy_with_unknown).is_err());
     assert!(
@@ -1558,67 +1480,6 @@ fn host_port_catalog_validates_required_ports_without_creating_implementations()
 }
 
 #[test]
-fn capability_profile_ids_are_versioned_portable_contract_names() {
-    let id = CapabilityProfileId::new("memory.context_retrieval.v1").unwrap();
-    assert_eq!(id.as_str(), "memory.context_retrieval.v1");
-    assert_eq!(serde_json::to_value(&id).unwrap(), json!(id.as_str()));
-    assert_eq!(
-        serde_json::from_value::<CapabilityProfileId>(json!(id.as_str())).unwrap(),
-        id
-    );
-
-    for invalid in [
-        "",
-        "memory",
-        "memory.context_retrieval",
-        "memory.context_retrieval.version1",
-        "Memory.context_retrieval.v1",
-        "memory/context_retrieval/v1",
-        "memory..context_retrieval.v1",
-        "memory.context_retrieval.v1\n",
-        "1memory.context_retrieval.v1",
-        "memory.2context_retrieval.v1",
-    ] {
-        assert!(
-            CapabilityProfileId::new(invalid).is_err(),
-            "{invalid:?} should be rejected"
-        );
-        assert!(
-            serde_json::from_value::<CapabilityProfileId>(json!(invalid)).is_err(),
-            "{invalid:?} should also be rejected when deserialized"
-        );
-    }
-}
-
-#[test]
-fn capability_profile_contract_rejects_empty_or_duplicate_operations() {
-    let profile_id = CapabilityProfileId::new("memory.context_retrieval.v1").unwrap();
-    let operation = CapabilityProfileOperationContract::new(
-        CapabilityProfileOperationId::new("memory.context.retrieve.v1").unwrap(),
-        "schemas/memory/context-retrieve.input.v1.json",
-        "schemas/memory/context-retrieve.output.v1.json",
-    )
-    .unwrap();
-
-    let contract = CapabilityProfileContract::new(profile_id.clone(), vec![operation.clone()])
-        .expect("single-operation profile is valid");
-    assert_eq!(contract.id(), &profile_id);
-    assert_eq!(
-        contract.required_operations(),
-        std::slice::from_ref(&operation)
-    );
-
-    assert!(
-        CapabilityProfileContract::new(profile_id.clone(), Vec::new()).is_err(),
-        "profiles without required operations should fail closed"
-    );
-    assert!(
-        CapabilityProfileContract::new(profile_id, vec![operation.clone(), operation]).is_err(),
-        "duplicate profile operation contracts should fail closed"
-    );
-}
-
-#[test]
 fn capability_profile_schema_refs_are_relative_repository_paths() {
     for valid in [
         "schemas/memory/context-retrieve.input.v1.json",
@@ -1668,12 +1529,15 @@ fn sample_context() -> ExecutionContext {
     let project_id = ProjectId::new("project1").unwrap();
 
     ExecutionContext {
+        run_id: None,
+        origin: None,
         invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,
         parent_process_id: None,
         tenant_id: tenant_id.clone(),
         user_id: user_id.clone(),
+        authenticated_actor_user_id: None,
         agent_id: None,
         project_id: Some(project_id.clone()),
         mission_id: None,
@@ -1752,7 +1616,7 @@ fn runtime_credential_auth_requirement_defaults_setup_and_round_trips_oauth() {
     assert_eq!(parsed.setup, RuntimeCredentialAccountSetup::ManualToken);
 
     let oauth = RuntimeCredentialAuthRequirement {
-        provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+        provider: VendorId::new("google").unwrap(),
         setup: RuntimeCredentialAccountSetup::OAuth {
             scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
         },
@@ -1795,7 +1659,7 @@ fn dispatch_error_auth_required_debug_redacts_required_secrets() {
         "zero redaction count must appear; got: {debug_empty}"
     );
     let requirement = RuntimeCredentialAuthRequirement {
-        provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+        provider: VendorId::new("google").unwrap(),
         setup: RuntimeCredentialAccountSetup::OAuth {
             scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
         },

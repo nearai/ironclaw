@@ -5,54 +5,42 @@ use ironclaw_auth::{
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext,
     ExtensionId, GrantConstraints, InvocationId, MountView, NetworkPolicy, NetworkTargetPattern,
-    Principal, ResourceScope, RuntimeCredentialAccountSetup, RuntimeKind, TenantId, ThreadId,
-    TrustClass, UserId,
+    Principal, ResourceScope, RunId, RuntimeCredentialAccountSetup, RuntimeKind, TenantId,
+    ThreadId, TrustClass, UserId,
 };
-use ironclaw_host_runtime::{RuntimeCapabilityOutcome, RuntimeFailureKind};
-use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
+use ironclaw_host_runtime::RuntimeCapabilityOutcome;
+use ironclaw_product::{LifecyclePackageKind, LifecyclePackageRef};
 
-use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
-use crate::extension_lifecycle_capabilities::{
-    EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
-};
-use crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionRequest;
-use crate::{
-    RebornBuildInput, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
-    RebornServices, build_reborn_services,
-};
+use crate::factory::{RebornRuntimeStores, build_runtime_substrate};
+use ironclaw_auth::RuntimeCredentialAccountSelectionRequest;
+use ironclaw_auth::{RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest};
+use ironclaw_extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
+use ironclaw_extension_host::extension_lifecycle_capabilities::EXTENSION_ACTIVATE_CAPABILITY_ID;
 
 #[tokio::test]
 async fn local_dev_extension_activate_accepts_manual_token_from_webui_gate_scope() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(RebornBuildInput::local_dev(
+    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
         "3eee560a-7fe5-474c-965a-67cb69df3d04",
         dir.path().join("local-dev"),
     ))
     .await
     .expect("local-dev services build");
     let extension_management = services
-        .local_runtime
-        .as_ref()
+        .local_runtime_for_test()
         .expect("local runtime substrate")
         .extension_management
-        .as_ref()
-        .expect("extension management")
         .clone();
     let install_scope = webui_gate_resource_scope();
     let auth_scope_resource = webui_gate_resource_scope();
     let activate_scope = webui_gate_resource_scope();
 
-    invoke_json_with_context(
-        &services,
-        EXTENSION_INSTALL_CAPABILITY_ID,
-        execution_context_for_scope(install_scope, [EXTENSION_INSTALL_CAPABILITY_ID]),
-        serde_json::json!({"extension_id": "github"}),
-    )
-    .await
-    .expect("install succeeds");
+    install_inactive_for_user(&services, "github", &install_scope.user_id)
+        .await
+        .expect("durable inactive install succeeds");
 
     let auth_scope = AuthProductScope::new(auth_scope_resource.clone(), AuthSurface::Callback);
-    let product_auth = services.product_auth.as_ref().expect("product auth");
+    let product_auth = services.product_auth.as_ref();
     let challenge = product_auth
         .request_manual_token_setup(RebornManualTokenSetupRequest {
             scope: auth_scope.clone(),
@@ -122,14 +110,14 @@ async fn local_dev_extension_activate_accepts_manual_token_from_webui_gate_scope
 
 /// W4-MCP-SSO-WIRING (#5439 class): the NEAR AI MCP host-managed credential
 /// fallback (`HostManagedCredentialFallbackRule`) must actually reach the
-/// runtime-credential-selection path `build_reborn_services` wires up — not
+/// runtime-credential-selection path `build_runtime_substrate` wires up — not
 /// just the private rule/selector types the crate's other unit tests exercise
 /// directly. Before #5439, the bootstrapped NEAR AI MCP API key was resolvable
 /// only under the boot-owner's own scope; a Google-SSO user in the SAME
 /// tenant/agent/project with no NEAR AI token of their own was prompted for
 /// one instead of transparently sharing the host-managed key.
 ///
-/// Drives ONLY the composition's public surface: `build_reborn_services` (the
+/// Drives ONLY the composition's public surface: `build_runtime_substrate` (the
 /// local-dev path always derives `nearai_mcp_host_managed_scope` from the
 /// boot owner — see `local_dev_nearai_mcp_owner_scope` in `factory.rs` — so no
 /// live NEAR AI config injection is needed to prove the wiring) and
@@ -151,13 +139,13 @@ async fn local_dev_extension_activate_accepts_manual_token_from_webui_gate_scope
 async fn local_dev_nearai_runtime_selection_falls_back_to_host_managed_account_for_sso_user() {
     let dir = tempfile::tempdir().expect("tempdir");
     let owner_id = "3eee560a-7fe5-474c-965a-67cb69df3d04";
-    let services = build_reborn_services(RebornBuildInput::local_dev(
+    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
         owner_id,
         dir.path().join("local-dev"),
     ))
     .await
     .expect("local-dev services build");
-    let product_auth = services.product_auth.as_ref().expect("product auth");
+    let product_auth = services.product_auth.as_ref();
     let nearai_provider = AuthProviderId::new("nearai").expect("provider"); // safety: static test provider id is valid.
     let nearai_extension = ExtensionId::new("nearai").expect("extension"); // safety: static test extension id is valid.
 
@@ -258,24 +246,8 @@ async fn local_dev_nearai_runtime_selection_falls_back_to_host_managed_account_f
     );
 }
 
-async fn invoke_json_with_context(
-    services: &RebornServices,
-    capability_id: &str,
-    context: ExecutionContext,
-    input: serde_json::Value,
-) -> Result<serde_json::Value, RuntimeFailureKind> {
-    crate::approval_test_support::invoke_json_with_local_dev_approval(
-        services,
-        capability_id,
-        context,
-        input,
-        trust_decision(),
-    )
-    .await
-}
-
 async fn invoke_outcome_with_context(
-    services: &RebornServices,
+    services: &RebornRuntimeStores,
     capability_id: &str,
     context: ExecutionContext,
     input: serde_json::Value,
@@ -285,7 +257,6 @@ async fn invoke_outcome_with_context(
         capability_id,
         context,
         input,
-        trust_decision(),
     )
     .await
 }
@@ -302,18 +273,37 @@ async fn active_extension_capability_ids(
         .collect()
 }
 
+async fn install_inactive_for_user(
+    services: &RebornRuntimeStores,
+    extension_id: &str,
+    caller: &UserId,
+) -> Result<(), ironclaw_product::ProductSurfaceFailure> {
+    let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id)
+        .expect("valid extension package ref"); // safety: test helper callers pass static extension ids.
+    services
+        .local_runtime_for_test()
+        .expect("local runtime substrate") // safety: this helper is only used with local-runtime test substrates.
+        .extension_management
+        .install(package_ref, caller)
+        .await
+        .map(|_| ())
+}
+
 fn execution_context_for_scope<'a>(
     resource_scope: ResourceScope,
     capability_ids: impl IntoIterator<Item = &'a str>,
 ) -> ExecutionContext {
     let caller = ExtensionId::new("extension-tool-test-caller").expect("valid extension id"); // safety: static test extension id is valid.
     let context = ExecutionContext {
+        run_id: Some(RunId::new()),
+        origin: None,
         invocation_id: resource_scope.invocation_id,
         correlation_id: ironclaw_host_api::CorrelationId::new(),
         process_id: None,
         parent_process_id: None,
         tenant_id: resource_scope.tenant_id.clone(),
         user_id: resource_scope.user_id.clone(),
+        authenticated_actor_user_id: None,
         agent_id: resource_scope.agent_id.clone(),
         project_id: resource_scope.project_id.clone(),
         mission_id: resource_scope.mission_id.clone(),
@@ -379,16 +369,4 @@ fn allowed_effects() -> Vec<EffectKind> {
         EffectKind::WriteFilesystem,
         EffectKind::Network,
     ]
-}
-
-fn trust_decision() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::user_trusted(),
-        authority_ceiling: AuthorityCeiling {
-            allowed_effects: allowed_effects(),
-            max_resource_ceiling: None,
-        },
-        provenance: TrustProvenance::Default,
-        evaluated_at: chrono::Utc::now(),
-    }
 }

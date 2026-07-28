@@ -9,11 +9,9 @@
 //! - Resolution-stage failures (e.g. no default configured) must NOT produce
 //!   delivery-attempt rows — those rows are for attempts that reach the
 //!   transport layer. Instead we write a lightweight outcome record here.
-//! - Best-effort: a failure to record must never block or abort delivery.
+//! - Authoritative terminal state: owners propagate record failures into their
+//!   managed task lifecycle instead of reporting an unpersisted completion.
 //! - Personal scope only: non-personal triggers fail closed with `Denied`.
-
-use std::collections::HashMap;
-use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
 use ironclaw_turns::TurnRunId;
@@ -52,9 +50,8 @@ pub struct TriggeredRunDeliveryRecord {
 
 /// Store for [`TriggeredRunDeliveryRecord`]s.
 ///
-/// Intentionally minimal: one write per run, one read per run for test
-/// assertions. Production callers treat this as best-effort and swallow
-/// store errors.
+/// Intentionally minimal: one write per run and one read per run. The channel
+/// delivery owner treats write failures as authoritative lifecycle failures.
 #[async_trait::async_trait]
 pub trait TriggeredRunDeliveryStore: Send + Sync {
     async fn record_triggered_run_delivery(
@@ -68,45 +65,13 @@ pub trait TriggeredRunDeliveryStore: Send + Sync {
     ) -> Result<Option<TriggeredRunDeliveryRecord>, String>;
 }
 
-/// In-memory [`TriggeredRunDeliveryStore`].
-#[derive(Default)]
-pub struct InMemoryTriggeredRunDeliveryStore {
-    records: Mutex<HashMap<TurnRunId, TriggeredRunDeliveryRecord>>,
-}
-
-#[async_trait::async_trait]
-impl TriggeredRunDeliveryStore for InMemoryTriggeredRunDeliveryStore {
-    async fn record_triggered_run_delivery(
-        &self,
-        record: TriggeredRunDeliveryRecord,
-    ) -> Result<(), String> {
-        self.records
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(record.run_id, record);
-        Ok(())
-    }
-
-    async fn load_triggered_run_delivery(
-        &self,
-        run_id: TurnRunId,
-    ) -> Result<Option<TriggeredRunDeliveryRecord>, String> {
-        Ok(self
-            .records
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(&run_id)
-            .cloned())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[tokio::test]
     async fn in_memory_store_round_trips_outcome_record() {
-        let store = InMemoryTriggeredRunDeliveryStore::default();
+        let store = crate::test_support::in_memory_backed_outbound_state_store();
         let run_id = TurnRunId::new();
         let record = TriggeredRunDeliveryRecord {
             run_id,
@@ -129,7 +94,7 @@ mod tests {
 
     #[tokio::test]
     async fn in_memory_store_returns_none_for_unknown_run() {
-        let store = InMemoryTriggeredRunDeliveryStore::default();
+        let store = crate::test_support::in_memory_backed_outbound_state_store();
 
         let loaded = store
             .load_triggered_run_delivery(TurnRunId::new())
@@ -141,7 +106,7 @@ mod tests {
 
     #[tokio::test]
     async fn in_memory_store_overwrites_on_second_write() {
-        let store = InMemoryTriggeredRunDeliveryStore::default();
+        let store = crate::test_support::in_memory_backed_outbound_state_store();
         let run_id = TurnRunId::new();
 
         store

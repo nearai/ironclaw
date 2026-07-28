@@ -1,15 +1,18 @@
+// arch-exempt: large_file, whole-path delivery regressions reuse the existing conversation-store contract harness, plan #6175
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use ironclaw_conversations::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageLookup,
-    AcceptedInboundMessageReplay, AdapterInstallationId, AdapterKind,
+    AcceptedInboundMessageReplay, AdapterInstallationId, AdapterKind, ConditionalUnpairOutcome,
     ConversationBindingResolution, ConversationBindingService, ConversationRouteKind,
-    ExternalActorRef, ExternalConversationIdentity, ExternalConversationRef, ExternalEventId,
+    ExpectedExternalActorOwner, ExternalActorBindingEpoch, ExternalActorRef,
+    ExternalConversationIdentity, ExternalConversationRef, ExternalEventId,
     InMemoryConversationServices, InboundMessageContentRef, InboundTurnError, InboundTurnRequest,
     InboundTurnService, LinkConversationRequest, LinkedConversationBinding,
-    MessageIdempotencyStatus, ReplyTargetBinding, SessionThreadService, ThreadAccessDecision,
+    MessageIdempotencyStatus, ReplyTargetBinding, ResolveStoredReplyTargetRequest,
+    SessionThreadService, StoredReplyTargetAccess, ThreadAccessDecision,
     ValidateReplyTargetRequest,
 };
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
@@ -159,6 +162,696 @@ async fn lookup_binding_does_not_create_missing_conversation_binding() {
         .await
         .expect("lookup-only miss must not poison later create");
     assert_eq!(created.actor.user_id, user("alice"));
+}
+
+#[tokio::test]
+async fn unpair_external_actor_revokes_direct_conversation_bindings() {
+    let services = InMemoryConversationServices::default();
+    let actor = external_actor("telegram-user-1");
+    let conversation = external_conversation("chat-unpair-revoke", None);
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            actor.clone(),
+            user("alice"),
+        )
+        .await;
+    let first = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            actor.clone(),
+            conversation.clone(),
+            "telegram-event-before-unpair",
+        ))
+        .await
+        .expect("first direct binding");
+
+    services
+        .unpair_external_actor(&tenant(), &telegram(), &default_installation(), &actor)
+        .await;
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            actor.clone(),
+            user("alice"),
+        )
+        .await;
+
+    let stale_reply_target = services
+        .validate_reply_target(validate_reply_request(
+            user("alice"),
+            telegram(),
+            default_installation(),
+            actor.clone(),
+            first.turn_scope.thread_id.clone(),
+            first.reply_target_binding_ref,
+        ))
+        .await
+        .expect_err("old reply target should be revoked with the direct binding");
+    assert!(matches!(
+        stale_reply_target,
+        InboundTurnError::ThreadNotFound { .. }
+    ));
+    let missing = services
+        .lookup_binding(resolve_request(
+            telegram(),
+            actor.clone(),
+            conversation.clone(),
+            "telegram-event-after-repair-lookup",
+        ))
+        .await
+        .expect_err("old direct conversation binding should be gone after re-pair");
+    assert!(matches!(missing, InboundTurnError::BindingRequired { .. }));
+
+    let rebound = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            actor,
+            conversation,
+            "telegram-event-after-repair",
+        ))
+        .await
+        .expect("re-paired actor should create a fresh binding");
+    assert_ne!(
+        rebound.turn_scope.thread_id, first.turn_scope.thread_id,
+        "unpair must not silently reuse the pre-removal Slack DM thread route"
+    );
+}
+
+#[tokio::test]
+async fn user_scoped_channel_unpair_revokes_every_owned_actor_and_direct_route() {
+    let services = InMemoryConversationServices::default();
+    let removed_actor = external_actor("slack-user-reconnected");
+    let retained_actor = external_actor("slack-user-other-installation");
+    let removed_conversation = external_conversation("slack-dm-reconnected", None);
+    let other_installation =
+        AdapterInstallationId::new("other-installation").expect("installation");
+
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            removed_actor.clone(),
+            user("alice"),
+        )
+        .await;
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            other_installation.clone(),
+            retained_actor.clone(),
+            user("alice"),
+        )
+        .await;
+    services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            removed_actor.clone(),
+            removed_conversation.clone(),
+            "slack-event-before-removal",
+        ))
+        .await
+        .expect("old user owns the first direct route");
+
+    let removed = services
+        .unpair_external_actors_owned_by(
+            &tenant(),
+            &telegram(),
+            Some(&default_installation()),
+            &user("alice"),
+        )
+        .await
+        .expect("user-scoped channel removal");
+    assert_eq!(removed, 1);
+
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            removed_actor.clone(),
+            user("bob"),
+        )
+        .await;
+    let rebound = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            removed_actor,
+            removed_conversation,
+            "slack-event-after-reconnect",
+        ))
+        .await
+        .expect("the same external actor can bind to the new user after removal");
+    assert_eq!(rebound.actor.user_id, user("bob"));
+
+    let mut retained_request = resolve_request(
+        telegram(),
+        retained_actor,
+        external_conversation("slack-dm-other-installation", None),
+        "slack-event-other-installation",
+    );
+    retained_request.adapter_installation_id = other_installation;
+    let retained = services
+        .resolve_or_create_binding(retained_request)
+        .await
+        .expect("another installation remains paired");
+    assert_eq!(retained.actor.user_id, user("alice"));
+}
+
+#[tokio::test]
+async fn stored_reply_target_revalidates_durable_run_authority_and_revocation() {
+    let services = InMemoryConversationServices::default();
+    let actor = external_actor("telegram-user-stored-route");
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            actor.clone(),
+            user("alice"),
+        )
+        .await;
+    let resolved = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            actor.clone(),
+            external_conversation("stored-route-chat", None),
+            "stored-route-event",
+        ))
+        .await
+        .expect("direct binding");
+
+    let request = ResolveStoredReplyTargetRequest {
+        tenant_id: tenant(),
+        actor_user_id: user("alice"),
+        current_thread_id: resolved.turn_scope.thread_id.clone(),
+        reply_target_binding_ref: resolved.reply_target_binding_ref.clone(),
+        access: StoredReplyTargetAccess::ExactOriginActor,
+    };
+    let target = services
+        .resolve_stored_reply_target(request.clone())
+        .await
+        .expect("current owner may resolve stored target");
+    assert_eq!(target.adapter_kind, telegram());
+    assert_eq!(target.route_kind, ConversationRouteKind::Direct);
+    assert_eq!(
+        target.external_conversation_ref.conversation_id(),
+        "stored-route-chat"
+    );
+
+    services
+        .unpair_external_actor(&tenant(), &telegram(), &default_installation(), &actor)
+        .await;
+    let error = services
+        .resolve_stored_reply_target(request)
+        .await
+        .expect_err("unpair must revoke the durable route");
+    assert!(matches!(error, InboundTurnError::ThreadNotFound { .. }));
+}
+
+#[tokio::test]
+async fn stored_shared_reply_allows_participant_but_not_authority_bearing_prompt() {
+    let services = InMemoryConversationServices::default();
+    let alice_actor = external_actor("stored-shared-alice");
+    let bob_actor = external_actor("stored-shared-bob");
+    for (actor, owner) in [
+        (alice_actor.clone(), user("alice")),
+        (bob_actor.clone(), user("bob")),
+    ] {
+        services
+            .pair_external_actor(tenant(), telegram(), default_installation(), actor, owner)
+            .await;
+    }
+    let conversation = external_conversation("stored-shared-chat", Some("topic-a"));
+    let mut alice_request = resolve_request(
+        telegram(),
+        alice_actor,
+        conversation.clone(),
+        "stored-shared-alice-event",
+    );
+    alice_request.route_kind = ConversationRouteKind::Shared;
+    let resolved = services
+        .resolve_or_create_binding(alice_request)
+        .await
+        .expect("alice creates shared binding");
+    services
+        .add_thread_participant(&tenant(), &resolved.turn_scope.thread_id, user("bob"))
+        .await
+        .expect("bob is a thread participant");
+    let mut bob_request = resolve_request(
+        telegram(),
+        bob_actor,
+        conversation,
+        "stored-shared-bob-event",
+    );
+    bob_request.route_kind = ConversationRouteKind::Shared;
+    let bob_resolution = services
+        .resolve_or_create_binding(bob_request)
+        .await
+        .expect("bob may enter the shared route");
+
+    let ordinary = services
+        .resolve_stored_reply_target(ResolveStoredReplyTargetRequest {
+            tenant_id: tenant(),
+            actor_user_id: user("bob"),
+            current_thread_id: bob_resolution.turn_scope.thread_id.clone(),
+            reply_target_binding_ref: bob_resolution.reply_target_binding_ref.clone(),
+            access: StoredReplyTargetAccess::OrdinaryReply,
+        })
+        .await
+        .expect("shared participant may resolve an ordinary reply");
+    assert_eq!(ordinary.route_kind, ConversationRouteKind::Shared);
+
+    let error = services
+        .resolve_stored_reply_target(ResolveStoredReplyTargetRequest {
+            tenant_id: tenant(),
+            actor_user_id: user("bob"),
+            current_thread_id: bob_resolution.turn_scope.thread_id,
+            reply_target_binding_ref: bob_resolution.reply_target_binding_ref,
+            access: StoredReplyTargetAccess::ExactOriginActor,
+        })
+        .await
+        .expect_err("shared widening cannot authorize an authority-bearing prompt");
+    assert!(matches!(error, InboundTurnError::AccessDenied { .. }));
+}
+
+#[tokio::test]
+async fn unpair_external_actor_if_owned_by_revokes_the_expected_epoch_and_direct_route() {
+    let services = InMemoryConversationServices::default();
+    let actor = external_actor("telegram-user-conditional");
+    let epoch = ExternalActorBindingEpoch::new("generation-7").expect("epoch");
+    services
+        .pair_external_actor_with_epoch(
+            tenant(),
+            telegram(),
+            default_installation(),
+            actor.clone(),
+            user("alice"),
+            epoch.clone(),
+        )
+        .await
+        .expect("pair with epoch");
+    let first = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            actor.clone(),
+            external_conversation("chat-conditional-unpair", None),
+            "telegram-event-conditional-unpair",
+        ))
+        .await
+        .expect("first direct binding");
+    assert_eq!(first.binding_epoch.as_ref(), Some(&epoch));
+
+    let outcome = services
+        .unpair_external_actor_if_owned_by(
+            &tenant(),
+            &telegram(),
+            &default_installation(),
+            &actor,
+            &ExpectedExternalActorOwner {
+                user_id: user("alice"),
+                binding_epoch: Some(epoch),
+            },
+        )
+        .await
+        .expect("conditional unpair");
+
+    assert_eq!(outcome, ConditionalUnpairOutcome::Unpaired);
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            actor.clone(),
+            user("alice"),
+        )
+        .await;
+    let missing = services
+        .lookup_binding(resolve_request(
+            telegram(),
+            actor,
+            external_conversation("chat-conditional-unpair", None),
+            "telegram-event-after-conditional-unpair",
+        ))
+        .await
+        .expect_err("matching conditional unpair must revoke the direct route");
+    assert!(matches!(missing, InboundTurnError::BindingRequired { .. }));
+}
+
+#[tokio::test]
+async fn unpair_external_actor_if_owned_by_preserves_a_newer_owner() {
+    let services = InMemoryConversationServices::default();
+    let actor = external_actor("telegram-user-owner-race");
+    let old_epoch = ExternalActorBindingEpoch::new("generation-1").expect("epoch");
+    let new_epoch = ExternalActorBindingEpoch::new("generation-2").expect("epoch");
+    services
+        .pair_external_actor_with_epoch(
+            tenant(),
+            telegram(),
+            default_installation(),
+            actor.clone(),
+            user("alice"),
+            old_epoch.clone(),
+        )
+        .await
+        .expect("old pairing");
+    let original_route = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            actor.clone(),
+            external_conversation("chat-owner-race", None),
+            "telegram-event-owner-race-old",
+        ))
+        .await
+        .expect("old owner's route");
+    services
+        .add_thread_participant(&tenant(), &original_route.turn_scope.thread_id, user("bob"))
+        .await
+        .expect("new owner can prove the old route was preserved");
+    services
+        .pair_external_actor_with_epoch(
+            tenant(),
+            telegram(),
+            default_installation(),
+            actor.clone(),
+            user("bob"),
+            new_epoch.clone(),
+        )
+        .await
+        .expect("new pairing");
+
+    let outcome = services
+        .unpair_external_actor_if_owned_by(
+            &tenant(),
+            &telegram(),
+            &default_installation(),
+            &actor,
+            &ExpectedExternalActorOwner {
+                user_id: user("alice"),
+                binding_epoch: Some(old_epoch),
+            },
+        )
+        .await
+        .expect("stale conditional unpair");
+
+    assert_eq!(outcome, ConditionalUnpairOutcome::OwnerChanged);
+    let current = services
+        .lookup_binding(resolve_request(
+            telegram(),
+            actor,
+            external_conversation("chat-owner-race", None),
+            "telegram-event-owner-race-current",
+        ))
+        .await
+        .expect("new owner and the existing route must both remain intact");
+    assert_eq!(current.actor.user_id, user("bob"));
+    assert_eq!(current.binding_epoch, Some(new_epoch));
+    assert_eq!(
+        current.turn_scope.thread_id,
+        original_route.turn_scope.thread_id
+    );
+}
+
+#[tokio::test]
+async fn unpair_external_actor_if_owned_by_is_idempotent_when_absent() {
+    let services = InMemoryConversationServices::default();
+    let outcome = services
+        .unpair_external_actor_if_owned_by(
+            &tenant(),
+            &telegram(),
+            &default_installation(),
+            &external_actor("telegram-user-absent"),
+            &ExpectedExternalActorOwner {
+                user_id: user("alice"),
+                binding_epoch: Some(
+                    ExternalActorBindingEpoch::new("generation-absent").expect("epoch"),
+                ),
+            },
+        )
+        .await
+        .expect("absent unpair is idempotent");
+
+    assert_eq!(outcome, ConditionalUnpairOutcome::AlreadyAbsent);
+}
+
+#[tokio::test]
+async fn pair_external_actor_without_epoch_clears_an_older_epoch_for_the_same_actor_key() {
+    let services = InMemoryConversationServices::default();
+    let actor = external_actor("telegram-user-clear-epoch");
+    services
+        .pair_external_actor_with_epoch(
+            tenant(),
+            telegram(),
+            default_installation(),
+            actor.clone(),
+            user("alice"),
+            ExternalActorBindingEpoch::new("generation-old").expect("epoch"),
+        )
+        .await
+        .expect("epoch pairing");
+
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            actor.clone(),
+            user("alice"),
+        )
+        .await;
+
+    let resolution = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            actor,
+            external_conversation("chat-clear-epoch", None),
+            "telegram-event-clear-epoch",
+        ))
+        .await
+        .expect("epoch-less pairing remains usable");
+    assert_eq!(resolution.binding_epoch, None);
+}
+
+#[tokio::test]
+async fn unpair_external_actor_clears_direct_external_event_routes() {
+    let services = InMemoryConversationServices::default();
+    let actor = external_actor("telegram-user-1");
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            actor.clone(),
+            user("alice"),
+        )
+        .await;
+    let first = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            actor.clone(),
+            external_conversation("chat-unpair-event-route-old", None),
+            "telegram-event-before-unpair-route",
+        ))
+        .await
+        .expect("first direct binding");
+
+    services
+        .unpair_external_actor(&tenant(), &telegram(), &default_installation(), &actor)
+        .await;
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            actor.clone(),
+            user("alice"),
+        )
+        .await;
+
+    let rebound = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            actor,
+            external_conversation("chat-unpair-event-route-new", None),
+            "telegram-event-before-unpair-route",
+        ))
+        .await
+        .expect("unpair should remove the stale direct event route");
+    assert_ne!(
+        rebound.turn_scope.thread_id, first.turn_scope.thread_id,
+        "reusing an event id after direct unpair must create a fresh route, not revive stale state"
+    );
+}
+
+#[tokio::test]
+async fn unpair_external_actor_preserves_shared_conversation_routes() {
+    let services = InMemoryConversationServices::default();
+    let alice_actor = external_actor("alice-telegram");
+    let bob_actor = external_actor("bob-telegram");
+    let conversation = external_conversation("shared-chat-unpair-preserve", Some("topic-a"));
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            alice_actor.clone(),
+            user("alice"),
+        )
+        .await;
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            bob_actor.clone(),
+            user("bob"),
+        )
+        .await;
+    let mut alice_request = resolve_request(
+        telegram(),
+        alice_actor.clone(),
+        conversation.clone(),
+        "shared-chat-alice",
+    );
+    alice_request.route_kind = ConversationRouteKind::Shared;
+    let alice_resolution = services
+        .resolve_or_create_binding(alice_request)
+        .await
+        .expect("alice creates shared binding");
+    services
+        .add_thread_participant(
+            &tenant(),
+            &alice_resolution.turn_scope.thread_id,
+            user("bob"),
+        )
+        .await
+        .expect("bob participant");
+    let mut bob_before_unpair = resolve_request(
+        telegram(),
+        bob_actor.clone(),
+        conversation.clone(),
+        "shared-chat-bob-before-unpair",
+    );
+    bob_before_unpair.route_kind = ConversationRouteKind::Shared;
+    let bob_before_unpair = services
+        .resolve_or_create_binding(bob_before_unpair)
+        .await
+        .expect("bob can use shared binding before alice unpairs");
+
+    services
+        .unpair_external_actor(
+            &tenant(),
+            &telegram(),
+            &default_installation(),
+            &alice_actor,
+        )
+        .await;
+
+    let mut bob_after_unpair = resolve_request(
+        telegram(),
+        bob_actor,
+        conversation,
+        "shared-chat-bob-after-unpair",
+    );
+    bob_after_unpair.route_kind = ConversationRouteKind::Shared;
+    let bob_after_unpair = services
+        .resolve_or_create_binding(bob_after_unpair)
+        .await
+        .expect("alice unpair must not remove the shared conversation route");
+
+    assert_eq!(
+        bob_before_unpair.turn_scope.thread_id,
+        alice_resolution.turn_scope.thread_id
+    );
+    assert_eq!(
+        bob_after_unpair.turn_scope.thread_id,
+        alice_resolution.turn_scope.thread_id
+    );
+}
+
+#[tokio::test]
+async fn unpair_external_actor_if_owned_by_preserves_shared_conversation_routes() {
+    let services = InMemoryConversationServices::default();
+    let alice_actor = external_actor("alice-conditional-shared");
+    let bob_actor = external_actor("bob-conditional-shared");
+    let alice_epoch = ExternalActorBindingEpoch::new("generation-shared").expect("epoch");
+    let conversation = external_conversation("shared-chat-conditional-preserve", Some("topic-a"));
+    services
+        .pair_external_actor_with_epoch(
+            tenant(),
+            telegram(),
+            default_installation(),
+            alice_actor.clone(),
+            user("alice"),
+            alice_epoch.clone(),
+        )
+        .await
+        .expect("alice pairing");
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            bob_actor.clone(),
+            user("bob"),
+        )
+        .await;
+    let mut alice_request = resolve_request(
+        telegram(),
+        alice_actor.clone(),
+        conversation.clone(),
+        "shared-conditional-alice",
+    );
+    alice_request.route_kind = ConversationRouteKind::Shared;
+    let alice_resolution = services
+        .resolve_or_create_binding(alice_request)
+        .await
+        .expect("alice creates shared route");
+    services
+        .add_thread_participant(
+            &tenant(),
+            &alice_resolution.turn_scope.thread_id,
+            user("bob"),
+        )
+        .await
+        .expect("bob participant");
+
+    let outcome = services
+        .unpair_external_actor_if_owned_by(
+            &tenant(),
+            &telegram(),
+            &default_installation(),
+            &alice_actor,
+            &ExpectedExternalActorOwner {
+                user_id: user("alice"),
+                binding_epoch: Some(alice_epoch),
+            },
+        )
+        .await
+        .expect("conditional unpair");
+    assert_eq!(outcome, ConditionalUnpairOutcome::Unpaired);
+
+    let mut bob_request = resolve_request(
+        telegram(),
+        bob_actor,
+        conversation,
+        "shared-conditional-bob",
+    );
+    bob_request.route_kind = ConversationRouteKind::Shared;
+    let bob_resolution = services
+        .resolve_or_create_binding(bob_request)
+        .await
+        .expect("shared route remains available to bob");
+    assert_eq!(
+        bob_resolution.turn_scope.thread_id,
+        alice_resolution.turn_scope.thread_id
+    );
 }
 
 #[tokio::test]
@@ -2554,6 +3247,8 @@ fn serde_deserialization_revalidates_external_ref_invariants() {
     );
     assert!(serde_json::from_str::<ExternalEventId>("\"event\\u0000id\"").is_err());
     assert!(serde_json::from_str::<InboundMessageContentRef>("\"\"").is_err());
+    assert!(serde_json::from_str::<ExternalActorBindingEpoch>("\"\"").is_err());
+    assert!(serde_json::from_str::<ExternalActorBindingEpoch>("\"bad\\u0000epoch\"").is_err());
     assert!(serde_json::from_str::<ExternalActorRef>(r#"{"kind":"user","id":""}"#).is_err());
     assert!(serde_json::from_str::<ExternalConversationRef>(
         r#"{"space_id":null,"conversation_id":"chat-1","thread_id":"ok","message_id":"bad\u0001"}"#
@@ -2865,6 +3560,7 @@ impl ConversationBindingService for DriftBindingService {
         Ok(ConversationBindingResolution {
             tenant_id: request.tenant_id.clone(),
             actor: TurnActor::new(user_id),
+            binding_epoch: None,
             turn_scope: TurnScope::new(
                 request.tenant_id,
                 None,
@@ -2891,21 +3587,21 @@ impl ConversationBindingService for DriftBindingService {
         &self,
         _request: ironclaw_conversations::ResolveConversationRequest,
     ) -> Result<ConversationBindingResolution, InboundTurnError> {
-        unimplemented!("not used by inbound facade tests")
+        unimplemented!("not used by inbound service tests")
     }
 
     async fn link_conversation_to_thread(
         &self,
         _request: LinkConversationRequest,
     ) -> Result<LinkedConversationBinding, InboundTurnError> {
-        unimplemented!("not used by inbound facade tests")
+        unimplemented!("not used by inbound service tests")
     }
 
     async fn validate_reply_target(
         &self,
         _request: ValidateReplyTargetRequest,
     ) -> Result<ReplyTargetBinding, InboundTurnError> {
-        unimplemented!("not used by inbound facade tests")
+        unimplemented!("not used by inbound service tests")
     }
 }
 
@@ -3059,19 +3755,19 @@ impl TurnCoordinator for PermanentFailureTurnCoordinator {
         &self,
         _request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError> {
-        unimplemented!("not used by inbound facade tests")
+        unimplemented!("not used by inbound service tests")
     }
 
     async fn retry_turn(&self, _request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
-        unimplemented!("not used by inbound facade tests")
+        unimplemented!("not used by inbound service tests")
     }
 
     async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
-        unimplemented!("not used by inbound facade tests")
+        unimplemented!("not used by inbound service tests")
     }
 
     async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
-        unimplemented!("not used by inbound facade tests")
+        unimplemented!("not used by inbound service tests")
     }
 }
 
@@ -3096,19 +3792,19 @@ impl TurnCoordinator for CapacityFailureTurnCoordinator {
         &self,
         _request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError> {
-        unimplemented!("not used by inbound facade tests")
+        unimplemented!("not used by inbound service tests")
     }
 
     async fn retry_turn(&self, _request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
-        unimplemented!("not used by inbound facade tests")
+        unimplemented!("not used by inbound service tests")
     }
 
     async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
-        unimplemented!("not used by inbound facade tests")
+        unimplemented!("not used by inbound service tests")
     }
 
     async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
-        unimplemented!("not used by inbound facade tests")
+        unimplemented!("not used by inbound service tests")
     }
 }
 
@@ -3138,19 +3834,19 @@ impl TurnCoordinator for BusyFirstUniqueKeyCoordinator {
         &self,
         _request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError> {
-        unimplemented!("not used by inbound facade tests")
+        unimplemented!("not used by inbound service tests")
     }
 
     async fn retry_turn(&self, _request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
-        unimplemented!("not used by inbound facade tests")
+        unimplemented!("not used by inbound service tests")
     }
 
     async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
-        unimplemented!("not used by inbound facade tests")
+        unimplemented!("not used by inbound service tests")
     }
 
     async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
-        unimplemented!("not used by inbound facade tests")
+        unimplemented!("not used by inbound service tests")
     }
 }
 
@@ -3178,19 +3874,19 @@ impl TurnCoordinator for FailFirstTurnCoordinator {
         &self,
         _request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError> {
-        unimplemented!("not used by inbound facade tests")
+        unimplemented!("not used by inbound service tests")
     }
 
     async fn retry_turn(&self, _request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
-        unimplemented!("not used by inbound facade tests")
+        unimplemented!("not used by inbound service tests")
     }
 
     async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
-        unimplemented!("not used by inbound facade tests")
+        unimplemented!("not used by inbound service tests")
     }
 
     async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
-        unimplemented!("not used by inbound facade tests")
+        unimplemented!("not used by inbound service tests")
     }
 }
 
@@ -3212,19 +3908,19 @@ impl TurnCoordinator for RecordingTurnCoordinator {
         &self,
         _request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError> {
-        unimplemented!("not used by inbound facade tests")
+        unimplemented!("not used by inbound service tests")
     }
 
     async fn retry_turn(&self, _request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
-        unimplemented!("not used by inbound facade tests")
+        unimplemented!("not used by inbound service tests")
     }
 
     async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
-        unimplemented!("not used by inbound facade tests")
+        unimplemented!("not used by inbound service tests")
     }
 
     async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
-        unimplemented!("not used by inbound facade tests")
+        unimplemented!("not used by inbound service tests")
     }
 }
 

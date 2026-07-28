@@ -10,15 +10,15 @@
 //! `from` we can't actor-ref) return `ParsedProductInbound { payload:
 //! ProductInboundPayload::NoOp, .. }` with synthetic external refs for
 //! the slots we genuinely have no source for. This matches the
-//! `ironclaw_product_adapters` contract that says NoOps must be a
+//! `ironclaw_product` contract that says NoOps must be a
 //! parsed inbound with the explicit `NoOp` payload variant, NOT an
 //! out-of-band `None` path.
 
-use ironclaw_product_adapters::{
-    AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ExternalEventId,
-    InboundCommandPayload, ParsedProductInbound, ProductAdapterError, ProductAttachmentDescriptor,
-    ProductAttachmentKind, ProductInboundPayload, ProductTriggerReason, ProtocolAuthEvidence,
-    UserMessagePayload,
+use ironclaw_host_api::product_adapter::{
+    AdapterInstallationId, AttachmentRef, ExternalActorRef, ExternalConversationRef,
+    ExternalEventId, InboundCommandPayload, NormalizedInboundMessage, ParsedProductInbound,
+    ProductAdapterError, ProductAttachmentDescriptor, ProductAttachmentKind, ProductInboundPayload,
+    ProductTriggerReason, ProtocolAuthEvidence, UserMessagePayload,
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -33,7 +33,7 @@ pub const TELEGRAM_USER_ACTOR_KIND: &str = "telegram_user";
 /// Telegram private/direct chats do not require any trigger — every message
 /// is forwarded. In groups/supergroups the adapter forwards a message ONLY
 /// when one of these triggers fires, per #3285's "explicit triggers" rule.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GroupTriggerPolicy {
     /// Configured bot username (without leading `@`). Must be ASCII
     /// alphanumeric or `_`. The adapter compares mention entities against
@@ -72,7 +72,7 @@ pub enum PayloadParseError {
 /// `payload = ProductInboundPayload::NoOp` and synthetic external refs
 /// for the slots that genuinely have no source. The webhook still
 /// acks 200 OK; the NoOp payload variant short-circuits inside the
-/// workflow facade.
+/// workflow service.
 pub fn parse_telegram_update(
     raw_payload: &[u8],
     auth_evidence: &ProtocolAuthEvidence,
@@ -378,6 +378,84 @@ fn slice_text_by_offset(text: &str, offset: u32, length: u32) -> Option<&str> {
     text.get(start..end)
 }
 
+// ── Channel-normalized parsing (generic ingress router, extension-runtime P4) ──
+
+/// One host-verified Telegram webhook update, normalized for the generic
+/// channel-adapter contract: an ignored (but authenticated) update or one
+/// plain user message. Bot-command reclassification is a host-sink concern;
+/// the message text carries the command verbatim.
+#[derive(Debug)]
+pub enum TelegramInboundEvent {
+    Ignore,
+    Message(Box<NormalizedInboundMessage>),
+}
+
+/// Parse one HOST-VERIFIED Telegram update into its normalized channel form.
+/// Pure protocol work — no I/O, no secrets; the host executed the
+/// `shared_secret_header` recipe before calling this. Applies the same
+/// forwarding rules as [`parse_telegram_update`]: private chats always
+/// forward; groups only on an explicit trigger; everything else is an
+/// authenticated no-op.
+pub fn normalize_telegram_update(
+    raw_payload: &[u8],
+    installation_id: &AdapterInstallationId,
+    group_trigger_policy: &GroupTriggerPolicy,
+) -> Result<TelegramInboundEvent, PayloadParseError> {
+    let update: TelegramUpdate =
+        serde_json::from_slice(raw_payload).map_err(|err| PayloadParseError::InvalidJson {
+            reason: err.to_string(),
+        })?;
+    let update_id = update.update_id;
+    if update_id == 0 {
+        return Err(PayloadParseError::MissingUpdateId);
+    }
+    let event_id = build_event_id(installation_id, update_id)?;
+
+    let Some(message) = update.message else {
+        return Ok(TelegramInboundEvent::Ignore);
+    };
+    if message.from.is_none() {
+        return Ok(TelegramInboundEvent::Ignore);
+    }
+    let chat_kind = TelegramChatKind::from_str(message.chat.kind.as_str());
+    let Some(trigger) = classify_trigger(&message, chat_kind, group_trigger_policy) else {
+        return Ok(TelegramInboundEvent::Ignore);
+    };
+    let actor = build_actor_ref(message.from.as_ref())?;
+    let conversation = build_conversation_ref(&message)?;
+    let attachments = collect_attachments(&message)?;
+    let text = strip_leading_mention(
+        message
+            .text
+            .clone()
+            .or_else(|| message.caption.clone())
+            .unwrap_or_default(),
+        group_trigger_policy,
+    );
+    let attachments = attachments
+        .into_iter()
+        .map(|descriptor| AttachmentRef {
+            vendor_ref: descriptor.external_file_id.clone(),
+            mime_hint: Some(descriptor.mime_type.clone()),
+            descriptor,
+        })
+        .collect();
+    Ok(TelegramInboundEvent::Message(Box::new(
+        NormalizedInboundMessage {
+            actor,
+            conversation,
+            event_id,
+            text,
+            trigger,
+            attachments,
+            // Reply routing rides the conversation ref's thread anchors
+            // (pre-coordinator delivery path); adopted when the P5 delivery
+            // coordinator consumes stored contexts.
+            reply_context: None,
+        },
+    )))
+}
+
 #[cfg(test)]
 mod slice_tests {
     use super::*;
@@ -502,7 +580,7 @@ fn build_payload(
     // messages that also contained a `/command`.
     if let Some((command, arguments)) = extract_first_bot_command(&message, policy) {
         // Route through `InboundCommandPayload::new` so the shared
-        // `ironclaw_product_adapters` validation fires on the
+        // `ironclaw_product` validation fires on the
         // untrusted Telegram text: command-token shape and byte limit,
         // arguments byte limit, control-character rejection. A struct
         // literal here would bypass those checks and let oversized or
@@ -525,6 +603,21 @@ fn build_payload(
         .or_else(|| message.caption.clone())
         .unwrap_or_default();
     text = strip_leading_mention(text, policy);
+    // In-chat gate commands (`approve`/`deny`/`auth deny <gate_ref>`) — the
+    // channel-neutral grammar shared with Slack. The busy/prompt copy the
+    // shared delivery driver posts to this chat advertises these commands,
+    // so they must resolve gates here instead of bouncing off a busy thread
+    // as plain user messages (Ben's 2026-07-17 phantom-affordance loop).
+    if let Some(resolution) = ironclaw_host_api::product_adapter::parse_interaction_resolution_text(
+        ironclaw_host_api::product_adapter::strip_wrapping_inline_code(&text),
+        trigger,
+    )
+    .map_err(|err| PayloadParseError::InvalidExternalRef {
+        kind: "interaction_resolution_payload",
+        reason: err.to_string(),
+    })? {
+        return Ok(resolution);
+    }
     let attachments = collect_attachments(&message)?;
     let user_message = UserMessagePayload::new(text, attachments, trigger).map_err(|err| {
         PayloadParseError::InvalidExternalRef {
@@ -822,8 +915,8 @@ fn _suppress_unused_field_warnings(update: &TelegramUpdate) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_product_adapters::ProductAdapterId;
-    use ironclaw_product_adapters::auth::mark_shared_secret_header_verified;
+    use ironclaw_host_api::product_adapter::ProductAdapterId;
+    use ironclaw_host_api::product_adapter::auth::mark_shared_secret_header_verified;
 
     fn evidence() -> ProtocolAuthEvidence {
         mark_shared_secret_header_verified(
@@ -855,7 +948,7 @@ mod tests {
         // `ProtocolAuthEvidence` is now a sealed struct, not an enum;
         // `failed(failure)` constructs an unverified evidence.
         let evidence = ProtocolAuthEvidence::failed(
-            ironclaw_product_adapters::ProtocolAuthFailure::SharedSecretMismatch,
+            ironclaw_host_api::product_adapter::ProtocolAuthFailure::SharedSecretMismatch,
         );
         let err = parse_telegram_update(payload, &evidence, &install_id(), &policy())
             .expect_err("unauthenticated must error");
@@ -968,7 +1061,7 @@ mod tests {
         // Henry's review (PR #3354, 2026-05-12T18:59:39Z) — Critical:
         // `build_payload` previously constructed `InboundCommandPayload`
         // with a struct literal, bypassing `InboundCommandPayload::new`
-        // and the shared `ironclaw_product_adapters` validation
+        // and the shared `ironclaw_product` validation
         // (token shape, byte limits, control-char rejection). Untrusted
         // Telegram webhook text could carry control characters into
         // the trusted inbound envelope.
@@ -1020,7 +1113,7 @@ mod tests {
     fn command_arguments_exceeding_byte_limit_rejected_via_shared_validation() {
         // Defense-in-depth for the same fix: synthesize a command with
         // arguments larger than `COMMAND_ARGUMENTS_MAX_BYTES` (64 KiB
-        // per `ironclaw_product_adapters::inbound`) and assert the
+        // per `ironclaw_host_api::product_adapter::inbound`) and assert the
         // shared validator rejects it through `InboundCommandPayload::new`.
         // 70_000 bytes is comfortably over the 64 * 1024 = 65_536 limit.
         let oversized = "a".repeat(70_000);
@@ -1422,5 +1515,86 @@ mod tests {
         let err = parse_telegram_update(payload, &evidence(), &install_id(), &policy())
             .expect_err("malformed");
         assert!(matches!(err, PayloadParseError::InvalidJson { .. }));
+    }
+
+    /// Ben's regression (2026-07-17): the shared busy-on-auth hint tells the
+    /// user to reply `auth deny gate:<ref>` in this chat, but Telegram's
+    /// parse treated that reply as a plain `UserMessage` — it bounced off
+    /// the busy thread with the same hint, forever. The advertised
+    /// interaction grammar (shared with Slack via
+    /// `ironclaw_host_api::product_adapter::interaction_commands`) must parse here.
+    #[test]
+    fn dm_auth_deny_command_parses_to_auth_resolution_not_user_message() {
+        let payload = br#"{
+            "update_id": 300,
+            "message": {
+                "message_id": 30,
+                "date": 1700000000,
+                "from": {"id": 777, "is_bot": false, "first_name": "Alice", "username": "alice"},
+                "chat": {"id": 777, "type": "private"},
+                "text": "auth deny gate:auth-abc123"
+            }
+        }"#;
+        let parsed =
+            parse_telegram_update(payload, &evidence(), &install_id(), &policy()).expect("parses");
+        match parsed.payload {
+            ironclaw_host_api::product_adapter::ProductInboundPayload::AuthResolution(
+                resolution,
+            ) => {
+                assert_eq!(resolution.auth_request_ref, "gate:auth-abc123");
+            }
+            other => panic!("expected AuthResolution, got {other:?}"),
+        }
+    }
+
+    /// The hint renders the command in backticks; Telegram clients copy them.
+    #[test]
+    fn dm_backticked_approve_command_parses_to_approval_resolution() {
+        let payload = br#"{
+            "update_id": 301,
+            "message": {
+                "message_id": 31,
+                "date": 1700000000,
+                "from": {"id": 777, "is_bot": false, "first_name": "Alice", "username": "alice"},
+                "chat": {"id": 777, "type": "private"},
+                "text": "`approve gate:approval-9`"
+            }
+        }"#;
+        let parsed =
+            parse_telegram_update(payload, &evidence(), &install_id(), &policy()).expect("parses");
+        assert!(
+            matches!(
+                parsed.payload,
+                ironclaw_host_api::product_adapter::ProductInboundPayload::ApprovalResolution(_)
+            ),
+            "got {:?}",
+            parsed.payload
+        );
+    }
+
+    /// Guard: ordinary conversation that merely starts with a verb-like word
+    /// still routes as a user message.
+    #[test]
+    fn dm_ordinary_text_still_routes_as_user_message() {
+        let payload = br#"{
+            "update_id": 302,
+            "message": {
+                "message_id": 32,
+                "date": 1700000000,
+                "from": {"id": 777, "is_bot": false, "first_name": "Alice", "username": "alice"},
+                "chat": {"id": 777, "type": "private"},
+                "text": "hello there, what can you do?"
+            }
+        }"#;
+        let parsed =
+            parse_telegram_update(payload, &evidence(), &install_id(), &policy()).expect("parses");
+        assert!(
+            matches!(
+                parsed.payload,
+                ironclaw_host_api::product_adapter::ProductInboundPayload::UserMessage(_)
+            ),
+            "got {:?}",
+            parsed.payload
+        );
     }
 }

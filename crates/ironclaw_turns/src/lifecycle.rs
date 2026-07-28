@@ -17,9 +17,10 @@ use crate::{
     events::{EventCursor, lifecycle_owner_user_id},
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
-        ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest, RecoverExpiredLeasesRequest,
-        RecoverExpiredLeasesResponse, RelinquishRunRequest, TurnRunTransitionPort,
+        ClaimRunRequest, ClaimRunsRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest,
+        HeartbeatRequest, RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest,
+        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, RelinquishRunRequest,
+        TurnRunTransitionPort,
     },
     store::SpawnTreeReservation,
 };
@@ -305,6 +306,21 @@ impl<S: ?Sized> LifecyclePublishingTurnStateStore<S> {
         }
     }
 
+    /// Publish the lifecycle event for a run-transition result and return the
+    /// state. The event kind and sanitized reason are derived from the state
+    /// ([`event_kind_for_state`] / [`sanitized_reason_for_state`]) — the same
+    /// values every `TurnRunTransitionPort` terminal transition would compute
+    /// by hand, so this is the one place that shape lives.
+    async fn publish_transition(&self, state: TurnRunState) -> Result<TurnRunState, TurnError> {
+        let event = TurnLifecycleEvent::from_run_state(
+            &state,
+            event_kind_for_state(&state),
+            sanitized_reason_for_state(&state),
+        );
+        self.publish_state_once(state.clone(), event).await?;
+        Ok(state)
+    }
+
     async fn publish_state_once_best_effort(
         &self,
         state: TurnRunState,
@@ -538,6 +554,13 @@ where
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
         self.inner.get_run_state(request).await
     }
+
+    async fn get_run_state_for_cancellation(
+        &self,
+        request: GetRunStateRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        self.inner.get_run_state_for_cancellation(request).await
+    }
 }
 
 #[async_trait]
@@ -594,9 +617,21 @@ where
         scope: &crate::TurnScope,
         root_run_id: TurnRunId,
         delta: u32,
+        idempotency_key: TurnRunId,
     ) -> Result<(), TurnError> {
         self.inner
-            .release_tree_descendants(scope, root_run_id, delta)
+            .release_tree_descendants(scope, root_run_id, delta, idempotency_key)
+            .await
+    }
+
+    async fn prune_released_child(
+        &self,
+        scope: &crate::TurnScope,
+        root_run_id: TurnRunId,
+        child_run_id: TurnRunId,
+    ) -> Result<(), TurnError> {
+        self.inner
+            .prune_released_child(scope, root_run_id, child_run_id)
             .await
     }
 }
@@ -619,6 +654,27 @@ where
             );
             self.publish_state_once_best_effort(claimed.state.clone(), event, "committed claim")
                 .await;
+        }
+        Ok(claimed)
+    }
+
+    async fn claim_next_runs(
+        &self,
+        request: ClaimRunsRequest,
+    ) -> Result<Vec<ClaimedTurnRun>, TurnError> {
+        let claimed = self.inner.claim_next_runs(request).await?;
+        for claimed_run in &claimed {
+            let event = TurnLifecycleEvent::from_run_state(
+                &claimed_run.state,
+                TurnEventKind::RunnerClaimed,
+                None,
+            );
+            self.publish_state_once_best_effort(
+                claimed_run.state.clone(),
+                event,
+                "committed claim",
+            )
+            .await;
         }
         Ok(claimed)
     }
@@ -664,16 +720,12 @@ where
 
     async fn block_run(&self, request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
         let state = self.inner.block_run(request).await?;
-        let event = TurnLifecycleEvent::from_run_state(&state, TurnEventKind::Blocked, None);
-        self.publish_state_once(state.clone(), event).await?;
-        Ok(state)
+        self.publish_transition(state).await
     }
 
     async fn complete_run(&self, request: CompleteRunRequest) -> Result<TurnRunState, TurnError> {
         let state = self.inner.complete_run(request).await?;
-        let event = TurnLifecycleEvent::from_run_state(&state, TurnEventKind::Completed, None);
-        self.publish_state_once(state.clone(), event).await?;
-        Ok(state)
+        self.publish_transition(state).await
     }
 
     async fn cancel_run(
@@ -681,20 +733,12 @@ where
         request: CancelRunCompletionRequest,
     ) -> Result<TurnRunState, TurnError> {
         let state = self.inner.cancel_run(request).await?;
-        let event = TurnLifecycleEvent::from_run_state(&state, TurnEventKind::Cancelled, None);
-        self.publish_state_once(state.clone(), event).await?;
-        Ok(state)
+        self.publish_transition(state).await
     }
 
     async fn fail_run(&self, request: FailRunRequest) -> Result<TurnRunState, TurnError> {
         let state = self.inner.fail_run(request).await?;
-        let event = TurnLifecycleEvent::from_run_state(
-            &state,
-            TurnEventKind::Failed,
-            sanitized_reason_for_state(&state),
-        );
-        self.publish_state_once(state.clone(), event).await?;
-        Ok(state)
+        self.publish_transition(state).await
     }
 
     async fn record_runner_failure(
@@ -702,13 +746,7 @@ where
         request: RecordRunnerFailureRequest,
     ) -> Result<TurnRunState, TurnError> {
         let state = self.inner.record_runner_failure(request).await?;
-        let event = TurnLifecycleEvent::from_run_state(
-            &state,
-            event_kind_for_state(&state),
-            sanitized_reason_for_state(&state),
-        );
-        self.publish_state_once(state.clone(), event).await?;
-        Ok(state)
+        self.publish_transition(state).await
     }
 
     async fn relinquish_run(
@@ -716,13 +754,7 @@ where
         request: RelinquishRunRequest,
     ) -> Result<TurnRunState, TurnError> {
         let state = self.inner.relinquish_run(request).await?;
-        let event = TurnLifecycleEvent::from_run_state(
-            &state,
-            event_kind_for_state(&state),
-            sanitized_reason_for_state(&state),
-        );
-        self.publish_state_once(state.clone(), event).await?;
-        Ok(state)
+        self.publish_transition(state).await
     }
 
     async fn apply_validated_loop_exit(
@@ -730,12 +762,6 @@ where
         request: ApplyValidatedLoopExitRequest,
     ) -> Result<TurnRunState, TurnError> {
         let state = self.inner.apply_validated_loop_exit(request).await?;
-        let event = TurnLifecycleEvent::from_run_state(
-            &state,
-            event_kind_for_state(&state),
-            sanitized_reason_for_state(&state),
-        );
-        self.publish_state_once(state.clone(), event).await?;
-        Ok(state)
+        self.publish_transition(state).await
     }
 }

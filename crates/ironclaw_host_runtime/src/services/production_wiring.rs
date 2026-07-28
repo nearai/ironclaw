@@ -2,14 +2,17 @@ use std::any::{TypeId, type_name};
 
 use thiserror::Error;
 
+use ironclaw_approvals::PersistentApprovalPolicyStore;
+use ironclaw_authorization::CapabilityLeaseStore;
+use ironclaw_filesystem::InMemoryBackend;
+use ironclaw_processes::{ProcessResultStore, ProcessStore};
+use ironclaw_run_state::{ApprovalRequestStore, RunStateStore};
+
 use super::{
-    DurableAuditSink, DurableEventSink, EmptyWasmRuntimeCredentials, InMemoryApprovalRequestStore,
-    InMemoryAuditSink, InMemoryCapabilityLeaseStore, InMemoryCredentialBroker,
-    InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink,
-    InMemoryPersistentApprovalPolicyStore, InMemoryProcessResultStore, InMemoryProcessStore,
-    InMemoryResourceGovernor, InMemoryRunStateStore, InMemorySecretStore, InMemoryTurnStateStore,
-    LocalFilesystem, LocalHostProcessPort, NoopTurnRunWakeNotifier, RebornEventStoreError,
-    RuntimeKind,
+    DiskFilesystem, DurableAuditSink, DurableEventSink, EmptyWasmRuntimeCredentials,
+    HostProcessPort, InMemoryAuditSink, InMemoryCredentialBroker, InMemoryDurableAuditLog,
+    InMemoryDurableEventLog, InMemoryEventSink, InMemoryResourceGovernor, NoopTurnRunWakeNotifier,
+    RebornEventStoreError, RuntimeKind, SecretStore,
 };
 
 #[derive(Debug, Error)]
@@ -77,15 +80,15 @@ pub enum ProductionWiringComponent {
     TrustPolicy,
     Filesystem,
     ResourceGovernor,
-    ProcessStore,
-    ProcessResultStore,
+    ProcessStorePort,
+    ProcessResultStorePort,
     RunState,
     ApprovalRequests,
     CapabilityLeases,
     PersistentApprovalPolicies,
     EventSink,
     AuditSink,
-    SecretStore,
+    SecretStorePort,
     CredentialAccountStore,
     CredentialSessionStore,
     RuntimeHttpEgress,
@@ -108,15 +111,15 @@ impl ProductionWiringComponent {
             Self::TrustPolicy => "trust_policy",
             Self::Filesystem => "filesystem",
             Self::ResourceGovernor => "resource_governor",
-            Self::ProcessStore => "process_store",
-            Self::ProcessResultStore => "process_result_store",
+            Self::ProcessStorePort => "process_store",
+            Self::ProcessResultStorePort => "process_result_store",
             Self::RunState => "run_state",
             Self::ApprovalRequests => "approval_requests",
             Self::CapabilityLeases => "capability_leases",
             Self::PersistentApprovalPolicies => "persistent_approval_policies",
             Self::EventSink => "event_sink",
             Self::AuditSink => "audit_sink",
-            Self::SecretStore => "secret_store",
+            Self::SecretStorePort => "secret_store",
             Self::CredentialAccountStore => "credential_account_store",
             Self::CredentialSessionStore => "credential_session_store",
             Self::RuntimeHttpEgress => "runtime_http_egress",
@@ -151,6 +154,18 @@ pub struct ProductionWiringIssue {
 }
 
 impl ProductionWiringIssue {
+    pub fn new(
+        component: ProductionWiringComponent,
+        kind: ProductionWiringIssueKind,
+        implementation: Option<&'static str>,
+    ) -> Self {
+        Self {
+            component,
+            kind,
+            implementation,
+        }
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_test(component: ProductionWiringComponent, kind: ProductionWiringIssueKind) -> Self {
         Self {
@@ -180,6 +195,10 @@ pub struct ProductionWiringReport {
 }
 
 impl ProductionWiringReport {
+    pub fn new(issues: Vec<ProductionWiringIssue>) -> Self {
+        Self { issues }
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_test(issues: Vec<ProductionWiringIssue>) -> Self {
         Self { issues }
@@ -287,24 +306,45 @@ pub(super) fn component_name(component: Option<ProductionComponentType>) -> Opti
 fn classify_component_type<T: ?Sized + 'static>() -> ProductionImplementationReadiness {
     let type_id = TypeId::of::<T>();
     match () {
-        () if type_id == TypeId::of::<LocalFilesystem>()
+        () if type_id == TypeId::of::<DiskFilesystem>()
             || type_id == TypeId::of::<InMemoryResourceGovernor>()
-            || type_id == TypeId::of::<InMemoryProcessStore>()
-            || type_id == TypeId::of::<InMemoryProcessResultStore>()
-            || type_id == TypeId::of::<InMemoryRunStateStore>()
-            || type_id == TypeId::of::<InMemoryApprovalRequestStore>()
-            || type_id == TypeId::of::<InMemoryCapabilityLeaseStore>()
-            || type_id == TypeId::of::<InMemoryPersistentApprovalPolicyStore>()
+            // The process lifecycle/result stores no longer have bespoke
+            // in-memory implementations; "in-memory" is the `InMemoryBackend`
+            // behind the one production `FilesystemProcess*Store<F>`
+            // (arch-simplification §4.3). A store backed by `InMemoryBackend` is
+            // still local-only; libSQL/Postgres monomorphizations are distinct.
+            || type_id == TypeId::of::<ProcessStore<InMemoryBackend>>()
+            || type_id == TypeId::of::<ProcessResultStore<InMemoryBackend>>()
+            // The run-state and approval-request stores no longer have bespoke
+            // in-memory implementations; "in-memory" is the `InMemoryBackend`
+            // behind the one production `Filesystem*Store<F>` (arch-simplification
+            // §4.3). A store backed by `InMemoryBackend` is still local-only;
+            // libSQL/Postgres monomorphizations are distinct.
+            || type_id == TypeId::of::<RunStateStore<InMemoryBackend>>()
+            || type_id == TypeId::of::<ApprovalRequestStore<InMemoryBackend>>()
+            // The persistent-approval and capability-lease stores no longer have
+            // bespoke in-memory implementations; "in-memory" is now the
+            // `InMemoryBackend` behind the one production `Filesystem*Store<F>`
+            // (arch-simplification §4.3). A store backed by `InMemoryBackend` is
+            // still local-only; the durable libSQL/Postgres monomorphizations are
+            // distinct types and correctly classify as production candidates.
+            || type_id == TypeId::of::<PersistentApprovalPolicyStore<InMemoryBackend>>()
+            || type_id == TypeId::of::<CapabilityLeaseStore<InMemoryBackend>>()
             || type_id == TypeId::of::<InMemoryEventSink>()
             || type_id == TypeId::of::<InMemoryDurableEventLog>()
             || type_id == TypeId::of::<InMemoryAuditSink>()
             || type_id == TypeId::of::<InMemoryDurableAuditLog>()
-            || type_id == TypeId::of::<InMemorySecretStore>()
+            // The secret store no longer has a bespoke in-memory implementation;
+            // "in-memory" is the `InMemoryBackend` behind the one production
+            // encrypted `SecretStore<F>` (arch-simplification §4.3).
+            // A store backed by `InMemoryBackend` is still local-only; the
+            // durable libSQL/Postgres monomorphizations are distinct types and
+            // correctly classify as production candidates.
+            || type_id == TypeId::of::<SecretStore<InMemoryBackend>>()
             || type_id == TypeId::of::<InMemoryCredentialBroker>()
             || type_id == TypeId::of::<EmptyWasmRuntimeCredentials>()
-            || type_id == TypeId::of::<InMemoryTurnStateStore>()
             || type_id == TypeId::of::<NoopTurnRunWakeNotifier>()
-            || type_id == TypeId::of::<LocalHostProcessPort>() =>
+            || type_id == TypeId::of::<HostProcessPort>() =>
         {
             ProductionImplementationReadiness::LocalOnly
         }

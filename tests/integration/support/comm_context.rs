@@ -6,9 +6,9 @@
 //! `assert_model_request_contains`).
 //!
 //! DISTINCT from the outbound delivery **sink** (E-OUTBOUND): this is prompt
-//! **context**, not a delivery recorder. The production facade→context
+//! **context**, not a delivery recorder. The production service→context
 //! mapping is already unit-tested in
-//! `crates/ironclaw_reborn_composition/src/communication_context.rs`; this
+//! `crates/ironclaw_reborn_composition/src/root/communication_context.rs`; this
 //! double covers only the int-tier wiring gap.
 
 // Shared integration-test support: not every binary that mounts the
@@ -50,6 +50,7 @@ impl RecordingCommunicationContextProvider {
                     name: channel_name.into(),
                     authenticated: true,
                     active: true,
+                    presentation: None,
                 }]),
                 delivery_target: DeliveryTargetState::Set(DeliveryTargetSummary {
                     display_name: display_name.into(),

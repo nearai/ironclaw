@@ -194,8 +194,7 @@ pub struct WasmHookRuntime {
     /// Held for its `Drop` impl: signals the background epoch ticker to
     /// stop and joins the thread so the engine clone the ticker carried is
     /// released alongside this runtime.
-    #[allow(dead_code)]
-    epoch_ticker: EpochTickerHandle,
+    _epoch_ticker: EpochTickerHandle,
 }
 
 impl WasmHookRuntime {
@@ -212,7 +211,7 @@ impl WasmHookRuntime {
             engine,
             resolver,
             modules: Mutex::new(LruCache::new(MODULE_CACHE_CAPACITY)),
-            epoch_ticker,
+            _epoch_ticker: epoch_ticker,
         })
     }
 
@@ -539,11 +538,15 @@ impl Drop for EpochTickerHandle {
         // The ticker sleeps for at most `EPOCH_TICK_INTERVAL` before
         // re-checking the flag, so the join completes promptly.
         if let Some(handle) = self.join.take() {
-            // A panic on the ticker thread would surface here; we
-            // deliberately swallow it so a single stuck runtime drop
-            // can't poison the process. The shutdown flag is already
-            // set, so any subsequent runtime drop also no-ops cleanly.
-            let _ = handle.join();
+            // A panic on the ticker thread surfaces here. We deliberately do
+            // not propagate it so a single stuck runtime drop can't poison the
+            // process (the shutdown flag is already set, so any subsequent
+            // runtime drop also no-ops cleanly), but we leave a debug trail for
+            // operators. The join error carries an opaque panic payload
+            // (`Box<dyn Any>`), so there is nothing further to log.
+            if handle.join().is_err() {
+                tracing::debug!("epoch ticker thread panicked during drop");
+            }
         }
     }
 }

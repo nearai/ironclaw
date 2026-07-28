@@ -2,9 +2,9 @@
 
 use ironclaw_host_api::{CapabilityId, EffectKind, MountView};
 use ironclaw_host_runtime::{
-    TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
-    TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
-    TRACE_COMMONS_STATUS_CAPABILITY_ID,
+    TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID,
+    TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
 };
 
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
@@ -18,6 +18,7 @@ pub(crate) fn trace_commons_tools_profile() -> HarnessResult<ToolsProfile> {
             CapabilityId::new(TRACE_COMMONS_CREDITS_CAPABILITY_ID)?,
             CapabilityId::new(TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID)?,
             CapabilityId::new(TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID)?,
+            CapabilityId::new(TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID)?,
         ],
         effect_kinds: vec![
             EffectKind::DispatchCapability,

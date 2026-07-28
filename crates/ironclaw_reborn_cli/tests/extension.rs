@@ -1,7 +1,7 @@
 use std::{fs, path::Path, process::Command};
 
 fn reborn_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_ironclaw-reborn")
+    env!("CARGO_BIN_EXE_ironclaw")
 }
 
 #[test]
@@ -12,7 +12,9 @@ fn extension_search_json_reads_reborn_home_local_dev_packages() {
 
     let json = run_extension_json(&reborn_home, &["search", "zztest", "--json"]);
 
-    assert_eq!(json["phase"], "discovered");
+    // Multi-item search keeps a neutral public phase; per-item membership
+    // states ride `installation_phase` and never expose host checkpoints.
+    assert_eq!(json["phase"], "setup_needed");
     assert_eq!(json["payload"]["kind"], "extension_search");
     assert_eq!(json["payload"]["count"], 1);
     assert_eq!(
@@ -37,10 +39,36 @@ fn extension_search_json_without_query_lists_local_dev_packages() {
         .filter_map(|extension| extension["package_ref"]["id"].as_str())
         .collect::<Vec<_>>();
 
-    assert_eq!(json["phase"], "discovered");
+    // Multi-item search keeps a neutral public phase; per-item membership
+    // states ride `installation_phase` and never expose host checkpoints.
+    assert_eq!(json["phase"], "setup_needed");
     assert_eq!(json["payload"]["kind"], "extension_search");
     assert!(ids.contains(&"zztest-alpha"), "ids: {ids:?}");
     assert!(ids.contains(&"zztest-beta"), "ids: {ids:?}");
+}
+
+#[test]
+fn extension_search_json_finds_binary_bundled_first_party_package() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+
+    let json = run_extension_json(&reborn_home, &["search", "github", "--json"]);
+    let extensions = json["payload"]["extensions"]
+        .as_array()
+        .expect("extensions array");
+    let ids = extensions
+        .iter()
+        .filter_map(|extension| extension["package_ref"]["id"].as_str())
+        .collect::<Vec<_>>();
+
+    // Search envelopes keep the neutral public phase (#6520 three-state
+    // lifecycle retired the "installed" wire literal).
+    assert_eq!(json["phase"], "setup_needed");
+    assert_eq!(json["payload"]["kind"], "extension_search");
+    assert!(
+        ids.contains(&"github"),
+        "binary-bundled first-party packages must be visible to lifecycle search: {ids:?}"
+    );
 }
 
 #[test]
@@ -56,6 +84,7 @@ fn extension_install_json_uses_reborn_home_without_v1_state() {
         .arg("zztest-mcp")
         .arg("--json")
         .env_clear()
+        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("IRONCLAW_BASE_DIR", &v1_base_dir)
         .output()
@@ -68,7 +97,11 @@ fn extension_install_json_uses_reborn_home_without_v1_state() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
-    assert_eq!(json["phase"], "installed");
+    assert_eq!(json["phase"], "active");
+    assert!(
+        json["payload"].get("activated").is_none(),
+        "the retired activation projection must not reappear"
+    );
     assert_eq!(json["package_ref"]["id"], "zztest-mcp");
     assert_eq!(json["payload"]["kind"], "extension_install");
     assert_eq!(json["payload"]["installed"], true);
@@ -100,6 +133,7 @@ fn extension_search_human_output_escapes_control_characters() {
         .arg("search")
         .arg("zztest-evil")
         .env_clear()
+        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
         .expect("ironclaw-reborn extension search should run");
@@ -117,21 +151,21 @@ fn extension_search_human_output_escapes_control_characters() {
 }
 
 #[test]
-fn extension_activate_and_remove_json_use_persisted_installation_state() {
+fn extension_install_auto_advances_and_remove_uses_persisted_installation_state() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
     write_extension_fixture(&reborn_home, "zztest-mcp");
 
     let install = run_extension_json(&reborn_home, &["install", "zztest-mcp", "--json"]);
-    assert_eq!(install["phase"], "installed");
-
-    let activate = run_extension_json(&reborn_home, &["activate", "zztest-mcp", "--json"]);
-    assert_eq!(activate["phase"], "active");
-    assert_eq!(activate["payload"]["kind"], "extension_activate");
-    assert_eq!(activate["payload"]["activated"], true);
+    assert_eq!(install["phase"], "active");
+    assert_eq!(install["payload"]["kind"], "extension_install");
+    assert!(
+        install["payload"].get("activated").is_none(),
+        "install completion is expressed by phase=active, not a second projection"
+    );
 
     let remove = run_extension_json(&reborn_home, &["remove", "zztest-mcp", "--json"]);
-    assert_eq!(remove["phase"], "removed");
+    assert_eq!(remove["phase"], "uninstalled");
     assert_eq!(remove["payload"]["kind"], "extension_remove");
     assert_eq!(remove["payload"]["removed"], true);
     assert!(
@@ -147,6 +181,7 @@ fn run_extension_json(reborn_home: &Path, args: &[&str]) -> serde_json::Value {
         .arg("extension")
         .args(args)
         .env_clear()
+        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("IRONCLAW_REBORN_HOME", reborn_home)
         .output()
         .expect("ironclaw-reborn extension command should run");
@@ -181,6 +216,9 @@ fn write_extension_fixture_with_metadata(
     fs::create_dir_all(&extension_root).expect("fixture extension dir");
     let name = toml_basic_string_value(name);
     let description = toml_basic_string_value(description);
+    // Filesystem-discovered manifests validate as `InstalledLocal` (#5499),
+    // which forbids the legacy top-level `[[capabilities]]` shape — the
+    // fixture uses the installed-legal `capability_provider` host_api form.
     fs::write(
         extension_root.join("manifest.toml"),
         format!(
@@ -197,7 +235,13 @@ transport = "stdio"
 command = "zztest-mcp-server"
 args = ["--stdio"]
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "{extension_id}.search_issues"
 description = "Search GitHub issues"
 effects = ["network", "dispatch_capability"]

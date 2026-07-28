@@ -70,25 +70,40 @@ MOCK_SKILLS = [
     },
 ]
 
+CHANNEL_SURFACES = [
+    {
+        "kind": "channel",
+        "channel": "telegram",
+        "direction": "bidirectional",
+        "connection": {
+            "status": "connected",
+            "strategy": "oauth",
+            "action": {
+                "kind": "open_setup",
+                "submit_label": "Reconnect",
+            },
+        },
+    }
+]
+
 MOCK_CHANNEL_EXTENSION = {
-    "name": "telegram-channel",
     "package_ref": {"kind": "extension", "id": "telegram-channel"},
     "display_name": "Telegram Channel",
-    "kind": "wasm_channel",
+    "runtime": "first_party",
     "description": "Configured messaging channel.",
-    "active": True,
-    "authenticated": True,
-    "onboarding_state": "ready",
+    "tools": [],
+    "installation_state": "active",
+    "surfaces": [{"kind": "channel", "inbound": True, "outbound": True}],
 }
 
 MOCK_MCP_EXTENSION = {
-    "name": "beta-mcp",
     "package_ref": {"kind": "extension", "id": "beta-mcp"},
     "display_name": "Beta MCP",
-    "kind": "mcp_server",
+    "runtime": "mcp",
     "description": "Installed MCP server.",
-    "active": False,
-    "authenticated": False,
+    "tools": [],
+    "installation_state": "setup_needed",
+    "surfaces": [{"kind": "tool"}],
 }
 
 
@@ -303,7 +318,7 @@ async def _open_mocked_settings_page(
     await page.route("**/api/webchat/v2/extensions**", handle_extensions)
     await page.route("**/api/webchat/v2/llm/**", handle_llm)
 
-    await page.goto(f"{reborn_v2_server}/v2/settings/{tab}?token={REBORN_V2_AUTH_TOKEN}")
+    await page.goto(f"{reborn_v2_server}/settings/{tab}?token={REBORN_V2_AUTH_TOKEN}")
     search = page.get_by_placeholder(SEL_V2["settings_search_placeholder"])
     try:
         await expect(search).to_be_visible(timeout=15000)
@@ -322,6 +337,16 @@ def _provider_card(page, provider_id: str):
     return page.locator(
         SEL_V2["llm_provider_card_for"].format(provider_id=provider_id)
     )
+
+
+async def _choose_select_menu_option(root, label: str, option: str) -> None:
+    trigger = root.get_by_role("button", name=label)
+    await trigger.click()
+    listbox = root.get_by_role("listbox")
+    await expect(listbox).to_be_visible(timeout=5000)
+    await listbox.get_by_role("option", name=option).click()
+    await expect(listbox).to_have_count(0)
+    await expect(trigger).to_contain_text(option)
 
 
 def _mock_llm_state() -> dict:
@@ -442,7 +467,7 @@ async def test_reborn_legacy_settings_channels_search(
         await expect(page.get_by_text("Telegram Channel", exact=True)).to_be_visible(
             timeout=5000
         )
-        await expect(page.get_by_text("Beta MCP", exact=True)).to_be_visible(timeout=5000)
+        await expect(page.get_by_text("Beta MCP", exact=True)).to_have_count(0)
 
         await search.fill("telegram")
         await expect(page.get_by_text("Telegram Channel", exact=True)).to_be_visible()
@@ -484,6 +509,10 @@ async def test_reborn_legacy_settings_inference_add_test_and_activate_provider(
         dialog = page.get_by_role("dialog")
         await expect(dialog.get_by_role("heading", name="New provider")).to_be_visible()
 
+        await expect(dialog.get_by_role("combobox")).to_have_count(0)
+        await _choose_select_menu_option(dialog, "Adapter", "Anthropic")
+        await _choose_select_menu_option(dialog, "Adapter", "OpenAI Compatible")
+
         await dialog.get_by_label("Display name").fill("Acme LLM")
         await expect(dialog.get_by_label("Provider ID")).to_have_value("acme-llm")
         await dialog.get_by_label("Base URL").fill("https://llm.acme.test/v1")
@@ -492,7 +521,7 @@ async def test_reborn_legacy_settings_inference_add_test_and_activate_provider(
 
         await dialog.get_by_role("button", name="Fetch models").click()
         await expect(dialog.get_by_text("2 models found.")).to_be_visible(timeout=5000)
-        await dialog.get_by_role("combobox").nth(1).select_option("acme-pro")
+        await _choose_select_menu_option(dialog, "Default model", "acme-pro")
 
         await dialog.get_by_role("button", name="Test connection").click()
         await expect(dialog.get_by_text("probe ok for acme-pro")).to_be_visible(

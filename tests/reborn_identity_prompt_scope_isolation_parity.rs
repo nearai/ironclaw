@@ -12,12 +12,12 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
     HostIdentityMessageContent, HostManagedModelMessageRole, HostManagedModelResponse,
     IdentityApplicability, IdentityFileName,
 };
-use ironclaw_product_adapters::ProductTriggerReason;
+use ironclaw_product::ProductTriggerReason;
 use ironclaw_turns::{
     LoopMessageRef, TurnStatus,
     run_profile::{LoopRunContext, PromptMode},
@@ -122,7 +122,7 @@ async fn reborn_identity_prompt_scope_isolation_parity() {
     harness.shutdown().await;
 }
 
-fn system_prompt_text(request: &ironclaw_loop_support::HostManagedModelRequest) -> String {
+fn system_prompt_text(request: &ironclaw_loop_host::HostManagedModelRequest) -> String {
     request
         .messages
         .iter()

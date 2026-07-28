@@ -1,12 +1,6 @@
-//! Gated to the durable storage features: the fix and the bug both live in
-//! `build_local_runtime`'s `#[cfg(any(feature = "libsql", feature = "postgres"))]`
-//! branch. Without those features the in-memory branch runs instead, whose
-//! unwrapped `InMemoryAuthProductServices::refresh_account` *also* returns
-//! `CredentialMissing` for an unknown account — so the assertion below would pass
-//! pre- and post-fix and guard nothing. Skipping (not falsely passing) under the
-//! in-memory feature set keeps this an honest regression guard. CI runs the crate
-//! with `--features libsql,postgres`.
-#![cfg(any(feature = "libsql", feature = "postgres"))]
+//! Regression coverage for the durable `build_local_runtime` product-auth
+//! branch. The old in-memory branch is gone from normal builds, so this test now
+//! always compiles with the production-shaped durable service.
 
 //! Regression (issue #5378): the local-dev / hosted-single-tenant product-auth
 //! composition must wrap the credential-account service in
@@ -37,21 +31,21 @@ use ironclaw_auth::{
     CredentialRefreshRequest,
 };
 use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
-use ironclaw_reborn_composition::{RebornBuildInput, build_reborn_services};
+use ironclaw_reborn_composition::{RebornRuntimeInput, build_reborn_runtime};
 
 #[tokio::test]
 async fn local_dev_product_auth_refresh_is_provider_backed_not_stub() {
     let dir = tempfile::tempdir().unwrap();
-    let services = build_reborn_services(RebornBuildInput::local_dev(
-        "refresh-composition-owner",
-        dir.path().to_path_buf(),
+    let runtime = build_reborn_runtime(RebornRuntimeInput::from_build_input(
+        ironclaw_reborn_composition::local_dev_build_input(
+            "refresh-composition-owner",
+            dir.path().to_path_buf(),
+        ),
     ))
     .await
     .expect("local-dev runtime should build");
 
-    let product_auth = services
-        .product_auth
-        .expect("local-dev composition must expose product-auth services");
+    let product_auth = runtime.product_auth_for_test();
     let account_service = product_auth.credential_account_service();
 
     let scope = AuthProductScope::new(
@@ -84,4 +78,5 @@ async fn local_dev_product_auth_refresh_is_provider_backed_not_stub() {
          account service was not wrapped in ProviderBackedCredentialAccountService. \
          Regression: issue #5378."
     );
+    runtime.shutdown().await.expect("runtime shutdown");
 }

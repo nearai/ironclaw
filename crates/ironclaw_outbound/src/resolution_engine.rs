@@ -72,8 +72,13 @@ impl<'a> OutboundResolutionEngine<'a> {
             RunNotificationOrigin::LiveSourceRoute { source_route } => {
                 source_route.reply_target_binding_ref.clone()
             }
+            RunNotificationOrigin::RunScopedTarget { target } => target.clone(),
             RunNotificationOrigin::Triggered { .. } => {
                 self.resolve_triggered_target(scope, actor, kind).await?
+            }
+            RunNotificationOrigin::TriggeredWithTarget { target, .. } => {
+                self.resolve_triggered_explicit_target(kind, target, scope, actor)
+                    .await?
             }
             RunNotificationOrigin::TriggeredFromSourceRoute { source_route, .. } => {
                 self.resolve_triggered_from_source_route_target(
@@ -101,6 +106,17 @@ impl<'a> OutboundResolutionEngine<'a> {
         scope: &ironclaw_turns::TurnScope,
         actor: &ironclaw_turns::TurnActor,
     ) -> Result<ReplyTargetBindingRef, OutboundError> {
+        self.resolve_triggered_explicit_target(kind, source_route_target, scope, actor)
+            .await
+    }
+
+    async fn resolve_triggered_explicit_target(
+        &self,
+        kind: CommunicationDeliveryKind,
+        ordinary_notification_target: &ReplyTargetBindingRef,
+        scope: &ironclaw_turns::TurnScope,
+        actor: &ironclaw_turns::TurnActor,
+    ) -> Result<ReplyTargetBindingRef, OutboundError> {
         match kind {
             CommunicationDeliveryKind::ApprovalPrompt => {
                 self.load_preference_target(scope, actor, PreferenceTargetKind::ApprovalPrompt)
@@ -112,7 +128,7 @@ impl<'a> OutboundResolutionEngine<'a> {
             }
             CommunicationDeliveryKind::FinalReply
             | CommunicationDeliveryKind::ProgressUpdate
-            | CommunicationDeliveryKind::DeliveryStatus => Ok(source_route_target.clone()),
+            | CommunicationDeliveryKind::DeliveryStatus => Ok(ordinary_notification_target.clone()),
         }
     }
 
@@ -227,12 +243,12 @@ mod tests {
     use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnScope};
 
     use super::*;
+    use crate::test_support::in_memory_backed_outbound_state_store;
     use crate::{
         CommunicationModality, CommunicationPreferenceRecord, DeliveryDefaultScope,
-        InMemoryOutboundStateStore, RequestedOutboundKind, RunNotificationEventKind,
-        SourceRouteContext, SystemEventReasonCode, TriggerCommunicationContext, TriggerFireSlot,
-        TriggerOriginRef, TriggerSourceKind, VersionedCommunicationPreferenceRecord,
-        WriteCommunicationPreferenceRequest,
+        RequestedOutboundKind, RunNotificationEventKind, SourceRouteContext, SystemEventReasonCode,
+        TriggerCommunicationContext, TriggerFireSlot, TriggerOriginRef, TriggerSourceKind,
+        VersionedCommunicationPreferenceRecord, WriteCommunicationPreferenceRequest,
     };
 
     struct BackendErrorPreferenceRepository;
@@ -256,7 +272,7 @@ mod tests {
 
     #[tokio::test]
     async fn requested_outbound_prefers_the_explicit_target() {
-        let store = InMemoryOutboundStateStore::default();
+        let store = in_memory_backed_outbound_state_store();
         let engine = OutboundResolutionEngine::new(&store);
         let request = requested_request("reply:requested");
 
@@ -282,7 +298,7 @@ mod tests {
 
     #[tokio::test]
     async fn requested_outbound_delivery_status_preserves_the_explicit_target() {
-        let store = InMemoryOutboundStateStore::default();
+        let store = in_memory_backed_outbound_state_store();
         let engine = OutboundResolutionEngine::new(&store);
         let request = requested_request_with_kind(
             "reply:delivery-status",
@@ -328,7 +344,7 @@ mod tests {
 
     #[tokio::test]
     async fn live_source_route_final_reply_prefers_the_source_route_over_preferences() {
-        let store = InMemoryOutboundStateStore::default();
+        let store = in_memory_backed_outbound_state_store();
         let engine = OutboundResolutionEngine::new(&store);
 
         store
@@ -360,7 +376,7 @@ mod tests {
 
     #[tokio::test]
     async fn live_source_route_approval_needed_uses_the_source_route() {
-        let store = InMemoryOutboundStateStore::default();
+        let store = in_memory_backed_outbound_state_store();
         let engine = OutboundResolutionEngine::new(&store);
 
         store
@@ -389,7 +405,7 @@ mod tests {
 
     #[tokio::test]
     async fn live_source_route_auth_required_uses_the_source_route() {
-        let store = InMemoryOutboundStateStore::default();
+        let store = in_memory_backed_outbound_state_store();
         let engine = OutboundResolutionEngine::new(&store);
 
         store
@@ -418,7 +434,7 @@ mod tests {
 
     #[tokio::test]
     async fn triggered_final_reply_uses_the_creator_users_preferred_target() {
-        let store = InMemoryOutboundStateStore::default();
+        let store = in_memory_backed_outbound_state_store();
         let engine = OutboundResolutionEngine::new(&store);
 
         store
@@ -448,7 +464,7 @@ mod tests {
 
     #[tokio::test]
     async fn triggered_final_reply_actor_fallback_uses_actor_personal_default_even_with_agent() {
-        let store = InMemoryOutboundStateStore::default();
+        let store = in_memory_backed_outbound_state_store();
         let engine = OutboundResolutionEngine::new(&store);
 
         store
@@ -500,7 +516,7 @@ mod tests {
 
     #[tokio::test]
     async fn triggered_final_reply_actor_fallback_without_agent_uses_actor_personal_default() {
-        let store = InMemoryOutboundStateStore::default();
+        let store = in_memory_backed_outbound_state_store();
         let engine = OutboundResolutionEngine::new(&store);
 
         store
@@ -535,7 +551,7 @@ mod tests {
 
     #[tokio::test]
     async fn triggered_final_reply_ownerless_agent_scope_uses_shared_agent_default() {
-        let store = InMemoryOutboundStateStore::default();
+        let store = in_memory_backed_outbound_state_store();
         let engine = OutboundResolutionEngine::new(&store);
 
         store
@@ -587,7 +603,7 @@ mod tests {
 
     #[tokio::test]
     async fn triggered_final_reply_ownerless_without_agent_uses_actor_personal_default() {
-        let store = InMemoryOutboundStateStore::default();
+        let store = in_memory_backed_outbound_state_store();
         let engine = OutboundResolutionEngine::new(&store);
 
         store
@@ -622,7 +638,7 @@ mod tests {
 
     #[tokio::test]
     async fn triggered_default_target_uses_explicit_owner_preferences_when_actor_differs() {
-        let store = InMemoryOutboundStateStore::default();
+        let store = in_memory_backed_outbound_state_store();
         let engine = OutboundResolutionEngine::new(&store);
         let owner = UserId::new("user-owner").expect("valid owner");
 
@@ -686,8 +702,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn triggered_with_target_routes_ordinary_result_without_global_preference() {
+        let store = in_memory_backed_outbound_state_store();
+        let engine = OutboundResolutionEngine::new(&store);
+
+        assert_resolves_to(
+            &engine,
+            RunNotificationEventKind::FinalReplyReady,
+            RunNotificationOrigin::TriggeredWithTarget {
+                trigger: trigger_context(),
+                target: reply_ref("reply:per-trigger"),
+            },
+            "reply:per-trigger",
+            CommunicationDeliveryKind::FinalReply,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn triggered_with_target_does_not_select_authority_prompt_destination() {
+        let store = in_memory_backed_outbound_state_store();
+        let engine = OutboundResolutionEngine::new(&store);
+        store
+            .put_communication_preference(preference_record(
+                Some("reply:final"),
+                None,
+                Some("reply:approval"),
+                None,
+            ))
+            .await
+            .expect("seed preference");
+
+        assert_resolves_to(
+            &engine,
+            RunNotificationEventKind::ApprovalNeeded,
+            RunNotificationOrigin::TriggeredWithTarget {
+                trigger: trigger_context(),
+                target: reply_ref("reply:per-trigger"),
+            },
+            "reply:approval",
+            CommunicationDeliveryKind::ApprovalPrompt,
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn triggered_from_source_route_approval_needed_uses_the_approval_prompt_preference() {
-        let store = InMemoryOutboundStateStore::default();
+        let store = in_memory_backed_outbound_state_store();
         let engine = OutboundResolutionEngine::new(&store);
 
         store
@@ -717,7 +778,7 @@ mod tests {
 
     #[tokio::test]
     async fn triggered_from_source_route_auth_required_uses_the_auth_prompt_preference() {
-        let store = InMemoryOutboundStateStore::default();
+        let store = in_memory_backed_outbound_state_store();
         let engine = OutboundResolutionEngine::new(&store);
 
         store
@@ -748,7 +809,7 @@ mod tests {
     #[tokio::test]
     async fn triggered_from_source_route_approval_needed_falls_back_to_final_reply_target_when_slot_unset()
      {
-        let store = InMemoryOutboundStateStore::default();
+        let store = in_memory_backed_outbound_state_store();
         let engine = OutboundResolutionEngine::new(&store);
 
         store
@@ -774,7 +835,7 @@ mod tests {
     #[tokio::test]
     async fn triggered_from_source_route_auth_required_falls_back_to_final_reply_target_when_slot_unset()
      {
-        let store = InMemoryOutboundStateStore::default();
+        let store = in_memory_backed_outbound_state_store();
         let engine = OutboundResolutionEngine::new(&store);
 
         store
@@ -799,7 +860,7 @@ mod tests {
 
     #[tokio::test]
     async fn triggered_approval_needed_falls_back_to_final_reply_target_when_slot_unset() {
-        let store = InMemoryOutboundStateStore::default();
+        let store = in_memory_backed_outbound_state_store();
         let engine = OutboundResolutionEngine::new(&store);
 
         store
@@ -821,7 +882,7 @@ mod tests {
 
     #[tokio::test]
     async fn triggered_auth_required_falls_back_to_final_reply_target_when_slot_unset() {
-        let store = InMemoryOutboundStateStore::default();
+        let store = in_memory_backed_outbound_state_store();
         let engine = OutboundResolutionEngine::new(&store);
 
         store
@@ -843,7 +904,7 @@ mod tests {
 
     #[tokio::test]
     async fn system_event_notifications_are_metadata_only_without_candidate() {
-        let store = InMemoryOutboundStateStore::default();
+        let store = in_memory_backed_outbound_state_store();
         let engine = OutboundResolutionEngine::new(&store);
 
         let resolution = engine
@@ -866,7 +927,7 @@ mod tests {
 
     #[tokio::test]
     async fn triggered_final_reply_fails_closed_without_a_preference_target() {
-        let store = InMemoryOutboundStateStore::default();
+        let store = in_memory_backed_outbound_state_store();
         let engine = OutboundResolutionEngine::new(&store);
 
         let missing_record = engine
@@ -905,7 +966,7 @@ mod tests {
 
     #[tokio::test]
     async fn non_final_run_notifications_choose_the_correct_targets() {
-        let store = InMemoryOutboundStateStore::default();
+        let store = in_memory_backed_outbound_state_store();
         let engine = OutboundResolutionEngine::new(&store);
 
         store

@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[package.metadata.ironclaw]
+layer = "substrates"
+
 [dependencies]
 async-trait = "0.1"
 ironclaw_host_api = { path = "../ironclaw_host_api" }
@@ -11,8 +14,9 @@ percent-encoding = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
 thiserror = "2"
 tokio = { version = "1", features = ["rt"] }
+tracing = "0.1"
 url = "2"
 zeroize = "1"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt", "time"] }
+tokio = { version = "1", features = ["macros", "rt", "time", "net", "io-util"] }

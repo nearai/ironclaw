@@ -30,15 +30,32 @@ use crate::{
 };
 
 mod broker;
+mod ca;
 mod container_identity;
+mod credential_firewall;
+mod key_codec;
 mod mounts;
 mod scope_key;
+
+// `attribution`, `registry`, and `user_key` are the persistent per-user
+// sandbox container model's identity/registry primitives: container naming,
+// label-based identity, and Docker-network connection attribution. Their
+// consumers are the exec-based transport's per-user container reuse and the
+// egress proxy's credential-injection path. `user_key` is `pub`/re-exported
+// for cross-crate composition wiring to construct directly; `registry` and
+// `attribution` stay crate-private, with per-item `#[allow(dead_code)]`
+// comments naming the future consumer where one isn't wired yet.
+mod attribution;
+mod registry;
+mod user_key;
 
 use mounts::RebornSandboxMountSources;
 
 pub use broker::{RebornSandboxNetworkBroker, RebornSandboxSecretBroker};
 pub use container_identity::{RebornSandboxContainerIdentity, RebornSandboxWorkspaceMode};
+pub use registry::SandboxActivityRegistry;
 pub use scope_key::RebornSandboxScopeKey;
+pub use user_key::RebornSandboxUserKey;
 
 const DEFAULT_IMAGE: &str = "ironclaw-worker:latest";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -374,7 +391,7 @@ impl RebornScopedSandboxCommandTransport {
             Ok(result) => result,
             Err(_) => Err(RuntimeProcessError::Timeout(timeout)),
         };
-        let _ = self
+        if let Err(error) = self
             .docker
             .remove_container(
                 &container_id,
@@ -383,7 +400,10 @@ impl RebornScopedSandboxCommandTransport {
                     ..Default::default()
                 }),
             )
-            .await;
+            .await
+        {
+            tracing::debug!(?error, "best-effort removal of sandbox container failed");
+        }
         result
     }
 

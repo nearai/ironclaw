@@ -1,4 +1,4 @@
-//! WebChat v2 auth-surface assembly for `ironclaw-reborn serve`.
+//! WebChat v2 auth-surface assembly for `ironclaw serve`.
 //!
 //! Owns the one place that turns host config into the pair the listener
 //! needs: the `WebuiAuthenticator` the protected v2 routes use, plus the
@@ -13,15 +13,17 @@
 use std::sync::Arc;
 
 use anyhow::anyhow;
-use ironclaw_reborn_composition::host_api::{AgentId, ProjectId, TenantId};
-use ironclaw_reborn_composition::{
-    LocalTriggerAccessStore, PublicRouteMount, RebornIdentityResolver, WebuiAuthenticator,
+use ironclaw_reborn_composition::RebornIdentityResolver;
+use ironclaw_reborn_composition::host_api::TenantId;
+use ironclaw_webui::{
+    CompositeAuthenticator, PublicRouteMount, SessionAuthenticator, SignedSessionLoginConfig,
+    WebuiAuthenticator, build_signed_session_login, empty_webui_v2_auth_providers_mount,
+    signed_session_store,
 };
-use ironclaw_reborn_webui_ingress::{SignedSessionLoginConfig, build_signed_session_login};
 use secrecy::SecretString;
 
 use crate::commands::serve_sso::SsoStartupConfig;
-use crate::commands::user_directory::{LocalTriggerAccessBootstrap, WebuiUserDirectory};
+use crate::commands::user_directory::WebuiUserDirectory;
 
 /// The composed WebChat v2 auth surface: the authenticator the protected
 /// routes verify bearers with, plus the optional public login-route mount
@@ -31,23 +33,12 @@ pub(crate) struct WebuiAuthSurface {
     pub(crate) public_mount: Option<PublicRouteMount>,
 }
 
-/// How to seed local-dev trigger-fire access for SSO users on login.
-///
-/// Carries the already-open local trigger-access store plus the scope an
-/// admitted user's access row is seeded under. `serve.rs` opens the store once
-/// through the active runtime profile so SSO and trigger-poller wiring share
-/// the same backend.
-pub(crate) struct LocalTriggerAccessBootstrapConfig {
-    pub(crate) store: Arc<dyn LocalTriggerAccessStore>,
-    pub(crate) tenant_id: TenantId,
-    pub(crate) agent_id: AgentId,
-    pub(crate) project_id: Option<ProjectId>,
-}
-
 /// Build the auth surface from resolved startup config.
 ///
 /// With no SSO provider configured (`sso_startup` is `None`), the listener
-/// keeps its plain env-bearer authenticator and mounts no public routes.
+/// keeps its env-bearer authenticator, also validates signed session tokens
+/// minted by the admin API, and mounts only the inert auth surface so
+/// `/auth/providers` can return an empty provider list.
 /// With providers configured, this layers the fail-closed email-domain
 /// admission adapter on top of the runtime-owned canonical Reborn identity
 /// resolver and hands the result to the ingress signed-session builder.
@@ -57,25 +48,38 @@ pub(crate) struct LocalTriggerAccessBootstrapConfig {
 /// local-runtime substrate; with SSO configured that is unrecoverable, so
 /// this fails closed rather than minting users against a missing store.
 ///
-/// When `local_trigger_access` is present and SSO is configured, admitted
-/// users get a local trigger-access row seeded on each login (via the
-/// admission adapter). There is no startup reconciliation in this path: the
-/// bootstrap only seeds, it does not enumerate or revoke.
+/// An admitted SSO user's trigger-fire access is no longer seeded here: the
+/// canonical `StoredUser` the resolver persists on login IS the membership the
+/// runtime's fire-time checker reads (arch-simplification §4.4).
 pub(crate) async fn build_webui_auth_surface(
     sso_startup: Option<SsoStartupConfig>,
     identity_resolver: Option<Arc<dyn RebornIdentityResolver>>,
     tenant_id: TenantId,
     session_signing_secret: SecretString,
     env_authenticator: Arc<dyn WebuiAuthenticator>,
-    local_trigger_access: Option<LocalTriggerAccessBootstrapConfig>,
 ) -> anyhow::Result<WebuiAuthSurface> {
     let Some(sso) = sso_startup else {
-        // No SSO providers: keep the env-bearer authenticator and mount no
-        // public routes. There are no SSO logins to seed local trigger
-        // access for, so any bootstrap config is unused on this path.
+        // No SSO providers: no public login routes. But the
+        // serve layer *always* wires the admin-API token minter, which mints
+        // signed **session** tokens (the user-create bearer). Those validate
+        // only through a `SessionAuthenticator` over the same signed store —
+        // absent it, an admin-created user's API token would 401 on every
+        // request (regression caught by `tests/e2e/scenarios/test_admin_api.py`).
+        // Compose the env-bearer (operator) authenticator with a session
+        // authenticator over that store so minted tokens work without SSO;
+        // operator capabilities still follow the env token only, so the session
+        // bearer stays non-operator.
+        let session_authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(
+            SessionAuthenticator::new(signed_session_store(&session_signing_secret, &tenant_id)),
+        );
+        let authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(CompositeAuthenticator::new(
+            session_authenticator,
+            env_authenticator,
+        ));
+        let public_mount = empty_webui_v2_auth_providers_mount();
         return Ok(WebuiAuthSurface {
-            authenticator: env_authenticator,
-            public_mount: None,
+            authenticator,
+            public_mount: Some(public_mount),
         });
     };
 
@@ -90,15 +94,11 @@ pub(crate) async fn build_webui_auth_surface(
         )
     })?;
 
-    let mut user_directory = WebuiUserDirectory::new(
+    let user_directory = WebuiUserDirectory::new(
         identity_resolver,
         tenant_id.clone(),
         sso.allowed_email_domains,
     );
-    if let Some(config) = local_trigger_access {
-        user_directory =
-            user_directory.with_local_trigger_access(local_trigger_access_bootstrap(config));
-    }
 
     let wiring = build_signed_session_login(SignedSessionLoginConfig {
         tenant_id,
@@ -111,7 +111,7 @@ pub(crate) async fn build_webui_auth_surface(
     .expect("non-empty providers always produce login wiring"); // safety: sso_startup_config_from_env returns None when providers is empty, so this Some(sso) arm always has a non-empty provider list
 
     eprintln!(
-        "ironclaw-reborn: WebChat v2 SSO login mounted — \
+        "ironclaw: WebChat v2 SSO login mounted — \
          see GET /auth/providers for the enabled set"
     );
     Ok(WebuiAuthSurface {
@@ -120,27 +120,13 @@ pub(crate) async fn build_webui_auth_surface(
     })
 }
 
-fn local_trigger_access_bootstrap(
-    config: LocalTriggerAccessBootstrapConfig,
-) -> LocalTriggerAccessBootstrap {
-    let LocalTriggerAccessBootstrapConfig {
-        store,
-        tenant_id,
-        agent_id,
-        project_id,
-    } = config;
-    LocalTriggerAccessBootstrap::new(store, tenant_id, agent_id, project_id)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use async_trait::async_trait;
-    use ironclaw_reborn_composition::WebuiAuthentication;
-    use ironclaw_reborn_webui_ingress::{
-        OAuthError, OAuthProvider, OAuthProviderName, OAuthUserProfile,
-    };
+    use ironclaw_webui::WebuiAuthentication;
+    use ironclaw_webui::{OAuthError, OAuthProvider, OAuthProviderName, OAuthUserProfile};
 
     /// Bearer verifier that accepts nothing — stands in for the env-bearer
     /// authenticator without pulling in its construction requirements.
@@ -198,7 +184,6 @@ mod tests {
             TenantId::new("tenant-host").expect("tenant"),
             SecretString::from("session-signing-secret".to_string()),
             Arc::new(RejectingAuth),
-            None,
         )
         .await;
 
@@ -213,41 +198,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_sso_keeps_env_authenticator_and_mounts_no_public_routes() {
-        // With no SSO configured the surface is the plain env-bearer
-        // authenticator and no public login routes — the absent-resolver
-        // check must not fire on this path, and a bootstrap config is unused.
+    async fn no_sso_composes_env_and_session_auth_and_mounts_empty_provider_route() {
+        // With no SSO configured the surface still needs env-bearer access
+        // plus signed-session bearer access for admin-created users. It also
+        // mounts an inert public auth surface for provider discovery. The
+        // absent-resolver check must not fire on this path.
         let result = build_webui_auth_surface(
             None,
             None,
             TenantId::new("tenant-host").expect("tenant"),
             SecretString::from("session-signing-secret".to_string()),
             Arc::new(RejectingAuth),
-            None,
         )
         .await;
 
         match result {
             Ok(surface) => assert!(
-                surface.public_mount.is_none(),
-                "no SSO must mount no public login routes"
+                surface.public_mount.as_ref().is_some_and(|mount| {
+                    mount.descriptors.len() == 1
+                        && mount.descriptors[0].route_pattern().as_str() == "/auth/providers"
+                }),
+                "no SSO must mount only /auth/providers with an empty list"
             ),
             Err(error) => panic!("no SSO is a valid configuration, got error: {error}"),
         }
     }
 
     #[tokio::test]
-    async fn sso_with_local_trigger_access_bootstrap_builds_surface() {
-        // SSO configured with a local-trigger-access bootstrap: the surface
-        // must attach the per-login seeder to the admission adapter and mount
-        // the public login routes — proving the bootstrap config is wired
-        // through, not silently dropped.
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let access_store_path = tmp.path().join("reborn-local-dev.db");
-        let access_store =
-            ironclaw_reborn_composition::open_local_trigger_access_store(&access_store_path)
-                .await
-                .expect("open local trigger access store");
+    async fn sso_configured_builds_surface_with_public_login_mount() {
+        // SSO configured: the surface layers the admission adapter over the
+        // runtime identity resolver and mounts the public login routes. Trigger
+        // access is no longer seeded here (arch-simplification §4.4) — the
+        // resolver's own `StoredUser` is the membership the fire-time checker
+        // reads.
         let sso = SsoStartupConfig {
             providers: vec![Arc::new(StubProvider(
                 OAuthProviderName::new("google").expect("provider name"),
@@ -264,15 +247,9 @@ mod tests {
             TenantId::new("sso-bootstrap-tenant").expect("tenant"),
             SecretString::from("operator-session-secret".to_string()),
             Arc::new(RejectingAuth),
-            Some(LocalTriggerAccessBootstrapConfig {
-                store: access_store,
-                tenant_id: TenantId::new("sso-bootstrap-tenant").expect("tenant"),
-                agent_id: AgentId::new("sso-bootstrap-agent").expect("agent"),
-                project_id: Some(ProjectId::new("sso-bootstrap-project").expect("project")),
-            }),
         )
         .await
-        .expect("SSO surface with a bootstrap config must build");
+        .expect("SSO surface must build");
 
         assert!(
             surface.public_mount.is_some(),

@@ -10,6 +10,9 @@ homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
 publish = false
 
+[package.metadata.ironclaw]
+layer = "substrates"
+
 [dependencies]
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
@@ -18,16 +21,12 @@ ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_safety = { path = "../ironclaw_safety" }
 ironclaw_triggers = { path = "../ironclaw_triggers", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
-ironclaw_product_context = { path = "../ironclaw_product_context", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["sync"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
-
-[features]
-default = []
 
 [dev-dependencies]
 ironclaw_triggers = { path = "../ironclaw_triggers", version = "0.1.0", features = ["test-support"] }

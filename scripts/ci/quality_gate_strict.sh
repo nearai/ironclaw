@@ -31,15 +31,29 @@ cargo fmt --all -- --check
 
 echo "==> WebUI bundle toolchain"
 require_node_22
-require_command npm "install npm with Node.js"
-npm --version
+if ! command -v pnpm &>/dev/null; then
+    require_command corepack "install Node.js Corepack or pnpm"
+    corepack enable pnpm
+fi
+require_command pnpm "enable with: corepack enable pnpm"
+pnpm --version
+
+echo "==> WebUI frontend build"
+(
+    cd crates/ironclaw_webui/frontend
+    pnpm install --frozen-lockfile
+    pnpm build
+)
 
 echo "==> clippy (all warnings)"
 cargo clippy --locked --all --benches --tests --examples --all-features -- -D warnings
+
+echo "==> static: include_str! paths + Docker COPY coverage"
+"$(git rev-parse --show-toplevel)/scripts/ci/check-include-str-paths.sh"
 
 echo "==> cargo deny"
 require_command cargo-deny "install with: cargo install cargo-deny"
 cargo deny check
 
 echo "==> tests"
-cargo test --locked
+cargo test --locked --workspace

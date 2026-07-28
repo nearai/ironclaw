@@ -16,7 +16,7 @@ Living companions to the tier tree in `../SKILL.md`. Each exemplar is a real in-
 
 ## 2. The scripted-model harness seam
 
-The in-process harness (code in `tests/integration/support/`, spec in `tests/integration/CLAUDE.md`) fakes exactly one thing: the vendor SDK at the bottom (`TraceLlm`). Everything else — product workflow, coordinator, scheduler, agent loop, the real `ironclaw_llm` retry/failover/circuit-breaker chain — executes for real, and assertions read *persisted state* (filesystem, thread history), never internals.
+The in-process harness (code in `tests/integration/support/`, spec in `tests/integration/CLAUDE.md`) fakes exactly one thing: the vendor SDK at the bottom (`TraceLlm`). Everything else — product orchestration, coordinator, scheduler, agent loop, the real `ironclaw_llm` retry/failover/circuit-breaker chain — executes for real, and assertions read *persisted state* (filesystem, thread history), never internals.
 
 - **Right**: mock at the vendor-SDK seam; assert from durable state; `cargo test --test reborn_integration_<name>` runs offline with zero setup.
 - **Wrong**: mocking at the gateway seam (skips the whole `ironclaw_llm` chain — that's the separate binary-replay tier's job); hand-building `TraceStep`s; asserting on internal structs.
@@ -25,14 +25,14 @@ The in-process harness (code in `tests/integration/support/`, spec in `tests/int
 
 Two tests lock the WebChat v2 surface from opposite sides — copy the pairing whenever policy is declared in one crate and enforced in another:
 
-- `crates/ironclaw_webui_v2/tests/webui_v2_descriptors_contract.rs` — locks the **declared** policy table per route (method, auth schemes, body/rate limits, CORS, audit class). Adding a route without updating it fails CI.
-- `crates/ironclaw_webui_v2/tests/webui_v2_handlers_contract.rs` — drives a **real axum router** against a stub facade, including the fail-closed case (`missing_caller_extension_returns_500`). Its header cites the test-through-the-caller rule; that's the level of intent-documentation to imitate.
+- `crates/ironclaw_webui/tests/webui_v2_descriptors_contract.rs` — locks the **declared** policy table per route (method, auth schemes, body/rate limits, CORS, audit class). Adding a route without updating it fails CI.
+- `crates/ironclaw_webui/tests/webui_v2_handlers_contract.rs` — drives a **real axum router** against a stub facade, including the fail-closed case (`missing_caller_extension_returns_500`). Its header cites the test-through-the-caller rule; that's the level of intent-documentation to imitate.
 
 The *enforcement* side (real HTTP 401/413/429/CORS through the composed app) lives in `crates/ironclaw_reborn_composition/tests/webui_v2_serve.rs` — caller-level, not middleware unit tests.
 
 ## 4. Helper-only coverage: the cautionary shape
 
-When a predicate selects what goes out the wire, the test must construct the real adapter and inspect the rendered egress body, not call the predicate directly. Use `crates/ironclaw_product_workflow/tests/outbound_delivery_contract.rs` and its Telegram egress case as the shape to copy. If you're adding a channel, write the caller-level adapter test on day one.
+When a predicate selects what goes out the wire, the test must construct the real adapter and inspect the rendered egress body, not call the predicate directly. Use the owning product adapter's caller-level delivery contract and its Telegram egress case as the shape to copy. If you're adding a channel, write the caller-level adapter test on day one.
 
 ## 5. Silent skip vs loud skip
 

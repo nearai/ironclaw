@@ -22,7 +22,7 @@ In your Google Cloud project, navigate to **APIs & Services → Library**, searc
 <Step title="Install the Extension">
 
 ```bash
-ironclaw registry install google-calendar
+ironclaw extension install google-calendar
 ```
 
 </Step>
@@ -30,10 +30,10 @@ ironclaw registry install google-calendar
 <Step title="Authorize Access">
 
 ```bash
-ironclaw tool auth google-calendar
+ironclaw extension activate google-calendar
 ```
 
-IronClaw will provide a URL for you to authenticate - remember to follow the [auth setup](./oauth-setup) to enable your agent to capture the callback. If possible, it will open a browser window. Once approved, the token is stored securely and refreshed automatically.
+Activating an extension that needs credentials starts its setup flow. Complete it from **Extensions** in the [web interface](/using/webui) — for Google services that means the OAuth consent screen. Follow the [auth setup](/extensions/google/oauth-setup) first so your agent can capture the callback. Tokens are stored encrypted and refreshed automatically.
 
 <Tip>
 If you already authenticated one Google service, you still need to authenticate each additional Google extension separately.

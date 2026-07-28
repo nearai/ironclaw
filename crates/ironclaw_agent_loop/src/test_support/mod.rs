@@ -10,30 +10,29 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::{CapabilityId, RuntimeKind, TenantId, ThreadId};
+use ironclaw_host_api::{
+    CapabilityId, FailureKind, Resolution, ResolutionBatch, RuntimeKind, TenantId, ThreadId,
+};
 use ironclaw_turns::{
     AgentLoopDriverDescriptor, LoopFailureKind, LoopGateRef, LoopMessageRef, LoopResultRef,
     RunProfileId, RunProfileVersion, TurnCheckpointId, TurnId, TurnRunId, TurnScope,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, AssistantReply,
-        CancellationPolicy, CapabilityBatchInvocation, CapabilityBatchOutcome,
-        CapabilityCallCandidate, CapabilityDescriptorView, CapabilityFailure,
-        CapabilityFailureKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
-        CapabilityProgress, CapabilityResultMessage, CapabilitySurfaceProfileId,
-        CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass,
-        ConcurrencyHint, ContentDigest, ContextProfileId, FinalizeAssistantMessage,
-        LoopCancellationPort, LoopCancellationSignal, LoopCheckpointKind, LoopCheckpointRequest,
-        LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome, LoopCompactionRequest,
-        LoopCompactionResponse, LoopContextBundle, LoopContextCompactionMetadata,
-        LoopContextRequest, LoopDriverId, LoopInput, LoopInputAck, LoopInputAckToken,
-        LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopModelMessage, LoopModelRequest,
-        LoopModelResponse, LoopProgressEvent, LoopPromptBundle, LoopPromptBundleRef,
-        LoopPromptBundleRequest, LoopRunContext, LoopRunInfoPort, ModelProfileId, ModelStreamChunk,
-        ParentLoopOutput, ProviderToolCallReference, RedactedRunProfileProvenance,
-        ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier, RunClassId,
-        RunProfileFingerprint, RuntimeProfileConstraints, SchedulingClass,
-        StageCheckpointPayloadRequest, SteeringPolicy, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        CancellationPolicy, CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInputRef,
+        CapabilityProgress, CapabilitySurfaceProfileId, CapabilitySurfaceVersion, CheckpointPolicy,
+        CheckpointSchemaId, ConcurrencyClass, ConcurrencyHint, ContentDigest, ContextProfileId,
+        FinalizeAssistantMessage, LoopCancellationPort, LoopCancellationSignal, LoopCheckpointKind,
+        LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome,
+        LoopCompactionRequest, LoopCompactionResponse, LoopContextBundle,
+        LoopContextCompactionMetadata, LoopContextRequest, LoopDriverId, LoopInput, LoopInputAck,
+        LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopModelMessage,
+        LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopPromptBundle,
+        LoopPromptBundleRef, LoopPromptBundleRequest, LoopRequest, LoopRequestBatch,
+        LoopRunContext, LoopRunInfoPort, ModelProfileId, ModelStreamChunk, ParentLoopOutput,
+        ProviderToolCallReference, RedactedRunProfileProvenance, ResolvedRunProfile,
+        ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
+        RuntimeProfileConstraints, SchedulingClass, StageCheckpointPayloadRequest, SteeringPolicy,
+        VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
     },
 };
 
@@ -42,7 +41,7 @@ pub mod compaction;
 
 use crate::state::{
     CapabilityCallSignature, CheckpointKind, LoopExecutionState, RecoveryAttemptClass,
-    RecoveryStrategyState,
+    RecoveryStrategyState, TerminalWarningObservation,
 };
 
 /// Scriptable implementation of [`AgentLoopDriverHost`].
@@ -529,7 +528,7 @@ pub enum ScriptedCapabilityOutcome {
     /// Failed result.
     Failed {
         /// Error kind string consumed by the executor classifier.
-        error_kind: CapabilityFailureKind,
+        error_kind: FailureKind,
     },
 }
 
@@ -592,6 +591,20 @@ impl ScriptedCapabilityOutcome {
         Self::Failed {
             error_kind: scripted_failure_kind(error_kind.as_ref()),
         }
+    }
+}
+
+/// Bundle fixture [`Resolution`]s into a [`ResolutionBatch`], carrying the
+/// `stopped_on_suspension` flag through unchanged — the batch-loop test sites'
+/// helper (§5.3 Stage 2b: producers emit `Resolution` directly, so fixtures
+/// build them through `ironclaw_turns::run_profile::resolution::*`).
+pub fn resolution_batch_from_scripted(
+    resolutions: impl IntoIterator<Item = Resolution>,
+    stopped_on_suspension: bool,
+) -> ResolutionBatch {
+    ResolutionBatch {
+        resolutions: resolutions.into_iter().collect(),
+        stopped_on_suspension,
     }
 }
 
@@ -684,6 +697,22 @@ impl Default for LoopExecutionStateBuilder {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Returns a state that has already consumed its one no-progress warning.
+///
+/// This exposes a stable scenario setup to downstream integration tests
+/// without making terminal-warning scheduler internals part of the production
+/// API.
+pub fn state_after_no_progress_warning_attempt(context: &LoopRunContext) -> LoopExecutionState {
+    let mut state = LoopExecutionState::initial_for_run(context);
+    let scheduled = state
+        .terminal_warning_state
+        .schedule(TerminalWarningObservation::no_progress(None, None));
+    assert!(scheduled); // safety: test-support scenario construction must fail loudly on invalid static setup.
+    state.terminal_warning_state.mark_delivered();
+    state.terminal_warning_state.clear_active();
+    state
 }
 
 impl LoopRunInfoPort for MockAgentLoopDriverHost {
@@ -819,8 +848,8 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockAgentLoopDriverHost
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        request: LoopRequest,
+    ) -> Result<Resolution, AgentLoopHostError> {
         self.record_call(MockHostCall::InvokeCapability {
             capability_id: request.capability_id,
         });
@@ -838,26 +867,27 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockAgentLoopDriverHost
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+        request: LoopRequestBatch,
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
         self.record_call(MockHostCall::InvokeCapabilityBatch {
             call_count: request.invocations.len(),
             stop_on_first_suspension: request.stop_on_first_suspension,
         });
-        let outcomes = lock_or_panic(&self.script)
+        let resolutions: Vec<Resolution> = lock_or_panic(&self.script)
             .capability_outcomes
             .pop_front()
             .unwrap_or_default()
             .into_iter()
             .map(scripted_capability_outcome)
             .collect::<Result<Vec<_>, _>>()?;
-        let stopped_on_suspension = request.stop_on_first_suspension
-            && outcomes.iter().any(CapabilityOutcome::is_suspension);
+        // `parks()`, not `is_suspension()` (H1): a re-entrant gate stops the batch too.
+        let stopped_on_suspension =
+            request.stop_on_first_suspension && resolutions.iter().any(Resolution::parks);
         if let Some(signal) = lock_or_panic(&self.cancel_after_capability_batch).take() {
             self.set_cancellation_signal(signal);
         }
-        Ok(CapabilityBatchOutcome {
-            outcomes,
+        Ok(ResolutionBatch {
+            resolutions,
             stopped_on_suspension,
         })
     }
@@ -1108,70 +1138,68 @@ fn scripted_capability_call(call: ScriptedCapabilityCall) -> CapabilityCallCandi
 
 fn scripted_capability_outcome(
     outcome: ScriptedCapabilityOutcome,
-) -> Result<CapabilityOutcome, AgentLoopHostError> {
+) -> Result<Resolution, AgentLoopHostError> {
     match outcome {
         ScriptedCapabilityOutcome::Completed {
             result_ref,
             progress,
             terminate_hint,
             output_digest,
-        } => Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
-            result_ref: LoopResultRef::new(result_ref)
+        } => Ok(resolution::completed(
+            LoopResultRef::new(result_ref)
                 .unwrap_or_else(|error| panic!("test result ref should be valid: {error}")),
-            safe_summary: "completed".to_string(),
+            "completed".to_string(),
             progress,
             terminate_hint,
-            byte_len: 0,
+            0,
             output_digest,
-        })),
+            None,
+        )),
         ScriptedCapabilityOutcome::ApprovalRequired { gate_ref } => {
-            Ok(CapabilityOutcome::ApprovalRequired {
-                gate_ref: loop_gate_ref(&gate_ref),
-                safe_summary: "approval required".to_string(),
-                approval_resume: None,
-            })
+            Ok(resolution::approval_required(
+                loop_gate_ref(&gate_ref),
+                "approval required".to_string(),
+                None,
+            )
+            .resolution)
         }
-        ScriptedCapabilityOutcome::AuthRequired { gate_ref } => {
-            Ok(CapabilityOutcome::AuthRequired {
-                gate_ref: loop_gate_ref(&gate_ref),
-                credential_requirements: Vec::new(),
-                safe_summary: "auth required".to_string(),
-                auth_resume: None,
-            })
-        }
-        ScriptedCapabilityOutcome::ResourceBlocked { gate_ref } => {
-            Ok(CapabilityOutcome::ResourceBlocked {
-                gate_ref: loop_gate_ref(&gate_ref),
-                safe_summary: "resource blocked".to_string(),
-            })
-        }
+        ScriptedCapabilityOutcome::AuthRequired { gate_ref } => Ok(resolution::auth_required(
+            loop_gate_ref(&gate_ref),
+            Vec::new(),
+            "auth required".to_string(),
+            None,
+        )
+        .resolution),
+        ScriptedCapabilityOutcome::ResourceBlocked { gate_ref } => Ok(
+            resolution::resource_blocked(loop_gate_ref(&gate_ref), "resource blocked".to_string())
+                .resolution,
+        ),
         ScriptedCapabilityOutcome::AwaitDependentRun {
             gate_ref,
             result_ref,
             byte_len,
-        } => Ok(CapabilityOutcome::AwaitDependentRun {
-            gate_ref: loop_gate_ref(&gate_ref),
-            result_ref: loop_result_ref(&result_ref),
-            safe_summary: "await dependent run".to_string(),
+        } => Ok(resolution::await_dependent_run(
+            loop_gate_ref(&gate_ref),
+            loop_result_ref(&result_ref),
+            "await dependent run".to_string(),
             byte_len,
-        }),
+            None,
+        )
+        .resolution),
         ScriptedCapabilityOutcome::SpawnedChildRun {
             child_run_id,
             result_ref,
             byte_len,
-        } => Ok(CapabilityOutcome::SpawnedChildRun {
+        } => Ok(resolution::spawned_child_run(
             child_run_id,
-            result_ref: LoopResultRef::new(result_ref)
+            LoopResultRef::new(result_ref)
                 .unwrap_or_else(|error| panic!("test result ref should be valid: {error}")),
-            safe_summary: "spawned child run".to_string(),
+            "spawned child run".to_string(),
             byte_len,
-        }),
+            None,
+        )),
         ScriptedCapabilityOutcome::Failed { error_kind } => {
-            Ok(CapabilityOutcome::Failed(CapabilityFailure {
-                error_kind,
-                safe_summary: "failed".to_string(),
-                detail: None,
-            }))
+            Ok(resolution::failed(error_kind, "failed".to_string(), None))
         }
     }
 }
@@ -1185,30 +1213,12 @@ fn checkpoint_kind_from_host(kind: LoopCheckpointKind) -> CheckpointKind {
     }
 }
 
-fn scripted_failure_kind(kind: &str) -> CapabilityFailureKind {
+fn scripted_failure_kind(kind: &str) -> FailureKind {
     match kind {
-        "authorization" => CapabilityFailureKind::Authorization,
-        "backend" => CapabilityFailureKind::Backend,
-        "cancelled" => CapabilityFailureKind::Cancelled,
-        "dispatcher" => CapabilityFailureKind::Dispatcher,
-        "gate_declined" => CapabilityFailureKind::GateDeclined,
-        "input_invalid" | "invalid_input" => CapabilityFailureKind::InvalidInput,
-        "invalid_output" => CapabilityFailureKind::InvalidOutput,
-        "missing_runtime" => CapabilityFailureKind::MissingRuntime,
-        "network" => CapabilityFailureKind::Network,
-        "operation_failed" => CapabilityFailureKind::OperationFailed,
-        "output_too_large" => CapabilityFailureKind::OutputTooLarge,
-        "policy_denied" => CapabilityFailureKind::PolicyDenied,
-        "process" => CapabilityFailureKind::Process,
-        "resource" => CapabilityFailureKind::Resource,
-        "transient" => CapabilityFailureKind::Transient,
-        "unavailable" => CapabilityFailureKind::Unavailable,
-        "internal" => CapabilityFailureKind::Internal,
-        "permanent" => CapabilityFailureKind::Permanent,
-        other => match CapabilityFailureKind::unknown(other.to_string()) {
-            Ok(kind) => kind,
-            Err(_) => CapabilityFailureKind::Permanent,
-        },
+        // Historical scripted alias that predates the unified tag set.
+        "input_invalid" => FailureKind::InputEncode,
+        // Total over every tag (historical aliases included).
+        other => FailureKind::from_tag(other),
     }
 }
 
@@ -1260,4 +1270,61 @@ fn lock_or_panic<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 fn clone_mutex_vec<T: Clone>(mutex: &Mutex<Vec<T>>) -> Vec<T> {
     lock_or_panic(mutex).clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a fixture [`Resolution`] from a scripted outcome via the same
+    /// private mapper the mock host uses, so these tests exercise the real
+    /// fixture-shaped inputs the helpers consume.
+    fn outcome(scripted: ScriptedCapabilityOutcome) -> Resolution {
+        scripted_capability_outcome(scripted).expect("scripted fixture builds a resolution")
+    }
+
+    #[test]
+    fn scripted_outcome_maps_to_the_right_resolution_channel() {
+        // Completed → Done (ran, does not park).
+        let completed = outcome(ScriptedCapabilityOutcome::completed("result:one"));
+        assert_eq!(completed.kind(), "done");
+        assert!(!completed.parks());
+
+        // Failed → Done (a recoverable failure rides the Done channel; the model
+        // can retry) — it does not park.
+        let failed = outcome(ScriptedCapabilityOutcome::failed("network"));
+        assert_eq!(failed.kind(), "done");
+        assert!(!failed.parks());
+
+        // ApprovalRequired → Blocked (a re-entrant gate): it parks but is NOT a
+        // suspension — the distinction parks() exists to preserve.
+        let approval = outcome(ScriptedCapabilityOutcome::ApprovalRequired {
+            gate_ref: "gate:approve-1".to_string(),
+        });
+        assert_eq!(approval.kind(), "blocked");
+        assert!(approval.parks());
+        assert!(!approval.is_suspension());
+    }
+
+    #[test]
+    fn resolution_batch_from_scripted_preserves_order_and_stop_flag() {
+        let batch = resolution_batch_from_scripted(
+            [
+                outcome(ScriptedCapabilityOutcome::completed("result:a")),
+                outcome(ScriptedCapabilityOutcome::AwaitDependentRun {
+                    gate_ref: "gate:dep-1".to_string(),
+                    result_ref: "result:dep-1".to_string(),
+                    byte_len: 0,
+                }),
+            ],
+            true,
+        );
+        assert!(batch.stopped_on_suspension);
+        assert_eq!(batch.resolutions.len(), 2);
+        assert_eq!(batch.resolutions[0].kind(), "done");
+        // AwaitDependentRun → Suspended: parks and is a suspension.
+        assert_eq!(batch.resolutions[1].kind(), "suspended");
+        assert!(batch.resolutions[1].parks());
+        assert!(batch.resolutions[1].is_suspension());
+    }
 }

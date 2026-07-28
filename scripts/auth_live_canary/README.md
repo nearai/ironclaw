@@ -1,7 +1,7 @@
 # Live Auth Canary
 
-This runner starts a fresh local IronClaw instance, seeds real provider
-credentials into a clean database, and verifies provider-backed auth through:
+This runner starts the shipping Reborn `ironclaw` binary in a clean home and
+verifies provider-backed auth through:
 
 Use [scripts/live-canary/run.sh](../live-canary/run.sh)
 as the top-level entrypoint for scheduled and manual lane dispatch. This file
@@ -16,28 +16,29 @@ not model behavior.
 
 ## What It Proves
 
-- a brand-new machine can build and start the gateway
-- seeded credentials are accepted on a fresh database
-- extension install + activation succeeds without manual recovery
+- a brand-new machine can build and start the shipping Reborn binary
+- manifest-declared tenant configuration is saved through the operator API
+- install derives `setup_needed` when personal auth is missing
+- completing the declared setup recipe derives `active` and publishes tools
 - the Responses API can execute provider-backed tools
 - the browser UI can execute provider-backed tools
-- Google refresh still works when the stored access token is deliberately expired
+- no public activation endpoint or legacy auth booleans are required
 
 ## Current Provider Cases
 
 - `gmail`
-  Uses `google_oauth_token`
+  Configures `vendor.google`, then completes the declared Google OAuth recipe
   Runs through Responses API and browser
 - `google_calendar`
-  Uses `google_oauth_token`
+  Installs package `google-calendar` and completes the declared Google OAuth recipe
   Runs through Responses API
 - `github`
-  Uses `github_token`
+  Submits the PAT under the opaque manual-token requirement named by the manifest
   Runs through Responses API only (PAT-only — not browser-OAuth; the
-  github WASM tool registers as `auth_summary.method = "manual"`)
+  GitHub manifest declares `manual_token`)
 - `notion`
-  Uses `mcp_notion_access_token`
-  Runs through Responses API and browser
+  Runs only in browser mode because its manifest declares OAuth/DCR. The
+  generic setup API intentionally does not accept a pre-seeded OAuth token.
 
 ## Setup
 
@@ -52,18 +53,21 @@ cp config.example.env config.env
 set -a && source config.env && set +a
 ```
 
-For Google refresh verification you should provide both:
+For seeded Google verification provide:
 
 - `AUTH_LIVE_GOOGLE_ACCESS_TOKEN`
-- `AUTH_LIVE_GOOGLE_REFRESH_TOKEN`
 
 along with:
 
 - `GOOGLE_OAUTH_CLIENT_ID`
 - `GOOGLE_OAUTH_CLIENT_SECRET`
 
-The runner will seed the token into the clean DB, then backdate its expiry so
-the first Google-backed probe has to refresh.
+The runner saves the client values through the generic `vendor.google` admin
+configuration group. It then installs each package, starts the descriptor's
+OAuth flow, and completes the Reborn callback against the deterministic token
+endpoint. If `AUTH_LIVE_GOOGLE_REFRESH_TOKEN` is also set, the resulting account
+includes it; no canary reaches into persistence or mutates an internal state
+field.
 
 ### Browser-consent Google challenge bypass
 
@@ -88,25 +92,31 @@ Re-run the bootstrap if browser-mode failures suggest the session has decayed.
 From the repo root:
 
 ```bash
-python3 scripts/auth_live_canary/run_live_canary.py
+python3 scripts/auth_live_canary/run_live_canary.py --mode seeded
 ```
 
 Run only selected providers:
 
 ```bash
-python3 scripts/auth_live_canary/run_live_canary.py --case gmail --case github
+python3 scripts/auth_live_canary/run_live_canary.py \
+  --mode seeded \
+  --case gmail \
+  --case github
 ```
 
 CI-style fresh-machine install:
 
 ```bash
-python3 scripts/auth_live_canary/run_live_canary.py --playwright-install with-deps
+python3 scripts/auth_live_canary/run_live_canary.py \
+  --mode seeded \
+  --playwright-install with-deps
 ```
 
 Reuse an existing venv and binary:
 
 ```bash
 python3 scripts/auth_live_canary/run_live_canary.py \
+  --mode seeded \
   --skip-python-bootstrap \
   --skip-build
 ```
@@ -114,7 +124,7 @@ python3 scripts/auth_live_canary/run_live_canary.py \
 List the currently configured cases:
 
 ```bash
-python3 scripts/auth_live_canary/run_live_canary.py --list-cases
+python3 scripts/auth_live_canary/run_live_canary.py --mode seeded --list-cases
 ```
 
 ## Artifacts
@@ -122,7 +132,7 @@ python3 scripts/auth_live_canary/run_live_canary.py --list-cases
 The runner writes JSON results to:
 
 ```text
-artifacts/auth-live-canary/results.json
+artifacts/auth-live-canary/<mode>/results.json
 ```
 
 Browser failures also write screenshots into the same output directory.
@@ -131,16 +141,14 @@ Browser failures also write screenshots into the same output directory.
 
 This is the practical high-frequency live canary.
 
-It does **not** automate the provider login UI on every run. Instead it seeds
-known-good test credentials into a fresh local IronClaw instance and then
-verifies that the runtime can still use and refresh them. That is the right
-shape for hourly checks because it catches:
+Seeded mode does **not** automate the provider login UI. It still crosses the
+same generic Reborn install/setup/callback contracts as browser mode; its mock
+token exchange returns the configured live Google test tokens. This catches:
 
-- bad secret persistence
-- broken refresh logic
+- broken manifest/admin/setup plumbing
+- regressions in derived lifecycle state or tool publication
 - bad redirect/client config shipped with the runtime
 - provider-side token validation changes
-- silent regressions in extension activation or tool execution
+- tool execution regressions
 
-If you want a full provider-consent browser automation pass too, that should be
-a separate lower-frequency suite.
+Browser mode is the lower-frequency full provider-consent pass.

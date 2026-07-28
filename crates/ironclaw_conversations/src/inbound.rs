@@ -103,12 +103,12 @@ where
             BindingResolutionPolicy::Trusted {
                 kind: TrustedInboundKind::Trigger,
                 ..
-            } => ironclaw_product_context::InboundClassification::TrustedTrigger,
+            } => ironclaw_turns::product_context::InboundClassification::TrustedTrigger,
             BindingResolutionPolicy::Trusted { .. } => {
-                ironclaw_product_context::InboundClassification::TrustedOther
+                ironclaw_turns::product_context::InboundClassification::TrustedOther
             }
             BindingResolutionPolicy::Untrusted => {
-                ironclaw_product_context::InboundClassification::Untrusted
+                ironclaw_turns::product_context::InboundClassification::Untrusted
             }
         };
         let surface_type = match &route_kind {
@@ -216,7 +216,7 @@ where
         &self,
         mut resolution: ConversationBindingResolution,
         accepted_message: AcceptedInboundMessage,
-        classification: ironclaw_product_context::InboundClassification,
+        classification: ironclaw_turns::product_context::InboundClassification,
         run_adapter: RunOriginAdapter,
         surface_type: Option<TurnSurfaceType>,
     ) -> Result<InboundTurnResponse, InboundTurnError> {
@@ -243,6 +243,7 @@ where
         let turn_submission_result = self
             .turn_coordinator
             .submit_turn(SubmitTurnRequest {
+                requested_model: None,
                 scope: resolution.turn_scope.clone(),
                 actor: accepted_message.actor.clone(),
                 accepted_message_ref: accepted_message.message_ref.clone(),
@@ -255,7 +256,7 @@ where
                 parent_run_id: None,
                 subagent_depth: 0,
                 spawn_tree_root_run_id: None,
-                product_context: Some(ironclaw_product_context::resolve_inbound(
+                product_context: Some(ironclaw_turns::product_context::resolve_inbound(
                     classification,
                     run_adapter,
                     surface_type,
@@ -400,7 +401,7 @@ fn trusted_inbound_request_from_trigger(
             received_at,
             // Issue #5505: a trusted trigger fire must run under the
             // dedicated scheduled_trigger profile so the host deny-map
-            // (ironclaw_reborn runtime.rs) strips the trigger mutator
+            // (ironclaw_runner runtime.rs) strips the trigger mutator
             // capabilities from the fire's model-visible surface — a fire
             // must not be able to create/remove/pause/resume triggers.
             requested_run_profile: Some(
@@ -716,7 +717,7 @@ mod tests {
 
     #[tokio::test]
     async fn trusted_inbound_with_owner_resolves_explicit_user_turn_scope() {
-        let (facade, _services, _coordinator) = trusted_inbound_service().await;
+        let (service, _services, _coordinator) = trusted_inbound_service().await;
         let creator = UserId::new("user-creator").expect("user id");
 
         let request = TrustedInboundTurnRequest::new(
@@ -727,7 +728,7 @@ mod tests {
             TrustedInboundKind::Trigger,
         );
 
-        let response = facade
+        let response = service
             .handle_inbound_turn_with_trusted_scope(request)
             .await
             .expect("trusted inbound turn succeeds");
@@ -745,7 +746,7 @@ mod tests {
 
     #[tokio::test]
     async fn trusted_inbound_does_not_backfill_owner_on_existing_direct_binding() {
-        let (facade, _services, _coordinator) = trusted_inbound_service().await;
+        let (service, _services, _coordinator) = trusted_inbound_service().await;
         let creator = UserId::new("user-creator").expect("user id");
 
         // First fire: no owner (legacy-shaped binding).
@@ -756,7 +757,7 @@ mod tests {
             None,
             TrustedInboundKind::Trigger,
         );
-        facade
+        service
             .handle_inbound_turn_with_trusted_scope(first)
             .await
             .expect("first trusted turn succeeds");
@@ -774,7 +775,7 @@ mod tests {
             Some(creator),
             TrustedInboundKind::Trigger,
         );
-        let response = facade
+        let response = service
             .handle_inbound_turn_with_trusted_scope(second)
             .await
             .expect("second trusted turn succeeds");
@@ -813,6 +814,7 @@ mod tests {
             agent_id: Some(agent()),
             project_id: Some(project()),
             prompt: "test trigger prompt".to_string(),
+            delivery_target: None,
         };
         let content_ref =
             TriggerInboundContentRef::new("content:test-trigger-creator").expect("content ref");
@@ -834,7 +836,7 @@ mod tests {
             "submit_trusted_trigger_fire must surface the creator as explicit turn-scope owner"
         );
         // Issue #5505: a trusted trigger fire must request the dedicated
-        // scheduled_trigger run profile so the host deny-map (ironclaw_reborn
+        // scheduled_trigger run profile so the host deny-map (ironclaw_runner
         // runtime.rs) strips the trigger mutator capabilities from the fire's
         // model-visible surface. Assert through the same recording
         // coordinator already used above, on the SubmitTurnRequest that
@@ -1061,6 +1063,7 @@ mod tests {
             resolution: ConversationBindingResolution {
                 tenant_id: tenant_id.clone(),
                 actor: actor.clone(),
+                binding_epoch: None,
                 turn_scope: TurnScope::new(
                     tenant_id.clone(),
                     Some(agent()),
@@ -1133,7 +1136,7 @@ mod tests {
         }
     }
 
-    /// Returns `(facade, services, coordinator)` — a paired `InboundTurnService`
+    /// Returns `(service, services, coordinator)` — a paired `InboundTurnService`
     /// backed by `InMemoryConversationServices` with "alice" already paired so
     /// trusted binding resolution succeeds, plus the underlying services and
     /// coordinator for post-call inspection.
@@ -1157,9 +1160,9 @@ mod tests {
             )
             .await;
         let coordinator = Arc::new(RecordingTurnCoordinator::default());
-        let facade =
+        let service =
             InboundTurnService::new(services.clone(), services.clone(), coordinator.clone());
-        (facade, services, coordinator)
+        (service, services, coordinator)
     }
 
     fn tenant() -> TenantId {
@@ -1331,21 +1334,21 @@ mod tests {
             &self,
             _request: crate::ResolveConversationRequest,
         ) -> Result<ConversationBindingResolution, InboundTurnError> {
-            unimplemented!("not used by inbound facade tests")
+            unimplemented!("not used by inbound service tests")
         }
 
         async fn link_conversation_to_thread(
             &self,
             _request: LinkConversationRequest,
         ) -> Result<LinkedConversationBinding, InboundTurnError> {
-            unimplemented!("not used by inbound facade tests")
+            unimplemented!("not used by inbound service tests")
         }
 
         async fn validate_reply_target(
             &self,
             _request: ValidateReplyTargetRequest,
         ) -> Result<ReplyTargetBinding, InboundTurnError> {
-            unimplemented!("not used by inbound facade tests")
+            unimplemented!("not used by inbound service tests")
         }
     }
 
@@ -1387,28 +1390,28 @@ mod tests {
             &self,
             _request: ResumeTurnRequest,
         ) -> Result<ResumeTurnResponse, TurnError> {
-            unimplemented!("not used by inbound facade tests")
+            unimplemented!("not used by inbound service tests")
         }
 
         async fn retry_turn(
             &self,
             _request: RetryTurnRequest,
         ) -> Result<RetryTurnResponse, TurnError> {
-            unimplemented!("not used by inbound facade tests")
+            unimplemented!("not used by inbound service tests")
         }
 
         async fn cancel_run(
             &self,
             _request: CancelRunRequest,
         ) -> Result<CancelRunResponse, TurnError> {
-            unimplemented!("not used by inbound facade tests")
+            unimplemented!("not used by inbound service tests")
         }
 
         async fn get_run_state(
             &self,
             _request: GetRunStateRequest,
         ) -> Result<TurnRunState, TurnError> {
-            unimplemented!("not used by inbound facade tests")
+            unimplemented!("not used by inbound service tests")
         }
     }
 

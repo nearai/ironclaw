@@ -1,15 +1,14 @@
 use std::collections::{HashMap, HashSet};
 
-use ironclaw_host_api::{CapabilityId, DispatchInputIssueCode};
+use ironclaw_host_api::{CapabilityId, DispatchInputIssueCode, FailureKind};
 use ironclaw_turns::{
     LoopResultRef,
     run_profile::{
         AgentLoopDriverHost, AppendCapabilityResultRef, CapabilityApprovalResume,
         CapabilityAuthResume, CapabilityCallCandidate, CapabilityDescriptorView, CapabilityFailure,
-        CapabilityFailureDetail, CapabilityFailureKind, CapabilityInputIssue,
-        CapabilityInputRepair, CapabilityInvocation, CapabilityRecoveryHint,
-        CapabilityResultMessage, CapabilitySurfaceVersion, ModelVisibleToolObservation,
-        ObservationTrust, ProviderToolCall, ProviderToolCallReference,
+        CapabilityFailureDetail, CapabilityInputIssue, CapabilityInputRepair,
+        CapabilityRecoveryHint, CapabilityResultMessage, CapabilitySurfaceVersion, LoopRequest,
+        ModelVisibleToolObservation, ObservationTrust, ProviderToolCall, ProviderToolCallReference,
         RegisterProviderToolCallRequest, SameCallRetryConstraint, ToolObservationDetail,
         ToolObservationStatus, ToolRecoveryObservation, VisibleCapabilitySurface,
     },
@@ -31,8 +30,8 @@ const MAX_MODEL_OBSERVATION_TEXT_BYTES: usize = 256;
 pub(super) fn capability_invocation_from_candidate(
     call: CapabilityCallCandidate,
     approval_resume: Option<CapabilityApprovalResume>,
-) -> CapabilityInvocation {
-    CapabilityInvocation {
+) -> LoopRequest {
+    LoopRequest {
         activity_id: call.activity_id,
         surface_version: call.surface_version,
         capability_id: call.capability_id,
@@ -42,7 +41,7 @@ pub(super) fn capability_invocation_from_candidate(
     }
 }
 
-/// Builds a `CapabilityInvocation` from an auth-resumed candidate.
+/// Builds a `LoopRequest` from an auth-resumed candidate.
 ///
 /// When `pending_auth.resume_token` is set (i.e., the invocation previously
 /// passed an approval gate), the returned invocation carries a
@@ -51,21 +50,26 @@ pub(super) fn capability_invocation_from_candidate(
 pub(super) fn capability_invocation_from_auth_resume_candidate(
     call: CapabilityCallCandidate,
     pending_auth: &PendingAuthResume,
-) -> CapabilityInvocation {
-    let auth_resume = pending_auth
-        .resume_token
-        .as_ref()
-        .map(|token| CapabilityAuthResume {
-            resume_token: token.clone(),
-            prior_approval: pending_auth.prior_approval.as_ref().map(|pa| {
-                ironclaw_turns::run_profile::AuthResumeApprovalIdentity {
-                    approval_request_id: pa.approval_request_id,
-                    correlation_id: pa.correlation_id,
-                }
-            }),
-            replay: pending_auth.replay.clone(),
-        });
-    CapabilityInvocation {
+) -> LoopRequest {
+    let auth_resume = if matches!(
+        pending_auth.disposition,
+        Some(ironclaw_turns::GateResumeDisposition::Denied)
+    ) {
+        Some(CapabilityAuthResume::denied())
+    } else {
+        pending_auth.resume_token.as_ref().map(|token| {
+            CapabilityAuthResume::resolved(
+                token.clone(),
+                pending_auth.prior_approval.as_ref().map(|pa| {
+                    ironclaw_turns::run_profile::AuthResumeApprovalIdentity {
+                        approval_request_id: pa.approval_request_id,
+                        correlation_id: pa.correlation_id,
+                    }
+                }),
+            )
+        })
+    };
+    LoopRequest {
         activity_id: call.activity_id,
         surface_version: call.surface_version,
         capability_id: call.capability_id,
@@ -255,11 +259,37 @@ pub(super) async fn append_capability_result_ref(
         result_ref: result.result_ref.clone(),
         safe_summary: result.safe_summary.clone(),
         provider_call: provider_tool_call_reference(call),
-        model_observation: None,
+        model_observation: result
+            .model_observation
+            .clone()
+            .or_else(|| model_visible_capability_success_observation(call, result)),
     })
     .await
     .map_err(capability_host_error)?;
     Ok(())
+}
+
+fn model_visible_capability_success_observation(
+    call: &CapabilityCallCandidate,
+    result: &CapabilityResultMessage,
+) -> Option<ModelVisibleToolObservation> {
+    call.provider_replay.as_ref()?;
+    Some(ModelVisibleToolObservation {
+        schema_version: ironclaw_turns::run_profile::MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+        status: ToolObservationStatus::Success,
+        summary: result.safe_summary.clone(),
+        detail: ToolObservationDetail::ResultReference {
+            result_ref: result.result_ref.as_str().to_string(),
+            byte_len: result.byte_len,
+            preview: None,
+            total_bytes: None,
+            next_offset: None,
+            item_count: None,
+        },
+        artifacts: Vec::new(),
+        recovery: None,
+        trust: ObservationTrust::UntrustedToolOutput,
+    })
 }
 
 pub(super) fn provider_tool_call_reference(
@@ -267,16 +297,8 @@ pub(super) fn provider_tool_call_reference(
 ) -> Option<ProviderToolCallReference> {
     let provider_replay = call.provider_replay.as_ref()?;
     Some(ProviderToolCallReference {
-        provider_id: provider_replay.provider_id.clone(),
-        provider_model_id: provider_replay.provider_model_id.clone(),
-        provider_turn_id: provider_replay.provider_turn_id.clone(),
-        provider_call_id: provider_replay.provider_call_id.clone(),
-        provider_tool_name: provider_replay.provider_tool_name.clone(),
+        replay: provider_replay.clone(),
         capability_id: call.capability_id.clone(),
-        arguments: provider_replay.arguments.clone(),
-        response_reasoning: provider_replay.response_reasoning.clone(),
-        reasoning: provider_replay.reasoning.clone(),
-        signature: provider_replay.signature.clone(),
     })
 }
 
@@ -337,24 +359,38 @@ pub(super) fn model_visible_capability_failure_observation(
             invalid_input_observation(bounded_input_issues(issues))
         }
         detail => {
-            let diagnostic = match detail {
-                Some(CapabilityFailureDetail::Diagnostic { text }) => {
-                    Some(bounded_diagnostic_detail(text))
-                }
-                _ => None,
+            // The trusted host-authored channel renders into the SAME
+            // model-visible detail slot as `Diagnostic` — the model reads one
+            // field; the two channels differ in what may reach it, not in where
+            // it lands. The difference that must SURVIVE the render is the
+            // provenance: the detail slot is an untyped `String`, so the trust
+            // bit rides `ObservationTrust` alongside it. Without that, the
+            // persistence validator downstream would have to re-derive trust by
+            // sniffing content — a heuristic that needs a new revision every
+            // time someone rewords a remediation string.
+            let (diagnostic, trust) = match detail {
+                Some(CapabilityFailureDetail::Diagnostic { text }) => (
+                    Some(bounded_diagnostic_detail(text)),
+                    ObservationTrust::UntrustedToolOutput,
+                ),
+                Some(CapabilityFailureDetail::HostRemediation { text }) => (
+                    Some(bounded_diagnostic_detail(text.as_str())),
+                    ObservationTrust::HostAuthored,
+                ),
+                _ => (None, ObservationTrust::UntrustedToolOutput),
             };
             ModelVisibleToolObservation {
                 schema_version:
                     ironclaw_turns::run_profile::MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
                 status: ToolObservationStatus::Error,
-                summary: model_visible_failure_summary(&failure.error_kind),
+                summary: model_visible_failure_summary(failure.error_kind),
                 detail: ToolObservationDetail::GenericFailure {
-                    failure_kind: failure.error_kind.clone(),
+                    failure_kind: failure.error_kind,
                     detail: diagnostic,
                 },
                 artifacts: Vec::new(),
-                recovery: Some(generic_failure_recovery(&failure.error_kind)),
-                trust: ObservationTrust::UntrustedToolOutput,
+                recovery: Some(generic_failure_recovery(failure.error_kind)),
+                trust,
             }
         }
     }
@@ -374,9 +410,9 @@ fn bounded_diagnostic_detail(value: &str) -> String {
     value[..end].to_string() // safety: `end` reduced to a valid UTF-8 boundary.
 }
 
-fn model_visible_failure_summary(error_kind: &CapabilityFailureKind) -> String {
+fn model_visible_failure_summary(error_kind: FailureKind) -> String {
     match error_kind {
-        CapabilityFailureKind::GateDeclined => "Capability declined by user.".to_string(),
+        FailureKind::GateDeclined => "Capability declined by user.".to_string(),
         _ => format!("Capability failed with {}.", error_kind.as_str()),
     }
 }
@@ -432,28 +468,52 @@ fn invalid_input_observation(issues: Vec<CapabilityInputIssue>) -> ModelVisibleT
     }
 }
 
-fn generic_failure_recovery(error_kind: &CapabilityFailureKind) -> ToolRecoveryObservation {
+fn generic_failure_recovery(error_kind: FailureKind) -> ToolRecoveryObservation {
+    // Wildcard-free over the unified kind vocabulary: a new kind must choose
+    // its same-call retry constraint deliberately. Buckets preserve the
+    // retired coarse mapping and place each precise kind beside its ancestor:
+    // policy denials forbid the same call, model-correctable shapes require a
+    // changed call, world hiccups allow retry after a delay, and
+    // setup/cancellation faults make a same-call retry useless.
     let same_call_retry = match error_kind {
-        CapabilityFailureKind::Authorization
-        | CapabilityFailureKind::GateDeclined
-        | CapabilityFailureKind::PolicyDenied => SameCallRetryConstraint::Forbidden,
-        CapabilityFailureKind::InvalidInput
-        | CapabilityFailureKind::InvalidOutput
-        | CapabilityFailureKind::OutputTooLarge => SameCallRetryConstraint::RequiresChangedInput,
-        CapabilityFailureKind::Backend
-        | CapabilityFailureKind::Network
-        | CapabilityFailureKind::Transient
-        | CapabilityFailureKind::Unavailable => SameCallRetryConstraint::AllowedAfterDelay,
-        CapabilityFailureKind::Cancelled
-        | CapabilityFailureKind::MissingRuntime
-        | CapabilityFailureKind::Permanent => SameCallRetryConstraint::NotUseful,
-        CapabilityFailureKind::Dispatcher
-        | CapabilityFailureKind::OperationFailed
-        | CapabilityFailureKind::Process
-        | CapabilityFailureKind::Resource
-        | CapabilityFailureKind::Internal
-        | CapabilityFailureKind::Unknown(_) => SameCallRetryConstraint::Allowed,
-        _ => SameCallRetryConstraint::Allowed,
+        FailureKind::Authorization
+        | FailureKind::GateDeclined
+        | FailureKind::PolicyDenied
+        | FailureKind::NetworkDenied
+        | FailureKind::FilesystemDenied
+        | FailureKind::SecretDenied
+        | FailureKind::AuthRequired => SameCallRetryConstraint::Forbidden,
+        FailureKind::InputEncode
+        | FailureKind::OutputDecode
+        | FailureKind::InvalidResult
+        | FailureKind::OutputTooLarge
+        | FailureKind::MethodMissing
+        | FailureKind::UndeclaredCapability
+        | FailureKind::UnknownCapability
+        | FailureKind::UnknownProvider => SameCallRetryConstraint::RequiresChangedInput,
+        FailureKind::Backend
+        | FailureKind::Network
+        | FailureKind::Transient
+        | FailureKind::Unavailable => SameCallRetryConstraint::AllowedAfterDelay,
+        FailureKind::Cancelled
+        | FailureKind::MissingRuntime
+        | FailureKind::MissingRuntimeBackend
+        | FailureKind::UnsupportedRunner
+        | FailureKind::RuntimeMismatch
+        | FailureKind::ExtensionRuntimeMismatch
+        | FailureKind::Manifest => SameCallRetryConstraint::NotUseful,
+        FailureKind::OperationFailed
+        | FailureKind::ExitFailure
+        | FailureKind::Resource
+        | FailureKind::Internal
+        | FailureKind::Guest
+        | FailureKind::Memory
+        | FailureKind::Client
+        | FailureKind::Executor
+        // Unclassifiable: the constraint is unknown, so do not forbid a
+        // retry the model judges worthwhile.
+        | FailureKind::Unclassified
+        | FailureKind::StaleSurface => SameCallRetryConstraint::Allowed,
     };
     ToolRecoveryObservation {
         same_call_retry,
@@ -646,6 +706,7 @@ mod tests {
             terminate_hint: false,
             byte_len: 1000,
             output_digest: None,
+            model_observation: None,
         };
         let result_a2 = CapabilityResultMessage {
             result_ref: ironclaw_turns::LoopResultRef::new("result:a2".to_string()).unwrap(),
@@ -654,6 +715,7 @@ mod tests {
             terminate_hint: false,
             byte_len: 500,
             output_digest: None,
+            model_observation: None,
         };
         let result_b = CapabilityResultMessage {
             result_ref: ironclaw_turns::LoopResultRef::new("result:b".to_string()).unwrap(),
@@ -662,6 +724,7 @@ mod tests {
             terminate_hint: false,
             byte_len: 2000,
             output_digest: None,
+            model_observation: None,
         };
         push_completed_result(&mut state, &cap_a, result_a1);
         push_completed_result(&mut state, &cap_a, result_a2);
@@ -750,7 +813,7 @@ mod tests {
     fn generic_failure_observation_carries_diagnostic_detail_to_model() {
         let path = "missing input_schema_ref at /system/extensions/google-calendar/schemas/google-calendar/list_calendars.input.v1.json";
         let failure = CapabilityFailure {
-            error_kind: CapabilityFailureKind::MissingRuntime,
+            error_kind: FailureKind::MissingRuntime,
             safe_summary: "capability invocation failed".to_string(),
             detail: Some(CapabilityFailureDetail::Diagnostic {
                 text: path.to_string(),
@@ -775,7 +838,7 @@ mod tests {
     #[test]
     fn generic_failure_observation_without_diagnostic_has_no_detail() {
         let failure = CapabilityFailure {
-            error_kind: CapabilityFailureKind::Backend,
+            error_kind: FailureKind::Backend,
             safe_summary: "capability invocation failed".to_string(),
             detail: None,
         };
@@ -803,7 +866,6 @@ mod tests {
             resume_token: None,
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             prior_approval: None,
-            replay: None,
             disposition: None,
         };
         let surface_version = CapabilitySurfaceVersion::new("surface:v1").unwrap();
@@ -819,7 +881,7 @@ mod tests {
 
     /// When both `resume_token` and `prior_approval` are set (the invocation
     /// previously passed both an approval gate and is now being resumed after an
-    /// auth gate), the resulting `CapabilityInvocation` must:
+    /// auth gate), the resulting `LoopRequest` must:
     /// - carry `auth_resume: Some(...)` with the resume token,
     /// - carry `auth_resume.prior_approval: Some(...)` with both the
     ///   `approval_request_id` and `correlation_id` from `prior_approval`,
@@ -850,7 +912,6 @@ mod tests {
                 approval_request_id,
                 correlation_id,
             }),
-            replay: None,
             disposition: None,
         };
         let surface_version = CapabilitySurfaceVersion::new("surface:v1").unwrap();
@@ -871,7 +932,8 @@ mod tests {
             .as_ref()
             .expect("auth_resume must be Some when resume_token is set");
         assert_eq!(
-            auth_resume.resume_token, resume_token,
+            auth_resume.resume_token.as_ref(),
+            Some(&resume_token),
             "auth_resume.resume_token must match the pending resume token"
         );
 
@@ -901,7 +963,7 @@ mod tests {
     fn capability_invocation_from_auth_resume_candidate_with_none_resume_token_sets_auth_resume_none()
      {
         // When `PendingAuthResume.resume_token` is None (the invocation never
-        // passed an approval gate), the returned `CapabilityInvocation` must
+        // passed an approval gate), the returned `LoopRequest` must
         // carry `auth_resume: None` so the host routes through `invoke_json`,
         // while preserving the call activity id as the invocation identity.
         use ironclaw_turns::run_profile::CapabilityInputRef;
@@ -917,7 +979,6 @@ mod tests {
             resume_token: None, // no prior approval — the key precondition
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             prior_approval: None,
-            replay: None,
             disposition: None,
         };
         let surface_version = CapabilitySurfaceVersion::new("surface:v1").unwrap();

@@ -10,7 +10,7 @@ canonical executor, loop execution state, and executor test support.
   behavior here only when it applies to every family.
 - `src/family.rs` owns `LoopFamily`, `LoopFamilyId`, component identity, and
   registry rules.
-- `src/planner.rs` owns the public planner facade and crate-private strategy
+- `src/planner.rs` owns the public planner service and crate-private strategy
   access.
 - `src/default_planner.rs` wires the built-in default strategy composition.
 - `src/state.rs` and `src/state/` own resumable execution state.
@@ -21,11 +21,11 @@ canonical executor, loop execution state, and executor test support.
 ## Boundaries
 
 - This crate depends upward on neutral contracts in `ironclaw_turns`.
-- This crate must not depend on `ironclaw_reborn`, host runtime crates, product
+- This crate must not depend on `ironclaw_runner`, host runtime crates, product
   adapters, dispatcher, capability host, filesystem, network, secrets, or DB
   backends.
 - The framework never sees `AgentLoopDriver`; `PlannedDriver` in
-  `ironclaw_reborn` adapts runner-facing driver calls to this crate's executor.
+  `ironclaw_runner` adapts runner-facing driver calls to this crate's executor.
 - State stores refs, cursors, counters, versions, and safe summaries only. Do
   not store raw prompts, raw model output, tool args, secrets, host paths,
   provider errors, or stack traces in state or strategy slots.
@@ -44,7 +44,7 @@ canonical executor, loop execution state, and executor test support.
 - Keep `src/executor/canonical.rs` as the ordered lifecycle spine.
 - Put lifecycle mechanics in the owning executor stage instead of adding branch
   logic directly to `canonical.rs`.
-- Keep `CanonicalAgentLoopExecutor` as the public facade; keep
+- Keep `CanonicalAgentLoopExecutor` as the public service; keep
   `DefaultExecutorPipeline` and stage types crate-internal.
 - Do not pass sibling stages through another stage's input. If a phase needs
   helper behavior, keep that helper owned inside the stage module.

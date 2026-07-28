@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     CapabilityId, HostApiError, HostPortId, NetworkMethod,
-    dotted_id::{PrefixRule, VersionRule, validate_dotted_id},
+    dotted_id::{PrefixRule, validate_dotted_id},
 };
 
 fn validate_ingress_route_id(value: &str) -> Result<(), HostApiError> {
@@ -22,7 +22,6 @@ fn validate_ingress_route_id(value: &str) -> Result<(), HostApiError> {
         2,
         "must have at least surface and route segments",
         PrefixRule::Any,
-        VersionRule::Unversioned,
     )
 }
 
@@ -555,7 +554,7 @@ pub enum AuditTraceClass {
 pub enum AllowedEffectPath {
     NoEffect,
     ProjectionOnly,
-    ProductWorkflow,
+    ProductSurface,
     TurnCoordinator,
     HostPort { id: HostPortId },
     CapabilityHost { capability_id: CapabilityId },
@@ -737,7 +736,7 @@ mod tests {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProductWorkflow,
+            effect_path: AllowedEffectPath::ProductSurface,
         }
     }
 
@@ -857,7 +856,7 @@ mod tests {
     #[test]
     fn public_route_scope_cannot_enter_effectful_paths() {
         let effectful_paths = [
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProductSurface,
             AllowedEffectPath::TurnCoordinator,
             AllowedEffectPath::HostPort {
                 id: HostPortId::new("host.storage.sql_transaction.first_party")
@@ -901,7 +900,7 @@ mod tests {
             (
                 ListenerClass::LocalGateway,
                 vec![IngressAuthScheme::Oidc],
-                AllowedEffectPath::ProductWorkflow,
+                AllowedEffectPath::ProductSurface,
                 "local gateway",
             ),
             (

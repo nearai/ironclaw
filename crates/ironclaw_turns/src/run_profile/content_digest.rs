@@ -2,7 +2,7 @@
 //!
 //! Boundary note: `ironclaw_turns` is otherwise a contracts-only crate, but the
 //! `ContentDigest` newtype AND its `normalize_for_hash`/JCS/BLAKE3 implementation
-//! live here together on purpose — both the host adapter (`ironclaw_loop_support`,
+//! live here together on purpose — both the host adapter (`ironclaw_loop_host`,
 //! which computes the digest from raw output) and the loop mechanics
 //! (`ironclaw_agent_loop`, whose `CapabilityCallSignature` reuses the same
 //! normalizer) must agree byte-for-byte, and `ironclaw_turns` is the only crate
@@ -229,10 +229,6 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::{
-        LoopResultRef,
-        run_profile::{CapabilityProgress, CapabilityResultMessage},
-    };
 
     #[test]
     fn content_digest_is_deterministic_for_identical_content() {
@@ -273,29 +269,5 @@ mod tests {
             ContentDigest::from_json_value(&first).expect("digest first"),
             ContentDigest::from_json_value(&second).expect("digest second")
         );
-    }
-
-    #[test]
-    fn capability_result_message_without_output_digest_decodes_to_none() {
-        let payload = json!({
-            "result_ref": "result:legacy",
-            "safe_summary": "capability completed",
-            "progress": "made_progress",
-            "terminate_hint": false,
-            "byte_len": 42
-        });
-
-        let decoded: CapabilityResultMessage =
-            serde_json::from_value(payload).expect("decode legacy result");
-
-        assert_eq!(
-            decoded.output_digest, None,
-            "legacy result payload without output_digest must decode to None"
-        );
-        assert_eq!(
-            decoded.result_ref,
-            LoopResultRef::new("result:legacy").expect("valid result ref")
-        );
-        assert_eq!(decoded.progress, CapabilityProgress::MadeProgress);
     }
 }

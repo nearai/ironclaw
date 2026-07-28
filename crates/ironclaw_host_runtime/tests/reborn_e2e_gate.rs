@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_approvals::LeaseApproval;
 use ironclaw_authorization::{
-    CapabilityLeaseStatus, CapabilityLeaseStore, GrantAuthorizer, InMemoryCapabilityLeaseStore,
-    TrustAwareCapabilityDispatchAuthorizer,
+    CapabilityLeaseStatus, CapabilityLeaseStore, CapabilityLeaseStorePort, GrantAuthorizer,
+    TrustAwareCapabilityDispatchAuthorizer, in_memory_backed_capability_lease_store,
 };
 use ironclaw_capabilities::CapabilityObligationHandler;
 use ironclaw_events::{
@@ -20,25 +20,23 @@ use ironclaw_events::{
     ReadScope, RuntimeEventKind,
 };
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem, RootFilesystem};
+use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem};
+use ironclaw_host_api::FailureKind;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationServices, CapabilitySurfacePolicy, CapabilitySurfaceVersion, HostRuntime,
-    HostRuntimeServices, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    RuntimeCapabilityResumeRequest, RuntimeFailureKind, RuntimeStatusRequest, SurfaceKind,
+    HostRuntimeServices, RuntimeCapabilityOutcome, RuntimeStatusRequest, SurfaceKind,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
 };
-use ironclaw_processes::{InMemoryProcessResultStore, InMemoryProcessStore, ProcessServices};
+use ironclaw_processes::{ProcessResultStore, ProcessStore};
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount, ResourceTally};
-use ironclaw_run_state::{
-    InMemoryApprovalRequestStore, InMemoryRunStateStore, RunStateStore, RunStatus,
-};
+use ironclaw_run_state::{RunStateStorePort, RunStatus};
 use ironclaw_scripts::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptRuntime, ScriptRuntimeConfig,
 };
-use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
+use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStorePort};
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
     HostTrustPolicy, TrustDecision, TrustProvenance,
@@ -48,7 +46,7 @@ use serde_json::json;
 #[tokio::test]
 async fn reborn_e2e_gate_invokes_script_through_host_runtime_with_status_events_and_resources() {
     let governor = Arc::new(InMemoryResourceGovernor::new());
-    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let event_log = Arc::new(InMemoryDurableEventLog::new());
     let filesystem = Arc::new(InMemoryBackend::new());
     seed_script_manifest_assets(filesystem.as_ref()).await;
@@ -57,7 +55,7 @@ async fn reborn_e2e_gate_invokes_script_through_host_runtime_with_status_events_
         filesystem,
         Arc::clone(&governor),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy()))
@@ -113,15 +111,11 @@ async fn reborn_e2e_gate_invokes_script_through_host_runtime_with_status_events_
         "host_path_sentinel": "/private/tmp/reborn-e2e-gate"
     });
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             script_capability_id(),
-            ResourceEstimate {
-                output_bytes: Some(4096),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default().set_output_bytes(4096),
             input.clone(),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -213,13 +207,12 @@ async fn reborn_e2e_gate_blocks_for_approval_resumes_once_and_rejects_replay() {
         approve_dispatch_for_services(&fixture.services, &scope, gate.approval_request_id).await;
 
     let resumed = runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context.clone(),
             gate.approval_request_id,
             script_capability_id(),
             ResourceEstimate::default(),
             input.clone(),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -249,17 +242,16 @@ async fn reborn_e2e_gate_blocks_for_approval_resumes_once_and_rejects_replay() {
     );
 
     let replay = runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context,
             gate.approval_request_id,
             script_capability_id(),
             ResourceEstimate::default(),
             json!({"message": "approval resume through Reborn E2E gate"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
-    assert_failed_outcome(replay, RuntimeFailureKind::Authorization);
+    assert_failed_outcome(replay, FailureKind::Authorization);
     assert_eq!(
         fixture.events.events().len(),
         3,
@@ -269,15 +261,15 @@ async fn reborn_e2e_gate_blocks_for_approval_resumes_once_and_rejects_replay() {
 
 #[tokio::test]
 async fn reborn_e2e_gate_fails_unsupported_obligations_before_runtime_events_or_success() {
-    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let events = InMemoryEventSink::new();
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::clone(&governor),
         Arc::new(ObligatingAuthorizer::new(vec![Obligation::AuditBefore])),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy()))
@@ -293,17 +285,16 @@ async fn reborn_e2e_gate_fails_unsupported_obligations_before_runtime_events_or_
     let invocation_id = context.invocation_id;
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             script_capability_id(),
             ResourceEstimate::default(),
             json!({"message": "unsupported obligation"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::Backend);
+    assert_failed_outcome(outcome, FailureKind::Backend);
     assert!(events.events().is_empty());
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(run.status, RunStatus::Failed);
@@ -321,14 +312,14 @@ async fn reborn_e2e_gate_fails_unsupported_obligations_before_runtime_events_or_
 
 #[tokio::test]
 async fn reborn_e2e_gate_redacts_runtime_output_before_public_result() {
-    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let events = InMemoryEventSink::new();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ObligatingAuthorizer::new(vec![Obligation::RedactOutput])),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy()))
@@ -348,12 +339,11 @@ async fn reborn_e2e_gate_redacts_runtime_output_before_public_result() {
     let leaked = format!("Bearer {leaked_header}.{leaked_payload}.{leaked_signature}");
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             script_capability_id(),
             ResourceEstimate::default(),
             json!({"authorization": leaked, "message": "redact before public result"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -385,14 +375,14 @@ async fn reborn_e2e_gate_redacts_runtime_output_before_public_result() {
 
 #[tokio::test]
 async fn reborn_e2e_gate_sanitizes_runtime_backend_failure_before_public_surfaces() {
-    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let events = InMemoryEventSink::new();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy()))
@@ -407,26 +397,27 @@ async fn reborn_e2e_gate_sanitizes_runtime_backend_failure_before_public_surface
     let scope = context.resource_scope.clone();
     let invocation_id = context.invocation_id;
     let input_sentinel = "BACKEND_FAILURE_INPUT_SENTINEL_3067";
+    let backend_registry_token = concat!("ghp_", "012345678901234567890123456789012345");
     let backend_secret = "BACKEND_PROVIDER_ERROR_SECRET_3067 /private/tmp/backend-path sk-live";
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             script_capability_id(),
             ResourceEstimate::default(),
             json!({"message": input_sentinel}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
 
     match outcome {
         RuntimeCapabilityOutcome::Failed(failure) => {
-            assert_eq!(failure.kind, RuntimeFailureKind::Backend);
+            assert_eq!(failure.kind, FailureKind::Backend);
             let rendered = format!("{failure:?}");
             for forbidden in [
                 input_sentinel,
                 backend_secret,
+                backend_registry_token,
                 "/private/tmp/backend-path",
                 "sk-live",
             ] {
@@ -436,6 +427,24 @@ async fn reborn_e2e_gate_sanitizes_runtime_backend_failure_before_public_surface
                 );
             }
             assert!(failure.message.is_some());
+            // The descriptive cause is NOT lost: it rides the in-process-only
+            // `model_visible_cause` channel (absent from Debug/rows/events)
+            // toward the model-visible Diagnostic seam, registry-scrubbed.
+            let cause = failure
+                .model_visible_cause()
+                .expect("backend cause must survive on the model-visible channel");
+            assert!(
+                cause.contains("BACKEND_PROVIDER_ERROR_SECRET_3067"),
+                "descriptive cause must survive for the model: {cause}"
+            );
+            // The registry belt scrubs credential-shaped tokens out of the
+            // cause before it can reach the model (the loop seam re-scrubs
+            // `sk-`-prefixed shapes and injection-fences on top). A path is
+            // deliberately NOT scrubbed here — the model needs it to recover.
+            assert!(
+                !cause.contains(backend_registry_token),
+                "registry credential must be scrubbed from the model-visible cause: {cause}"
+            );
         }
         other => panic!("expected sanitized backend failure, got {other:?}"),
     }
@@ -448,6 +457,7 @@ async fn reborn_e2e_gate_sanitizes_runtime_backend_failure_before_public_surface
     for forbidden in [
         input_sentinel,
         backend_secret,
+        backend_registry_token,
         "/private/tmp/backend-path",
         "sk-live",
     ] {
@@ -464,16 +474,16 @@ async fn reborn_e2e_gate_sanitizes_runtime_backend_failure_before_public_surface
 
 #[tokio::test]
 async fn reborn_e2e_gate_blocks_oversized_runtime_output_before_publication() {
-    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let events = InMemoryEventSink::new();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ObligatingAuthorizer::new(vec![
             Obligation::EnforceOutputLimit { bytes: 8 },
         ])),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy()))
@@ -490,19 +500,18 @@ async fn reborn_e2e_gate_blocks_oversized_runtime_output_before_publication() {
     let forbidden = "OUTPUT_LIMIT_SENTINEL_MUST_NOT_LEAK";
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             script_capability_id(),
             ResourceEstimate::default(),
             json!({"message": forbidden}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
 
     match outcome {
         RuntimeCapabilityOutcome::Failed(failure) => {
-            assert_eq!(failure.kind, RuntimeFailureKind::OutputTooLarge);
+            assert_eq!(failure.kind, FailureKind::OutputTooLarge);
             let rendered = format!("{failure:?}");
             assert!(!rendered.contains(forbidden));
         }
@@ -540,7 +549,7 @@ async fn reborn_e2e_gate_host_http_consumes_staged_policy_and_secret_once() {
     let capability_id = script_capability_id();
     let handle = SecretHandle::new("api-token").unwrap();
     let staged_policy = sample_policy();
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(SecretStore::ephemeral());
     let obligation_services = BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
         secret_store.clone(),
@@ -635,30 +644,30 @@ async fn reborn_e2e_gate_host_http_consumes_staged_policy_and_secret_once() {
 }
 
 type InMemoryServices = HostRuntimeServices<
-    LocalFilesystem,
+    DiskFilesystem,
     InMemoryResourceGovernor,
-    InMemoryProcessStore,
-    InMemoryProcessResultStore,
+    ProcessStore<InMemoryBackend>,
+    ProcessResultStore<InMemoryBackend>,
 >;
 
 struct ApprovalFixture {
     services: InMemoryServices,
-    run_state: Arc<InMemoryRunStateStore>,
-    capability_leases: Arc<InMemoryCapabilityLeaseStore>,
+    run_state: Arc<ironclaw_run_state::RunStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    capability_leases: Arc<CapabilityLeaseStore<InMemoryBackend>>,
     events: InMemoryEventSink,
 }
 
 fn approval_resume_fixture() -> ApprovalFixture {
-    let run_state = Arc::new(InMemoryRunStateStore::new());
-    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
-    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
+    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let events = InMemoryEventSink::new();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ApprovalThenGrantAuthorizer),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy()))
@@ -685,12 +694,11 @@ async fn block_for_approval(
     input: serde_json::Value,
 ) -> ironclaw_host_runtime::RuntimeApprovalGate {
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             script_capability_id(),
             ResourceEstimate::default(),
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -793,7 +801,10 @@ struct FailingScriptBackend;
 
 impl ScriptBackend for FailingScriptBackend {
     fn execute(&self, _request: ScriptBackendRequest) -> Result<ScriptBackendOutput, String> {
-        Err("BACKEND_PROVIDER_ERROR_SECRET_3067 /private/tmp/backend-path sk-live".to_string())
+        Err(format!(
+            "BACKEND_PROVIDER_ERROR_SECRET_3067 /private/tmp/backend-path sk-live {}",
+            concat!("ghp_", "012345678901234567890123456789012345")
+        ))
     }
 }
 
@@ -870,6 +881,7 @@ fn parse_manifest(manifest: &str) -> ExtensionManifest {
         &manifest,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .unwrap()
 }
@@ -877,7 +889,7 @@ fn parse_manifest(manifest: &str) -> ExtensionManifest {
 fn execution_context_with_dispatch_grant() -> ExecutionContext {
     let mut grants = CapabilitySet::default();
     grants.grants.push(dispatch_grant());
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::Script,
@@ -885,11 +897,13 @@ fn execution_context_with_dispatch_grant() -> ExecutionContext {
         grants,
         MountView::default(),
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn execution_context_without_grants() -> ExecutionContext {
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::Script,
@@ -897,7 +911,9 @@ fn execution_context_without_grants() -> ExecutionContext {
         CapabilitySet::default(),
         MountView::default(),
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn dispatch_grant() -> CapabilityGrant {
@@ -993,7 +1009,7 @@ fn assert_event_kinds(events: &InMemoryEventSink, expected: &[RuntimeEventKind])
     assert_eq!(actual, expected);
 }
 
-fn assert_failed_outcome(outcome: RuntimeCapabilityOutcome, expected: RuntimeFailureKind) {
+fn assert_failed_outcome(outcome: RuntimeCapabilityOutcome, expected: FailureKind) {
     match outcome {
         RuntimeCapabilityOutcome::Failed(failure) => assert_eq!(failure.kind, expected),
         other => panic!("expected failed outcome {expected:?}, got {other:?}"),
@@ -1020,3 +1036,14 @@ effects = ["dispatch_capability"]
 default_permission = "allow"
 parameters_schema = { type = "object" }
 "#;
+
+fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                .expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    contracts
+}

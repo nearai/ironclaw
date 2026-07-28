@@ -4,8 +4,18 @@ First-class **Project** entity, membership, and access control for the IronClaw
 Reborn stack. Plan: `docs/plans/2026-06-17-reborn-projects.md`.
 
 > Not to be confused with `ironclaw_engine`'s legacy `Project` type. This crate
-> serves the Reborn stack (`ironclaw_product_workflow` → composition →
-> `ironclaw_webui_v2`).
+> serves the Reborn stack (`ironclaw_product` → composition →
+> `ironclaw_webui`).
+
+## W2 crate-count decision
+
+Keep `ironclaw_projects` as a standalone substrate crate for W2. It owns the
+durable project entity, live membership ACL, and repository contract over
+`ScopedFilesystem`; folding that into composition would put domain persistence
+behind the wiring layer. If this boundary is revisited later, the only plausible
+consumer-side target is `ironclaw_product` (which owns the
+`ProjectService` service), and only if the project repository/domain contract can
+move there without forcing lower substrate crates to depend upward.
 
 ## What this crate owns
 
@@ -32,7 +42,7 @@ Reborn stack. Plan: `docs/plans/2026-06-17-reborn-projects.md`.
   (`ProjectError::backend("op", e)`); do not `map_err(|_| …)` away the source
   (see `.claude/rules/error-handling.md`).
 - This crate persists data; it does **not** authorize callers, expose HTTP, or
-  know about the facade. Authorization gating that combines `resolve_access`
+  know about the service. Authorization gating that combines `resolve_access`
   with a required role lives in the composition adapter (`RebornProjectService`),
   not here.
 

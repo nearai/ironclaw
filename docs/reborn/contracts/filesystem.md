@@ -136,7 +136,7 @@ Recommended meaning:
 | `/conversations` | conversation binding and session-thread state records (consumer-store mount alias under `ironclaw_conversations`) |
 | `/turns` | turn-coordination persistence snapshot (consumer-store mount alias under `ironclaw_turns`) |
 | `/resources` | resource-governor reservation/usage snapshots (consumer-store mount alias under `ironclaw_resources`) |
-| `/tenant-shared` | data shared between users/agents in the same tenant; resolves to `/tenants/<tenant_id>/shared/...` per [scoped-filesystem-tenant-isolation](../../plans/2026-05-16-scoped-filesystem-tenant-isolation.md) |
+| `/tenant-shared` | data shared between users/agents in the same tenant; resolves to `/tenants/<tenant_id>/shared/...` under the scoped filesystem contract |
 | `/tenants` | reserved root for tenant-scoped target subtrees written by the per-invocation `MountView` (`/tenants/<tenant_id>/users/<user_id>/<alias>/...`); not consumed directly by stores |
 
 Extension-visible workspace-style names should be scoped aliases such as:
@@ -209,6 +209,13 @@ Rules:
 8. Symlinks may be read or traversed only if final canonical target remains inside the backend root.
 9. Symlink writes that would create or follow an escape outside the root are denied.
 10. Returned errors must identify virtual/scoped paths, not raw host paths.
+
+**Leaf-scoped local mounts (`mount_local_per_leaf`).** Multiple callers can share one `host_root` while each is confined to its own first-path-segment leaf (`host_root/<leaf>`), for the persistent per-user sandbox container model where one shared workspace directory hosts every user's leaf:
+
+- a request for the bare mount root (no leaf segment) is denied, not silently rooted at `host_root`
+- a leaf that does not yet exist on disk is bootstrapped on first write — the containment check accepts `host_root` itself as the nearest *existing* ancestor for a brand-new leaf, rather than rejecting it as an escape
+- containment is enforced per leaf, not just per `host_root`: a symlink inside `leaf-a` that resolves to a path physically under `host_root` but outside `leaf-a` (e.g. into `leaf-b`) is rejected on both the read and write paths, even though a plain `mount_local` (host_root-only) containment check would let it resolve
+- a *dangling* final symlink (the directory entry exists but its target does not) is rejected on the write path rather than treated as a brand-new file: existence is checked via `lstat` semantics (which see the symlink itself), not by following it, so a pre-planted dangling symlink cannot redirect a write outside its leaf
 
 ---
 
@@ -327,9 +334,9 @@ Rules:
 V1 backend types:
 
 ```text
-LocalFilesystem
-PostgresRootFilesystem   // feature = "postgres"
-LibSqlRootFilesystem     // feature = "libsql"
+DiskFilesystem
+PostgresRootFilesystem
+LibSqlRootFilesystem
 Memory/test backends as needed
 ```
 
@@ -396,10 +403,13 @@ pub enum FilesystemError {
     SymlinkEscape { path: VirtualPath },
     MountConflict { path: VirtualPath },
     Backend { path: VirtualPath, operation: FilesystemOperation, reason: String },
+    NotFound { path: VirtualPath, operation: FilesystemOperation },
+    VersionMismatch { path: VirtualPath, expected: Option<RecordVersion>, found: Option<RecordVersion> },
+    Unsupported { path: VirtualPath, operation: FilesystemOperation },
 }
 ```
 
-Backend errors may keep raw errors for logs, but public/display errors should use scoped or virtual paths.
+Backend errors may keep raw errors for logs, but public/display errors should use scoped or virtual paths. `NotFound`/`VersionMismatch`/`Unsupported` back `delete_if_version` (§14.1) — absent path, stale version, and unsupported-backend cases respectively.
 
 ---
 
@@ -419,6 +429,21 @@ pub trait RootFilesystem {
     async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError>;
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError>;
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError>;
+    // additive, default trait impl below — same pattern as other optional CAS operations (§14.1)
+    // no `CasExpectation`: `Any`/`Absent` are unrepresentable for delete (§14.1)
+    async fn delete_if_version(
+        &self,
+        path: &VirtualPath,
+        expected_version: RecordVersion,
+    ) -> Result<(), FilesystemError> {
+        let _ = expected_version;
+        Err(FilesystemError::Unsupported {
+            path: path.clone(),
+            // reuses the existing `Delete` operation tag — no new
+            // `FilesystemOperation` variant is introduced for this method
+            operation: FilesystemOperation::Delete,
+        })
+    }
 }
 
 pub struct CompositeRootFilesystem;
@@ -440,10 +465,30 @@ impl<F: RootFilesystem> ScopedFilesystem<F> {
     async fn write_file(&self, path: &ScopedPath, bytes: &[u8]) -> Result<(), FilesystemError>;
     async fn list_dir(&self, path: &ScopedPath) -> Result<Vec<DirEntry>, FilesystemError>;
     async fn stat(&self, path: &ScopedPath) -> Result<FileStat, FilesystemError>;
+    // requires `delete` permission, same as `delete`
+    async fn delete_if_version(
+        &self,
+        path: &ScopedPath,
+        expected_version: RecordVersion,
+    ) -> Result<(), FilesystemError>;
 }
 ```
 
 The implementation may start synchronous if the V1 local backend is synchronous, but the public trait should not block future async/remote backends.
+
+### 14.1 `delete_if_version` — CAS-guarded delete
+
+Additive method on `RootFilesystem` (default trait impl: `Unsupported`, same pattern as other optional CAS operations). Takes a concrete `expected_version: RecordVersion` directly — **not** the `CasExpectation` enum used by the CAS'd write path (`Version(RecordVersion) | Any | Absent`). `Any` and `Absent` are unrepresentable here, by design: `Any` would be behaviorally identical to the existing unconditional `delete(path)` — offering it on `delete_if_version` too would duplicate a sibling method; `Absent` has no meaning for a delete (nothing to compare against). Both are excluded at the type level rather than accepted and runtime-rejected.
+
+Rules:
+
+- version-guarded, single-key delete only — no subtree/cascade semantics
+- path absent -> `NotFound`
+- path present at a different version -> `VersionMismatch`
+- requires `delete` permission at the `ScopedFilesystem` layer, same as `delete`
+- backends without CAS-delete support return `Unsupported` by default — fail-closed, never a silent unconditional delete
+
+**ABA caller invariant.** Version tokens are not generation-stable: a path's version restarts at 1 on a fresh `put` after a prior delete, so a token captured before a delete+recreate cycle can match a different incarnation of the same path (ABA). `delete_if_version` is a sound standalone precondition only for paths that are never recreated; callers that recreate paths must pair every successful delete with an unconditional postcondition recheck.
 
 ---
 
@@ -460,6 +505,7 @@ Add tests through the caller-facing filesystem APIs, not only helper functions:
 - path traversal in scoped path is rejected before backend access
 - local backend denies symlink escape
 - local backend does not leak raw host path in display error
+- `mount_local_per_leaf` denies a bare mount-root request, bootstraps a brand-new leaf on first write, rejects a same-`host_root` cross-leaf symlink escape on both read and write, and rejects a dangling final symlink on write
 - `CompositeRootFilesystem` routes operations by longest virtual mount prefix
 - `CompositeRootFilesystem::describe_path` reports matched root, backend identity, content kind, and index policy
 - exact duplicate composite mount roots fail closed
@@ -468,6 +514,9 @@ Add tests through the caller-facing filesystem APIs, not only helper functions:
 - libSQL backend reads, writes, stats, overwrites, lists direct children, infers directories, and returns virtual-path-only missing-file errors
 - `/tmp` mount can be created per invocation and cleaned up
 - `/artifacts` writes are captured under approved virtual path only
+- `delete_if_version` distinguishes `NotFound` (absent path) from `VersionMismatch` (wrong version) and leaves the entry untouched on either error
+- `delete_if_version` on a backend using the default trait implementation (no override) returns `Unsupported`
+- `delete_if_version` denied when the mount lacks `delete` permission
 
 ---
 

@@ -144,13 +144,27 @@ fn validate_delivery_status(
     failure_kind: Option<DeliveryFailureKind>,
 ) -> Result<(), OutboundError> {
     match (status, failure_kind) {
-        (OutboundDeliveryStatus::Pending | OutboundDeliveryStatus::Delivered, None) => Ok(()),
+        // In-flight coordinator states and `Unknown` (outcome ambiguous, not
+        // a known failure) never carry a failure kind.
+        (
+            OutboundDeliveryStatus::Prepared
+            | OutboundDeliveryStatus::Sending
+            | OutboundDeliveryStatus::Pending
+            | OutboundDeliveryStatus::Delivered
+            | OutboundDeliveryStatus::Unknown,
+            None,
+        ) => Ok(()),
         (OutboundDeliveryStatus::Failed | OutboundDeliveryStatus::DeadLettered, Some(_)) => Ok(()),
-        (OutboundDeliveryStatus::Pending | OutboundDeliveryStatus::Delivered, Some(_)) => {
-            Err(OutboundError::InvalidRequest {
-                reason: "successful delivery statuses must not include failure kind",
-            })
-        }
+        (
+            OutboundDeliveryStatus::Prepared
+            | OutboundDeliveryStatus::Sending
+            | OutboundDeliveryStatus::Pending
+            | OutboundDeliveryStatus::Delivered
+            | OutboundDeliveryStatus::Unknown,
+            Some(_),
+        ) => Err(OutboundError::InvalidRequest {
+            reason: "non-failed delivery statuses must not include failure kind",
+        }),
         (OutboundDeliveryStatus::Failed | OutboundDeliveryStatus::DeadLettered, None) => {
             Err(OutboundError::InvalidRequest {
                 reason: "failed delivery statuses require failure kind",
@@ -163,10 +177,12 @@ pub(crate) fn validate_delivery_identity(
     existing: &OutboundDeliveryAttempt,
     incoming: &OutboundDeliveryAttempt,
 ) -> Result<(), OutboundError> {
+    // `attempted_at` records the first reservation and is not part of the
+    // idempotency identity: a replay after reopen necessarily arrives at a
+    // later wall-clock time but must resolve to the same durable attempt.
     if existing.delivery_id != incoming.delivery_id
         || existing.scope != incoming.scope
         || existing.candidate != incoming.candidate
-        || existing.attempted_at != incoming.attempted_at
     {
         return Err(OutboundError::Backend);
     }

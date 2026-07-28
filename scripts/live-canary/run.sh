@@ -107,6 +107,7 @@ write_env_summary() {
     echo "python_bin=${PYTHON_BIN}"
     echo "cases=${CASES:-<default>}"
     echo "reborn_webui_v2_live_qa_harness_ref=${REBORN_WEBUI_V2_LIVE_QA_HARNESS_REF:-<checkout>}"
+    echo "reborn_webui_v2_live_qa_build_source=${REBORN_WEBUI_V2_LIVE_QA_BUILD_SOURCE:-<local>}"
     echo "skip_build=${SKIP_BUILD:-0}"
     echo "skip_python_bootstrap=${SKIP_PYTHON_BOOTSTRAP:-0}"
   } > "${ENV_FILE}"
@@ -127,9 +128,9 @@ run_cargo_test() {
   local filter="${2:-}"
 
   if [[ -n "${filter}" ]]; then
-    run_with_timeout cargo test --features libsql --test "${test_target}" "${filter}" -- --ignored --nocapture --test-threads=1
+    run_with_timeout cargo test --test "${test_target}" "${filter}" -- --ignored --nocapture --test-threads=1
   else
-    run_with_timeout cargo test --features libsql --test "${test_target}" -- --ignored --nocapture --test-threads=1
+    run_with_timeout cargo test --test "${test_target}" -- --ignored --nocapture --test-threads=1
   fi
 }
 

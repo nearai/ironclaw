@@ -66,7 +66,7 @@ has_reborn_tests=true"
 
 assert_scope \
   "reborn product storage crate" \
-  "crates/ironclaw_product_workflow_storage/src/lib.rs" \
+  "crates/ironclaw_product_storage/src/lib.rs" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
@@ -74,7 +74,23 @@ has_reborn_tests=true"
 
 assert_scope \
   "reborn v2 adapter crate" \
-  "crates/ironclaw_telegram_v2_adapter/src/lib.rs" \
+  "crates/ironclaw_telegram_extension/src/lib.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "reborn telegram extension crate" \
+  "crates/ironclaw_telegram_extension/src/channel.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "reborn telegram v2 protocol adapter crate" \
+  "crates/ironclaw_telegram_v2_adapter/src/render.rs" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
@@ -148,14 +164,6 @@ has_legacy_tests=true
 has_reborn_tests=true"
 
 assert_scope \
-  "legacy root runtime" \
-  "src/agent/session.rs" \
-  "docs_only=false
-has_core_code=true
-has_legacy_tests=true
-has_reborn_tests=false"
-
-assert_scope \
   "shared manifest" \
   "Cargo.toml" \
   "docs_only=false
@@ -185,6 +193,46 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true
+has_reborn_tests=true"
+
+assert_scope \
+  "Reborn crate bucket script" \
+  "scripts/ci/reborn-crate-test-buckets.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "Reborn crate bucket regression suite" \
+  "scripts/ci/test-reborn-crate-test-buckets.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "Reborn Responses E2E manifest checker" \
+  "scripts/ci/check-reborn-responses-e2e-manifest.py" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "Reborn Responses E2E manifest" \
+  "tests/e2e/reborn_responses_e2e_tests.txt" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "Reborn coverage manifest" \
+  "tests/e2e/reborn_coverage_tests.txt" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
 has_reborn_tests=true"
 
 assert_scope \
@@ -219,7 +267,7 @@ has_reborn_tests=false"
 
 assert_scope \
   "nested markdown is not docs only" \
-  "crates/ironclaw_reborn/CLAUDE.md" \
+  "crates/ironclaw_runner/CLAUDE.md" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
@@ -234,8 +282,8 @@ has_legacy_tests=false
 has_reborn_tests=true"
 
 assert_scope \
-  "mixed legacy and reborn" \
-  "src/agent/session.rs
+  "mixed tests and reborn" \
+  "tests/e2e/scenarios/test_live_flow.py
 crates/ironclaw_reborn_composition/src/lib.rs" \
   "docs_only=false
 has_core_code=true

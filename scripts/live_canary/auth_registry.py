@@ -110,7 +110,7 @@ SEEDED_CASES: dict[str, SeededProviderCase] = {
     ),
     "google_calendar": SeededProviderCase(
         key="google_calendar",
-        extension_install_name="google_calendar",
+        extension_install_name="google-calendar",
         expected_display_name="Google Calendar",
         response_prompt="list next calendar event",
         expected_tool_name="google_calendar",
@@ -153,7 +153,7 @@ SEEDED_CASES: dict[str, SeededProviderCase] = {
     ),
     "google_calendar_lifecycle": SeededProviderCase(
         key="google_calendar_lifecycle",
-        extension_install_name="google_calendar",
+        extension_install_name="google-calendar",
         expected_display_name="Google Calendar",
         response_prompt="create a Google Calendar event titled '[canary] test' for tomorrow at 10am lasting 30 minutes",
         expected_tool_name="google_calendar",
@@ -220,7 +220,11 @@ def configured_seeded_cases(selected: list[str] | None) -> list[SeededProviderCa
     if selected:
         names = selected
     else:
-        names = [n for n in SEEDED_CASES if n not in LIFECYCLE_CASE_NAMES]
+        names = [
+            name
+            for name in SEEDED_CASES
+            if name not in LIFECYCLE_CASE_NAMES and name != "notion"
+        ]
     google_access = env_str("AUTH_LIVE_GOOGLE_ACCESS_TOKEN")
     google_refresh = env_str("AUTH_LIVE_GOOGLE_REFRESH_TOKEN")
     if google_refresh and not google_access:
@@ -252,13 +256,10 @@ def configured_seeded_cases(selected: list[str] | None) -> list[SeededProviderCa
             )
             case = replace(case, response_prompt=f"read github issue {owner}/{repo}#{issue_number}")
         elif name == "notion":
-            if not env_str("AUTH_LIVE_NOTION_ACCESS_TOKEN"):
-                continue
-            query = required_env(
-                "AUTH_LIVE_NOTION_QUERY",
-                message="AUTH_LIVE_NOTION_QUERY is required for the selected live-provider case",
+            raise CanaryError(
+                "Notion declares OAuth/DCR setup and cannot accept a seeded token "
+                "through the generic setup API; run `--mode browser --case notion`"
             )
-            case = replace(case, response_prompt=f"search notion for {query}")
         # ── Lifecycle write+cleanup cases ────────────────────────────────
         elif name == "gmail_roundtrip":
             if not google_access:
@@ -287,14 +288,9 @@ def configured_seeded_cases(selected: list[str] | None) -> list[SeededProviderCa
                 ),
             )
         elif name == "notion_search_lifecycle":
-            if not env_str("AUTH_LIVE_NOTION_ACCESS_TOKEN"):
-                continue
-            ts = _canary_timestamp()
-            case = replace(
-                case,
-                response_prompt=(
-                    f"search notion for 'canary {ts}', then search again for 'test'"
-                ),
+            raise CanaryError(
+                "Notion lifecycle probes require browser OAuth/DCR and are not "
+                "supported by seeded mode"
             )
         cases.append(case)
     return cases
@@ -310,4 +306,3 @@ def configured_browser_cases(selected: list[str] | None) -> list[BrowserProvider
         ):
             cases.append(case)
     return cases
-

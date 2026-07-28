@@ -11,6 +11,9 @@ homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
 publish = false
 
+[package.metadata.ironclaw]
+layer = "kernel"
+
 [dependencies]
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }

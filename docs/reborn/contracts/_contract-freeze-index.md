@@ -94,8 +94,6 @@ If a task needs to change one of those answers, it is not implementation work; i
 - [`conversation-binding.md`](conversation-binding.md)
 - [`triggers.md`](triggers.md)
 - [`migration-compatibility.md`](migration-compatibility.md)
-- [`product-adapters.md`](product-adapters.md) (issue #3269 first-slice)
-- [`telegram-v2.md`](telegram-v2.md) (issue #3285 first-slice)
 - [`communication-delivery-resolution.md`](communication-delivery-resolution.md)
 - [`trust-boundary-hardening.md`](trust-boundary-hardening.md)
 
@@ -106,7 +104,7 @@ If a task needs to change one of those answers, it is not implementation work; i
 The implementation-alignment map is:
 
 ```text
-docs/reborn/2026-04-25-current-architecture-map.md
+docs/reborn/README.md and the owning crate contracts
 ```
 
 Reviewers should use it alongside this packet to separate:

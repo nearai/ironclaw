@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-25
 **Status:** Draft contract
-**Depends on:** `docs/reborn/2026-04-24-os-like-architecture-design.md`, `docs/reborn/contracts/runtime-workflows.md`, `docs/reborn/contracts/capability-access.md`, `docs/reborn/contracts/run-state.md`
+**Depends on:** `docs/reborn/contracts/runtime-workflows.md`, `docs/reborn/contracts/capability-access.md`, `docs/reborn/contracts/run-state.md`
 **Reference loop mechanics:** `docs/reborn/contracts/lightweight-agent-loop.md`
 
 ---
@@ -170,6 +170,19 @@ Those blocked states are host-managed transitions driven by approval or auth ser
   agent loop owns recovery: it retries the model call with a model-visible
   repair hint in the prompt bundle, and exhausted retries fail the run as
   `invalid_model_output`.
+- Recoverable `context_overflow`, `content_filtered`, and `invalid_output`
+  failures may receive one additional observation-assisted model attempt after
+  their ordinary retry budget. The observation is loop-owned, typed, and
+  host-authored: provider summaries, diagnostics, and blocked content never
+  enter the retry prompt. Content-filter recovery asks for a policy-compliant
+  alternative without reproducing blocked content.
+- The first `no_progress_detected` or `iteration_limit` terminal condition is
+  converted into a normal model iteration with the current capability surface
+  and a typed, host-authored warning. The warning contains only bounded facts
+  (the terminal class, configured limit, repeated-call count, or typed failure
+  kind), never raw provider or capability diagnostics. If the same terminal
+  class recurs, the run takes its ordinary typed failure path instead of
+  granting another warning iteration.
 - `BlockedApproval` / `BlockedAuth` is host control-plane state
 
 These must not be collapsed into a single vague text outcome.
@@ -189,6 +202,29 @@ Recommended durable distinction:
 - capability results
 - approval/auth blocking milestones
 - child-thread/job creation milestones
+
+Model-error retry accounting and pending prompt controls are also checkpointed
+loop state. A `BeforeModel` retry-transition checkpoint records the consumed
+attempt budget, any pending typed observation, and any invalid-output repair
+directive. Prompt construction does not clear those controls; the executor
+clears them only after the model boundary returns a non-gate result. A
+pre-dispatch budget gate therefore leaves them pending for the approved retry.
+A worker restart can replay a pending control at least once, but cannot silently
+lose it or grant a fresh recovery budget. Unsupported observation schema
+versions fail prompt construction before a model call.
+
+Pre-termination warning accounting follows the same checkpoint discipline. The
+attempted terminal class and pending typed warning are written to the
+`BeforeModel` checkpoint, remain pending through prompt construction, and clear
+only after the model returns a response. At that point an active warning marker
+survives capability gates and resume checkpoints until the warning turn's
+capability results are evaluated. If a no-progress warning response again
+produces only `NoChange` results, the loop fails immediately instead of
+rebuilding the ordinary detection window; a `MadeProgress` result continues
+normally. Restarts can therefore replay a pending warning but cannot reset its
+one-shot budget or grant extra no-progress turns. Legacy checkpoints deserialize
+an empty warning state, and unsupported warning schema versions fail before the
+model boundary.
 
 This keeps projections, debugging, and compaction grounded in typed state rather than inferences from transcript prose alone.
 

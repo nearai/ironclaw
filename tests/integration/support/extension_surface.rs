@@ -18,19 +18,18 @@
 
 pub const EXTENSION_SEARCH_CAPABILITY_ID: &str = "builtin.extension_search";
 pub const EXTENSION_INSTALL_CAPABILITY_ID: &str = "builtin.extension_install";
-pub const EXTENSION_ACTIVATE_CAPABILITY_ID: &str = "builtin.extension_activate";
 pub const EXTENSION_REMOVE_CAPABILITY_ID: &str = "builtin.extension_remove";
 
 pub const EXTENSION_LIFECYCLE_CAPABILITY_IDS: &[&str] = &[
     EXTENSION_SEARCH_CAPABILITY_ID,
     EXTENSION_INSTALL_CAPABILITY_ID,
-    EXTENSION_ACTIVATE_CAPABILITY_ID,
     EXTENSION_REMOVE_CAPABILITY_ID,
 ];
 
 pub const BUNDLED_EXTENSION_IDS: &[&str] = &[
     "github",
     "web-access",
+    "slack",
     "gmail",
     "google-calendar",
     "google-docs",
@@ -85,6 +84,7 @@ pub const BUNDLED_EXTENSION_CAPABILITY_IDS: &[&str] = &[
     "github.trigger_workflow",
     "github.get_workflow_runs",
     "github.get_workflow_run_jobs",
+    "github.get_job_logs",
     "github.get_workflow_run_artifacts",
     "github.rerun_failed_workflow_run_jobs",
     "github.rerun_workflow_job",
@@ -92,6 +92,14 @@ pub const BUNDLED_EXTENSION_CAPABILITY_IDS: &[&str] = &[
     "github.handle_webhook",
     "web-access.search",
     "web-access.get_content",
+    "slack.search_messages",
+    "slack.list_conversations",
+    "slack.get_conversation_info",
+    "slack.get_conversation_history",
+    "slack.get_thread_replies",
+    "slack.get_user_info",
+    "slack.whoami",
+    "slack.send_message",
     "gmail.list_messages",
     "gmail.get_message",
     "gmail.send_message",
@@ -155,35 +163,19 @@ pub const BUNDLED_EXTENSION_CAPABILITY_IDS: &[&str] = &[
     "google-slides.format_paragraph",
     "google-slides.replace_shapes_with_image",
     "google-slides.batch_update",
+    // NEAR AI pins its core search capability so it is available before live
+    // discovery. Notion remains discovery-only.
     "nearai.web_search",
-    "notion.notion-search",
-    "notion.notion-fetch",
-    "notion.notion-create-pages",
-    "notion.notion-update-page",
-    "notion.notion-move-pages",
-    "notion.notion-duplicate-page",
-    "notion.notion-create-database",
-    "notion.notion-update-data-source",
-    "notion.notion-create-view",
-    "notion.notion-update-view",
-    "notion.notion-query-data-sources",
-    "notion.notion-query-database-view",
-    "notion.notion-create-comment",
-    "notion.notion-get-comments",
-    "notion.notion-get-teams",
-    "notion.notion-get-users",
-    "notion.notion-get-user",
-    "notion.notion-get-self",
 ];
 
 /// Bundled first-party extension asset directories under
 /// `crates/ironclaw_first_party_extensions/assets/`, parsed by
 /// [`bundled_extension_manifest_capability_ids`]. Excludes `github` (parsed
 /// separately by `github::capability_ids()`, which this list intentionally
-/// does not duplicate) and `slack` (not yet a modeled bundled extension in
-/// this harness).
+/// does not duplicate).
 const BUNDLED_EXTENSION_MANIFEST_ASSET_DIRS: &[&str] = &[
     "web-access",
+    "slack",
     "gmail",
     "google-calendar",
     "google-docs",
@@ -197,7 +189,7 @@ const BUNDLED_EXTENSION_MANIFEST_ASSET_DIRS: &[&str] = &[
 /// Real capability ids declared by every non-github bundled first-party
 /// extension's production `manifest.toml` asset — parsed the same way
 /// `github::capability_ids()` parses github's
-/// (`ExtensionManifest::parse_with_host_api_contracts` over the actual
+/// (`ExtensionManifest::parse` over the actual
 /// shipped asset file), so this is production truth, not a second
 /// hand-transcribed test-only id list like `BUNDLED_EXTENSION_CAPABILITY_IDS`
 /// above.
@@ -208,12 +200,16 @@ pub fn bundled_extension_manifest_capability_ids()
         let asset_root = repo_root()
             .join("crates/ironclaw_first_party_extensions/assets")
             .join(dir_name);
-        let manifest = ironclaw_extensions::ExtensionManifest::parse_with_host_api_contracts(
-            &std::fs::read_to_string(asset_root.join("manifest.toml"))?,
+        // Parse through the single record entry point (the bundled assets
+        // are manifest v3 documents since the first-party rewrite).
+        let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
+            std::fs::read_to_string(asset_root.join("manifest.toml"))?,
             ironclaw_extensions::ManifestSource::HostBundled,
             &ironclaw_host_runtime::default_host_port_catalog()?,
+            None,
             &ironclaw_host_runtime::default_host_api_contract_registry()?,
         )?;
+        let manifest = ironclaw_extensions::ExtensionManifest::try_from(record.manifest().clone())?;
         // The manifest's OWN `id` (not the asset directory name) must match
         // the `ExtensionPackage` root's last segment — they differ for
         // `nearai-mcp`/`notion-mcp` (manifest id `nearai`/`notion`).

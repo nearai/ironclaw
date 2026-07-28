@@ -11,6 +11,9 @@ homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
 publish = false
 
+[package.metadata.ironclaw]
+layer = "substrates"
+
 [dependencies]
 async-trait = "0.1"
 # Required by `MemoryServiceProfileSetRequest::from_tool_input`, which validates
@@ -25,3 +28,14 @@ sha2 = "0.11"
 # Required only by `DocumentMetadata::from_value`, which logs a diagnostic on
 # deserialize failure; preserved to keep behavior identical to the impl crate.
 tracing = "0.1"
+
+[features]
+# Dev-only `test-support` seam (cargo-features rule bar 4): exposes the
+# provider-level `MemoryService` contract suite (`test_support`) to downstream
+# provider crates' integration tests, enabled only via [dev-dependencies].
+# Zero bytes in production builds.
+test-support = []
+
+[dev-dependencies]
+# Test substrate only: drives the async `MemoryService` default-impl unit test.
+tokio = { version = "1", features = ["macros", "rt"] }

@@ -17,6 +17,13 @@ pub struct ClaimRunRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimRunsRequest {
+    pub runner_id: TurnRunnerId,
+    pub scope_filter: Option<TurnScope>,
+    pub max_runs: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaimedTurnRun {
     pub state: TurnRunState,
     pub resolved_run_profile: ResolvedRunProfile,
@@ -103,6 +110,11 @@ pub struct ApplyValidatedLoopExitRequest {
     pub runner_id: TurnRunnerId,
     pub lease_token: TurnLeaseToken,
     pub mapping: LoopExitMapping,
+    /// Cumulative provider-reported token usage the loop accumulated for this
+    /// run, carried from the `LoopExit` so a terminal transition can persist it
+    /// on the run record. `None` when the exit reported no usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_usage: Option<crate::run_profile::LoopModelUsage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +139,27 @@ pub trait TurnRunTransitionPort: Send + Sync {
         &self,
         request: ClaimRunRequest,
     ) -> Result<Option<ClaimedTurnRun>, TurnError>;
+
+    async fn claim_next_runs(
+        &self,
+        request: ClaimRunsRequest,
+    ) -> Result<Vec<ClaimedTurnRun>, TurnError> {
+        let mut claimed = Vec::new();
+        for _ in 0..request.max_runs {
+            let next = self
+                .claim_next_run(ClaimRunRequest {
+                    runner_id: request.runner_id,
+                    lease_token: TurnLeaseToken::new(),
+                    scope_filter: request.scope_filter.clone(),
+                })
+                .await?;
+            let Some(next) = next else {
+                break;
+            };
+            claimed.push(next);
+        }
+        Ok(claimed)
+    }
 
     async fn heartbeat(&self, request: HeartbeatRequest) -> Result<EventCursor, TurnError>;
 

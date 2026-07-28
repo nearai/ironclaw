@@ -64,51 +64,12 @@
         {
           "tool_call_id": "toolu_018gVSakxiWMFRe9uXGoUjaG",
           "name": "builtin__extension_search",
-          "content": " object payload object count 1 extensions array object credential_requirements array object name gmail_account provider google required true setup object kind oauth scopes array https:  www.googleapis.com auth gmail.modify https:  www.googleapis.com auth gmail.readonly https:  www.googleapis.com auth gmail.send description First-party Gmail capabilities for Reborn. name Gmail onboarding object credential_instructions Authorize the Google account that IronClaw should use for Gmail. credential_next_step After authorization completes, activate Gmail to publish its tools. instructions Gmail needs Google OAuth authorization before mail tools can run. package_ref object id gmail kind extension runtime_kind first_party source host_bundled version 0.1.0 visible_capability_ids array gmail.list_messages gmail.get_message gmail.send_message gmail.create_draft gmail.reply_to_message gmail.trash_message visible_read_only_capability_ids array gmail.list_messages gmail.get_message kind extension_search phase discovered"
+          "content": " object payload object count 1 extensions array object credential_requirements array object name gmail_account provider google required true setup object kind oauth scopes array https:  www.googleapis.com auth gmail.modify https:  www.googleapis.com auth gmail.readonly https:  www.googleapis.com auth gmail.send description First-party Gmail capabilities for Reborn. name Gmail onboarding object credential_instructions Authorize the Google account that IronClaw should use for Gmail. credential_next_step After authorization completes, IronClaw finishes Gmail installation automatically and publishes its tools. instructions Gmail needs Google OAuth authorization before mail tools can run. package_ref object id gmail kind extension runtime_kind first_party source host_bundled version 0.1.0 visible_capability_ids array gmail.list_messages gmail.get_message gmail.send_message gmail.create_draft gmail.reply_to_message gmail.trash_message visible_read_only_capability_ids array gmail.list_messages gmail.get_message kind extension_search phase discovered"
         },
         {
           "tool_call_id": "toolu_01WRWjn2dmLnjQJJotq3cDsQ",
           "name": "builtin__extension_search",
           "content": " object payload object count 1 extensions array object credential_requirements array object name google_runtime_token provider google required true setup object kind oauth scopes array https:  www.googleapis.com auth spreadsheets https:  www.googleapis.com auth spreadsheets.readonly description Google Sheets capabilities for creating, reading, writing, and formatting spreadsheets. name Google Sheets package_ref object id google-sheets kind extension runtime_kind wasm_tool source host_bundled version 0.1.0 visible_capability_ids array google-sheets.create_spreadsheet google-sheets.get_spreadsheet google-sheets.read_values google-sheets.batch_read_values google-sheets.write_values google-sheets.append_values google-sheets.clear_values google-sheets.add_sheet google-sheets.delete_sheet google-sheets.rename_sheet google-sheets.format_cells visible_read_only_capability_ids array google-sheets.get_spreadsheet google-sheets.read_values google-sheets.batch_read_values kind extension_search phase discovered"
-        }
-      ]
-    },
-    {
-      "request_hint": {
-        "last_user_message_contains": "Every 30 minutes in UTC, create a routine that checks my Gmail inbox and adds an",
-        "min_message_count": 8
-      },
-      "response": {
-        "type": "tool_calls",
-        "tool_calls": [
-          {
-            "id": "toolu_01GCpKTEVGcLQcAQEZnvdiwH",
-            "name": "builtin__extension_activate",
-            "arguments": {
-              "extension_id": "gmail"
-            }
-          },
-          {
-            "id": "toolu_01WSvSVyjtjJSeexwnD1u6Aa",
-            "name": "builtin__extension_activate",
-            "arguments": {
-              "extension_id": "google-sheets"
-            }
-          }
-        ],
-        "input_tokens": 13500,
-        "output_tokens": 101
-      },
-      "expected_tool_results": [
-        {
-          "tool_call_id": "toolu_01JNsfhiQcRsqmqe6VrZxhVE",
-          "name": "builtin__extension_install",
-          "content": " object package_ref object id gmail kind extension payload object installed true kind extension_install next_step Call builtin.extension_activate now with input  \"extension_id\":\"gmail\" . Activation publishes the tools and opens the auth gate if credentials are missing. visible_capability_ids array gmail.list_messages gmail.get_message gmail.send_message gmail.create_draft gmail.reply_to_message gmail.trash_message phase installed"
-        },
-        {
-          "tool_call_id": "toolu_012n4SERQUdjvJsm4gv3ehEh",
-          "name": "builtin__extension_install",
-          "content": " object package_ref object id google-sheets kind extension payload object installed true kind extension_install next_step Call builtin.extension_activate now with input  \"extension_id\":\"google-sheets\" . Activation publishes the tools and opens the auth gate if credentials are missing. visible_capability_ids array google-sheets.create_spreadsheet google-sheets.get_spreadsheet google-sheets.read_values google-sheets.batch_read_values google-sheets.write_values google-sheets.append_values google-sheets.clear_values google-sheets.add_sheet google-sheets.delete_sheet google-sheets.rename_sheet google-sheets.format_cells phase installed"
         }
       ]
     },
@@ -126,25 +87,17 @@
             "arguments": {
               "name": "Check Gmail for near.ai emails → ABC Sheet",
               "prompt": "Check the Gmail inbox for any emails from a near.ai address (i.e. sender email ends with @near.ai). For each matching email found, append a new row to the Google Sheet called \"ABC\" with the following columns: Date/Time Received, Sender, Subject, and a short Snippet of the email body. Do not send any emails or modify the messages — read only. If no near.ai emails are found, do nothing.",
-              "schedule": { "kind": "cron", "expression": "*/30 * * * *", "timezone": "UTC" }
+              "schedule": {
+                "kind": "cron",
+                "expression": "*/30 * * * *",
+                "timezone": "UTC"
+              }
             }
           }
         ],
         "input_tokens": 17241,
         "output_tokens": 231
-      },
-      "expected_tool_results": [
-        {
-          "tool_call_id": "toolu_01GCpKTEVGcLQcAQEZnvdiwH",
-          "name": "builtin__extension_activate",
-          "content": " object message Extension activation succeeded and its tools are now available. No additional authorization or configuration is needed unless a later tool call reports auth_required. package_ref object id gmail kind extension payload object activated true kind extension_activate visible_capability_ids array gmail.list_messages gmail.get_message gmail.send_message gmail.create_draft gmail.reply_to_message gmail.trash_message phase active"
-        },
-        {
-          "tool_call_id": "toolu_01WSvSVyjtjJSeexwnD1u6Aa",
-          "name": "builtin__extension_activate",
-          "content": " object message Extension activation succeeded and its tools are now available. No additional authorization or configuration is needed unless a later tool call reports auth_required. package_ref object id google-sheets kind extension payload object activated true kind extension_activate visible_capability_ids array google-sheets.create_spreadsheet google-sheets.get_spreadsheet google-sheets.read_values google-sheets.batch_read_values google-sheets.write_values google-sheets.append_values google-sheets.clear_values google-sheets.add_sheet google-sheets.delete_sheet google-sheets.rename_sheet google-sheets.format_cells phase active"
-        }
-      ]
+      }
     },
     {
       "request_hint": {

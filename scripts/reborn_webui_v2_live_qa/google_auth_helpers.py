@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import sqlite3
+from contextlib import closing
 import urllib.parse
 import uuid
 from datetime import datetime, timezone
@@ -146,7 +147,7 @@ def _stored_google_oauth_client_id_from_reborn_home(reborn_home: Path) -> tuple[
     db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
     if not db_path.exists():
         return None
-    with sqlite3.connect(db_path) as db:
+    with closing(sqlite3.connect(db_path)) as db:
         rows = db.execute(
             "SELECT path, contents FROM root_filesystem_entries "
             "WHERE path LIKE '%product-auth/callback/flows/%.json' "
@@ -251,7 +252,7 @@ def _root_filesystem_secret_metadata_by_handle(
     if not handle:
         return None
     suffix = f"/{handle}.json"
-    with sqlite3.connect(db_path) as db:
+    with closing(sqlite3.connect(db_path)) as db:
         rows = db.execute(
             "SELECT contents FROM root_filesystem_entries WHERE path LIKE ?",
             (f"%{suffix}",),
@@ -427,7 +428,7 @@ def _google_runtime_access_token(
         f"/tenants/reborn-cli/users/{user_id}/secrets/agents/reborn-cli-agent/"
         "product-auth/%/accounts/%.json"
     )
-    with sqlite3.connect(db_path) as db:
+    with closing(sqlite3.connect(db_path)) as db:
         account_rows = db.execute(
             "SELECT path, contents FROM root_filesystem_entries WHERE path LIKE ?",
             (account_pattern,),
@@ -549,7 +550,7 @@ def _google_product_auth_preflight(
         f"/tenants/reborn-cli/users/{user_id}/secrets/agents/reborn-cli-agent/"
         "product-auth/%/accounts/%.json"
     )
-    with sqlite3.connect(db_path) as db:
+    with closing(sqlite3.connect(db_path)) as db:
         rows = db.execute(
             "SELECT path, contents FROM root_filesystem_entries WHERE path LIKE ?",
             (account_pattern,),

@@ -9,32 +9,33 @@ mod capability_permission;
 mod cas_record;
 mod policy;
 
-use ironclaw_authorization::{CapabilityLease, CapabilityLeaseError, CapabilityLeaseStore};
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
+
+use ironclaw_authorization::{CapabilityLease, CapabilityLeaseError, CapabilityLeaseStorePort};
 use ironclaw_events::AuditSink;
 use ironclaw_host_api::{
     Action, ApprovalDecisionKind, ApprovalRequestId, CapabilityGrant, CapabilityGrantId,
     CapabilityId, GrantConstraints, InvocationFingerprint, Principal, ResourceScope,
 };
-use ironclaw_run_state::{ApprovalRecord, ApprovalRequestStore, ApprovalStatus, RunStateError};
+use ironclaw_run_state::{ApprovalRecord, ApprovalRequestStorePort, ApprovalStatus, RunStateError};
 use thiserror::Error;
 
 pub use auto_approve::{
     AUTO_APPROVE_DEFAULT_ENABLED, AutoApproveSettingInput, AutoApproveSettingKey,
-    AutoApproveSettingRecord, AutoApproveSettingStore, FilesystemAutoApproveSettingStore,
-    InMemoryAutoApproveSettingStore,
+    AutoApproveSettingRecord, AutoApproveSettingStore, AutoApproveSettingStorePort,
 };
 pub use capability_permission::{
     CapabilityPermissionOverride, CapabilityPermissionOverrideInput,
     CapabilityPermissionOverrideKey, CapabilityPermissionOverrideRecord,
-    CapabilityPermissionOverrideStore, CapabilityPermissionState, CapabilityPermissionStoreError,
-    FilesystemCapabilityPermissionOverrideStore, InMemoryCapabilityPermissionOverrideStore,
+    CapabilityPermissionOverrideStore, CapabilityPermissionOverrideStorePort,
+    CapabilityPermissionState, CapabilityPermissionStoreError,
 };
 pub use policy::{
-    FilesystemPersistentApprovalPolicyStore, InMemoryPersistentApprovalPolicyStore,
     PersistentApprovalAction, PersistentApprovalPolicy, PersistentApprovalPolicyError,
     PersistentApprovalPolicyInput, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
-    PersistentApprovalScope, permission_mode_allows_persistent_approval,
-    persistent_approval_grant_issuer,
+    PersistentApprovalPolicyStorePort, PersistentApprovalScope,
+    permission_mode_allows_persistent_approval, persistent_approval_grant_issuer,
 };
 
 pub type ToolPermissionOverride = CapabilityPermissionOverride;
@@ -43,17 +44,17 @@ pub type ToolPermissionOverrideKey = CapabilityPermissionOverrideKey;
 pub type ToolPermissionOverrideRecord = CapabilityPermissionOverrideRecord;
 pub type ToolPermissionState = CapabilityPermissionState;
 pub type ToolPermissionStoreError = CapabilityPermissionStoreError;
-pub type FilesystemToolPermissionOverrideStore<F> = FilesystemCapabilityPermissionOverrideStore<F>;
-pub type InMemoryToolPermissionOverrideStore = InMemoryCapabilityPermissionOverrideStore;
+pub type ToolPermissionOverrideStore<F> = CapabilityPermissionOverrideStore<F>;
 
-pub trait ToolPermissionOverrideStore: CapabilityPermissionOverrideStore {}
+pub trait ToolPermissionOverrideStorePort: CapabilityPermissionOverrideStorePort {}
 
-impl<T> ToolPermissionOverrideStore for T where T: CapabilityPermissionOverrideStore + ?Sized {}
+impl<T> ToolPermissionOverrideStorePort for T where T: CapabilityPermissionOverrideStorePort + ?Sized
+{}
 
 pub struct ApprovalResolver<'a, A, L>
 where
-    A: ApprovalRequestStore + ?Sized,
-    L: CapabilityLeaseStore + ?Sized,
+    A: ApprovalRequestStorePort + ?Sized,
+    L: CapabilityLeaseStorePort + ?Sized,
 {
     approvals: &'a A,
     leases: &'a L,
@@ -62,8 +63,8 @@ where
 
 impl<'a, A, L> ApprovalResolver<'a, A, L>
 where
-    A: ApprovalRequestStore + ?Sized,
-    L: CapabilityLeaseStore + ?Sized,
+    A: ApprovalRequestStorePort + ?Sized,
+    L: CapabilityLeaseStorePort + ?Sized,
 {
     pub fn new(approvals: &'a A, leases: &'a L) -> Self {
         Self {

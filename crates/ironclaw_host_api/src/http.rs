@@ -139,6 +139,15 @@ pub enum RuntimeCredentialTarget {
     PathPlaceholder {
         placeholder: String,
     },
+    /// Insert the resolved secret as a JSON string at the RFC 6901 pointer in
+    /// the request's JSON body (e.g. a vendor webhook-registration call whose
+    /// API takes the shared secret as a body field). The host parses the
+    /// body, inserts the value at the pointer, and re-serializes; a non-JSON
+    /// body, a missing parent object, or an already-present field fails the
+    /// request closed.
+    BodyJsonPointer {
+        pointer: String,
+    },
 }
 
 pub fn valid_http_field_name(name: &str) -> bool {
@@ -188,6 +197,9 @@ impl RuntimeCredentialTarget {
             Self::PathPlaceholder { placeholder } => {
                 validate_runtime_credential_path_placeholder(placeholder)?;
             }
+            Self::BodyJsonPointer { pointer } => {
+                validate_runtime_credential_body_pointer(pointer)?;
+            }
         }
         Ok(())
     }
@@ -214,6 +226,20 @@ fn validate_runtime_credential_path_placeholder(placeholder: &str) -> Result<(),
         return Err(HostApiError::invalid_runtime_credential_target(
             "path_placeholder",
             "must be a non-empty unreserved path segment other than . or ..",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_runtime_credential_body_pointer(pointer: &str) -> Result<(), HostApiError> {
+    if pointer.is_empty()
+        || !pointer.starts_with('/')
+        || pointer.contains('\0')
+        || pointer.chars().any(char::is_control)
+    {
+        return Err(HostApiError::invalid_runtime_credential_target(
+            "body_json_pointer",
+            "must be a non-empty RFC 6901 pointer starting with '/' without control characters",
         ));
     }
     Ok(())
@@ -462,6 +488,33 @@ pub trait RuntimeHttpEgress: Send + Sync {
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError>;
+
+    /// Egress for a **host OAuth token exchange** — an OAuth/OIDC token
+    /// endpoint such as Slack `oauth.v2.access`. This entry point is reserved
+    /// for the host auth system's OAuth provider client; no tool, plugin, or
+    /// general runtime caller may use it.
+    ///
+    /// Unlike [`RuntimeHttpEgress::execute`], the response is intentionally
+    /// **not** leak-sanitized. A token-endpoint response legitimately carries
+    /// credential material (e.g. `xoxp-`/`xoxb-` tokens) that the host auth
+    /// system consumes directly — parsed and re-stored as a secret handle — and
+    /// never surfaces to the model. Running the response sanitizer here would
+    /// redact or hard-block the very token this call exists to retrieve.
+    /// Request-side leak validation and host credential injection still apply,
+    /// exactly as on [`RuntimeHttpEgress::execute`]; only the response
+    /// sanitizer is bypassed, and only because such requests carry no injected
+    /// credentials to redact.
+    ///
+    /// The default forwards to [`RuntimeHttpEgress::execute`], which is correct
+    /// for implementations that never sanitize responses (e.g. test fakes).
+    /// The production host egress service overrides this to run the transport
+    /// pipeline with the response sanitizer skipped.
+    async fn execute_credential_exchange(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        self.execute(request).await
+    }
 }
 
 #[async_trait]
@@ -474,6 +527,13 @@ where
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
         self.as_ref().execute(request).await
+    }
+
+    async fn execute_credential_exchange(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        self.as_ref().execute_credential_exchange(request).await
     }
 }
 

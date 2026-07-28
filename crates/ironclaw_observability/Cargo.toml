@@ -10,6 +10,9 @@ homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
 publish = false
 
+[package.metadata.ironclaw]
+layer = "substrates"
+
 [dependencies]
 serde_json = "1"
 tracing = "0.1"

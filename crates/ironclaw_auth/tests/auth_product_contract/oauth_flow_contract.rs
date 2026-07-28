@@ -1,5 +1,72 @@
 use crate::common::*;
 
+/// Cross-implementation conformance: the shared OAuth-callback state-machine
+/// suite (`ironclaw_auth::test_support::conformance`) holds for the in-memory fake. The
+/// durable `FilesystemAuthProductServices` runs the SAME suite from the root
+/// `tests/integration/oauth_connect.rs` — together they turn the two
+/// implementations' agreement into an enforced contract instead of a
+/// coincidence of two disjoint test suites.
+#[tokio::test]
+async fn oauth_flow_state_machine_conformance_holds_for_in_memory_fake() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("conformance");
+    ironclaw_auth::test_support::conformance::assert_auth_flow_callback_conformance(
+        &services,
+        &owner,
+        &provider(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn continuation_side_effect_failure_terminalizes_only_the_expected_completion() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    let flow = oauth_flow(&services, owner.clone()).await;
+    let completed = services
+        .complete_oauth_callback(
+            &owner,
+            OAuthCallbackInput {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash("state-hash"),
+                outcome: ProviderCallbackOutcome::Authorized {
+                    exchange: Box::new(OAuthProviderExchange {
+                        provider: provider(),
+                        account_label: label("work github"),
+                        authorization_code_hash: code_hash("code-hash"),
+                        pkce_verifier_hash: pkce_hash("pkce-hash"),
+                        access_secret: SecretHandle::new("github-access").unwrap(),
+                        refresh_secret: None,
+                        scopes: Vec::new(),
+                        account_id: None,
+                        provider_identity: None,
+                    }),
+                },
+            },
+        )
+        .await
+        .expect("OAuth completion");
+
+    // Re-expressed from main's claim/settle continuation-dispatch shape onto
+    // this branch's equivalent hardening (`fail_completed_continuation` —
+    // PR body "Auth = ours"): one call terminalizes the completed flow whose
+    // continuation side effects failed, and a second call cannot overwrite
+    // the terminal state.
+    let failed = services
+        .fail_completed_continuation(&owner, completed.id, AuthErrorCode::BackendUnavailable)
+        .await
+        .expect("terminal continuation failure");
+    assert_eq!(failed.status, AuthFlowStatus::Failed);
+    assert_eq!(failed.error, Some(AuthErrorCode::BackendUnavailable));
+    assert!(failed.continuation_emitted_at.is_none());
+
+    let stale = services
+        .fail_completed_continuation(&owner, completed.id, AuthErrorCode::BackendUnavailable)
+        .await
+        .expect_err("stale failure cannot overwrite terminal state");
+    assert_eq!(stale, AuthProductError::FlowAlreadyTerminal);
+}
+
 #[tokio::test]
 async fn oauth_callback_exchanges_provider_code_then_completes_once() {
     let services = InMemoryAuthProductServices::new();
@@ -37,7 +104,9 @@ async fn oauth_callback_exchanges_provider_code_then_completes_once() {
             OAuthCallbackInput {
                 flow_id: flow.id,
                 opaque_state_hash: state_hash("state-hash"),
-                outcome: ProviderCallbackOutcome::Authorized { exchange },
+                outcome: ProviderCallbackOutcome::Authorized {
+                    exchange: Box::new(exchange),
+                },
             },
         )
         .await
@@ -243,7 +312,7 @@ async fn oauth_callback_updates_existing_account_from_provider_exchange() {
                 flow_id: flow.id,
                 opaque_state_hash: state_hash("state-hash"),
                 outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: provider(),
                         account_label: label("renamed github"),
                         authorization_code_hash: code_hash("code-hash"),
@@ -252,7 +321,8 @@ async fn oauth_callback_updates_existing_account_from_provider_exchange() {
                         refresh_secret: Some(refresh_secret.clone()),
                         scopes: provider_scopes(&["repo", "workflow"]),
                         account_id: Some(existing.id),
-                    },
+                        provider_identity: None,
+                    }),
                 },
             },
         )
@@ -316,7 +386,7 @@ async fn oauth_callback_with_no_provider_account_id_updates_bound_account_across
                 flow_id: flow.id,
                 opaque_state_hash: state_hash("state-hash"),
                 outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: provider(),
                         account_label: label("renamed github"),
                         authorization_code_hash: code_hash("code-hash"),
@@ -325,7 +395,8 @@ async fn oauth_callback_with_no_provider_account_id_updates_bound_account_across
                         refresh_secret: None,
                         scopes: provider_scopes(&["repo"]),
                         account_id: None,
-                    },
+                        provider_identity: None,
+                    }),
                 },
             },
         )
@@ -382,7 +453,7 @@ async fn oauth_callback_rejects_mismatched_provider_and_invalid_existing_account
                 flow_id: provider_mismatch_flow.id,
                 opaque_state_hash: state_hash("state-hash"),
                 outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: gitlab.clone(),
                         account_label: label("gitlab"),
                         authorization_code_hash: code_hash("code-hash"),
@@ -391,7 +462,8 @@ async fn oauth_callback_rejects_mismatched_provider_and_invalid_existing_account
                         refresh_secret: None,
                         scopes: provider_scopes(&["read_user"]),
                         account_id: None,
-                    },
+                        provider_identity: None,
+                    }),
                 },
             },
         )
@@ -407,7 +479,7 @@ async fn oauth_callback_rejects_mismatched_provider_and_invalid_existing_account
                 flow_id: unbound_account_flow.id,
                 opaque_state_hash: state_hash("state-hash"),
                 outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: provider(),
                         account_label: label("missing"),
                         authorization_code_hash: code_hash("code-hash"),
@@ -416,7 +488,8 @@ async fn oauth_callback_rejects_mismatched_provider_and_invalid_existing_account
                         refresh_secret: None,
                         scopes: provider_scopes(&["repo"]),
                         account_id: Some(existing.id),
-                    },
+                        provider_identity: None,
+                    }),
                 },
             },
         )
@@ -432,7 +505,7 @@ async fn oauth_callback_rejects_mismatched_provider_and_invalid_existing_account
                 flow_id: cross_scope_flow.id,
                 opaque_state_hash: state_hash("state-hash"),
                 outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: provider(),
                         account_label: label("foreign"),
                         authorization_code_hash: code_hash("code-hash"),
@@ -441,7 +514,8 @@ async fn oauth_callback_rejects_mismatched_provider_and_invalid_existing_account
                         refresh_secret: None,
                         scopes: provider_scopes(&["repo"]),
                         account_id: Some(foreign.id),
-                    },
+                        provider_identity: None,
+                    }),
                 },
             },
         )
@@ -457,7 +531,7 @@ async fn oauth_callback_rejects_mismatched_provider_and_invalid_existing_account
                 flow_id: unbound_provider_mismatch_flow.id,
                 opaque_state_hash: state_hash("state-hash"),
                 outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: provider(),
                         account_label: label("wrong provider account"),
                         authorization_code_hash: code_hash("code-hash"),
@@ -466,7 +540,8 @@ async fn oauth_callback_rejects_mismatched_provider_and_invalid_existing_account
                         refresh_secret: None,
                         scopes: provider_scopes(&["repo"]),
                         account_id: Some(provider_mismatch.id),
-                    },
+                        provider_identity: None,
+                    }),
                 },
             },
         )
@@ -485,7 +560,7 @@ async fn oauth_callback_rejects_mismatched_provider_and_invalid_existing_account
                 flow_id: valid_update_flow.id,
                 opaque_state_hash: state_hash("state-hash"),
                 outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: provider(),
                         account_label: label("renamed github"),
                         authorization_code_hash: code_hash("code-hash"),
@@ -494,7 +569,8 @@ async fn oauth_callback_rejects_mismatched_provider_and_invalid_existing_account
                         refresh_secret: None,
                         scopes: provider_scopes(&["repo"]),
                         account_id: Some(existing.id),
-                    },
+                        provider_identity: None,
+                    }),
                 },
             },
         )
@@ -636,7 +712,7 @@ async fn oauth_callback_rejects_cross_scope_stale_malformed_and_denied() {
                 flow_id: flow.id,
                 opaque_state_hash: state_hash("state-hash"),
                 outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: provider(),
                         account_label: label("work github"),
                         authorization_code_hash: code_hash("code-hash"),
@@ -645,7 +721,8 @@ async fn oauth_callback_rejects_cross_scope_stale_malformed_and_denied() {
                         refresh_secret: None,
                         scopes: provider_scopes(&["repo"]),
                         account_id: None,
-                    },
+                        provider_identity: None,
+                    }),
                 },
             },
         )
@@ -821,4 +898,217 @@ async fn get_flow_returns_none_owner_record_and_cross_scope_denial() {
         .await
         .expect_err("cross scope");
     assert_eq!(cross_scope, AuthProductError::CrossScopeDenied);
+}
+
+/// Create a setup flow with an explicit continuation and provider — the shape
+/// the web "Connect" and extension-card connect buttons both mint.
+async fn setup_flow_with(
+    services: &InMemoryAuthProductServices,
+    owner: AuthProductScope,
+    flow_provider: AuthProviderId,
+    continuation: AuthContinuationRef,
+) -> ironclaw_auth::AuthFlowRecord {
+    services
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: owner,
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: flow_provider,
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: authorization_url("https://provider.example/oauth"),
+                expires_at: Utc::now() + Duration::minutes(5),
+            },
+            continuation,
+            update_binding: None,
+            opaque_state_hash: Some(state_hash("state-hash")),
+            pkce_verifier_hash: Some(pkce_hash("pkce-hash")),
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .expect("setup flow")
+}
+
+fn turn_gate_continuation(gate: &str) -> AuthContinuationRef {
+    AuthContinuationRef::TurnGateResume {
+        turn_run_ref: TurnRunRef::new(uuid::Uuid::new_v4().to_string()).expect("turn run ref"),
+        gate_ref: AuthGateRef::new(gate).expect("gate ref"),
+    }
+}
+
+fn lifecycle_continuation() -> AuthContinuationRef {
+    AuthContinuationRef::LifecycleActivation {
+        package_ref: LifecyclePackageRef::new("github-extension").expect("valid package"),
+    }
+}
+
+async fn flow_status(
+    services: &InMemoryAuthProductServices,
+    owner: &AuthProductScope,
+    flow_id: ironclaw_auth::AuthFlowId,
+) -> AuthFlowStatus {
+    services
+        .get_flow(owner, flow_id)
+        .await
+        .expect("lookup")
+        .expect("record")
+        .status
+}
+
+/// Supersede-on-start lives INSIDE `create_flow`: minting a setup-class flow
+/// is itself the seam that cancels the prior live setup-class flows for the
+/// same owner root + provider, so no start route can forget to supersede
+/// (the #6130 DCR/Notion gap class becomes unrepresentable). Gate flows, other
+/// providers, and other owners are bystanders the creation must not disturb.
+#[tokio::test]
+async fn create_flow_supersedes_prior_live_setup_class_flows() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    let bob = scope("bob");
+    let other_provider = AuthProviderId::new("gmail").expect("valid provider");
+
+    let setup_only = setup_flow_with(
+        &services,
+        owner.clone(),
+        provider(),
+        AuthContinuationRef::SetupOnly,
+    )
+    .await;
+    let lifecycle = setup_flow_with(
+        &services,
+        owner.clone(),
+        provider(),
+        lifecycle_continuation(),
+    )
+    .await;
+    let turn_gate = setup_flow_with(
+        &services,
+        owner.clone(),
+        provider(),
+        turn_gate_continuation("gate:parked-turn"),
+    )
+    .await;
+    let other_prov = setup_flow_with(
+        &services,
+        owner.clone(),
+        other_provider,
+        AuthContinuationRef::SetupOnly,
+    )
+    .await;
+    let other_owner = setup_flow_with(
+        &services,
+        bob.clone(),
+        provider(),
+        AuthContinuationRef::SetupOnly,
+    )
+    .await;
+
+    // The re-opened "Connect" popup mints its flow: creation supersedes.
+    let reopened = setup_flow_with(
+        &services,
+        owner.clone(),
+        provider(),
+        AuthContinuationRef::SetupOnly,
+    )
+    .await;
+
+    assert_eq!(
+        flow_status(&services, &owner, reopened.id).await,
+        AuthFlowStatus::AwaitingUser,
+        "the freshly created flow must not supersede itself"
+    );
+    assert_eq!(
+        flow_status(&services, &owner, setup_only.id).await,
+        AuthFlowStatus::Canceled,
+        "creating a setup-class flow must cancel the prior SetupOnly flow"
+    );
+    assert_eq!(
+        flow_status(&services, &owner, lifecycle.id).await,
+        AuthFlowStatus::Canceled,
+        "creating a setup-class flow must cancel the prior LifecycleActivation flow"
+    );
+    assert_eq!(
+        flow_status(&services, &owner, turn_gate.id).await,
+        AuthFlowStatus::AwaitingUser,
+        "a parked turn's auth gate is not a setup flow and must survive creation"
+    );
+    assert_eq!(
+        flow_status(&services, &owner, other_prov.id).await,
+        AuthFlowStatus::AwaitingUser
+    );
+    assert_eq!(
+        flow_status(&services, &bob, other_owner.id).await,
+        AuthFlowStatus::AwaitingUser
+    );
+}
+
+/// The exclusion that keeps parked turns alive cuts both ways: creating a
+/// `TurnGateResume` flow is not a setup start, so it must not cancel a live
+/// setup-class flow for the same owner+provider (and vice versa is pinned
+/// above). Both classes stay live side by side.
+#[tokio::test]
+async fn create_flow_for_a_parked_turn_gate_does_not_supersede_setup_flows() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+
+    let setup_only = setup_flow_with(
+        &services,
+        owner.clone(),
+        provider(),
+        AuthContinuationRef::SetupOnly,
+    )
+    .await;
+    let turn_gate = setup_flow_with(
+        &services,
+        owner.clone(),
+        provider(),
+        turn_gate_continuation("gate:parked-turn"),
+    )
+    .await;
+
+    assert_eq!(
+        flow_status(&services, &owner, setup_only.id).await,
+        AuthFlowStatus::AwaitingUser,
+        "a gate flow's creation must never cancel the setup surface's flow"
+    );
+    assert_eq!(
+        flow_status(&services, &owner, turn_gate.id).await,
+        AuthFlowStatus::AwaitingUser
+    );
+}
+
+/// The `create_flow` supersede contract must hold under CONCURRENCY, not just
+/// sequentially: two Connect clicks racing each other must still leave
+/// exactly one live setup-class flow. The cancel walk and the insert happen
+/// under one state lock, so no interleaving can let two creates each observe
+/// "no live predecessor" and both survive. Multi-threaded runtime + a start
+/// barrier + repeated rounds to actually exercise the interleavings.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_setup_creates_leave_exactly_one_live_flow() {
+    for round in 0..20 {
+        let services = std::sync::Arc::new(InMemoryAuthProductServices::new());
+        let owner = scope("alice");
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(8));
+        let mut racers = Vec::new();
+        for _ in 0..8 {
+            let services = std::sync::Arc::clone(&services);
+            let owner = owner.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            racers.push(tokio::spawn(async move {
+                barrier.wait().await;
+                setup_flow_with(&services, owner, provider(), AuthContinuationRef::SetupOnly).await
+            }));
+        }
+        for racer in racers {
+            racer.await.expect("racer task completes");
+        }
+        let live = services
+            .flow_records_snapshot()
+            .into_iter()
+            .filter(|flow| flow.status == AuthFlowStatus::AwaitingUser)
+            .count();
+        assert_eq!(
+            live, 1,
+            "round {round}: concurrent setup creates must leave exactly one live flow"
+        );
+    }
 }

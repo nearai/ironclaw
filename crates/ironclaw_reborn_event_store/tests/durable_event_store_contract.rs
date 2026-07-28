@@ -11,7 +11,6 @@ use ironclaw_host_api::{
 use ironclaw_reborn_event_store::{
     RebornEventStoreConfig, RebornProfile, build_reborn_event_stores,
 };
-#[cfg(feature = "postgres")]
 use secrecy::SecretString;
 
 fn capability_id() -> CapabilityId {
@@ -67,8 +66,6 @@ fn audit_record(scope: &ResourceScope, status: &str) -> AuditEnvelope {
         }),
     }
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_replay_advances_next_cursor_past_trailing_filtered_records() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -103,10 +100,8 @@ async fn libsql_replay_advances_next_cursor_past_trailing_filtered_records() {
         .await
         .expect("append trailing project b");
 
-    let project_a = ReadScope {
-        project_id: scope_a.project_id.clone(),
-        ..ReadScope::default()
-    };
+    let project_a = ReadScope::default()
+        .set_project_id(scope_a.project_id.clone().expect("fixture has project id"));
     let replay = stores
         .events
         .read_after_cursor(&stream, &project_a, None, 10)
@@ -121,8 +116,6 @@ async fn libsql_replay_advances_next_cursor_past_trailing_filtered_records() {
         "filtered trailing records must advance SQL replay cursor"
     );
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_append_batch_groups_by_stream_and_preserves_order() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -238,10 +231,8 @@ async fn jsonl_runtime_log_survives_rebuild_and_preserves_filtered_cursor_semant
     .await
     .expect("jsonl stores after restart");
 
-    let project_a = ReadScope {
-        project_id: scope_a.project_id.clone(),
-        ..ReadScope::default()
-    };
+    let project_a = ReadScope::default()
+        .set_project_id(scope_a.project_id.clone().expect("fixture has project id"));
     let first = stores
         .events
         .read_after_cursor(&stream, &project_a, None, 1)
@@ -264,10 +255,8 @@ async fn jsonl_runtime_log_survives_rebuild_and_preserves_filtered_cursor_semant
     );
     assert_eq!(second.next_cursor, EventCursor::new(3));
 
-    let project_b = ReadScope {
-        project_id: scope_b.project_id.clone(),
-        ..ReadScope::default()
-    };
+    let project_b = ReadScope::default()
+        .set_project_id(scope_b.project_id.clone().expect("fixture has project id"));
     let replay_b = stores
         .events
         .read_after_cursor(&stream, &project_b, None, 10)
@@ -393,10 +382,8 @@ async fn jsonl_audit_log_survives_rebuild_and_filters_scope() {
     )
     .await
     .expect("jsonl stores after restart");
-    let project_a = ReadScope {
-        project_id: scope_a.project_id.clone(),
-        ..ReadScope::default()
-    };
+    let project_a = ReadScope::default()
+        .set_project_id(scope_a.project_id.clone().expect("fixture has project id"));
     let replay = stores
         .audit
         .read_after_cursor(&stream, &project_a, None, 10)
@@ -410,8 +397,6 @@ async fn jsonl_audit_log_survives_rebuild_and_filters_scope() {
         Some("project-a".to_string())
     );
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_runtime_and_audit_logs_survive_rebuild_with_filtered_cursor_semantics() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -479,10 +464,8 @@ async fn libsql_runtime_and_audit_logs_survive_rebuild_with_filtered_cursor_sema
     .await
     .expect("libsql stores after restart");
 
-    let project_a = ReadScope {
-        project_id: scope_a.project_id.clone(),
-        ..ReadScope::default()
-    };
+    let project_a = ReadScope::default()
+        .set_project_id(scope_a.project_id.clone().expect("fixture has project id"));
     let first = stores
         .events
         .read_after_cursor(&stream, &project_a, None, 1)
@@ -516,8 +499,6 @@ async fn libsql_runtime_and_audit_logs_survive_rebuild_with_filtered_cursor_sema
         Some("project-a".to_string())
     );
 }
-
-#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn postgres_replay_advances_next_cursor_past_trailing_filtered_records() {
     let Ok(url) = std::env::var("IRONCLAW_REBORN_EVENT_STORE_POSTGRES_URL") else {
@@ -561,10 +542,8 @@ async fn postgres_replay_advances_next_cursor_past_trailing_filtered_records() {
         .await
         .expect("append trailing project b");
 
-    let project_a = ReadScope {
-        project_id: scope_a.project_id.clone(),
-        ..ReadScope::default()
-    };
+    let project_a = ReadScope::default()
+        .set_project_id(scope_a.project_id.clone().expect("fixture has project id"));
     let replay = stores
         .events
         .read_after_cursor(&stream, &project_a, None, 10)
@@ -579,8 +558,6 @@ async fn postgres_replay_advances_next_cursor_past_trailing_filtered_records() {
         "filtered trailing records must advance Postgres replay cursor"
     );
 }
-
-#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn postgres_runtime_and_audit_logs_survive_rebuild_with_filtered_cursor_semantics() {
     let Ok(url) = std::env::var("IRONCLAW_REBORN_EVENT_STORE_POSTGRES_URL") else {
@@ -656,10 +633,8 @@ async fn postgres_runtime_and_audit_logs_survive_rebuild_with_filtered_cursor_se
     .await
     .expect("postgres stores after reconnect");
 
-    let project_a = ReadScope {
-        project_id: scope_a.project_id.clone(),
-        ..ReadScope::default()
-    };
+    let project_a = ReadScope::default()
+        .set_project_id(scope_a.project_id.clone().expect("fixture has project id"));
     let replay = stores
         .events
         .read_after_cursor(&stream, &project_a, None, 10)
@@ -786,10 +761,8 @@ async fn jsonl_replay_advances_next_cursor_past_trailing_filtered_records() {
         .await
         .expect("append b1");
 
-    let project_a = ReadScope {
-        project_id: scope_a.project_id.clone(),
-        ..ReadScope::default()
-    };
+    let project_a = ReadScope::default()
+        .set_project_id(scope_a.project_id.clone().expect("fixture has project id"));
     let replay = stores
         .events
         .read_after_cursor(&stream, &project_a, None, 10)

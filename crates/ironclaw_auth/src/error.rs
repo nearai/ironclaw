@@ -21,6 +21,10 @@ pub enum AuthErrorCode {
     AccountSelectionRequired,
     #[error("backend_unavailable")]
     BackendUnavailable,
+    #[error("lifecycle_activation_failed")]
+    LifecycleActivationFailed,
+    #[error("provider_identity_already_connected")]
+    ProviderIdentityAlreadyConnected,
     #[error("malformed_config")]
     MalformedConfig,
     #[error("malformed_callback")]
@@ -59,6 +63,10 @@ pub enum AuthProductError {
     AccountSelectionRequired,
     #[error("backend unavailable")]
     BackendUnavailable,
+    #[error("extension authorization completed but lifecycle activation failed")]
+    LifecycleActivationFailed,
+    #[error("provider identity is already connected")]
+    ProviderIdentityAlreadyConnected,
     #[error("auth backend configuration is malformed")]
     MalformedConfig,
     /// A compare-and-swap precondition failed; the caller should re-read and
@@ -92,6 +100,10 @@ impl AuthProductError {
             Self::CredentialMissing => AuthErrorCode::CredentialMissing,
             Self::AccountSelectionRequired => AuthErrorCode::AccountSelectionRequired,
             Self::BackendUnavailable => AuthErrorCode::BackendUnavailable,
+            Self::LifecycleActivationFailed => AuthErrorCode::LifecycleActivationFailed,
+            Self::ProviderIdentityAlreadyConnected => {
+                AuthErrorCode::ProviderIdentityAlreadyConnected
+            }
             Self::MalformedConfig => AuthErrorCode::MalformedConfig,
             // CAS conflicts are an infrastructure detail; surface as BackendUnavailable
             // at all stable product boundaries.

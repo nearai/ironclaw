@@ -42,6 +42,12 @@ pub(super) async fn dispatch(cmd: TracesSubcommand) -> anyhow::Result<()> {
             min_submission_score,
         }),
         TracesSubcommand::OptOut { user_scope } => opt_out(user_scope.as_deref()),
+        TracesSubcommand::EnrollInstance {
+            invite,
+            include_message_text,
+            include_tool_payloads,
+            json,
+        } => enroll_instance(&invite, include_message_text, include_tool_payloads, json).await,
         TracesSubcommand::Status { json, user_scope } => {
             show_policy_status(json, user_scope.as_deref())
         }

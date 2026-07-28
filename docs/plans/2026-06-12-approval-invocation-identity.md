@@ -21,11 +21,11 @@ Root cause chain (all verified against main):
    `pending_auth_resume` (`crates/ironclaw_agent_loop/src/executor/gates.rs:79-88`).
 3. When the run later resumes, the loop re-dispatches the capability from
    `pending_auth_resume` as a **fresh invocation**: `invocation_context_from_visible`
-   mints `InvocationId::new()` (`crates/ironclaw_loop_support/src/capability_port.rs:1629`).
+   mints `InvocationId::new()` (`crates/ironclaw_loop_host/src/capability_port.rs:1629`).
 4. The fresh invocation cannot satisfy `has_matching_approval_grant`
    (`crates/ironclaw_reborn_composition/src/profile_approval_authorization.rs:159-190`):
    the visible-request grants are empty (`CapabilitySet::default()`,
-   `crates/ironclaw_reborn_composition/src/product_live_adapters.rs:446-456`), and the
+   `crates/ironclaw_reborn_composition/src/root/product_live_adapters.rs:446-456`), and the
    prior lease is unusable — `max_invocations = 1` (consumed) and matched by
    `lease.scope == context.resource_scope` where the scope embeds the old `invocation_id`
    (`crates/ironclaw_capabilities/src/helpers.rs:95-99`).
@@ -35,7 +35,7 @@ Root cause chain (all verified against main):
 
 The same hole exists for the *legitimate* flow: user completes OAuth →
 `dispatch_turn_gate_resume` resumes the run (`BlockedAuthGate` precondition,
-`crates/ironclaw_product_workflow/src/auth_continuation.rs:99-110`) → re-dispatch mints a
+`crates/ironclaw_product/src/auth_continuation.rs:99-110`) → re-dispatch mints a
 new invocation → a second approval is demanded for an action the user already approved.
 
 Persistent "Always allow" policies (`persistent_approval_grant` branch,
@@ -45,7 +45,7 @@ Persistent "Always allow" policies (`persistent_approval_grant` branch,
 
 - WebUI approval/auth flows currently work and must not regress. WebUI resolves gates
   through the same `ApprovalInteractionService` / `AuthInteractionService` workflow
-  services (`crates/ironclaw_product_workflow/src/approval_interaction/service.rs`,
+  services (`crates/ironclaw_product/src/approval_interaction/service.rs`,
   `auth_interaction/service.rs`); the fix must live below that boundary (loop executor /
   capability host), not in any channel adapter.
 - `ironclaw_capabilities` guardrail: "Approval resume must validate and claim the matching
@@ -112,7 +112,7 @@ changes only which card appears first, not the wire contract of either gate
 
 ## Fix C (defense in depth, separate plan #4539): enforce the advisory idempotency key
 
-`invocation_idempotency_key` (`crates/ironclaw_loop_support/src/capability_port.rs:1772-1799`)
+`invocation_idempotency_key` (`crates/ironclaw_loop_host/src/capability_port.rs:1772-1799`)
 is stable across identical retries (`loop-capability:sha256:…`, confirmed in QA logs) but
 only logged today. Goal: a model-retry of the identical call (genuinely new tool call,
 identical input) within the same run reuses the human's earlier approval. Covers the
@@ -126,7 +126,7 @@ the invocation-independent input fingerprint — such that the existing
 `has_matching_approval_grant` matching
 (`crates/ironclaw_reborn_composition/src/profile_approval_authorization.rs:159-190`) and
 the `PersistentApprovalPolicyInput` shape
-(`crates/ironclaw_product_workflow/src/approval_interaction/service.rs:249-265`, today
+(`crates/ironclaw_product/src/approval_interaction/service.rs:249-265`, today
 hardcoding `max_invocations: None`) absorb it. One approval-reuse mechanism, not three.
 
 Scope guard: run-scoped and input-fingerprint-exact; never crosses runs, users, or
@@ -151,12 +151,12 @@ confirmable the same way.
 
 - Loop-level: integration test driving approve → AuthRequired → auth-resume → dispatch
   completes WITHOUT a second approval request (extends
-  `crates/ironclaw_reborn/tests/loop_driver_host.rs` approval/resume coverage, e.g.
+  `crates/ironclaw_runner/tests/loop_driver_host.rs` approval/resume coverage, e.g.
   `turn_runner_blocks_on_approval_then_coordinator_resume_completes_same_run`).
 - Capability-host contract: auth-resume with original invocation id reuses run record;
   fingerprint mismatch still rejected.
 - Product-workflow contract: WebUI-path approve/auth resolution unchanged
-  (`crates/ironclaw_product_workflow/tests/approval_interaction_contract.rs`,
+  (`crates/ironclaw_product/tests/approval_interaction_contract.rs`,
   `auth_interaction_contract.rs`).
 - E2E (tests/e2e): Slack DM scenario — approve once, complete OAuth, run completes; no
   duplicate approval gates.

@@ -1,12 +1,11 @@
 use ironclaw_extensions::{
     CAPABILITY_PROVIDER_HOST_API_ID, CAPABILITY_PROVIDER_SECTION, ExtensionError, ManifestV2Error,
 };
-use ironclaw_filesystem::LocalFilesystem;
+use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_host_api::{
     CapabilityId, ExtensionId, HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPath, HostPortId, VirtualPath,
 };
 use ironclaw_host_runtime::discover_extensions_with_default_host_api_contracts;
-use ironclaw_product_adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
 use tempfile::tempdir;
 
 #[tokio::test]
@@ -46,29 +45,24 @@ async fn default_host_api_contracts_discover_capability_provider_manifest() {
 }
 
 #[tokio::test]
-async fn default_host_api_contracts_discover_product_adapter_manifest() {
+async fn default_host_api_contracts_do_not_own_product_adapter_manifest() {
     let (_storage, fs) = mounted_extension_fs("telegram-v2", PRODUCT_ADAPTER_MANIFEST);
 
-    let registry = discover_extensions_with_default_host_api_contracts(
+    let err = discover_extensions_with_default_host_api_contracts(
         &fs,
         &VirtualPath::new("/system/extensions").unwrap(),
     )
     .await
-    .unwrap();
+    .unwrap_err();
 
-    let package = registry
-        .get_extension(&ExtensionId::new("telegram-v2").unwrap())
-        .unwrap();
-    assert_eq!(package.manifest.host_apis.len(), 1);
-    assert_eq!(
-        package.manifest.host_apis[0].id.as_str(),
-        PRODUCT_ADAPTER_HOST_API_ID
+    assert!(
+        matches!(
+            err,
+            ExtensionError::ManifestV2(ManifestV2Error::UnknownHostApi { ref id })
+                if id.as_str() == "ironclaw.product_adapter/v1"
+        ),
+        "unexpected error: {err:?}"
     );
-    assert_eq!(
-        package.manifest.host_apis[0].section.as_str(),
-        "product_adapter.inbound"
-    );
-    assert!(package.capabilities.is_empty());
 }
 
 #[tokio::test]
@@ -86,22 +80,25 @@ async fn default_host_port_catalog_rejects_unknown_required_port() {
     .await
     .unwrap_err();
 
+    // The capability-provider contract preserves typed manifest errors, so
+    // the unknown port surfaces as `UnknownHostPort`, still fail-closed
+    // before install.
     assert!(
         matches!(
             err,
-            ExtensionError::ManifestV2(ManifestV2Error::HostApiSectionRejected { ref reason, .. })
-                if reason.contains("unknown host port 'host.runtime.not_supported'")
+            ExtensionError::ManifestV2(ManifestV2Error::UnknownHostPort { ref port, .. })
+                if port.as_str() == "host.runtime.not_supported"
         ),
         "unexpected error: {err:?}"
     );
 }
 
-fn mounted_extension_fs(id: &str, manifest: &str) -> (tempfile::TempDir, LocalFilesystem) {
+fn mounted_extension_fs(id: &str, manifest: &str) -> (tempfile::TempDir, DiskFilesystem) {
     let storage = tempdir().unwrap();
     std::fs::create_dir_all(storage.path().join(id)).unwrap();
     std::fs::write(storage.path().join(id).join("manifest.toml"), manifest).unwrap();
 
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/system/extensions").unwrap(),
         HostPath::from_path_buf(storage.path().to_path_buf()),

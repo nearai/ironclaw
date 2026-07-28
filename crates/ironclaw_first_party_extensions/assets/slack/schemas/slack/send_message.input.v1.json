@@ -1,0 +1,13 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Slack send_message",
+  "description": "Send a message as you to a channel or DM.",
+  "type": "object",
+  "required": ["channel", "text"],
+  "properties": {
+    "channel": { "type": "string", "description": "Channel ID or name (#general or C123...), or a DM conversation ID." },
+    "text": { "type": "string", "description": "Message text (Slack mrkdwn). Never call this tool, or instruct a trigger to call it, for that run's own final reply when outbound delivery or delivery_target_id is configured; the host delivers that result automatically. To notify someone else, mention them as <@U…> with their real user id (e.g. <@U0123ABCD>) — a plain @name does not notify. Never guess or derive a user id from a channel or DM conversation id. For a known DM conversation ID, call slack.get_conversation_info and use the returned conversation.user; use slack.list_conversations only to discover a DM when no ID is known." },
+    "thread_ts": { "type": "string", "description": "Optional thread timestamp to reply in a thread." }
+  },
+  "additionalProperties": false
+}

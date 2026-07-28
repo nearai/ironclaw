@@ -6,7 +6,7 @@ use ironclaw_run_state::*;
 
 #[tokio::test]
 async fn approval_store_marks_pending_request_approved_or_denied_with_scope() {
-    let store = InMemoryApprovalRequestStore::new();
+    let store = in_mem_approval_request_store();
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
     let approval = approval_request(invocation_id);
@@ -34,7 +34,7 @@ async fn approval_store_marks_pending_request_approved_or_denied_with_scope() {
 
 #[tokio::test]
 async fn approval_resolution_is_scoped_to_tenant_and_user() {
-    let store = InMemoryApprovalRequestStore::new();
+    let store = in_mem_approval_request_store();
     let invocation_id = InvocationId::new();
     let tenant_a = sample_scope(invocation_id, "tenant1", "user1");
     let tenant_b = sample_scope(invocation_id, "tenant2", "user1");
@@ -53,7 +53,7 @@ async fn approval_resolution_is_scoped_to_tenant_and_user() {
 
 #[tokio::test]
 async fn approval_store_rejects_second_resolution_attempt() {
-    let store = InMemoryApprovalRequestStore::new();
+    let store = in_mem_approval_request_store();
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
     let approval = approval_request(invocation_id);
@@ -75,7 +75,7 @@ async fn approval_store_rejects_second_resolution_attempt() {
 
 #[tokio::test]
 async fn approval_store_rejects_duplicate_pending_save() {
-    let store = InMemoryApprovalRequestStore::new();
+    let store = in_mem_approval_request_store();
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
     let approval = approval_request(invocation_id);
@@ -105,7 +105,7 @@ async fn approval_store_rejects_duplicate_pending_save() {
 #[tokio::test]
 async fn filesystem_approval_store_rejects_second_resolution_attempt() {
     let fs = Arc::new(engine_filesystem());
-    let store = FilesystemApprovalRequestStore::new(scoped_run_state_fs(fs));
+    let store = ApprovalRequestStore::new(scoped_run_state_fs(fs));
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
     let approval = approval_request(invocation_id);
@@ -128,7 +128,7 @@ async fn filesystem_approval_store_rejects_second_resolution_attempt() {
 #[tokio::test]
 async fn filesystem_approval_store_rejects_duplicate_pending_save() {
     let fs = Arc::new(engine_filesystem());
-    let store = FilesystemApprovalRequestStore::new(scoped_run_state_fs(fs));
+    let store = ApprovalRequestStore::new(scoped_run_state_fs(fs));
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
     let approval = approval_request(invocation_id);
@@ -157,6 +157,15 @@ async fn filesystem_approval_store_rejects_duplicate_pending_save() {
 
 fn engine_filesystem() -> ironclaw_filesystem::InMemoryBackend {
     ironclaw_filesystem::InMemoryBackend::new()
+}
+
+/// The production approval-request store over a fresh in-memory backend — the
+/// drop-in for the deleted `InMemoryApprovalRequestStore` (arch-simplification §4.3).
+fn in_mem_approval_request_store()
+-> ironclaw_run_state::ApprovalRequestStore<ironclaw_filesystem::InMemoryBackend> {
+    ironclaw_run_state::ApprovalRequestStore::new(scoped_run_state_fs(std::sync::Arc::new(
+        engine_filesystem(),
+    )))
 }
 
 /// Build a [`ScopedFilesystem`] exposing `/run-state` and `/approvals`

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use ironclaw_host_api::RuntimeCredentialAuthRequirement;
+use ironclaw_host_api::{RuntimeCredentialAuthRequirement, SanitizedFailure};
 
 use crate::{
     AcceptedMessageRef, CapabilityActivityId, GateRef, ProductTurnContext, ReplyTargetBindingRef,
@@ -42,19 +42,39 @@ impl TurnStatus {
     /// run/external tool). Used to decide when a transition changed the set of
     /// gate-blocked runs and therefore needs durable persistence.
     pub fn is_blocked(self) -> bool {
-        matches!(
-            self,
-            Self::BlockedApproval
-                | Self::BlockedAuth
-                | Self::BlockedResource
-                | Self::BlockedDependentRun
-                | Self::BlockedExternalTool
-        )
+        GateKind::from_status(self).is_some()
     }
 
     pub fn keeps_active_lock(self) -> bool {
         !self.is_terminal()
     }
+}
+
+/// The recoverability-critical transition boundary (#6263 Step 3 / #6284 / Step 5b).
+///
+/// A run status is **recoverability-critical** when it is a gate-park
+/// ([`TurnStatus::is_blocked`]), a terminal ([`TurnStatus::is_terminal`]), or a
+/// [`TurnStatus::CancelRequested`]:
+///
+/// * losing a gate-park strands a run away from the human who must act on it;
+/// * losing a terminal re-runs an already-performed side effect, or loses the
+///   sanitized, model-visible failure cause the model must see;
+/// * losing a `CancelRequested` re-runs work the caller was told was cancelled:
+///   `request_cancel` reports success once the transition is committed, so a
+///   write-behind crash that reverts it to `Running`/`Queued` would execute a
+///   run the caller successfully cancelled (and drop its idempotency record).
+///   The caller is waiting on this transition exactly as on a gate-park.
+///
+/// These transitions MUST stay synchronously durable even under async
+/// write-behind: the async path may move only NON-critical transitions off the
+/// synchronous ack. The row store's `delta_is_recoverability_critical` also
+/// treats a brand-new run (one `baseline` has never seen — `submit_turn`,
+/// `submit_child_turn`, and the runs `resume_turn`/`retry_turn` spawn) as
+/// critical: it has no durable fallback to recover from if lost. The
+/// crash-consistency suite references THIS function (not a copy) as the
+/// single boundary write-behind flips.
+pub fn is_recoverability_critical(status: TurnStatus) -> bool {
+    status.is_blocked() || status.is_terminal() || matches!(status, TurnStatus::CancelRequested)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,15 +174,89 @@ pub enum BlockedReason {
     },
 }
 
-impl BlockedReason {
-    pub fn status(&self) -> TurnStatus {
+/// The canonical kind of gate a run can park on. One value per blocked
+/// `TurnStatus`; every other blocked-gate representation in the crate
+/// (`BlockedReason`, `TurnBlockedGateKind`, `LoopBlockedKind`,
+/// `ResumeTurnPrecondition`) maps to and from this so the correspondence lives
+/// in one place and adding a gate kind is a compiler-forced edit here rather
+/// than across ~6 scattered match tables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GateKind {
+    Approval,
+    Auth,
+    Resource,
+    AwaitDependentRun,
+    ExternalTool,
+}
+
+impl GateKind {
+    /// The blocked `TurnStatus` a run in this gate holds. The single
+    /// authoritative `GateKind -> TurnStatus` correspondence.
+    pub fn blocked_status(self) -> TurnStatus {
         match self {
-            Self::Approval { .. } => TurnStatus::BlockedApproval,
-            Self::Auth { .. } => TurnStatus::BlockedAuth,
-            Self::Resource { .. } => TurnStatus::BlockedResource,
-            Self::AwaitDependentRun { .. } => TurnStatus::BlockedDependentRun,
-            Self::ExternalTool { .. } => TurnStatus::BlockedExternalTool,
+            Self::Approval => TurnStatus::BlockedApproval,
+            Self::Auth => TurnStatus::BlockedAuth,
+            Self::Resource => TurnStatus::BlockedResource,
+            Self::AwaitDependentRun => TurnStatus::BlockedDependentRun,
+            Self::ExternalTool => TurnStatus::BlockedExternalTool,
         }
+    }
+
+    /// The gate kind a `TurnStatus` represents, or `None` when the status is not
+    /// a blocked-gate status. Exhaustive over `TurnStatus`, so a new blocked
+    /// variant fails to compile until it is classified here.
+    pub fn from_status(status: TurnStatus) -> Option<Self> {
+        match status {
+            TurnStatus::BlockedApproval => Some(Self::Approval),
+            TurnStatus::BlockedAuth => Some(Self::Auth),
+            TurnStatus::BlockedResource => Some(Self::Resource),
+            TurnStatus::BlockedDependentRun => Some(Self::AwaitDependentRun),
+            TurnStatus::BlockedExternalTool => Some(Self::ExternalTool),
+            TurnStatus::Queued
+            | TurnStatus::Running
+            | TurnStatus::CancelRequested
+            | TurnStatus::Cancelled
+            | TurnStatus::Completed
+            | TurnStatus::Failed
+            | TurnStatus::RecoveryRequired => None,
+        }
+    }
+
+    /// Build the data-carrying [`BlockedReason`] for this gate kind. Only `Auth`
+    /// carries credential requirements; the rest ignore them.
+    pub fn into_blocked_reason(
+        self,
+        gate_ref: GateRef,
+        credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
+    ) -> BlockedReason {
+        match self {
+            Self::Approval => BlockedReason::Approval { gate_ref },
+            Self::Auth => BlockedReason::Auth {
+                gate_ref,
+                credential_requirements,
+            },
+            Self::Resource => BlockedReason::Resource { gate_ref },
+            Self::AwaitDependentRun => BlockedReason::AwaitDependentRun { gate_ref },
+            Self::ExternalTool => BlockedReason::ExternalTool { gate_ref },
+        }
+    }
+}
+
+impl BlockedReason {
+    /// The gate kind this reason represents.
+    pub fn gate_kind(&self) -> GateKind {
+        match self {
+            Self::Approval { .. } => GateKind::Approval,
+            Self::Auth { .. } => GateKind::Auth,
+            Self::Resource { .. } => GateKind::Resource,
+            Self::AwaitDependentRun { .. } => GateKind::AwaitDependentRun,
+            Self::ExternalTool { .. } => GateKind::ExternalTool,
+        }
+    }
+
+    pub fn status(&self) -> TurnStatus {
+        self.gate_kind().blocked_status()
     }
 
     pub fn gate_ref(&self) -> &GateRef {
@@ -182,151 +276,6 @@ impl BlockedReason {
                 ..
             } => credential_requirements,
             _ => &[],
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct SanitizedFailure {
-    category: String,
-    /// Secret-scrubbed, model-visible raw cause for this failure (e.g.
-    /// `"HTTP 404 model not found"`). Unlike `category`, this is free-form text
-    /// — the producer is responsible for scrubbing secret VALUES upstream (see
-    /// [`crate::run_profile::sanitize_model_visible_text`]). Optional and
-    /// serialized only when present so persisted pre-detail rows round-trip
-    /// without migration.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    detail: Option<String>,
-}
-
-impl SanitizedFailure {
-    pub fn new(category: impl Into<String>) -> Result<Self, String> {
-        let category = category.into();
-        validate_sanitized_category("failure_category", &category)?;
-        Ok(Self {
-            category,
-            detail: None,
-        })
-    }
-
-    pub(crate) fn from_trusted_static(category: &'static str) -> Self {
-        debug_assert!(validate_sanitized_category("failure_category", category).is_ok());
-        Self {
-            category: category.to_string(),
-            detail: None,
-        }
-    }
-
-    /// Attach a secret-scrubbed, model-visible detail string. The caller is
-    /// responsible for scrubbing secret VALUES before calling this (see
-    /// [`Self::detail`]).
-    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
-        self.detail = Some(detail.into());
-        self
-    }
-
-    pub fn category(&self) -> &str {
-        &self.category
-    }
-
-    pub fn detail(&self) -> Option<&str> {
-        self.detail.as_deref()
-    }
-
-    pub fn into_category(self) -> String {
-        self.category
-    }
-
-    /// A copy of this failure with the model-visible `detail` stripped.
-    ///
-    /// `detail` is free-form, model-visible raw cause text intended only for
-    /// the failure-explainer prompt — it can carry backend diagnostics (paths,
-    /// provider errors, internal context) and is scrubbed for secret VALUES,
-    /// not for public exposure. Public/WebUI surfaces must serialize this
-    /// projection instead of the raw failure so that internal detail never
-    /// reaches the browser; `category` (the user-facing signal) is retained.
-    pub fn public_projection(&self) -> Self {
-        Self {
-            category: self.category.clone(),
-            detail: None,
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for SanitizedFailure {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct WireFailure {
-            category: String,
-            #[serde(default)]
-            detail: Option<String>,
-        }
-
-        let wire = WireFailure::deserialize(deserializer)?;
-        // Backward compatibility: historical rows used the colon-delimited
-        // category `host_stage_unavailable:model` (one colon between two
-        // non-empty parts) before the charset was tightened to reject `:`.
-        // Normalize *only* that exact shape on the read path so loading a
-        // persisted snapshot never borks — a failed deserialize here would
-        // defeat the whole no-borking-failures goal. Any other colon payload
-        // (`a::b`, `:model`, `host_stage_unavailable:`, `:`) is passed through
-        // untouched so `Self::new` still rejects it; we must not mint values the
-        // strict write path could never produce. The write path stays strict.
-        let normalized = match wire.category.split_once(':') {
-            Some((left, right))
-                if !left.is_empty() && !right.is_empty() && !right.contains(':') =>
-            {
-                format!("{left}_{right}")
-            }
-            _ => wire.category,
-        };
-        let mut failure = Self::new(normalized).map_err(serde::de::Error::custom)?;
-        failure.detail = wire.detail;
-        Ok(failure)
-    }
-}
-
-fn validate_sanitized_category(kind: &'static str, value: &str) -> Result<(), String> {
-    if value.is_empty() {
-        return Err(format!("{kind} must not be empty"));
-    }
-    if value.len() > 256 {
-        return Err(format!("{kind} must be at most 256 bytes"));
-    }
-    if value.chars().any(|c| c == '\0' || c.is_control()) {
-        return Err(format!("{kind} must not contain control characters"));
-    }
-    if !value
-        .chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-    {
-        return Err(format!(
-            "{kind} must contain only lowercase ASCII letters, digits, or underscores"
-        ));
-    }
-    Ok(())
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SanitizedCancelReason {
-    UserRequested,
-    Superseded,
-    Timeout,
-    OperatorRequested,
-    Policy,
-}
-
-impl SanitizedCancelReason {
-    pub fn category(self) -> &'static str {
-        match self {
-            Self::UserRequested => "user_requested",
-            Self::Superseded => "superseded",
-            Self::Timeout => "timeout",
-            Self::OperatorRequested => "operator_requested",
-            Self::Policy => "policy",
         }
     }
 }
@@ -397,6 +346,12 @@ pub struct TurnRunState {
     pub resolved_run_profile_version: RunProfileVersion,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_model_route: Option<LoopModelRouteSnapshot>,
+    /// Cumulative provider-reported token usage for this run's model calls,
+    /// captured at loop exit. `None` for runs that reported no usage (replay
+    /// stubs) or that pre-date usage capture. Read by the OpenAI-compatible
+    /// Responses/Chat surfaces to report `usage` and cost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_usage: Option<crate::run_profile::LoopModelUsage>,
     pub received_at: TurnTimestamp,
     pub checkpoint_id: Option<TurnCheckpointId>,
     pub gate_ref: Option<GateRef>,
@@ -535,6 +490,7 @@ impl TurnError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_host_api::ModelInvalidOutputDetailReason;
 
     #[test]
     fn blocked_external_tool_status_is_non_terminal_and_keeps_lock() {
@@ -564,6 +520,76 @@ mod tests {
         let json = serde_json::to_string(&reason).expect("serialize");
         let decoded: BlockedReason = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded, reason);
+    }
+
+    #[test]
+    fn model_invalid_output_detail_reason_round_trips_fixed_safe_summaries() {
+        use ModelInvalidOutputDetailReason as Reason;
+
+        for reason in [
+            Reason::EmptyAssistantResponse,
+            Reason::TextualToolCallSyntax,
+            Reason::OutsideCapabilitySurface,
+            Reason::ToolUseFinishWithoutToolCalls,
+            Reason::UnsupportedToolCallsForTextOnlyLoop,
+            Reason::InvalidReturnedToolName,
+            Reason::InvalidToolCallArguments,
+        ] {
+            assert_eq!(
+                Reason::from_failure_category_and_safe_summary(
+                    "model_invalid_output",
+                    Some(reason.safe_summary()),
+                ),
+                Some(reason),
+                "{reason:?} safe summary should parse back to the same reason"
+            );
+        }
+    }
+
+    #[test]
+    fn model_invalid_output_detail_reason_accepts_safe_parse_error_prefix() {
+        assert_eq!(
+            ModelInvalidOutputDetailReason::from_failure_category_and_safe_summary(
+                "model_invalid_output",
+                Some("failed to parse tool-call arguments JSON: expected value at line 1 column 1"),
+            ),
+            Some(ModelInvalidOutputDetailReason::MalformedToolCallArguments)
+        );
+    }
+
+    #[test]
+    fn model_invalid_output_detail_reason_is_category_gated() {
+        assert_eq!(
+            ModelInvalidOutputDetailReason::from_failure_category_and_safe_summary(
+                "model_unavailable",
+                Some(ModelInvalidOutputDetailReason::EmptyAssistantResponse.safe_summary()),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn model_invalid_output_detail_reason_rejects_unvalidated_detail() {
+        let oversized = format!(
+            "failed to parse tool-call arguments JSON: {}",
+            "x".repeat(512)
+        );
+
+        for detail in [
+            " model returned an empty assistant response",
+            "model returned an empty assistant response\n",
+            "model returned an empty assistant response\0",
+            oversized.as_str(),
+        ] {
+            assert_eq!(
+                ModelInvalidOutputDetailReason::from_failure_category_and_safe_summary(
+                    "model_invalid_output",
+                    Some(detail),
+                ),
+                None,
+                "{detail:?} should not be accepted for projection matching"
+            );
+        }
     }
 
     #[test]

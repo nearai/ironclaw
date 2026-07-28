@@ -2,11 +2,11 @@ use std::sync::Arc;
 
 use super::{
     DefaultHostRuntime, DefaultTurnCoordinator, HostRuntimeServices, ProcessBackendKind,
-    ProcessResultStore, ProcessStore, ProductionComponentType, ProductionEventStoreWiringError,
-    ProductionImplementationReadiness, ProductionWiringComponent, ProductionWiringConfig,
-    ProductionWiringIssue, ProductionWiringIssueKind, ProductionWiringReport,
-    RebornEventStoreConfig, RebornProfile, ResourceGovernor, RootFilesystem, RuntimeKind,
-    TurnRunExecutor, TurnRunScheduler, TurnRunSchedulerConfig, TurnStateStore, component_name,
+    ProcessResultStorePort, ProcessStorePort, ProductionComponentType,
+    ProductionEventStoreWiringError, ProductionImplementationReadiness, ProductionWiringComponent,
+    ProductionWiringConfig, ProductionWiringIssue, ProductionWiringIssueKind,
+    ProductionWiringReport, RebornEventStoreConfig, RebornProfile, ResourceGovernor,
+    RootFilesystem, RuntimeKind, TurnRunTransitionPort, TurnStateStore, component_name,
     local_only_runtime_policy_reason, production_wiring_report, runtime_http_egress_is_configured,
 };
 
@@ -14,8 +14,8 @@ impl<F, G, S, R> HostRuntimeServices<F, G, S, R>
 where
     F: RootFilesystem + 'static,
     G: ResourceGovernor + 'static,
-    S: ProcessStore + 'static,
-    R: ProcessResultStore + 'static,
+    S: ProcessStorePort + 'static,
+    R: ProcessResultStorePort + 'static,
 {
     /// Validates that this service graph is explicitly wired for production
     /// instead of relying on local/test defaults. This is a guardrail for
@@ -93,7 +93,7 @@ where
         );
         self.push_missing(
             &mut issues,
-            ProductionWiringComponent::SecretStore,
+            ProductionWiringComponent::SecretStorePort,
             self.secret_store.is_some(),
         );
         if config.require_credential_broker {
@@ -248,12 +248,12 @@ where
         );
         self.push_local_only(
             &mut issues,
-            ProductionWiringComponent::ProcessStore,
+            ProductionWiringComponent::ProcessStorePort,
             Some(self.component_types.process_store),
         );
         self.push_local_only(
             &mut issues,
-            ProductionWiringComponent::ProcessResultStore,
+            ProductionWiringComponent::ProcessResultStorePort,
             Some(self.component_types.process_result_store),
         );
         self.push_local_only(
@@ -298,7 +298,7 @@ where
         );
         self.push_local_only(
             &mut issues,
-            ProductionWiringComponent::SecretStore,
+            ProductionWiringComponent::SecretStorePort,
             self.component_types.secret_store,
         );
         self.push_local_only(
@@ -390,7 +390,7 @@ where
         });
     }
 
-    /// Validates this graph and then builds the upper facade for production
+    /// Validates this graph and then builds the upper service for production
     /// callers. This consumes the service graph so callers cannot mutate shared
     /// runtime-adapter handoff slots after validation.
     pub fn host_runtime_for_production(
@@ -436,14 +436,12 @@ where
             .with_wake_notifier(Arc::clone(notifier)))
     }
 
-    /// Validates turn persistence wiring and builds a scheduler over the
-    /// configured trusted runner transition port. The concrete executor stays
-    /// injected so product loop strategy remains above host-runtime.
-    pub fn turn_scheduler_for_production(
+    /// Validates turn persistence wiring and returns the configured trusted
+    /// runner transition port. The runner crate owns scheduler construction;
+    /// host runtime only verifies that the lower service is production-ready.
+    pub fn turn_run_transition_port_for_production(
         &self,
-        executor: Arc<dyn TurnRunExecutor>,
-        config: TurnRunSchedulerConfig,
-    ) -> Result<TurnRunScheduler, ProductionWiringReport> {
+    ) -> Result<Arc<dyn TurnRunTransitionPort>, ProductionWiringReport> {
         let mut issues = Vec::new();
         self.push_missing(
             &mut issues,
@@ -488,11 +486,7 @@ where
                 component_name(self.component_types.turn_state),
             ));
         };
-        Ok(TurnRunScheduler::new(
-            Arc::clone(transition_port),
-            executor,
-            config,
-        ))
+        Ok(Arc::clone(transition_port))
     }
 
     fn validate_production_turn_wiring(&self) -> Result<(), ProductionWiringReport> {
@@ -530,7 +524,7 @@ where
     }
 
     /// Builds and attaches the configured Reborn durable event/audit stores,
-    /// validates production wiring, and returns the host runtime facade.
+    /// validates production wiring, and returns the host runtime service.
     pub async fn host_runtime_for_production_with_event_store_config(
         self,
         event_store_config: RebornEventStoreConfig,

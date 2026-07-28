@@ -102,7 +102,7 @@ for the model-visible path.
 predicate needs *resolved* `SanitizedArguments` to evaluate the sum.
 Resolved arguments require sanitization (`SanitizedArguments::from_json`,
 sealed) plus a `CapabilityInputResolver` wired through middleware.
-Both seams live in `ironclaw_reborn`. From a standalone
+Both seams live in `ironclaw_runner`. From a standalone
 `ironclaw_hooks` test, the best a hook author can do is:
 
 - Validate the manifest (`entry.validate()`).
@@ -110,13 +110,13 @@ Both seams live in `ironclaw_reborn`. From a standalone
 - Confirm that dispatch with unresolved args **fails closed**.
 
 The actual "the cap trips at $1000" behavior can only be asserted in
-an `ironclaw_reborn` integration test
+an `ironclaw_runner` integration test
 (`hooks_integration::numeric_sum_predicate_caps_total_value_against_real_inputs`,
 which already exists).
 
 **Why this is friction:** A third-party extension author writing a
 NumericSum hook has no way to TDD the *fire* condition without
-either (a) depending on `ironclaw_reborn` as a dev-dep (heavy + the
+either (a) depending on `ironclaw_runner` as a dev-dep (heavy + the
 extension probably shouldn't reach into Reborn at all), or (b)
 faking the resolver in their crate, which requires the
 `SanitizedArguments::from_json` constructor to be reachable.
@@ -133,7 +133,7 @@ faking the resolver in their crate, which requires the
    transform fn, and runs the resolver+sanitize path under test
    harness control. More machinery but doesn't require feature-gating.
 3. Accept the friction and document that NumericSum hooks must be
-   integration-tested via `ironclaw_reborn`. Cheapest, but it's a
+   integration-tested via `ironclaw_runner`. Cheapest, but it's a
    real barrier to adoption — declarative predicate hooks promised
    "no need to depend on the runtime crate to author one."
 

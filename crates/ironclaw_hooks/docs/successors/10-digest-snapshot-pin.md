@@ -31,7 +31,7 @@ actually observe:
 ```rust
 #[test]
 fn invocation_arguments_digest_is_stable_for_known_inputs() {
-    let invocation = CapabilityInvocation {
+    let invocation = LoopRequest {
         activity_id: ironclaw_turns::CapabilityActivityId::new(),
         surface_version: CapabilitySurfaceVersion::new("snapshot:v1").unwrap(),
         capability_id: CapabilityId::new("cap.snapshot.fixture").unwrap(),

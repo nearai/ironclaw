@@ -1,21 +1,24 @@
+// arch-exempt: large_file, mechanical §4.3 store swap only — test seams repointed from deleted InMemory*Store doubles to the production stores over InMemoryBackend, plan #6168
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+
+use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_host_api::{
     AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
     ExecutionContext, ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant,
-    MountPermissions, MountView, NetworkPolicy, NetworkTargetPattern, Principal, RuntimeKind,
-    TenantId, ThreadId, TrustClass, UserId, VirtualPath,
+    MountPermissions, MountView, NetworkPolicy, NetworkTargetPattern, Principal, Resolution,
+    RuntimeKind, TenantId, ThreadId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, ECHO_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
     SKILL_INSTALL_CAPABILITY_ID, SurfaceKind,
     VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
-use ironclaw_loop_support::{
-    CapabilityResultWrite, CapabilityWriteResult, EmptyUserProfileSource,
+use ironclaw_loop_host::{
+    CapabilityResultWrite, CapabilityWriteResult, DurablePersistence, EmptyUserProfileSource,
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
     HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError, HostManagedModelError,
     HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelRequest,
@@ -24,7 +27,14 @@ use ironclaw_loop_support::{
     RunCancellationHandle, loop_driver_execution_extension_id,
     verify_product_live_cancellation_probe,
 };
-use ironclaw_reborn::{
+use ironclaw_reborn_composition::{
+    ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
+    ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,
+    ProductLivePlannedRuntimeAdapters, ProductLiveVisibleCapabilityRequestConfig,
+    RebornHostBindings, RebornRuntime, RebornRuntimeInput, build_reborn_runtime,
+    capability_allowlist, visible_capability_request_for_run,
+};
+use ironclaw_runner::{
     loop_exit_applier::ThreadCheckpointLoopExitEvidencePort,
     model_routes::{ModelSelectionMode, ModelSlot},
     planned_driver_factory::default_planned_run_profile_resolver,
@@ -32,32 +42,50 @@ use ironclaw_reborn::{
         DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, build_product_live_planned_runtime,
     },
     subagent::{
+        await_edge::{
+            boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver, store::AwaitEdgeStore,
+        },
         flavors::StaticSubagentDefinitionResolver,
-        gate_resolution::BoundedSubagentGateResolutionStore,
-        goal_store::InMemoryBoundedSubagentGoalStore,
+        goal_store::{SubagentGoalStore, in_memory_backed_subagent_goal_store},
     },
-};
-use ironclaw_reborn_composition::{
-    ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
-    ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,
-    ProductLivePlannedRuntimeAdapters, ProductLiveVisibleCapabilityRequestConfig, RebornBuildInput,
-    RebornServices, build_reborn_services, capability_allowlist,
-    visible_capability_request_for_run,
 };
 use ironclaw_threads::{InMemorySessionThreadService, SessionThreadService, ThreadScope};
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use ironclaw_turns::{
-    CheckpointStateStore, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
-    InMemoryTurnStateStore, LoopCheckpointStore, LoopResultRef, RunProfileResolutionRequest,
+    CheckpointStateStorePort, LoopCheckpointStore, LoopResultRef, RunProfileResolutionRequest,
     RunProfileResolver, TurnId, TurnRunId, TurnScope, TurnStateStore,
     run_profile::{
-        AgentLoopHostError, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
-        InMemoryLoopHostMilestoneSink, InstructionSafetyContext, LoopCancelReasonKind,
-        LoopModelBudgetAccountant, LoopModelPolicyGuard, LoopRunContext, NoOpBudgetAccountant,
-        NoOpPolicyGuard, PromptMode, ProviderToolCall, RegisterProviderToolCallRequest,
-        VisibleCapabilityRequest,
+        AgentLoopHostError, CapabilityInputRef, InMemoryLoopHostMilestoneSink,
+        InstructionSafetyContext, LoopCancelReasonKind, LoopModelBudgetAccountant,
+        LoopModelPolicyGuard, LoopRequest, LoopRunContext, NoOpBudgetAccountant, NoOpPolicyGuard,
+        PromptMode, ProviderToolCall, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
     },
 };
+
+use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
+use ironclaw_turns::test_support::in_memory_turn_state_store;
+
+async fn build_runtime_for_test(input: RebornHostBindings) -> RebornRuntime {
+    build_reborn_runtime(RebornRuntimeInput::from_build_input(input))
+        .await
+        .expect("runtime builds")
+}
+
+fn adapters_from_runtime(
+    runtime: &RebornRuntime,
+    config: ProductLivePlannedRuntimeAdapterConfig,
+) -> Result<ProductLivePlannedRuntimeAdapters, ProductLivePlannedRuntimeAdapterError> {
+    ProductLivePlannedRuntimeAdapters::from_host_runtime(
+        runtime
+            .host_runtime_for_test()
+            .expect("runtime exposes host runtime"),
+        config,
+    )
+}
+
+fn in_memory_subagent_goal_store() -> Arc<SubagentGoalStore<InMemoryBackend>> {
+    Arc::new(in_memory_backed_subagent_goal_store())
+}
 
 async fn write_capability_result_for_test(
     io: &ProductLiveCapabilityIo,
@@ -75,6 +103,7 @@ async fn write_capability_result_for_test(
             capability_id: &capability_id,
             output,
             display_preview: None,
+            durable_persistence: DurablePersistence::Persist,
         })
         .await?;
     Ok(result_ref)
@@ -159,9 +188,10 @@ async fn capability_io_write_capability_result_returns_serialized_payload_byte_l
             capability_id: &capability_id,
             output: output.clone(),
             display_preview: None,
+            durable_persistence: DurablePersistence::Persist,
         })
         .await
-        .expect("write capability result");
+        .unwrap();
 
     assert_eq!(
         byte_len, expected_len,
@@ -406,12 +436,11 @@ async fn visible_capability_request_preserves_custom_provider_trust_decision() {
 #[tokio::test]
 async fn local_dev_adapter_gates_builtin_echo_when_global_auto_approve_is_off() {
     let root = tempfile::tempdir().unwrap();
-    let services = build_reborn_services(RebornBuildInput::local_dev(
+    let services = build_runtime_for_test(ironclaw_reborn_composition::local_dev_build_input(
         "builtin-echo-owner",
         root.path().join("local-dev"),
     ))
-    .await
-    .unwrap();
+    .await;
     let run_context = loop_run_context("builtin-echo").await;
     disable_global_auto_approve_for_run(
         &services,
@@ -427,9 +456,11 @@ async fn local_dev_adapter_gates_builtin_echo_when_global_auto_approve_is_off() 
         )
         .unwrap();
     let capability_id = capability_id(ECHO_CAPABILITY_ID);
-    let adapters = ProductLivePlannedRuntimeAdapters::from_services(
+    let adapters = adapters_from_runtime(
         &services,
         ProductLivePlannedRuntimeAdapterConfig {
+            gate_record_store: test_gate_record_store(),
+            replay_payload_store: test_replay_payload_store(),
             capability_authority_resolver: authority_resolver(
                 ProductLiveVisibleCapabilityRequestConfig::new(
                     UserId::new("user-builtin-echo").unwrap(),
@@ -473,7 +504,7 @@ async fn local_dev_adapter_gates_builtin_echo_when_global_auto_approve_is_off() 
     );
 
     let outcome = capability_port
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: capability_id.clone(),
@@ -483,28 +514,30 @@ async fn local_dev_adapter_gates_builtin_echo_when_global_auto_approve_is_off() 
         })
         .await
         .unwrap();
-    let CapabilityOutcome::ApprovalRequired {
-        approval_resume: Some(resume),
-        ..
-    } = outcome
-    else {
+    let Resolution::Blocked(blocked) = outcome else {
         panic!("expected builtin echo approval gate, got {outcome:?}");
     };
-    assert_eq!(
-        resume.input,
-        serde_json::json!({ "message": "hello product live" })
+    assert_eq!(blocked.kind(), "approval");
+    // Raw input/estimate no longer ride the loop-facing approval resume (§5.3
+    // Stage 2a-i); the host persists them in the replay-payload store at the gate
+    // raise. The gate still carries the resume token that keys that payload.
+    let resume_token = blocked
+        .resume_token()
+        .expect("approval gate carries the resume token that keys the host-side replay payload");
+    assert!(
+        !resume_token.as_str().is_empty(),
+        "approval gate must carry the resume token that keys the host-side replay payload"
     );
 }
 
 #[tokio::test]
 async fn local_dev_adapter_invokes_builtin_shell_through_product_live_surface() {
     let root = tempfile::tempdir().unwrap();
-    let services = build_reborn_services(RebornBuildInput::local_dev(
+    let services = build_runtime_for_test(ironclaw_reborn_composition::local_dev_build_input(
         "builtin-shell-owner",
         root.path().join("local-dev"),
     ))
-    .await
-    .unwrap();
+    .await;
     let run_context = loop_run_context("builtin-shell").await;
     disable_global_auto_approve_for_run(
         &services,
@@ -552,9 +585,11 @@ async fn local_dev_adapter_invokes_builtin_shell_through_product_live_surface() 
             max_invocations: None,
         },
     };
-    let adapters = ProductLivePlannedRuntimeAdapters::from_services(
+    let adapters = adapters_from_runtime(
         &services,
         ProductLivePlannedRuntimeAdapterConfig {
+            gate_record_store: test_gate_record_store(),
+            replay_payload_store: test_replay_payload_store(),
             capability_authority_resolver: authority_resolver(
                 ProductLiveVisibleCapabilityRequestConfig::new(
                     user_id,
@@ -598,7 +633,7 @@ async fn local_dev_adapter_invokes_builtin_shell_through_product_live_surface() 
     );
 
     let outcome = capability_port
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: capability_id.clone(),
@@ -608,27 +643,30 @@ async fn local_dev_adapter_invokes_builtin_shell_through_product_live_surface() 
         })
         .await
         .unwrap();
-    let CapabilityOutcome::ApprovalRequired {
-        gate_ref,
-        safe_summary,
-        ..
-    } = outcome
-    else {
+    let Resolution::Blocked(blocked) = outcome else {
         panic!("expected approval gate for builtin shell outcome, got {outcome:?}");
     };
-    assert!(gate_ref.as_str().starts_with("gate:approval-"));
-    assert_eq!(safe_summary, "capability requires approval");
+    assert_eq!(blocked.kind(), "approval");
+    // The minted gate ref is an opaque uuid; the originating loop gate ref
+    // ("gate:approval-...") is preserved on `origin`.
+    let origin = blocked
+        .origin()
+        .expect("approval gate preserves the originating loop gate ref");
+    assert!(origin.as_str().starts_with("gate:approval-"));
+    // Flip consequence (§5.2.9 collapse, confirmed) — the gate-render `safe_summary`
+    // ("capability requires approval") now rides the durable GateRecord, not the
+    // Blocked resolution channel, so it can no longer be asserted from the
+    // returned Resolution here. Re-assert it against the gate record store.
 }
 
 #[tokio::test]
 async fn local_dev_adapter_invokes_extension_scoped_grants_with_loop_driver_principal() {
     let root = tempfile::tempdir().unwrap();
-    let services = build_reborn_services(RebornBuildInput::local_dev(
+    let services = build_runtime_for_test(ironclaw_reborn_composition::local_dev_build_input(
         "extension-grant-owner",
         root.path().join("local-dev"),
     ))
-    .await
-    .unwrap();
+    .await;
     let run_context = loop_run_context("extension-grant").await;
     enable_global_auto_approve_for_run(
         &services,
@@ -646,9 +684,11 @@ async fn local_dev_adapter_invokes_extension_scoped_grants_with_loop_driver_prin
     let capability_id = capability_id(ECHO_CAPABILITY_ID);
     let extension_principal =
         Principal::Extension(loop_driver_execution_extension_id(&run_context).unwrap());
-    let adapters = ProductLivePlannedRuntimeAdapters::from_services(
+    let adapters = adapters_from_runtime(
         &services,
         ProductLivePlannedRuntimeAdapterConfig {
+            gate_record_store: test_gate_record_store(),
+            replay_payload_store: test_replay_payload_store(),
             capability_authority_resolver: authority_resolver(
                 ProductLiveVisibleCapabilityRequestConfig::new(
                     UserId::new("user-extension-grant").unwrap(),
@@ -692,7 +732,7 @@ async fn local_dev_adapter_invokes_extension_scoped_grants_with_loop_driver_prin
     );
 
     let outcome = capability_port
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id,
@@ -702,12 +742,22 @@ async fn local_dev_adapter_invokes_extension_scoped_grants_with_loop_driver_prin
         })
         .await
         .unwrap();
-    let CapabilityOutcome::Completed(completed) = outcome else {
+    let Resolution::Done(completed) = outcome else {
         panic!("expected completed extension-grant echo outcome, got {outcome:?}");
     };
+    // The minted `refs.result` is an opaque uuid; the loop result ref the io
+    // staged the output under is preserved on `refs.origin`.
+    let result_ref = LoopResultRef::new(
+        completed
+            .refs
+            .origin
+            .as_ref()
+            .expect("completed outcome preserves the originating loop result ref")
+            .as_str(),
+    )
+    .expect("valid loop result ref");
     assert_eq!(
-        io.result_for_ref(&run_context, &completed.result_ref)
-            .unwrap(),
+        io.result_for_ref(&run_context, &result_ref).unwrap(),
         serde_json::json!("hello extension grant")
     );
 }
@@ -715,12 +765,11 @@ async fn local_dev_adapter_invokes_extension_scoped_grants_with_loop_driver_prin
 #[tokio::test]
 async fn local_dev_adapter_registers_provider_tool_calls_as_run_scoped_inputs() {
     let root = tempfile::tempdir().unwrap();
-    let services = build_reborn_services(RebornBuildInput::local_dev(
+    let services = build_runtime_for_test(ironclaw_reborn_composition::local_dev_build_input(
         "provider-tool-owner",
         root.path().join("local-dev"),
     ))
-    .await
-    .unwrap();
+    .await;
     let run_context = loop_run_context("provider-tool").await;
     enable_global_auto_approve_for_run(
         &services,
@@ -730,9 +779,11 @@ async fn local_dev_adapter_registers_provider_tool_calls_as_run_scoped_inputs() 
     .await;
     let io = Arc::new(ProductLiveCapabilityIo::default());
     let capability_id = capability_id(ECHO_CAPABILITY_ID);
-    let adapters = ProductLivePlannedRuntimeAdapters::from_services(
+    let adapters = adapters_from_runtime(
         &services,
         ProductLivePlannedRuntimeAdapterConfig {
+            gate_record_store: test_gate_record_store(),
+            replay_payload_store: test_replay_payload_store(),
             capability_authority_resolver: authority_resolver(
                 ProductLiveVisibleCapabilityRequestConfig::new(
                     UserId::new("user-provider-tool").unwrap(),
@@ -832,7 +883,7 @@ async fn local_dev_adapter_registers_provider_tool_calls_as_run_scoped_inputs() 
     );
 
     let outcome = capability_port
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: candidate.activity_id,
             surface_version: candidate.surface_version,
             capability_id,
@@ -842,12 +893,22 @@ async fn local_dev_adapter_registers_provider_tool_calls_as_run_scoped_inputs() 
         })
         .await
         .unwrap();
-    let CapabilityOutcome::Completed(completed) = outcome else {
+    let Resolution::Done(completed) = outcome else {
         panic!("expected completed provider echo outcome, got {outcome:?}");
     };
+    // The minted `refs.result` is an opaque uuid; the loop result ref the io
+    // staged the output under is preserved on `refs.origin`.
+    let result_ref = LoopResultRef::new(
+        completed
+            .refs
+            .origin
+            .as_ref()
+            .expect("completed outcome preserves the originating loop result ref")
+            .as_str(),
+    )
+    .expect("valid loop result ref");
     assert_eq!(
-        io.result_for_ref(&run_context, &completed.result_ref)
-            .unwrap(),
+        io.result_for_ref(&run_context, &result_ref).unwrap(),
         serde_json::json!("hello from provider tool")
     );
 }
@@ -855,12 +916,11 @@ async fn local_dev_adapter_registers_provider_tool_calls_as_run_scoped_inputs() 
 #[tokio::test]
 async fn local_dev_adapter_exposes_skill_install_provider_tool_schema_requires_string_content() {
     let root = tempfile::tempdir().unwrap();
-    let services = build_reborn_services(RebornBuildInput::local_dev(
+    let services = build_runtime_for_test(ironclaw_reborn_composition::local_dev_build_input(
         "provider-skill-install-owner",
         root.path().join("local-dev"),
     ))
-    .await
-    .unwrap();
+    .await;
     let run_context = loop_run_context("provider-skill-install").await;
     let io = Arc::new(ProductLiveCapabilityIo::default());
     let capability_id = capability_id(SKILL_INSTALL_CAPABILITY_ID);
@@ -871,9 +931,11 @@ async fn local_dev_adapter_exposes_skill_install_provider_tool_schema_requires_s
         EffectKind::DeleteFilesystem,
         EffectKind::Network,
     ];
-    let adapters = ProductLivePlannedRuntimeAdapters::from_services(
+    let adapters = adapters_from_runtime(
         &services,
         ProductLivePlannedRuntimeAdapterConfig {
+            gate_record_store: test_gate_record_store(),
+            replay_payload_store: test_replay_payload_store(),
             capability_authority_resolver: authority_resolver(
                 ProductLiveVisibleCapabilityRequestConfig::new(
                     user_id.clone(),
@@ -955,18 +1017,19 @@ async fn local_dev_adapter_exposes_skill_install_provider_tool_schema_requires_s
 #[tokio::test]
 async fn adapter_config_can_authorize_non_dispatch_provider_trust_effects() {
     let root = tempfile::tempdir().unwrap();
-    let services = build_reborn_services(RebornBuildInput::local_dev(
+    let services = build_runtime_for_test(ironclaw_reborn_composition::local_dev_build_input(
         "read-effect-owner",
         root.path().join("local-dev"),
     ))
-    .await
-    .unwrap();
+    .await;
     let run_context = loop_run_context("read-effect").await;
     let io = Arc::new(ProductLiveCapabilityIo::default());
     let capability_id = capability_id(READ_FILE_CAPABILITY_ID);
-    let adapters = ProductLivePlannedRuntimeAdapters::from_services(
+    let adapters = adapters_from_runtime(
         &services,
         ProductLivePlannedRuntimeAdapterConfig {
+            gate_record_store: test_gate_record_store(),
+            replay_payload_store: test_replay_payload_store(),
             capability_authority_resolver: authority_resolver(
                 ProductLiveVisibleCapabilityRequestConfig::new(
                     UserId::new("user-read-effect").unwrap(),
@@ -1018,10 +1081,11 @@ async fn local_dev_adapter_invokes_read_file_with_configured_mounts() {
     let storage_root = root.path().join("local-dev");
     std::fs::create_dir_all(storage_root.join("workspace")).unwrap();
     std::fs::write(storage_root.join("workspace/readme.md"), "alpha\nbeta\n").unwrap();
-    let services =
-        build_reborn_services(RebornBuildInput::local_dev("read-file-owner", storage_root))
-            .await
-            .unwrap();
+    let services = build_runtime_for_test(ironclaw_reborn_composition::local_dev_build_input(
+        "read-file-owner",
+        storage_root,
+    ))
+    .await;
     let run_context = loop_run_context("read-file").await;
     enable_global_auto_approve_for_run(
         &services,
@@ -1038,9 +1102,11 @@ async fn local_dev_adapter_invokes_read_file_with_configured_mounts() {
         .unwrap();
     let capability_id = capability_id(READ_FILE_CAPABILITY_ID);
     let mounts = read_only_workspace_mounts();
-    let adapters = ProductLivePlannedRuntimeAdapters::from_services(
+    let adapters = adapters_from_runtime(
         &services,
         ProductLivePlannedRuntimeAdapterConfig {
+            gate_record_store: test_gate_record_store(),
+            replay_payload_store: test_replay_payload_store(),
             capability_authority_resolver: authority_resolver(
                 ProductLiveVisibleCapabilityRequestConfig::new(
                     UserId::new("user-read-file").unwrap(),
@@ -1080,7 +1146,7 @@ async fn local_dev_adapter_invokes_read_file_with_configured_mounts() {
         .unwrap();
 
     let outcome = capability_port
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id,
@@ -1090,12 +1156,21 @@ async fn local_dev_adapter_invokes_read_file_with_configured_mounts() {
         })
         .await
         .unwrap();
-    let CapabilityOutcome::Completed(completed) = outcome else {
+    let Resolution::Done(completed) = outcome else {
         panic!("expected completed read_file outcome, got {outcome:?}");
     };
-    let output = io
-        .result_for_ref(&run_context, &completed.result_ref)
-        .unwrap();
+    // The minted `refs.result` is an opaque uuid; the loop result ref the io
+    // staged the output under is preserved on `refs.origin`.
+    let result_ref = LoopResultRef::new(
+        completed
+            .refs
+            .origin
+            .as_ref()
+            .expect("completed outcome preserves the originating loop result ref")
+            .as_str(),
+    )
+    .expect("valid loop result ref");
+    let output = io.result_for_ref(&run_context, &result_ref).unwrap();
     assert_eq!(output["path"], serde_json::json!("/workspace/readme.md"));
     assert_eq!(output["lines_shown"], serde_json::json!(1));
     assert!(
@@ -1107,30 +1182,18 @@ async fn local_dev_adapter_invokes_read_file_with_configured_mounts() {
 }
 
 #[tokio::test]
-async fn adapter_bundle_requires_host_runtime_facade() {
-    let result = ProductLivePlannedRuntimeAdapters::from_services(
-        &RebornServices::disabled(),
-        adapter_config(),
-    );
-
-    assert!(matches!(
-        result,
-        Err(ProductLivePlannedRuntimeAdapterError::MissingHostRuntime)
-    ));
-}
-
-#[tokio::test]
 async fn adapter_bundle_maps_authority_resolution_failure_to_host_error() {
     let root = tempfile::tempdir().unwrap();
-    let services = build_reborn_services(RebornBuildInput::local_dev(
+    let services = build_runtime_for_test(ironclaw_reborn_composition::local_dev_build_input(
         "authority-failure-owner",
         root.path().join("local-dev"),
     ))
-    .await
-    .unwrap();
-    let adapters = ProductLivePlannedRuntimeAdapters::from_services(
+    .await;
+    let adapters = adapters_from_runtime(
         &services,
         ProductLivePlannedRuntimeAdapterConfig {
+            gate_record_store: test_gate_record_store(),
+            replay_payload_store: test_replay_payload_store(),
             capability_authority_resolver: Arc::new(FailingAuthorityResolver),
             ..adapter_config()
         },
@@ -1163,14 +1226,12 @@ async fn adapter_bundle_maps_authority_resolution_failure_to_host_error() {
 #[tokio::test]
 async fn adapter_bundle_wires_required_product_live_components() {
     let root = tempfile::tempdir().unwrap();
-    let services = build_reborn_services(RebornBuildInput::local_dev(
+    let services = build_runtime_for_test(ironclaw_reborn_composition::local_dev_build_input(
         "adapter-test-owner",
         root.path().join("local-dev"),
     ))
-    .await
-    .unwrap();
-    let adapters =
-        ProductLivePlannedRuntimeAdapters::from_services(&services, adapter_config()).unwrap();
+    .await;
+    let adapters = adapters_from_runtime(&services, adapter_config()).unwrap();
 
     let route = adapters
         .model_route_resolver
@@ -1193,7 +1254,7 @@ async fn adapter_bundle_wires_required_product_live_components() {
         .expect("turn-state cancellation factory should expose a live probe");
     assert_eq!(
         readiness,
-        ironclaw_loop_support::ProductLiveCancellationReadiness::ExternallyControllable
+        ironclaw_loop_host::ProductLiveCancellationReadiness::ExternallyControllable
     );
 
     let capability_port = adapters
@@ -1207,21 +1268,19 @@ async fn adapter_bundle_wires_required_product_live_components() {
         .unwrap();
     assert!(
         !visible.version.as_str().is_empty(),
-        "host-runtime capability facade should supply a concrete surface version"
+        "host-runtime capability service should supply a concrete surface version"
     );
 }
 
 #[tokio::test]
 async fn adapter_bundle_builds_visible_requests_from_each_run_context() {
     let root = tempfile::tempdir().unwrap();
-    let services = build_reborn_services(RebornBuildInput::local_dev(
+    let services = build_runtime_for_test(ironclaw_reborn_composition::local_dev_build_input(
         "multi-run-owner",
         root.path().join("local-dev"),
     ))
-    .await
-    .unwrap();
-    let adapters =
-        ProductLivePlannedRuntimeAdapters::from_services(&services, adapter_config()).unwrap();
+    .await;
+    let adapters = adapters_from_runtime(&services, adapter_config()).unwrap();
     let first_context = loop_run_context("multi-run-first").await;
     let second_context = loop_run_context("multi-run-second").await;
 
@@ -1246,16 +1305,17 @@ async fn adapter_bundle_builds_visible_requests_from_each_run_context() {
 #[tokio::test]
 async fn adapter_bundle_resolves_authority_for_each_run_context() {
     let root = tempfile::tempdir().unwrap();
-    let services = build_reborn_services(RebornBuildInput::local_dev(
+    let services = build_runtime_for_test(ironclaw_reborn_composition::local_dev_build_input(
         "run-authority-owner",
         root.path().join("local-dev"),
     ))
-    .await
-    .unwrap();
+    .await;
     let calls = Arc::new(Mutex::new(Vec::new()));
-    let adapters = ProductLivePlannedRuntimeAdapters::from_services(
+    let adapters = adapters_from_runtime(
         &services,
         ProductLivePlannedRuntimeAdapterConfig {
+            gate_record_store: test_gate_record_store(),
+            replay_payload_store: test_replay_payload_store(),
             capability_authority_resolver: Arc::new(RecordingAuthorityResolver {
                 calls: Arc::clone(&calls),
             }),
@@ -1298,48 +1358,73 @@ async fn adapter_bundle_resolves_authority_for_each_run_context() {
 #[tokio::test]
 async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
     let root = tempfile::tempdir().unwrap();
-    let services = build_reborn_services(RebornBuildInput::local_dev(
+    let services = build_runtime_for_test(ironclaw_reborn_composition::local_dev_build_input(
         "runtime-gate-owner",
         root.path().join("local-dev"),
     ))
-    .await
-    .unwrap();
+    .await;
     let thread_service = Arc::new(InMemorySessionThreadService::default());
-    let turn_state = Arc::new(InMemoryTurnStateStore::default());
-    let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
-    let loop_checkpoint_store = Arc::new(InMemoryLoopCheckpointStore::default());
+    let turn_state = Arc::new(in_memory_turn_state_store());
+    let checkpoint_state_store = in_memory_checkpoint_state_store();
+    let loop_checkpoint_store = Arc::clone(&turn_state);
     let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let thread_scope = thread_scope("runtime-gate");
-    let adapters =
-        ProductLivePlannedRuntimeAdapters::from_services(&services, adapter_config()).unwrap();
+    let adapters = adapters_from_runtime(&services, adapter_config()).unwrap();
 
     let turn_state_for_evidence: Arc<dyn TurnStateStore> = turn_state.clone();
     let loop_checkpoint_for_evidence: Arc<dyn LoopCheckpointStore> = loop_checkpoint_store.clone();
-    let subagent_gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
+    let await_edge_mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/turns").unwrap(),
+        VirtualPath::new("/turns").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    let await_edge_store = Arc::new(AwaitEdgeStore::new(Arc::new(
+        ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), await_edge_mounts),
+    )));
+    let subagent_goal_store = in_memory_subagent_goal_store();
+    let await_edge_resolver = Arc::new(AwaitEdgeResolver::new_unbound(
+        Arc::clone(&await_edge_store),
+        subagent_goal_store.clone() as Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,
+        turn_state.clone() as Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore>,
+        adapters.capability_result_writer.clone(),
+        Arc::clone(&thread_service),
+    ));
+    let await_edge_driver = Arc::new(ScopeRecoveryDriver::new(
+        Arc::clone(&await_edge_resolver),
+        Arc::clone(&await_edge_store),
+    ));
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        gate_record_store: None,
         turn_state,
         thread_service: Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,
         thread_scope: thread_scope.clone(),
         model_gateway: Arc::new(StubModelGateway),
-        checkpoint_state_store: checkpoint_state_store as Arc<dyn CheckpointStateStore>,
+        checkpoint_state_store: checkpoint_state_store as Arc<dyn CheckpointStateStorePort>,
         loop_checkpoint_store,
         milestone_sink,
         capability_factory: adapters.capability_factory,
         capability_surface_resolver: adapters.capability_surface_resolver,
         capability_result_writer: adapters.capability_result_writer,
-        subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
-        subagent_gate_store: subagent_gate_store.clone(),
+        subagent_goal_store,
+        subagent_await_edge_writer: await_edge_driver
+            as Arc<dyn ironclaw_loop_host::AwaitEdgeWriter>,
+        subagent_await_edge_settler: await_edge_resolver
+            as Arc<dyn ironclaw_loop_host::AwaitEdgeSettler>,
+        subagent_await_edge_evidence: Arc::clone(&await_edge_store)
+            as Arc<dyn ironclaw_runner::loop_exit_applier::AwaitDependentRunEvidenceStore>,
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
             adapters.capability_input_resolver,
         )),
-        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
+        subagent_spawn_limits: ironclaw_loop_host::SubagentSpawnLimits::default(),
         loop_exit_evidence: Arc::new(ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
             thread_service,
             turn_state_for_evidence,
             loop_checkpoint_for_evidence,
-            subagent_gate_store,
+            await_edge_store
+                as Arc<dyn ironclaw_runner::loop_exit_applier::AwaitDependentRunEvidenceStore>,
             thread_scope,
         )),
         config: DefaultPlannedRuntimeConfig::default(),
@@ -1349,6 +1434,8 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
         input_queue: Some(adapters.input_queue),
         identity_context_source: adapters.identity_context_source,
         user_profile_source: Arc::new(EmptyUserProfileSource),
+        memory_context_service: None,
+        after_turn_memory_writer: None,
         model_policy_guard: Some(adapters.model_policy_guard),
         model_budget_accountant: Some(adapters.model_budget_accountant),
         safety_context: Some(adapters.safety_context),
@@ -1371,19 +1458,20 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
 #[tokio::test]
 async fn model_route_settings_wire_default_and_mission_slots() {
     let root = tempfile::tempdir().unwrap();
-    let services = build_reborn_services(RebornBuildInput::local_dev(
+    let services = build_runtime_for_test(ironclaw_reborn_composition::local_dev_build_input(
         "route-settings-owner",
         root.path().join("local-dev"),
     ))
-    .await
-    .unwrap();
+    .await;
     let settings = ProductLiveModelRouteSettings::new("nearai", "qwen3-coder")
         .unwrap()
         .with_mission_route("openrouter", "anthropic/claude-sonnet-4")
         .unwrap();
-    let adapters = ProductLivePlannedRuntimeAdapters::from_services(
+    let adapters = adapters_from_runtime(
         &services,
         ProductLivePlannedRuntimeAdapterConfig {
+            gate_record_store: test_gate_record_store(),
+            replay_payload_store: test_replay_payload_store(),
             model_routes: settings,
             ..adapter_config()
         },
@@ -1401,18 +1489,19 @@ async fn model_route_settings_wire_default_and_mission_slots() {
 #[tokio::test]
 async fn model_route_settings_respect_selection_mode_override() {
     let root = tempfile::tempdir().unwrap();
-    let services = build_reborn_services(RebornBuildInput::local_dev(
+    let services = build_runtime_for_test(ironclaw_reborn_composition::local_dev_build_input(
         "route-selection-mode-owner",
         root.path().join("local-dev"),
     ))
-    .await
-    .unwrap();
+    .await;
     let settings = ProductLiveModelRouteSettings::new("nearai", "qwen3-coder")
         .unwrap()
         .with_selection_mode(ModelSelectionMode::DeveloperAnyConfigured);
-    let adapters = ProductLivePlannedRuntimeAdapters::from_services(
+    let adapters = adapters_from_runtime(
         &services,
         ProductLivePlannedRuntimeAdapterConfig {
+            gate_record_store: test_gate_record_store(),
+            replay_payload_store: test_replay_payload_store(),
             model_routes: settings,
             ..adapter_config()
         },
@@ -1429,8 +1518,22 @@ async fn model_route_settings_respect_selection_mode_override() {
     );
 }
 
+fn test_gate_record_store() -> Arc<dyn ironclaw_run_state::GateRecordStorePort> {
+    Arc::new(ironclaw_run_state::GateRecordStore::new(
+        ironclaw_reborn_composition::wrap_scoped(Arc::new(InMemoryBackend::new())),
+    ))
+}
+
+fn test_replay_payload_store() -> Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort> {
+    Arc::new(ironclaw_capabilities::ReplayPayloadStore::new(
+        ironclaw_reborn_composition::wrap_scoped(Arc::new(InMemoryBackend::new())),
+    ))
+}
+
 fn adapter_config() -> ProductLivePlannedRuntimeAdapterConfig {
     ProductLivePlannedRuntimeAdapterConfig {
+        gate_record_store: test_gate_record_store(),
+        replay_payload_store: test_replay_payload_store(),
         capability_authority_resolver: authority_resolver(visible_capability_request_config(
             "adapter-config",
         )),
@@ -1538,11 +1641,11 @@ impl ProductLiveCapabilityAuthorityResolver for RecordingAuthorityResolver {
 // user)` lets a scripted call exercise the dispatch path instead of stopping
 // at the per-tool approval gate.
 async fn enable_global_auto_approve_for_run(
-    services: &RebornServices,
+    runtime: &RebornRuntime,
     run_context: &LoopRunContext,
     user_id: UserId,
 ) {
-    let store = services
+    let store = runtime
         .local_dev_auto_approve_settings_for_test()
         .expect("local-dev exposes auto-approve settings for test");
     let mut scope = run_context.scope.to_resource_scope();
@@ -1560,11 +1663,11 @@ async fn enable_global_auto_approve_for_run(
 // Global auto-approve now defaults ON, so a test that needs to exercise the
 // per-tool approval gate must flip it OFF for the dispatch scope explicitly.
 async fn disable_global_auto_approve_for_run(
-    services: &RebornServices,
+    runtime: &RebornRuntime,
     run_context: &LoopRunContext,
     user_id: UserId,
 ) {
-    let store = services
+    let store = runtime
         .local_dev_auto_approve_settings_for_test()
         .expect("local-dev exposes auto-approve settings for test");
     let mut scope = run_context.scope.to_resource_scope();
@@ -1864,3 +1967,5 @@ impl ProductLiveCancellationProbe for ReadyCancellationProbe {
         Ok(self.handle.is_requested())
     }
 }
+
+// arch-exempt: large_file, pre-existing large file minimally touched for the §5.3 Stage 2a-i replay-payload move (field/store wiring + tests), plan #6175

@@ -1,3 +1,4 @@
+// arch-exempt: large_file, whole-handshake catalog regression reuses the existing mediated HTTP fixture, plan #4088
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -20,12 +21,10 @@ async fn mcp_runtime_reserves_calls_adapter_and_reconciles_success() {
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_concurrency_slots: Some(1),
-                max_process_count: Some(1),
-                max_output_bytes: Some(10_000),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_concurrency_slots(1)
+                .set_max_process_count(1)
+                .set_max_output_bytes(10_000),
         )
         .unwrap();
 
@@ -36,12 +35,10 @@ async fn mcp_runtime_reserves_calls_adapter_and_reconciles_success() {
                 package: &package,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope,
-                estimate: ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    process_count: Some(1),
-                    output_bytes: Some(10_000),
-                    ..ResourceEstimate::default()
-                },
+                estimate: ResourceEstimate::default()
+                    .set_concurrency_slots(1)
+                    .set_process_count(1)
+                    .set_output_bytes(10_000),
                 resource_reservation: None,
                 invocation: McpInvocation {
                     input: json!({"query": "ironclaw"}),
@@ -743,17 +740,20 @@ async fn concrete_mcp_http_client_discovers_tool_schemas_through_shared_egress()
     );
 
     let output = client
-        .discover_tools(McpClientRequest {
-            provider: ExtensionId::new("github-mcp").unwrap(),
-            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
-            scope: sample_scope(),
-            transport: "http".to_string(),
-            command: None,
-            args: vec![],
-            url: Some("https://mcp.example.test/mcp".to_string()),
-            input: json!({}),
-            max_output_bytes: 4096,
-        })
+        .discover_tools(
+            McpClientRequest {
+                provider: ExtensionId::new("github-mcp").unwrap(),
+                capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+                scope: sample_scope(),
+                transport: "http".to_string(),
+                command: None,
+                args: vec![],
+                url: Some("https://mcp.example.test/mcp".to_string()),
+                input: json!({}),
+                max_output_bytes: 4096,
+            },
+            128,
+        )
         .await
         .unwrap();
 
@@ -803,6 +803,157 @@ async fn concrete_mcp_http_client_discovers_tool_schemas_through_shared_egress()
     );
 }
 
+#[tokio::test]
+async fn concrete_mcp_http_client_bounds_long_provider_descriptions_without_dropping_catalog() {
+    let egress = RecordingRuntimeEgress::long_tool_description();
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(egress.clone())),
+        StaticMcpHostHttpEgressPlanner::new(host_http_plan()),
+    );
+
+    let output = client
+        .discover_tools(
+            McpClientRequest {
+                provider: ExtensionId::new("github-mcp").unwrap(),
+                capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+                scope: sample_scope(),
+                transport: "http".to_string(),
+                command: None,
+                args: vec![],
+                url: Some("https://mcp.example.test/mcp".to_string()),
+                input: json!({}),
+                max_output_bytes: 16_384,
+            },
+            128,
+        )
+        .await
+        .expect("a valid provider catalog must survive an overlong description");
+
+    assert_eq!(output.tools.len(), 2);
+    assert_eq!(output.tools[0].name, "search");
+    assert_eq!(output.tools[0].description.len(), 2_048);
+    assert!(
+        output.tools[0].description.ends_with("..."),
+        "bounded descriptions must make truncation explicit"
+    );
+    assert_eq!(
+        egress
+            .requests()
+            .iter()
+            .map(|request| json_rpc_method(&request.body))
+            .collect::<Vec<_>>(),
+        vec!["initialize", "notifications/initialized", "tools/list"]
+    );
+}
+
+/// Regression for hosted MCP catalogs generated from OpenAPI. A provider can
+/// return a small, valid tool list whose schemas exceed the old arbitrary
+/// depth-8 parser limit. Discovery must accept that bounded schema through the
+/// real client/egress path instead of discarding the entire catalog.
+#[tokio::test]
+async fn concrete_mcp_http_client_discovers_bounded_deep_openapi_schema() {
+    let egress = RecordingRuntimeEgress::deep_openapi_schema();
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(egress.clone())),
+        StaticMcpHostHttpEgressPlanner::new(host_http_plan()),
+    );
+
+    let output = client
+        .discover_tools(
+            McpClientRequest {
+                provider: ExtensionId::new("hosted-docs").unwrap(),
+                capability_id: CapabilityId::new("hosted-docs.connection").unwrap(),
+                scope: sample_scope(),
+                transport: "http".to_string(),
+                command: None,
+                args: vec![],
+                url: Some("https://mcp.example.test/mcp".to_string()),
+                input: json!({}),
+                max_output_bytes: 16_384,
+            },
+            64,
+        )
+        .await
+        .expect("bounded OpenAPI-derived schemas must remain discoverable");
+
+    assert_eq!(output.tools.len(), 24);
+    assert_eq!(output.tools[0].name, "document.update-0");
+    assert_eq!(egress.requests().len(), 3);
+}
+
+#[tokio::test]
+async fn concrete_mcp_http_client_classifies_invalid_catalog_as_non_retryable_shape_failure() {
+    let egress = RecordingRuntimeEgress::invalid_tool_catalog();
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(egress)),
+        StaticMcpHostHttpEgressPlanner::new(host_http_plan()),
+    );
+
+    let error = client
+        .discover_tools(
+            McpClientRequest {
+                provider: ExtensionId::new("hosted-docs").unwrap(),
+                capability_id: CapabilityId::new("hosted-docs.connection").unwrap(),
+                scope: sample_scope(),
+                transport: "http".to_string(),
+                command: None,
+                args: vec![],
+                url: Some("https://mcp.example.test/mcp".to_string()),
+                input: json!({}),
+                max_output_bytes: 16_384,
+            },
+            64,
+        )
+        .await
+        .expect_err("an unsafe live catalog must not be retried as transport flakiness");
+
+    assert!(matches!(
+        error,
+        McpClientError::InvalidToolCatalog { ref reason }
+            if reason == "mcp_invalid_tool_list: invalid_tool_name"
+    ));
+}
+
+/// Regression for the first-install brick: a real MCP server can advertise a
+/// mostly-valid catalog with one shape-nonconforming tool (here an uppercase
+/// name). The offending tool is skipped and the remaining valid tools still
+/// publish through the real client/egress path, so the integration activates
+/// instead of failing whole-catalog with no prior generation to fall back to.
+#[tokio::test]
+async fn concrete_mcp_http_client_skips_shape_invalid_tool_and_publishes_bounded_remainder() {
+    let egress = RecordingRuntimeEgress::mixed_shape_invalid_catalog();
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(egress.clone())),
+        StaticMcpHostHttpEgressPlanner::new(host_http_plan()),
+    );
+
+    let output = client
+        .discover_tools(
+            McpClientRequest {
+                provider: ExtensionId::new("hosted-docs").unwrap(),
+                capability_id: CapabilityId::new("hosted-docs.connection").unwrap(),
+                scope: sample_scope(),
+                transport: "http".to_string(),
+                command: None,
+                args: vec![],
+                url: Some("https://mcp.example.test/mcp".to_string()),
+                input: json!({}),
+                max_output_bytes: 16_384,
+            },
+            64,
+        )
+        .await
+        .expect("a bounded catalog must survive one shape-nonconforming tool");
+
+    let names = output
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["document.search", "document.update"]);
+    assert_eq!(egress.requests().len(), 3);
+}
+
 /// Coverage gap noted in review of the SSE contract tests: the loopback MCP
 /// path predeclares its tool schemas, so `discover_tools` (host-mediated HTTP
 /// path) is only ever exercised over JSON-framed `tools/list` responses
@@ -820,17 +971,20 @@ async fn concrete_mcp_http_client_discovers_tool_schemas_over_sse_framing() {
     );
 
     let sse_output = sse_client
-        .discover_tools(McpClientRequest {
-            provider: ExtensionId::new("github-mcp").unwrap(),
-            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
-            scope: sample_scope(),
-            transport: "sse".to_string(),
-            command: None,
-            args: vec![],
-            url: Some("https://mcp.example.test/sse".to_string()),
-            input: json!({}),
-            max_output_bytes: 4096,
-        })
+        .discover_tools(
+            McpClientRequest {
+                provider: ExtensionId::new("github-mcp").unwrap(),
+                capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+                scope: sample_scope(),
+                transport: "sse".to_string(),
+                command: None,
+                args: vec![],
+                url: Some("https://mcp.example.test/sse".to_string()),
+                input: json!({}),
+                max_output_bytes: 4096,
+            },
+            128,
+        )
         .await
         .unwrap();
 
@@ -839,17 +993,20 @@ async fn concrete_mcp_http_client_discovers_tool_schemas_over_sse_framing() {
         StaticMcpHostHttpEgressPlanner::new(host_http_plan()),
     );
     let json_output = json_client
-        .discover_tools(McpClientRequest {
-            provider: ExtensionId::new("github-mcp").unwrap(),
-            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
-            scope: sample_scope(),
-            transport: "http".to_string(),
-            command: None,
-            args: vec![],
-            url: Some("https://mcp.example.test/mcp".to_string()),
-            input: json!({}),
-            max_output_bytes: 4096,
-        })
+        .discover_tools(
+            McpClientRequest {
+                provider: ExtensionId::new("github-mcp").unwrap(),
+                capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+                scope: sample_scope(),
+                transport: "http".to_string(),
+                command: None,
+                args: vec![],
+                url: Some("https://mcp.example.test/mcp".to_string()),
+                input: json!({}),
+                max_output_bytes: 4096,
+            },
+            128,
+        )
         .await
         .unwrap();
 
@@ -868,17 +1025,20 @@ async fn concrete_mcp_http_client_maps_discovery_auth_status_to_auth_required() 
     );
 
     let error = client
-        .discover_tools(McpClientRequest {
-            provider: ExtensionId::new("github-mcp").unwrap(),
-            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
-            scope: sample_scope(),
-            transport: "http".to_string(),
-            command: None,
-            args: vec![],
-            url: Some("https://mcp.example.test/mcp".to_string()),
-            input: json!({}),
-            max_output_bytes: 4096,
-        })
+        .discover_tools(
+            McpClientRequest {
+                provider: ExtensionId::new("github-mcp").unwrap(),
+                capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+                scope: sample_scope(),
+                transport: "http".to_string(),
+                command: None,
+                args: vec![],
+                url: Some("https://mcp.example.test/mcp".to_string()),
+                input: json!({}),
+                max_output_bytes: 4096,
+            },
+            128,
+        )
         .await
         .expect_err("upstream MCP discovery auth failures must stay typed");
 
@@ -1007,10 +1167,7 @@ async fn mcp_runtime_denies_budget_before_adapter_call() {
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_output_bytes: Some(1),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_output_bytes(1),
         )
         .unwrap();
 
@@ -1021,10 +1178,7 @@ async fn mcp_runtime_denies_budget_before_adapter_call() {
                 package: &package,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope,
-                estimate: ResourceEstimate {
-                    output_bytes: Some(10_000),
-                    ..ResourceEstimate::default()
-                },
+                estimate: ResourceEstimate::default().set_output_bytes(10_000),
                 resource_reservation: None,
                 invocation: McpInvocation { input: json!({}) },
             },
@@ -1053,10 +1207,7 @@ async fn mcp_runtime_releases_reservation_when_adapter_fails() {
                 package: &package,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope,
-                estimate: ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    ..ResourceEstimate::default()
-                },
+                estimate: ResourceEstimate::default().set_concurrency_slots(1),
                 resource_reservation: None,
                 invocation: McpInvocation { input: json!({}) },
             },
@@ -1084,10 +1235,7 @@ async fn mcp_runtime_preserves_adapter_error_when_release_cleanup_fails() {
                 package: &package,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope: sample_scope(),
-                estimate: ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    ..ResourceEstimate::default()
-                },
+                estimate: ResourceEstimate::default().set_concurrency_slots(1),
                 resource_reservation: None,
                 invocation: McpInvocation { input: json!({}) },
             },
@@ -1110,10 +1258,7 @@ async fn mcp_runtime_rejects_non_mcp_or_undeclared_capability_before_reserving()
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_concurrency_slots: Some(0),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_concurrency_slots(0),
         )
         .unwrap();
 
@@ -1124,10 +1269,7 @@ async fn mcp_runtime_rejects_non_mcp_or_undeclared_capability_before_reserving()
                 package: &non_mcp,
                 capability_id: &CapabilityId::new("script.echo").unwrap(),
                 scope: scope.clone(),
-                estimate: ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    ..ResourceEstimate::default()
-                },
+                estimate: ResourceEstimate::default().set_concurrency_slots(1),
                 resource_reservation: None,
                 invocation: McpInvocation { input: json!({}) },
             },
@@ -1149,10 +1291,7 @@ async fn mcp_runtime_rejects_non_mcp_or_undeclared_capability_before_reserving()
                 package: &mcp,
                 capability_id: &CapabilityId::new("github-mcp.missing").unwrap(),
                 scope,
-                estimate: ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    ..ResourceEstimate::default()
-                },
+                estimate: ResourceEstimate::default().set_concurrency_slots(1),
                 resource_reservation: None,
                 invocation: McpInvocation { input: json!({}) },
             },
@@ -1190,11 +1329,9 @@ async fn mcp_runtime_enforces_output_limit_and_releases_reservation() {
                 package: &package,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope,
-                estimate: ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    output_bytes: Some(10_000),
-                    ..ResourceEstimate::default()
-                },
+                estimate: ResourceEstimate::default()
+                    .set_concurrency_slots(1)
+                    .set_output_bytes(10_000),
                 resource_reservation: None,
                 invocation: McpInvocation { input: json!({}) },
             },
@@ -1232,11 +1369,9 @@ async fn mcp_runtime_can_enforce_client_reported_output_size_without_serializing
                 package: &package,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope,
-                estimate: ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    output_bytes: Some(10_000),
-                    ..ResourceEstimate::default()
-                },
+                estimate: ResourceEstimate::default()
+                    .set_concurrency_slots(1)
+                    .set_output_bytes(10_000),
                 resource_reservation: None,
                 invocation: McpInvocation { input: json!({}) },
             },
@@ -1277,11 +1412,9 @@ async fn mcp_runtime_rejects_output_when_adapter_under_reports_size() {
                 package: &package,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope,
-                estimate: ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    output_bytes: Some(10_000),
-                    ..ResourceEstimate::default()
-                },
+                estimate: ResourceEstimate::default()
+                    .set_concurrency_slots(1)
+                    .set_output_bytes(10_000),
                 resource_reservation: None,
                 invocation: McpInvocation { input: json!({}) },
             },
@@ -1339,6 +1472,10 @@ enum RecordedResponseMode {
     Json,
     AuthRequired,
     JsonMissingProtocolVersion,
+    DeepOpenApiSchema,
+    InvalidToolCatalog,
+    MixedShapeInvalidCatalog,
+    LongToolDescription,
     Sse,
 }
 
@@ -1373,6 +1510,38 @@ impl RecordingRuntimeEgress {
     fn json_rpc_without_protocol_version() -> Self {
         Self {
             mode: RecordedResponseMode::JsonMissingProtocolVersion,
+            protocol_version: "2025-06-18",
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn long_tool_description() -> Self {
+        Self {
+            mode: RecordedResponseMode::LongToolDescription,
+            protocol_version: "2025-06-18",
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn deep_openapi_schema() -> Self {
+        Self {
+            mode: RecordedResponseMode::DeepOpenApiSchema,
+            protocol_version: "2025-06-18",
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn invalid_tool_catalog() -> Self {
+        Self {
+            mode: RecordedResponseMode::InvalidToolCatalog,
+            protocol_version: "2025-06-18",
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn mixed_shape_invalid_catalog() -> Self {
+        Self {
+            mode: RecordedResponseMode::MixedShapeInvalidCatalog,
             protocol_version: "2025-06-18",
             requests: Arc::new(Mutex::new(Vec::new())),
         }
@@ -1442,13 +1611,15 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
                 let id = json_rpc_id(&request.body);
                 match self.mode {
                     RecordedResponseMode::Json
-                    | RecordedResponseMode::JsonMissingProtocolVersion => {
-                        Ok(runtime_json_response(
-                            id,
-                            json!({"content":[{"type":"text","text":"ok"}],"isError":false}),
-                            vec![],
-                        ))
-                    }
+                    | RecordedResponseMode::JsonMissingProtocolVersion
+                    | RecordedResponseMode::DeepOpenApiSchema
+                    | RecordedResponseMode::InvalidToolCatalog
+                    | RecordedResponseMode::MixedShapeInvalidCatalog
+                    | RecordedResponseMode::LongToolDescription => Ok(runtime_json_response(
+                        id,
+                        json!({"content":[{"type":"text","text":"ok"}],"isError":false}),
+                        vec![],
+                    )),
                     RecordedResponseMode::Sse => Ok(runtime_sse_response(
                         id,
                         json!({"content":[{"type":"text","text":"ok from sse"}],"isError":false}),
@@ -1460,11 +1631,77 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
             }
             "tools/list" => {
                 let id = json_rpc_id(&request.body);
+                if self.mode == RecordedResponseMode::DeepOpenApiSchema {
+                    let mut nested = json!({"type": "string"});
+                    for _ in 0..5 {
+                        nested = json!({
+                            "type": "object",
+                            "properties": {"next": nested}
+                        });
+                    }
+                    let tools = (0..24)
+                        .map(|index| {
+                            json!({
+                                "name": format!("document.update-{index}"),
+                                "description": "Update a hosted document",
+                                "inputSchema": if index == 0 {
+                                    nested.clone()
+                                } else {
+                                    json!({"type": "object"})
+                                }
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    return Ok(runtime_json_response(id, json!({ "tools": tools }), vec![]));
+                }
+                if self.mode == RecordedResponseMode::InvalidToolCatalog {
+                    return Ok(runtime_json_response(
+                        id,
+                        json!({
+                            "tools": [{
+                                "name": "UnsafeUppercaseName",
+                                "description": "the only tool is shape-invalid, so nothing publishes",
+                                "inputSchema": {"type": "object"}
+                            }]
+                        }),
+                        vec![],
+                    ));
+                }
+                if self.mode == RecordedResponseMode::MixedShapeInvalidCatalog {
+                    return Ok(runtime_json_response(
+                        id,
+                        json!({
+                            "tools": [
+                                {
+                                    "name": "document.search",
+                                    "description": "Search hosted documents",
+                                    "inputSchema": {"type": "object"}
+                                },
+                                {
+                                    "name": "UppercaseName",
+                                    "description": "shape-invalid name is skipped, not fatal",
+                                    "inputSchema": {"type": "object"}
+                                },
+                                {
+                                    "name": "document.update",
+                                    "description": "Update a hosted document",
+                                    "inputSchema": {"type": "object"}
+                                }
+                            ]
+                        }),
+                        vec![],
+                    ));
+                }
+                let search_description = if self.mode == RecordedResponseMode::LongToolDescription {
+                    "x".repeat(7_115)
+                } else {
+                    "Search GitHub issues\nacross repositories".to_string()
+                };
                 let result = json!({
                     "tools": [
                         {
                             "name": "search",
-                            "description": "Search GitHub issues\nacross repositories",
+                            "description": search_description,
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
@@ -1493,7 +1730,11 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
                 });
                 match self.mode {
                     RecordedResponseMode::Json
-                    | RecordedResponseMode::JsonMissingProtocolVersion => {
+                    | RecordedResponseMode::JsonMissingProtocolVersion
+                    | RecordedResponseMode::DeepOpenApiSchema
+                    | RecordedResponseMode::InvalidToolCatalog
+                    | RecordedResponseMode::MixedShapeInvalidCatalog
+                    | RecordedResponseMode::LongToolDescription => {
                         Ok(runtime_json_response(id, result, vec![]))
                     }
                     RecordedResponseMode::Sse => Ok(runtime_sse_response(id, result)),
@@ -1965,6 +2206,10 @@ impl ResourceGovernor for ReleaseFailingGovernor {
         self.inner.reconcile(reservation_id, actual)
     }
 
+    fn validate_reservation(&self, reservation: &ResourceReservation) -> Result<(), ResourceError> {
+        self.inner.validate_reservation(reservation)
+    }
+
     fn release(
         &self,
         reservation_id: ResourceReservationId,
@@ -1981,7 +2226,7 @@ impl ResourceGovernor for ReleaseFailingGovernor {
 }
 
 fn package_from_manifest(manifest: &str) -> ExtensionPackage {
-    let manifest = ExtensionManifest::parse_with_optional_host_api_contracts(
+    let manifest = ExtensionManifest::parse(
         manifest,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),

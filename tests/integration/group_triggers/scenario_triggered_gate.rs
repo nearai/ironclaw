@@ -124,7 +124,7 @@ pub async fn run_deny(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 ///
 /// Drives a triggered fire to a real `BlockedApproval` gate like
 /// [`run_approve`], then resumes the SAME `run_id` under a mismatched tenant
-/// scope. `InMemoryTurnStateStore::resume_turn_once` checks `record.scope !=
+/// scope. The turn-state store's `resume_turn_once` checks `record.scope !=
 /// request.scope` BEFORE consulting gate/precondition/actor, so this
 /// deterministically hits `TurnError::ScopeNotFound` and reinserts the
 /// taken-out record unconditionally — the gate's `BlockedApproval` state is

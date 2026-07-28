@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironclaw_host_api::ThreadId;
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelRequest, HostManagedModelResponse,
 };
@@ -63,6 +63,7 @@ impl ScriptedReply {
         HostManagedModelResponse::assistant_reply(self.text).with_usage(LoopModelUsage {
             input_tokens: self.input_tokens,
             output_tokens: self.output_tokens,
+            ..LoopModelUsage::default()
         })
     }
 }

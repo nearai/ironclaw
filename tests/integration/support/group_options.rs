@@ -17,9 +17,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ironclaw_host_api::CapabilityId;
-use ironclaw_loop_support::CapabilityAllowSet;
-use ironclaw_reborn::loop_driver_host::HookDispatcherBuilderFactory;
-use ironclaw_reborn::runtime::ToolDisclosureMode;
+use ironclaw_loop_host::CapabilityAllowSet;
+use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
+use ironclaw_runner::runtime::ToolDisclosureMode;
 use ironclaw_turns::InMemoryTurnEventSink;
 use ironclaw_turns::run_profile::{CommunicationContextProvider, InstructionSafetyContext};
 
@@ -43,6 +43,20 @@ impl RebornIntegrationGroupBuilder {
     /// C-SAFETY). Defaults to `None` (no banner, matching today's behavior).
     pub fn safety_context(mut self, ctx: InstructionSafetyContext) -> Self {
         self.safety_context = Some(ctx);
+        self
+    }
+
+    /// E-MEMORY: bind `provider` as the group's memory provider with the
+    /// lifecycle set its manifest declares. The group's ONE planned runtime
+    /// derives its memory consumers through the production
+    /// `memory_lifecycle_consumers` helper, so an undeclared hook is never
+    /// queried, recorded to, or profile-read from.
+    pub fn with_bound_memory_provider(
+        mut self,
+        provider: std::sync::Arc<dyn ironclaw_memory::MemoryService>,
+        lifecycle: ironclaw_host_api::MemoryDescriptor,
+    ) -> Self {
+        self.bound_memory = Some((provider, lifecycle));
         self
     }
 
@@ -149,8 +163,18 @@ impl RebornIntegrationGroupBuilder {
         self
     }
 
+    /// Wire a raw trajectory observer into the group's ONE production
+    /// capability-port factory. Defaults `None`.
+    pub fn with_raw_trajectory_observer(
+        mut self,
+        observer: Arc<dyn ironclaw_reborn_composition::RebornTrajectoryObserver>,
+    ) -> Self {
+        self.trajectory_observer = Some(observer);
+        self
+    }
+
     /// Shorten the group's turn-state store lease TTL (default 90s,
-    /// `InMemoryTurnStateStoreLimits::default()`) for lease-expiry-under-a-
+    /// `TurnStateStoreLimits::default()`) for lease-expiry-under-a-
     /// wedged-tool coverage (see `tests/integration/lease_wedge.rs`).
     /// `None` (default) leaves today's behavior byte-identical.
     pub fn with_runner_lease_ttl_for_test(mut self, ttl: chrono::Duration) -> Self {
@@ -168,10 +192,17 @@ impl RebornIntegrationGroupBuilder {
         self
     }
 
+    /// Override the canonical default-family iteration limit for a focused
+    /// whole-turn recovery scenario. Production defaults remain unchanged.
+    pub fn with_iteration_limit_for_test(mut self, limit: std::num::NonZeroU32) -> Self {
+        self.planned_default_iteration_limit = Some(limit);
+        self
+    }
+
     /// Wire the REAL approval/auth interaction services (via the group's
     /// `HostRuntimeCapabilityHarness`'s retained `RebornServices`, over the
     /// group's own shared turn-state store) into every thread's
-    /// `DefaultProductWorkflow`, so `submit_inbound(ApprovalResolution/
+    /// `DefaultProductSurface`, so `submit_inbound(ApprovalResolution/
     /// AuthResolution)` dispatches through the SAME arms a real adapter reply
     /// hits, instead of every workflow's default `Rejecting*InteractionService`
     /// stubs. Requires a `HostRuntime` capability backend built via

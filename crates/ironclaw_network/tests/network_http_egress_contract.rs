@@ -302,13 +302,18 @@ async fn http_egress_rejects_userinfo_url_before_transport() {
 }
 
 #[tokio::test]
-async fn reqwest_transport_does_not_follow_redirects() {
+async fn http_egress_denies_redirect_to_host_outside_policy() {
+    // The HTTP client stays pinned to `Policy::none()`, so the 302 surfaces to
+    // the host-mediated egress, which follows redirects itself — but only after
+    // re-authorizing the new destination against the caller's network policy. A
+    // `Location` pointing off the allowlist must fail closed rather than
+    // silently fetch an attacker-chosen host (SSRF).
     let (url, server) = single_response_server(
         "HTTP/1.1 302 Found\r\nLocation: http://example.invalid/\r\nContent-Length: 0\r\n\r\n",
     );
     let egress = PolicyNetworkHttpEgress::new(ReqwestNetworkTransport::new(Duration::from_secs(2)));
 
-    let response = egress
+    let error = egress
         .execute(NetworkHttpRequest {
             scope: sample_scope(),
             method: NetworkMethod::Get,
@@ -320,12 +325,101 @@ async fn reqwest_transport_does_not_follow_redirects() {
             timeout_ms: None,
         })
         .await
-        .expect("redirect responses should be returned, not followed");
+        .expect_err("a redirect off the policy allowlist must fail closed");
     server.join().unwrap();
 
+    assert!(matches!(error, NetworkHttpError::PolicyDenied { .. }));
+}
+
+#[tokio::test]
+async fn http_egress_follows_allowlisted_redirect_and_strips_credentials() {
+    // A redirect to a host the policy allows is followed, but the host-injected
+    // Authorization header must NOT travel to the redirect destination — GitHub
+    // job-log downloads redirect to a pre-signed blob host that needs no token,
+    // and forwarding the token there would leak it off its audience host.
+    let transport = ScriptedTransport::new(vec![
+        redirect_response("https://logs.example.test/blob/abc"),
+        ok_response("logdata"),
+    ]);
+    let requests = transport.requests.clone();
+    let mut allow = policy("api.example.test", Some(443), true, None);
+    allow.allowed_targets.push(NetworkTargetPattern {
+        scheme: None,
+        host_pattern: "logs.example.test".to_string(),
+        port: Some(443),
+    });
+    let egress = PolicyNetworkHttpEgress::new_with_resolver(
+        transport,
+        StaticResolver::new(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]),
+    );
+
+    let response = egress
+        .execute(NetworkHttpRequest {
+            scope: sample_scope(),
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/logs".to_string(),
+            headers: vec![("authorization".to_string(), "Bearer sk-secret".to_string())],
+            body: vec![],
+            policy: allow,
+            response_body_limit: Some(1024),
+            timeout_ms: None,
+        })
+        .await
+        .expect("an allowlisted redirect should be followed");
+
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body, b"logdata");
+    let requests = requests.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        2,
+        "one initial request plus one followed hop"
+    );
+    assert!(
+        requests[0]
+            .headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("authorization")),
+        "the original hop carries the injected credential"
+    );
+    assert_eq!(requests[1].url, "https://logs.example.test/blob/abc");
+    assert!(
+        requests[1]
+            .headers
+            .iter()
+            .all(|(name, _)| !name.eq_ignore_ascii_case("authorization")),
+        "the credential must be stripped before following a cross-host redirect"
+    );
+}
+
+#[tokio::test]
+async fn http_egress_bounds_redirect_hops() {
+    // Even when every hop targets an allowlisted host, the loop must stop after
+    // the bound and return the last response instead of following forever.
+    let transport = ScriptedTransport::new(vec![
+        redirect_response("https://api.example.test/1"),
+        redirect_response("https://api.example.test/2"),
+        redirect_response("https://api.example.test/3"),
+        redirect_response("https://api.example.test/4"),
+        redirect_response("https://api.example.test/5"),
+    ]);
+    let requests = transport.requests.clone();
+    let egress = PolicyNetworkHttpEgress::new_with_resolver(
+        transport,
+        StaticResolver::new(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]),
+    );
+
+    let response = egress
+        .execute(sample_request("https://api.example.test/start"))
+        .await
+        .expect("bounded redirects should return the final response");
+
     assert_eq!(response.status, 302);
-    assert_eq!(response.usage.request_bytes, 0);
-    assert_eq!(response.usage.response_bytes, 0);
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        4,
+        "initial request plus at most three followed hops"
+    );
 }
 
 #[tokio::test]
@@ -551,6 +645,62 @@ impl NetworkHttpTransport for RecordingTransport {
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {
         self.requests.lock().unwrap().push(request);
         self.response.clone()
+    }
+}
+
+/// Transport that returns a scripted queue of responses (one per call) and
+/// records every request it receives — used to drive multi-hop redirect paths.
+#[derive(Clone)]
+struct ScriptedTransport {
+    responses: Arc<Mutex<std::collections::VecDeque<NetworkHttpResponse>>>,
+    requests: Arc<Mutex<Vec<NetworkTransportRequest>>>,
+}
+
+impl ScriptedTransport {
+    fn new(responses: Vec<NetworkHttpResponse>) -> Self {
+        Self {
+            responses: Arc::new(Mutex::new(responses.into())),
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl NetworkHttpTransport for ScriptedTransport {
+    async fn execute(
+        &self,
+        request: NetworkTransportRequest,
+    ) -> Result<NetworkHttpResponse, NetworkHttpError> {
+        self.requests.lock().unwrap().push(request);
+        let next = self.responses.lock().unwrap().pop_front();
+        Ok(next.unwrap_or_else(|| NetworkHttpResponse {
+            status: 200,
+            headers: vec![],
+            body: b"scripted-exhausted".to_vec(),
+            usage: NetworkUsage::default(),
+        }))
+    }
+}
+
+fn redirect_response(location: &str) -> NetworkHttpResponse {
+    NetworkHttpResponse {
+        status: 302,
+        headers: vec![("location".to_string(), location.to_string())],
+        body: vec![],
+        usage: NetworkUsage::default(),
+    }
+}
+
+fn ok_response(body: &str) -> NetworkHttpResponse {
+    NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: body.as_bytes().to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 0,
+            response_bytes: body.len() as u64,
+            resolved_ip: None,
+        },
     }
 }
 

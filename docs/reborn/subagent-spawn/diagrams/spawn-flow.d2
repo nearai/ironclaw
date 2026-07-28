@@ -9,11 +9,11 @@ title: "Subagent spawn flow — background and blocking" {
 }
 
 parent: "Parent agent loop"
-port: "Capability port\n(ironclaw_loop_support)"
+port: "Capability port\n(ironclaw_loop_host)"
 coord: "TurnCoordinator\n(ironclaw_turns)"
 pool: "Runner-worker pool"
 child: "Child run\n(subagent family)"
-obs: "SubagentCompletionObserver\n(ironclaw_reborn)"
+obs: "SubagentCompletionObserver\n(ironclaw_runner)"
 
 parent -> port: "invoke spawn_subagent(flavor, goal, run_in_background)"
 

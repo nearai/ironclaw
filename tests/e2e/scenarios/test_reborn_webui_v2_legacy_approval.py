@@ -161,7 +161,7 @@ async def _open_stubbed_approval_thread(
         handle_resolve,
     )
 
-    await page.goto(f"{reborn_v2_server}/v2/chat/{THREAD_ID}?token={REBORN_V2_AUTH_TOKEN}")
+    await page.goto(f"{reborn_v2_server}/chat/{THREAD_ID}?token={REBORN_V2_AUTH_TOKEN}")
     await expect(page.locator(SEL_V2["chat_composer"])).to_be_visible(timeout=15000)
     await expect(page.locator(SEL_V2["msg_user"]).first).to_contain_text(
         "run a gated command", timeout=15000
@@ -273,7 +273,7 @@ async def test_reborn_legacy_approval_buttons_resolve_gate(
         assert f"/threads/{THREAD_ID}/runs/{RUN_ID}/gates/gate-deny/resolve" in (
             resolve_requests[2]["url"]
         )
-        assert resolve_requests[2]["body"]["resolution"] == "denied"
+        assert resolve_requests[2]["body"]["resolution"] == "declined"
         assert resolve_requests[2]["body"]["always"] is False
     finally:
         await context.close()
@@ -310,7 +310,7 @@ async def test_reborn_legacy_approval_deny_shows_declined_activity(
         assert f"/threads/{THREAD_ID}/runs/{RUN_ID}/gates/gate-denied-visible/resolve" in (
             resolve_requests[0]["url"]
         )
-        assert resolve_requests[0]["body"]["resolution"] == "denied"
+        assert resolve_requests[0]["body"]["resolution"] == "declined"
         assert resolve_requests[0]["body"]["always"] is False
     finally:
         await context.close()

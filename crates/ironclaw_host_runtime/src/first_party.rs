@@ -11,8 +11,8 @@ use std::{collections::HashMap, fmt, sync::Arc};
 use async_trait::async_trait;
 use ironclaw_host_api::{
     CapabilityDisplayOutputPreview, CapabilityId, DispatchFailureDetail, DispatchInputIssue,
-    MountView, ResourceEstimate, ResourceScope, ResourceUsage, RuntimeCredentialAuthRequirement,
-    RuntimeDispatchErrorKind, SecretHandle,
+    HostRemediation, InvocationOrigin, MountView, ResourceEstimate, ResourceScope, ResourceUsage,
+    RunId, RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, SecretHandle, UserId,
 };
 use serde_json::Value;
 
@@ -28,6 +28,15 @@ use crate::InvocationServices;
 pub struct FirstPartyCapabilityRequest {
     pub capability_id: CapabilityId,
     pub scope: ResourceScope,
+    pub authenticated_actor_user_id: Option<UserId>,
+    /// Loop turn-run identity forwarded from the dispatch chain. `None` for
+    /// non-loop callers. Handlers that enforce within-run continuity (e.g.
+    /// coding read-before-edit) key state on it.
+    pub run_id: Option<RunId>,
+    /// Authoritative origin of this capability call. Trigger/routine mutation
+    /// policy consumes this typed value and never re-derives it from
+    /// presentation data.
+    pub origin: Option<InvocationOrigin>,
     pub estimate: ResourceEstimate,
     pub mounts: Option<MountView>,
     pub services: InvocationServices,
@@ -40,6 +49,12 @@ impl fmt::Debug for FirstPartyCapabilityRequest {
             .debug_struct("FirstPartyCapabilityRequest")
             .field("capability_id", &self.capability_id)
             .field("scope", &self.scope)
+            .field(
+                "authenticated_actor_user_id",
+                &self.authenticated_actor_user_id,
+            )
+            .field("run_id", &self.run_id)
+            .field("origin", &self.origin)
             .field("estimate", &self.estimate)
             .field("mounts", &self.mounts)
             .field("services", &self.services)
@@ -52,6 +67,9 @@ impl PartialEq for FirstPartyCapabilityRequest {
     fn eq(&self, other: &Self) -> bool {
         self.capability_id == other.capability_id
             && self.scope == other.scope
+            && self.authenticated_actor_user_id == other.authenticated_actor_user_id
+            && self.run_id == other.run_id
+            && self.origin == other.origin
             && self.estimate == other.estimate
             && self.mounts == other.mounts
             && self.input == other.input
@@ -70,16 +88,23 @@ impl FirstPartyCapabilityRequest {
         Self {
             capability_id,
             scope,
+            authenticated_actor_user_id: None,
+            run_id: None,
+            origin: Some(InvocationOrigin::Product(
+                ironclaw_host_api::ProductKind::new("test").expect("valid test product kind"), // safety: test-support-only static fixture.
+            )),
             estimate: ResourceEstimate::default(),
             mounts: None,
             services: InvocationServices {
                 filesystem: Arc::new(ironclaw_filesystem::InMemoryBackend::new()),
                 runtime_http_egress,
                 tool_call_http_egress: None,
-                process: Arc::new(crate::LocalHostProcessPort::new()),
+                runtime_secret_material_stager: None,
+                process: Arc::new(crate::HostProcessPort::new()),
                 secret_store: None,
                 audit_sink: None,
                 unsafe_raw_diagnostics_allowed: false,
+                post_edit_check: None,
             },
             input,
         }
@@ -171,6 +196,73 @@ impl FirstPartyCapabilityError {
             kind: RuntimeDispatchErrorKind::InputEncode,
             safe_summary: Some(safe_summary.into()),
             detail: Some(Box::new(DispatchFailureDetail::InvalidInput { issues })),
+            usage: None,
+        }
+    }
+
+    /// Construct a dispatch failure carrying HOST-AUTHORED operator remediation
+    /// on the trusted text channel.
+    ///
+    /// Use this — not [`Self::dispatch_with_diagnostic`] — whenever the text is
+    /// a host-authored constant (or built entirely from host-authored
+    /// constants): a `config set` instruction, a console URL, an operator
+    /// enable step. Those survive intact here; on the untrusted diagnostic
+    /// channel they collapse to "capability summary unavailable" at the
+    /// host_api boundary, which is the bug this constructor exists to prevent.
+    ///
+    /// **Never** pass capability output, a backend error string, or any other
+    /// untrusted text — that is [`Self::dispatch_with_diagnostic`]'s job. See
+    /// [`HostRemediation`] for the invariant.
+    ///
+    /// Falls back to the untrusted diagnostic channel if the text fails the
+    /// remediation value guard, so a mistake degrades the text rather than
+    /// dropping the whole error. Production strings are pinned against that
+    /// fallback by `host_remediation_texts_survive_the_whole_path`.
+    pub fn dispatch_with_host_remediation(
+        kind: RuntimeDispatchErrorKind,
+        safe_summary: Option<String>,
+        remediation_text: impl Into<String>,
+    ) -> Self {
+        let remediation_text = remediation_text.into();
+        match HostRemediation::new(remediation_text.clone()) {
+            Ok(text) => Self::Dispatch {
+                kind,
+                safe_summary,
+                detail: Some(Box::new(DispatchFailureDetail::HostRemediation { text })),
+                usage: None,
+            },
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    "host-authored remediation failed the trusted-channel value guard; \
+                     falling back to the untrusted diagnostic channel"
+                );
+                Self::dispatch_with_diagnostic(kind, safe_summary, remediation_text)
+            }
+        }
+    }
+
+    /// Construct a dispatch failure carrying an UNTRUSTED free-text cause on the
+    /// model-visible diagnostic detail channel rather than `safe_summary`.
+    ///
+    /// Use this for a raw failure cause the strict `safe_summary` validator
+    /// rejects (a path, newlines from a shell error). The text is scrubbed and
+    /// then squeezed through the full `SafeSummary` contract at the host_api
+    /// boundary, so a path- or URL-shaped value degrades to the placeholder —
+    /// which is correct for untrusted output and WRONG for host-authored
+    /// remediation. For the latter use
+    /// [`Self::dispatch_with_host_remediation`].
+    pub fn dispatch_with_diagnostic(
+        kind: RuntimeDispatchErrorKind,
+        safe_summary: Option<String>,
+        diagnostic_text: impl Into<String>,
+    ) -> Self {
+        Self::Dispatch {
+            kind,
+            safe_summary,
+            detail: Some(Box::new(DispatchFailureDetail::Diagnostic {
+                text: diagnostic_text.into(),
+            })),
             usage: None,
         }
     }
@@ -317,6 +409,17 @@ impl FirstPartyCapabilityRegistry {
         self.handlers.insert(capability_id, handler);
     }
 
+    /// `insert_handler` for an already type-erased handler — used by callers
+    /// that receive the handler as `Arc<dyn FirstPartyCapabilityHandler>`
+    /// (e.g. the bound memory provider's tool handler from composition).
+    pub fn insert_handler_dyn(
+        &mut self,
+        capability_id: CapabilityId,
+        handler: Arc<dyn FirstPartyCapabilityHandler>,
+    ) {
+        self.handlers.insert(capability_id, handler);
+    }
+
     pub fn remove_handler(&mut self, capability_id: &CapabilityId) {
         self.handlers.remove(capability_id);
     }
@@ -388,10 +491,7 @@ mod tests {
     #[test]
     fn first_party_capability_error_with_usage_preserves_required_secrets() {
         let handle = SecretHandle::new("google-access-token").unwrap();
-        let usage = ResourceUsage {
-            network_egress_bytes: 42,
-            ..ResourceUsage::default()
-        };
+        let usage = ResourceUsage::default().set_network_egress_bytes(42);
         let error = FirstPartyCapabilityError::auth_required_with(vec![handle.clone()])
             .with_usage(usage.clone());
 
@@ -416,14 +516,34 @@ mod tests {
     #[test]
     fn first_party_capability_error_with_usage_on_dispatch_variant() {
         use ironclaw_host_api::RuntimeDispatchErrorKind;
-        let error = FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend).with_usage(
-            ResourceUsage {
-                network_egress_bytes: 10,
-                ..ResourceUsage::default()
-            },
-        );
+        let error = FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
+            .with_usage(ResourceUsage::default().set_network_egress_bytes(10));
         assert_eq!(error.kind(), Some(RuntimeDispatchErrorKind::Backend));
         assert_eq!(error.required_secrets(), None);
         assert!(!error.is_auth_required());
+    }
+
+    #[test]
+    fn dispatch_with_diagnostic_carries_free_text_detail_and_optional_safe_summary() {
+        use ironclaw_host_api::RuntimeDispatchErrorKind;
+        let error = FirstPartyCapabilityError::dispatch_with_diagnostic(
+            RuntimeDispatchErrorKind::OperationFailed,
+            None,
+            "config set google.client_secret <value>".to_string(),
+        );
+        assert_eq!(
+            error.kind(),
+            Some(RuntimeDispatchErrorKind::OperationFailed)
+        );
+        assert_eq!(error.safe_summary(), None);
+        let FirstPartyCapabilityError::Dispatch { detail, .. } = &error else {
+            panic!("expected Dispatch variant");
+        };
+        let ironclaw_host_api::DispatchFailureDetail::Diagnostic { text } =
+            detail.as_deref().expect("diagnostic detail must be set")
+        else {
+            panic!("expected Diagnostic detail");
+        };
+        assert!(text.contains("client_secret"));
     }
 }

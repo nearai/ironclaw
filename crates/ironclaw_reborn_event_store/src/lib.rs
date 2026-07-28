@@ -1,3 +1,4 @@
+// arch-exempt: large_file, adds Postgres TLS preflight helper in existing backend module, plan #8
 //! Reborn-owned durable event and audit store backends.
 //!
 //! This crate is the production-composition side of the Reborn event
@@ -37,10 +38,8 @@ use ironclaw_events::{
     DurableAuditLog, DurableEventLog, EventCursor, EventError, EventLogEntry, EventReplay,
     EventStreamKey, InMemoryDurableAuditLog, InMemoryDurableEventLog, ReadScope, RuntimeEvent,
 };
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{AgentId, AuditEnvelope};
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -48,12 +47,10 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 
 mod coalescing_sink;
-mod filesystem_store;
+mod durable_log;
 
 pub use coalescing_sink::{CoalescingEventSink, EventBatchConfig};
-pub use filesystem_store::{FilesystemDurableAuditLog, FilesystemDurableEventLog};
-
-#[cfg(feature = "postgres")]
+pub use durable_log::{FilesystemDurableAuditLog, FilesystemDurableEventLog};
 pub const DEFAULT_POSTGRES_POOL_MAX_SIZE: usize = 2;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -86,7 +83,6 @@ impl std::str::FromStr for RebornPostgresSslMode {
 
 /// Open a PostgreSQL pool using the same TLS policy as the production event
 /// store backend.
-#[cfg(feature = "postgres")]
 pub fn open_postgres_pool(
     url: SecretString,
 ) -> Result<deadpool_postgres::Pool, RebornEventStoreError> {
@@ -94,7 +90,6 @@ pub fn open_postgres_pool(
 }
 
 /// Open a PostgreSQL pool with an explicit maximum connection count.
-#[cfg(feature = "postgres")]
 pub fn open_postgres_pool_with_max_size(
     url: SecretString,
     max_size: usize,
@@ -103,13 +98,20 @@ pub fn open_postgres_pool_with_max_size(
 }
 
 /// Open a PostgreSQL pool with explicit TLS options.
-#[cfg(feature = "postgres")]
 pub fn open_postgres_pool_with_tls_options(
     url: SecretString,
     max_size: usize,
     tls_options: PostgresPoolTlsOptions,
 ) -> Result<deadpool_postgres::Pool, RebornEventStoreError> {
     postgres_backed::build_pool(url, max_size, tls_options)
+}
+
+/// Validate PostgreSQL TLS policy without opening a network connection.
+pub fn validate_postgres_pool_tls_options(
+    url: &SecretString,
+    tls_options: PostgresPoolTlsOptions,
+) -> Result<(), RebornEventStoreError> {
+    postgres_backed::validate_tls_options(url, tls_options)
 }
 
 /// Backend configuration for Reborn durable event/audit stores.
@@ -144,7 +146,6 @@ pub enum RebornEventStoreConfig {
     ///
     /// Hosted production uses this to avoid opening a second independent
     /// Postgres pool for event logs when the substrate already owns a pool.
-    #[cfg(feature = "postgres")]
     PostgresPool { pool: deadpool_postgres::Pool },
     /// libSQL backend configuration. The store opens a
     /// [`LibSqlRootFilesystem`](ironclaw_filesystem::LibSqlRootFilesystem)
@@ -209,8 +210,6 @@ impl RebornEventStoreError {
     fn io(operation: &'static str, source: std::io::Error) -> Self {
         Self::Io { operation, source }
     }
-
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
     fn backend<E>(backend: &'static str, operation: &'static str, _source: E) -> Self {
         Self::BackendOperation { backend, operation }
     }
@@ -248,20 +247,8 @@ pub async fn build_reborn_event_stores(
             })
         }
         RebornEventStoreConfig::Postgres { url, tls_options } => {
-            #[cfg(feature = "postgres")]
-            {
-                postgres_backed::build(url, tls_options).await
-            }
-            #[cfg(not(feature = "postgres"))]
-            {
-                let _ = tls_options;
-                let _ = url;
-                Err(RebornEventStoreError::BackendUnavailable {
-                    backend: "postgres",
-                })
-            }
+            postgres_backed::build(url, tls_options).await
         }
-        #[cfg(feature = "postgres")]
         RebornEventStoreConfig::PostgresPool { pool } => {
             postgres_backed::build_from_pool(pool).await
         }
@@ -272,15 +259,7 @@ pub async fn build_reborn_event_stores(
             if profile == RebornProfile::Production {
                 validate_production_libsql_target(&path_or_url)?;
             }
-            #[cfg(feature = "libsql")]
-            {
-                libsql_backed::build(path_or_url, auth_token).await
-            }
-            #[cfg(not(feature = "libsql"))]
-            {
-                let _ = (path_or_url, auth_token);
-                Err(RebornEventStoreError::BackendUnavailable { backend: "libsql" })
-            }
+            libsql_backed::build(path_or_url, auth_token).await
         }
     }
 }
@@ -294,7 +273,6 @@ pub async fn build_reborn_event_stores(
 ///
 /// The caller must run any backend schema migrations before calling this
 /// helper. Config-based builders perform their own migration step.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub fn build_reborn_event_stores_from_root_filesystem<F>(
     root: Arc<F>,
 ) -> Result<RebornEventStores, RebornEventStoreError>
@@ -303,8 +281,6 @@ where
 {
     wrap_root_filesystem_as_event_stores(root)
 }
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn wrap_root_filesystem_as_event_stores<F>(
     root: Arc<F>,
 ) -> Result<RebornEventStores, RebornEventStoreError>
@@ -321,7 +297,6 @@ where
 /// Wrap a [`RootFilesystem`] in a [`ScopedFilesystem`] whose [`MountView`]
 /// grants the `/events` plane the permissions the durable log needs
 /// (append → write, tail → read+list).
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn build_events_scoped_filesystem<F>(
     root: Arc<F>,
 ) -> Result<Arc<ScopedFilesystem<F>>, RebornEventStoreError>
@@ -419,8 +394,6 @@ fn validate_production_libsql_target(path_or_url: &str) -> Result<(), RebornEven
         | LibsqlTargetClass::LocalRelative => Ok(()),
     }
 }
-
-#[cfg(feature = "libsql")]
 mod libsql_backed {
     //! libSQL-backed [`RootFilesystem`] construction for the durable event
     //! store. The connection lives behind the standard
@@ -545,8 +518,6 @@ mod libsql_backed {
         }
     }
 }
-
-#[cfg(feature = "postgres")]
 mod postgres_backed {
     //! PostgreSQL-backed [`RootFilesystem`] construction for the durable
     //! event store. Mirrors `libsql_backed::build`: parse the URL, enforce
@@ -608,6 +579,7 @@ mod postgres_backed {
         if let Some(ssl_mode) = tls_options.ssl_mode_override {
             pg_config.ssl_mode(ssl_mode.into());
         }
+        validate_remote_tls_policy(&mut pg_config, tls_options)?;
         let manager_config = ManagerConfig {
             recycling_method: RecyclingMethod::Fast,
         };
@@ -655,6 +627,38 @@ mod postgres_backed {
             .runtime(Runtime::Tokio1)
             .build()
             .map_err(|source| RebornEventStoreError::backend("postgres", "build pool", source))
+    }
+
+    pub(super) fn validate_tls_options(
+        url: &SecretString,
+        tls_options: PostgresPoolTlsOptions,
+    ) -> Result<(), RebornEventStoreError> {
+        let raw_url = url.expose_secret();
+        let mut pg_config: Config = raw_url.parse().map_err(|source| {
+            RebornEventStoreError::backend("postgres", "parse connection string", source)
+        })?;
+        if let Some(ssl_mode) = tls_options.ssl_mode_override {
+            pg_config.ssl_mode(ssl_mode.into());
+        }
+        validate_remote_tls_policy(&mut pg_config, tls_options)
+    }
+
+    fn validate_remote_tls_policy(
+        pg_config: &mut Config,
+        tls_options: PostgresPoolTlsOptions,
+    ) -> Result<(), RebornEventStoreError> {
+        let local = is_local_postgres_config(pg_config);
+        let remote_cleartext = !local && matches!(pg_config.get_ssl_mode(), SslMode::Disable);
+        if remote_cleartext {
+            if !tls_options.allow_remote_cleartext {
+                return Err(RebornEventStoreError::RemotePostgresClearTextDisabled);
+            }
+            return Ok(());
+        }
+        if !local {
+            enforce_remote_ssl_mode(pg_config)?;
+        }
+        Ok(())
     }
 
     /// Returns true if the parsed Postgres `Config` targets only loopback
@@ -1981,8 +1985,6 @@ mod tests {
             Err(RebornEventStoreError::ProductionLibsqlAmbiguousTarget)
         ));
     }
-
-    #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn local_dev_still_allows_bare_relative_libsql_path() {
         // The bare-path rejection is a production-only policy. LocalDev /

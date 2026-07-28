@@ -2,7 +2,7 @@
 //!
 //! [`PolicySource`] is the extension point for host-controlled trust
 //! assignment. PR1b ships in-memory [`BundledRegistry`] and [`AdminConfig`]
-//! sources; [`SignedRegistry`] and [`LocalDevOverride`] are interface seams
+//! sources; [`SignedRegistry`] and [`DevTrustOverride`] are interface seams
 //! that real signature verification / dev-tool overrides will fill in
 //! later, but they expose enough shape that downstream wiring can target a
 //! stable surface today.
@@ -570,15 +570,15 @@ impl PolicySource for SignedRegistry {
     }
 }
 
-/// Local development override — interface seam for an opt-in,
+/// Development trust override — interface seam for an opt-in,
 /// administratively-blessed dev mode that lets a developer mark specific
-/// local packages as privileged for testing.
+/// packages as privileged for testing.
 ///
 /// PR1b ships only the shape. The future implementation will require
 /// explicit configuration (e.g., a CLI flag or a config file outside any
 /// user-writable location) and audit logging on every match. Without that
 /// configuration the source is inert.
-pub(crate) struct LocalDevOverride {
+pub(crate) struct DevTrustOverride {
     /// Packages the operator has explicitly opted in for elevated trust in
     /// development. Empty means the source has nothing to evaluate even
     /// once the implementation lands.
@@ -590,8 +590,8 @@ pub(crate) struct LocalDevOverride {
     enabled: bool,
 }
 
-impl LocalDevOverride {
-    /// Construct an inert `LocalDevOverride`. PR1b has no production opt-in
+impl DevTrustOverride {
+    /// Construct an inert `DevTrustOverride`. PR1b has no production opt-in
     /// path — the source is documented as future-compatible and never
     /// matches.
     pub(crate) fn inert() -> Self {
@@ -617,7 +617,7 @@ impl LocalDevOverride {
             .len()
     }
 
-    /// Test-only: construct a `LocalDevOverride` that has been "enabled"
+    /// Test-only: construct a `DevTrustOverride` that has been "enabled"
     /// and pre-staged with override entries.
     ///
     /// Even with this, [`PolicySource::evaluate`] returns `Ok(None)` —
@@ -637,15 +637,15 @@ impl LocalDevOverride {
     }
 }
 
-impl Default for LocalDevOverride {
+impl Default for DevTrustOverride {
     fn default() -> Self {
         Self::inert()
     }
 }
 
-impl PolicySource for LocalDevOverride {
+impl PolicySource for DevTrustOverride {
     fn name(&self) -> &'static str {
-        "local_dev_override"
+        "dev_trust_override"
     }
 
     fn as_any(&self) -> &dyn Any {

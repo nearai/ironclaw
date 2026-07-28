@@ -34,10 +34,18 @@ concurrency:
 
 env:
   # Tests must never touch the real OS keychain (macOS Keychain auth dialog /
-  # Linux Secret Service). Guarded by src/secrets/keychain.rs::os_keychain_suppressed:
+  # Linux Secret Service). Guarded by
+  # crates/ironclaw_secrets/src/keychain.rs::os_keychain_suppressed:
   # cfg!(test) covers unit tests; this covers integration/e2e that link the
   # non-cfg(test) library.
   IRONCLAW_DISABLE_OS_KEYCHAIN: "1"
+  # Pin wall-clock rendering inputs so a test cannot pass or fail on the
+  # runner's locale. Reborn renders model-visible time slices, and date/number
+  # formatting differs by locale, so an unpinned runner turns a formatting
+  # regression into an unreproducible flake. UTC also keeps recorded fixtures
+  # comparable with what a developer sees locally.
+  TZ: "UTC"
+  LANG: "C.UTF-8"
   # PR #5086 measured mold linking the heaviest Reborn build in parallel with
   # no OOM, so keep Cargo's default parallelism. If runner OOMs recur, restore
   # the previous one-job Cargo build serialization as the one-line fallback.
@@ -116,13 +124,28 @@ jobs:
                   [
                     .packages[]
                     | select(
-                        (.name | startswith("ironclaw_reborn"))
-                        or (.name | startswith("ironclaw_product"))
-                        or (.name == "ironclaw_architecture")
-                        or (.name == "ironclaw_slack_v2_adapter")
-                        or (.name == "ironclaw_telegram_v2_adapter")
-                        or (.name == "ironclaw_wasm_product_adapters")
-                        or (.name | startswith("ironclaw_webui_v2"))
+                        (
+                          (.name == "ironclaw")
+                          or (.name == "ironclaw_runner")
+                          or (.name | startswith("ironclaw_reborn"))
+                          or (.name | startswith("ironclaw_product"))
+                          or (.name == "ironclaw_architecture")
+                          or (.name == "ironclaw_slack_extension")
+                          or (.name == "ironclaw_telegram_extension")
+                          or (.name == "ironclaw_telegram_v2_adapter")
+                          or (.name | startswith("ironclaw_webui"))
+                        )
+                        # The root workspace package (test-only host for the
+                        # reborn integration [[test]] targets) matches
+                        # startswith("ironclaw_reborn") by NAME only. Its
+                        # `[[test]]` suites run via the dedicated root /
+                        # integration-coverage / group jobs — never as a
+                        # per-crate bucket, where `--all-targets` would
+                        # redundantly (and, for env-sensitive integration
+                        # suites, incorrectly) re-run them. Pre-Tier-B this was
+                        # implicit: the host package was `ironclaw_legacy`,
+                        # which never matched the allowlist.
+                        and (.name != "ironclaw_reborn_integration_tests")
                       )
                     | .name
                   ]
@@ -130,7 +153,7 @@ jobs:
                 '
           )"
 
-          # The full ironclaw_reborn_cli dependency closure: every workspace
+          # The full canonical ironclaw dependency closure: every workspace
           # crate the shipped Reborn binary links (normal + build deps). Running
           # each crate's own suite on every PR is the "run everything on every
           # PR" gate -- a green reborn-tests run means the whole closure is
@@ -138,7 +161,7 @@ jobs:
           # extensions, ...) can no longer regress unnoticed.
           closure_packages="$(
             comm -12 \
-              <(cargo tree -p ironclaw_reborn_cli -e normal,build --prefix none \
+              <(cargo tree -p ironclaw -e normal,build --prefix none \
                 | grep -oE 'ironclaw_[a-z0-9_]+' \
                 | sort -u) \
               <(cargo metadata --no-deps --format-version 1 \
@@ -220,12 +243,16 @@ jobs:
 
           while IFS= read -r package; do
             feature_flags="$(scripts/ci/package-feature-flags.sh "$package")"
-            if [[ "${feature_flags}" == *"webui-v2-beta"* ]]; then
-              needs_webui_node=true
-            fi
+            # These packages link `ironclaw_webui`, whose build script compiles
+            # the Vite frontend and therefore needs a Node/pnpm toolchain.
+            case "${package}" in
+              ironclaw|ironclaw_reborn_composition)
+                needs_webui_node=true
+                ;;
+            esac
 
             case "${package}" in
-              ironclaw_first_party_extension_ports|ironclaw_host_runtime|ironclaw_loop_support|ironclaw_product_workflow|ironclaw_reborn|ironclaw_reborn_cli|ironclaw_reborn_composition|ironclaw_reborn_webui_ingress|ironclaw_wasm|ironclaw_wasm_product_adapters|ironclaw_wasm_sandbox_core)
+              ironclaw|ironclaw_first_party_extension_ports|ironclaw_host_runtime|ironclaw_loop_host|ironclaw_product|ironclaw_runner|ironclaw_reborn_composition|ironclaw_webui|ironclaw_wasm)
                 sccache_dist_enabled=false
                 ;;
             esac
@@ -234,13 +261,27 @@ jobs:
           echo "needs_webui_node=${needs_webui_node}" >> "${GITHUB_OUTPUT}"
           echo "sccache_dist_enabled=${sccache_dist_enabled}" >> "${GITHUB_OUTPUT}"
 
+      - name: Enable pnpm for setup-node cache
+        if: ${{ steps.bucket-settings.outputs.needs_webui_node == 'true' }}
+        run: corepack enable pnpm
+
       - name: Install Node.js for WebUI bundle builds
         if: ${{ steps.bucket-settings.outputs.needs_webui_node == 'true' }}
         uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
         with:
           node-version: "22"
-          cache: "npm"
-          cache-dependency-path: crates/ironclaw_webui_v2/frontend/package-lock.json
+          cache: "pnpm"
+          cache-dependency-path: crates/ironclaw_webui/frontend/pnpm-lock.yaml
+
+      - name: Enable pnpm
+        if: ${{ steps.bucket-settings.outputs.needs_webui_node == 'true' }}
+        run: corepack enable pnpm
+
+      - name: Install WebUI frontend dependencies
+        if: ${{ steps.bucket-settings.outputs.needs_webui_node == 'true' }}
+        run: |
+          cd crates/ironclaw_webui/frontend
+          pnpm install --frozen-lockfile
 
       - name: Install mold and clang
         run: |
@@ -312,7 +353,7 @@ jobs:
             echo "::endgroup::"
           done < <(printf '%s\n' "${BUCKET_PACKAGES}" | jq -r '.[]')
 
-          # Concat per-package lcov into one artifact per bucket (keeps artifact count at ~12, not ~60); merge script parses end_of_record blocks per file already, so `cat` is sufficient.
+          # Concat per-package lcov into one artifact per bucket (keeps artifact count bounded by the matrix, not ~60); merge script parses end_of_record blocks per file already, so `cat` is sufficient.
           cat coverage/*.lcov > "bucket-${BUCKET_NAME}.lcov"
 
       - name: Upload bucket lcov artifact
@@ -338,6 +379,12 @@ jobs:
       REBORN_ROOT_TEST_PARTITION: ${{ matrix.partition }}
       REBORN_ROOT_TEST_TIMEOUT: 28m
       CARGO_INCREMENTAL: "0"
+      # The QA smoke binaries build a full Reborn runtime and drive whole
+      # turns on the libtest current-thread stack; the combined debug async
+      # frames of that pipeline overflow the 8 MiB default (measured need:
+      # ~10 MiB for reborn_qa_smoke_scenarios_e2e). Same pathology and value
+      # as the documented RUST_MIN_STACK in reborn_qa_recorded_behavior.rs.
+      RUST_MIN_STACK: "67108864"
     strategy:
       fail-fast: false
       matrix:
@@ -426,6 +473,14 @@ jobs:
       OPENAI_API_KEY: ""
       REBORN_GROUP_TEST_TIMEOUT: 28m
       CARGO_INCREMENTAL: "0"
+      # Group suites build a full Reborn runtime per scenario on the libtest
+      # test-thread stack, so their combined debug async frames sit within a
+      # few percent of whatever stack they are given (reborn_group_triggers'
+      # triggered_gate_group overflowed the 8 MiB libtest default on an
+      # unrelated layout shift). Same pathology and value as the root-tests
+      # job above and the documented RUST_MIN_STACK in
+      # reborn_qa_recorded_behavior.rs.
+      RUST_MIN_STACK: "67108864"
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -512,6 +567,12 @@ jobs:
       OLLAMA_BASE_URL: ""
       OPENAI_API_KEY: ""
       CARGO_INCREMENTAL: "0"
+      # llvm-cov instrumentation inflates stack frames; the deep channel
+      # admission futures (webhook -> pairing gate -> workflow) overflow the
+      # default 2 MiB test-thread stack under instrumentation only. The
+      # deepest subtrees are Box::pin'd at their seams; this is headroom for
+      # the instrumented lane, not a substitute.
+      RUST_MIN_STACK: "8388608"
     strategy:
       fail-fast: false
       matrix:
@@ -704,18 +765,14 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Run Reborn settings JS tests
+      - name: Enable pnpm
+        run: corepack enable pnpm
+
+      - name: Run Reborn WebUI frontend tests
         run: |
-          mapfile -t tests < <(
-            find crates/ironclaw_webui_v2/static/js/pages/settings \
-              -type f \( -name '*.test.mjs' -o -name '*.test.js' \) \
-              | sort
-          )
-          if [ "${#tests[@]}" -eq 0 ]; then
-            echo "No Reborn settings JS tests found"
-            exit 1
-          fi
-          node --test "${tests[@]}"
+          cd crates/ironclaw_webui/frontend
+          pnpm install --frozen-lockfile
+          pnpm test
 
   qa-recorded-fixtures:
     name: Reborn QA recorded fixtures
@@ -765,7 +822,7 @@ jobs:
         run: scripts/ci/check-reborn-qa-fixtures.sh
 
       - name: Run Reborn QA fixture contracts and replay
-        run: cargo test --test reborn_qa_recorded_behavior --features libsql -- --nocapture
+        run: cargo test -p ironclaw_reborn_integration_tests --test reborn_qa_recorded_behavior -- --nocapture
 
   reborn-tests:
     name: Tests (Reborn)
@@ -782,8 +839,18 @@ jobs:
       - webui-v2-js-tests
       - qa-recorded-fixtures
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
       - name: Check Reborn test result
         run: |
+          # shellcheck disable=SC1091
+          if ! source .github/scripts/ci-job-result-ok.sh; then
+            echo "Unable to source .github/scripts/ci-job-result-ok.sh"
+            exit 1
+          fi
+
           if [[ "${{ needs.changes.result }}" != "success" ]]; then
             echo "changes failed: ${{ needs.changes.result }}"
             exit 1
@@ -799,22 +866,22 @@ jobs:
             exit 0
           fi
 
-          if [[ "${{ needs.package-matrix.result }}" != "success" ]]; then
+          if ! job_result_ok "package-matrix" "${{ needs.package-matrix.result }}" false "allow"; then
             echo "Reborn package matrix discovery failed: ${{ needs.package-matrix.result }}"
             exit 1
           fi
 
-          if [[ "${{ needs.crate-tests.result }}" != "success" ]]; then
+          if ! job_result_ok "crate-tests" "${{ needs.crate-tests.result }}" false "allow"; then
             echo "One or more Reborn binary crate tests failed: ${{ needs.crate-tests.result }}"
             exit 1
           fi
 
-          if [[ "${{ needs.root-reborn-parity-tests.result }}" != "success" ]]; then
+          if ! job_result_ok "root-reborn-parity-tests" "${{ needs.root-reborn-parity-tests.result }}" false "allow"; then
             echo "One or more Reborn root tests failed: ${{ needs.root-reborn-parity-tests.result }}"
             exit 1
           fi
 
-          if [[ "${{ needs.reborn-group-tests.result }}" != "success" ]]; then
+          if ! job_result_ok "reborn-group-tests" "${{ needs.reborn-group-tests.result }}" false "allow"; then
             echo "One or more Reborn group tests failed: ${{ needs.reborn-group-tests.result }}"
             exit 1
           fi
@@ -823,7 +890,7 @@ jobs:
           # suites (see the reborn-integration-coverage job), so it gates like
           # every other test job above — real pass/fail, not the coverage
           # percentage (that's coverage-report below).
-          if [[ "${{ needs.reborn-integration-coverage.result }}" != "success" ]]; then
+          if ! job_result_ok "reborn-integration-coverage" "${{ needs.reborn-integration-coverage.result }}" false "allow"; then
             echo "One or more Reborn integration-tier coverage lanes failed: ${{ needs.reborn-integration-coverage.result }}"
             exit 1
           fi
@@ -835,17 +902,17 @@ jobs:
           # like every other job above. (While [global].enforce = false in the
           # floor file, the ratchet step always exits 0, so this stays green
           # during the dry-run soak period — see the floor file's own header.)
-          if [[ "${{ needs.coverage-report.result }}" != "success" ]]; then
+          if ! job_result_ok "coverage-report" "${{ needs.coverage-report.result }}" false "allow"; then
             echo "Reborn coverage-report job failed (merge/summary error, or a coverage ratchet violation): ${{ needs.coverage-report.result }}"
             exit 1
           fi
 
-          if [[ "${{ needs.webui-v2-js-tests.result }}" != "success" ]]; then
+          if ! job_result_ok "webui-v2-js-tests" "${{ needs.webui-v2-js-tests.result }}" false "allow"; then
             echo "Reborn WebUI v2 JS tests failed: ${{ needs.webui-v2-js-tests.result }}"
             exit 1
           fi
 
-          if [[ "${{ needs.qa-recorded-fixtures.result }}" != "success" ]]; then
+          if ! job_result_ok "qa-recorded-fixtures" "${{ needs.qa-recorded-fixtures.result }}" false "allow"; then
             echo "Reborn QA recorded fixture tests failed: ${{ needs.qa-recorded-fixtures.result }}"
             exit 1
           fi

@@ -17,6 +17,7 @@ pub use activation::{
     SkillActivationMode, SkillActivationObservedEvent, SkillActivationObserver,
     SkillActivationPlan, SkillActivationRequest, SkillActivationSelection,
     SkillActivationSelectionError, SkillActivationSelectionMode, SkillActivationSelectorConfig,
+    SkillInjectionMode,
 };
 pub use assets::{SkillBundleAsset, SkillBundleAssetReadError, SkillBundleAssetReader};
 pub use error::FirstPartySkillsExtensionError;

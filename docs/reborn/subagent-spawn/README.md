@@ -2,11 +2,11 @@
 
 **Status:** Blocking implementation exists but is temporarily disabled in shipped profiles; background mode deferred
 
-> **Current status (2026-07):** the worker-side control plane is `TurnRunScheduler` (`ironclaw_host_runtime`) plus `RebornTurnRunExecutor` (`ironclaw_reborn`). `builtin.spawn_subagent` is currently deny-filtered off in all shipped profiles (`TEMP(disable-spawn-subagents)`).
+> **Current status (2026-07):** the worker-side control plane is `TurnRunScheduler` plus `RebornTurnRunExecutor`, co-located in `ironclaw_runner`. `builtin.spawn_subagent` is currently deny-filtered off in all shipped profiles (`TEMP(disable-spawn-subagents)`). The completion-delivery/durability layer for background mode is designed in [`thread-harness-design.md`](./thread-harness-design.md) (canonical, supersedes the prior durability spec) — background mode ships staged per that doc's §7.
 **Date:** 2026-05-19
 **Branch:** `subagent-spawn-design`
 **Scope:** `crates/ironclaw_agent_loop`, `crates/ironclaw_turns`,
-`crates/ironclaw_loop_support`, `crates/ironclaw_reborn`,
+`crates/ironclaw_loop_host`, `crates/ironclaw_runner`,
 `crates/ironclaw_reborn_composition`
 
 This is the **overarching design doc**. Per-phase implementation docs (detailed,
@@ -33,7 +33,9 @@ implementation exposes **blocking** behavior only: the parent waits until the
 child reaches a terminal state and then resumes with the child result.
 
 Background subagents are deliberately disabled pending the durable completion
-delivery design tracked in [#4147](https://github.com/nearai/ironclaw/issues/4147).
+delivery design tracked in [#4147](https://github.com/nearai/ironclaw/issues/4147)
+— that design now exists ([`thread-harness-design.md`](./thread-harness-design.md),
+canonical) and ships staged per its §7.
 The public `spawn_subagent` schema does not expose a mode field. Omitted mode
 defaults to blocking, legacy explicit `mode: "blocking"` and
 `run_in_background: false` inputs are accepted for compatibility, and explicit
@@ -170,12 +172,16 @@ ironclaw_turns         + CapabilityOutcome::AwaitDependentRun
                            staging-key-then-rekey workaround. Missions/cron/triggers
                            will all need this same shape.
                        + DefaultTurnCoordinator::with_event_sink(...)
+                         [historical name — shipped as subscription on
+                          TurnLifecycleEventBus::subscribe_required
+                          (ironclaw_turns lifecycle.rs) + the
+                          TurnCommittedEventObserver hook]
 
-ironclaw_loop_support  + spawn handling in the capability-port impl
+ironclaw_loop_host  + spawn handling in the capability-port impl
 (host I/O glue)        ~ prompt/context port: direction system msg + user-role goal
                        + attenuation (CapabilityAllowSet) + hard allow_nesting gate
 
-ironclaw_reborn        + `subagent` PlannedDriver + run-profile→driver binding
+ironclaw_runner        + `subagent` PlannedDriver + run-profile→driver binding
 (loop library)         + built-in subagent flavor table + direction .md files
                        + DURABLE subagent goal store (DB-backed; piggybacks on
                          turn-state persistence — not an in-memory store)
@@ -185,14 +191,14 @@ ironclaw_reborn_composition
 (product composition)  + concrete product-live subagent assembly:
                          DB-backed store construction, root-provided
                          PendingGateProjectionSink adapter, composite event
-                         sink, restart-reconciler task, and runtime wiring
-                       + RestartReconciler — startup sweep + periodic poll over
-                         terminal child runs lacking gate-resolved / delivered
-                         observer outputs (fixes the "event lost between commit
-                         and observer dispatch" hole)
-                       + AutonomousContinuationBudget (per-tree wake/turn quota
-                         + per-time-window quota to bound self-amplifying spawn
-                         cascades)
+                         sink, and runtime wiring [historical: this line's
+                         restart-reconciler task was superseded, see below]
+                       + RestartReconciler — SUPERSEDED (2026-07): replaced by
+                         the roster-driven boot pass + lazy backstop in
+                         thread-harness-design.md §4.3/§5.3 (no periodic poll)
+                       + AutonomousContinuationBudget — SUPERSEDED (2026-07):
+                         never built; subsumed by the derived System-wake
+                         streak cap in thread-harness-design.md §8.3
                        ~ runtime.rs wiring
 
 ironclaw_host_runtime / ironclaw_host_api   — unchanged
@@ -253,32 +259,32 @@ spawn time and keyed by the coordinator-minted `TurnRunId`.
 | Area | Decision |
 |---|---|
 | Execution | In-process child runs, runner-worker driven. |
-| Result modes | Blocking only in the public schema. Background is deferred pending #4147. |
+| Result modes | Blocking only in the public schema today. Background is designed (`thread-harness-design.md`, canonical) and ships staged per its §7; not yet exposed. |
 | Spawn surface | `spawn_subagent` capability with `flavor_id`, `task`, and optional `handoff`; host port returns `AwaitDependentRun { gate_ref, safe_summary }` for blocking. Legacy explicit blocking inputs are accepted; explicit background inputs are rejected before child-run side effects. |
-| **Spawn-result payload (schema)** | For blocking mode, `result_ref` resolves to a typed JSON document the parent's model receives as the tool result. Fields: `child_run_id: TurnRunId`, `child_thread_id: ThreadId`, `flavor: SubagentFlavorId`, `mode: "blocking"`, `status: "completed" \| "failed" \| "cancelled"`, `output_available: bool`, `final_text: Option<String>` (sanitised), `failure_summary: Option<SanitizedFailure>`. Background payload shape is deferred with #4147. |
+| **Spawn-result payload (schema)** | For blocking mode, `result_ref` resolves to a typed JSON document the parent's model receives as the tool result. Fields: `child_run_id: TurnRunId`, `child_thread_id: ThreadId`, `flavor: SubagentFlavorId`, `mode: "blocking"`, `status: "completed" \| "failed" \| "cancelled"`, `output_available: bool`, `final_text: Option<String>` (sanitised), `failure_summary: Option<SanitizedFailure>`. Background payload shape is owned by `thread-harness-design.md` §8 (drain writes the framed content via the edge, superseding the historical background sketch here). |
 | **`requested_run_id` / `prepare_turn`** | A `TurnCoordinator::prepare_turn(scope) -> TurnRunId` API mints a `TurnRunId` **before** any side-effect; `SubmitTurnRequest.requested_run_id: Option<TurnRunId>` lets the submitter pass it in so the coordinator binds the prepared id rather than minting a new one. The spawn handler uses this to **persist the goal under the real child run id from the start** — no staging key, no rekey. Generalises to missions/cron/triggers (any submitter that needs to "persist dependent state before submit"). |
 | Blocking | The `AwaitDependentRun` gate and its awaited child-run **set** are recorded **at spawn time, before `submit_turn`** — durable. The gate awaits a set; the parent resumes once, after the **last** child is terminal. If every child is already terminal when the parent would block, the gate resolves **inline** (no `Blocked`). |
 | **Blocking interruptibility** | A parent blocked on `AwaitDependentRun` is interruptible by the normal `cancel_run(parent)` path — propagates a recursive subtree cancel (§7.5). **Blocking subagents are for short, bounded work**; long-running detached children require the deferred background design. |
 | Resume payload | One synthetic `GateRef`; a host-side gate-resolution store holds all N child results, mapped back to the N pending tool calls. |
 | Child failure | Failed/cancelled children produce a typed result entry; the gate waits for **all** children to reach terminal — no early resume, no sibling cancellation. |
-| Background delivery | Deferred pending #4147. The historical design was `accept_inbound_message` plus coalescing parent wake, but this is not exposed until durable delivery semantics are settled. |
-| **Autonomous-continuation budget** | Deferred with background delivery (#4147). The historical design bounded self-amplifying background wake cascades with per-tree and per-time-window wake quotas. |
+| Background delivery | Designed (2026-07): [`thread-harness-design.md`](./thread-harness-design.md) §8 — delivery is `activate(parent, System)` over durable await-edges, **not** the historical `accept_inbound_message` + coalescing-wake sketch, which is superseded. Ships staged per that doc's §7. |
+| **Autonomous-continuation budget** | Superseded (2026-07): the component was never built; its concern (self-amplifying wake cascades) is now bounded by the derived System-wake streak cap in `thread-harness-design.md` §8.3 — no separate per-tree quota/rate-window component. |
 | Child authority | The child run starts with an **empty grant/lease set** — no inheritance of parent grants/leases. The capability allowlist is a surface *ceiling*, not authority. The child re-acquires every lease via its own `Approval` gate on its own thread. |
 | **Child approval ownership** | Child runs inherit the parent's `owner_user_id` AND `project_id` — **enforced in spawn code** (the child `ensure_thread` + `SubmitTurnRequest` copy both verbatim from the parent run record; deviation = typed error, not silently filled). A child's `Approval` gate surfaces on the **child thread** addressed to that owner — the parent user is the approver. The child thread is user-visible in the same surface as any other thread under that user; UI nesting is the deferred linkage. |
 | **Approval surfacing (projection, not bridge)** | A turn transitioning to `TurnStatus::BlockedApproval` does NOT currently populate the engine's `PendingGateStore` that the UI queries — they are two disconnected systems. **A direct write-hook bridge in `block_run()` is fragile** (matches the split-brain shape `.claude/rules/gateway-events.md` exists to prevent). Instead: `PendingGateStore` becomes a **derived projection** of `TurnLifecycleEvent` — a projection consumer reads turn events and materialises the same read model the UI already queries. One source of truth (turn events), replayable from a cursor, restart-safe, idempotent. The UI surface is unchanged. Affects every blocked turn (not subagent-specific) — landed as prerequisite **P0** (see §11). |
 | Nesting | Hard gate: a spawn from a flavor with `allow_nesting=false` is rejected regardless of surface membership. Plus a depth cap (`subagent_depth` field, checked before `submit_turn`) and a per-turn fan-out cap. |
 | **Per-tree descendant atomicity** | The per-run-tree descendant cap (`MAX_TREE_DESCENDANTS`) is enforced via a **durable `SpawnTreeReservation` row keyed by scoped `spawn_tree_root_run_id`** — `reserve_tree_descendants(scope, root, delta, cap)` is atomic at the store, fails closed without mutation when over cap, and runs **before `submit_turn`**. Concurrent admit across subtrees cannot over-admit. (Concurrent parent turns on the *same* parent thread are impossible by the per-`TurnScope` active-run lock, but a single root can have many concurrent subtrees on different threads.) |
 | Loop family | One static `subagent` `LoopFamily` (`LoopFamilyId "subagent"`); default strategies + tighter `BudgetStrategy`. Bound to a dedicated `subagent` `PlannedDriver`. |
-| Flavors | Built-in static table — v1: `general`, `researcher`. Each: direction id, tool allowlist, model, iteration + token/cost budget, `allow_nesting`. |
-| Direction prompt | Static `.md` per flavor (`include_str!`, `ironclaw_reborn/src/directions/`), selected by static match. The system message. |
+| Flavors | Built-in static table — v1 proposal: `general`, `researcher`. Each: direction id, tool allowlist, model, iteration + token/cost budget, `allow_nesting`. **Historical naming** — shipped as four flavors (`General`/`Explorer`/`Coder`/`Planner`); `thread-harness-design.md` §10 is canonical. |
+| Direction prompt | Static `.md` per flavor (`include_str!`, shipped at `crates/ironclaw_runner/src/subagent/directions/`), selected by static match. The system message. |
 | Goal placement | The parent-injected goal + `Handoff` blob are the child's **first user message**, delimited as task data (`## Task (from parent)` / `## Context from parent`). **Never** the system message — the goal is model-generated and may carry upstream-tainted content. |
 | **Goal durability (DB-backed)** | Persisted in a **durable, DB-backed** subagent goal store keyed by the child `TurnRunId`. Implementation piggybacks on turn-state persistence (the same backend that stores `TurnRunRecord`). The child run id is **known before** `submit_turn` via `prepare_turn` — no staging key, no rekey. Survives process restart by construction. A store miss **fails the child run loudly**. |
 | Lineage | `parent_run_id`, `subagent_depth`, and `spawn_tree_root_run_id` fields on `SubmitTurnRequest` and `TurnRunRecord` (durable). `children_of` and `get_run_record` are store queries — no in-memory index as source of truth. |
-| **Restart reconciliation** | `with_event_sink` gives live delivery, but a process crash between *child terminal commit* and *observer dispatch* would strand a parent gate. `RestartReconciler` runs at startup and on a periodic timer: scans terminal child runs whose lineage points at a parent with an unresolved `AwaitDependentRun` gate and replays the observer resume action. Background-result reconciliation is deferred with #4147. Idempotent via the same `external_event_id` keying the live path uses. |
+| **Restart reconciliation** | **Superseded (2026-07):** the `RestartReconciler` (startup sweep + periodic poll) described here is replaced outright by the roster-driven boot pass + lazy per-scope backstop in [`thread-harness-design.md`](./thread-harness-design.md) §4.3/§5.3 — recovery is edge-file-driven, with no periodic timer. Kept for historical context only. |
 | **Cancellation tombstone** | A child completing terminal during a subtree cancel **does not silently drop**. It writes a typed `SubagentResultTombstone { child_run_id, disposition: "discarded_by_parent_cancel", terminal_status }` so reconciliation can distinguish "intentionally discarded" from "lost in the gap". |
 | Idempotency | Child `submit_turn` key = `(parent_run_id, parent_turn_id, spawn-call ordinal)` — deterministic for replay, unique per spawn call even for identical-argument siblings. The `requested_run_id` further pins which `TurnRunId` the coordinator binds for replay. |
 | Tenancy | The child `TurnScope` copies `tenant_id`/`agent_id`/`project_id` **verbatim**; only `thread_id` differs (fresh). Test-enforced invariant. |
-| Child output trust | A child result crossing back to the parent is **untrusted data** — wrapped in a delimited block, channel-edge sanitised, and safety-scanned before it enters the parent thread. |
+| Child output trust | A child result crossing back to the parent is **untrusted data** — wrapped in a delimited block and channel-edge sanitised before it enters the parent thread. **Correction (2026-07):** this is framing + sanitisation, not a safety scan — Reborn's ingress has no `SafetyLayer` wiring for `submit_turn` today, for any caller, so no scan runs here either. The catastrophe backstop is gate-driven approval-bubbling to a human, not content scanning; see `thread-harness-design.md` §12 for the tracked platform-wide `SafetyLayer` ingress follow-up. |
 | Context seed | `Fresh` (goal only), `Handoff(String)` (goal + curated parent blob, re-materialised into the child scope). `Fork` reserved, unimplemented. |
 
 ## 7. Flows
@@ -295,10 +301,12 @@ that approvals already use.
 
 ### 7.2 Spawn flow — blocking
 
-`spawn_subagent` is an ordinary capability; the `ironclaw_loop_support` capability
+`spawn_subagent` is an ordinary capability; the `ironclaw_loop_host` capability
 port handles it and returns an `AwaitDependentRun` gate. Background branches in
-the diagram are historical design context and are not exposed by the current
-schema.
+the diagram are historical design context, are not exposed by the current
+schema, and are architecturally superseded — background delivery is now
+`activate`-based per `thread-harness-design.md` §8, not the
+`accept_inbound_message` path drawn here.
 
 ![Subagent spawn flow](diagrams/spawn-flow.svg)
 
@@ -312,6 +320,13 @@ blocking is not "stuck", it is "waiting under cancellation".
 ![Blocking subagent lifecycle](diagrams/blocking-lifecycle.svg)
 
 ### 7.4 Autonomous wake (background)
+
+> **Superseded (2026-07).** This section is the historical design space for
+> #4147. The accepted mechanism is different:
+> [`thread-harness-design.md`](./thread-harness-design.md) §8 delivers via
+> `activate(parent, System)` over durable await-edges (not
+> `submit_turn`-as-tick), and §8.3's derived System-wake streak cap replaces
+> the `AutonomousContinuationBudget` sketched below. Historical context only.
 
 Background autonomous wake is not active in the current implementation. This
 section captures the deferred design space for #4147.
@@ -363,6 +378,11 @@ parent CancelRequested
 
 ### 7.6 Restart reconciliation
 
+> **Superseded (2026-07).** The `RestartReconciler` below is replaced outright
+> by [`thread-harness-design.md`](./thread-harness-design.md)'s roster-driven
+> boot pass + lazy per-scope backstop (§4.3/§5.3) — recovery enumerates durable
+> await-edge files, with no periodic poll. Historical context only.
+
 The live observer path (`with_event_sink`) handles steady-state delivery. A
 process crash between a child's terminal commit and the observer's dispatch would
 otherwise strand a parent gate. `RestartReconciler` closes that hole:
@@ -396,8 +416,10 @@ mitigations below are **load-bearing**, not optional.
    the atomic `SpawnTreeReservation`, all rejecting without queuing:
    `MAX_SUBAGENT_DEPTH`, `MAX_SPAWN_PER_TURN` (fan-out), `MAX_TREE_DESCENDANTS`
    (per-spawn-tree total — atomic via `spawn_tree_root_run_id` keyed reservation).
-4. **Autonomous-continuation containment.** Per-tree wake-turn quota + rate-limit
-   (§7.4) bound self-amplifying cascades that stay under the per-spawn caps.
+4. **Autonomous-continuation containment.** Superseded (2026-07): the per-tree
+   quota/rate-limit sketch (§7.4) is replaced by the derived System-wake streak
+   cap in `thread-harness-design.md` §8.3, which bounds self-amplifying
+   cascades that stay under the per-spawn caps.
 5. **Nesting hard gate.** `spawn_subagent` exclusion is not left to denylist-by-
    omission in each flavor's allowlist. A `spawn_subagent` invocation from a flavor
    with `allow_nesting=false` is rejected outright, regardless of surface membership.
@@ -406,9 +428,15 @@ mitigations below are **load-bearing**, not optional.
    delimited as task data — never the system message. The system message is the
    static, authored direction `.md` only.
 7. **Child output is untrusted.** A child's result crossing back to the parent
-   (tool result or inbound message) is wrapped in a delimited block, channel-edge
-   sanitised (host paths / internal identifiers stripped), and run through the
-   inbound `safety_layer` scan before it is stored in the parent thread.
+   (tool result or inbound message) is wrapped in a delimited block and channel-edge
+   sanitised (host paths / internal identifiers stripped) before it is stored in
+   the parent thread. **Correction (2026-07):** it is not additionally run through
+   an inbound safety scan — Reborn's `submit_turn` ingress has no `SafetyLayer`
+   wiring today, for any caller, so this path is no exception. Framing +
+   sanitisation plus gate-driven approval-bubbling to a human (the catastrophe
+   backstop) are the actual controls; see `thread-harness-design.md` §12 for the
+   tracked platform-wide `SafetyLayer` ingress follow-up that will eventually
+   cover this path too.
 8. **Tenancy invariant.** The child `TurnScope` copies `tenant_id`/`agent_id`/
    `project_id` verbatim; a spawn whose resolved scope deviates is rejected.
 9. **Idempotency keys** are derived from `(parent_run_id, parent_turn_id, ordinal)`
@@ -422,8 +450,8 @@ mitigations below are **load-bearing**, not optional.
 | Child completes before the parent blocks (lost wakeup) | The `AwaitDependentRun` gate + awaited set are recorded **before `submit_turn`**, durably. On entering the gate the parent reconciles against `get_run_state`. |
 | All children finish before the parent blocks | Gate resolves **inline** — the parent never emits `Blocked`. |
 | One child fails mid-flight | Failed/cancelled child = a typed result entry; the gate still waits for all children; siblings are not cancelled. |
-| Two background completions race on the parent thread | Deferred pending #4147; background is not currently exposed. |
-| Process restart **between child terminal commit and observer dispatch** | `RestartReconciler` (§7.6) sweeps at startup + periodically and replays observer actions; idempotent via `external_event_id`. The live event sink covers steady state; the reconciler covers the gap. |
+| Two background completions race on the parent thread | Designed in `thread-harness-design.md` §8 (per-edge `settled`-state dedupe + batched drain); background is not yet exposed in production. |
+| Process restart **between child terminal commit and observer dispatch** | Superseded (2026-07): this gap is now closed by durable await-edges + the roster-driven boot pass and lazy backstop (`thread-harness-design.md` §4.3/§5.3), not the `RestartReconciler` sweep §7.6 sketched. |
 | Process restart **general state** | Goal store is **DB-backed durable**; lineage (`parent_run_id`/`subagent_depth`/`spawn_tree_root_run_id`) is durable; `children_of` is a store query. No in-memory source of truth. A goal-store miss fails the child loudly. |
 | Identical-argument sibling spawns | Distinct idempotency keys via the per-turn ordinal; `requested_run_id` pins the bound run id. |
 | Parent cancelled | Recursive subtree cancel; worker-released Blocked parent driven to `Cancelled` via gate-abort. |
@@ -431,7 +459,7 @@ mitigations below are **load-bearing**, not optional.
 | Child completes with no assistant message | Typed "completed, no output" result — the parent always receives N well-formed results. |
 | Partial spawn (`submit_turn` fails after `prepare_turn` + reservation) | The reservation + awaited-set entry are the source of truth, written first; the half-spawn is reconciled (child absent or marked failed) and the reservation is released; fail loud. |
 | **Per-tree descendant over-admit** | `reserve_tree_descendants(scope, root, delta, cap)` is **atomic at the store** and runs before `submit_turn`. Concurrent admit across subtrees (different threads) cannot over-admit. Concurrent admit on the same parent thread is precluded by the per-`TurnScope` active-run lock. |
-| **Autonomous-continuation runaway** | Deferred with background autonomous wake (#4147). |
+| **Autonomous-continuation runaway** | Bounded by the derived System-wake streak cap (`thread-harness-design.md` §8.3), which supersedes the deferred `AutonomousContinuationBudget` sketch. |
 | **Blocking parent waiting indefinitely** | Parent is interruptible: `cancel_run(parent)` cascades through the subtree (§7.5). Blocking subagents are *for short bounded work*; long detached children require the deferred background design. |
 | **Approval invisible to UI** (today, every blocked turn) | `block_run()` only writes `TurnStatus::BlockedApproval` + a `TurnLifecycleEvent` scoped to `TurnScope`; the engine's `PendingGateStore` (where the UI queries) is not populated. Fix is **prerequisite P0** (§11): make `PendingGateStore` a derived projection of `TurnLifecycleEvent`. Single source log; replayable from cursor; restart-safe; no `block_run()` dual-write. |
 
@@ -441,8 +469,8 @@ mitigations below are **load-bearing**, not optional.
 |---|---|---|---|
 | `ironclaw_agent_loop` | sealed; product-agnostic; refs not raw prompts | one `subagent` family; `GateKind::AwaitDependentRun` is neutral; executor gains only outcome-to-existing-gate/result mapping | ✅ |
 | `ironclaw_turns` | coordination contracts; lifecycle metadata + refs | `CapabilityOutcome` variants, blocked-kind variants, lineage fields, `prepare_turn` API, atomic descendant reservation query | ✅ |
-| `ironclaw_loop_support` | host-port adapter glue; no stateful stores | blocking spawn handling in the capability port; concrete stores and projection sinks are injected by composition | ✅ |
-| `ironclaw_reborn` | generic loop library; driver/profile/readiness; no root `src/` adapters | family driver, profiles, flavors, directions, Reborn-neutral goal/tombstone traits, observer/reconciler logic, and readiness metadata | ✅ |
+| `ironclaw_loop_host` | host-port adapter glue; no stateful stores | blocking spawn handling in the capability port; concrete stores and projection sinks are injected by composition | ✅ |
+| `ironclaw_runner` | generic loop library; driver/profile/readiness; no root `src/` adapters | family driver, profiles, flavors, directions, Reborn-neutral goal/tombstone traits, observer/reconciler logic, and readiness metadata | ✅ |
 | `ironclaw_reborn_composition` | concrete product-live assembly; still no root `src/` imports | DB-backed store construction, root-provided `PendingGateProjectionSink`, composite event sink, and runtime assembly | ✅ |
 | `ironclaw_host_runtime` / `ironclaw_host_api` | — | untouched | ✅ |
 
@@ -492,7 +520,7 @@ PHASE 1 — Contracts & isolated units                                [needs non
   P1.B  ironclaw_agent_loop: `subagent` family + GateKind::AwaitDependentRun
           ── needs P1.A's variant names; in practice land P1.A first, then P1.B
              can build in parallel with P1.C
-  P1.C  ironclaw_reborn data: direction .md files, DB-backed goal-store schema,
+  P1.C  ironclaw_runner data: direction .md files, DB-backed goal-store schema,
         flavor table, SpawnTreeReservation row schema
           ── independent of P1.A/B at the data level
 
@@ -501,9 +529,9 @@ PHASE 2 — Mechanisms                   (4 parallel workstreams; each needs Pha
           uses prepare_turn + reservation; persists goal under known child id
   P2.B  loop_support: prompt composition + attenuation             [needs P1.A, P1.C]
           system = direction .md ; user = goal + handoff
-  P2.C  ironclaw_reborn: `subagent` PlannedDriver + profile binding [needs P1.B]
+  P2.C  ironclaw_runner: `subagent` PlannedDriver + profile binding [needs P1.B]
           + child runs inherit parent owner_user_id
-  P2.D  ironclaw_reborn: SubagentCompletionObserver                [needs P1.A, P1.C]
+  P2.D  ironclaw_runner: SubagentCompletionObserver                [needs P1.A, P1.C]
           live delivery; writes SubagentResultTombstone on mid-cancel completes
         ── P2.A and P2.B touch the same crate but different files; coordinate
            file ownership (capability port vs prompt port).
@@ -514,6 +542,11 @@ PHASE 3 — Integration                  (single workstream; needs all of Phase 
         AutonomousContinuationBudget enforcement ·
         end-to-end integration tests · quality gate
 ```
+
+> **Note (2026-07):** the `RestartReconciler` and tombstone-store items in
+> Phase 3 above are superseded by `thread-harness-design.md`'s await-edge
+> design (canonical) — see that doc's §7 staging table for the current
+> delivery/durability implementation plan.
 
 Detailed per-phase docs with pseudo code:
 [phase-1](./phase-1-contracts.md) · [phase-2](./phase-2-mechanisms.md) ·
@@ -529,9 +562,12 @@ Detailed per-phase docs with pseudo code:
   per-tree atomic), cancellation subtree + tombstone, restart-reconciliation
   (kill process between child terminal and observer dispatch, restart, assert
   delivery), blocking-interruption, and no-deadlock regression (child
-  `thread_id` ≠ parent). Background E2E coverage, including
-  autonomous-continuation-budget-stop, is deferred until #4147 defines durable
-  delivery.
+  `thread_id` ≠ parent). Background E2E coverage is owned by
+  `thread-harness-design.md`'s staged test plan (§7/§13), which also replaces
+  the historical autonomous-continuation-budget-stop case with §8.3's
+  System-wake streak-cap test. (Note: the tombstone and restart-reconciliation
+  cases above are likewise superseded by that doc's await-edge tests — it is
+  canonical for background delivery.)
 - **Quality gate:** `cargo fmt`; `cargo clippy --all --benches --tests --examples
   --all-features` (zero warnings); `cargo test`.
 - **Architecture guardrails:** `cargo test -p ironclaw_architecture --test
@@ -540,16 +576,21 @@ Detailed per-phase docs with pseudo code:
 - **Replay/snapshot evidence:** add deterministic subagent trace fixtures and run
   `scripts/replay-snap.sh test` (or the current replay command for those
   fixtures) before claiming product compatibility for blocking result payloads
-  and idempotent replay. Background delivery fixtures are deferred with #4147.
-  Until those fixtures land, implementation PRs must say subagent spawn is not
-  yet product-compatible even if unit and integration tests pass.
+  and idempotent replay. Background delivery fixtures land with
+  `thread-harness-design.md`'s staged PRs (§7) rather than being deferred to an
+  undesigned future. Until those fixtures land, implementation PRs must say
+  subagent spawn is not yet product-compatible even if unit and integration
+  tests pass.
 
 ## 13. Follow-ups (explicitly deferred)
 
-Mission / cron / trigger loop families + their submitters; durable background
-subagent completion delivery (#4147); parent↔child UI/event linkage (nested
-thread display); `Fork` seed mode; relaying a child's approval into the parent
-conversation; file-discovered user-defined flavors.
+Mission / cron / trigger loop families + their submitters; parent↔child
+UI/event linkage (nested thread display); `Fork` seed mode; relaying a child's
+approval into the parent conversation; file-discovered user-defined flavors.
+
+Durable background completion delivery (#4147) is **no longer deferred**: it is
+designed in [`thread-harness-design.md`](./thread-harness-design.md)
+(canonical) and ships staged per that doc's §7.
 
 (The goal-store durability question is **resolved** in v1: DB-backed via
 turn-state persistence — see §6 "Goal durability (DB-backed)".)

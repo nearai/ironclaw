@@ -12,6 +12,7 @@
 use ironclaw_extensions::ExtensionRegistry;
 
 use crate::error::RebornBuildError;
+use ironclaw_extension_host::product_extension_host_api_contract_registry;
 
 use super::HooksActivationConfig;
 use super::audit::emit_hook_quarantined;
@@ -138,7 +139,7 @@ impl std::fmt::Debug for HookProjectionRegistry {
 /// to discovery resolves `/system/extensions/<id>` to that tenant's storage and
 /// no other's.** In local-dev (single-tenant, the only profile
 /// `build_reborn_runtime` wires) the runtime's FS is constructed once per
-/// identity in `build_reborn_services`, so it is per-identity by construction;
+/// identity in `build_runtime_substrate`, so it is per-identity by construction;
 /// production wiring (a follow-up, since `build_reborn_runtime` only supports
 /// local-dev) must supply a tenant-scoped backend here.
 ///
@@ -202,7 +203,7 @@ pub(super) fn enforce_root_containment(
 /// is *computed* from the identity ([`tenant_extension_root`]) inside the
 /// builder — never supplied by the caller — which is the tenant-isolation
 /// contract (Step 2). The filesystem is the same tenant-scoped
-/// [`RootFilesystem`] already built in `build_reborn_services`.
+/// [`RootFilesystem`] already built in `build_runtime_substrate`.
 pub struct ThirdPartyDiscoveryInput<'a, F: ironclaw_filesystem::RootFilesystem> {
     pub filesystem: &'a F,
     pub tenant_id: &'a ironclaw_host_api::TenantId,
@@ -265,13 +266,19 @@ where
         // (Critical-2 fail-open fix). The ONLY error that triggers the
         // builtin-only fallback is failure to LIST THE ROOT itself (the
         // extensions tree is unreadable) — surfaced as the outer `Err` below.
-        let discovered = match ironclaw_host_runtime::discover_extensions_tolerant_bounded(
+        let contracts = product_extension_host_api_contract_registry().map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: format!("could not build extension host API contract registry: {error}"),
+            }
+        })?;
+        let discovery = ironclaw_host_runtime::discover_extensions_tolerant_bounded_with_contracts(
             input.filesystem,
             &root,
+            &contracts,
             MAX_INSTALLED_EXTENSIONS_CONSIDERED,
         )
-        .await
-        {
+        .await;
+        let discovered = match discovery {
             Ok(discovered) => discovered,
             Err(error) => {
                 // Root unreadable: cannot make per-package decisions. Fail-safe

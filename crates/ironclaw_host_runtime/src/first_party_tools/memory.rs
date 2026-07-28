@@ -1,148 +1,200 @@
+//! Memory tools ride the ordinary first-party capability registry.
+//!
+//! Tools are manifest-declared and registry-routed: composition registers the
+//! BOUND memory package's declared capability ids to its provider's handler
+//! ([`register_memory_tool_handler`]), so the host never enumerates memory
+//! tool ids — the memory contract itself is lifecycle-only
+//! (`ironclaw_memory::MemoryService`). This file owns:
+//!
+//! - [`MemoryToolProfile`] / [`memory_tool_profiles`]: the per-tool dispatch
+//!   profile derived from the bound package's manifest (mount authority from
+//!   declared effects, input schema for null-sentinel normalization) — shared
+//!   by every provider's handler.
+//! - [`NativeMemoryToolHandler`]: the NATIVE provider's handler — constructs
+//!   the native service over each request's filesystem (fs-identity cache,
+//!   audit-backed prompt-write-safety sink) and serves the conventional tools
+//!   native declares. mem0's equivalent lives in composition (the one layer
+//!   allowed to name the mem0 crate). The model-visible wire shapes come from
+//!   `ironclaw_memory`'s shared output helpers, so backends cannot drift.
+
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_events::AuditSink;
-use ironclaw_extensions::{CapabilityManifest, ExtensionError};
+use ironclaw_extensions::ExtensionPackage;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    ActionResultSummary, ActionSummary, AuditEnvelope, AuditEventId, AuditStage, CorrelationId,
-    DecisionSummary, EffectKind, ExtensionId, PermissionMode, ResourceUsage,
+    ActionResultSummary, ActionSummary, AuditEnvelope, AuditEventId, AuditStage, CapabilityId,
+    CorrelationId, DecisionSummary, EffectKind, ExtensionId, ResourceUsage,
     RuntimeDispatchErrorKind,
 };
 use ironclaw_memory::{
-    MemoryEventSinkError, MemoryInvocation, MemoryService, MemoryServiceError,
-    MemoryServiceErrorKind, MemoryServiceReadRequest, MemoryServiceReadResponse,
-    MemoryServiceSearchRequest, MemoryServiceSearchResponse, MemoryServiceTreeRequest,
-    MemoryServiceTreeResponse, MemoryServiceWriteRequest, MemoryServiceWriteResponse,
-    MemoryWriteStatus, PromptSafetyReasonCode, PromptWriteOperation, PromptWriteSafetyEvent,
-    PromptWriteSafetyEventKind, PromptWriteSafetyEventSink,
+    MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
+    MEMORY_WRITE_CAPABILITY_ID, MemoryEventSinkError, MemoryInvocation, MemoryServiceError,
+    MemoryServiceErrorKind, MemoryServiceProfileSetRequest, MemoryServiceReadRequest,
+    MemoryServiceSearchRequest, MemoryServiceTreeRequest, MemoryServiceWriteRequest,
+    PROFILE_SET_CAPABILITY_ID, PromptSafetyReasonCode, PromptWriteOperation,
+    PromptWriteSafetyEvent, PromptWriteSafetyEventKind, PromptWriteSafetyEventSink,
+    profile_set_response_output, read_response_output, search_response_output,
+    tree_response_output, write_response_output,
 };
 use ironclaw_memory_native::NativeMemoryService;
-use serde_json::{Value, json};
+use serde_json::Value;
 
-use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest, FirstPartyCapabilityResult};
+use crate::{
+    FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
+    FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
+};
 
-use super::{first_party_capability_manifest, input_error, operation_error, resource_profile};
+use super::{
+    FIRST_PARTY_MAX_OUTPUT_BYTES, bounded_output_bytes, input_error,
+    normalize_optional_null_sentinels_against_schema, operation_error,
+    resolve_native_memory_input_schema_ref,
+};
 
-pub const MEMORY_SEARCH_CAPABILITY_ID: &str = "builtin.memory_search";
-pub const MEMORY_WRITE_CAPABILITY_ID: &str = "builtin.memory_write";
-pub const MEMORY_READ_CAPABILITY_ID: &str = "builtin.memory_read";
-pub const MEMORY_TREE_CAPABILITY_ID: &str = "builtin.memory_tree";
 const MEMORY_PROMPT_SAFETY_EXTENSION_ID: &str = "memory.prompt_safety";
-const MEMORY_SEARCH_SCOPE: &str = "reborn_internal_persistent_memory";
 
-struct MemoryServices {
-    invocation: MemoryInvocation,
-    memory_service: Arc<dyn MemoryService>,
+/// Per-tool dispatch profile derived from the BOUND package's manifest: the
+/// mount authority the host enforces (from the tool's declared effects) and
+/// the declared input schema the null-sentinel normalization consults. The
+/// host derives this from manifest data — it never hardcodes per-tool policy.
+#[derive(Clone)]
+pub struct MemoryToolProfile {
+    pub requires_write_mount: bool,
+    pub input_schema: Option<Value>,
 }
 
-#[derive(Default)]
-pub(super) struct MemoryCapabilityState {
-    cached_memory_service: Mutex<Option<CachedMemoryService>>,
-    #[cfg(test)]
-    memory_service_for_test: Option<Arc<dyn MemoryService>>,
+/// Derive the per-tool dispatch profiles from a memory package's manifest.
+pub fn memory_tool_profiles(
+    package: &ExtensionPackage,
+) -> BTreeMap<CapabilityId, MemoryToolProfile> {
+    package
+        .manifest
+        .capabilities
+        .iter()
+        .map(|capability| {
+            (
+                capability.id.clone(),
+                MemoryToolProfile {
+                    requires_write_mount: capability.effects.contains(&EffectKind::WriteFilesystem),
+                    input_schema: resolve_native_memory_input_schema_ref(
+                        capability.input_schema_ref.as_str(),
+                    ),
+                },
+            )
+        })
+        .collect()
 }
 
-impl std::fmt::Debug for MemoryCapabilityState {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("MemoryCapabilityState")
-            .field("cached_memory_service", &"<cached-memory-service>")
-            .finish()
+/// Register the bound provider's tool handler for every capability id its
+/// package declares — wrapped in the host-owned [`MemoryToolGuard`], so the
+/// mount check, input normalization, and output bounding are enforced ONCE
+/// here for every provider, never re-implemented (or forgotten) per handler.
+/// Registration is the only way a memory tool becomes dispatchable, which
+/// makes the guard unforgeable; nothing is registered when no provider is
+/// bound, so the tools are absent from dispatch exactly as they are absent
+/// from the surface.
+pub fn register_memory_tool_handler(
+    registry: &mut FirstPartyCapabilityRegistry,
+    package: &ExtensionPackage,
+    handler: Arc<dyn FirstPartyCapabilityHandler>,
+) {
+    let guarded: Arc<dyn FirstPartyCapabilityHandler> = Arc::new(MemoryToolGuard {
+        profiles: memory_tool_profiles(package),
+        inner: handler,
+    });
+    for capability in &package.manifest.capabilities {
+        registry.insert_handler_dyn(capability.id.clone(), Arc::clone(&guarded));
     }
+}
+
+/// Host-owned guard around every registered memory tool handler. Derives each
+/// tool's authority and schema FROM THE MANIFEST and enforces, in order:
+///
+/// 1. the id is one the bound manifest declares (fail closed otherwise);
+/// 2. the `/memory` mount check — write+delete authority exactly when the
+///    tool's declared effects include a filesystem write;
+/// 3. schema-driven null-sentinel input normalization;
+/// 4. after the provider handler runs: the model-visible output byte bound
+///    and usage stamping.
+///
+/// Provider handlers behind this guard implement pure tool BEHAVIOR only.
+struct MemoryToolGuard {
+    profiles: BTreeMap<CapabilityId, MemoryToolProfile>,
+    inner: Arc<dyn FirstPartyCapabilityHandler>,
+}
+
+#[async_trait]
+impl FirstPartyCapabilityHandler for MemoryToolGuard {
+    async fn dispatch(
+        &self,
+        mut request: FirstPartyCapabilityRequest,
+    ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
+        let start = std::time::Instant::now();
+        let Some(profile) = self.profiles.get(&request.capability_id).cloned() else {
+            return Err(FirstPartyCapabilityError::new(
+                RuntimeDispatchErrorKind::UndeclaredCapability,
+            ));
+        };
+        ensure_memory_mount(&request, profile.requires_write_mount)?;
+        normalize_memory_tool_input(&mut request.input, &profile);
+        let result = self.inner.dispatch(request).await?;
+        finish_memory_tool_result(result.output, start)
+    }
+}
+
+/// Convenience for local-testing/harness compositions that bind the default
+/// native provider: build native's bundle + handler and register its declared
+/// tools. Mirrors what production composition does with the resolved binding.
+pub fn register_native_memory_tools(
+    registry: &mut FirstPartyCapabilityRegistry,
+) -> Result<(), ironclaw_extensions::ExtensionError> {
+    let bundle = crate::memory_native_extension::native_memory_provider_bundle()?;
+    let handler = Arc::new(NativeMemoryToolHandler::from_package(&bundle.package));
+    register_memory_tool_handler(registry, &bundle.package, handler);
+    Ok(())
 }
 
 struct CachedMemoryService {
     filesystem: Arc<dyn RootFilesystem>,
     audit_sink: Option<Arc<dyn AuditSink>>,
-    service: Arc<dyn MemoryService>,
+    service: Arc<NativeMemoryService>,
 }
 
-pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
-    Ok(vec![
-        first_party_capability_manifest(
-            MEMORY_SEARCH_CAPABILITY_ID,
-            "Search only Reborn internal persistent memory documents in the current tenant/user/agent/project scope. This does not search connected app or extension data.",
-            vec![EffectKind::ReadFilesystem],
-            PermissionMode::Allow,
-            resource_profile(),
-        )?,
-        first_party_capability_manifest(
-            MEMORY_WRITE_CAPABILITY_ID,
-            "Write, append, or patch Reborn persistent memory documents in the current tenant/user/agent/project scope. For structured user facts (timezone, locale, location), use builtin.profile_set instead.",
-            vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
-            PermissionMode::Allow,
-            resource_profile(),
-        )?,
-        first_party_capability_manifest(
-            MEMORY_READ_CAPABILITY_ID,
-            "Read a Reborn persistent memory document in the current tenant/user/agent/project scope",
-            vec![EffectKind::ReadFilesystem],
-            PermissionMode::Allow,
-            resource_profile(),
-        )?,
-        first_party_capability_manifest(
-            MEMORY_TREE_CAPABILITY_ID,
-            "List Reborn persistent memory documents as a compact tree",
-            vec![EffectKind::ReadFilesystem],
-            PermissionMode::Allow,
-            resource_profile(),
-        )?,
-    ])
+/// The native provider's tool handler: serves the conventional memory tools
+/// over a per-request native service (constructed over the request's
+/// filesystem, cached on filesystem identity, with the audit-backed
+/// prompt-write-safety sink attached when the request carries an audit sink).
+pub struct NativeMemoryToolHandler {
+    profiles: BTreeMap<CapabilityId, MemoryToolProfile>,
+    cached: Mutex<Option<CachedMemoryService>>,
 }
 
-pub(super) async fn dispatch(
-    state: &MemoryCapabilityState,
-    request: &FirstPartyCapabilityRequest,
-) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
-    let start = std::time::Instant::now();
-    let services = memory_services(state, request)?;
-    let output = match request.capability_id.as_str() {
-        MEMORY_SEARCH_CAPABILITY_ID => dispatch_search(&services, &request.input).await?,
-        MEMORY_WRITE_CAPABILITY_ID => dispatch_write(&services, &request.input).await?,
-        MEMORY_READ_CAPABILITY_ID => dispatch_read(&services, &request.input).await?,
-        MEMORY_TREE_CAPABILITY_ID => dispatch_tree(&services, &request.input).await?,
-        _ => return Err(operation_error()),
-    };
-    let wall_clock_ms = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
-    Ok(FirstPartyCapabilityResult::new(
-        output,
-        ResourceUsage {
-            wall_clock_ms,
-            ..ResourceUsage::default()
-        },
-    ))
+impl std::fmt::Debug for NativeMemoryToolHandler {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeMemoryToolHandler")
+            .field("tools", &self.profiles.len())
+            .finish()
+    }
 }
 
-fn memory_services(
-    state: &MemoryCapabilityState,
-    request: &FirstPartyCapabilityRequest,
-) -> Result<MemoryServices, FirstPartyCapabilityError> {
-    ensure_memory_mount(
-        request,
-        request.capability_id.as_str() == MEMORY_WRITE_CAPABILITY_ID,
-    )?;
-    Ok(MemoryServices {
-        invocation: invocation_for_request(request),
-        memory_service: state.service_for(request)?,
-    })
-}
+impl NativeMemoryToolHandler {
+    /// Build the handler for native's (or a native-shaped) memory package.
+    pub fn from_package(package: &ExtensionPackage) -> Self {
+        Self {
+            profiles: memory_tool_profiles(package),
+            cached: Mutex::new(None),
+        }
+    }
 
-impl MemoryCapabilityState {
-    pub(super) fn service_for(
+    fn service_for(
         &self,
         request: &FirstPartyCapabilityRequest,
-    ) -> Result<Arc<dyn MemoryService>, FirstPartyCapabilityError> {
-        #[cfg(test)]
-        if let Some(service) = &self.memory_service_for_test {
-            return Ok(Arc::clone(service));
-        }
-
-        let mut cached = self
-            .cached_memory_service
-            .lock()
-            .map_err(|_| operation_error())?;
+    ) -> Result<Arc<NativeMemoryService>, FirstPartyCapabilityError> {
+        let mut cached = self.cached.lock().map_err(|_| operation_error())?;
         if let Some(cached) = cached.as_ref()
             && Arc::ptr_eq(&cached.filesystem, &request.services.filesystem)
             && audit_sinks_match(
@@ -159,7 +211,7 @@ impl MemoryCapabilityState {
             Arc::new(AuditPromptWriteSafetyEventSink { audit_sink })
                 as Arc<dyn PromptWriteSafetyEventSink>
         });
-        let service: Arc<dyn MemoryService> = Arc::new(NativeMemoryService::from_filesystem(
+        let service = Arc::new(NativeMemoryService::from_filesystem(
             Arc::clone(&filesystem),
             prompt_write_safety_event_sink,
         ));
@@ -170,13 +222,80 @@ impl MemoryCapabilityState {
         });
         Ok(service)
     }
+}
 
-    #[cfg(test)]
-    pub(super) fn with_memory_service_for_test(memory_service: Arc<dyn MemoryService>) -> Self {
-        Self {
-            cached_memory_service: Mutex::new(None),
-            memory_service_for_test: Some(memory_service),
+#[async_trait]
+impl FirstPartyCapabilityHandler for NativeMemoryToolHandler {
+    async fn dispatch(
+        &self,
+        request: FirstPartyCapabilityRequest,
+    ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
+        // Pure behavior: the host-owned MemoryToolGuard already enforced the
+        // manifest-declared mount authority, normalized the input, and will
+        // bound the output.
+        let start = std::time::Instant::now();
+        let output = serve_native_tool(self, &request).await?;
+        finish_memory_tool_result(output, start)
+    }
+}
+
+/// Serve one of native's conventional tools. A declared id native does not
+/// implement fails closed as an operation error — never a silent fallback.
+async fn serve_native_tool(
+    handler: &NativeMemoryToolHandler,
+    request: &FirstPartyCapabilityRequest,
+) -> Result<Value, FirstPartyCapabilityError> {
+    let service = handler.service_for(request)?;
+    let invocation = invocation_for_request(request);
+    match request.capability_id.as_str() {
+        PROFILE_SET_CAPABILITY_ID => {
+            let parsed = MemoryServiceProfileSetRequest::from_tool_input(&request.input)
+                .map_err(map_memory_service_error)?;
+            let response = service
+                .profile_set(invocation, parsed)
+                .await
+                .map_err(map_memory_service_error)?;
+            Ok(profile_set_response_output(response))
         }
+        MEMORY_SEARCH_CAPABILITY_ID => {
+            let parsed = MemoryServiceSearchRequest::from_tool_input(&request.input)
+                .map_err(map_memory_service_error)?;
+            let response = service
+                .search(invocation, parsed)
+                .await
+                .map_err(map_memory_service_error)?;
+            Ok(search_response_output(response))
+        }
+        MEMORY_WRITE_CAPABILITY_ID => {
+            let parsed = MemoryServiceWriteRequest::from_tool_input(&request.input)
+                .map_err(map_memory_service_error)?;
+            let response = service
+                .write(invocation, parsed)
+                .await
+                .map_err(map_memory_service_error)?;
+            Ok(write_response_output(response))
+        }
+        MEMORY_READ_CAPABILITY_ID => {
+            let parsed = MemoryServiceReadRequest::from_tool_input(&request.input)
+                .map_err(map_memory_service_error)?;
+            let response = service
+                .read(invocation, parsed)
+                .await
+                .map_err(map_memory_service_error)?;
+            Ok(read_response_output(response))
+        }
+        MEMORY_TREE_CAPABILITY_ID => {
+            let parsed = MemoryServiceTreeRequest::from_tool_input(&request.input)
+                .map_err(map_memory_service_error)?;
+            let response = service
+                .tree(invocation, parsed)
+                .await
+                .map_err(map_memory_service_error)?;
+            Ok(tree_response_output(response))
+        }
+        // Declared in the manifest but not implemented by this provider:
+        // fail closed with the model-visible operation error.
+        _ => Err(operation_error()),
     }
 }
 
@@ -322,7 +441,10 @@ fn encode_prompt_safety_metadata(event: &PromptWriteSafetyEvent) -> String {
     format!("memory_prompt_safety:v1;{}", pairs.join(";"))
 }
 
-pub(super) fn ensure_memory_mount(
+/// Authorize a memory-tool request against its `/memory` mount grant. Write
+/// authority is required exactly when the tool's manifest declares a write
+/// effect ([`MemoryToolProfile::requires_write_mount`]).
+pub fn ensure_memory_mount(
     request: &FirstPartyCapabilityRequest,
     write: bool,
 ) -> Result<(), FirstPartyCapabilityError> {
@@ -352,14 +474,38 @@ pub(super) fn ensure_memory_mount(
     Ok(())
 }
 
-pub(super) fn invocation_for_request(request: &FirstPartyCapabilityRequest) -> MemoryInvocation {
+/// Build the memory invocation for a tool request.
+pub fn invocation_for_request(request: &FirstPartyCapabilityRequest) -> MemoryInvocation {
     MemoryInvocation {
         scope: request.scope.clone(),
         correlation_id: CorrelationId::new(),
     }
 }
 
-pub(super) fn map_memory_service_error(error: MemoryServiceError) -> FirstPartyCapabilityError {
+/// Bound + stamp a memory tool's output into a capability result (shared by
+/// every provider's handler so usage accounting cannot drift).
+pub fn finish_memory_tool_result(
+    output: Value,
+    started: std::time::Instant,
+) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
+    let output_bytes = bounded_output_bytes(&output, FIRST_PARTY_MAX_OUTPUT_BYTES)?;
+    let wall_clock_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+    Ok(FirstPartyCapabilityResult::new(
+        output,
+        ResourceUsage::default()
+            .set_wall_clock_ms(wall_clock_ms)
+            .set_output_bytes(output_bytes),
+    ))
+}
+
+/// Schema-driven null-sentinel normalization for a memory tool input, using
+/// the tool's manifest-declared schema (see [`MemoryToolProfile`]).
+pub fn normalize_memory_tool_input(input: &mut Value, profile: &MemoryToolProfile) {
+    normalize_optional_null_sentinels_against_schema(input, profile.input_schema.as_ref());
+}
+
+/// Map a provider error onto the sanitized model-visible capability error.
+pub fn map_memory_service_error(error: MemoryServiceError) -> FirstPartyCapabilityError {
     match error.kind() {
         MemoryServiceErrorKind::Input => input_error(),
         MemoryServiceErrorKind::Operation | MemoryServiceErrorKind::Unavailable => {
@@ -374,164 +520,37 @@ pub(super) fn map_memory_service_error(error: MemoryServiceError) -> FirstPartyC
     }
 }
 
-async fn dispatch_search(
-    services: &MemoryServices,
-    input: &Value,
-) -> Result<Value, FirstPartyCapabilityError> {
-    let request =
-        MemoryServiceSearchRequest::from_tool_input(input).map_err(map_memory_service_error)?;
-    let response = services
-        .memory_service
-        .search(services.invocation.clone(), request)
-        .await
-        .map_err(map_memory_service_error)?;
-    Ok(search_response_to_value(response))
-}
-
-async fn dispatch_write(
-    services: &MemoryServices,
-    input: &Value,
-) -> Result<Value, FirstPartyCapabilityError> {
-    let request =
-        MemoryServiceWriteRequest::from_tool_input(input).map_err(map_memory_service_error)?;
-    let response = services
-        .memory_service
-        .write(services.invocation.clone(), request)
-        .await
-        .map_err(map_memory_service_error)?;
-    Ok(write_response_to_value(response))
-}
-
-async fn dispatch_read(
-    services: &MemoryServices,
-    input: &Value,
-) -> Result<Value, FirstPartyCapabilityError> {
-    let request =
-        MemoryServiceReadRequest::from_tool_input(input).map_err(map_memory_service_error)?;
-    let response = services
-        .memory_service
-        .read(services.invocation.clone(), request)
-        .await
-        .map_err(map_memory_service_error)?;
-    Ok(read_response_to_value(response))
-}
-
-async fn dispatch_tree(
-    services: &MemoryServices,
-    input: &Value,
-) -> Result<Value, FirstPartyCapabilityError> {
-    let request =
-        MemoryServiceTreeRequest::from_tool_input(input).map_err(map_memory_service_error)?;
-    let response = services
-        .memory_service
-        .tree(services.invocation.clone(), request)
-        .await
-        .map_err(map_memory_service_error)?;
-    Ok(tree_response_to_value(response))
-}
-
-fn search_response_to_value(response: MemoryServiceSearchResponse) -> Value {
-    let results = response
-        .results
-        .into_iter()
-        .map(|result| {
-            json!({
-                "content": result.content,
-                "score": result.score,
-                "path": result.path,
-                "is_hybrid_match": result.is_hybrid_match,
-            })
-        })
-        .collect::<Vec<_>>();
-    let result_count = results.len();
-    json!({
-        "query": response.query,
-        "results": results,
-        "result_count": result_count,
-        "search_scope": MEMORY_SEARCH_SCOPE,
-        "external_services_searched": false,
-    })
-}
-
-fn write_response_to_value(response: MemoryServiceWriteResponse) -> Value {
-    // Exhaustive over `MemoryWriteStatus`; the `"status"` field still serializes
-    // to the same snake_case wire strings (`cleared`/`patched`/`written`).
-    match response.status {
-        MemoryWriteStatus::Cleared => json!({
-            "status": response.status,
-            "path": response.path,
-            "message": response.message.unwrap_or_default(),
-        }),
-        MemoryWriteStatus::Patched => json!({
-            "status": response.status,
-            "path": response.path,
-            "replacements": response.replacements.unwrap_or(0),
-            "content_length": response.content_length,
-        }),
-        MemoryWriteStatus::Written => json!({
-            "status": response.status,
-            "path": response.path,
-            "append": response.append,
-            "content_length": response.content_length,
-        }),
-    }
-}
-
-fn read_response_to_value(response: MemoryServiceReadResponse) -> Value {
-    json!({
-        "path": response.path,
-        "content": response.content,
-        "word_count": response.word_count,
-    })
-}
-
-fn tree_response_to_value(response: MemoryServiceTreeResponse) -> Value {
-    Value::Array(response.entries)
-}
-
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
-    use async_trait::async_trait;
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{
         CapabilityId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
         ResourceScope, TenantId, ThreadId, UserId, VirtualPath,
     };
-    use ironclaw_memory::{
-        MemoryServiceSearchRequest, MemoryServiceSearchResponse, MemoryServiceSearchResult,
-    };
+    use serde_json::{Value, json};
 
-    use crate::{FirstPartyCapabilityRequest, InvocationServices, LocalHostProcessPort};
+    use crate::{FirstPartyCapabilityRequest, HostProcessPort, InvocationServices};
 
     use super::*;
 
-    #[derive(Debug, Default)]
-    struct RecordingMemoryService {
-        seen: Mutex<Vec<(MemoryInvocation, MemoryServiceSearchRequest)>>,
+    fn handler() -> MemoryToolGuard {
+        guard_with_extra_profile(None)
     }
 
-    #[async_trait]
-    impl MemoryService for RecordingMemoryService {
-        async fn search(
-            &self,
-            invocation: MemoryInvocation,
-            request: MemoryServiceSearchRequest,
-        ) -> Result<MemoryServiceSearchResponse, MemoryServiceError> {
-            self.seen
-                .lock()
-                .expect("recording memory service lock should not be poisoned")
-                .push((invocation, request));
-            Ok(MemoryServiceSearchResponse {
-                query: "search marker".to_string(),
-                results: vec![MemoryServiceSearchResult {
-                    content: "captured through IronClaw memory".to_string(),
-                    score: 1.0,
-                    path: "notes/alpha.md".to_string(),
-                    is_hybrid_match: false,
-                }],
-            })
+    /// Build the production-shaped guard→native chain; `extra` injects an
+    /// additional declared-tool profile (the declared-but-unserved case).
+    fn guard_with_extra_profile(extra: Option<(&str, MemoryToolProfile)>) -> MemoryToolGuard {
+        let bundle = crate::memory_native_extension::native_memory_provider_bundle()
+            .expect("native bundle builds");
+        let mut profiles = memory_tool_profiles(&bundle.package);
+        if let Some((id, profile)) = extra {
+            profiles.insert(CapabilityId::new(id).unwrap(), profile);
+        }
+        MemoryToolGuard {
+            profiles,
+            inner: Arc::new(NativeMemoryToolHandler::from_package(&bundle.package)),
         }
     }
 
@@ -556,56 +575,179 @@ mod tests {
         .unwrap()
     }
 
-    fn memory_request(capability_id: &'static str, input: Value) -> FirstPartyCapabilityRequest {
+    fn memory_request_over(
+        filesystem: Arc<InMemoryBackend>,
+        capability_id: &str,
+        input: Value,
+    ) -> FirstPartyCapabilityRequest {
         FirstPartyCapabilityRequest {
+            origin: None,
+            run_id: None,
             capability_id: CapabilityId::new(capability_id).unwrap(),
             scope: sample_scope(),
+            authenticated_actor_user_id: None,
             estimate: ironclaw_host_api::ResourceEstimate::default(),
             mounts: Some(memory_mount()),
             services: InvocationServices {
-                filesystem: Arc::new(InMemoryBackend::new()),
+                filesystem,
                 runtime_http_egress: None,
                 tool_call_http_egress: None,
-                process: Arc::new(LocalHostProcessPort::new()),
+                runtime_secret_material_stager: None,
+                process: Arc::new(HostProcessPort::new()),
                 secret_store: None,
                 audit_sink: None,
                 unsafe_raw_diagnostics_allowed: false,
+                post_edit_check: None,
             },
             input,
         }
     }
 
+    /// The registry-routed handler serves the conventional tools end to end
+    /// over the real native service: a write dispatched through the handler is
+    /// visible to a search dispatched through the handler on the same request
+    /// filesystem.
     #[tokio::test]
-    async fn builtin_memory_search_dispatches_through_memory_service_facade() {
-        let memory_service = Arc::new(RecordingMemoryService::default());
-        let state = MemoryCapabilityState::with_memory_service_for_test(memory_service.clone());
-        let request = memory_request(
-            MEMORY_SEARCH_CAPABILITY_ID,
-            json!({"query": "search marker", "limit": 3}),
-        );
+    async fn handler_serves_write_then_search_over_the_request_filesystem() {
+        let handler = handler();
+        let filesystem = Arc::new(InMemoryBackend::new());
 
-        let result = dispatch(&state, &request)
+        let write = handler
+            .dispatch(memory_request_over(
+                Arc::clone(&filesystem),
+                MEMORY_WRITE_CAPABILITY_ID,
+                json!({
+                    "target": "notes/alpha.md",
+                    "content": "handler marker heron",
+                    "append": false
+                }),
+            ))
             .await
-            .expect("memory_search should succeed through IronClaw memory facade");
+            .expect("write dispatches through the handler");
+        assert_eq!(write.output["path"], "notes/alpha.md");
 
-        assert_eq!(result.output["result_count"], 1);
+        let search = handler
+            .dispatch(memory_request_over(
+                filesystem,
+                MEMORY_SEARCH_CAPABILITY_ID,
+                json!({"query": "heron", "limit": 3}),
+            ))
+            .await
+            .expect("search dispatches through the handler");
         assert_eq!(
-            result.output["search_scope"],
+            search.output["search_scope"],
             "reborn_internal_persistent_memory"
         );
-        assert_eq!(result.output["external_services_searched"], false);
+        assert_eq!(search.output["external_services_searched"], false);
+        assert_eq!(search.output["result_count"], 1);
+    }
+
+    /// An id the bound manifest never declared is refused even if something
+    /// mis-registered it to this handler.
+    #[tokio::test]
+    async fn undeclared_capability_id_fails_closed() {
+        let handler = handler();
+        let err = handler
+            .dispatch(memory_request_over(
+                Arc::new(InMemoryBackend::new()),
+                "ironclaw.memory.never_declared",
+                json!({}),
+            ))
+            .await
+            .expect_err("an undeclared id must fail closed");
         assert_eq!(
-            result.output["results"][0]["content"],
-            "captured through IronClaw memory"
+            err.kind(),
+            Some(RuntimeDispatchErrorKind::UndeclaredCapability)
         );
-        let seen = memory_service
-            .seen
-            .lock()
-            .expect("recording memory service lock should not be poisoned");
-        assert_eq!(seen.len(), 1);
-        assert_eq!(seen[0].0.scope.tenant_id.as_str(), "tenant-memory-service");
-        assert_eq!(seen[0].0.scope.user_id.as_str(), "user-memory-service");
-        assert_eq!(seen[0].1.query, "search marker");
-        assert_eq!(seen[0].1.limit, 3);
+    }
+
+    /// A manifest-declared tool this provider does not implement fails closed
+    /// with the model-visible operation error (never a silent fallback).
+    #[tokio::test]
+    async fn declared_but_unserved_tool_fails_closed() {
+        let handler = guard_with_extra_profile(Some((
+            "ironclaw.memory.push",
+            MemoryToolProfile {
+                requires_write_mount: false,
+                input_schema: None,
+            },
+        )));
+        let err = handler
+            .dispatch(memory_request_over(
+                Arc::new(InMemoryBackend::new()),
+                "ironclaw.memory.push",
+                json!({}),
+            ))
+            .await
+            .expect_err("a declared-but-unserved tool must fail closed");
+        assert_eq!(err.kind(), Some(RuntimeDispatchErrorKind::OperationFailed));
+    }
+
+    /// The write tool requires write+delete mount authority (derived from its
+    /// manifest effects, not a hardcoded id list).
+    #[tokio::test]
+    async fn write_tool_requires_write_mount_authority() {
+        let handler = handler();
+        let mut request = memory_request_over(
+            Arc::new(InMemoryBackend::new()),
+            MEMORY_WRITE_CAPABILITY_ID,
+            json!({"target": "notes/alpha.md", "content": "x", "append": false}),
+        );
+        request.mounts = Some(
+            MountView::new(vec![MountGrant::new(
+                MountAlias::new("/memory").unwrap(),
+                VirtualPath::new("/memory").unwrap(),
+                MountPermissions::read_only(),
+            )])
+            .unwrap(),
+        );
+        let err = handler
+            .dispatch(request)
+            .await
+            .expect_err("a read-only mount must not authorize the write tool");
+        assert_eq!(err.kind(), Some(RuntimeDispatchErrorKind::FilesystemDenied));
+    }
+
+    /// profile_set rejects an unknown field before any memory-service side
+    /// effect, and round-trips through the real native service.
+    #[tokio::test]
+    async fn profile_set_validates_fields_then_writes() {
+        let handler = handler();
+        let filesystem = Arc::new(InMemoryBackend::new());
+
+        let err = handler
+            .dispatch(memory_request_over(
+                Arc::clone(&filesystem),
+                PROFILE_SET_CAPABILITY_ID,
+                json!({"always_approve": true}),
+            ))
+            .await
+            .expect_err("unknown profile field must be rejected");
+        assert_eq!(err.kind(), Some(RuntimeDispatchErrorKind::InputEncode));
+
+        let ok = handler
+            .dispatch(memory_request_over(
+                Arc::clone(&filesystem),
+                PROFILE_SET_CAPABILITY_ID,
+                json!({"timezone": "Asia/Tokyo"}),
+            ))
+            .await
+            .expect("valid profile_set dispatches");
+        assert_eq!(ok.output["status"], "ok");
+
+        let read = handler
+            .dispatch(memory_request_over(
+                filesystem,
+                MEMORY_READ_CAPABILITY_ID,
+                json!({"path": "context/profile.json"}),
+            ))
+            .await
+            .expect("profile document reads back through the handler");
+        assert!(
+            read.output["content"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Asia/Tokyo")
+        );
     }
 }

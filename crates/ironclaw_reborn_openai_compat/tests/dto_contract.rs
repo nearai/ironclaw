@@ -262,6 +262,8 @@ fn response_dtos_serialize_openai_shapes() {
             input_tokens: 3,
             output_tokens: 5,
             total_tokens: 8,
+            input_tokens_details: None,
+            cost: None,
         }),
     };
     let response_json = serde_json::to_value(response).expect("response json");

@@ -6,13 +6,12 @@ use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelMessageRole,
     HostManagedModelRequest, HostManagedModelResponse,
 };
 use ironclaw_turns::TurnStatus;
 
-use crate::input::RebornBuildInput;
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
 
 use super::{RebornRuntimeError, build_reborn_runtime};
@@ -93,18 +92,18 @@ async fn local_dev_runtime_injects_default_system_prompt_into_model_request() {
         "test should observe the real model request for the submitted user turn"
     );
     assert!(
-        recorded_requests[0].messages.iter().any(|message| {
+        !recorded_requests[0].messages.iter().any(|message| {
             message.role == HostManagedModelMessageRole::System
                 && message.content.contains("Outbound delivery target:")
         }),
-        "local-dev runtime should include outbound delivery target in runtime context"
+        "plain WebUI chat should not resolve an unrelated outbound delivery target"
     );
     assert!(
         recorded_requests[0].messages.iter().any(|message| {
             message.role == HostManagedModelMessageRole::System
-                && message.content.contains("Run origin: WebUI chat")
+                && message.content.contains("Run origin: CLI chat")
         }),
-        "local-dev runtime send_user_message should tag WebUiChat origin in runtime context"
+        "local-dev runtime send_user_message should tag CLI source-channel origin in runtime context"
     );
 
     runtime.shutdown().await.expect("runtime shutdown");
@@ -151,6 +150,19 @@ async fn local_dev_runtime_uses_existing_edited_default_system_prompt() {
         }),
         "default-on disclosure should append the tool-search protocol to the edited prompt"
     );
+    // Docs grounding is ground knowledge about the runtime (#6734), not a seed
+    // default: an install whose SYSTEM.md never contained it must still be told
+    // to look IronClaw's own capabilities up in the published docs.
+    assert!(
+        recorded_requests[0].messages.iter().any(|message| {
+            message.role == HostManagedModelMessageRole::System
+                && message.content.starts_with("custom edited runtime prompt")
+                && message
+                    .content
+                    .contains("https://docs.ironclaw.com/llms.txt")
+        }),
+        "self-knowledge docs grounding should reach the model even for a custom system prompt"
+    );
 
     runtime.shutdown().await.expect("runtime shutdown");
 }
@@ -187,8 +199,8 @@ fn runtime_input(
     requests: Arc<StdMutex<Vec<HostManagedModelRequest>>>,
 ) -> RebornRuntimeInput {
     let gateway = Arc::new(RecordingGateway { requests });
-    RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-system-prompt-owner", storage_root)
+    RebornRuntimeInput::from_build_input(
+        crate::deployment::local_dev_build_input("runtime-system-prompt-owner", storage_root)
             .with_runtime_policy(local_dev_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
@@ -204,7 +216,7 @@ fn runtime_input(
     .with_model_gateway_override(gateway)
     // Pin bridged explicitly so the disclosure-protocol assertions don't depend on
     // the temporary default-on behavior (and won't break on the default-off revert).
-    .with_tool_disclosure(ironclaw_reborn::runtime::ToolDisclosureMode::Bridged)
+    .with_tool_disclosure(ironclaw_runner::runtime::ToolDisclosureMode::Bridged)
 }
 
 fn recorded_requests(

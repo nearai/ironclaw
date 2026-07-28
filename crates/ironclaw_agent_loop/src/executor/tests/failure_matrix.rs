@@ -1,14 +1,21 @@
 use super::{
     AgentLoopExecutor, AgentLoopExecutorError, AgentLoopHostError, AgentLoopHostErrorKind,
-    CanonicalAgentLoopExecutor, CapabilityFailureKind, CapabilityOutcome, CapabilityResultMessage,
-    CheckpointKind, DefaultCompactionStrategy, FixedReplyAdmissionPolicy, GateOutcome, HostStage,
-    LoopCheckpointKind, LoopCompactionError, LoopExecutionState, LoopExit, LoopFailureKind,
-    LoopGateRef, LoopResultRef, LoopSafeSummary, MockHost, active_task_preserving_compaction_index,
-    calls_response, empty_gate_state, family_with_compaction_strategy, family_with_gate_outcome,
-    family_with_iteration_limit, family_with_reply_admission, final_staged_state, reply_response,
-    reply_response_with_text,
+    CanonicalAgentLoopExecutor, CheckpointKind, DefaultCompactionStrategy, FailureKind,
+    FixedReplyAdmissionPolicy, GateOutcome, HostStage, LoopCheckpointKind, LoopCompactionError,
+    LoopExecutionState, LoopExit, LoopFailureKind, LoopGateRef, LoopResultRef, LoopSafeSummary,
+    MockHost, TerminalWarningObservation, active_task_preserving_compaction_index, calls_response,
+    empty_gate_state, family_with_compaction_strategy, family_with_gate_outcome,
+    family_with_iteration_limit, family_with_reply_admission, final_staged_state,
+    provider_calls_response, reply_response, reply_response_with_text, resolution,
 };
-use ironclaw_turns::run_profile::LoopRunInfoPort;
+use ironclaw_turns::run_profile::{
+    AppendCapabilityResultRef, CapabilityFailureDetail, LoopRunInfoPort, ToolObservationDetail,
+    ToolObservationStatus,
+};
+
+const OPERATION_FAILED_CAPABILITY_DETAIL: &str = "permanent dispatch failure code 47";
+const INVALID_OUTPUT_CAPABILITY_SUMMARY: &str = "MCP dispatch failed at /tmp/{socket}";
+const INVALID_OUTPUT_CAPABILITY_DETAIL: &str = "MCP dispatch failed with transport error";
 
 #[derive(Clone, Copy)]
 struct MatrixRow {
@@ -21,7 +28,7 @@ struct MatrixRow {
 #[derive(Debug, Clone, Copy)]
 enum FailureSetup {
     ModelError,
-    CapabilityProtocolError,
+    CapabilityOperationFailedRecoverable,
     CapabilityInvalidInputRecoverable,
     CapabilityInvalidOutputRecoverable,
     IterationLimit,
@@ -30,6 +37,7 @@ enum FailureSetup {
     NoProgressDetected,
     PolicyDenied,
     CapabilityPolicyDeniedRecoverable,
+    CapabilityAuthorizationRecoverable,
     CompactionUnavailable,
     TranscriptWriteFailed,
     CheckpointRejected,
@@ -61,6 +69,7 @@ struct ObservedTerminal {
     final_assistant_refs: Option<Vec<ironclaw_turns::LoopMessageRef>>,
     finalized_assistant_messages: Vec<String>,
     model_request_count: usize,
+    appended_result_refs: Vec<AppendCapabilityResultRef>,
 }
 
 #[derive(Debug)]
@@ -80,13 +89,17 @@ const ROWS: &[MatrixRow] = &[
         expects_explanation: false,
     },
     MatrixRow {
-        label: "CapabilityProtocolError <- batch outcome Failed(Permanent)",
-        setup: FailureSetup::CapabilityProtocolError,
-        expected_kind: ExpectedTerminal::Failed {
-            kind: LoopFailureKind::CapabilityProtocolError,
-            safe_summary: Some("capability_permanent"),
+        label: "CapabilityProtocolError <- batch outcome Failed(OperationFailed)",
+        setup: FailureSetup::CapabilityOperationFailedRecoverable,
+        // Unified-FailureKind migration: the retired `Permanent` kind merged
+        // into `OperationFailed`, whose fate is ModelVisible — the failure
+        // surfaces as a tool error and the run recovers instead of aborting.
+        // The terminal set for capability failure kinds is exactly
+        // `{Cancelled}` now.
+        expected_kind: ExpectedTerminal::CompletedDivergence {
+            planned_kind: LoopFailureKind::CapabilityProtocolError,
         },
-        expects_explanation: true,
+        expects_explanation: false,
     },
     MatrixRow {
         label: "ModelError <- capability Failed(InvalidInput)",
@@ -127,12 +140,13 @@ const ROWS: &[MatrixRow] = &[
     MatrixRow {
         label: "DriverBug <- Approval gate SkipAndContinue",
         setup: FailureSetup::DriverBugApprovalSkip,
-        // matrix-divergence: GateOutcome::validate_for_gate_kind marks
-        // Approval+SkipAndContinue as DriverBug, but GateStage does not enforce
-        // that validator today; the planned executor skips the gate and can
-        // continue to a normal completion.
-        expected_kind: ExpectedTerminal::CompletedDivergence {
-            planned_kind: LoopFailureKind::DriverBug,
+        // §5a.1 closed: GateStage now enforces
+        // GateOutcome::validate_for_gate_kind — a SkipAndContinue outcome on an
+        // Approval gate is a strategy-contract violation and fails the run as
+        // DriverBug instead of silently skipping the gated call and completing.
+        expected_kind: ExpectedTerminal::Failed {
+            kind: LoopFailureKind::DriverBug,
+            safe_summary: None,
         },
         expects_explanation: false,
     },
@@ -143,10 +157,10 @@ const ROWS: &[MatrixRow] = &[
             kind: LoopFailureKind::NoProgressDetected,
             safe_summary: None,
         },
-        // matrix-divergence: NoProgressDetected is listed as explainable, but
-        // the StopKind::NoProgressDetected exit path writes the failed exit
-        // directly instead of calling attach_failure_explanation.
-        expects_explanation: false,
+        // §5a.2 closed: the StopKind::NoProgressDetected failed branch attaches
+        // a failure explanation through the same path as other explainable
+        // kinds.
+        expects_explanation: true,
     },
     MatrixRow {
         label: "PolicyDenied <- scripted Denied capability outcome",
@@ -170,13 +184,27 @@ const ROWS: &[MatrixRow] = &[
         expects_explanation: false,
     },
     MatrixRow {
+        label: "PolicyDenied <- capability Failed(Authorization)",
+        setup: FailureSetup::CapabilityAuthorizationRecoverable,
+        // Regression: the auto-built card-summary prefix ("capability failed
+        // with authorization: ") used to trip the summary validator's own
+        // "authorization:" marker ban and terminally bork the run before
+        // handle_capability_error could fire. A 401/expired-scope tool failure
+        // is model-recoverable and must stay that way.
+        expected_kind: ExpectedTerminal::CompletedDivergence {
+            planned_kind: LoopFailureKind::PolicyDenied,
+        },
+        expects_explanation: false,
+    },
+    MatrixRow {
         label: "CompactionUnavailable <- compaction port returns Err",
         setup: FailureSetup::CompactionUnavailable,
-        expected_kind: ExpectedTerminal::Failed {
-            kind: LoopFailureKind::CompactionUnavailable,
-            safe_summary: Some("compaction_security_rejected"),
+        // stack #5838 makes best-effort compaction failures recoverable; matrix
+        // asserts the prompt path continues instead of failing the whole run.
+        expected_kind: ExpectedTerminal::CompletedDivergence {
+            planned_kind: LoopFailureKind::CompactionUnavailable,
         },
-        expects_explanation: true,
+        expects_explanation: false,
     },
     MatrixRow {
         label: "TranscriptWriteFailed <- fail_transcript_with",
@@ -221,6 +249,7 @@ macro_rules! matrix_row_test {
                 .spawn(|| {
                     tokio::runtime::Builder::new_current_thread()
                         .enable_all()
+                        .start_paused(true)
                         .build()
                         .expect("matrix row runtime")
                         .block_on(run_matrix_row(&ROWS[$row_index]))
@@ -233,18 +262,19 @@ macro_rules! matrix_row_test {
 }
 
 matrix_row_test!(matrix_model_error_exhausting_retries, 0);
-matrix_row_test!(matrix_capability_protocol_error_permanent, 1);
+matrix_row_test!(matrix_capability_operation_failed_recovers, 1);
 matrix_row_test!(matrix_capability_invalid_input_recovers, 2);
 matrix_row_test!(matrix_capability_invalid_output_recovers, 3);
 matrix_row_test!(matrix_iteration_limit, 4);
 matrix_row_test!(matrix_invalid_model_output, 5);
-matrix_row_test!(matrix_driver_bug_approval_skip_diverges, 6);
+matrix_row_test!(matrix_driver_bug_approval_skip_fails_as_driver_bug, 6);
 matrix_row_test!(matrix_no_progress_detected, 7);
 matrix_row_test!(matrix_policy_denied_outcome_diverges, 8);
 matrix_row_test!(matrix_capability_policy_denied_recovers, 9);
-matrix_row_test!(matrix_compaction_unavailable, 10);
-matrix_row_test!(matrix_transcript_write_failed, 11);
-matrix_row_test!(matrix_checkpoint_rejected, 12);
+matrix_row_test!(matrix_capability_authorization_recovers, 10);
+matrix_row_test!(matrix_compaction_unavailable, 11);
+matrix_row_test!(matrix_transcript_write_failed, 12);
+matrix_row_test!(matrix_checkpoint_rejected, 13);
 
 async fn run_matrix_row(row: &MatrixRow) {
     let observed = run_setup(row.setup).await;
@@ -254,24 +284,39 @@ async fn run_matrix_row(row: &MatrixRow) {
 async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
     match setup {
         FailureSetup::ModelError => {
-            let host = MockHost::new(Vec::new()).with_model_errors(vec![
-                AgentLoopHostError::new(AgentLoopHostErrorKind::Unavailable, "model unavailable"),
-                AgentLoopHostError::new(AgentLoopHostErrorKind::Unavailable, "model unavailable"),
-                AgentLoopHostError::new(AgentLoopHostErrorKind::Unavailable, "model unavailable"),
-            ]);
+            // One more error than the availability retry budget so the abort
+            // (and its category) is driven by the Unavailable class rather
+            // than the mock's script-exhausted Internal fallback.
+            let unavailable_error_count = crate::strategies::DefaultRecoveryStrategy::default()
+                .max_model_availability_attempts as usize
+                + 1;
+            let host = MockHost::new(Vec::new()).with_model_errors(
+                (0..unavailable_error_count)
+                    .map(|_| {
+                        AgentLoopHostError::new(
+                            AgentLoopHostErrorKind::Unavailable,
+                            "model unavailable",
+                        )
+                    })
+                    .collect(),
+            );
             run_local(crate::families::default(), host, None).await
         }
-        FailureSetup::CapabilityProtocolError => {
+        FailureSetup::CapabilityOperationFailedRecoverable => {
+            // Provider-call path on purpose: model-visible observations are
+            // persisted on provider result refs only, so the cause-survival
+            // assertion below is real (a plain `calls_response()` would leave
+            // `model_observation` None and silently skip it).
             let host = MockHost::new(vec![
-                calls_response(),
+                provider_calls_response(),
                 reply_response_with_text("explanation"),
             ])
-            .with_batch_outcomes(vec![batch_outcome(CapabilityOutcome::Failed(
-                ironclaw_turns::run_profile::CapabilityFailure {
-                    error_kind: CapabilityFailureKind::Permanent,
-                    safe_summary: "permanent protocol failure".to_string(),
-                    detail: None,
-                },
+            .with_batch_outcomes(vec![batch_outcome(resolution::failed(
+                FailureKind::OperationFailed,
+                "permanent protocol failure".to_string(),
+                Some(CapabilityFailureDetail::Diagnostic {
+                    text: OPERATION_FAILED_CAPABILITY_DETAIL.to_string(),
+                }),
             ))]);
             run_local(crate::families::default(), host, None).await
         }
@@ -281,25 +326,36 @@ async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
                 reply_response_with_text("completed after invalid input"),
             ])
             .with_batch_outcomes(vec![batch_outcome(failed_capability(
-                CapabilityFailureKind::InvalidInput,
+                FailureKind::InputEncode,
                 "invalid input supplied by model",
             ))]);
             run_local(crate::families::default(), host, None).await
         }
         FailureSetup::CapabilityInvalidOutputRecoverable => {
             let host = MockHost::new(vec![
-                calls_response(),
+                provider_calls_response(),
                 reply_response_with_text("completed after invalid output"),
             ])
-            .with_batch_outcomes(vec![batch_outcome(failed_capability(
-                CapabilityFailureKind::InvalidOutput,
-                "invalid tool output",
+            .with_batch_outcomes(vec![batch_outcome(resolution::failed(
+                FailureKind::OutputDecode,
+                INVALID_OUTPUT_CAPABILITY_SUMMARY.to_string(),
+                Some(CapabilityFailureDetail::Diagnostic {
+                    text: INVALID_OUTPUT_CAPABILITY_DETAIL.to_string(),
+                }),
             ))]);
             run_local(crate::families::default(), host, None).await
         }
         FailureSetup::IterationLimit => {
             let host = MockHost::new(vec![reply_response_with_text("iteration explanation")]);
-            run_local(family_with_iteration_limit(0), host, None).await
+            let mut state = LoopExecutionState::initial_for_run(host.run_context());
+            assert!(
+                state
+                    .terminal_warning_state
+                    .schedule(TerminalWarningObservation::iteration_limit(0))
+            );
+            state.terminal_warning_state.mark_delivered();
+            state.terminal_warning_state.clear_active();
+            run_local(family_with_iteration_limit(0), host, Some(state)).await
         }
         FailureSetup::InvalidModelOutput => {
             let host = MockHost::new(vec![
@@ -321,11 +377,12 @@ async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
                 reply_response_with_text("completed"),
             ])
             .with_batch_outcomes(vec![batch_outcome_stopped(
-                CapabilityOutcome::ApprovalRequired {
-                    gate_ref: LoopGateRef::new("gate:approval-skip").expect("valid"),
-                    safe_summary: "approval required".to_string(),
-                    approval_resume: None,
-                },
+                resolution::approval_required(
+                    LoopGateRef::new("gate:approval-skip").expect("valid"),
+                    "approval required".to_string(),
+                    None,
+                )
+                .resolution,
             )]);
             run_local(
                 family_with_gate_outcome(GateOutcome::SkipAndContinue {
@@ -337,26 +394,42 @@ async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
             .await
         }
         FailureSetup::NoProgressDetected => {
-            let host = MockHost::new(vec![calls_response(), calls_response(), calls_response()])
-                .with_batch_outcomes(vec![
-                    batch_outcome(no_change_result("result:no-progress-1")),
-                    batch_outcome(no_change_result("result:no-progress-2")),
-                    batch_outcome(no_change_result("result:no-progress-3")),
-                ]);
-            run_local(crate::families::default(), host, None).await
+            // The 4th scripted response feeds the failure-explanation model
+            // call that fires after the no-progress stop (nudges are disabled
+            // in this profile, so the nudge path declines without a model call).
+            let host = MockHost::new(vec![
+                calls_response(),
+                calls_response(),
+                calls_response(),
+                reply_response_with_text("no progress explanation"),
+            ])
+            .with_batch_outcomes(vec![
+                batch_outcome(no_change_result("result:no-progress-1")),
+                batch_outcome(no_change_result("result:no-progress-2")),
+                batch_outcome(no_change_result("result:no-progress-3")),
+            ]);
+            let mut state = LoopExecutionState::initial_for_run(host.run_context());
+            assert!(
+                state
+                    .terminal_warning_state
+                    .schedule(TerminalWarningObservation::no_progress(None, None))
+            );
+            state.terminal_warning_state.mark_delivered();
+            state.terminal_warning_state.clear_active();
+            run_local(crate::families::default(), host, Some(state)).await
         }
         FailureSetup::PolicyDenied => {
             let host = MockHost::new(vec![
                 calls_response(),
                 reply_response_with_text("completed"),
             ])
-            .with_batch_outcomes(vec![batch_outcome(CapabilityOutcome::Denied(
-                ironclaw_turns::run_profile::CapabilityDenied {
-                    reason_kind:
-                        ironclaw_turns::run_profile::CapabilityDeniedReasonKind::EmptySurface,
-                    safe_summary: "provider call denied".to_string(),
-                },
-            ))]);
+            .with_batch_outcomes(vec![batch_outcome(
+                resolution::denied(
+                    ironclaw_turns::run_profile::CapabilityDeniedReasonKind::EmptySurface,
+                    "provider call denied".to_string(),
+                )
+                .resolution,
+            )]);
             run_local(crate::families::default(), host, None).await
         }
         FailureSetup::CapabilityPolicyDeniedRecoverable => {
@@ -365,8 +438,19 @@ async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
                 reply_response_with_text("completed after policy denial"),
             ])
             .with_batch_outcomes(vec![batch_outcome(failed_capability(
-                CapabilityFailureKind::PolicyDenied,
+                FailureKind::PolicyDenied,
                 "capability policy denied",
+            ))]);
+            run_local(crate::families::default(), host, None).await
+        }
+        FailureSetup::CapabilityAuthorizationRecoverable => {
+            let host = MockHost::new(vec![
+                calls_response(),
+                reply_response_with_text("completed after authorization failure"),
+            ])
+            .with_batch_outcomes(vec![batch_outcome(failed_capability(
+                FailureKind::Authorization,
+                "the provider token has expired",
             ))]);
             run_local(crate::families::default(), host, None).await
         }
@@ -424,6 +508,7 @@ async fn run_local(
         final_assistant_refs,
         finalized_assistant_messages: host.finalized_assistant_messages(),
         model_request_count: host.model_requests().len(),
+        appended_result_refs: host.appended_result_refs(),
     }
 }
 
@@ -517,6 +602,49 @@ fn assert_expected_terminal(row: &MatrixRow, observed: &ObservedTerminal) {
                 "{}: completed divergence row should still checkpoint final state",
                 row.label
             );
+            if matches!(
+                row.setup,
+                FailureSetup::CapabilityOperationFailedRecoverable
+            ) {
+                // The capability cause survives on the model-visible
+                // observation detail even though the run recovers.
+                let observation = observed
+                    .appended_result_refs
+                    .iter()
+                    .find_map(|result| result.model_observation.as_ref())
+                    .expect("recovered capability failure must carry a model-visible observation");
+                assert!(matches!(
+                    &observation.detail,
+                    ToolObservationDetail::GenericFailure {
+                        failure_kind: FailureKind::OperationFailed,
+                        detail: Some(detail),
+                    } if detail == OPERATION_FAILED_CAPABILITY_DETAIL
+                ));
+            }
+            if matches!(row.setup, FailureSetup::CapabilityInvalidOutputRecoverable) {
+                // Phase 1: the capability failure's safe_summary carries `/`
+                // and `{` and fails strict validation. The run must NOT bork —
+                // it recovers (two model requests) and the real cause survives
+                // on the model-visible observation detail.
+                assert_eq!(
+                    observed.model_request_count, 2,
+                    "{}: malformed summary must remain recoverable",
+                    row.label
+                );
+                let observation = observed
+                    .appended_result_refs
+                    .iter()
+                    .find_map(|result| result.model_observation.as_ref())
+                    .expect("provider result should carry a model-visible observation");
+                assert_eq!(observation.status, ToolObservationStatus::Error);
+                assert!(matches!(
+                    &observation.detail,
+                    ToolObservationDetail::GenericFailure {
+                        failure_kind: FailureKind::OutputDecode,
+                        detail: Some(detail),
+                    } if detail == INVALID_OUTPUT_CAPABILITY_DETAIL
+                ));
+            }
         }
         _ => panic!(
             "{}: expected {:?}, observed {:?}",
@@ -566,39 +694,34 @@ fn assert_explanation_refs(row: &MatrixRow, refs: &[ironclaw_turns::LoopMessageR
     }
 }
 
-fn batch_outcome(
-    outcome: CapabilityOutcome,
-) -> ironclaw_turns::run_profile::CapabilityBatchOutcome {
-    ironclaw_turns::run_profile::CapabilityBatchOutcome {
-        outcomes: vec![outcome],
+fn batch_outcome(outcome: ironclaw_host_api::Resolution) -> ironclaw_host_api::ResolutionBatch {
+    ironclaw_host_api::ResolutionBatch {
+        resolutions: vec![outcome],
         stopped_on_suspension: false,
     }
 }
 
-fn failed_capability(error_kind: CapabilityFailureKind, safe_summary: &str) -> CapabilityOutcome {
-    CapabilityOutcome::Failed(ironclaw_turns::run_profile::CapabilityFailure {
-        error_kind,
-        safe_summary: safe_summary.to_string(),
-        detail: None,
-    })
+fn failed_capability(error_kind: FailureKind, safe_summary: &str) -> ironclaw_host_api::Resolution {
+    resolution::failed(error_kind, safe_summary.to_string(), None)
 }
 
 fn batch_outcome_stopped(
-    outcome: CapabilityOutcome,
-) -> ironclaw_turns::run_profile::CapabilityBatchOutcome {
-    ironclaw_turns::run_profile::CapabilityBatchOutcome {
-        outcomes: vec![outcome],
+    outcome: ironclaw_host_api::Resolution,
+) -> ironclaw_host_api::ResolutionBatch {
+    ironclaw_host_api::ResolutionBatch {
+        resolutions: vec![outcome],
         stopped_on_suspension: true,
     }
 }
 
-fn no_change_result(result_ref: &str) -> CapabilityOutcome {
-    CapabilityOutcome::Completed(CapabilityResultMessage {
-        result_ref: LoopResultRef::new(result_ref).expect("valid"),
-        safe_summary: "completed without progress".to_string(),
-        progress: ironclaw_turns::run_profile::CapabilityProgress::NoChange,
-        terminate_hint: false,
-        byte_len: 0,
-        output_digest: None,
-    })
+fn no_change_result(result_ref: &str) -> ironclaw_host_api::Resolution {
+    resolution::completed(
+        LoopResultRef::new(result_ref).expect("valid"),
+        "completed without progress".to_string(),
+        ironclaw_turns::run_profile::CapabilityProgress::NoChange,
+        false,
+        0,
+        None,
+        None,
+    )
 }

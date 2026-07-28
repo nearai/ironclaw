@@ -981,10 +981,7 @@ async fn read_scope_filter_isolates_project_within_same_stream() {
 
     let stream = EventStreamKey::new(tenant_id, user_id, Some(agent_id));
 
-    let project_a_filter = ReadScope {
-        project_id: Some(project_a.clone()),
-        ..ReadScope::default()
-    };
+    let project_a_filter = ReadScope::default().set_project_id(project_a.clone());
     let project_a_replay = log
         .read_after_cursor(&stream, &project_a_filter, None, 10)
         .await
@@ -998,10 +995,7 @@ async fn read_scope_filter_isolates_project_within_same_stream() {
     // cursor reflects the position they've already considered.
     assert_eq!(project_a_replay.next_cursor, EventCursor::new(3));
 
-    let project_b_filter = ReadScope {
-        project_id: Some(project_b.clone()),
-        ..ReadScope::default()
-    };
+    let project_b_filter = ReadScope::default().set_project_id(project_b.clone());
     let project_b_replay = log
         .read_after_cursor(&stream, &project_b_filter, None, 10)
         .await
@@ -1019,6 +1013,13 @@ async fn read_scope_filter_isolates_project_within_same_stream() {
 /// `succeed_count` calls and fails for every subsequent call.  `append_batch`
 /// is deliberately NOT overridden so the test exercises the default
 /// implementation in [`DurableEventLog`].
+//
+// domain-state fake, not an I/O fault — cannot move to
+// ironclaw_filesystem::FaultInjecting. It exists to exercise the trait's
+// *default* `append_batch` loop, which the filesystem-backed store overrides
+// (so the real store never runs this path); and the filesystem store lives in
+// the downstream `ironclaw_reborn_event_store` crate, unreachable from
+// `ironclaw_events` without a circular dependency.
 struct PartialFailLog {
     call_count: std::sync::atomic::AtomicUsize,
     succeed_count: usize,
@@ -1148,10 +1149,7 @@ async fn read_scope_filter_excludes_records_with_none_field_when_filter_is_some(
     .expect("without project");
 
     let stream = EventStreamKey::from_scope(&scope_with_project);
-    let filter = ReadScope {
-        project_id: scope_with_project.project_id.clone(),
-        ..ReadScope::default()
-    };
+    let filter = ReadScope::default().set_project_id(scope_with_project.project_id.clone());
     let replay = log
         .read_after_cursor(&stream, &filter, None, 10)
         .await

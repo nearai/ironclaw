@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use futures_core::Stream;
-use ironclaw_product_adapters::{
+use ironclaw_product::{
     ProductInboundAck, ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionItem,
     ProductProjectionState, ProjectionCursor, ProjectionSubscriptionRequest,
 };

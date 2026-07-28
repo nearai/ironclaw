@@ -9,9 +9,8 @@ engine state, settings, …) lives behind a single set of ops: `put` / `get` /
 `append` / `tail`.
 
 This supersedes the earlier "bytes mount; structured records stay typed"
-boundary recorded in
-`docs/reborn/2026-04-25-storage-catalog-and-placement.md`. The override is
-codified in `docs/reborn/2026-05-14-universal-fs-dispatch.md` (the new ADR).
+boundary. The current rule is codified in
+`docs/reborn/contracts/filesystem.md` and `docs/reborn/contracts/storage-placement.md`.
 
 ## What this crate owns
 
@@ -32,11 +31,33 @@ codified in `docs/reborn/2026-05-14-universal-fs-dispatch.md` (the new ADR).
 - `ScopedFilesystem` (`src/scoped.rs`) — the invocation-scoped view that
   higher-level stores accept in their constructor. Performs the permission
   check against `MountView` before any backend dispatch.
-- Backends: `LocalFilesystem`, `PostgresRootFilesystem`,
+- Backends: `DiskFilesystem`, `PostgresRootFilesystem`,
   `LibSqlRootFilesystem`, `InMemoryBackend`. All implement
   `RootFilesystem`.
 - Backend containment checks (symlink traversal, mount escape, raw-host
   path prevention).
+- `FaultInjecting` (`src/fault.rs`, behind the `test-support` feature) — a
+  fault-injecting + op-recording `RootFilesystem` decorator. Downstream tests
+  wrap the real backend in it (`SecretStore::ephemeral_over`,
+  `FaultInjecting::new(InMemoryBackend::new()).with_fault(...)`) and drive their
+  **genuine** `Filesystem*Store` against injected backend faults — exercising
+  the store's real encryption/CAS/`FilesystemError -> DomainError` mapping.
+  **Do not hand-roll a per-crate `impl RootFilesystem for …Failing…` fault
+  fake, and do not add a whole-trait `impl SomeStore for …Failing…`** that
+  bypasses the production store: use this decorator so the fault flows through
+  the real code path. Known limits (kept deliberately narrow): it gates by
+  `FilesystemOperation` only — **not** by `CasExpectation` (can't fault "only
+  versioned writes"), and it injects errors + records ops only — it is **not**
+  a synchronization primitive (a test needing a read/write *interleaving*
+  barrier keeps its own tiny delegating filesystem, which is not a fault fake).
+  Genuinely **domain-behavioral** doubles stay hand-rolled and must carry a
+  `// domain-state fake, not an I/O fault` comment: fakes that return
+  valid-but-wrong records, drop reservation ids, or need a store method to
+  return `Ok(None)`/a non-`FilesystemError` domain error a backend fault can't
+  produce (e.g. `ProcessError::ProcessResultUnavailable`, TOCTOU
+  present-then-absent). If migrating a fake changes which domain error the test
+  sees, that is a real coverage finding — fix the assertion to the production
+  error, don't keep the fake's fiction.
 
 ## What this crate does NOT do
 
@@ -81,7 +102,7 @@ codified in `docs/reborn/2026-05-14-universal-fs-dispatch.md` (the new ADR).
    into a store. `cas_update` fails **closed** on a non-CAS backend
    (`CasUpdateError::CasUnsupported`) rather than falling back to a blind
    `CasExpectation::Any` overwrite; all production store mounts resolve to
-   CAS-capable db/in-memory backends (`LocalFilesystem` is byte-only and is
+   CAS-capable db/in-memory backends (`DiskFilesystem` is byte-only and is
    structurally unreachable from those mounts), so fail-closed is correct.
    See `docs/plans/2026-06-25-cas-migration.md`.
 
@@ -94,7 +115,7 @@ codified in `docs/reborn/2026-05-14-universal-fs-dispatch.md` (the new ADR).
    and do not treat a store's absence from this list as license to write a
    new local retry loop instead of calling `cas_update`.
 
-   - `ironclaw_turns` runner-lease sidecar (`filesystem_store/runner_lease.rs`,
+   - `ironclaw_turns` runner-lease sidecar (`turn_state_row_store/runner_lease.rs`,
      landed independently in #5232) drives its per-run lease records through
      a local `put_with_cas` + `cas_retry_backoff` retry loop; the main
      turn-state snapshot RMW already goes through `cas_update`. Migration
@@ -110,9 +131,8 @@ codified in `docs/reborn/2026-05-14-universal-fs-dispatch.md` (the new ADR).
      so they are not the convoy hazard `cas_update` was introduced to fix;
      migration to `cas_update`'s fail-closed semantics is a deferred
      follow-up tracked as a sibling to #5274.
-   - `ironclaw_conversations::filesystem_store::save_state`,
-     `ironclaw_reborn::local_trigger_access::filesystem::deactivate_stale_record`
-     (via `put_record`), and `ironclaw_product_workflow_storage::filesystem_ledger`
+   - `ironclaw_conversations::conversation_state_store::save_state` and
+     `ironclaw_product::filesystem_ledger`
      (`begin_or_replay` / `settle` / `release` / `try_acquire_prune_lease`)
      are further pre-existing examples of the same lock-free retry-loop
      pattern, pending the same migration.
@@ -154,10 +174,8 @@ consumers of the legacy methods — new code should call `put`/`get`/
 
 ## When you're editing this crate
 
-- Run the full crate tests, both feature combinations:
-  `cargo test -p ironclaw_filesystem --all-features`,
-  `cargo check -p ironclaw_filesystem --no-default-features --features libsql`,
-  `cargo check -p ironclaw_filesystem --no-default-features --features postgres`.
+- Run the full crate tests:
+  `cargo test -p ironclaw_filesystem`.
 - New `Entry` shapes (record kinds, indexed projections) belong in the
   consumer crate, not here. This crate only owns the trait surface and
   shared primitives.

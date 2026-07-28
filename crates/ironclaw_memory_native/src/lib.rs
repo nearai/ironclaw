@@ -6,7 +6,7 @@
 
 mod backend;
 mod chunking;
-#[cfg(any(test, feature = "contract-tests"))]
+#[cfg(any(test, feature = "test-support"))]
 pub mod contract_tests;
 mod embedding;
 mod events;
@@ -56,11 +56,12 @@ pub use safety::{
 };
 pub use search::{FusionStrategy, MemorySearchRequest, MemorySearchResult};
 pub use service::{
-    MemoryContextProfileId, MemoryInvocation, MemoryProfileSetStatus, MemoryService,
-    MemoryServiceContextRequest, MemoryServiceContextSnippet, MemoryServiceError,
-    MemoryServiceErrorKind, MemoryServiceProfileSetRequest, MemoryServiceProfileSetResponse,
-    MemoryServiceReadRequest, MemoryServiceReadResponse, MemoryServiceSearchRequest,
-    MemoryServiceSearchResponse, MemoryServiceSearchResult, MemoryServiceTreeRequest,
-    MemoryServiceTreeResponse, MemoryServiceWriteRequest, MemoryServiceWriteResponse,
-    MemoryWriteStatus, NativeMemoryService,
+    MemoryContextProfileId, MemoryInteractionMessage, MemoryInteractionRole, MemoryInvocation,
+    MemoryProfileSetStatus, MemoryService, MemoryServiceContextRequest,
+    MemoryServiceContextSnippet, MemoryServiceError, MemoryServiceErrorKind,
+    MemoryServiceProfileSetRequest, MemoryServiceProfileSetResponse, MemoryServiceReadRequest,
+    MemoryServiceReadResponse, MemoryServiceRecordRequest, MemoryServiceRecordResponse,
+    MemoryServiceSearchRequest, MemoryServiceSearchResponse, MemoryServiceSearchResult,
+    MemoryServiceTreeRequest, MemoryServiceTreeResponse, MemoryServiceWriteRequest,
+    MemoryServiceWriteResponse, MemoryWriteStatus, NativeMemoryService,
 };

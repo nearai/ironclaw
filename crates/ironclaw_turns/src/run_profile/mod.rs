@@ -23,6 +23,7 @@ mod policy;
 mod prompt;
 mod prompt_text;
 mod refs;
+pub mod resolution;
 mod resolver;
 mod runtime_context;
 mod skill_context;
@@ -46,13 +47,10 @@ pub use driver::{
 pub use host::{
     AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
     AppendCapabilityResultRef, AssistantReply, AuthResumeApprovalIdentity, BatchPolicyKind,
-    BeginAssistantDraft, CapabilityApprovalResume, CapabilityAuthResume,
-    CapabilityAuthResumeReplay, CapabilityBatchInvocation, CapabilityBatchOutcome,
-    CapabilityCallCandidate, CapabilityDenied, CapabilityDeniedReasonKind,
-    CapabilityDeniedReasonKindValue, CapabilityDescriptorView, CapabilityFailure,
-    CapabilityFailureKind, CapabilityFailureKindValue, CapabilityInputRef, CapabilityInvocation,
-    CapabilityOutcome, CapabilityProgress, CapabilityResultMessage, CapabilityResumeToken,
-    CapabilitySurfaceVersion, ConcurrencyHint, FinalizeAssistantMessage,
+    BeginAssistantDraft, CapabilityApprovalResume, CapabilityAuthResume, CapabilityCallCandidate,
+    CapabilityDeniedReasonKind, CapabilityDeniedReasonKindValue, CapabilityDescriptorView,
+    CapabilityFailure, CapabilityInputRef, CapabilityProgress, CapabilityResultMessage,
+    CapabilityResumeToken, CapabilitySurfaceVersion, ConcurrencyHint, FinalizeAssistantMessage,
     LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES, LOOP_CONTEXT_TOTAL_MODEL_CONTENT_MAX_BYTES,
     LoadCheckpointPayloadRequest, LoadedCheckpointPayload, LoopCancelReasonKind,
     LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointKind,
@@ -65,15 +63,15 @@ pub use host::{
     LoopModelRequest, LoopModelResponse, LoopModelRouteSnapshot, LoopModelUsage, LoopProcessRef,
     LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority,
     LoopPromptBundleGrant, LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort,
-    LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, ModelStreamChunk,
-    ParentLoopOutput, ProcessHandleSummary, PromptMode, ProviderToolCall,
+    LoopRequest, LoopRequestBatch, LoopRunContext, LoopRunInfoPort, LoopSafeSummary,
+    LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput, PromptMode, ProviderToolCall,
     ProviderToolCallCapabilityIds, ProviderToolCallReference, ProviderToolCallReplay,
     ProviderToolDefinition, RegisterProviderToolCallRequest, StageCheckpointPayloadRequest,
     UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
     sanitize_model_visible_text, validate_model_route_component_value,
 };
 pub use instruction_bundle::{
-    InMemoryInstructionMaterializationStore, InstructionBundle, InstructionBundleBuilder,
+    EphemeralInstructionMaterializationStore, InstructionBundle, InstructionBundleBuilder,
     InstructionBundleFingerprint, InstructionBundleMaterializedMessage, InstructionBundleRequest,
     InstructionMaterializationStore, InstructionSafetyContext,
     sort_instruction_snippets_for_prompt,
@@ -89,8 +87,8 @@ pub use milestones::{
 };
 pub use model::{
     HostManagedLoopModelPort, LoopModelBudgetAccountant, LoopModelGateway, LoopModelGatewayError,
-    LoopModelGatewayRequest, LoopModelPolicyGuard, ModelCallOutcome, NoOpBudgetAccountant,
-    NoOpPolicyGuard,
+    LoopModelGatewayRequest, LoopModelPolicyGuard, LoopModelProgressSink, ModelCallOutcome,
+    NoOpBudgetAccountant, NoOpPolicyGuard,
 };
 pub use model_observation::{
     CapabilityFailureDetail, CapabilityInputIssue, CapabilityInputRepair, CapabilityRecoveryHint,
@@ -112,6 +110,7 @@ pub use refs::{
     LoopDriverId, ModelProfileId, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
     RunProfileSourceLayer, RunProfileSourceRef, RunnerPoolId, SchedulingClass,
 };
+pub use resolution::{DeniedResolution, GatedResolution};
 pub use resolver::{
     InMemoryRunProfileRegistry, InMemoryRunProfileResolver, RunProfileDefinition,
     RunProfileRegistryError, RunProfileResolutionRequest, RunProfileResolver,

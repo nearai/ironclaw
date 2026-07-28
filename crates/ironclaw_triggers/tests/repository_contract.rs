@@ -1,21 +1,22 @@
-#![cfg(any(feature = "libsql", feature = "postgres"))]
-
 use chrono::{SecondsFormat, TimeZone, Utc};
+use ironclaw_common::AutomationName;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
+use ironclaw_triggers::PostgresTriggerRepository;
 use ironclaw_triggers::{
-    ActiveTriggerScanCursor, ClearActiveFireRequest, InMemoryTriggerRepository, TriggerError,
-    TriggerId, TriggerRecord, TriggerRepository, TriggerRunStatus, TriggerSchedule,
-    TriggerSourceKind, TriggerState,
+    ActiveTriggerScanCursor, ClearActiveFireRequest, InMemoryTriggerRepository,
+    TriggerDeliveryTargetId, TriggerError, TriggerId, TriggerRecord, TriggerRepository,
+    TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
 };
 use ironclaw_turns::TurnRunId;
-
-#[cfg(feature = "libsql")]
 use {
-    ironclaw_triggers::LibSqlTriggerRepository, libsql::params, std::sync::Arc, tempfile::tempdir,
+    ironclaw_triggers::LibSqlTriggerRepository,
+    libsql::params,
+    std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    },
+    tempfile::tempdir,
 };
-
-#[cfg(feature = "postgres")]
-use ironclaw_triggers::PostgresTriggerRepository;
 
 fn ts(seconds: i64) -> Timestamp {
     Utc.timestamp_opt(seconds, 0).single().expect("valid ts")
@@ -27,6 +28,10 @@ fn tenant(value: &str) -> TenantId {
 
 fn user(value: &str) -> UserId {
     UserId::new(value).expect("valid user")
+}
+
+fn automation_name(value: &str) -> AutomationName {
+    AutomationName::new(value).expect("valid automation name")
 }
 
 fn sample_record(
@@ -44,6 +49,7 @@ fn sample_record(
         source: TriggerSourceKind::Schedule,
         schedule: TriggerSchedule::cron("0 8 * * *").expect("valid cron"),
         prompt: "summarize unread mail".to_string(),
+        delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at,
         last_run_at: None,
@@ -258,6 +264,9 @@ async fn assert_round_trip_preserves_optional_run_metadata_and_schedule_kind(
     record.last_status = Some(TriggerRunStatus::Error);
     record.active_fire_slot = Some(ts(1_704_067_260));
     record.active_run_ref = Some(TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").unwrap());
+    record.delivery_target = Some(
+        TriggerDeliveryTargetId::new("slack:personal-dm:T123:user-a").expect("delivery target"),
+    );
 
     repo.upsert_trigger(record.clone())
         .await
@@ -1056,7 +1065,59 @@ async fn assert_scoped_state_transition_controls_fire_eligibility(repo: &impl Tr
     );
 }
 
-#[cfg(feature = "libsql")]
+async fn assert_scoped_rename_updates_only_matching_scope(repo: &impl TriggerRepository) {
+    let trigger_id = TriggerId::parse("01J00000000000000000000004").expect("ulid");
+    let tenant_id = tenant("tenant-a");
+    let record = sample_record(trigger_id, tenant_id.clone(), ts(1_704_067_200));
+    repo.upsert_trigger(record.clone())
+        .await
+        .expect("insert trigger to rename");
+
+    let wrong_scope = repo
+        .rename_scoped_trigger(
+            tenant_id.clone(),
+            user("user-a"),
+            Some(AgentId::new("agent-other").expect("valid agent")),
+            Some(ProjectId::new("project-a").expect("valid project")),
+            trigger_id,
+            automation_name("wrong scope name"),
+        )
+        .await
+        .expect("wrong-scope rename");
+    assert_eq!(wrong_scope, None);
+    assert_eq!(
+        repo.get_trigger(tenant_id.clone(), trigger_id)
+            .await
+            .expect("get after wrong-scope rename")
+            .expect("record")
+            .name,
+        record.name
+    );
+
+    let renamed = repo
+        .rename_scoped_trigger(
+            tenant_id.clone(),
+            user("user-a"),
+            Some(AgentId::new("agent-a").expect("valid agent")),
+            Some(ProjectId::new("project-a").expect("valid project")),
+            trigger_id,
+            automation_name("morning inbox summary"),
+        )
+        .await
+        .expect("matching-scope rename")
+        .expect("renamed record");
+    assert_eq!(renamed.name, "morning inbox summary");
+    assert_eq!(renamed.state, TriggerState::Scheduled);
+    assert_eq!(renamed.prompt, record.prompt);
+    assert_eq!(renamed.next_run_at, record.next_run_at);
+
+    let fetched = repo
+        .get_trigger(tenant_id.clone(), trigger_id)
+        .await
+        .expect("get renamed trigger")
+        .expect("renamed record");
+    assert_eq!(fetched.name, "morning inbox summary");
+}
 async fn build_libsql_repo_with_db() -> (
     tempfile::TempDir,
     Arc<libsql::Database>,
@@ -1074,14 +1135,10 @@ async fn build_libsql_repo_with_db() -> (
     repo.run_migrations().await.expect("run migrations");
     (dir, db, repo)
 }
-
-#[cfg(feature = "libsql")]
 async fn build_libsql_repo() -> (tempfile::TempDir, LibSqlTriggerRepository) {
     let (dir, _db, repo) = build_libsql_repo_with_db().await;
     (dir, repo)
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_repository_contract_parity() {
     let (_dir, repo) = build_libsql_repo().await;
@@ -1113,9 +1170,10 @@ async fn libsql_repository_contract_parity() {
 
     let (_dir, repo) = build_libsql_repo().await;
     assert_scoped_state_transition_controls_fire_eligibility(&repo).await;
-}
 
-#[cfg(feature = "libsql")]
+    let (_dir, repo) = build_libsql_repo().await;
+    assert_scoped_rename_updates_only_matching_scope(&repo).await;
+}
 #[tokio::test]
 async fn libsql_repository_run_migrations_is_idempotent() {
     let dir = tempdir().expect("tempdir");
@@ -1131,8 +1189,47 @@ async fn libsql_repository_run_migrations_is_idempotent() {
     repo.run_migrations().await.expect("first run migrations");
     repo.run_migrations().await.expect("second run migrations");
 }
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn libsql_repository_busy_timeout_waits_for_write_lock() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("triggers.db");
+    let db = Arc::new(
+        libsql::Builder::new_local(db_path.display().to_string())
+            .build()
+            .await
+            .expect("build libsql db"),
+    );
+    let lock_holder = db.connect().expect("connect raw libsql");
+    lock_holder
+        .execute_batch("BEGIN IMMEDIATE;")
+        .await
+        .expect("hold write lock");
 
-#[cfg(feature = "libsql")]
+    let repo = LibSqlTriggerRepository::new(db);
+    let started = Instant::now();
+    let migration = tokio::spawn(async move { repo.run_migrations().await });
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !migration.is_finished(),
+        "repository migration should wait for the held write lock instead of failing immediately"
+    );
+
+    lock_holder
+        .execute_batch("COMMIT;")
+        .await
+        .expect("release write lock");
+
+    let result = tokio::time::timeout(Duration::from_secs(2), migration)
+        .await
+        .expect("migration should finish after lock release")
+        .expect("migration task should not panic");
+    result.expect("migration should succeed after waiting for the lock");
+    assert!(
+        started.elapsed() >= Duration::from_millis(100),
+        "migration should have been blocked by the held write lock"
+    );
+}
 #[tokio::test]
 async fn libsql_repository_rejects_malformed_persisted_rows() {
     let (_dir, db, repo) = build_libsql_repo_with_db().await;
@@ -1174,8 +1271,6 @@ async fn libsql_repository_rejects_malformed_persisted_rows() {
         .expect("restore valid row");
     }
 }
-
-#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn postgres_repository_contract_parity() {
     let Some((_container, pool)) = postgres_pool_or_skip().await else {
@@ -1211,9 +1306,10 @@ async fn postgres_repository_contract_parity() {
 
     clear_postgres_triggers(&pool).await;
     assert_scoped_state_transition_controls_fire_eligibility(&repo).await;
-}
 
-#[cfg(feature = "postgres")]
+    clear_postgres_triggers(&pool).await;
+    assert_scoped_rename_updates_only_matching_scope(&repo).await;
+}
 #[tokio::test]
 async fn postgres_repository_run_migrations_is_idempotent() {
     let Some((_container, pool)) = postgres_pool_or_skip().await else {
@@ -1224,8 +1320,6 @@ async fn postgres_repository_run_migrations_is_idempotent() {
     repo.run_migrations().await.expect("first run migrations");
     repo.run_migrations().await.expect("second run migrations");
 }
-
-#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn postgres_repository_rejects_malformed_persisted_rows() {
     let Some((_container, pool)) = postgres_pool_or_skip().await else {
@@ -1273,8 +1367,6 @@ async fn postgres_repository_rejects_malformed_persisted_rows() {
         .expect("restore valid row");
     }
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_repository_rejects_corrupted_once_rows() {
     let (_dir, db, repo) = build_libsql_repo_with_db().await;
@@ -1339,8 +1431,6 @@ async fn libsql_repository_rejects_corrupted_once_rows() {
         .await
         .expect("clear corrupted row");
 }
-
-#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn postgres_repository_rejects_corrupted_once_rows() {
     let Some((_container, pool)) = postgres_pool_or_skip().await else {
@@ -1499,8 +1589,6 @@ async fn assert_malformed_row_error(
         "expected malformed row to report {expected_field}, got {error:?}"
     );
 }
-
-#[cfg(feature = "postgres")]
 async fn postgres_pool_or_skip() -> Option<(
     testcontainers_modules::testcontainers::ContainerAsync<
         testcontainers_modules::postgres::Postgres,
@@ -1531,8 +1619,6 @@ async fn postgres_pool_or_skip() -> Option<(
     }
     Some((container, pool))
 }
-
-#[cfg(feature = "postgres")]
 async fn start_postgres_container() -> Option<(
     testcontainers_modules::testcontainers::ContainerAsync<
         testcontainers_modules::postgres::Postgres,
@@ -1579,8 +1665,6 @@ async fn start_postgres_container() -> Option<(
         format!("postgres://postgres:postgres@{host}:{port}/ironclaw_test"),
     ))
 }
-
-#[cfg(feature = "postgres")]
 async fn clear_postgres_triggers(pool: &deadpool_postgres::Pool) {
     pool.get()
         .await
@@ -1629,15 +1713,11 @@ async fn assert_round_trip_preserves_named_timezone(repo: &impl TriggerRepositor
         }
     }
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_timezone_round_trip() {
     let (_dir, repo) = build_libsql_repo().await;
     assert_round_trip_preserves_named_timezone(&repo).await;
 }
-
-#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn postgres_timezone_round_trip() {
     let Some((_container, pool)) = postgres_pool_or_skip().await else {
@@ -1664,8 +1744,6 @@ async fn postgres_timezone_round_trip() {
 // run_migrations first, which the postgres harness does not support without
 // a separate DDL setup step; that coverage is deferred. See comment below.
 // ---------------------------------------------------------------------------
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_utc_backfill_on_legacy_row_without_schedule_timezone() {
     // Build the database without the schedule_timezone column — simulate the
@@ -3551,15 +3629,11 @@ mod fire_claim_contract {
         assert_fire_once_accept_with_none_next_run_at_succeeds(&repo).await;
         assert_scoped_state_transition_controls_fire_eligibility(&repo).await;
     }
-
-    #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn libsql_repository_fire_claim_contract() {
         let (_dir, repo) = build_libsql_repo().await;
         assert_durable_fire_claim_contract(&repo).await;
     }
-
-    #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn libsql_repository_option_next_run_at_contracts() {
         let (_dir, repo) = build_libsql_repo().await;
@@ -3567,8 +3641,6 @@ mod fire_claim_contract {
         let (_dir, repo) = build_libsql_repo().await;
         assert_fire_once_accept_with_none_next_run_at_succeeds(&repo).await;
     }
-
-    #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn libsql_repository_rejects_malformed_persisted_run_history_rows() {
         for (column, value, expected) in malformed_run_history_cases() {
@@ -3588,15 +3660,11 @@ mod fire_claim_contract {
                 .await;
         }
     }
-
-    #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn libsql_repository_fire_claim_is_atomic() {
         let (_dir, repo) = build_libsql_repo().await;
         assert_durable_claim_is_atomic(std::sync::Arc::new(repo)).await;
     }
-
-    #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn libsql_repository_mark_fire_accepted_is_idempotent_under_concurrency() {
         let (_dir, repo) = build_libsql_repo().await;
@@ -3607,8 +3675,6 @@ mod fire_claim_contract {
         )
         .await;
     }
-
-    #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn libsql_repository_mark_fire_replayed_is_idempotent_under_concurrency() {
         let (_dir, repo) = build_libsql_repo().await;
@@ -3619,8 +3685,6 @@ mod fire_claim_contract {
         )
         .await;
     }
-
-    #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn libsql_repository_mark_fire_accepted_settles_equivalent_active_fire_timestamp_text() {
         let (_dir, db, repo) = build_libsql_repo_with_db().await;
@@ -3669,8 +3733,6 @@ mod fire_claim_contract {
         assert_eq!(runs[0].run_id, Some(run_id));
         assert_eq!(runs[0].thread_id, Some(thread_id));
     }
-
-    #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn libsql_repository_mark_fire_replayed_settles_equivalent_active_fire_timestamp_text() {
         let (_dir, db, repo) = build_libsql_repo_with_db().await;
@@ -3719,8 +3781,6 @@ mod fire_claim_contract {
         assert_eq!(runs[0].run_id, Some(run_id));
         assert_eq!(runs[0].thread_id, Some(thread_id));
     }
-
-    #[cfg(feature = "libsql")]
     async fn rewrite_libsql_active_fire_slot_to_equivalent_text(
         db: &libsql::Database,
         tenant_id: &TenantId,
@@ -3746,8 +3806,6 @@ mod fire_claim_contract {
             .await
             .expect("rewrite active fire timestamp text");
     }
-
-    #[cfg(feature = "postgres")]
     #[tokio::test]
     async fn postgres_repository_fire_claim_contract() {
         let Some((_container, pool)) = postgres_pool_or_skip().await else {
@@ -3758,8 +3816,6 @@ mod fire_claim_contract {
         assert_durable_fire_claim_contract(&repo).await;
         clear_postgres_triggers(&pool).await;
     }
-
-    #[cfg(feature = "postgres")]
     #[tokio::test]
     async fn postgres_repository_rejects_malformed_persisted_run_history_rows() {
         let Some((_container, pool)) = postgres_pool_or_skip().await else {
@@ -3800,8 +3856,6 @@ mod fire_claim_contract {
             .expect("clear trigger run history");
         clear_postgres_triggers(&pool).await;
     }
-
-    #[cfg(feature = "postgres")]
     #[tokio::test]
     async fn postgres_repository_fire_claim_is_atomic() {
         let Some((_container, pool)) = postgres_pool_or_skip().await else {
@@ -3812,8 +3866,6 @@ mod fire_claim_contract {
         assert_durable_claim_is_atomic(std::sync::Arc::new(repo)).await;
         clear_postgres_triggers(&pool).await;
     }
-
-    #[cfg(feature = "postgres")]
     #[tokio::test]
     async fn postgres_repository_mark_fire_accepted_is_idempotent_under_concurrency() {
         let Some((_container, pool)) = postgres_pool_or_skip().await else {
@@ -3829,8 +3881,6 @@ mod fire_claim_contract {
         .await;
         clear_postgres_triggers(&pool).await;
     }
-
-    #[cfg(feature = "postgres")]
     #[tokio::test]
     async fn postgres_repository_mark_fire_accepted_settles_equivalent_active_fire_timestamp_text()
     {
@@ -3889,8 +3939,6 @@ mod fire_claim_contract {
         assert_eq!(runs[0].thread_id, Some(thread_id));
         clear_postgres_triggers(&pool).await;
     }
-
-    #[cfg(feature = "postgres")]
     #[tokio::test]
     async fn postgres_repository_mark_fire_replayed_settles_equivalent_active_fire_timestamp_text()
     {
@@ -3948,8 +3996,6 @@ mod fire_claim_contract {
         assert_eq!(runs[0].thread_id, Some(thread_id));
         clear_postgres_triggers(&pool).await;
     }
-
-    #[cfg(feature = "postgres")]
     async fn rewrite_postgres_active_fire_slot_to_equivalent_text(
         pool: &deadpool_postgres::Pool,
         tenant_id: &TenantId,
@@ -3978,8 +4024,6 @@ mod fire_claim_contract {
             .await
             .expect("rewrite active fire timestamp text");
     }
-
-    #[cfg(feature = "postgres")]
     #[tokio::test]
     async fn postgres_repository_mark_fire_replayed_is_idempotent_under_concurrency() {
         let Some((_container, pool)) = postgres_pool_or_skip().await else {
@@ -4088,22 +4132,16 @@ mod fire_claim_contract {
         let repo = InMemoryTriggerRepository::default();
         assert_fire_once_accept_with_none_next_run_at_succeeds(&repo).await;
     }
-
-    #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn libsql_recurring_accept_rejects_non_future_next_run_at() {
         let (_dir, repo) = build_libsql_repo().await;
         assert_recurring_accept_rejects_non_future_next_run_at(&repo).await;
     }
-
-    #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn libsql_fire_once_accept_with_none_next_run_at_succeeds() {
         let (_dir, repo) = build_libsql_repo().await;
         assert_fire_once_accept_with_none_next_run_at_succeeds(&repo).await;
     }
-
-    #[cfg(feature = "postgres")]
     #[tokio::test]
     async fn postgres_recurring_accept_rejects_non_future_next_run_at() {
         let Some((_container, pool)) = super::postgres_pool_or_skip().await else {
@@ -4114,8 +4152,6 @@ mod fire_claim_contract {
         assert_recurring_accept_rejects_non_future_next_run_at(&repo).await;
         super::clear_postgres_triggers(&pool).await;
     }
-
-    #[cfg(feature = "postgres")]
     #[tokio::test]
     async fn postgres_fire_once_accept_with_none_next_run_at_succeeds() {
         let Some((_container, pool)) = super::postgres_pool_or_skip().await else {
@@ -4228,22 +4264,16 @@ mod fire_claim_contract {
         let repo = InMemoryTriggerRepository::default();
         assert_recurring_replayed_rejects_none_next_run_at(&repo).await;
     }
-
-    #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn libsql_recurring_accept_rejects_none_next_run_at() {
         let (_dir, repo) = build_libsql_repo().await;
         assert_recurring_accept_rejects_none_next_run_at(&repo).await;
     }
-
-    #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn libsql_recurring_replayed_rejects_none_next_run_at() {
         let (_dir, repo) = build_libsql_repo().await;
         assert_recurring_replayed_rejects_none_next_run_at(&repo).await;
     }
-
-    #[cfg(feature = "postgres")]
     #[tokio::test]
     async fn postgres_recurring_accept_rejects_none_next_run_at() {
         let Some((_container, pool)) = super::postgres_pool_or_skip().await else {
@@ -4254,8 +4284,6 @@ mod fire_claim_contract {
         assert_recurring_accept_rejects_none_next_run_at(&repo).await;
         super::clear_postgres_triggers(&pool).await;
     }
-
-    #[cfg(feature = "postgres")]
     #[tokio::test]
     async fn postgres_recurring_replayed_rejects_none_next_run_at() {
         let Some((_container, pool)) = super::postgres_pool_or_skip().await else {
@@ -4389,15 +4417,11 @@ mod find_trigger_run_by_thread_id_contract {
         let repo = InMemoryTriggerRepository::default();
         assert_find_trigger_run_by_thread_id_contract(&repo).await;
     }
-
-    #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn libsql_find_trigger_run_by_thread_id() {
         let (_dir, repo) = super::build_libsql_repo().await;
         assert_find_trigger_run_by_thread_id_contract(&repo).await;
     }
-
-    #[cfg(feature = "postgres")]
     #[tokio::test]
     async fn postgres_find_trigger_run_by_thread_id() {
         let Some((_container, pool)) = super::postgres_pool_or_skip().await else {
@@ -4480,15 +4504,11 @@ mod list_scoped_triggers_excluded_states_contract {
         let repo = InMemoryTriggerRepository::default();
         assert_list_scoped_triggers_excludes_states(&repo).await;
     }
-
-    #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn libsql_list_scoped_triggers_excludes_completed_rows() {
         let (_dir, repo) = super::build_libsql_repo().await;
         assert_list_scoped_triggers_excludes_states(&repo).await;
     }
-
-    #[cfg(feature = "postgres")]
     #[tokio::test]
     async fn postgres_list_scoped_triggers_excludes_completed_rows() {
         let Some((_container, pool)) = super::postgres_pool_or_skip().await else {
@@ -4560,15 +4580,11 @@ mod list_scoped_triggers_excluded_states_contract {
         let repo = InMemoryTriggerRepository::default();
         assert_list_scoped_triggers_exclusion_precedes_limit(&repo).await;
     }
-
-    #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn libsql_list_scoped_triggers_exclusion_precedes_limit() {
         let (_dir, repo) = super::build_libsql_repo().await;
         assert_list_scoped_triggers_exclusion_precedes_limit(&repo).await;
     }
-
-    #[cfg(feature = "postgres")]
     #[tokio::test]
     async fn postgres_list_scoped_triggers_exclusion_precedes_limit() {
         let Some((_container, pool)) = super::postgres_pool_or_skip().await else {
@@ -4580,8 +4596,6 @@ mod list_scoped_triggers_excluded_states_contract {
         super::clear_postgres_triggers(&pool).await;
     }
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_once_trigger_completes_on_clear_active_fire() {
     let (_dir, repo) = build_libsql_repo().await;

@@ -92,20 +92,20 @@ const CONNECT_ATTEMPTS: u32 = 3;
 ///
 /// 1. **In-process write serialisation (`write_lock`).** Every mutating op
 ///    (`record_invocation`, `record_value`, `evict_older_than`,
-///    `run_migrations`) acquires a per-backend `Arc<Mutex<()>>` and holds it
-///    for the whole `BEGIN IMMEDIATE` … `COMMIT` transaction. This is the
-///    primary admission control: it serialises all writers from THIS process
-///    before they ever contend at the SQLite layer. Without it, an unbounded
-///    fan-out (e.g. a heartbeat tick evaluating thousands of hooks at once)
-///    races on the single SQLite write lock; in libSQL's replication-enabled
-///    build a raw `BEGIN IMMEDIATE` statement can return `SQLITE_BUSY`
-///    *immediately* instead of honouring `busy_timeout`, surfacing as
-///    `Unavailable("database is locked")` — which **fail-closes** predicate
-///    evaluation (a hook that should pass gets denied under load). Serialising
-///    in-process keeps each process to one writer at a time, so the file-handle
+///    `run_migrations`) acquires a per-backend `Arc<Mutex<()>>` before opening
+///    its write connection, and holds it for the whole `BEGIN IMMEDIATE` …
+///    `COMMIT` transaction. This is the primary admission control: it
+///    serialises all writers from THIS backend before they ever contend at the
+///    SQLite layer or fan out connection opens. Without it, an unbounded fan-out
+///    (e.g. a heartbeat tick evaluating thousands of hooks at once) can race on
+///    libSQL connection setup and the single SQLite write lock; in libSQL's
+///    replication-enabled build that can surface as `SQLITE_BUSY`, `SQLITE_MISUSE`,
+///    or even transient readonly/CANTOPEN errors, which become
+///    `Unavailable(...)` and **fail-close** predicate evaluation. Serialising
+///    in-process keeps each backend to one writer at a time, so the file-handle
 ///    footprint stays flat and the SQLite write lock is never contended from
-///    within the process. This is exactly the `write_lock: Arc<Mutex<()>>`
-///    pattern `LibSqlWorkspaceStore` uses for the same reason.
+///    within a backend. This is exactly the `write_lock: Arc<Mutex<()>>` pattern
+///    `LibSqlWorkspaceStore` uses for the same reason.
 ///
 /// 2. **Cross-process serialisation (`PRAGMA busy_timeout = 5000`).** Two
 ///    separate processes (or two backend instances over different `Database`
@@ -148,10 +148,13 @@ impl LibSqlPredicateStateBackend {
         }
     }
 
-    /// Open a fresh connection with the project-standard busy timeout. Retries
-    /// connection creation with exponential backoff on transient open failures
-    /// (`SQLITE_CANTOPEN` during concurrent opens) so a brief race doesn't
-    /// fail-close predicate evaluation. Mirrors `LibSqlBackend::connect`.
+    /// Open a fresh connection with the project-standard busy timeout. Callers
+    /// hold the backend write lock before entering this method so a one-backend
+    /// writer flood cannot open an unbounded number of libSQL connections before
+    /// the transaction is serialised. Retries connection creation with
+    /// exponential backoff on transient open failures (`SQLITE_CANTOPEN` during
+    /// cross-instance concurrent opens) so a brief race doesn't fail-close
+    /// predicate evaluation. Mirrors `LibSqlBackend::connect`.
     async fn connect(&self) -> Result<Connection, PredicateBackendError> {
         let mut last_err = None;
         for attempt in 0..CONNECT_ATTEMPTS {
@@ -180,11 +183,9 @@ impl LibSqlPredicateStateBackend {
     /// wrapped in `BEGIN IMMEDIATE` so concurrent first-time migrations
     /// serialise. SQLite supports transactional DDL.
     pub async fn run_migrations(&self) -> Result<(), PredicateBackendError> {
-        // Connect (and retry/backoff) before taking the lock so a transient
-        // open race never stalls other writers; the lock spans only the txn.
-        let conn = self.connect().await?;
         // Migrations are writers too: serialise with record_* / evict.
         let _write_guard = self.write_lock.lock().await;
+        let conn = self.connect().await?;
         conn.execute("BEGIN IMMEDIATE", ()).await.map_err(map_err)?;
         let result = run_migrations_inner(&conn).await;
         match result {
@@ -236,18 +237,12 @@ impl LibSqlPredicateStateBackend {
             read_result,
         } = spec;
 
-        // Open (and, if needed, retry) the connection BEFORE taking the
-        // write_lock. `connect()` can sleep on its exponential backoff
-        // (`SQLITE_CANTOPEN` race); holding the in-process write lock across
-        // that sleep would needlessly stall every other writer without any
-        // serialisation benefit — nothing touches SQLite's write path until
-        // `BEGIN IMMEDIATE` below. The lock only needs to span the actual
-        // transaction.
-        let conn = self.connect().await?;
-
-        // Serialise in-process writers before touching SQLite (see the
-        // concurrency contract on the struct). Held for the whole transaction.
+        // Serialise in-process writers before opening a connection or touching
+        // SQLite (see the concurrency contract on the struct). Holding the lock
+        // across connect bounds one-backend fan-out to one libSQL connection at
+        // a time, which is the condition the adversarial quota tests exercise.
         let _write_guard = self.write_lock.lock().await;
+        let conn = self.connect().await?;
         conn.execute("BEGIN IMMEDIATE", ()).await.map_err(map_err)?;
 
         let result = async {
@@ -481,11 +476,9 @@ impl PredicateStateBackend for LibSqlPredicateStateBackend {
     /// its own `BEGIN IMMEDIATE` transaction.
     async fn evict_older_than(&self, cutoff: DateTime<Utc>) -> Result<u64, PredicateBackendError> {
         let cutoff_ms = to_epoch_millis(cutoff);
-        // Connect (and retry/backoff) before taking the lock; the lock spans
-        // only the transaction (see record()).
-        let conn = self.connect().await?;
         // Reaper is a writer too: serialise with record_* / migrations.
         let _write_guard = self.write_lock.lock().await;
+        let conn = self.connect().await?;
         conn.execute("BEGIN IMMEDIATE", ()).await.map_err(map_err)?;
         let result = async {
             let a = conn

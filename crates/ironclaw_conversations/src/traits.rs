@@ -3,10 +3,11 @@ use ironclaw_turns::{AcceptedMessageRef, IdempotencyKey, SubmitTurnResponse};
 
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageLookup,
-    AcceptedInboundMessageReplay, AdapterInstallationId, AdapterKind,
-    ConversationBindingResolution, ExternalActorRef, InboundTurnError, LinkConversationRequest,
-    LinkedConversationBinding, ReplyTargetBinding, ResolveConversationRequest,
-    ValidateReplyTargetRequest,
+    AcceptedInboundMessageReplay, AdapterInstallationId, AdapterKind, ConditionalUnpairOutcome,
+    ConversationBindingResolution, ExpectedExternalActorOwner, ExternalActorBindingEpoch,
+    ExternalActorRef, InboundTurnError, LinkConversationRequest, LinkedConversationBinding,
+    ReplyTargetBinding, ResolveConversationRequest, ResolveStoredReplyTargetRequest,
+    StoredReplyTargetBinding, ValidateReplyTargetRequest,
 };
 
 #[async_trait]
@@ -48,6 +49,19 @@ pub trait ConversationBindingService: Send + Sync {
         &self,
         request: ValidateReplyTargetRequest,
     ) -> Result<ReplyTargetBinding, InboundTurnError>;
+
+    /// Revalidate a sealed reply target using only durable run authority.
+    /// Implementations must not reconstruct adapter or conversation metadata
+    /// from display strings.
+    async fn resolve_stored_reply_target(
+        &self,
+        request: ResolveStoredReplyTargetRequest,
+    ) -> Result<StoredReplyTargetBinding, InboundTurnError> {
+        Err(InboundTurnError::AccessDenied {
+            actor_id: request.actor_user_id.to_string(),
+            thread_id: request.current_thread_id.to_string(),
+        })
+    }
 }
 
 #[async_trait]
@@ -65,6 +79,41 @@ pub trait ConversationActorPairingService: Send + Sync {
         external_actor_ref: ExternalActorRef,
         user_id: ironclaw_host_api::UserId,
     ) -> Result<(), InboundTurnError>;
+
+    /// Pair an external actor while recording an opaque binding generation.
+    ///
+    /// The epoch is provider-neutral. The conversation layer only preserves and
+    /// compares it; product adapters own its meaning.
+    async fn pair_external_actor_with_epoch(
+        &self,
+        tenant_id: ironclaw_host_api::TenantId,
+        adapter_kind: AdapterKind,
+        adapter_installation_id: AdapterInstallationId,
+        external_actor_ref: ExternalActorRef,
+        user_id: ironclaw_host_api::UserId,
+        binding_epoch: ExternalActorBindingEpoch,
+    ) -> Result<(), InboundTurnError>;
+
+    /// Remove a host-trusted external actor pairing and revoke direct
+    /// conversation routes owned by that actor.
+    async fn unpair_external_actor(
+        &self,
+        tenant_id: ironclaw_host_api::TenantId,
+        adapter_kind: AdapterKind,
+        adapter_installation_id: AdapterInstallationId,
+        external_actor_ref: ExternalActorRef,
+    ) -> Result<(), InboundTurnError>;
+
+    /// Remove a pairing only when both its current canonical user and opaque
+    /// epoch still match the caller's expected owner.
+    async fn unpair_external_actor_if_owned_by(
+        &self,
+        tenant_id: &ironclaw_host_api::TenantId,
+        adapter_kind: &AdapterKind,
+        adapter_installation_id: &AdapterInstallationId,
+        external_actor_ref: &ExternalActorRef,
+        expected: &ExpectedExternalActorOwner,
+    ) -> Result<ConditionalUnpairOutcome, InboundTurnError>;
 }
 
 #[async_trait]

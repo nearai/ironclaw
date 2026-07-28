@@ -26,10 +26,10 @@ use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, PermissionMode, RuntimeKind,
     TrustClass,
 };
-use ironclaw_host_runtime::{
-    PlannerError, SHELL_CAPABILITY_ID, builtin_first_party_package, plan_capability,
+use ironclaw_host_runtime::{SHELL_CAPABILITY_ID, builtin_first_party_package};
+use ironclaw_runtime_policy::{
+    OrgPolicyConstraints, PlannerError, ResolveRequest, plan_capability, resolve,
 };
-use ironclaw_runtime_policy::{OrgPolicyConstraints, ResolveRequest, resolve};
 
 fn descriptor_with_runtime(
     id: &str,
@@ -46,7 +46,10 @@ fn descriptor_with_runtime(
         effects,
         default_permission: PermissionMode::Allow,
         runtime_credentials: Vec::new(),
+        network_targets: Vec::new(),
+        max_egress_bytes: None,
         resource_profile: None,
+        origin_gate_matrix: None,
     }
 }
 

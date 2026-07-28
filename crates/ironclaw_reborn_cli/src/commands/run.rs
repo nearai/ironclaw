@@ -47,7 +47,7 @@ fn run_dry(context: RebornCliContext) -> anyhow::Result<()> {
     let driver_registry_initialized =
         readiness.text_only_driver.is_initialized() && readiness.planned_driver.is_initialized();
     println!("IronClaw Reborn runtime readiness snapshot");
-    println!("binary: ironclaw-reborn");
+    println!("binary: ironclaw");
     println!("version: {}", env!("CARGO_PKG_VERSION"));
     println!("reborn_home: {}", config.home().path().display());
     println!("home_source: {}", config.home().source_label());

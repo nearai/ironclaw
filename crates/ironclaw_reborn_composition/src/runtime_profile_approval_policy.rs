@@ -1,9 +1,10 @@
 use ironclaw_host_api::{
-    CapabilityId, EffectKind,
-    runtime_policy::{ApprovalPolicy, RuntimeProfile},
+    CapabilityId, EffectKind, InvocationOrigin, OriginGateMatrix, OriginGatePolicy,
+    runtime_policy::ApprovalPolicy,
 };
+use ironclaw_runtime_policy::MinimalApprovalBypass;
 
-use crate::profile_approval_authorization::ProfileApprovalGatePolicy;
+use crate::profile_approval_authorization::{OriginGateRequirement, ProfileApprovalGatePolicy};
 
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeProfileApprovalGateEffectSets {
@@ -22,18 +23,22 @@ impl RuntimeProfileApprovalGateEffectSets {
 
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeProfileApprovalGatePolicy {
-    resolved_profile: RuntimeProfile,
+    /// Whether `ApprovalPolicy::Minimal` may bypass effect gates, as a
+    /// resolved policy *value* — not a deployment profile this type then asks
+    /// about itself (§4.4). `ironclaw_runtime_policy::minimal_approval_bypass`
+    /// is the one place that classification lives.
+    minimal_bypass: MinimalApprovalBypass,
     effects: RuntimeProfileApprovalGateEffectSets,
     exempt_capabilities: Vec<CapabilityId>,
 }
 
 impl RuntimeProfileApprovalGatePolicy {
     pub(crate) fn new(
-        resolved_profile: RuntimeProfile,
+        minimal_bypass: MinimalApprovalBypass,
         effects: RuntimeProfileApprovalGateEffectSets,
     ) -> Self {
         Self {
-            resolved_profile,
+            minimal_bypass,
             effects,
             exempt_capabilities: Vec::new(),
         }
@@ -48,7 +53,7 @@ impl RuntimeProfileApprovalGatePolicy {
     }
 
     fn profile_allows_minimal_bypass(&self) -> bool {
-        self.resolved_profile.allows_minimal_approval_bypass()
+        self.minimal_bypass == MinimalApprovalBypass::Allowed
     }
 }
 
@@ -91,25 +96,100 @@ impl ProfileApprovalGatePolicy for RuntimeProfileApprovalGatePolicy {
             _ => !effects.is_empty(),
         }
     }
+
+    fn origin_gate_requirement(
+        &self,
+        approval_policy: ApprovalPolicy,
+        origin: Option<&InvocationOrigin>,
+        matrix: Option<&OriginGateMatrix>,
+    ) -> OriginGateRequirement {
+        // No resolvable origin: a test-only context that stamped neither
+        // `origin` nor `run_id`. The matrix is not consulted, so it contributes
+        // nothing — this is the path that keeps pre-S4 decisions neutral.
+        let Some(origin) = origin else {
+            return OriginGateRequirement::None;
+        };
+        // Production descriptors always declare a matrix (S3). A missing matrix
+        // with a real origin is fail-closed: `Forbidden` for every origin. Only
+        // test fixtures leave it `None`, and those never stamp an origin, so
+        // this Deny arm is unreachable outside deliberate fail-closed tests.
+        let policy = match matrix {
+            Some(matrix) => matrix.policy_for(origin),
+            None => OriginGatePolicy::Forbidden,
+        };
+        match policy {
+            // A forbidden origin is denied regardless of profile — NOT
+            // suppressed by the Minimal (yolo) bypass.
+            OriginGatePolicy::Forbidden => OriginGateRequirement::Deny,
+            // `AskAlways` is a hard-floor gate (§5.2.7): every invocation gates
+            // and no stored auto-approve/always-allow can bypass it. Like
+            // `effects_force_approval` (which fires for Financial/ModifyApproval/
+            // ModifyBudget even under yolo), it is NOT suppressed by the Minimal
+            // bypass — AskAlways gates even in yolo.
+            OriginGatePolicy::AskAlways => OriginGateRequirement::GateHardFloor,
+            // `GatedUnlessGranted` is a soft gate satisfied by a scoped
+            // persistent/policy grant. Suppress it behind the SAME Minimal-bypass
+            // guard `effects_require_approval` uses (see the
+            // `ApprovalPolicy::Minimal` arm above), so yolo stays "no prompts"
+            // and the fold is behavior-neutral under it.
+            OriginGatePolicy::GatedUnlessGranted => {
+                if approval_policy == ApprovalPolicy::Minimal
+                    && self.profile_allows_minimal_bypass()
+                {
+                    OriginGateRequirement::None
+                } else {
+                    OriginGateRequirement::GateSoft
+                }
+            }
+            OriginGatePolicy::ConsentSufficient | OriginGatePolicy::Ungated => {
+                OriginGateRequirement::None
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use ironclaw_host_api::{
         EffectKind,
-        runtime_policy::{ApprovalPolicy, RuntimeProfile},
+        runtime_policy::{ApprovalPolicy, DeploymentMode, RuntimeProfile},
     };
+    use ironclaw_runtime_policy::{OrgPolicyConstraints, ResolveRequest};
 
     use super::*;
 
+    /// Build the gate policy the way production does: resolve the profile
+    /// through the sanctioned resolver, then classify the resolved policy.
+    /// Driving the real resolver here (rather than hand-picking a bypass
+    /// value) keeps this suite honest about which profiles actually reach
+    /// `MinimalApprovalBypass::Allowed`.
     fn policy(profile: RuntimeProfile) -> RuntimeProfileApprovalGatePolicy {
         RuntimeProfileApprovalGatePolicy::new(
-            profile,
+            bypass_for(profile),
             RuntimeProfileApprovalGateEffectSets::new(
                 vec![EffectKind::WriteFilesystem, EffectKind::SpawnProcess],
                 vec![EffectKind::SpawnProcess],
             ),
         )
+    }
+
+    fn bypass_for(profile: RuntimeProfile) -> MinimalApprovalBypass {
+        let deployment = match profile {
+            RuntimeProfile::HostedSafe
+            | RuntimeProfile::HostedDev
+            | RuntimeProfile::HostedYoloTenantScoped => DeploymentMode::HostedMultiTenant,
+            RuntimeProfile::EnterpriseSafe
+            | RuntimeProfile::EnterpriseDev
+            | RuntimeProfile::EnterpriseYoloDedicated => DeploymentMode::EnterpriseDedicated,
+            _ => DeploymentMode::LocalSingleUser,
+        };
+        let resolved = ironclaw_runtime_policy::resolve(ResolveRequest {
+            yolo_disclosure_acknowledged: true,
+            org_policy: OrgPolicyConstraints::default().set_admin_approves_dedicated_yolo(true),
+            ..ResolveRequest::new(deployment, profile)
+        })
+        .expect("test profile resolves");
+        ironclaw_runtime_policy::minimal_approval_bypass(&resolved)
     }
 
     #[test]
@@ -167,6 +247,35 @@ mod tests {
                 "{profile:?} should fail closed if Minimal reaches a non-minimal profile"
             );
         }
+    }
+
+    #[test]
+    fn org_ceiling_narrowing_yolo_away_restores_minimal_approval_gates() {
+        // Regression for the mode-as-type leak (§4.4): the gate policy used to
+        // hold a `RuntimeProfile` and ask it about itself. It now consumes a
+        // resolved value, so a tenant/org ceiling that narrows `LocalYolo`
+        // down to `LocalDev` also re-gates `Minimal` — authority reductions
+        // reach this axis instead of stopping at the requested profile.
+        let narrowed = ironclaw_runtime_policy::resolve(ResolveRequest {
+            yolo_disclosure_acknowledged: true,
+            org_policy: OrgPolicyConstraints::default().set_max_profile(RuntimeProfile::LocalDev),
+            ..ResolveRequest::new(DeploymentMode::LocalSingleUser, RuntimeProfile::LocalYolo)
+        })
+        .expect("narrowed local yolo resolves");
+        assert!(narrowed.was_reduced());
+
+        let gate_policy = RuntimeProfileApprovalGatePolicy::new(
+            ironclaw_runtime_policy::minimal_approval_bypass(&narrowed),
+            RuntimeProfileApprovalGateEffectSets::new(
+                vec![EffectKind::WriteFilesystem, EffectKind::SpawnProcess],
+                vec![EffectKind::SpawnProcess],
+            ),
+        );
+        assert!(
+            gate_policy
+                .effects_require_approval(ApprovalPolicy::Minimal, &[EffectKind::SpawnProcess]),
+            "an org ceiling that removes yolo must restore Minimal approval gates"
+        );
     }
 
     #[test]

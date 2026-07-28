@@ -11,7 +11,7 @@
 #
 # When adding a new migration, append a new line in the same commit.
 # Regenerate locally with:
-#   cargo test -p ironclaw -- --ignored regenerate_migration_checksums_lockfile
+#   cargo test -p ironclaw_legacy -- --ignored regenerate_migration_checksums_lockfile
 
 V1__initial = 13924994861355873385
 V2__wasm_secure_api = 7920426121433120191

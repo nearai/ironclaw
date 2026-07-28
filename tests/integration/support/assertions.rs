@@ -17,8 +17,10 @@
 // Module-level allow matches `builder.rs`/`reply.rs`/`http_matcher.rs`.
 #![allow(dead_code)]
 
+use ironclaw_events::{SecurityBoundary, SecurityDecision};
 use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_resources::ResourceGovernor;
+use ironclaw_turns::run_profile::LoopHostMilestoneKind;
 use rust_decimal::Decimal;
 
 use super::builder::RebornIntegrationHarness;
@@ -206,6 +208,28 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// A tool with this model-facing wire name (e.g. `ironclaw__memory__search`)
+    /// was offered to the model on at least one captured request.
+    pub fn assert_model_tool_offered(&self, tool_name: &str) -> HarnessResult<()> {
+        let names = self.captured_model_tool_names();
+        if names.contains(tool_name) {
+            return Ok(());
+        }
+        Err(format!("tool {tool_name:?} was not offered to the model; offered: {names:?}").into())
+    }
+
+    /// No captured request offered a tool with this model-facing wire name.
+    pub fn assert_model_tool_not_offered(&self, tool_name: &str) -> HarnessResult<()> {
+        let names = self.captured_model_tool_names();
+        if names.contains(tool_name) {
+            return Err(format!(
+                "tool {tool_name:?} must NOT be offered to the model; offered: {names:?}"
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     /// Assert some model-visible `System`-role prompt captured across all
     /// requests captured by the harness so far contains `text`. Reads the
     /// scripted `TraceLlm` retained before the `dyn LlmProvider` upcast —
@@ -249,6 +273,134 @@ impl RebornIntegrationHarness {
             requests.len()
         )
         .into())
+    }
+
+    /// Assert that the textual `content` of some message sent to the model
+    /// contains `needle`. Unlike [`assert_model_request_contains`], this does
+    /// not serialize the request a second time, so JSON embedded in a tool
+    /// result is matched exactly as the model receives it rather than through
+    /// an additional layer of escape characters.
+    pub async fn assert_model_message_content_contains(&self, needle: &str) -> HarnessResult<()> {
+        let requests = self.scripted_llm.captured_requests();
+        if requests
+            .iter()
+            .flatten()
+            .any(|message| message.content.contains(needle))
+        {
+            return Ok(());
+        }
+        Err(format!(
+            "no model message content contained {needle:?}; captured {} request(s)",
+            requests.len()
+        )
+        .into())
+    }
+
+    /// Assert that one model-visible message contains every `needle` in the
+    /// supplied order. Other content may appear between needles.
+    pub async fn assert_model_message_content_in_order(
+        &self,
+        needles: &[&str],
+    ) -> HarnessResult<()> {
+        if needles.is_empty() {
+            return Err("ordered model-message assertion needs at least one needle".into());
+        }
+        let requests = self.scripted_llm.captured_requests();
+        'message: for message in requests.iter().flatten() {
+            let mut remaining = message.content.as_str();
+            for needle in needles {
+                let Some(position) = remaining.find(needle) else {
+                    continue 'message;
+                };
+                remaining = &remaining[position + needle.len()..];
+            }
+            return Ok(());
+        }
+        Err(format!(
+            "no model message content contained {needles:?} in order; captured {} request(s)",
+            requests.len()
+        )
+        .into())
+    }
+
+    /// Assert the exact number of interactive, tool-capable calls observed by
+    /// the recoverable-failure provider wrapper. Text-only system-inference
+    /// calls used for compaction are intentionally excluded.
+    pub async fn assert_interactive_model_provider_call_count(
+        &self,
+        expected: usize,
+    ) -> HarnessResult<()> {
+        let probe = self
+            .model_provider_call_probe
+            .as_ref()
+            .ok_or("model provider call probe is not enabled for this harness")?;
+        let actual = probe.interactive_calls();
+        if actual == expected {
+            return Ok(());
+        }
+        Err(
+            format!("expected {expected} interactive model provider call(s), observed {actual}")
+                .into(),
+        )
+    }
+
+    /// Assert the exact number of times `needle` occurs across every request
+    /// seen by the recoverable-failure provider, including injected failures
+    /// that never reach the delegated `TraceLlm`.
+    pub async fn assert_model_message_content_occurrences(
+        &self,
+        needle: &str,
+        expected: usize,
+    ) -> HarnessResult<()> {
+        let probe = self
+            .model_provider_call_probe
+            .as_ref()
+            .ok_or("model provider call probe is not enabled for this harness")?;
+        let actual = probe.message_content_occurrences(needle);
+        if actual == expected {
+            return Ok(());
+        }
+        Err(format!(
+            "expected model message content to contain {needle:?} {expected} time(s), observed {actual}"
+        )
+        .into())
+    }
+
+    /// Assert that at least `minimum` text-only provider calls occurred. These
+    /// are system-inference calls in the recovery scenarios, including context
+    /// compaction.
+    pub async fn assert_text_model_provider_call_count_at_least(
+        &self,
+        minimum: usize,
+    ) -> HarnessResult<()> {
+        let probe = self
+            .model_provider_call_probe
+            .as_ref()
+            .ok_or("model provider call probe is not enabled for this harness")?;
+        let actual = probe.text_calls();
+        if actual >= minimum {
+            return Ok(());
+        }
+        Err(format!(
+            "expected at least {minimum} text-only model provider call(s), observed {actual}"
+        )
+        .into())
+    }
+
+    /// Assert no request seen by the recoverable-failure provider contains
+    /// `needle`, including requests rejected before `TraceLlm` delegation.
+    pub async fn assert_model_message_content_not_contains(
+        &self,
+        needle: &str,
+    ) -> HarnessResult<()> {
+        let probe = self
+            .model_provider_call_probe
+            .as_ref()
+            .ok_or("model provider call probe is not enabled for this harness")?;
+        if !probe.message_content_contains(needle) {
+            return Ok(());
+        }
+        Err(format!("model message content unexpectedly contained {needle:?}").into())
     }
 
     /// Assert some SINGLE model request contains EVERY needle in `needles`
@@ -410,6 +562,62 @@ impl RebornIntegrationHarness {
         Ok(())
     }
 
+    /// Harness-port-seam Change 4: assert the LATEST captured `tools` argument
+    /// carries a definition named `name` whose `description` contains
+    /// `needle` — pins `wrap_surface_disclosure`'s scoped-roots note
+    /// mutation (`HostSurfaceDisclosure::apply_to_surface_fields`), which
+    /// mutates `ProviderToolDefinition::description`/`parameters`, not tool
+    /// presence/absence.
+    pub async fn assert_model_tool_description_contains(
+        &self,
+        name: &str,
+        needle: &str,
+    ) -> HarnessResult<()> {
+        let definitions = self.scripted_llm.captured_tool_definitions();
+        let Some(latest) = definitions.last() else {
+            return Err("no tool definitions captured for any request".into());
+        };
+        let Some(definition) = latest.iter().find(|definition| definition.name == name) else {
+            let seen: Vec<&str> = latest.iter().map(|d| d.name.as_str()).collect();
+            return Err(format!("no captured tool definition named {name:?}; saw {seen:?}").into());
+        };
+        if !definition.description.contains(needle) {
+            return Err(format!(
+                "tool {name:?} description did not contain {needle:?}: {:?}",
+                definition.description
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    /// Inverse of [`assert_model_tool_description_contains`]: the definition
+    /// exists but its description does NOT contain `needle` — the negative
+    /// control proving the note is conditional on a confirmed host mount,
+    /// not always appended.
+    pub async fn assert_model_tool_description_excludes(
+        &self,
+        name: &str,
+        needle: &str,
+    ) -> HarnessResult<()> {
+        let definitions = self.scripted_llm.captured_tool_definitions();
+        let Some(latest) = definitions.last() else {
+            return Err("no tool definitions captured for any request".into());
+        };
+        let Some(definition) = latest.iter().find(|definition| definition.name == name) else {
+            let seen: Vec<&str> = latest.iter().map(|d| d.name.as_str()).collect();
+            return Err(format!("no captured tool definition named {name:?}; saw {seen:?}").into());
+        };
+        if definition.description.contains(needle) {
+            return Err(format!(
+                "tool {name:?} description unexpectedly contained {needle:?}: {:?}",
+                definition.description
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     /// Collects the fully-decoded `ToolResultReferenceEnvelope` of every
     /// `ToolResultReference` message on this thread's FULL history (not
     /// baseline-sliced — safe only for single-turn harnesses today), in
@@ -477,12 +685,89 @@ impl RebornIntegrationHarness {
         &self,
         kind: ironclaw_turns::TurnEventKind,
     ) -> HarnessResult<()> {
+        // Lifecycle events publish best-effort AFTER the status transition the
+        // caller waited on (`wait_for_status` reads the store's hot-cache
+        // status, which the transition sets synchronously; the sink publish
+        // runs just after that transition returns). So a just-completed turn's
+        // terminal event can land a moment after its status is observable —
+        // poll briefly rather than checking exactly once, which otherwise races
+        // the publish.
+        for _ in 0..100 {
+            if self
+                .recorded_turn_events()
+                .iter()
+                .any(|event| event.kind == kind)
+            {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
         let events = self.recorded_turn_events();
-        if events.iter().any(|event| event.kind == kind) {
+        let seen: Vec<_> = events.iter().map(|event| &event.kind).collect();
+        Err(format!("no recorded turn event of kind {kind:?} after waiting; saw {seen:?}").into())
+    }
+
+    /// Assert the always-wired security-audit recorder captured an event with
+    /// the expected stable boundary/decision/code tuple.
+    pub async fn assert_security_audit_event_recorded(
+        &self,
+        boundary: SecurityBoundary,
+        decision: SecurityDecision,
+        code: &'static str,
+    ) -> HarnessResult<()> {
+        let events = self.recorded_security_audit_events();
+        if events.iter().any(|event| {
+            event.boundary == boundary && event.decision == decision && event.code == code
+        }) {
             return Ok(());
         }
-        let seen: Vec<_> = events.iter().map(|event| &event.kind).collect();
-        Err(format!("no recorded turn event of kind {kind:?}; saw {seen:?}").into())
+        let seen: Vec<_> = events
+            .iter()
+            .map(|event| (event.boundary.as_str(), event.decision.as_str(), event.code))
+            .collect();
+        Err(format!(
+            "no recorded security-audit event ({}, {}, {code}); saw {seen:?}",
+            boundary.as_str(),
+            decision.as_str()
+        )
+        .into())
+    }
+
+    /// Assert a `LoopHostMilestoneKind::CompactionFailed` milestone was
+    /// recorded whose `reason_kind` equals `reason_kind`, scoped to the
+    /// milestones recorded SINCE `baseline` (a value from
+    /// [`RebornIntegrationHarness::milestone_len`] captured at the start of
+    /// the turn under test) — proves forced compaction failed safety
+    /// validation for that turn specifically, not a stale milestone from an
+    /// earlier turn on a multi-turn harness (mirrors the `_since` pattern
+    /// used by the tool-error and history assertions).
+    pub async fn assert_compaction_failed_since(
+        &self,
+        baseline: usize,
+        reason_kind: &str,
+    ) -> HarnessResult<()> {
+        let milestones = self.loop_milestones();
+        let Some(since) = milestones.get(baseline..) else {
+            return Err(format!(
+                "milestone baseline {baseline} exceeds current milestone count {} — stale baseline",
+                milestones.len()
+            )
+            .into());
+        };
+        if since.iter().any(|milestone| {
+            matches!(
+                &milestone.kind,
+                LoopHostMilestoneKind::CompactionFailed { reason_kind: actual, .. }
+                    if actual.as_str() == reason_kind
+            )
+        }) {
+            return Ok(());
+        }
+        let seen: Vec<_> = since.iter().map(|milestone| &milestone.kind).collect();
+        Err(format!(
+            "no CompactionFailed milestone with reason_kind {reason_kind:?} since baseline {baseline}; saw {seen:?}"
+        )
+        .into())
     }
 
     /// Assert a captured model request carried a multimodal `data:` image part
@@ -597,6 +882,107 @@ impl RebornIntegrationHarness {
             format!("no persisted tool-error summary containing {text:?}; saw {summaries:?}")
                 .into(),
         )
+    }
+
+    /// Every persisted `ToolResultReference`'s `(safe_summary,
+    /// observation_status)` pair, where `observation_status` is the envelope's
+    /// parsed `model_observation.status` (`"success"` / `"error"`) when an
+    /// observation is present. Shared collector for the error-SHAPE negative
+    /// assertions below; same fail-loud decode contract as
+    /// `persisted_tool_error_summaries`.
+    async fn persisted_tool_result_reference_shapes(
+        &self,
+    ) -> HarnessResult<Vec<(String, Option<String>)>> {
+        let history = self
+            .thread_harness
+            .history(self.binding.thread_id.clone())
+            .await?;
+        history
+            .iter()
+            .filter(|message| message.kind == ironclaw_threads::MessageKind::ToolResultReference)
+            .map(|message| {
+                let Some(content) = message.content.as_deref() else {
+                    return Err("ToolResultReference message missing content".into());
+                };
+                serde_json::from_str::<ironclaw_threads::ToolResultReferenceEnvelope>(content)
+                    .map(|envelope| {
+                        let status = envelope
+                            .model_observation
+                            .as_ref()
+                            .and_then(|observation| observation.get("status"))
+                            .and_then(|status| status.as_str())
+                            .map(str::to_string);
+                        (envelope.safe_summary.as_str().to_string(), status)
+                    })
+                    .map_err(|err| {
+                        let truncated = match content.char_indices().nth(200) {
+                            Some((cutoff, _)) => format!("{}...[truncated]", &content[..cutoff]),
+                            None => content.to_string(),
+                        };
+                        format!(
+                            "failed to decode ToolResultReferenceEnvelope: {err}; raw: {truncated}"
+                        )
+                        .into()
+                    })
+            })
+            .collect()
+    }
+
+    /// Assert NO persisted `ToolResultReference` is ERROR-SHAPED — where
+    /// error-shaped means EITHER the envelope's `model_observation.status` is
+    /// `"error"` (the structural marker
+    /// `model_visible_capability_failure_observation` attaches to Failed and
+    /// Denied outcomes) OR its `safe_summary` starts with a
+    /// [`ToolErrorClass`] prefix.
+    ///
+    /// Strictly stronger than `assert_no_tool_error(class, "")` for a
+    /// "surfaced EXCLUSIVELY as the gate" pin (#5878/#6105 T2): that prefix
+    /// filter is blind to the OTHER class's prefix and to executor-synthesized
+    /// raw planner summaries (e.g. the gate-declined "auth gate denied by
+    /// user"), which persist with no class prefix — the bypass
+    /// `short_circuit_denied_resume`'s own test documents. Residual gap
+    /// (accepted): an error persisted with no observation AND a novel
+    /// unprefixed summary evades both arms.
+    ///
+    /// Scans the full thread history (not baseline-sliced) — single-turn
+    /// threads only, like [`assert_tool_error`].
+    ///
+    /// [`assert_tool_error`]: Self::assert_tool_error
+    pub async fn assert_no_error_shaped_tool_result(&self) -> HarnessResult<()> {
+        self.assert_no_error_shaped_tool_result_except(&[]).await
+    }
+
+    /// [`Self::assert_no_error_shaped_tool_result`], allowing error-shaped
+    /// references whose summary contains one of `allowed_substrings` — for
+    /// post-resume checks where one deliberate error IS the contract (a
+    /// denied gate persists its planner summary) but nothing else
+    /// error-shaped may exist.
+    pub async fn assert_no_error_shaped_tool_result_except(
+        &self,
+        allowed_substrings: &[&str],
+    ) -> HarnessResult<()> {
+        let shapes = self.persisted_tool_result_reference_shapes().await?;
+        let offending: Vec<&(String, Option<String>)> = shapes
+            .iter()
+            .filter(|(summary, status)| {
+                status.as_deref() == Some("error")
+                    || summary.starts_with(ToolErrorClass::Failed.summary_prefix())
+                    || summary.starts_with(ToolErrorClass::Denied.summary_prefix())
+            })
+            .filter(|(summary, _)| {
+                !allowed_substrings
+                    .iter()
+                    .any(|allowed| summary.contains(allowed))
+            })
+            .collect();
+        if offending.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "expected no error-shaped ToolResultReference beyond {allowed_substrings:?}; \
+             found (summary, observation-status) pairs {offending:?}"
+        )
+        .into())
     }
 
     /// Assert that any captured **network** egress request whose URL
@@ -809,6 +1195,57 @@ impl RebornIntegrationHarness {
         Ok(self.persisted_history().await?.len())
     }
 
+    /// The MOST RECENT persisted `ToolResultReference` message (highest
+    /// `sequence`), for durable tool-result projection scenarios (issue
+    /// #5838) that need to script a dependent `result_read` call with a
+    /// server-minted value (`result_ref`, `next_offset`) `push_script`
+    /// couldn't know ahead of time. Errors when no such message exists.
+    async fn latest_tool_result_reference_message(
+        &self,
+    ) -> HarnessResult<ironclaw_threads::ThreadMessageRecord> {
+        let history = self.persisted_history().await?;
+        history
+            .into_iter()
+            .filter(|message| message.kind == ironclaw_threads::MessageKind::ToolResultReference)
+            .max_by_key(|message| message.sequence)
+            .ok_or_else(|| "no persisted ToolResultReference message".into())
+    }
+
+    /// The `result_ref` of the most recent persisted `ToolResultReference`
+    /// message. See [`latest_tool_result_reference_message`].
+    ///
+    /// [`latest_tool_result_reference_message`]: Self::latest_tool_result_reference_message
+    pub async fn latest_tool_result_ref(&self) -> HarnessResult<String> {
+        self.latest_tool_result_reference_message()
+            .await?
+            .tool_result_ref
+            .ok_or_else(|| "latest ToolResultReference message has no result_ref".into())
+    }
+
+    /// The `model_observation.detail.next_offset` of the most recent
+    /// persisted `ToolResultReference` message's `ResultReference`
+    /// observation — the server-computed continuation offset a `result_read`
+    /// script must use, since the preview's char-boundary floor can move it
+    /// off a fixed byte constant when the payload contains multi-byte UTF-8.
+    /// Errors when the message has no observation or no `next_offset` (i.e.
+    /// the preview already covered the whole payload).
+    pub async fn latest_tool_result_next_offset(&self) -> HarnessResult<u64> {
+        let message = self.latest_tool_result_reference_message().await?;
+        let content = message
+            .content
+            .ok_or("latest ToolResultReference message has no content")?;
+        let envelope: serde_json::Value = serde_json::from_str(&content).map_err(|error| {
+            format!("latest ToolResultReference content is not valid JSON: {error}")
+        })?;
+        envelope["model_observation"]["detail"]["next_offset"]
+            .as_u64()
+            .ok_or_else(|| {
+                "latest ToolResultReference observation has no next_offset (preview may cover \
+                 the whole payload)"
+                    .into()
+            })
+    }
+
     /// Slice `history[baseline..]`, failing loud on an out-of-range `baseline` —
     /// a baseline greater than the current history length is always a caller bug
     /// (a stale or foreign-thread value; history never shrinks). Degrading it to
@@ -985,6 +1422,46 @@ impl RebornIntegrationHarness {
             .await
     }
 
+    /// Assert NO persisted thread-history message's `content` contains
+    /// `needle`, across the FULL history and ANY role.
+    ///
+    /// The counterpart to [`assert_conversation_history_contains`], and the one
+    /// that catches DEGRADATION rather than error: a host-authored remediation
+    /// that collapsed to the safe-summary placeholder still produces a
+    /// completed run and a plausible-looking error message, so a test that only
+    /// asserts "something was surfaced" stays green while the UX is dead. Pair
+    /// the two — assert the expected step is present AND the placeholder is
+    /// absent.
+    pub async fn assert_conversation_history_lacks(&self, needle: &str) -> HarnessResult<()> {
+        let history = self.persisted_history().await?;
+        let slice = Self::history_slice(&history, 0)?;
+        let offending: Vec<String> = slice
+            .iter()
+            .filter(|message| {
+                message
+                    .content
+                    .as_deref()
+                    .is_some_and(|content| content.contains(needle))
+            })
+            .map(|message| {
+                let body = message.content.as_deref().unwrap_or("<no-content>");
+                let body = match body.char_indices().nth(160) {
+                    Some((cutoff, _)) => format!("{}...", &body[..cutoff]), // safety: `cutoff` from `char_indices`, always a valid UTF-8 boundary.
+                    None => body.to_string(),
+                };
+                format!("{:?}:{body:?}", message.kind)
+            })
+            .collect();
+        if offending.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "conversation history must NOT contain {needle:?}, but {} message(s) did: {offending:?}",
+            offending.len()
+        )
+        .into())
+    }
+
     /// [`assert_conversation_history_contains`], scoped to the `[baseline..]`
     /// slice (a [`history_len`] value from the start of the turn under test) —
     /// the multi-turn variant.
@@ -1007,6 +1484,20 @@ impl RebornIntegrationHarness {
         needle: &str,
     ) -> HarnessResult<()> {
         self.conversation_history_contains_impl(0, Some(kind), needle)
+            .await
+    }
+
+    /// [`assert_conversation_history_role_contains`], scoped to the
+    /// `[baseline..]` slice (a [`history_len`] value from the start of the
+    /// turn under test) — the multi-turn variant, mirroring
+    /// [`assert_conversation_history_contains_since`].
+    pub async fn assert_conversation_history_role_contains_since(
+        &self,
+        baseline: usize,
+        kind: ironclaw_threads::MessageKind,
+        needle: &str,
+    ) -> HarnessResult<()> {
+        self.conversation_history_contains_impl(baseline, Some(kind), needle)
             .await
     }
 }

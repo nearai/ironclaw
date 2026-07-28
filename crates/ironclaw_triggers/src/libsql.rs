@@ -1,18 +1,3 @@
-#[cfg(feature = "libsql")]
-use std::{collections::HashMap, sync::Arc};
-
-#[cfg(feature = "libsql")]
-use async_trait::async_trait;
-#[cfg(feature = "libsql")]
-use chrono::{DateTime, SecondsFormat, Utc};
-#[cfg(feature = "libsql")]
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
-#[cfg(feature = "libsql")]
-use ironclaw_turns::TurnRunId;
-#[cfg(feature = "libsql")]
-use libsql::params;
-
-#[cfg(feature = "libsql")]
 use crate::{
     ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire,
     ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
@@ -21,87 +6,68 @@ use crate::{
     TriggerSchedule, TriggerState, reject_failed_result_after_active_run,
     reject_non_future_next_run_at, reject_run_ref_rewrite, trigger_run_history_status_text,
 };
-
-#[cfg(feature = "libsql")]
+use async_trait::async_trait;
+use chrono::{DateTime, SecondsFormat, Utc};
+use ironclaw_common::AutomationName;
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
+use ironclaw_turns::TurnRunId;
+use libsql::params;
+use std::{collections::HashMap, sync::Arc};
 const TRIGGER_TABLE: &str = "trigger_records";
-#[cfg(feature = "libsql")]
 const TRIGGER_RUN_TABLE: &str = "trigger_run_history";
-
-#[cfg(feature = "libsql")]
 const TRIGGER_COLUMNS: &str = "\
     trigger_id, tenant_id, creator_user_id, agent_id, project_id, \
     name, source, schedule_expression, schedule_timezone, schedule_kind, prompt, \
     state, next_run_at, last_run_at, last_fired_slot, last_status, \
-    active_fire_slot, active_run_ref, created_at, schedule_at";
-
-#[cfg(feature = "libsql")]
+    active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target";
+const RENAME_SCOPED_TRIGGER_SQL: &str = "\
+    UPDATE trigger_records
+       SET name = ?6
+     WHERE tenant_id = ?1
+       AND creator_user_id = ?2
+       AND (CASE WHEN ?3 IS NULL THEN agent_id IS NULL ELSE agent_id = ?3 END)
+       AND (CASE WHEN ?4 IS NULL THEN project_id IS NULL ELSE project_id = ?4 END)
+       AND trigger_id = ?5
+     RETURNING trigger_id, tenant_id, creator_user_id, agent_id, project_id,
+       name, source, schedule_expression, schedule_timezone, schedule_kind, prompt,
+       state, next_run_at, last_run_at, last_fired_slot, last_status,
+       active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target";
 const TRIGGER_ID_COL: usize = 0;
-#[cfg(feature = "libsql")]
 const TENANT_ID_COL: usize = 1;
-#[cfg(feature = "libsql")]
 const CREATOR_USER_ID_COL: usize = 2;
-#[cfg(feature = "libsql")]
 const AGENT_ID_COL: usize = 3;
-#[cfg(feature = "libsql")]
 const PROJECT_ID_COL: usize = 4;
-#[cfg(feature = "libsql")]
 const NAME_COL: usize = 5;
-#[cfg(feature = "libsql")]
 const SOURCE_COL: usize = 6;
-#[cfg(feature = "libsql")]
 const SCHEDULE_EXPRESSION_COL: usize = 7;
-#[cfg(feature = "libsql")]
 const SCHEDULE_TIMEZONE_COL: usize = 8;
-#[cfg(feature = "libsql")]
 const SCHEDULE_KIND_COL: usize = 9;
-#[cfg(feature = "libsql")]
 const PROMPT_COL: usize = 10;
-#[cfg(feature = "libsql")]
 const STATE_COL: usize = 11;
-#[cfg(feature = "libsql")]
 const NEXT_RUN_AT_COL: usize = 12;
-#[cfg(feature = "libsql")]
 const LAST_RUN_AT_COL: usize = 13;
-#[cfg(feature = "libsql")]
 const LAST_FIRED_SLOT_COL: usize = 14;
-#[cfg(feature = "libsql")]
 const LAST_STATUS_COL: usize = 15;
-#[cfg(feature = "libsql")]
 const ACTIVE_FIRE_SLOT_COL: usize = 16;
-#[cfg(feature = "libsql")]
 const ACTIVE_RUN_REF_COL: usize = 17;
-#[cfg(feature = "libsql")]
 const CREATED_AT_COL: usize = 18;
-#[cfg(feature = "libsql")]
 const SCHEDULE_AT_COL: usize = 19;
-
-#[cfg(feature = "libsql")]
+const DELIVERY_TARGET_COL: usize = 20;
 const TRIGGER_RUN_COLUMNS: &str = "\
     tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at, completed_at";
-#[cfg(feature = "libsql")]
 const RUN_TENANT_ID_COL: usize = 0;
-#[cfg(feature = "libsql")]
 const RUN_TRIGGER_ID_COL: usize = 1;
-#[cfg(feature = "libsql")]
 const RUN_FIRE_SLOT_COL: usize = 2;
-#[cfg(feature = "libsql")]
 const RUN_ID_COL: usize = 3;
-#[cfg(feature = "libsql")]
 const RUN_THREAD_ID_COL: usize = 4;
-#[cfg(feature = "libsql")]
 const RUN_STATUS_COL: usize = 5;
-#[cfg(feature = "libsql")]
 const RUN_SUBMITTED_AT_COL: usize = 6;
-#[cfg(feature = "libsql")]
 const RUN_COMPLETED_AT_COL: usize = 7;
 
 /// Durable libSQL trigger repository.
-#[cfg(feature = "libsql")]
 pub struct LibSqlTriggerRepository {
     db: Arc<libsql::Database>,
 }
-
-#[cfg(feature = "libsql")]
 impl LibSqlTriggerRepository {
     pub fn new(db: Arc<libsql::Database>) -> Self {
         Self { db }
@@ -270,6 +236,19 @@ impl LibSqlTriggerRepository {
                     return Err(backend_error("add schedule_at column", error));
                 }
             }
+            // Add delivery_target column if it doesn't already exist (idempotent migration).
+            if let Err(error) = conn
+                .execute(
+                    &format!("ALTER TABLE {TRIGGER_TABLE} ADD COLUMN delivery_target TEXT"),
+                    (),
+                )
+                .await
+            {
+                let msg = error.to_string();
+                if !msg.contains("duplicate column") && !msg.contains("already exists") {
+                    return Err(backend_error("add delivery_target column", error));
+                }
+            }
             // Drop the legacy `completion_policy` column on tables created before the
             // schedule-derived rework. Completion is now derived from the schedule
             // (`Once` / exhausted cron), so the column is no longer written; leaving it
@@ -376,14 +355,12 @@ impl LibSqlTriggerRepository {
             .db
             .connect()
             .map_err(|error| backend_error("connect trigger repository", error))?;
-        conn.query("PRAGMA busy_timeout = 5000", ())
+        conn.execute_batch("PRAGMA busy_timeout = 5000;")
             .await
             .map_err(|error| backend_error("set trigger repository busy_timeout", error))?;
         Ok(conn)
     }
 }
-
-#[cfg(feature = "libsql")]
 #[async_trait]
 impl TriggerRepository for LibSqlTriggerRepository {
     async fn upsert_trigger(&self, record: TriggerRecord) -> Result<(), TriggerError> {
@@ -615,6 +592,40 @@ impl TriggerRepository for LibSqlTriggerRepository {
             Ok(Some(row)) => Ok(Some(row_to_record(&row)?)),
             Ok(None) => Ok(None),
             Err(error) => Err(backend_error("read scoped trigger state row", error)),
+        }
+    }
+
+    async fn rename_scoped_trigger(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        trigger_id: TriggerId,
+        name: AutomationName,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let conn = self.connect().await?;
+        let agent_id = agent_id.as_ref().map(AgentId::as_str);
+        let project_id = project_id.as_ref().map(ProjectId::as_str);
+        let name = name.into_inner();
+        let mut rows = conn
+            .query(
+                RENAME_SCOPED_TRIGGER_SQL,
+                params![
+                    tenant_id.as_str(),
+                    creator_user_id.as_str(),
+                    agent_id,
+                    project_id,
+                    trigger_id.to_string(),
+                    name,
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("rename scoped trigger", error))?;
+        match rows.next().await {
+            Ok(Some(row)) => Ok(Some(row_to_record(&row)?)),
+            Ok(None) => Ok(None),
+            Err(error) => Err(backend_error("read renamed scoped trigger row", error)),
         }
     }
 
@@ -1298,8 +1309,6 @@ impl TriggerRepository for LibSqlTriggerRepository {
         Ok(runs_by_trigger)
     }
 }
-
-#[cfg(feature = "libsql")]
 fn row_to_record(row: &libsql::Row) -> Result<TriggerRecord, TriggerError> {
     let trigger_id = TriggerId::parse(&required_text(row, TRIGGER_ID_COL, "trigger_id")?)?;
     let tenant_id = TenantId::new(required_text(row, TENANT_ID_COL, "tenant_id")?)
@@ -1341,6 +1350,9 @@ fn row_to_record(row: &libsql::Row) -> Result<TriggerRecord, TriggerError> {
     let active_run_ref = optional_text(row, ACTIVE_RUN_REF_COL, "active_run_ref")?
         .map(|value| parse_turn_run_id(&value))
         .transpose()?;
+    let delivery_target = optional_text(row, DELIVERY_TARGET_COL, "delivery_target")?
+        .map(crate::parse_trigger_delivery_target_id)
+        .transpose()?;
 
     let record = TriggerRecord {
         trigger_id,
@@ -1352,6 +1364,7 @@ fn row_to_record(row: &libsql::Row) -> Result<TriggerRecord, TriggerError> {
         source: crate::parse_source_kind_codec(&required_text(row, SOURCE_COL, "source")?)?,
         schedule,
         prompt: required_text(row, PROMPT_COL, "prompt")?,
+        delivery_target,
         state: crate::parse_state_codec(&required_text(row, STATE_COL, "state")?)?,
         next_run_at: parse_timestamp(
             &required_text(row, NEXT_RUN_AT_COL, "next_run_at")?,
@@ -1370,8 +1383,6 @@ fn row_to_record(row: &libsql::Row) -> Result<TriggerRecord, TriggerError> {
     record.validate()?;
     Ok(record)
 }
-
-#[cfg(feature = "libsql")]
 async fn fetch_record(
     conn: &libsql::Connection,
     tenant_id: &TenantId,
@@ -1395,8 +1406,6 @@ async fn fetch_record(
         Err(error) => Err(backend_error("read trigger record row", error)),
     }
 }
-
-#[cfg(feature = "libsql")]
 async fn returned_record(
     rows: &mut libsql::Rows,
     operation: &str,
@@ -1407,32 +1416,24 @@ async fn returned_record(
         Err(error) => Err(backend_error(operation, error)),
     }
 }
-
-#[cfg(feature = "libsql")]
 async fn begin_immediate(conn: &libsql::Connection, operation: &str) -> Result<(), TriggerError> {
     conn.execute("BEGIN IMMEDIATE", ())
         .await
         .map(|_| ())
         .map_err(|error| backend_error(operation, error))
 }
-
-#[cfg(feature = "libsql")]
 async fn commit(conn: &libsql::Connection, operation: &str) -> Result<(), TriggerError> {
     conn.execute("COMMIT", ())
         .await
         .map(|_| ())
         .map_err(|error| backend_error(operation, error))
 }
-
-#[cfg(feature = "libsql")]
 async fn rollback(conn: &libsql::Connection, operation: &str) -> Result<(), TriggerError> {
     conn.execute("ROLLBACK", ())
         .await
         .map(|_| ())
         .map_err(|error| backend_error(operation, error))
 }
-
-#[cfg(feature = "libsql")]
 async fn write_record(
     conn: &libsql::Connection,
     record: &TriggerRecord,
@@ -1444,8 +1445,8 @@ async fn write_record(
                 trigger_id, tenant_id, creator_user_id, agent_id, project_id,
                 name, source, schedule_expression, schedule_timezone, schedule_kind, prompt,
                 state, next_run_at, last_run_at, last_fired_slot, last_status,
-                active_fire_slot, active_run_ref, created_at, schedule_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+                active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
             ON CONFLICT (tenant_id, trigger_id) DO UPDATE SET
                 creator_user_id = excluded.creator_user_id,
                 agent_id = excluded.agent_id,
@@ -1463,7 +1464,8 @@ async fn write_record(
                 last_status = excluded.last_status,
                 active_fire_slot = excluded.active_fire_slot,
                 active_run_ref = excluded.active_run_ref,
-                schedule_at = excluded.schedule_at"
+                schedule_at = excluded.schedule_at,
+                delivery_target = excluded.delivery_target"
         ),
         libsql::params_from_iter([
             libsql::Value::Text(record.trigger_id.to_string()),
@@ -1486,14 +1488,13 @@ async fn write_record(
             record.active_run_ref.as_ref().map_or(libsql::Value::Null, |v| libsql::Value::Text(v.to_string())),
             libsql::Value::Text(fmt_ts(&record.created_at)),
             schedule_at.map_or(libsql::Value::Null, libsql::Value::Text),
+            record.delivery_target.as_ref().map_or(libsql::Value::Null, |v| libsql::Value::Text(v.as_str().to_string())),
         ]),
     )
     .await
     .map_err(|error| backend_error("upsert trigger record", error))?;
     Ok(())
 }
-
-#[cfg(feature = "libsql")]
 async fn resolve_missed_fire_result_update(
     conn: &libsql::Connection,
     tenant_id: &TenantId,
@@ -1519,8 +1520,6 @@ async fn resolve_missed_fire_result_update(
         "update predicate failed while claimed fire remained active without a run ref",
     ))
 }
-
-#[cfg(feature = "libsql")]
 async fn mark_successful_fire_result(
     conn: &libsql::Connection,
     update: SuccessfulFireResultUpdate<'_>,
@@ -1639,8 +1638,6 @@ async fn mark_successful_fire_result(
     )
     .await
 }
-
-#[cfg(feature = "libsql")]
 struct SuccessfulFireResultUpdate<'a> {
     tenant_id: &'a TenantId,
     trigger_id: TriggerId,
@@ -1655,8 +1652,6 @@ struct SuccessfulFireResultUpdate<'a> {
     update_operation: &'static str,
     read_operation: &'static str,
 }
-
-#[cfg(feature = "libsql")]
 fn row_to_run_record(row: &libsql::Row) -> Result<TriggerRunRecord, TriggerError> {
     let tenant_id = TenantId::new(required_text(row, RUN_TENANT_ID_COL, "tenant_id")?)
         .map_err(|error| invalid_record("tenant_id", error.to_string()))?;
@@ -1693,8 +1688,6 @@ fn row_to_run_record(row: &libsql::Row) -> Result<TriggerRunRecord, TriggerError
         completed_at,
     })
 }
-
-#[cfg(feature = "libsql")]
 async fn upsert_run_history(
     conn: &libsql::Connection,
     run: &TriggerRunRecord,
@@ -1727,8 +1720,6 @@ async fn upsert_run_history(
     prune_run_history(conn, &run.tenant_id, run.trigger_id).await?;
     Ok(())
 }
-
-#[cfg(feature = "libsql")]
 fn trigger_ids_json_array(trigger_ids: &[TriggerId]) -> String {
     let mut value = String::from("[");
     for (index, trigger_id) in trigger_ids.iter().enumerate() {
@@ -1742,8 +1733,6 @@ fn trigger_ids_json_array(trigger_ids: &[TriggerId]) -> String {
     value.push(']');
     value
 }
-
-#[cfg(feature = "libsql")]
 async fn complete_run_history(
     conn: &libsql::Connection,
     tenant_id: &TenantId,
@@ -1779,8 +1768,6 @@ async fn complete_run_history(
     prune_run_history(conn, tenant_id, trigger_id).await?;
     Ok(())
 }
-
-#[cfg(feature = "libsql")]
 async fn prune_run_history(
     conn: &libsql::Connection,
     tenant_id: &TenantId,
@@ -1809,14 +1796,10 @@ async fn prune_run_history(
     .map_err(|error| backend_error("prune trigger run history", error))?;
     Ok(())
 }
-
-#[cfg(feature = "libsql")]
 fn required_text(row: &libsql::Row, index: usize, field: &str) -> Result<String, TriggerError> {
     row.get(index as i32)
         .map_err(|error| invalid_record(field, error.to_string()))
 }
-
-#[cfg(feature = "libsql")]
 fn optional_text(
     row: &libsql::Row,
     index: usize,
@@ -1825,54 +1808,38 @@ fn optional_text(
     row.get(index as i32)
         .map_err(|error| backend_error(&format!("read optional trigger field {field}"), error))
 }
-
-#[cfg(feature = "libsql")]
 fn parse_timestamp(value: &str, field: &str) -> Result<Timestamp, TriggerError> {
     DateTime::parse_from_rfc3339(value)
         .map(|value| value.with_timezone(&Utc))
         .map_err(|error| invalid_record(field, error.to_string()))
 }
-
-#[cfg(feature = "libsql")]
 fn parse_turn_run_id(value: &str) -> Result<TurnRunId, TriggerError> {
     parse_turn_run_id_with_field(value, "active_run_ref")
 }
-
-#[cfg(feature = "libsql")]
 fn parse_turn_run_id_with_field(value: &str, field: &str) -> Result<TurnRunId, TriggerError> {
     TurnRunId::parse(value).map_err(|error| invalid_record(field, error.to_string()))
 }
-
-#[cfg(feature = "libsql")]
 fn fmt_ts(value: &Timestamp) -> String {
     value.to_rfc3339_opts(SecondsFormat::Nanos, true)
 }
-
-#[cfg(feature = "libsql")]
 fn opt_ts(value: Option<&Timestamp>) -> libsql::Value {
     match value {
         Some(value) => libsql::Value::Text(fmt_ts(value)),
         None => libsql::Value::Null,
     }
 }
-
-#[cfg(feature = "libsql")]
 fn opt_turn_run_id(value: Option<&TurnRunId>) -> libsql::Value {
     match value {
         Some(value) => libsql::Value::Text(value.to_string()),
         None => libsql::Value::Null,
     }
 }
-
-#[cfg(feature = "libsql")]
 fn invalid_record(field: &str, reason: impl Into<String>) -> TriggerError {
     TriggerError::InvalidRecord {
         kind: crate::TriggerRecordValidationKind::Other,
         reason: format!("{field}: {}", reason.into()),
     }
 }
-
-#[cfg(feature = "libsql")]
 fn backend_error(operation: &str, error: impl std::fmt::Display) -> TriggerError {
     TriggerError::Backend {
         reason: format!("{operation}: {error}"),

@@ -2,30 +2,27 @@ use std::any::type_name;
 
 use std::sync::Arc;
 
-#[cfg(feature = "libsql")]
 use super::LibSqlRootFilesystem;
-#[cfg(feature = "postgres")]
 use super::PostgresRootFilesystem;
 use super::{
-    ApprovalRequestStore, AuditSink, CapabilityLeaseStore, CoalescingEventSink, DurableAuditLog,
-    DurableAuditSink, DurableEventLog, DurableEventSink, EffectiveRuntimePolicy, EventBatchConfig,
-    EventSink, FilesystemApprovalRequestStore, FilesystemResourceGovernorStore,
-    FilesystemRunStateStore, FilesystemTurnStateStore, FirstPartyCapabilityRegistry,
-    HostRuntimeServices, McpExecutor, NetworkHttpEgress, PersistentResourceGovernor,
-    ProcessBackendKind, ProcessExecutor, ProcessObligationLifecycleStore, ProcessResultStore,
-    ProcessStore, ProductionComponentType, ProductionImplementationReadiness,
+    ApprovalRequestStore, ApprovalRequestStorePort, AuditSink, CapabilityLeaseStorePort,
+    CoalescingEventSink, DurableAuditLog, DurableAuditSink, DurableEventLog, DurableEventSink,
+    EffectiveRuntimePolicy, EventBatchConfig, EventSink, FilesystemResourceGovernor,
+    FirstPartyCapabilityRegistry, HostRuntimeServices, McpExecutor, NetworkHttpEgress,
+    ProcessBackendKind, ProcessExecutor, ProcessObligationLifecycleStore, ProcessResultStorePort,
+    ProcessStorePort, ProductionComponentType, ProductionImplementationReadiness,
     ProductionWiringComponent, ProductionWiringIssueKind, ProductionWiringReport,
     RebornEventStoreConfig, RebornEventStoreError, RebornEventStores, RebornProfile,
-    ResourceGovernor, RootFilesystem, RunProfileResolver, RunStateApprovalStore, RunStateStore,
-    RuntimeBackendHealth, RuntimeCredentialAccountResolver, RuntimeHttpEgress, RuntimeKind,
-    RuntimeProcessPort, ScopedFilesystem, ScriptExecutor, SecretMode, SecretStore,
+    ResourceGovernor, RootFilesystem, RunProfileResolver, RunStateApprovalStorePort, RunStateStore,
+    RunStateStorePort, RuntimeBackendHealth, RuntimeCredentialAccountResolver, RuntimeHttpEgress,
+    RuntimeKind, RuntimeProcessPort, ScopedFilesystem, ScriptExecutor, SecretMode, SecretStorePort,
     SecurityAuditSink, SharedSecretStore, TenantSandboxProcessPort, TrustPolicy,
-    TurnRunTransitionPort, TurnRunWakeNotifier, TurnStateStore, WasmError, WasmRuntimeAdapter,
-    WasmRuntimeCredentialProvider, WasmStagedRuntimeCredentials, WitToolHost, WitToolRuntimeConfig,
-    build_reborn_event_stores, production_wiring_report, set_runtime_http_egress,
-    set_tool_call_http_egress,
+    TurnRunTransitionPort, TurnRunWakeNotifier, TurnStateRowStore, TurnStateStore, WasmError,
+    WasmRuntimeAdapter, WasmRuntimeCredentialProvider, WasmStagedRuntimeCredentials, WitToolHost,
+    WitToolRuntimeConfig, build_reborn_event_stores, production_wiring_report,
+    set_runtime_http_egress, set_tool_call_http_egress,
 };
-use crate::LocalHostProcessPort;
+use crate::HostProcessPort;
 use crate::RuntimeHttpBodyStore;
 use crate::http_body::UnsupportedRuntimeHttpBodyStore;
 use crate::wasm_credentials::SharedHostWasmRuntimeCredentials;
@@ -35,10 +32,9 @@ impl<F, G, S, R> HostRuntimeServices<F, G, S, R>
 where
     F: RootFilesystem + 'static,
     G: ResourceGovernor + 'static,
-    S: ProcessStore + 'static,
-    R: ProcessResultStore + 'static,
+    S: ProcessStorePort + 'static,
+    R: ProcessResultStorePort + 'static,
 {
-    #[cfg(any(feature = "postgres", feature = "libsql"))]
     fn with_root_filesystem<T>(self, filesystem: Arc<T>) -> HostRuntimeServices<T, G, S, R>
     where
         T: RootFilesystem + 'static,
@@ -84,6 +80,8 @@ where
             run_profile_resolver,
             turn_run_transition_port,
             turn_run_wake_notifier,
+            extension_tool_resolver,
+            post_edit_check,
             mut component_types,
         } = self;
         component_types.filesystem = ProductionComponentType::of::<T>();
@@ -128,11 +126,12 @@ where
             run_profile_resolver,
             turn_run_transition_port,
             turn_run_wake_notifier,
+            extension_tool_resolver,
+            post_edit_check,
             component_types,
         }
     }
 
-    #[cfg(feature = "postgres")]
     pub fn with_postgres_root_filesystem(
         self,
         filesystem: Arc<PostgresRootFilesystem>,
@@ -140,7 +139,6 @@ where
         self.with_root_filesystem(filesystem)
     }
 
-    #[cfg(feature = "libsql")]
     pub fn with_libsql_root_filesystem(
         self,
         filesystem: Arc<LibSqlRootFilesystem>,
@@ -193,6 +191,8 @@ where
             run_profile_resolver,
             turn_run_transition_port,
             turn_run_wake_notifier,
+            extension_tool_resolver,
+            post_edit_check,
             mut component_types,
         } = self;
         let lifecycle_governor: Arc<dyn ResourceGovernor> = governor.clone();
@@ -247,30 +247,25 @@ where
             run_profile_resolver,
             turn_run_transition_port,
             turn_run_wake_notifier,
+            extension_tool_resolver,
+            post_edit_check,
             component_types,
         }
     }
 
-    /// Replace the in-memory governor with a filesystem-backed
-    /// [`PersistentResourceGovernor`] over the supplied
-    /// [`ScopedFilesystem`]. Backend choice (libSQL, Postgres, in-memory,
-    /// local disk) is a property of the underlying
-    /// [`RootFilesystem`](ironclaw_filesystem::RootFilesystem); see
-    /// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
+    /// Replace the in-memory governor with the journaled filesystem-backed
+    /// [`FilesystemResourceGovernor`] over the supplied [`ScopedFilesystem`].
+    /// Backend choice (libSQL, Postgres, in-memory, local disk) is a property
+    /// of the underlying [`RootFilesystem`](ironclaw_filesystem::RootFilesystem);
+    /// see `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
     pub fn with_filesystem_resource_governor<FsBackend>(
         self,
         scoped_filesystem: Arc<ScopedFilesystem<FsBackend>>,
-    ) -> HostRuntimeServices<
-        F,
-        PersistentResourceGovernor<FilesystemResourceGovernorStore<FsBackend>>,
-        S,
-        R,
-    >
+    ) -> HostRuntimeServices<F, FilesystemResourceGovernor<FsBackend>, S, R>
     where
         FsBackend: RootFilesystem + 'static,
     {
-        let store = FilesystemResourceGovernorStore::new(scoped_filesystem);
-        self.with_resource_governor(Arc::new(PersistentResourceGovernor::new(store)))
+        self.with_resource_governor(Arc::new(FilesystemResourceGovernor::new(scoped_filesystem)))
     }
 
     pub fn resource_governor(&self) -> Arc<G> {
@@ -304,7 +299,7 @@ where
 
     pub fn with_run_state<T>(mut self, run_state: Arc<T>) -> Self
     where
-        T: RunStateStore + 'static,
+        T: RunStateStorePort + 'static,
     {
         self.component_types.run_state = Some(ProductionComponentType::of::<T>());
         self.run_state = Some(run_state);
@@ -314,7 +309,7 @@ where
 
     pub fn with_approval_requests<T>(mut self, approval_requests: Arc<T>) -> Self
     where
-        T: ApprovalRequestStore + 'static,
+        T: ApprovalRequestStorePort + 'static,
     {
         self.component_types.approval_requests = Some(ProductionComponentType::of::<T>());
         self.approval_requests = Some(approval_requests);
@@ -324,7 +319,7 @@ where
 
     pub fn with_run_state_approval_store<T>(self, store: Arc<T>) -> Self
     where
-        T: RunStateApprovalStore + 'static,
+        T: RunStateApprovalStorePort + 'static,
     {
         self.with_run_state_approval_store_readiness(store, ProductionComponentType::of::<T>())
     }
@@ -335,7 +330,7 @@ where
     /// production-readiness classification.
     pub fn with_local_only_run_state_approval_store<T>(self, store: Arc<T>) -> Self
     where
-        T: RunStateApprovalStore + 'static,
+        T: RunStateApprovalStorePort + 'static,
     {
         self.with_run_state_approval_store_readiness(
             store,
@@ -352,7 +347,7 @@ where
         component_type: ProductionComponentType,
     ) -> Self
     where
-        T: RunStateApprovalStore + 'static,
+        T: RunStateApprovalStorePort + 'static,
     {
         self.component_types.run_state = Some(component_type);
         self.component_types.approval_requests = Some(component_type);
@@ -381,8 +376,8 @@ where
     /// atomic `save_pending_and_block_approval` transition: filesystem
     /// stores ship as two independent records under distinct mount aliases.
     /// Callers fall back to the two-step
-    /// `ApprovalRequestStore::save_pending` then
-    /// `RunStateStore::block_approval` path in
+    /// `ApprovalRequestStorePort::save_pending` then
+    /// `RunStateStorePort::block_approval` path in
     /// `ironclaw_capabilities::host`. Production composition should layer a
     /// transactional wrapper (or accept the two-step semantics) when
     /// cross-record atomicity matters.
@@ -393,15 +388,15 @@ where
     where
         FsBackend: RootFilesystem + 'static,
     {
-        let run_state = Arc::new(FilesystemRunStateStore::new(Arc::clone(&scoped_filesystem)));
-        let approval_requests = Arc::new(FilesystemApprovalRequestStore::new(scoped_filesystem));
+        let run_state = Arc::new(RunStateStore::new(Arc::clone(&scoped_filesystem)));
+        let approval_requests = Arc::new(ApprovalRequestStore::new(scoped_filesystem));
         self.with_run_state(run_state)
             .with_approval_requests(approval_requests)
     }
 
     pub fn with_capability_leases<T>(mut self, capability_leases: Arc<T>) -> Self
     where
-        T: CapabilityLeaseStore + 'static,
+        T: CapabilityLeaseStorePort + 'static,
     {
         self.component_types.capability_leases = Some(ProductionComponentType::of::<T>());
         self.capability_leases = Some(capability_leases);
@@ -410,7 +405,7 @@ where
 
     pub fn with_persistent_approval_policies<T>(mut self, policies: Arc<T>) -> Self
     where
-        T: ironclaw_approvals::PersistentApprovalPolicyStore + 'static,
+        T: ironclaw_approvals::PersistentApprovalPolicyStorePort + 'static,
     {
         self.component_types.persistent_approval_policies =
             Some(ProductionComponentType::of::<T>());
@@ -489,7 +484,7 @@ where
     where
         FsBackend: RootFilesystem + 'static,
     {
-        let store = Arc::new(FilesystemTurnStateStore::new(scoped_filesystem));
+        let store = Arc::new(TurnStateRowStore::new(scoped_filesystem));
         self.with_turn_state_and_transition_port(store)
     }
 
@@ -628,16 +623,16 @@ where
 
     pub fn with_secret_store<T>(mut self, secret_store: Arc<T>) -> Self
     where
-        T: SecretStore + 'static,
+        T: SecretStorePort + 'static,
     {
         self.component_types.secret_store = Some(ProductionComponentType::of::<T>());
         self.secret_store = Some(secret_store);
         self
     }
 
-    pub fn with_secret_store_dyn(mut self, secret_store: Arc<dyn SecretStore>) -> Self {
+    pub fn with_secret_store_dyn(mut self, secret_store: Arc<dyn SecretStorePort>) -> Self {
         self.component_types.secret_store = Some(ProductionComponentType::named(
-            "dyn SecretStore",
+            "dyn SecretStorePort",
             ProductionImplementationReadiness::ProductionCandidate,
         ));
         self.secret_store = Some(secret_store);
@@ -736,6 +731,15 @@ where
         self
     }
 
+    /// Configure the operator post-edit check appended to successful
+    /// `builtin.write_file` / `builtin.apply_patch` output. Composition
+    /// resolves the config once (see `PostEditCheckConfig::from_env`) and
+    /// threads it here; the feature stays off when this is never called.
+    pub fn with_post_edit_check(mut self, post_edit_check: crate::PostEditCheckConfig) -> Self {
+        self.post_edit_check = Some(post_edit_check);
+        self
+    }
+
     pub fn with_runtime_process_port_dyn(
         mut self,
         process_port: Arc<dyn RuntimeProcessPort>,
@@ -782,7 +786,7 @@ where
     ) -> Self
     where
         N: NetworkHttpEgress + 'static,
-        SecretBackend: SecretStore + 'static,
+        SecretBackend: SecretStorePort + 'static,
     {
         self.component_types.runtime_http_egress = Some(ProductionComponentType::of::<
             crate::HostHttpEgressService<N, SecretBackend>,
@@ -826,15 +830,15 @@ where
             return;
         }
         self.component_types.runtime_process_port =
-            ProductionComponentType::of::<LocalHostProcessPort>();
+            ProductionComponentType::of::<HostProcessPort>();
         self.process_port = if matches!(policy.secret_mode, SecretMode::InheritedEnv) {
             tracing::warn!(
                 host_access = "full-local",
                 "runtime policy selected inherited local host process environment"
             );
-            Arc::new(LocalHostProcessPort::new_inherited_env())
+            Arc::new(HostProcessPort::new_inherited_env())
         } else {
-            Arc::new(LocalHostProcessPort::new())
+            Arc::new(HostProcessPort::new())
         };
     }
 
@@ -915,7 +919,7 @@ where
     {
         let Some(secret_store) = self.secret_store.clone() else {
             return Err(production_wiring_report(
-                ProductionWiringComponent::SecretStore,
+                ProductionWiringComponent::SecretStorePort,
                 ProductionWiringIssueKind::Missing,
                 None,
             ));

@@ -1,0 +1,49 @@
+description = "NEAR AI MCP tools for web search and hosted agent capabilities."
+id = "nearai"
+name = "NEAR AI"
+schema_version = "reborn.extension_manifest.v3"
+trust = "first_party_requested"
+version = "0.1.0"
+
+[auth.nearai]
+display_name = "NEAR AI API key"
+method = "api_key"
+
+[[auth.nearai.fields]]
+handle = "llm_nearai_api_key"
+label = "NEAR AI API key"
+secret = true
+
+[mcp]
+default_permission = "ask"
+effects = ["network", "use_secret"]
+max_tools = 64
+namespace = "nearai"
+server = "__LIVE_CANARY_NEARAI_MCP_SERVER__"
+
+[[mcp.credentials]]
+handle = "llm_nearai_api_key"
+scopes = []
+vendor = "nearai"
+
+[mcp.credentials.injection]
+name = "authorization"
+prefix = "Bearer "
+type = "header"
+
+[mcp.origin_gate_matrix]
+automation = "forbidden"
+loop_run = "gated_unless_granted"
+product = "forbidden"
+
+[[tools]]
+default_permission = "ask"
+description = "Search through the NEAR AI MCP server."
+id = "nearai.web_search"
+input_schema_ref = "schemas/nearai/web_search.input.v1.json"
+prompt_doc_ref = "prompts/nearai/web_search.md"
+
+[tools.origin_gate_matrix]
+automation = "forbidden"
+loop_run = "gated_unless_granted"
+product = "forbidden"

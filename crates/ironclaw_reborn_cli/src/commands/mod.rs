@@ -12,17 +12,13 @@ pub(crate) mod onboard;
 pub(crate) mod profile;
 pub(crate) mod repl;
 pub(crate) mod run;
-#[cfg(feature = "webui-v2-beta")]
 pub(crate) mod serve;
-#[cfg(feature = "webui-v2-beta")]
-pub(crate) mod serve_slack;
-#[cfg(feature = "webui-v2-beta")]
 pub(crate) mod serve_sso;
+pub(crate) mod service;
 pub(crate) mod skills;
+pub(crate) mod status;
 pub(crate) mod traces;
-#[cfg(feature = "webui-v2-beta")]
 pub(crate) mod user_directory;
-#[cfg(feature = "webui-v2-beta")]
 pub(crate) mod webui_auth;
 
 #[derive(Debug, Subcommand)]
@@ -51,14 +47,16 @@ pub(crate) enum Command {
     Repl(repl::ReplCommand),
     /// Initialize the minimal Reborn runtime shell and exit.
     Run(run::RunCommand),
-    /// Start the Reborn WebUI service. Available only when the binary
-    /// is built with the `webui-v2-beta` Cargo feature; off by default
-    /// because the beta HTTP/auth gateway requires explicit opt-in
-    /// before being linked into a production binary.
-    #[cfg(feature = "webui-v2-beta")]
+    /// Start the Reborn WebUI service.
     Serve(serve::ServeCommand),
+    /// Install/start/stop/status/uninstall the standalone Reborn binary
+    /// as an OS-native service (launchd on macOS, systemd on Linux). The
+    /// installed unit runs `serve`.
+    Service(service::ServiceCommand),
     /// Inspect configured Reborn skills.
     Skills(skills::SkillsCommand),
+    /// Show Reborn runtime status snapshot.
+    Status(status::StatusCommand),
     /// Manage trace contributions to TraceCommons.
     Traces(Box<traces::TracesCommand>),
 }
@@ -90,14 +88,26 @@ impl Command {
             Self::Run(command) => {
                 command.execute(crate::context::RebornCliContext::resolve_from_env()?)
             }
-            #[cfg(feature = "webui-v2-beta")]
             Self::Serve(command) => {
+                command.execute(crate::context::RebornCliContext::resolve_from_env()?)
+            }
+            Self::Service(command) => {
                 command.execute(crate::context::RebornCliContext::resolve_from_env()?)
             }
             Self::Skills(command) => {
                 command.execute(crate::context::RebornCliContext::resolve_from_env()?)
             }
+            Self::Status(command) => {
+                command.execute(crate::context::RebornCliContext::resolve_from_env()?)
+            }
             Self::Traces(command) => command.execute(),
         }
     }
+}
+
+/// Shared error for CLI surfaces that are intentionally kept visible in
+/// `--help`/shell completions but do not yet have a working implementation
+/// (`channels`, `hooks`, `logs`).
+pub(crate) fn not_yet_implemented(command: &str) -> anyhow::Error {
+    anyhow::anyhow!("`{command}` is not implemented yet")
 }

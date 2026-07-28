@@ -7,8 +7,6 @@ use ironclaw_host_api::{
     CapabilityId, CredentialStageError, MountPermissions, RuntimeKind, SecretHandle, UserId,
 };
 use ironclaw_host_runtime::{READ_FILE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID};
-use ironclaw_network::NetworkHttpEgress;
-use ironclaw_reborn_composition::ProductLiveCapabilityIo;
 
 use super::super::super::github as github_support;
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
@@ -55,9 +53,13 @@ pub(crate) fn file_and_github_auth_tools_profile() -> HarnessResult<ToolsProfile
     // post-resume dispatch would attempt a live network call.
     let github_fixture_response =
         br#"{"id":1,"full_name":"octocat/hello-world","private":false}"#.to_vec();
-    let network_egress: Arc<dyn NetworkHttpEgress> = Arc::new(
-        RecordingNetworkHttpEgress::with_body(github_fixture_response),
-    );
+    // Recording (not just dyn) so the handle is retained: scenarios need to
+    // script statuses onto this lane and read back the captured requests, and
+    // `with_network_http_egress_for_test` alone wires the transport without
+    // keeping anything to observe it through.
+    let network_egress = Arc::new(RecordingNetworkHttpEgress::with_body(
+        github_fixture_response,
+    ));
     Ok(ToolsProfile {
         capability_ids: vec![
             CapabilityId::new(WRITE_FILE_CAPABILITY_ID)?,
@@ -69,7 +71,7 @@ pub(crate) fn file_and_github_auth_tools_profile() -> HarnessResult<ToolsProfile
             workspace_mounts(MountPermissions::read_write_list_delete())?,
             None,
         )
-        .with_network_http_egress_for_test(network_egress)
+        .with_recording_network_egress(network_egress)
         .with_activated_bundled_extension(github_support::extension_package()?),
         network_policy_override: Some(wildcard_test_policy()),
         provider_trust_override: Some(bundled_extension_provider_trust()?),
@@ -146,12 +148,17 @@ fn github_issue_tools_with_credential_result(
         credential_account_result,
     )?;
     let mounts = workspace_mounts(MountPermissions::read_write_list_delete())?;
+    let (io, result_writer_io) = super::super::default_capability_io_pair();
     Ok(HostRuntimeCapabilityHarness {
-        runtime,
+        runtime: Mutex::new(runtime),
         approval_parts: None,
+        gate_record_store: super::super::fresh_in_memory_gate_record_store(),
         auto_approve_settings: None,
         pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
-        io: Arc::new(ProductLiveCapabilityIo::default()),
+        io: Mutex::new(io),
+        result_writer_io: Mutex::new(result_writer_io),
+        durable_capability_io_thread_service: Mutex::new(None),
+        durable_capability_io_requested: false,
         root,
         workspace_root,
         mounts,
@@ -182,5 +189,6 @@ fn github_issue_tools_with_credential_result(
         persistent_approval_policies: None,
         trigger_repository: None,
         reborn_services: None,
+        trigger_active_run_lookup_requested: false,
     })
 }

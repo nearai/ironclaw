@@ -11,11 +11,6 @@
     "wecom",
     "enterprise-wechat"
   ],
-  "source": {
-    "dir": "channels-src/wecom",
-    "capabilities": "wecom.capabilities.json",
-    "crate_name": "wecom-channel"
-  },
   "artifacts": {
     "wasm32-wasip2": {
       "url": "https://github.com/nearai/ironclaw/releases/download/ironclaw-v0.29.0/channel-wecom-0.1.0-wasm32-wasip2.tar.gz",

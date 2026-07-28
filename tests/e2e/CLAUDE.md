@@ -2,12 +2,26 @@
 
 Python/Playwright test suite that runs against a live ironclaw instance. Added in PR #553 ("Trajectory benchmarks and e2e trace test rig").
 
-**Two surfaces are covered, not one.** The suite drives both:
+**The live surface is the Reborn `ironclaw serve` WebChat v2 SPA** (`/`,
+`/api/webchat/v2/*`), driven via the `reborn_webui_harness` / `reborn_v2_*`
+fixtures and `SEL_V2` selectors. This is the only surface the Reborn coverage
+gate (`reborn_coverage_tests.txt`, run by `reborn-e2e.yml`) exercises. When
+adding a browser test, use the `reborn_v2_*` fixtures — see
+`test_reborn_webui_v2_smoke.py` for the canonical example.
 
-- the **legacy `ironclaw` gateway** (`/`, `#auth-screen`, `/api/chat/*`) via the `ironclaw_binary` + `page` fixtures, and
-- the **Reborn `ironclaw-reborn serve` WebChat v2 SPA** (`/v2/`, `/api/webchat/v2/*`) via the `ironclaw_reborn_binary` + `reborn_v2_server` / `reborn_v2_browser` / `reborn_v2_page` fixtures.
-
-When adding a browser test for the v2 SPA, use the `reborn_v2_*` fixtures and `SEL_V2` selectors — **not** the legacy `page`/`SEL`. See `test_reborn_webui_v2_smoke.py` for the canonical v2 example.
+> **Tier B note:** the v1 legacy `ironclaw` gateway binary
+> (`ironclaw-legacy`, formerly built by the `ironclaw_binary` fixture) was
+> **deleted** under Tier B (`docs/plans/2026-07-02-reborn-internal-module-refactor.md`
+> §8). The eight browser scenarios that drove only the legacy gateway
+> (`test_connection`, `test_chat`, `test_html_injection`, `test_skills`,
+> `test_sse_reconnect`, `test_tool_approval`, `test_dom_resource_limits`,
+> `test_reborn_gateway_smoke`) were removed. The remaining suite still carries
+> legacy `conftest.py` fixtures (`ironclaw_binary`, `ironclaw_server`, the
+> legacy `page`/`browser`) and a number of `test_v2_*` scenarios that depend on
+> them; those are non-functional until repointed at the Reborn serve binary and
+> are tracked as a dedicated migration in issue #6369. The doc below still
+> describes that legacy machinery where it remains — treat any `ironclaw_binary`
+> / legacy-`page` reference as pending-removal, not current guidance.
 
 ## Setup
 
@@ -25,7 +39,7 @@ pip install -e .
 playwright install chromium
 ```
 
-Dependencies: `pytest`, `pytest-asyncio`, `pytest-playwright`, `pytest-timeout`, `playwright`, `aiohttp`, `httpx`. Optional: `anthropic` (vision extras). Requires Python >= 3.11. Emulate-backed provider tests also require Node.js with `npx`; CI installs Node 22 and runs the pinned `emulate@0.7.0` package.
+Dependencies: `pytest`, `pytest-asyncio`, `pytest-playwright`, `pytest-timeout`, `playwright`, `aiohttp`, `httpx`. Optional: `anthropic` (vision extras). Requires Python >= 3.11. Emulate-backed provider tests also require Node.js. CI installs Node 24, builds the `serrrfirat/emulate` commit pinned by [the Reborn E2E workflow](../../.github/workflows/reborn-e2e.yml), and passes its CLI through `IRONCLAW_EMULATE_CLI`. Without that override, unrelated local Emulate tests retain the `emulate@0.7.0` fallback.
 
 ## Running Tests
 
@@ -68,7 +82,7 @@ from `tests/e2e/` for the full, current set.
 | `test_tool_approval.py` | Approval card appears, buttons disable on approve/deny; waiting-approval regression uses a real HTTP tool call |
 | `test_dom_resource_limits.py` | DOM pruning at `MAX_DOM_MESSAGES`, no `setInterval` leaks across reconnect cycles |
 
-**Reborn `ironclaw-reborn serve` WebChat v2 SPA (browser via `reborn_v2_*` / `SEL_V2`):**
+**Reborn `ironclaw serve` WebChat v2 SPA (browser via `reborn_v2_*` / `SEL_V2`):**
 
 | File | What it tests |
 |------|--------------|
@@ -82,7 +96,7 @@ from `tests/e2e/` for the full, current set.
 
 The Code Coverage workflow does **not** run the entire historical Python E2E
 tree. It reads `tests/e2e/reborn_coverage_tests.txt`, which is limited to
-scenarios that start the standalone `ironclaw-reborn serve` binary and exercise
+scenarios that start the standalone `ironclaw serve` binary and exercise
 the Reborn WebChat v2 or OpenAI-compatible API surface. The manifest may use
 pytest node IDs to include only the Reborn binary/API checks from a broader
 scenario file.
@@ -97,8 +111,12 @@ full-path Emulate tests still start the legacy gateway binary.
 
 | File | What it tests |
 |------|--------------|
-| `test_emulate_reborn_provider_contracts.py` | Reborn Emulate fixture contracts: Google/Slack/GitHub seeded reads + stateful writes |
-| `test_reborn_emulate_full_path.py` | Install/auth a first-party extension, drive a scripted tool call, assert provider state via Emulate |
+| `test_emulate_reborn_provider_contracts.py` | Reborn Emulate fixture contracts: Google account isolation and stateful reads/writes, Slack QA 9/10 provider shapes and strict-scope failures, and GitHub identity plus positive/negative state transitions |
+| `test_provider_fault_proxy.py` | Harness self-tests for reusable provider status, response, timeout, connection-reset, and lost-acknowledgement profiles plus safe request evidence and reset |
+| `test_provider_capability_inventory.py` | Fast completeness gate derived from shipped first-party manifests. Every static provider capability must be tested, live-only, unsupported, or covered by an owned waiver in `fixtures/provider_capability_coverage.toml`; non-Emulate evidence names its exact Cargo target, source, and executable test. |
+| `test_journey_coverage.py` | Fast whole-path completeness gate. Harvested provider traces are typed `JourneyCase` entries, while representative WebUI, Slack, Telegram, and scheduled-trigger journeys name exact executable Pytest or Cargo evidence. Production channel manifests cannot add an inbound or outbound surface without journey evidence. |
+| `test_reborn_qa_trace_full_path.py` | Harvested and typed provider operations through standalone Reborn and Emulate, including representative read/idempotent-write/non-idempotent-write fault cases with provider readback |
+| `test_reborn_emulate_full_path.py` | Install/auth a first-party extension, drive scripted Gmail/Calendar/Drive/GitHub tool calls, assert provider state and cleanup via Emulate |
 | `test_oauth_refresh.py` | Hosted Gmail OAuth refresh: expire token, real tool call, refresh via mock proxy without leaking `client_secret` |
 | `test_extension_uninstall_cleanup.py` | Install/remove for WASM tools/channels, shared Google tools, MCP; uninstall deletes secrets, preserves shared creds |
 
@@ -120,17 +138,18 @@ All fixtures are defined in `tests/e2e/conftest.py`. Running `pytest scenarios/`
 
 | Fixture | What it does |
 |---------|-------------|
-| `ironclaw_binary` | Legacy gateway binary. Checks `target/debug/ironclaw`; if absent, runs `cargo build --no-default-features --features libsql` (timeout 600s). |
-| `ironclaw_reborn_binary` | Reborn v2 binary. Builds `target/debug/ironclaw-reborn` with `--features webui-v2-beta` (transitively `libsql`) when stale/missing. Used by the v2 SPA scenarios. |
-| `reborn_v2_server` | Starts `ironclaw-reborn serve` (v2 SPA under `/v2/`, `local-dev` profile) against `mock_llm_server`; config written via `_write_config_toml` (selects the `openai` provider pointed at the mock). Waits for `/api/health`; SIGINT teardown. (Module-scoped, defined in `test_reborn_webui_v2_smoke.py`.) |
+| `ironclaw_binary` | Legacy gateway binary. Checks `target/debug/ironclaw`; if absent, runs `cargo build -p ironclaw` (timeout 600s). |
+| `ironclaw_reborn_binary` | Reborn v2 binary. Builds `target/debug/ironclaw` with default features when stale/missing. Used by the v2 SPA and full-path fixture scenarios. |
+| `reborn_v2_server` | Starts `ironclaw serve` (v2 SPA at `/`, `local-dev` profile) against `mock_llm_server`; config written via `_write_config_toml` (selects the `openai` provider pointed at the mock). Waits for `/api/health`; SIGINT teardown. (Module-scoped, defined in `test_reborn_webui_v2_smoke.py`.) |
 | `reborn_v2_browser` | Chromium instance for the v2 scenarios, independent of the legacy `browser` fixture (generous launch timeout + retry). |
 | `mock_llm_server` | Starts `mock_llm.py --port 0`, reads the assigned port from stdout, waits for `/v1/models` to return 200. Yields the base URL. Serves canned responses including delayed ones (e.g. `"editable composer slow response"` → ~5s) so tests can act while a run is in flight. |
-| `emulate_google_server` | Starts `npx --yes emulate@0.7.0 --service google` with `fixtures/emulate/google_gmail.yaml`, waits for the Gmail messages endpoint to serve the seeded account, and yields the base URL for HTTP rewrite maps. The seed covers Gmail, Calendar, and Drive. Local runs skip if `npx` is unavailable; CI fails. |
-| `emulate_slack_server` | Starts `npx --yes emulate@0.7.0 --service slack` with `fixtures/emulate/slack.yaml`, waits for seeded token auth to pass `auth.test`, and yields the base URL for Slack provider-contract assertions. |
-| `emulate_github_server` | Starts `npx --yes emulate@0.7.0 --service github` with `fixtures/emulate/github.yaml`, waits for `/user` to return the seeded actor, and yields the base URL for GitHub provider-contract assertions. |
+| `emulate_google_server` | Starts the Emulate CLI selected by `IRONCLAW_EMULATE_CLI`, or the `emulate@0.7.0` fallback, with `fixtures/emulate/google_gmail.yaml`; waits for the Gmail messages endpoint; and yields the base URL for HTTP rewrite maps. The pinned CI fork covers Gmail, Calendar, Drive, Docs, Sheets, and Slides. Local runs skip if neither the selected CLI nor `npx` is available; CI fails. |
+| `emulate_slack_server` | Starts the selected Emulate CLI with `fixtures/emulate/slack.yaml`, waits for seeded token auth to pass `auth.test`, and yields the base URL for Slack provider-contract assertions, including `search.messages` with the pinned CI fork. |
+| `emulate_github_server` | Starts the selected Emulate CLI with `fixtures/emulate/github.yaml`, waits for `/user` to return the seeded actor, and yields the base URL for GitHub provider-contract assertions. |
+| `provider_fault_proxy_world` | Module-scoped. Starts one transparent aiohttp proxy per resettable Emulate provider. Reborn traffic crosses these proxies; setup and provider readback continue to use direct Emulate URLs. Faults and the safe request ledger reset independently from provider state. |
 | `ironclaw_server` | Starts the ironclaw binary with a minimal env (see below), waits for `/api/health` (timeout 60s). Yields the base URL. On teardown sends **SIGINT** (not SIGTERM) so the tokio ctrl_c handler triggers a graceful shutdown and LLVM coverage data is flushed. |
 | `hosted_oauth_refresh_server` | Starts a second ironclaw instance with a dedicated libSQL DB and `GOOGLE_OAUTH_CLIENT_ID=hosted-google-client-id`, while still pointing `IRONCLAW_OAUTH_EXCHANGE_URL` at `mock_llm.py`. Yields a dict with `base_url`, `db_path`, and `mock_llm_url` for hosted refresh scenarios that do not need provider API calls. |
-| `hosted_google_emulate_server` | Starts the same hosted OAuth fixture shape, but sets `IRONCLAW_TEST_HTTP_REWRITE_MAP` so Google WASM HTTP calls to `gmail.googleapis.com` and `www.googleapis.com` hit `emulate_google_server`. Yields `emulate_google_url` in addition to the hosted OAuth server fields. |
+| `hosted_google_emulate_server` | Starts the same hosted OAuth fixture shape, but sets `IRONCLAW_TEST_HTTP_REWRITE_MAP` so Google WASM HTTP calls to `gmail.googleapis.com`, `www.googleapis.com`, and `slides.googleapis.com` hit `emulate_google_server`. Yields `emulate_google_url` in addition to the hosted OAuth server fields. |
 | `hosted_google_oauth_refresh_server` | Compatibility alias for `hosted_google_emulate_server`, retained for hosted Gmail OAuth refresh regression tests. |
 | `extension_cleanup_server` | Starts an isolated ironclaw instance with its own temp DB/home/WASM dirs, `SECRETS_MASTER_KEY`, and hosted-style OAuth env so uninstall-cleanup scenarios can inspect the `secrets` table without interfering with the shared E2E server state. |
 | `managed_gateway_server` | Function-scoped restartable gateway instance for SSE/connectivity scenarios; preserves port/DB/home across explicit stop/start calls so tests can simulate server restarts. |
@@ -141,40 +160,115 @@ All fixtures are defined in `tests/e2e/conftest.py`. Running `pytest scenarios/`
 
 | Fixture | What it does |
 |---------|-------------|
+| `reborn_qa_emulate_provider_server` | Restores providers mutated by a QA journey while reusing the session-built binary and one module-scoped Reborn process. Google mutation cases restart the seeded provider on its stable port; Slack deliveries are deleted by provider-issued timestamp so the OAuth account remains valid. Read-only providers stay warm. |
+| `reborn_provider_fault_server` | Clears provider fault rules and request evidence before and after each representative fault case, then restores the affected seeded provider. |
 | `page` | Legacy gateway. Creates a fresh browser **context** (viewport 1280×720) and **page** per test, navigates to `/?token=e2e-test-token`, and waits for `#auth-screen` to become hidden before yielding. Closes the context after each test. |
-| `reborn_v2_page` | Reborn v2 SPA. Fresh context/page navigated to `/v2/?token=<REBORN_V2_AUTH_TOKEN>`, waits for `SEL_V2["chat_composer"]` (authed `/chat` shell). Use this (not `page`) for v2 browser tests. |
+| `reborn_v2_page` | Reborn v2 SPA. Fresh context/page navigated to `/?token=<REBORN_V2_AUTH_TOKEN>`, waits for `SEL_V2["chat_composer"]` (authed `/chat` shell). Use this (not `page`) for v2 browser tests. |
 
 The function-scoped `page` fixture means **each test gets a clean browser context** (cookies, storage, etc.) but reuses the same ironclaw server and browser process. Tests that need the server URL directly (e.g., `test_auth_rejection`) accept `ironclaw_server` as an additional parameter.
 
 ### Emulate provider coverage
 
 Use Emulate for provider APIs that map directly to Reborn features already in
-this repo: Google Gmail/Calendar/Drive, Slack delivery/reactions/user lookup,
-and GitHub repository, issue, pull request, search, branch, release, fork, Git
-object, and Actions route workflows. The current provider contract covers
+this repo: Google Gmail/Calendar/Drive/Docs/Sheets/Slides, Slack
+delivery/search/reactions/user lookup, and GitHub repository, issue, pull
+request, review thread, contents, search, branch, release, fork, Git object,
+and Actions workflows. The current provider contract covers
 seeded reads plus stateful writes for Gmail send, Calendar event create/delete,
 Drive upload/readback, Slack channel/thread/DM delivery/reactions, GitHub repo
 create/list, release create/list/latest, issue create/read/comment/search, PR
 create/read/list/files/review/comment/merge, branch/ref creation, Git
-blob/tree/commit read/write, fork create/list, and empty Actions route readback.
+blob/tree/commit read/write, contents create/read/delete, fork create/list,
+review-thread resolution, Actions dispatch/readback/reruns, and Slides
+presentation/slide/text/shape/image mutation.
 
 Direct provider-contract tests prove the Emulate fixture layer itself. Full-path
-Reborn + Emulate tests should use `hosted_google_emulate_server` or a matching
+recorded-trace tests load harvested `LlmTrace` JSON through `mock_llm.py`'s
+`/__mock/llm_trace` endpoint. `test_reborn_qa_trace_replay.py` replays every
+model response from every case in the live-canary manifest. Its closed-set
+assertions require new fixtures and provider operations to be classified
+instead of silently losing coverage. `test_reborn_qa_trace_full_path.py`
+discovers every manifest journey with an Emulate-supported provider call and
+executes that provider leg through standalone `ironclaw serve`, installed and
+authenticated first-party extensions, the credential/network boundaries, and
+the pinned Emulate fork. Mutated provider state is reset or removed using
+provider-issued evidence while read-only providers, the built binary, and the
+Reborn process are reused; representative mutation journeys run a second time with
+clean-baseline assertions to prevent order-dependent passes.
+Cross-provider ordering is retained, fresh Docs and
+Sheets IDs are bound from earlier real tool results, redacted provider IDs are
+mapped to deterministic seeded resources, and assertions target capability
+success plus provider readback rather than recorded final-answer wording.
+`ProviderOperationCase` adds typed provider service, capability, argument,
+baseline, and readback cases for operations not yet present in harvested
+journeys. These cases reuse the same Reborn process and reset only their mutable
+provider world.
+`JourneyCase` is the small composition layer above those operation contracts.
+It declares the trace (when recorded), provider worlds, ingress, execution
+lane, delivery target, observable assertions, and exact executable evidence.
+The harvested provider runner consumes these declarations directly; provider
+setup, normalization, and readback remain in provider-owned helpers rather
+than moving into a generic DSL. The journey coverage gate derives channel
+ingress and delivery requirements from shipped manifests and adds the built-in
+WebUI and scheduled-trigger surfaces.
+`ProviderFaultProfile` places a transparent proxy between that Reborn process
+and Emulate. Reusable profiles cover HTTP 400/401/403/404/409/429/5xx,
+timeout, connection reset, malformed/truncated/missing-field responses, and a
+provider commit followed by a lost acknowledgement. The full-path matrix uses
+representative read, idempotent-write, and non-idempotent-write operations,
+asserts one wire attempt, and reads Emulate directly to distinguish no effect
+from an unacknowledged committed effect. The proxy stores credential
+fingerprints and body digests, never raw credentials or request bodies.
+Debug E2E binaries honor `IRONCLAW_REBORN_TEST_HTTP_REWRITE_MAP` only for
+loopback IP socket targets after the original destination has passed the normal
+network policy and DNS checks. Release binaries fail startup if that test-only
+environment variable is set.
+
+Legacy hosted full-path Reborn + Emulate tests use
+`hosted_google_emulate_server` or a matching
 provider fixture, install/auth the first-party extension through IronClaw, drive
 the scripted mock model through `/api/chat/send`, auto-resolve expected approval
 gates, and read provider state back from Emulate. This is the contract tier to
 use when the behavior being protected is extension install/auth, model-to-tool
 routing, tool execution, and provider mutation together.
 
-Google Docs, Sheets, and Slides are first-party extension assets, but Emulate
-0.7.0 does not provide those APIs directly; do not claim those are covered
-unless a separate fixture exercises the actual document API behavior. The manual
-QA rows that mention Google Docs, Google Sheets, Telegram, Twitter/X, or HN/web
-search are therefore partial unless paired with a separate fake/provider fixture.
-GitHub `/contents` file create/update/delete and workflow dispatch also remain
-outside direct Emulate 0.7.0 coverage: the emulator exposes Git data APIs but no
-`/contents` routes, and it exposes Actions routes but does not let fixture seeds
-define workflows to dispatch.
+The pinned `serrrfirat/emulate` fork adds the Google Calendar, Docs, Drive,
+Sheets, and Slides operations; Slack `search.messages`; and GitHub Contents,
+GraphQL review threads, and seeded Actions workflows used by the provider
+contract catalog. All 123 shipped static provider capabilities are classified
+and named in the inventory, and `github.handle_webhook`, `nearai.web_search`,
+`web-access.get_content`, and `web-access.search` use Reborn integration tests
+at their actual local-WASM or hosted-MCP seams. The inventory records the exact
+Cargo target, source, and test for those non-Emulate cases and fails if that
+evidence stops being executable. Manual QA rows that mention Telegram or
+Twitter/X remain model-replay-only unless paired with their own provider
+fixture.
+
+**Being classified `tested` is not the same as being fully covered, and the
+inventory now says so mechanically.** Coverage is counted per
+*capability × outcome class*, not per capability:
+
+- An `external_write` capability (the effect is declared in the shipped
+  manifest, so the read/write split is production-derived) may not be
+  evidenced by a harvested tool-call name. A recorded model response naming
+  `slack__send_message` proves tool *choice*; it proves nothing about whether
+  the provider committed the effect. Writes need a `ProviderOperationCase`
+  with provider readback, an `integration_evidence` entry, or a
+  `journey_evidence` entry naming the exact test *and* the assertion helper
+  that performs the readback.
+- A read capability needs both a seeded `success` case and an `empty`-result
+  case, so the runtime is proven to distinguish "no results" from "the call
+  failed". Status and transport failures stay with the reusable fault
+  profiles; `outcome_class` covers only the per-operation semantic outcomes no
+  fault profile can stand in for.
+
+Everything not yet meeting those rules is listed in `coverage_backlog` with an
+owner, reason, issue, and review condition. The backlog is a ratchet: entries
+must be removed as coverage lands, and the gate fails if an entry names a write
+that now has a case, or a read that now covers every required outcome class. As
+of this writing it holds no write capabilities and 48 read capabilities missing
+an empty-result case. That gap was previously invisible because a harvested
+tool-call name satisfied the old gate.
 
 ### Environment passed to ironclaw in tests
 
@@ -228,7 +322,7 @@ CANNED_RESPONSES = [
 
 ## Configuration
 
-`conftest.py` handles all server startup automatically — you do not need to start ironclaw manually before running `pytest`. The conftest builds the binary (libsql feature), starts the mock LLM, and starts ironclaw with a fresh temp database on every `pytest` invocation.
+`conftest.py` handles all server startup automatically — you do not need to start ironclaw manually before running `pytest`. The conftest builds the binary, starts the mock LLM, and starts ironclaw with a fresh temp database on every `pytest` invocation.
 
 If you need to test against a manually started ironclaw, you can skip conftest by running pytest with `--co` (collect-only) to understand what would run, or by calling the httpx/REST helpers directly without the `page` fixture.
 

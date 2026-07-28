@@ -4,8 +4,8 @@ use ironclaw_turns::{
     LoopFailureKind, LoopMessageRef,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, FinalizeAssistantMessage, LoopInlineMessage,
-        LoopInlineMessageBody, LoopInlineMessageRole, LoopModelRequest, LoopModelResponse,
-        LoopPromptBundleRequest, ParentLoopOutput, PromptMode,
+        LoopInlineMessageBody, LoopInlineMessageRole, LoopModelCapabilityView, LoopModelRequest,
+        LoopModelResponse, LoopPromptBundleRequest, ParentLoopOutput, PromptMode,
     },
 };
 
@@ -75,7 +75,9 @@ pub(super) async fn explain_failure(
             messages,
             surface_version: None,
             model_preference: None,
-            capability_view: None,
+            capability_view: Some(LoopModelCapabilityView {
+                visible_capability_ids: Vec::new(),
+            }),
         }),
     )
     .await

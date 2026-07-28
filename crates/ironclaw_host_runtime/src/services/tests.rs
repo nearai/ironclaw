@@ -1,10 +1,11 @@
+// arch-exempt: large_file, mechanical approval-store migration only — InMemory*Store deleted, guard test repointed to Filesystem*Store<InMemoryBackend> (arch-simplification §4.3), no new test logic, plan #6168
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 use async_trait::async_trait;
-use ironclaw_approvals::InMemoryPersistentApprovalPolicyStore;
+use ironclaw_approvals::test_support::in_memory_backed_persistent_approval_policy_store;
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_capabilities::{
     CapabilityObligationCompletionRequest, CapabilityObligationError,
@@ -12,7 +13,7 @@ use ironclaw_capabilities::{
     CapabilityObligationRequest,
 };
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-use ironclaw_filesystem::LocalFilesystem;
+use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
 use ironclaw_host_api::{
     AgentId, CapabilityDescriptor, CapabilityDispatchResult, CapabilityId, CapabilitySet,
     CorrelationId, DispatchError, EffectKind, ExecutionContext, ExtensionId, HostPortCatalog,
@@ -20,37 +21,40 @@ use ironclaw_host_api::{
     Obligation, PermissionMode, ProjectId, ReservationStatus, ResourceEstimate, ResourceReceipt,
     ResourceReservationId, ResourceScope, ResourceUsage, RuntimeCredentialInjection,
     RuntimeCredentialSource, RuntimeCredentialTarget, RuntimeDispatchErrorKind, RuntimeHttpEgress,
-    RuntimeHttpEgressRequest, RuntimeKind, SecretHandle, TenantId, TrustClass, UserId, VirtualPath,
+    RuntimeHttpEgressRequest, RuntimeKind, RuntimeLane, SecretHandle, TenantId, TrustClass, UserId,
+    VirtualPath,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
 };
-use ironclaw_processes::{InMemoryProcessResultStore, InMemoryProcessStore, ProcessServices};
+use ironclaw_processes::{ProcessResultStore, ProcessStore};
 use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceGovernor, ResourceTally,
 };
 use ironclaw_secrets::{
-    InMemorySecretStore, SecretLeaseId, SecretMaterial, SecretStore, SecretStoreError,
+    SecretLeaseId, SecretMaterial, SecretStore, SecretStoreError, SecretStorePort,
 };
 use secrecy::ExposeSecret;
 use serde_json::{Value, json};
 
 use super::{
-    CapabilitySurfaceVersion, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
-    FirstPartyCapabilityRegistry, FirstPartyRuntimeAdapter, HostRuntimeHttpEgressPort,
-    HostRuntimeServices, LocalHostProcessPort, LocalInvocationServicesResolver, McpRuntimeAdapter,
-    NetworkMode, ProcessBackendKind, ProcessResultStore, ProcessStore, ProductionWiringComponent,
-    ProductionWiringConfig, ProductionWiringIssueKind, RootFilesystem, RuntimeAdapter,
-    RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeProfile, SecretMode,
-    ServiceResolvedRuntimeAdapter,
+    CapabilitySurfaceVersion, ConfiguredInvocationServicesResolver, DeploymentMode,
+    EffectiveRuntimePolicy, FilesystemBackendKind, FirstPartyCapabilityRegistry,
+    FirstPartyRuntimeAdapter, HostProcessPort, HostRuntimeHttpEgressPort, HostRuntimeServices,
+    McpRuntimeAdapter, NetworkMode, ProcessBackendKind, ProcessResultStorePort, ProcessStorePort,
+    ProductionWiringComponent, ProductionWiringConfig, ProductionWiringIssueKind, RootFilesystem,
+    RuntimeAdapter, RuntimeAdapterResult, RuntimeLaneExecutor, RuntimeLaneRequest, RuntimeProfile,
+    SecretMode, ServiceResolvedRuntimeAdapter,
 };
 #[cfg(unix)]
 use crate::CommandExecutionRequest;
 use crate::obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionStore};
 use crate::{HostRuntimeCredentialMaterial, HostRuntimeHttpEgressRequest};
 
+mod extension_tool_binder;
 mod first_party_runtime_adapter;
 mod mcp_runtime_adapter;
+mod registry_lane_tool_resolver;
 
 #[tokio::test]
 async fn shared_extension_registry_returns_same_instance() {
@@ -73,10 +77,16 @@ async fn production_wiring_reports_missing_persistent_approval_policies() {
     ));
 }
 
+// The volatile, in-memory-backed persistent-approval store must never satisfy
+// production wiring. `in_memory_backed_persistent_approval_policy_store()` returns
+// `PersistentApprovalPolicyStore<InMemoryBackend>`, so this guards the
+// concrete volatile shape. The durable libSQL/Postgres monomorphizations are
+// distinct types and fall through to `ProductionCandidate`.
 #[tokio::test]
 async fn production_wiring_reports_local_only_persistent_approval_policies() {
-    let services = test_services()
-        .with_persistent_approval_policies(Arc::new(InMemoryPersistentApprovalPolicyStore::new()));
+    let services = test_services().with_persistent_approval_policies(Arc::new(
+        in_memory_backed_persistent_approval_policy_store(),
+    ));
 
     let report = services
         .validate_production_wiring(&ProductionWiringConfig::new([]))
@@ -97,7 +107,7 @@ async fn product_auth_provider_runtime_ports_returns_none_without_egress() {
 
 #[tokio::test]
 async fn product_auth_provider_runtime_ports_returns_configured_egress_and_obligation_handler() {
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(SecretStore::ephemeral());
     let services = test_services()
         .with_secret_store(Arc::clone(&secret_store))
         .try_with_host_http_egress(RecordingNetwork::ok())
@@ -138,7 +148,7 @@ async fn product_auth_provider_runtime_ports_returns_configured_egress_and_oblig
 
 #[tokio::test]
 async fn product_auth_ports_stage_secret_from_source_scope_into_target_scope() {
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(SecretStore::ephemeral());
     let services = test_services()
         .with_secret_store(Arc::clone(&secret_store))
         .try_with_host_http_egress(RecordingNetwork::ok())
@@ -182,9 +192,71 @@ async fn product_auth_ports_stage_secret_from_source_scope_into_target_scope() {
 }
 
 #[tokio::test]
+async fn product_auth_staged_handoff_guard_discards_policy_and_secrets_on_drop() {
+    let secret_store = Arc::new(SecretStore::ephemeral());
+    let services = test_services()
+        .with_secret_store(Arc::clone(&secret_store))
+        .try_with_host_http_egress(RecordingNetwork::ok())
+        .expect("host HTTP egress should wire with graph secret store");
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("discovery-token").unwrap();
+    secret_store
+        .put(
+            scope.clone(),
+            handle.clone(),
+            SecretMaterial::from("discovery-material"),
+            None,
+        )
+        .await
+        .expect("test secret should store");
+    let ports = services
+        .product_auth_provider_runtime_ports()
+        .expect("runtime ports should be configured");
+
+    let guard = ports.staged_handoff_guard(scope.clone(), capability_id.clone());
+    ports.stage_network_policy_once(&scope, &capability_id, staged_policy());
+    ports
+        .stage_secret_once(&scope, &capability_id, &handle)
+        .await
+        .expect("discovery credential should stage");
+    assert!(
+        services
+            .network_policy_store
+            .get(&scope, &capability_id)
+            .is_some()
+    );
+    assert!(
+        services
+            .secret_injection_store
+            .clone_material(&scope, &capability_id, &handle)
+            .expect("staged secret lookup")
+            .is_some()
+    );
+
+    drop(guard);
+
+    assert!(
+        services
+            .network_policy_store
+            .get(&scope, &capability_id)
+            .is_none(),
+        "dropping discovery authority must revoke its network policy"
+    );
+    assert!(
+        services
+            .secret_injection_store
+            .clone_material(&scope, &capability_id, &handle)
+            .expect("staged secret lookup")
+            .is_none(),
+        "dropping discovery authority must erase every staged credential"
+    );
+}
+
+#[tokio::test]
 async fn runtime_secret_material_stager_stages_secret_material_into_target_scope() {
     let services = test_services()
-        .with_secret_store(Arc::new(InMemorySecretStore::new()))
+        .with_secret_store(Arc::new(SecretStore::ephemeral()))
         .try_with_host_http_egress(RecordingNetwork::ok())
         .expect("host HTTP egress should wire with graph secret store");
     let scope = sample_scope();
@@ -215,7 +287,7 @@ async fn host_runtime_http_egress_port_executes_with_host_staged_credentials() {
     let network = RecordingNetwork::ok();
     let recorded_requests = Arc::clone(&network.requests);
     let services = test_services()
-        .with_secret_store(Arc::new(InMemorySecretStore::new()))
+        .with_secret_store(Arc::new(SecretStore::ephemeral()))
         .try_with_host_http_egress(network)
         .expect("host HTTP egress should wire with graph secret store");
     let scope = sample_scope();
@@ -279,7 +351,7 @@ async fn host_runtime_http_egress_port_denies_before_network_when_obligation_fai
     let recorded_requests = Arc::clone(&network.requests);
     let runtime_http_egress = Arc::new(crate::HostHttpEgressService::production(
         network,
-        InMemorySecretStore::new(),
+        SecretStore::ephemeral(),
         Arc::new(NetworkObligationPolicyStore::new()),
         Arc::new(RuntimeSecretInjectionStore::new()),
         Arc::new(crate::http_body::UnsupportedRuntimeHttpBodyStore),
@@ -314,7 +386,7 @@ async fn host_http_egress_borrows_staged_policy_for_repeated_invocation_requests
     let network = RecordingNetwork::ok();
     let recorded_requests = Arc::clone(&network.requests);
     let services = test_services()
-        .with_secret_store(Arc::new(InMemorySecretStore::new()))
+        .with_secret_store(Arc::new(SecretStore::ephemeral()))
         .try_with_host_http_egress(network)
         .expect("host HTTP egress should wire with graph secret store");
     let scope = sample_scope();
@@ -352,7 +424,7 @@ async fn host_http_egress_helper_injects_staged_credentials_from_handoff_store()
     let network = RecordingNetwork::ok();
     let recorded_requests = Arc::clone(&network.requests);
     let services = test_services()
-        .with_secret_store(Arc::new(InMemorySecretStore::new()))
+        .with_secret_store(Arc::new(SecretStore::ephemeral()))
         .try_with_host_http_egress(network)
         .expect("host HTTP egress should wire with graph secret store");
     services
@@ -397,7 +469,7 @@ async fn host_http_egress_helper_consumes_staged_credentials_after_first_egress(
     let network = RecordingNetwork::ok();
     let recorded_requests = Arc::clone(&network.requests);
     let services = test_services()
-        .with_secret_store(Arc::new(InMemorySecretStore::new()))
+        .with_secret_store(Arc::new(SecretStore::ephemeral()))
         .try_with_host_http_egress(network)
         .expect("host HTTP egress should wire with graph secret store");
     services
@@ -449,7 +521,7 @@ async fn host_http_egress_treats_expired_staged_secret_as_missing() {
 
     let network = RecordingNetwork::ok();
     let recorded_requests = Arc::clone(&network.requests);
-    let mut services = test_services().with_secret_store(Arc::new(InMemorySecretStore::new()));
+    let mut services = test_services().with_secret_store(Arc::new(SecretStore::ephemeral()));
     services.secret_injection_store = Arc::new(RuntimeSecretInjectionStore::with_ttl(
         Duration::from_millis(5),
     ));
@@ -490,13 +562,13 @@ async fn host_http_egress_verification_rejects_mismatched_handoff_stores() {
     let mismatched_secret_injections = Arc::new(RuntimeSecretInjectionStore::new());
     let egress = Arc::new(crate::HostHttpEgressService::production(
         RecordingNetwork::ok(),
-        InMemorySecretStore::new(),
+        SecretStore::ephemeral(),
         mismatched_network_policies,
         mismatched_secret_injections,
         Arc::new(crate::http_body::UnsupportedRuntimeHttpBodyStore),
     ));
     let services = test_services()
-        .with_secret_store(Arc::new(InMemorySecretStore::new()))
+        .with_secret_store(Arc::new(SecretStore::ephemeral()))
         .with_host_http_egress_service(egress);
 
     let report = services
@@ -595,12 +667,15 @@ async fn host_runtime_services_with_security_audit_sink_records_leak_block() {
         invocation_id,
     };
     let context = ExecutionContext {
+        run_id: None,
+        origin: None,
         invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,
         parent_process_id: None,
         tenant_id: resource_scope.tenant_id.clone(),
         user_id: resource_scope.user_id.clone(),
+        authenticated_actor_user_id: None,
         agent_id: resource_scope.agent_id.clone(),
         project_id: resource_scope.project_id.clone(),
         mission_id: resource_scope.mission_id.clone(),
@@ -663,20 +738,17 @@ async fn service_guard_releases_reservation_on_planner_denial() {
     let inner = Arc::new(RecordingRuntimeAdapter::default());
     let adapter = ServiceResolvedRuntimeAdapter::new(
         Arc::clone(&inner),
-        Arc::new(LocalInvocationServicesResolver::new(
-            Arc::new(LocalFilesystem::new()),
+        Arc::new(ConfiguredInvocationServicesResolver::new(
+            Arc::new(DiskFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
-    let filesystem = LocalFilesystem::new();
+    let filesystem = DiskFilesystem::new();
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
-    let estimate = ResourceEstimate {
-        process_count: Some(1),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default().set_process_count(1);
     let reservation = governor
         .reserve(scope.clone(), estimate.clone())
         .expect("test reservation should be created");
@@ -693,7 +765,9 @@ async fn service_guard_releases_reservation_on_planner_denial() {
     );
 
     let result = adapter
-        .dispatch_json(RuntimeAdapterRequest {
+        .dispatch_json(RuntimeLaneRequest {
+            run_id: None,
+            origin: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -701,6 +775,7 @@ async fn service_guard_releases_reservation_on_planner_denial() {
             runtime_policy: &policy,
             capability_id: &descriptor.id,
             scope,
+            authenticated_actor_user_id: None,
             estimate,
             mounts: None,
             resource_reservation: Some(reservation),
@@ -711,7 +786,8 @@ async fn service_guard_releases_reservation_on_planner_denial() {
     assert!(matches!(
         result,
         Err(DispatchError::Script {
-            kind: RuntimeDispatchErrorKind::UnsupportedRunner
+            kind: RuntimeDispatchErrorKind::UnsupportedRunner,
+            ..
         })
     ));
     assert_eq!(inner.call_count(), 0);
@@ -726,14 +802,14 @@ async fn service_guard_rejects_resolution_before_wasm_dispatch() {
     let inner = Arc::new(RecordingRuntimeAdapter::default());
     let adapter = ServiceResolvedRuntimeAdapter::new(
         Arc::clone(&inner),
-        Arc::new(LocalInvocationServicesResolver::new(
-            Arc::new(LocalFilesystem::new()),
+        Arc::new(ConfiguredInvocationServicesResolver::new(
+            Arc::new(DiskFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
-    let filesystem = LocalFilesystem::new();
+    let filesystem = DiskFilesystem::new();
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     let estimate = ResourceEstimate::default();
@@ -747,7 +823,9 @@ async fn service_guard_rejects_resolution_before_wasm_dispatch() {
     );
 
     let result = adapter
-        .dispatch_json(RuntimeAdapterRequest {
+        .dispatch_json(RuntimeLaneRequest {
+            run_id: None,
+            origin: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -755,6 +833,7 @@ async fn service_guard_rejects_resolution_before_wasm_dispatch() {
             runtime_policy: &policy,
             capability_id: &descriptor.id,
             scope,
+            authenticated_actor_user_id: None,
             estimate,
             mounts: None,
             resource_reservation: None,
@@ -765,7 +844,8 @@ async fn service_guard_rejects_resolution_before_wasm_dispatch() {
     assert!(matches!(
         result,
         Err(DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::NetworkDenied
+            kind: RuntimeDispatchErrorKind::NetworkDenied,
+            ..
         })
     ));
     assert_eq!(inner.call_count(), 0);
@@ -776,20 +856,17 @@ async fn service_guard_releases_reservation_on_invocation_service_resolution_den
     let inner = Arc::new(RecordingRuntimeAdapter::default());
     let adapter = ServiceResolvedRuntimeAdapter::new(
         Arc::clone(&inner),
-        Arc::new(LocalInvocationServicesResolver::new(
-            Arc::new(LocalFilesystem::new()),
+        Arc::new(ConfiguredInvocationServicesResolver::new(
+            Arc::new(DiskFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
-    let filesystem = LocalFilesystem::new();
+    let filesystem = DiskFilesystem::new();
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
-    let estimate = ResourceEstimate {
-        network_egress_bytes: Some(1),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default().set_network_egress_bytes(1);
     let reservation = governor
         .reserve(scope.clone(), estimate.clone())
         .expect("test reservation should be created");
@@ -809,7 +886,9 @@ async fn service_guard_releases_reservation_on_invocation_service_resolution_den
     );
 
     let result = adapter
-        .dispatch_json(RuntimeAdapterRequest {
+        .dispatch_json(RuntimeLaneRequest {
+            run_id: None,
+            origin: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -817,6 +896,7 @@ async fn service_guard_releases_reservation_on_invocation_service_resolution_den
             runtime_policy: &policy,
             capability_id: &descriptor.id,
             scope,
+            authenticated_actor_user_id: None,
             estimate,
             mounts: None,
             resource_reservation: Some(reservation),
@@ -827,7 +907,8 @@ async fn service_guard_releases_reservation_on_invocation_service_resolution_den
     assert!(matches!(
         result,
         Err(DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::NetworkDenied
+            kind: RuntimeDispatchErrorKind::NetworkDenied,
+            ..
         })
     ));
     assert_eq!(inner.call_count(), 0);
@@ -842,14 +923,14 @@ async fn service_guard_rejects_required_secret_without_secret_store_before_dispa
     let inner = Arc::new(RecordingRuntimeAdapter::default());
     let adapter = ServiceResolvedRuntimeAdapter::new(
         Arc::clone(&inner),
-        Arc::new(LocalInvocationServicesResolver::new(
-            Arc::new(LocalFilesystem::new()),
+        Arc::new(ConfiguredInvocationServicesResolver::new(
+            Arc::new(DiskFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
-    let filesystem = LocalFilesystem::new();
+    let filesystem = DiskFilesystem::new();
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     let estimate = ResourceEstimate::default();
@@ -863,7 +944,9 @@ async fn service_guard_rejects_required_secret_without_secret_store_before_dispa
     );
 
     let result = adapter
-        .dispatch_json(RuntimeAdapterRequest {
+        .dispatch_json(RuntimeLaneRequest {
+            run_id: None,
+            origin: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -871,6 +954,7 @@ async fn service_guard_rejects_required_secret_without_secret_store_before_dispa
             runtime_policy: &policy,
             capability_id: &descriptor.id,
             scope,
+            authenticated_actor_user_id: None,
             estimate,
             mounts: None,
             resource_reservation: None,
@@ -881,7 +965,8 @@ async fn service_guard_rejects_required_secret_without_secret_store_before_dispa
     assert!(matches!(
         result,
         Err(DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::SecretDenied
+            kind: RuntimeDispatchErrorKind::SecretDenied,
+            ..
         })
     ));
     assert_eq!(inner.call_count(), 0);
@@ -896,21 +981,18 @@ async fn first_party_adapter_releases_reservation_when_invocation_service_resolu
     );
     let adapter = FirstPartyRuntimeAdapter::from_registry(
         registry,
-        Arc::new(LocalInvocationServicesResolver::new(
-            Arc::new(LocalFilesystem::new()),
+        Arc::new(ConfiguredInvocationServicesResolver::new(
+            Arc::new(DiskFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
-    let filesystem = LocalFilesystem::new();
+    let filesystem = DiskFilesystem::new();
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     let tenant_account = ResourceAccount::tenant(scope.tenant_id.clone());
-    let estimate = ResourceEstimate {
-        network_egress_bytes: Some(1),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default().set_network_egress_bytes(1);
     let reservation = governor
         .reserve(scope.clone(), estimate.clone())
         .expect("test reservation should be created");
@@ -927,7 +1009,9 @@ async fn first_party_adapter_releases_reservation_when_invocation_service_resolu
     );
 
     let result = adapter
-        .dispatch_json(RuntimeAdapterRequest {
+        .dispatch_json(RuntimeLaneRequest {
+            run_id: None,
+            origin: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -935,6 +1019,7 @@ async fn first_party_adapter_releases_reservation_when_invocation_service_resolu
             runtime_policy: &policy,
             capability_id: &descriptor.id,
             scope,
+            authenticated_actor_user_id: None,
             estimate,
             mounts: None,
             resource_reservation: Some(reservation),
@@ -1028,21 +1113,18 @@ async fn first_party_adapter_releases_reservation_when_planner_denies() {
     );
     let adapter = FirstPartyRuntimeAdapter::from_registry(
         registry,
-        Arc::new(LocalInvocationServicesResolver::new(
-            Arc::new(LocalFilesystem::new()),
+        Arc::new(ConfiguredInvocationServicesResolver::new(
+            Arc::new(DiskFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
-    let filesystem = LocalFilesystem::new();
+    let filesystem = DiskFilesystem::new();
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     let tenant_account = ResourceAccount::tenant(scope.tenant_id.clone());
-    let estimate = ResourceEstimate {
-        network_egress_bytes: Some(1),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default().set_network_egress_bytes(1);
     let reservation = governor
         .reserve(scope.clone(), estimate.clone())
         .expect("test reservation should be created");
@@ -1059,7 +1141,9 @@ async fn first_party_adapter_releases_reservation_when_planner_denies() {
     );
 
     let result = adapter
-        .dispatch_json(RuntimeAdapterRequest {
+        .dispatch_json(RuntimeLaneRequest {
+            run_id: None,
+            origin: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -1067,6 +1151,7 @@ async fn first_party_adapter_releases_reservation_when_planner_denies() {
             runtime_policy: &policy,
             capability_id: &descriptor.id,
             scope,
+            authenticated_actor_user_id: None,
             estimate,
             mounts: None,
             resource_reservation: Some(reservation),
@@ -1088,17 +1173,17 @@ async fn first_party_adapter_releases_reservation_when_planner_denies() {
 }
 
 fn test_services() -> HostRuntimeServices<
-    LocalFilesystem,
+    DiskFilesystem,
     InMemoryResourceGovernor,
-    InMemoryProcessStore,
-    InMemoryProcessResultStore,
+    ProcessStore<InMemoryBackend>,
+    ProcessResultStore<InMemoryBackend>,
 > {
     HostRuntimeServices::new(
         Arc::new(ExtensionRegistry::new()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
 }
@@ -1106,8 +1191,8 @@ fn test_services() -> HostRuntimeServices<
 fn configured_egress<
     F: RootFilesystem + 'static,
     G: ResourceGovernor + 'static,
-    S: ProcessStore + 'static,
-    R: ProcessResultStore + 'static,
+    S: ProcessStorePort + 'static,
+    R: ProcessResultStorePort + 'static,
 >(
     services: &HostRuntimeServices<F, G, S, R>,
 ) -> Arc<dyn RuntimeHttpEgress> {
@@ -1125,6 +1210,7 @@ fn test_package(manifest: &str, extension_id: &str) -> ExtensionPackage {
         manifest,
         ManifestSource::HostBundled,
         &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .expect("test manifest should parse");
     ExtensionPackage::from_manifest(
@@ -1145,7 +1231,10 @@ fn test_descriptor(runtime: RuntimeKind, effects: Vec<EffectKind>) -> Capability
         effects,
         default_permission: PermissionMode::Allow,
         runtime_credentials: Vec::new(),
+        network_targets: Vec::new(),
+        max_egress_bytes: None,
         resource_profile: None,
+        origin_gate_matrix: None,
     }
 }
 
@@ -1199,19 +1288,21 @@ async fn assert_first_party_denies_before_handler(
     );
     let adapter = FirstPartyRuntimeAdapter::from_registry(
         registry,
-        Arc::new(LocalInvocationServicesResolver::new(
-            Arc::new(LocalFilesystem::new()),
+        Arc::new(ConfiguredInvocationServicesResolver::new(
+            Arc::new(DiskFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
-            Some(Arc::new(InMemorySecretStore::new())),
+            Arc::new(HostProcessPort::new()),
+            Some(Arc::new(SecretStore::ephemeral())),
         )),
     );
-    let filesystem = LocalFilesystem::new();
+    let filesystem = DiskFilesystem::new();
     let governor = InMemoryResourceGovernor::new();
     let package = test_package(WASM_MANIFEST, "test-wasm");
 
     let result = adapter
-        .dispatch_json(RuntimeAdapterRequest {
+        .dispatch_json(RuntimeLaneRequest {
+            run_id: None,
+            origin: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -1219,6 +1310,7 @@ async fn assert_first_party_denies_before_handler(
             runtime_policy: &policy,
             capability_id: &descriptor.id,
             scope: sample_scope(),
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default(),
             mounts,
             resource_reservation: None,
@@ -1247,10 +1339,10 @@ impl RecordingRuntimeAdapter {
 }
 
 #[async_trait]
-impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingRuntimeAdapter {
+impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for RecordingRuntimeAdapter {
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
+        request: RuntimeLaneRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         *self.calls.lock().unwrap() += 1;
         let usage = ResourceUsage::default();
@@ -1261,6 +1353,7 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingRunt
                 .reserve(request.scope, request.estimate)
                 .map_err(|_| DispatchError::Wasm {
                     kind: RuntimeDispatchErrorKind::Resource,
+                    model_visible_cause: None,
                 })?,
         };
         let receipt: ResourceReceipt = request
@@ -1268,6 +1361,7 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingRunt
             .reconcile(reservation.id, usage.clone())
             .map_err(|_| DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::Resource,
+                model_visible_cause: None,
             })?;
         Ok(RuntimeAdapterResult {
             output: Value::Null,
@@ -1382,7 +1476,13 @@ runner = "sandboxed_process"
 command = "sh"
 args = ["-c", "cat"]
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "test-script.run"
 description = "Run script"
 effects = ["execute_code"]
@@ -1404,7 +1504,13 @@ trust = "untrusted"
 kind = "wasm"
 module = "test.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "test-wasm.run"
 description = "Run WASM"
 effects = ["network"]
@@ -1575,4 +1681,15 @@ async fn registered_runtime_health_returns_empty_when_all_required_available() {
         missing.is_empty(),
         "expected no missing kinds; got {missing:?}"
     );
+}
+
+fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                .expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    contracts
 }

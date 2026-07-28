@@ -73,8 +73,10 @@ pub(crate) enum GateKind {
 /// - `Block` — the executor checkpoints (`BeforeBlock`) and returns
 ///   `LoopExit::Blocked`. The standard production path.
 /// - `SkipAndContinue` — drop this call's result entirely and proceed with
-///   the rest of the batch. Use sparingly; intended for fire-and-forget
-///   tools where a missing approval is non-fatal.
+///   the rest of the batch. This outcome is valid only for `Auth` and
+///   `Resource` gates. For `Approval`, `AwaitDependentRun`, and `ExternalTool`
+///   gates, the executor enforces the contract by converting it to `Abort`
+///   with `LoopFailureKind::DriverBug`.
 /// - `Abort` — return `LoopExit::Failed { reason_kind: failure_kind }`.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

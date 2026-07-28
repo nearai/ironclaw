@@ -76,6 +76,12 @@ class RebornQaCaseReport:
     success: bool
     latency_ms: int | float | None = None
     message: str = ""
+    case_tier: str = "contract"
+    blocking: bool = True
+    failure_class: str = ""
+    failure_category: str = ""
+    failure_status: str = ""
+    inconclusive: bool = False
     tool_calls: list["RebornQaToolCall"] = field(default_factory=list)
     debug_paths: list[str] = field(default_factory=list)
 
@@ -93,10 +99,14 @@ class LaneReport:
     provider: str
     passed: int = 0
     failed: int = 0
+    warnings: int = 0
+    inconclusive: int = 0
     skipped: int = 0
     tests: int = 0
     duration_s: float = 0.0
     junit_failures: list[tuple[str, str]] = field(default_factory=list)
+    warning_failures: list[tuple[str, str]] = field(default_factory=list)
+    structured_results: bool = False
     status: str = "unknown"
     reason: str = ""
     tool_calls_total: int = 0
@@ -119,6 +129,48 @@ class CanaryRunContext:
     target_pr: str = ""
     target_branch: str = ""
     target_ref: str = ""
+
+
+@dataclass(frozen=True)
+class _ResultClassification:
+    tier: str
+    blocking: bool
+    failure_class: str
+    failure_category: str
+    failure_status: str
+    inconclusive: bool
+
+
+def _normalize_result_classification(entry: dict) -> _ResultClassification:
+    details = entry.get("details") or {}
+    if not isinstance(details, dict):
+        details = {}
+
+    tier_value = details.get("case_tier")
+    tier = tier_value if tier_value in ("contract", "behavioral") else "contract"
+    blocking_value = details.get("blocking")
+    blocking = blocking_value if isinstance(blocking_value, bool) else True
+
+    def typed_string(key: str) -> str:
+        value = details.get(key)
+        return value if isinstance(value, str) else ""
+
+    failure_class = typed_string("failure_class")
+    failure_category = typed_string("failure_category")
+    failure_status = typed_string("failure_status")
+    inconclusive = (
+        details.get("inconclusive") is True
+        or failure_class == "infrastructure"
+        or failure_status == "inconclusive"
+    )
+    return _ResultClassification(
+        tier=tier,
+        blocking=blocking,
+        failure_class=failure_class,
+        failure_category=failure_category,
+        failure_status=failure_status,
+        inconclusive=inconclusive,
+    )
 
 
 def read_tail(path: Path, n_bytes: int) -> str:
@@ -165,11 +217,11 @@ def parse_results_json(path: Path, report: LaneReport) -> None:
             ...
         ]}
 
-    ``passed`` = count(success); ``failed`` = count(!success); each failure
-    becomes a (name, message) entry on ``junit_failures`` so the Slack
-    output renders the same way an auth-canary failure would. Skipped
-    counts stay at 0 — workflow-canary scenarios always run when the
-    lane is enabled.
+    ``passed`` counts successful probes. Failed probes with explicit
+    ``blocking=false`` metadata become warnings, and infrastructure
+    results become inconclusive; neither increments the blocking
+    ``failed`` count or ``junit_failures``. Older results without typed
+    metadata fail closed as blocking failures.
     """
     if not path.exists() or path.stat().st_size == 0:
         return
@@ -183,11 +235,12 @@ def parse_results_json(path: Path, report: LaneReport) -> None:
     for entry in results:
         if not isinstance(entry, dict):
             continue
+        report.structured_results = True
         report.tests += 1
         if entry.get("success"):
             report.passed += 1
         else:
-            report.failed += 1
+            classification = _normalize_result_classification(entry)
             name = (
                 f"{entry.get('provider', '?')}/{entry.get('mode', '?')}"
             )
@@ -207,7 +260,16 @@ def parse_results_json(path: Path, report: LaneReport) -> None:
                         if len(fragments) >= 3:
                             break
                     msg = ", ".join(fragments)
-            report.junit_failures.append((name, msg[:240]))
+            else:
+                details = {}
+            if classification.inconclusive:
+                report.inconclusive += 1
+            elif classification.blocking:
+                report.failed += 1
+                report.junit_failures.append((name, msg[:240]))
+            else:
+                report.warnings += 1
+                report.warning_failures.append((name, msg[:240]))
         latency = entry.get("latency_ms")
         if isinstance(latency, (int, float)):
             report.duration_s += latency / 1000.0
@@ -367,6 +429,7 @@ def parse_reborn_qa_case_reports(lane_dir: Path, report: LaneReport) -> None:
     for entry in results:
         if not isinstance(entry, dict):
             continue
+        classification = _normalize_result_classification(entry)
         case = _reborn_case_from_result(entry)
         details = entry.get("details") or {}
         if not isinstance(details, dict):
@@ -408,6 +471,12 @@ def parse_reborn_qa_case_reports(lane_dir: Path, report: LaneReport) -> None:
                 success=bool(entry.get("success")),
                 latency_ms=latency if isinstance(latency, (int, float)) else None,
                 message=_reborn_failure_message(entry),
+                case_tier=classification.tier,
+                blocking=classification.blocking,
+                failure_class=classification.failure_class,
+                failure_category=classification.failure_category,
+                failure_status=classification.failure_status,
+                inconclusive=classification.inconclusive,
                 tool_calls=tool_calls,
                 debug_paths=debug_paths,
             )
@@ -459,6 +528,10 @@ def collect_lane(lane_dir: Path) -> LaneReport | None:
 
     if r.failed > 0:
         r.status = "fail"
+    elif r.inconclusive > 0:
+        r.status = "inconclusive"
+    elif r.warnings > 0:
+        r.status = "warn"
     elif r.tests > 0:
         r.status = "pass"
     else:
@@ -573,7 +646,7 @@ def run_haiku(api_key: str, report: LaneReport) -> None:
     except json.JSONDecodeError:
         report.notable = f"haiku JSON parse failed: {match.group(0)[:160]}"
         return
-    if isinstance(data.get("status"), str):
+    if isinstance(data.get("status"), str) and not report.structured_results:
         report.status = data["status"]
     report.reason = str(data.get("reason", ""))[:200]
     try:
@@ -614,6 +687,17 @@ def _qa_group_sort_key(value: str) -> tuple[int, int | str]:
     return (1, value)
 
 
+def _case_outcome(case: RebornQaCaseReport) -> tuple[str, str]:
+    """Return the display label and emoji for a case's effective outcome."""
+    if case.success:
+        return "Passed", ":white_check_mark:"
+    if case.inconclusive:
+        return "Inconclusive", ":grey_question:"
+    if not case.blocking:
+        return "Warning", ":warning:"
+    return "Failure", ":x:"
+
+
 def _format_reborn_tool_summary(cases: list[RebornQaCaseReport]) -> list[str]:
     calls: list[RebornQaToolCall] = []
     for case in cases:
@@ -640,7 +724,8 @@ def _format_reborn_failure_lines(
             continue
         rows = _qa_case_rows(case)
         message = case.message or "failed"
-        lines.append(f"*Failure `{rows}`:* {message}")
+        label, _ = _case_outcome(case)
+        lines.append(f"*{label} `{rows}`:* {message}")
         if case.debug_paths:
             paths = ", ".join(f"`{path}`" for path in case.debug_paths)
             if run_url:
@@ -655,9 +740,19 @@ def _format_reborn_qa_group(
     cases: list[RebornQaCaseReport],
     run_url: str | None = None,
 ) -> list[dict]:
-    passed = sum(1 for case in cases if case.success)
-    failed = len(cases) - passed
-    status = ":white_check_mark:" if failed == 0 else ":x:"
+    outcomes = [_case_outcome(case) for case in cases]
+    passed = sum(1 for label, _ in outcomes if label == "Passed")
+    failed = sum(1 for label, _ in outcomes if label == "Failure")
+    warnings = sum(1 for label, _ in outcomes if label == "Warning")
+    inconclusive = sum(1 for label, _ in outcomes if label == "Inconclusive")
+    if failed:
+        status = ":x:"
+    elif warnings:
+        status = ":warning:"
+    elif inconclusive:
+        status = ":grey_question:"
+    else:
+        status = ":white_check_mark:"
     duration_ms = sum(
         case.latency_ms for case in cases if isinstance(case.latency_ms, (int, float))
     )
@@ -667,8 +762,13 @@ def _format_reborn_qa_group(
         f"`{_qa_case_rows(case)}` {case.feature}"
         for case in cases
     ]
+    outcome_counts = ""
+    if warnings:
+        outcome_counts += f", {warnings} warning{'s' if warnings != 1 else ''}"
+    if inconclusive:
+        outcome_counts += f", {inconclusive} inconclusive"
     lines = [
-        f"{status} *QA {group}* — {passed}/{len(cases)} passed{duration}",
+        f"{status} *QA {group}* — {passed}/{len(cases)} passed{outcome_counts}{duration}",
         f"*Cases:* {_trim_slack_text('; '.join(case_summaries), 900)}",
     ]
     lines.extend(_format_reborn_failure_lines(cases, run_url))
@@ -756,6 +856,12 @@ def _github_md_code(value: object, limit: int | None = None) -> str:
     return text.replace("`", "'").replace("\n", " ").replace("|", "\\|")
 
 
+def _has_blocking_failure(report: LaneReport) -> bool:
+    if report.failed > 0:
+        return True
+    return not report.structured_results and report.status == "fail"
+
+
 def slack_payload(
     reports: list[LaneReport],
     run_url: str | None,
@@ -764,10 +870,22 @@ def slack_payload(
     category_summary: str = "",
     run_context: CanaryRunContext | None = None,
 ) -> dict:
-    emoji = {"pass": ":white_check_mark:", "fail": ":x:", "skip": ":heavy_minus_sign:"}
-    red = sum(1 for r in reports if r.status == "fail")
+    emoji = {
+        "pass": ":white_check_mark:",
+        "fail": ":x:",
+        "warn": ":warning:",
+        "inconclusive": ":grey_question:",
+        "skip": ":heavy_minus_sign:",
+    }
+    red = sum(1 for r in reports if _has_blocking_failure(r))
     green = sum(1 for r in reports if r.status == "pass")
     header = f"Canary: {green} passed, {red} failed of {len(reports)} lanes"
+    warning_count = sum(r.warnings for r in reports)
+    inconclusive_count = sum(r.inconclusive for r in reports)
+    if warning_count:
+        header += f"; {warning_count} warning{'s' if warning_count != 1 else ''}"
+    if inconclusive_count:
+        header += f"; {inconclusive_count} inconclusive"
     blocks: list[dict] = [
         {"type": "header", "text": {"type": "plain_text", "text": header}},
     ]
@@ -782,13 +900,17 @@ def slack_payload(
             f"{emoji.get(r.status, ':grey_question:')} *{r.lane}* ({r.provider}) — "
             f"{r.passed}/{r.tests} passed, {r.failed} failed in {r.duration_s:.0f}s"
         )
+        if r.warnings:
+            header_line += f", {r.warnings} warning{'s' if r.warnings != 1 else ''}"
+        if r.inconclusive:
+            header_line += f", {r.inconclusive} inconclusive"
         lines = [header_line]
         # Rich failure block: shown when Haiku populated the diagnostic
         # fields. The shape mirrors the issue-friendly format reviewers
         # asked for so a Slack reader can paste it straight into a
         # GitHub issue if needed.
         if (
-            r.status == "fail"
+            _has_blocking_failure(r)
             and not renders_reborn_qa_groups
             and (r.test_name or r.error or r.root_cause)
         ):
@@ -800,6 +922,9 @@ def slack_payload(
                 lines.append(f"  *Root Cause:* {r.root_cause}")
             if r.fix:
                 lines.append(f"  *Fix:* {r.fix}")
+        elif r.warning_failures and not renders_reborn_qa_groups:
+            for name, message in r.warning_failures[:10]:
+                lines.append(f"  *Warning `{name}`:* {message or 'failed'}")
         elif r.reason and not renders_reborn_qa_groups:
             # For passing/skipped lanes we keep the existing single-
             # line reason summary (Haiku's free-form notable).
@@ -871,6 +996,21 @@ def _markdown_run_context_lines(
     return lines
 
 
+def _markdown_reborn_tool_trace(case: RebornQaCaseReport) -> str:
+    summaries: list[str] = []
+    for call in case.tool_calls[:8]:
+        fingerprints: list[str] = []
+        if call.args_hash:
+            fingerprints.append(f"args#`{_github_md_code(call.args_hash, 64)}`")
+        if call.output_digest:
+            fingerprints.append(f"out#`{_github_md_code(call.output_digest, 64)}`")
+        suffix = f" ({', '.join(fingerprints)})" if fingerprints else ""
+        summaries.append(f"`{_github_md_code(call.name, 120)}`{suffix}")
+    if len(case.tool_calls) > 8:
+        summaries.append(f"+{len(case.tool_calls) - 8} more")
+    return ", ".join(summaries)
+
+
 def _markdown_reborn_case_lines(
     cases: list[RebornQaCaseReport],
     run_url: str | None,
@@ -881,10 +1021,20 @@ def _markdown_reborn_case_lines(
         grouped.setdefault(_qa_group_key(case), []).append(case)
     for group in sorted(grouped, key=_qa_group_sort_key):
         group_cases = grouped[group]
-        passed = sum(1 for case in group_cases if case.success)
-        lines.append(f"#### QA {group}: {passed}/{len(group_cases)} passed")
+        outcomes = [_case_outcome(case) for case in group_cases]
+        passed = sum(1 for label, _ in outcomes if label == "Passed")
+        warnings = sum(1 for label, _ in outcomes if label == "Warning")
+        inconclusive = sum(
+            1 for label, _ in outcomes if label == "Inconclusive"
+        )
+        heading = f"#### QA {group}: {passed}/{len(group_cases)} passed"
+        if warnings:
+            heading += f", {warnings} warning{'s' if warnings != 1 else ''}"
+        if inconclusive:
+            heading += f", {inconclusive} inconclusive"
+        lines.append(heading)
         for case in group_cases:
-            status = ":white_check_mark:" if case.success else ":x:"
+            label, status = _case_outcome(case)
             latency = (
                 f" ({case.latency_ms / 1000.0:.1f}s)"
                 if isinstance(case.latency_ms, (int, float))
@@ -895,7 +1045,14 @@ def _markdown_reborn_case_lines(
                 f"{_github_md_text(case.feature)}{latency}"
             )
             if not case.success and case.message:
-                lines.append(f"  - Failure: {_github_md_text(case.message)}")
+                lines.append(f"  - {label}: {_github_md_text(case.message)}")
+            if (
+                not case.success
+                and not case.blocking
+                and not case.inconclusive
+                and case.tool_calls
+            ):
+                lines.append(f"  - Tool trace: {_markdown_reborn_tool_trace(case)}")
             if not case.success and case.debug_paths:
                 paths = ", ".join(f"`{_github_md_code(path)}`" for path in case.debug_paths)
                 if run_url:
@@ -916,12 +1073,16 @@ def github_comment_body(
     category_summary: str = "",
     run_context: CanaryRunContext | None = None,
 ) -> str:
-    red = sum(1 for r in reports if r.status == "fail")
+    red = sum(1 for r in reports if _has_blocking_failure(r))
     green = sum(1 for r in reports if r.status == "pass")
-    lines = [
-        f"## Live canary result: {green} passed, {red} failed of {len(reports)} lanes",
-        "",
-    ]
+    heading = f"## Live canary result: {green} passed, {red} failed of {len(reports)} lanes"
+    warning_count = sum(r.warnings for r in reports)
+    inconclusive_count = sum(r.inconclusive for r in reports)
+    if warning_count:
+        heading += f"; {warning_count} warning{'s' if warning_count != 1 else ''}"
+    if inconclusive_count:
+        heading += f"; {inconclusive_count} inconclusive"
+    lines = [heading, ""]
     context_lines = _markdown_run_context_lines(run_context, run_url, commit)
     if context_lines:
         lines.extend(context_lines)
@@ -937,6 +1098,8 @@ def github_comment_body(
         status = {
             "pass": ":white_check_mark:",
             "fail": ":x:",
+            "warn": ":warning:",
+            "inconclusive": ":grey_question:",
             "skip": ":heavy_minus_sign:",
         }.get(r.status, ":grey_question:")
         lines.append(
@@ -1043,7 +1206,7 @@ def categorize_failures(api_key: str, reports: list[LaneReport]) -> str:
     per-lane block already conveys a single failure clearly without
     a category summary).
     """
-    failed = [r for r in reports if r.status == "fail"]
+    failed = [r for r in reports if _has_blocking_failure(r)]
     if len(failed) < 2:
         return ""
     payload_failures = [
@@ -1136,7 +1299,7 @@ def create_canary_issues(
       is a real risk if the same flake fires every 6h).
     - A non-empty ``GITHUB_TOKEN`` with ``issues: write`` permission.
     """
-    failed = [r for r in reports if r.status == "fail"]
+    failed = [r for r in reports if _has_blocking_failure(r)]
     if not failed:
         return []
     base = f"https://api.github.com/repos/{repo}"
@@ -1234,11 +1397,35 @@ def create_canary_issues(
 
 
 def fallback_payload(reports: list[LaneReport], run_url: str | None) -> dict:
-    red = sum(1 for r in reports if r.status == "fail")
+    red = sum(1 for r in reports if _has_blocking_failure(r))
     text = f"Canary: {red}/{len(reports)} lanes failed"
+    warning_count = sum(r.warnings for r in reports)
+    if warning_count:
+        text += f", {warning_count} warning{'s' if warning_count != 1 else ''}"
     if run_url:
         text += f" — {run_url}"
     return {"text": text}
+
+
+def google_oauth_preflight_report(status: str) -> LaneReport | None:
+    status = status.strip()
+    if not status or status == "healthy":
+        return None
+    return LaneReport(
+        lane="reborn-webui-v2-google-oauth-preflight",
+        provider="google-oauth",
+        failed=1,
+        tests=1,
+        status="fail",
+        reason=f"Google OAuth refresh failed: {status}",
+        test_name="google_oauth_refresh_preflight",
+        error=status,
+        root_cause="The live Google refresh token could not mint an access token.",
+        fix=(
+            "Re-authorize the dedicated QA account with the configured OAuth client "
+            "and rotate AUTH_LIVE_GOOGLE_REFRESH_TOKEN."
+        ),
+    )
 
 
 def main() -> int:
@@ -1290,7 +1477,10 @@ def main() -> int:
 
     artifacts_root = Path(args.artifacts_dir)
     lane_dirs = discover_lane_dirs(artifacts_root)
-    if not lane_dirs:
+    preflight_report = google_oauth_preflight_report(
+        os.environ.get("REBORN_GOOGLE_OAUTH_PREFLIGHT_STATUS", "")
+    )
+    if not lane_dirs and preflight_report is None:
         print(f"[notify_slack] no lane artifacts under {artifacts_root}", file=sys.stderr)
         return 0
 
@@ -1329,6 +1519,14 @@ def main() -> int:
         print("[notify_slack] no ANTHROPIC_API_KEY — skipping haiku enrichment",
               file=sys.stderr)
 
+    if preflight_report is not None:
+        reports.append(preflight_report)
+        print(
+            "[notify_slack] added Reborn Google OAuth infrastructure failure: "
+            f"{preflight_report.error}",
+            file=sys.stderr,
+        )
+
     # Second-pass categorization across all failed lanes — only fires
     # when there are 2+ failures since one failure is already obvious
     # from its own block.
@@ -1361,7 +1559,7 @@ def main() -> int:
         # Dry-run still surfaces what the issue creator WOULD do so a
         # local invocation can sanity-check title/body shapes.
         if args.create_issues and args.github_token:
-            failed = [r for r in reports if r.status == "fail"]
+            failed = [r for r in reports if _has_blocking_failure(r)]
             print(
                 f"[notify_slack] (dry-run) would open / update "
                 f"{len(failed)} issue(s) on {args.repo}",

@@ -8,9 +8,9 @@
 #   ./scripts/dev-setup.sh
 #
 # After running, you can:
-#   cargo check           # default features (postgres + libsql)
-#   cargo test            # default test suite (uses libsql temp DB)
-#   cargo test --all-features         # full test suite (requires Node.js/npm for WebUI bundle)
+#   cargo check           # default build
+#   cargo test            # default test suite
+#   cargo test --all-features         # full test suite (requires Node.js 22 + Corepack/pnpm for WebUI bundle)
 
 set -euo pipefail
 
@@ -55,10 +55,10 @@ if [ -n "$HOOKS_DIR" ]; then
     ln -sf "$SCRIPTS_ABS/commit-msg-regression.sh" "$HOOKS_DIR/commit-msg"
     echo "  commit-msg hook installed (regression test enforcement)"
     ln -sf "$SCRIPTS_ABS/pre-commit-safety.sh" "$HOOKS_DIR/pre-commit"
-    echo "  pre-commit hook installed (UTF-8, case-sensitivity, /tmp, redaction checks)"
+    echo "  pre-commit hook installed (UTF-8, case-sensitivity, /tmp, redaction, composition-mass ratchet)"
     REPO_ROOT="$(git rev-parse --show-toplevel)"
     ln -sf "$REPO_ROOT/.githooks/pre-push" "$HOOKS_DIR/pre-push"
-    echo "  pre-push hook installed (quality gate + optional delta lint)"
+    echo "  pre-push hook installed (merge check + CI-parity quality gate + Reborn coverage ratchet + WebUI provider replay + optional delta lint)"
 else
     echo "  Skipped: not a git repository"
 fi
@@ -82,7 +82,7 @@ echo ""
 echo "=== Setup complete ==="
 echo ""
 echo "Quick start:"
-echo "  cargo run                            # Run with default features"
-echo "  cargo test                           # Test suite (libsql temp DB)"
-echo "  cargo test --all-features            # Full test suite (requires Node.js/npm for WebUI bundle)"
-echo "  cargo clippy --all-features          # Lint all code (requires Node.js/npm for WebUI bundle)"
+echo "  cargo run                            # Run the default build"
+echo "  cargo test                           # Test suite"
+echo "  cargo test --all-features            # Full test suite (requires Node.js 22 + Corepack/pnpm for WebUI bundle)"
+echo "  cargo clippy --all-features          # Lint all code (requires Node.js 22 + Corepack/pnpm for WebUI bundle)"

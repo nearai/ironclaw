@@ -229,7 +229,10 @@ impl<'de> Deserialize<'de> for ExternalConversationRef {
     }
 }
 
-fn validate_external_id(kind: &'static str, value: &str) -> Result<(), InboundTurnError> {
+pub(crate) fn validate_external_id(
+    kind: &'static str,
+    value: &str,
+) -> Result<(), InboundTurnError> {
     if value.is_empty() {
         return Err(InboundTurnError::InvalidExternalRef {
             kind,

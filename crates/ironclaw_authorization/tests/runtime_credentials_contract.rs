@@ -179,7 +179,7 @@ async fn capability_access_resolves_product_auth_account_runtime_credentials() {
         effects: vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
         runtime_credentials: vec![RuntimeCredentialRequirement {
             source: RuntimeCredentialRequirementSource::ProductAuthAccount {
-                provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                provider: VendorId::new("github").unwrap(),
                 setup: Default::default(),
             },
             provider_scopes: vec!["repo".to_string()],
@@ -210,7 +210,7 @@ async fn capability_access_resolves_product_auth_account_runtime_credentials() {
         obligations.as_slice(),
         &[Obligation::InjectCredentialAccountOnce {
             handle: slot,
-            provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+            provider: VendorId::new("github").unwrap(),
             setup: Default::default(),
             provider_scopes: vec!["repo".to_string()],
             requester_extension: ExtensionId::new("echo").unwrap(),
@@ -228,7 +228,7 @@ async fn capability_access_preserves_oauth_product_auth_account_setup() {
         effects: vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
         runtime_credentials: vec![RuntimeCredentialRequirement {
             source: RuntimeCredentialRequirementSource::ProductAuthAccount {
-                provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                provider: VendorId::new("github").unwrap(),
                 setup: oauth_setup.clone(),
             },
             provider_scopes: vec!["repo".to_string()],
@@ -259,7 +259,7 @@ async fn capability_access_preserves_oauth_product_auth_account_setup() {
         obligations.as_slice(),
         &[Obligation::InjectCredentialAccountOnce {
             handle: slot,
-            provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+            provider: VendorId::new("github").unwrap(),
             setup: oauth_setup,
             provider_scopes: vec!["repo".to_string()],
             requester_extension: ExtensionId::new("echo").unwrap(),
@@ -332,7 +332,10 @@ fn wasm_descriptor() -> CapabilityDescriptor {
         effects: vec![EffectKind::DispatchCapability],
         default_permission: PermissionMode::Allow,
         runtime_credentials: Vec::new(),
+        network_targets: Vec::new(),
+        max_egress_bytes: None,
         resource_profile: None,
+        origin_gate_matrix: None,
     }
 }
 
@@ -378,12 +381,15 @@ fn execution_context(grants: CapabilitySet) -> ExecutionContext {
         invocation_id,
     };
     ExecutionContext {
+        run_id: None,
+        origin: None,
         invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,
         parent_process_id: None,
         tenant_id: resource_scope.tenant_id.clone(),
         user_id: resource_scope.user_id.clone(),
+        authenticated_actor_user_id: None,
         agent_id: resource_scope.agent_id.clone(),
         project_id: resource_scope.project_id.clone(),
         mission_id: resource_scope.mission_id.clone(),

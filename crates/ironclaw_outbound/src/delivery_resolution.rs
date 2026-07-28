@@ -138,8 +138,21 @@ pub enum RunNotificationOrigin {
     LiveSourceRoute {
         source_route: SourceRouteContext,
     },
+    /// A live run whose final answer was explicitly routed to one host-sealed
+    /// target. The route is scoped to the run and revalidated at egress.
+    RunScopedTarget {
+        target: ReplyTargetBindingRef,
+    },
     Triggered {
         trigger: TriggerCommunicationContext,
+    },
+    /// A triggered run whose creator selected a durable per-trigger target.
+    /// Ordinary notifications use this exact binding; authority-bearing
+    /// approval/auth prompts still resolve through the creator's dedicated
+    /// preference fields.
+    TriggeredWithTarget {
+        trigger: TriggerCommunicationContext,
+        target: ReplyTargetBindingRef,
     },
     TriggeredFromSourceRoute {
         trigger: TriggerCommunicationContext,
@@ -289,9 +302,24 @@ mod tests {
     }
 
     #[test]
+    fn run_notification_origin_round_trips_run_scoped_target() {
+        assert_json_round_trip(RunNotificationOrigin::RunScopedTarget {
+            target: reply_ref("reply:run-scoped"),
+        });
+    }
+
+    #[test]
     fn run_notification_origin_round_trips_triggered() {
         assert_json_round_trip(RunNotificationOrigin::Triggered {
             trigger: trigger_context(),
+        });
+    }
+
+    #[test]
+    fn run_notification_origin_round_trips_triggered_with_target() {
+        assert_json_round_trip(RunNotificationOrigin::TriggeredWithTarget {
+            trigger: trigger_context(),
+            target: ReplyTargetBindingRef::new("reply:trigger-target").expect("target"),
         });
     }
 

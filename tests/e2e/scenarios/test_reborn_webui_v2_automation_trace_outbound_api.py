@@ -18,7 +18,6 @@ pytest_plugins = ["reborn_webui_harness"]
 READ_PATHS = [
     "/api/webchat/v2/automations",
     "/api/webchat/v2/traces/credit",
-    "/api/webchat/v2/channels/connectable",
     "/api/webchat/v2/outbound/preferences",
     "/api/webchat/v2/outbound/targets",
 ]
@@ -175,16 +174,3 @@ async def test_reborn_v2_outbound_preferences_targets_and_channels_served(
         targets_body = targets.json()
         assert isinstance(targets_body["targets"], list)
         assert targets_body.get("next_cursor") in {None, ""}
-
-        channels = await client.get(
-            f"{reborn_v2_server}/api/webchat/v2/channels/connectable",
-            timeout=15,
-        )
-        channels.raise_for_status()
-        channels_body = channels.json()
-        assert isinstance(channels_body["channels"], list)
-        for channel in channels_body["channels"]:
-            assert channel["channel"]
-            assert channel["display_name"]
-            assert channel["strategy"]
-            assert channel["action"]["submit_label"]

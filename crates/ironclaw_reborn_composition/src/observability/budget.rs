@@ -10,11 +10,9 @@
 
 use std::sync::Arc;
 
-use ironclaw_loop_support::{BudgetSeedingPolicy, GovernorBackedAccountant, ModelCostTable};
+use ironclaw_loop_host::{BudgetSeedingPolicy, GovernorBackedAccountant, ModelCostTable};
 use ironclaw_reborn_config::BudgetDefaults;
-use ironclaw_resources::{
-    BudgetEventSink, BudgetGateStore, BudgetPeriod, BudgetThresholds, ResourceGovernor,
-};
+use ironclaw_resources::{BudgetEventSink, BudgetPeriod, BudgetThresholds, ResourceGovernor};
 use ironclaw_turns::run_profile::LoopModelBudgetAccountant;
 use rust_decimal::Decimal;
 
@@ -23,12 +21,12 @@ use rust_decimal::Decimal;
 ///
 /// The accountant gets:
 ///
-/// 1. The caller's `ResourceGovernor` (in-memory for local-dev,
-///    `PersistentResourceGovernor` for libsql / postgres production).
+/// 1. The caller's `ResourceGovernor` (in-memory for non-durable local-dev,
+///    `FilesystemResourceGovernor` for libsql / postgres production).
 /// 2. The caller's `ModelCostTable` (typically derived from
 ///    `LlmModelProfilePolicy::build_cost_table()` at startup).
 /// 3. A `BudgetGateStore` (in-memory for local-dev,
-///    `FilesystemBudgetGateStore` scoped to the tenant for production).
+///    `BudgetGateStore` scoped to the tenant for production).
 /// 4. A `BudgetSeedingPolicy` derived from the caller-resolved
 ///    [`BudgetDefaults`] so fresh user/project accounts pick up the
 ///    default daily cap on first model call.
@@ -56,7 +54,7 @@ use rust_decimal::Decimal;
 pub fn build_default_budget_accountant(
     governor: Arc<dyn ResourceGovernor>,
     cost_table: Arc<dyn ModelCostTable>,
-    gate_store: Arc<dyn BudgetGateStore>,
+    gate_store: Arc<dyn ironclaw_resources::BudgetGateStorePort>,
     event_sink: Arc<dyn BudgetEventSink>,
     defaults: &BudgetDefaults,
 ) -> Arc<dyn LoopModelBudgetAccountant> {
@@ -86,10 +84,9 @@ pub fn build_default_budget_accountant(
 mod tests {
     use super::*;
     use ironclaw_host_api::{InvocationId, ResourceEstimate, ResourceScope, TenantId, UserId};
-    use ironclaw_loop_support::ZeroCostTable;
-    use ironclaw_resources::{
-        InMemoryBudgetEventSink, InMemoryBudgetGateStore, InMemoryResourceGovernor, ResourceAccount,
-    };
+    use ironclaw_loop_host::ZeroCostTable;
+    use ironclaw_resources::test_support::in_memory_backed_budget_gate_store;
+    use ironclaw_resources::{InMemoryBudgetEventSink, InMemoryResourceGovernor, ResourceAccount};
     use rust_decimal_macros::dec;
 
     /// The helper installs the compiled-default $5 user cap on the
@@ -100,7 +97,8 @@ mod tests {
     #[tokio::test]
     async fn seeds_compiled_default_user_cap_on_first_touch() {
         let governor: Arc<dyn ResourceGovernor> = Arc::new(InMemoryResourceGovernor::new());
-        let gate_store: Arc<dyn BudgetGateStore> = Arc::new(InMemoryBudgetGateStore::new());
+        let gate_store: Arc<dyn ironclaw_resources::BudgetGateStorePort> =
+            Arc::new(in_memory_backed_budget_gate_store());
         let cost_table: Arc<dyn ModelCostTable> = Arc::new(ZeroCostTable);
         let event_sink: Arc<dyn BudgetEventSink> = Arc::new(InMemoryBudgetEventSink::new());
         let defaults = BudgetDefaults::compiled_defaults();

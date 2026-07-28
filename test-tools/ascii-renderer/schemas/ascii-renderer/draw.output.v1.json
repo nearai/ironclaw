@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ascii-renderer.draw output",
+  "type": "object",
+  "properties": {
+    "subject": { "type": "string" },
+    "art": { "type": "string" }
+  },
+  "required": ["subject", "art"],
+  "additionalProperties": false
+}

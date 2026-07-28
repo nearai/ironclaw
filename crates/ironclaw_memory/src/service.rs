@@ -71,17 +71,29 @@ pub struct MemoryServiceWriteRequest {
 
 impl MemoryServiceWriteRequest {
     pub fn from_tool_input(input: &Value) -> Result<Self, MemoryServiceError> {
-        // Lenient parsing matching the pre-lift host `parse_write_command`:
-        // a present-but-wrong-typed `target` is rejected, but every other
-        // present-but-wrong-typed optional field coerces to its default rather
-        // than failing (exact original behavior). `new_string`/`timezone` are
-        // only consulted by the native write path when relevant (patch /
-        // daily_log), preserving origin semantics.
+        // Lenient parsing matching the pre-lift host `parse_write_command`: an
+        // explicit JSON `null` target is treated as omitted (defaults to the
+        // daily log), but any other present-but-wrong-typed `target` (number,
+        // bool, object, array) is rejected. Every other present-but-wrong-typed
+        // optional field coerces to its default rather than failing (exact
+        // original behavior). `new_string`/`timezone` are only consulted by the
+        // native write path when relevant (patch / daily_log), preserving origin
+        // semantics.
         let target = match input.get("target") {
             Some(Value::String(target)) => target.to_string(),
+            Some(Value::Null) | None => "daily_log".to_string(),
             Some(_) => return Err(MemoryServiceError::input()),
-            None => "daily_log".to_string(),
         };
+        // Provider-neutral containment: reject a target that would escape the
+        // scoped memory mount before it reaches any provider. The model-facing
+        // `document-write` input schema advertises the same `not` pattern, but
+        // that schema is only surfaced to the model — it is not host-validated
+        // against the actual tool arguments — and a swapped provider may use the
+        // target verbatim (the mem0 adapter stores it as a memory metadata tag).
+        // The native filesystem provider keeps its own stricter
+        // `reject_local_or_traversal_path` as defense in depth; enforcing here
+        // closes the tool-surface path for every bound provider.
+        reject_out_of_scope_target(&target)?;
         let content = input
             .get("content")
             .and_then(Value::as_str)
@@ -233,6 +245,18 @@ pub struct MemoryServiceProfileSetResponse {
     pub status: MemoryProfileSetStatus,
 }
 
+/// Response for a provider-neutral profile-document read.
+///
+/// The provider resolves the profile document's scope/path (keyed to the human
+/// user at `agent=None, project=None`) and reads its raw bytes. The host parses,
+/// size-caps, and validates them; the provider does not interpret the document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryServiceProfileReadResponse {
+    /// Raw profile-document bytes for the run owner, or `None` if no profile
+    /// document exists.
+    pub document: Option<Vec<u8>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryServiceContextRequest {
     pub query: String,
@@ -320,11 +344,29 @@ impl From<MemoryContextProfileId> for String {
 // Deliberately no `Deref<Target = str>` — auto-deref would let `&id` silently
 // coerce to `&str`, the implicit-conversion pattern this rule prevents.
 
+/// A raw memory-context candidate returned by a [`MemoryService`] provider.
+///
+/// The provider returns the *unsanitized* snippet body plus the resolved
+/// scope/path components the host needs to build the model-visible reference.
+/// The host — not the provider — sanitizes the text, wraps it in the
+/// untrusted-memory envelope, hashes the `memory-snippet:*` reference, and
+/// enforces every model-visible budget. A provider therefore cannot bypass host
+/// prompt safety by pre-sanitizing, pre-wrapping, or forging a reference: the
+/// host is the sole constructor of admitted loop-context snippets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryServiceContextSnippet {
-    pub snippet_ref: String,
-    pub safe_summary: String,
-    pub model_content: String,
+    /// Resolved memory scope/path components. The host hashes
+    /// `[tenant_id, user_id, agent_id?, project_id?, relative_path]` into the
+    /// stable `memory-snippet:*` display reference.
+    pub tenant_id: String,
+    pub user_id: String,
+    pub agent_id: Option<String>,
+    pub project_id: Option<String>,
+    pub relative_path: String,
+    /// Raw, unsanitized snippet body. The host strips control characters,
+    /// truncates, wraps it in the untrusted envelope, and runs the prompt-safety
+    /// denylist before it can enter model context.
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -392,6 +434,16 @@ impl MemoryServiceError {
         }
     }
 
+    /// Input rejection that preserves the underlying validation cause for
+    /// logging (the model-visible classification stays `Input`).
+    pub fn input_from(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self {
+            kind: MemoryServiceErrorKind::Input,
+            message: "invalid memory request",
+            source: Some(Box::new(source)),
+        }
+    }
+
     /// Operation failure that preserves the underlying backend cause for logging.
     pub fn operation_from(source: impl std::error::Error + Send + Sync + 'static) -> Self {
         Self {
@@ -415,54 +467,129 @@ impl MemoryServiceError {
     }
 }
 
+/// Role of a single message in an interaction exchange handed to a provider's
+/// [`MemoryService::record_interaction`]. Typed (not a raw `String`) so a caller
+/// cannot pass an unknown role; serializes snake_case for any provider that
+/// forwards the `{role, content}` shape on the wire (mirrors mem0's message
+/// shape).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryInteractionRole {
+    User,
+    Assistant,
+    System,
+    Tool,
+}
+
+impl MemoryInteractionRole {
+    /// Stable string form, matching the serde snake_case wire output.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MemoryInteractionRole::User => "user",
+            MemoryInteractionRole::Assistant => "assistant",
+            MemoryInteractionRole::System => "system",
+            MemoryInteractionRole::Tool => "tool",
+        }
+    }
+}
+
+/// One message in an interaction exchange passed to
+/// [`MemoryService::record_interaction`].
+///
+/// `name` is the optional per-message actor label (mem0's message `name`, which a
+/// provider may map to a per-memory `actor_id`): the human `user_id` for a user
+/// message, the `agent_id` for an assistant message, `None` for a tool message.
+/// Provider-neutral and opaque — the native provider stores it verbatim in the
+/// transcript heading; a mem0 provider forwards it as the message `name`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryInteractionMessage {
+    pub role: MemoryInteractionRole,
+    pub content: String,
+    /// Optional actor label (mem0 message `name` → per-memory `actor_id`): user
+    /// `user_id` / assistant `agent_id` / `None` for a tool message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// Request for [`MemoryService::record_interaction`]: the raw interaction DATA.
+///
+/// Mirrors `mem0.add(messages=[...], metadata=...)`. The host passes the messages
+/// and free-form `metadata` and lets the *provider* decide what to record (store
+/// verbatim, run LLM extraction, or nothing) — the host makes no
+/// verbatim-vs-extract / provenance / TTL decision. `user_id`/`agent_id`/
+/// `thread_id` ride the invocation's [`ResourceScope`], not this request.
+///
+/// `turn_run_id` is the IronClaw per-turn run id, carried as **provenance** for
+/// this exchange. It is NOT mem0's session/`run_id`: mem0's session id maps to our
+/// `scope.thread_id` (the conversation) — which a provider derives from the
+/// invocation scope — so one mem0 "run"/session spans many of our turns. The
+/// native provider uses `turn_run_id` to name a per-run transcript file so that
+/// re-recording the same run overwrites idempotently instead of duplicating.
+/// `turn_run_id` and `metadata` are opaque provider pass-through.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemoryServiceRecordRequest {
+    pub messages: Vec<MemoryInteractionMessage>,
+    /// IronClaw per-turn run id (provenance), `None` when unavailable. Opaque
+    /// provider pass-through — NOT the mem0 session id (that is `scope.thread_id`).
+    pub turn_run_id: Option<String>,
+    /// Free-form provenance metadata, opaque provider pass-through (e.g.
+    /// `{ "turn_run_id", "correlation_id" }`). A provider self-generates
+    /// timestamps; the host does not add them.
+    pub metadata: Value,
+}
+
+/// Outcome of a [`MemoryService::record_interaction`] call.
+///
+/// `recorded` is `false` when the provider does not implement interaction
+/// recording (the trait default) or degraded to a no-op because the request
+/// lacked the scope it needs to record under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryServiceRecordResponse {
+    pub recorded: bool,
+}
+
+/// The host-initiated memory LIFECYCLE contract — the only stable part of
+/// the memory system.
+///
+/// These four hooks fire at fixed points of the agent loop and are called
+/// only when the bound provider's manifest declares the matching
+/// `[memory].lifecycle` token. Everything model-facing is a manifest-declared
+/// TOOL served through the ordinary first-party capability handler seam —
+/// providers declare whatever tools they want and back them with their own
+/// handler; nothing in the memory contract enumerates tool ids.
+///
+/// Every default fails closed (`unavailable`), except `record_interaction`,
+/// whose no-op default reports `recorded: false`.
+///
+/// Lane retrieval returns RAW snippets: the host — never a provider — owns
+/// scope filtering, sanitization, the untrusted-memory envelope, and the
+/// model-visible byte budgets (`ironclaw_host_runtime::memory_context`).
 #[async_trait]
 pub trait MemoryService: Send + Sync {
-    async fn search(
+    /// Read the run owner's profile document (loop start). The provider owns
+    /// the scope/path resolution and returns raw bytes; the host parses +
+    /// size-caps them.
+    async fn profile_read(
         &self,
         invocation: MemoryInvocation,
-        request: MemoryServiceSearchRequest,
-    ) -> Result<MemoryServiceSearchResponse, MemoryServiceError> {
-        let _ = (invocation, request);
+    ) -> Result<MemoryServiceProfileReadResponse, MemoryServiceError> {
+        let _ = invocation;
         Err(MemoryServiceError::unavailable())
     }
 
-    async fn write(
-        &self,
-        invocation: MemoryInvocation,
-        request: MemoryServiceWriteRequest,
-    ) -> Result<MemoryServiceWriteResponse, MemoryServiceError> {
-        let _ = (invocation, request);
-        Err(MemoryServiceError::unavailable())
-    }
-
-    async fn read(
-        &self,
-        invocation: MemoryInvocation,
-        request: MemoryServiceReadRequest,
-    ) -> Result<MemoryServiceReadResponse, MemoryServiceError> {
-        let _ = (invocation, request);
-        Err(MemoryServiceError::unavailable())
-    }
-
-    async fn tree(
-        &self,
-        invocation: MemoryInvocation,
-        request: MemoryServiceTreeRequest,
-    ) -> Result<MemoryServiceTreeResponse, MemoryServiceError> {
-        let _ = (invocation, request);
-        Err(MemoryServiceError::unavailable())
-    }
-
-    async fn profile_set(
-        &self,
-        invocation: MemoryInvocation,
-        request: MemoryServiceProfileSetRequest,
-    ) -> Result<MemoryServiceProfileSetResponse, MemoryServiceError> {
-        let _ = (invocation, request);
-        Err(MemoryServiceError::unavailable())
-    }
-
-    async fn retrieve_context(
+    /// Long-term lane (retrieve-before-run): the user's general / durable
+    /// memory. The host calls this only when the bound provider's manifest
+    /// declares the `read_long_term` lifecycle hook.
+    ///
+    /// Returns RAW, ranked, in-scope candidates. The host — never the
+    /// provider — applies the cross-scope drop filter, sanitization, the
+    /// untrusted-memory envelope, and every model-visible byte budget (see
+    /// [`MemoryServiceContextSnippet`]), and degrades a retrieval failure to
+    /// an empty lane. A provider must exclude per-thread short-term scratch
+    /// from this lane — regardless of whether the invocation scope carries an
+    /// active thread — so the two lanes stay disjoint when the host
+    /// concatenates them.
+    async fn read_long_term(
         &self,
         invocation: MemoryInvocation,
         request: MemoryServiceContextRequest,
@@ -470,6 +597,138 @@ pub trait MemoryService: Send + Sync {
         let _ = (invocation, request);
         Err(MemoryServiceError::unavailable())
     }
+
+    /// Short-term lane (retrieve-before-run): the active thread's (this
+    /// conversation's) scratch memory, scoped by the trusted
+    /// `invocation.scope.thread_id`. The host calls this only when the bound
+    /// provider's manifest declares the `read_short_term` lifecycle hook.
+    ///
+    /// Same raw-return contract as
+    /// [`read_long_term`](MemoryService::read_long_term): the host owns all
+    /// prompt safety. A provider must restrict this lane to the active
+    /// thread's content only.
+    async fn read_short_term(
+        &self,
+        invocation: MemoryInvocation,
+        request: MemoryServiceContextRequest,
+    ) -> Result<Vec<MemoryServiceContextSnippet>, MemoryServiceError> {
+        let _ = (invocation, request);
+        Err(MemoryServiceError::unavailable())
+    }
+
+    /// Record a completed interaction exchange (the after-turn `add` seam).
+    ///
+    /// The host passes the raw interaction DATA — the ordered turn transcript
+    /// messages, the per-turn `turn_run_id` (provenance, NOT the mem0 session id —
+    /// that is `scope.thread_id`), and free-form `metadata` — and lets the
+    /// *provider* decide what to do with it (store verbatim, run LLM extraction, or
+    /// nothing). `turn_run_id` and `metadata` are opaque provider pass-through.
+    /// `user_id`/`agent_id`/`thread_id` ride `invocation.scope`. Name-aligned with
+    /// the reserved `memory.interaction.record.v1` op; this is a host-driven trait
+    /// method, not a model-facing capability.
+    ///
+    /// Default: the provider does not record interactions — an infallible no-op
+    /// returning `recorded: false`. A provider opts in by overriding. Unlike the
+    /// other defaults (which fail closed as `unavailable`), the default here is
+    /// `Ok` so the host's after-turn seam completes cleanly against any provider.
+    async fn record_interaction(
+        &self,
+        invocation: MemoryInvocation,
+        request: MemoryServiceRecordRequest,
+    ) -> Result<MemoryServiceRecordResponse, MemoryServiceError> {
+        let _ = (invocation, request);
+        tracing::debug!("memory provider does not implement record_interaction; skipping");
+        Ok(MemoryServiceRecordResponse { recorded: false })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The shared memory tool vocabulary
+// ---------------------------------------------------------------------------
+// The five tools both bundled providers happen to declare, under the reserved
+// stable namespace, plus the wire-output helpers their handlers share so the
+// model-visible shapes cannot drift between backends. These are CONVENTIONS —
+// not a required surface: a provider may declare any subset, or entirely
+// different tools of its own, served by its own capability handler.
+
+pub const MEMORY_SEARCH_CAPABILITY_ID: &str = "ironclaw.memory.search";
+pub const MEMORY_WRITE_CAPABILITY_ID: &str = "ironclaw.memory.write";
+pub const MEMORY_READ_CAPABILITY_ID: &str = "ironclaw.memory.read";
+pub const MEMORY_TREE_CAPABILITY_ID: &str = "ironclaw.memory.tree";
+pub const PROFILE_SET_CAPABILITY_ID: &str = "ironclaw.memory.profile_set";
+
+/// Search-scope marker surfaced on every search output so the model knows the
+/// search covered internal persistent memory only.
+pub const MEMORY_SEARCH_SCOPE: &str = "reborn_internal_persistent_memory";
+
+/// Wire output for a search tool response. Shared by every provider declaring
+/// the conventional search tool so the model-visible shape cannot drift
+/// between backends.
+pub fn search_response_output(response: MemoryServiceSearchResponse) -> Value {
+    let results = response
+        .results
+        .into_iter()
+        .map(|result| {
+            json!({
+                "content": result.content,
+                "score": result.score,
+                "path": result.path,
+                "is_hybrid_match": result.is_hybrid_match,
+            })
+        })
+        .collect::<Vec<_>>();
+    let result_count = results.len();
+    json!({
+        "query": response.query,
+        "results": results,
+        "result_count": result_count,
+        "search_scope": MEMORY_SEARCH_SCOPE,
+        "external_services_searched": false,
+    })
+}
+
+/// Wire output for a write tool response. Exhaustive over
+/// [`MemoryWriteStatus`]; the `"status"` field serializes to the stable
+/// snake_case wire strings (`cleared`/`patched`/`written`).
+pub fn write_response_output(response: MemoryServiceWriteResponse) -> Value {
+    match response.status {
+        MemoryWriteStatus::Cleared => json!({
+            "status": response.status,
+            "path": response.path,
+            "message": response.message.unwrap_or_default(),
+        }),
+        MemoryWriteStatus::Patched => json!({
+            "status": response.status,
+            "path": response.path,
+            "replacements": response.replacements.unwrap_or(0),
+            "content_length": response.content_length,
+        }),
+        MemoryWriteStatus::Written => json!({
+            "status": response.status,
+            "path": response.path,
+            "append": response.append,
+            "content_length": response.content_length,
+        }),
+    }
+}
+
+/// Wire output for a read tool response.
+pub fn read_response_output(response: MemoryServiceReadResponse) -> Value {
+    json!({
+        "path": response.path,
+        "content": response.content,
+        "word_count": response.word_count,
+    })
+}
+
+/// Wire output for a tree tool response.
+pub fn tree_response_output(response: MemoryServiceTreeResponse) -> Value {
+    Value::Array(response.entries)
+}
+
+/// Wire output for a profile_set tool response.
+pub fn profile_set_response_output(response: MemoryServiceProfileSetResponse) -> Value {
+    json!({ "status": response.status })
 }
 
 fn search_query(input: &Value) -> Result<&str, MemoryServiceError> {
@@ -494,6 +753,23 @@ fn required_str<'a>(input: &'a Value, key: &'static str) -> Result<&'a str, Memo
 
 fn optional_u64(input: &Value, key: &'static str) -> Option<u64> {
     input.get(key).and_then(Value::as_u64)
+}
+
+/// Reject a write `target` that would escape the scoped memory mount or fail to
+/// name a document. Mirrors the fail-closed `not` pattern the model-facing
+/// `document-write` input schema advertises: blank, absolute path (leading `/`),
+/// any `..` traversal, or a backslash separator. Reserved names (`daily_log`,
+/// `memory`, `heartbeat`, `bootstrap`) and ordinary relative document paths
+/// (`notes/x.md`) pass unchanged.
+fn reject_out_of_scope_target(target: &str) -> Result<(), MemoryServiceError> {
+    if target.trim().is_empty()
+        || target.starts_with('/')
+        || target.contains("..")
+        || target.contains('\\')
+    {
+        return Err(MemoryServiceError::input());
+    }
+    Ok(())
 }
 
 fn validated_profile_fields(input: &Value) -> Result<Map<String, Value>, MemoryServiceError> {
@@ -541,4 +817,132 @@ fn validate_locale(value: &str) -> Result<(), MemoryServiceError> {
         return Err(MemoryServiceError::input());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_host_api::ResourceScope;
+
+    /// A provider that overrides NOTHING — every `MemoryService` method (including
+    /// `record_interaction`) is inherited from the trait default.
+    struct NonRecordingProvider;
+    impl MemoryService for NonRecordingProvider {}
+
+    /// The two retrieval lanes fail closed by default: a provider that does
+    /// not implement a lane reports `unavailable` (and, once bound, the host
+    /// only calls lanes the provider's manifest declares).
+    #[tokio::test]
+    async fn lane_defaults_fail_closed_as_unavailable() {
+        let provider = NonRecordingProvider;
+        let request = || MemoryServiceContextRequest {
+            query: "anything".to_string(),
+            max_snippets: 5,
+            context_profile_id: MemoryContextProfileId::new("default").expect("profile id"),
+        };
+        let invocation = || MemoryInvocation {
+            scope: ResourceScope::system(),
+            correlation_id: CorrelationId::new(),
+        };
+
+        let long = provider
+            .read_long_term(invocation(), request())
+            .await
+            .expect_err("default read_long_term must fail closed");
+        assert_eq!(long.kind(), MemoryServiceErrorKind::Unavailable);
+
+        let short = provider
+            .read_short_term(invocation(), request())
+            .await
+            .expect_err("default read_short_term must fail closed");
+        assert_eq!(short.kind(), MemoryServiceErrorKind::Unavailable);
+    }
+
+    /// The default `record_interaction` is a host-driven no-op: it must NOT error
+    /// (unlike the other default methods, which fail closed as `unavailable`) and
+    /// must report `recorded: false` so a provider that does not opt in still lets
+    /// the host's after-turn recording seam complete cleanly.
+    #[tokio::test]
+    async fn record_interaction_default_is_noop_returning_not_recorded() {
+        let provider = NonRecordingProvider;
+        let invocation = MemoryInvocation {
+            scope: ResourceScope::system(),
+            correlation_id: CorrelationId::new(),
+        };
+        let request = MemoryServiceRecordRequest {
+            messages: vec![
+                MemoryInteractionMessage {
+                    role: MemoryInteractionRole::User,
+                    content: "hello".to_string(),
+                    name: Some("user-1".to_string()),
+                },
+                MemoryInteractionMessage {
+                    role: MemoryInteractionRole::Assistant,
+                    content: "hi there".to_string(),
+                    name: Some("agent-1".to_string()),
+                },
+            ],
+            turn_run_id: Some("run-1".to_string()),
+            metadata: json!({}),
+        };
+
+        let response = provider
+            .record_interaction(invocation, request)
+            .await
+            .expect("default record_interaction must be an infallible no-op");
+
+        assert!(
+            !response.recorded,
+            "a provider that does not override record_interaction must report recorded=false"
+        );
+    }
+
+    #[test]
+    fn write_request_rejects_out_of_scope_targets() {
+        // A traversal-shaped target must be rejected at the contract layer, ahead
+        // of provider dispatch — the model-facing schema is not host-enforced, and
+        // a swapped provider (e.g. mem0) would otherwise use the target verbatim.
+        for target in [
+            "",
+            "   ",
+            "/abs",
+            "../escape",
+            "notes/../secrets",
+            "notes\\evil",
+        ] {
+            let input = json!({ "target": target, "content": "x" });
+            let result = MemoryServiceWriteRequest::from_tool_input(&input);
+            assert!(
+                result.is_err_and(|error| error.kind() == MemoryServiceErrorKind::Input),
+                "target {target:?} must be rejected as out-of-scope"
+            );
+        }
+    }
+
+    #[test]
+    fn write_request_accepts_reserved_names_and_relative_paths() {
+        // Reserved names and ordinary relative document paths are unaffected.
+        for target in [
+            "daily_log",
+            "memory",
+            "heartbeat",
+            "bootstrap",
+            "notes/sub.md",
+        ] {
+            let input = json!({ "target": target, "content": "x" });
+            assert!(
+                MemoryServiceWriteRequest::from_tool_input(&input).is_ok(),
+                "target {target:?} must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn write_request_default_daily_log_target_is_accepted() {
+        // The defaulted target (no `target` field) must also pass the guard.
+        let input = json!({ "content": "x" });
+        let request =
+            MemoryServiceWriteRequest::from_tool_input(&input).expect("default target is in-scope");
+        assert_eq!(request.target, "daily_log");
+    }
 }

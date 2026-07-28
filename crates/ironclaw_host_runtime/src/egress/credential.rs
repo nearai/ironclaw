@@ -4,7 +4,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_network::is_rfc3986_unreserved_segment;
 use ironclaw_safety::redaction_values_for_secret;
-use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStoreError};
+use ironclaw_secrets::{SecretMaterial, SecretStoreError, SecretStorePort};
 use secrecy::ExposeSecret;
 use std::sync::LazyLock;
 
@@ -90,7 +90,7 @@ impl<'a> CredentialSourceStrategy<'a> {
         injection: &RuntimeCredentialInjection,
     ) -> Result<Option<SecretMaterial>, RuntimeHttpEgressError>
     where
-        S: SecretStore,
+        S: SecretStorePort,
     {
         match self {
             Self::SecretStoreLease => lease_secret_for_injection(secrets, request, injection),
@@ -116,7 +116,7 @@ pub(super) fn apply_credential_injections<S>(
     request: &mut RuntimeHttpEgressRequest,
 ) -> Result<Vec<String>, RuntimeHttpEgressError>
 where
-    S: SecretStore,
+    S: SecretStorePort,
 {
     let mut redaction_values = Vec::new();
     let mut credential_materials = Vec::new();
@@ -206,7 +206,7 @@ fn credential_value_for_injection<'cache, S>(
     injection: &RuntimeCredentialInjection,
 ) -> Result<Option<&'cache SecretMaterial>, RuntimeHttpEgressError>
 where
-    S: SecretStore,
+    S: SecretStorePort,
 {
     let strategy = CredentialSourceStrategy::for_injection(injection);
     let key = strategy.cache_key(injection);
@@ -275,7 +275,7 @@ fn lease_secret_for_injection<S>(
     injection: &RuntimeCredentialInjection,
 ) -> Result<Option<SecretMaterial>, RuntimeHttpEgressError>
 where
-    S: SecretStore,
+    S: SecretStorePort,
 {
     match block_on_secret_store(async {
         let metadata = secrets.metadata(&request.scope, &injection.handle).await?;
@@ -376,11 +376,6 @@ fn apply_credential_injection(
                     reason: "credential injection path placeholder is invalid".to_string(),
                 });
             }
-            if !is_rfc3986_unreserved_segment(value) {
-                return Err(RuntimeHttpEgressError::Credential {
-                    reason: "credential injection path value is invalid".to_string(),
-                });
-            }
             let url = parsed_request_url(&request.url, parsed_url)?;
             if url.scheme() != "https" {
                 return Err(RuntimeHttpEgressError::Credential {
@@ -394,17 +389,65 @@ fn apply_credential_injection(
             };
             let path = url.path().to_string();
             let path = path.strip_prefix('/').unwrap_or(&path);
-            let placeholder_count = path
+            // Two placeholder shapes, exactly one injection site total:
+            //  - whole-segment: a path segment equal to the bare placeholder
+            //    (historic shape; value stays RFC3986-unreserved), and
+            //  - braced in-segment: `{placeholder}` embedded inside a segment
+            //    (e.g. a Bot-API-style `/bot{bot_token}/sendMessage`),
+            //    where the value additionally admits `:` — a legal pchar the
+            //    Bot API token format requires. Neither shape ever admits
+            //    `/`, `%`, braces, or control bytes, so a substituted value
+            //    cannot add segments, escape sequences, or nested
+            //    placeholders.
+            // `url::Url::parse` percent-encodes braces, so the braced shape
+            // appears in the parsed path as `%7B<placeholder>%7D`. Match both
+            // spellings; substitution happens on the parsed path string.
+            let braced_literal = format!("{{{placeholder}}}");
+            let braced_encoded = format!("%7B{placeholder}%7D");
+            let whole_segment_count = path
                 .split('/')
                 .filter(|segment| *segment == placeholder)
                 .count();
-            match placeholder_count {
-                0 => {
+            let braced_count = path.matches(braced_literal.as_str()).count()
+                + path.matches(braced_encoded.as_str()).count();
+            match (whole_segment_count, braced_count) {
+                (1, 0) => {
+                    if !is_rfc3986_unreserved_segment(value) {
+                        return Err(RuntimeHttpEgressError::Credential {
+                            reason: "credential injection path value is invalid".to_string(),
+                        });
+                    }
+                    let mut rewritten_path = String::with_capacity(path.len() + value.len());
+                    for (index, segment) in path.split('/').enumerate() {
+                        if index > 0 {
+                            rewritten_path.push('/');
+                        }
+                        if segment == placeholder {
+                            rewritten_path.push_str(value);
+                        } else {
+                            rewritten_path.push_str(segment);
+                        }
+                    }
+                    url.set_path(&rewritten_path);
+                }
+                (0, 1) => {
+                    if !is_in_segment_path_credential_value(value) {
+                        return Err(RuntimeHttpEgressError::Credential {
+                            reason: "credential injection path value is invalid".to_string(),
+                        });
+                    }
+                    let rewritten_path = if path.contains(braced_encoded.as_str()) {
+                        path.replacen(braced_encoded.as_str(), value, 1)
+                    } else {
+                        path.replacen(braced_literal.as_str(), value, 1)
+                    };
+                    url.set_path(&rewritten_path);
+                }
+                (0, 0) => {
                     return Err(RuntimeHttpEgressError::Credential {
                         reason: "credential injection path placeholder was not found".to_string(),
                     });
                 }
-                1 => {}
                 _ => {
                     return Err(RuntimeHttpEgressError::Credential {
                         reason: "credential injection path placeholder must appear exactly once"
@@ -412,21 +455,75 @@ fn apply_credential_injection(
                     });
                 }
             }
-            let mut rewritten_path = String::with_capacity(path.len() + value.len());
-            for (index, segment) in path.split('/').enumerate() {
-                if index > 0 {
-                    rewritten_path.push('/');
-                }
-                if segment == placeholder {
-                    rewritten_path.push_str(value);
-                } else {
-                    rewritten_path.push_str(segment);
-                }
-            }
-            url.set_path(&rewritten_path);
+        }
+        RuntimeCredentialTarget::BodyJsonPointer { pointer } => {
+            let mut parsed: serde_json::Value =
+                serde_json::from_slice(&request.body).map_err(|_| {
+                    RuntimeHttpEgressError::Credential {
+                        reason: "credential injection body is not valid JSON".to_string(),
+                    }
+                })?;
+            insert_body_secret_at_pointer(&mut parsed, pointer, value)?;
+            request.body =
+                serde_json::to_vec(&parsed).map_err(|_| RuntimeHttpEgressError::Credential {
+                    reason: "credential injection body did not re-serialize".to_string(),
+                })?;
         }
     }
     Ok(())
+}
+
+/// Insert `value` as a JSON string at the RFC 6901 `pointer`. The parent must
+/// be an existing JSON object and the leaf key must be absent: an adapter
+/// that pre-populates the field (or a pointer into a non-object) fails the
+/// request closed rather than silently overwriting or fabricating structure.
+fn insert_body_secret_at_pointer(
+    body: &mut serde_json::Value,
+    pointer: &str,
+    value: &str,
+) -> Result<(), RuntimeHttpEgressError> {
+    fn credential_error(reason: &str) -> RuntimeHttpEgressError {
+        RuntimeHttpEgressError::Credential {
+            reason: reason.to_string(),
+        }
+    }
+    let (parent_pointer, leaf) = pointer
+        .rsplit_once('/')
+        .ok_or_else(|| credential_error("credential injection body pointer is invalid"))?;
+    let leaf = leaf.replace("~1", "/").replace("~0", "~");
+    if leaf.is_empty() {
+        return Err(credential_error(
+            "credential injection body pointer is invalid",
+        ));
+    }
+    let parent = if parent_pointer.is_empty() {
+        &mut *body
+    } else {
+        body.pointer_mut(parent_pointer).ok_or_else(|| {
+            credential_error("credential injection body pointer parent is missing")
+        })?
+    };
+    let object = parent.as_object_mut().ok_or_else(|| {
+        credential_error("credential injection body pointer parent is not an object")
+    })?;
+    if object.contains_key(&leaf) {
+        return Err(credential_error(
+            "credential injection body field is already present",
+        ));
+    }
+    object.insert(leaf, serde_json::Value::String(value.to_string()));
+    Ok(())
+}
+
+/// Charset for braced in-segment path credentials: RFC3986 unreserved plus
+/// `:` (a legal `pchar`), which messenger bot-token formats require. Excludes every
+/// delimiter that could alter URL structure (`/`, `%`, `?`, `#`, braces) and
+/// all control bytes.
+fn is_in_segment_path_credential_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b':')
+        })
 }
 
 fn parsed_request_url<'a>(
@@ -468,13 +565,15 @@ const _: fn(&CredentialCacheEntry) = |entry| {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_filesystem::{Fault, FaultInjecting, FilesystemOperation, InMemoryBackend};
     use ironclaw_host_api::{
         InvocationId, NetworkMethod, NetworkPolicy, ResourceScope, RuntimeKind, TenantId,
         Timestamp, UserId,
     };
     use ironclaw_secrets::{
-        InMemorySecretStore, SecretLease, SecretLeaseId, SecretMetadata, SecretStoreError,
+        SecretLease, SecretLeaseId, SecretMetadata, SecretStore, SecretStoreError,
     };
+    use std::sync::Arc;
 
     fn sample_scope() -> ResourceScope {
         ResourceScope {
@@ -521,8 +620,15 @@ mod tests {
         }
     }
 
+    /// Exhaustive table of the pure `SecretStoreError -> sanitized reason`
+    /// mapping. These lease-lifecycle / misconfiguration variants are produced
+    /// by the secret store's OWN lease logic, not by a filesystem backend
+    /// fault, so they cannot be reproduced through `FaultInjecting` (which can
+    /// only ever surface as `StoreUnavailable` via `fs_to_secret_store_error`).
+    /// Testing the sanitizer directly is stronger than routing eight fake
+    /// stores through the caller and covers every branch.
     #[test]
-    fn lease_secret_maps_secret_store_errors_to_sanitized_reasons() {
+    fn sanitized_secret_error_maps_every_variant_to_stable_reason() {
         let scope = sample_scope();
         let handle = SecretHandle::new("api-token").unwrap();
         let lease_id = SecretLeaseId::new();
@@ -532,7 +638,7 @@ mod tests {
                     scope: Box::new(scope.clone()),
                     handle: handle.clone(),
                 },
-                "required credential is unavailable",
+                "credential is unavailable",
             ),
             (
                 SecretStoreError::UnknownLease {
@@ -568,18 +674,69 @@ mod tests {
             ),
         ];
 
-        let request = sample_request(scope.clone());
         for (store_error, expected_reason) in cases {
-            let store = FailingLeaseSecretStore {
-                scope: scope.clone(),
-                handle: handle.clone(),
-                error: store_error,
-            };
-            let error =
-                lease_secret_for_injection(&store, &request, &sample_injection(handle.clone()))
-                    .expect_err("failing secret store should reject lease resolution");
-            assert_eq!(credential_reason(&error), expected_reason);
+            assert_eq!(sanitized_secret_error(&store_error), expected_reason);
         }
+    }
+
+    /// Real `SecretStore` over a [`FaultInjecting`] backend armed to
+    /// fail the lease write. Replaces the whole-trait `FailingLeaseSecretStore`
+    /// fake for the one error the real store genuinely surfaces from a backend
+    /// fault: `lease_once` reads the seeded secret, then its `write_lease`
+    /// `put` hits the injected `FilesystemError::Backend`, which the store maps
+    /// (`fs_to_secret_store_error`) to `SecretStoreError::StoreUnavailable`, and
+    /// `lease_secret_for_injection` sanitizes to "credential store unavailable".
+    #[test]
+    fn lease_secret_surfaces_backend_lease_write_fault_as_store_unavailable() {
+        let scope = sample_scope();
+        let handle = SecretHandle::new("api-token").unwrap();
+        let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+        let store = SecretStore::ephemeral_over(backend.clone());
+        // Seed the secret so metadata()/lease read succeed; the fault fires on
+        // the lease write, not the reads.
+        block_on_test(store.put(
+            scope.clone(),
+            handle.clone(),
+            SecretMaterial::from("sk-test-secret"),
+            None,
+        ))
+        .unwrap();
+        backend.add_fault(
+            Fault::on(FilesystemOperation::WriteFile)
+                .path("secrets")
+                .backend("injected lease write failure"),
+        );
+
+        let request = sample_request(scope);
+        let error = lease_secret_for_injection(&store, &request, &sample_injection(handle))
+            .expect_err("lease write fault must surface as a credential error");
+
+        assert_eq!(credential_reason(&error), "credential store unavailable");
+        assert!(
+            backend.count(FilesystemOperation::WriteFile) >= 2,
+            "seed write plus the faulted lease write must both reach the backend"
+        );
+    }
+
+    /// A required credential that is genuinely absent must surface as
+    /// "required credential is unavailable" through the real store: `metadata`
+    /// returns `Ok(None)`, so the caller short-circuits via
+    /// `missing_runtime_credential` before ever reaching `lease_once`.
+    #[test]
+    fn lease_secret_missing_required_credential_reports_unavailable() {
+        let scope = sample_scope();
+        let handle = SecretHandle::new("absent-token").unwrap();
+        let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+        let store = SecretStore::ephemeral_over(backend);
+
+        let request = sample_request(scope);
+        let error = lease_secret_for_injection(&store, &request, &sample_injection(handle))
+            .expect_err("absent required credential must error");
+
+        assert_eq!(
+            credential_reason(&error),
+            "required credential is unavailable"
+        );
     }
 
     #[test]
@@ -610,99 +767,14 @@ mod tests {
         }
     }
 
-    struct FailingLeaseSecretStore {
-        scope: ResourceScope,
-        handle: SecretHandle,
-        error: SecretStoreError,
-    }
-
-    #[async_trait::async_trait]
-    impl SecretStore for FailingLeaseSecretStore {
-        async fn put(
-            &self,
-            scope: ResourceScope,
-            handle: SecretHandle,
-            _material: SecretMaterial,
-            _expires_at: Option<Timestamp>,
-        ) -> Result<SecretMetadata, SecretStoreError> {
-            Ok(SecretMetadata {
-                scope,
-                handle,
-                expires_at: None,
-            })
-        }
-
-        async fn metadata(
-            &self,
-            _scope: &ResourceScope,
-            _handle: &SecretHandle,
-        ) -> Result<Option<SecretMetadata>, SecretStoreError> {
-            Ok(Some(SecretMetadata {
-                scope: self.scope.clone(),
-                handle: self.handle.clone(),
-                expires_at: None,
-            }))
-        }
-
-        async fn metadata_for_scope(
-            &self,
-            _scope: &ResourceScope,
-        ) -> Result<Vec<SecretMetadata>, SecretStoreError> {
-            Ok(vec![SecretMetadata {
-                scope: self.scope.clone(),
-                handle: self.handle.clone(),
-                expires_at: None,
-            }])
-        }
-
-        async fn delete(
-            &self,
-            _scope: &ResourceScope,
-            _handle: &SecretHandle,
-        ) -> Result<bool, SecretStoreError> {
-            Ok(false)
-        }
-
-        async fn lease_once(
-            &self,
-            _scope: &ResourceScope,
-            _handle: &SecretHandle,
-        ) -> Result<SecretLease, SecretStoreError> {
-            Err(self.error.clone())
-        }
-
-        async fn consume(
-            &self,
-            _scope: &ResourceScope,
-            _lease_id: SecretLeaseId,
-        ) -> Result<SecretMaterial, SecretStoreError> {
-            Err(self.error.clone())
-        }
-
-        async fn revoke(
-            &self,
-            _scope: &ResourceScope,
-            _lease_id: SecretLeaseId,
-        ) -> Result<SecretLease, SecretStoreError> {
-            Err(self.error.clone())
-        }
-
-        async fn leases_for_scope(
-            &self,
-            _scope: &ResourceScope,
-        ) -> Result<Vec<SecretLease>, SecretStoreError> {
-            Ok(Vec::new())
-        }
-    }
-
     struct TokioBackedSecretStore {
-        inner: InMemorySecretStore,
+        inner: SecretStore<InMemoryBackend>,
     }
 
     impl TokioBackedSecretStore {
         fn new() -> Self {
             Self {
-                inner: InMemorySecretStore::new(),
+                inner: SecretStore::ephemeral(),
             }
         }
 
@@ -712,7 +784,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl SecretStore for TokioBackedSecretStore {
+    impl SecretStorePort for TokioBackedSecretStore {
         async fn put(
             &self,
             scope: ResourceScope,
@@ -808,5 +880,221 @@ mod tests {
             .build()
             .unwrap()
             .block_on(future)
+    }
+}
+
+#[cfg(test)]
+mod path_placeholder_tests {
+    use super::*;
+    use ironclaw_host_api::{
+        CapabilityId, InvocationId, NetworkMethod, NetworkPolicy, ResourceScope,
+        RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeHttpEgressRequest, RuntimeKind,
+        TenantId, UserId,
+    };
+    use ironclaw_secrets::SecretStore;
+
+    fn request_with_url(url: &str) -> RuntimeHttpEgressRequest {
+        RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope: ResourceScope {
+                tenant_id: TenantId::new("tenant1").unwrap(),
+                user_id: UserId::new("user1").unwrap(),
+                agent_id: None,
+                project_id: None,
+                mission_id: None,
+                thread_id: None,
+                invocation_id: InvocationId::new(),
+            },
+            capability_id: CapabilityId::new("runtime.http").unwrap(),
+            method: NetworkMethod::Post,
+            url: url.to_string(),
+            headers: vec![],
+            body: Vec::new(),
+            network_policy: NetworkPolicy {
+                allowed_targets: vec![],
+                deny_private_ip_ranges: true,
+                max_egress_bytes: Some(4096),
+            },
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            save_body_to: None,
+            timeout_ms: None,
+        }
+    }
+
+    fn apply_path_placeholder(
+        url: &str,
+        placeholder: &str,
+        secret_value: &str,
+    ) -> Result<String, RuntimeHttpEgressError> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let store = SecretStore::ephemeral();
+        let mut request = request_with_url(url);
+        let handle = SecretHandle::new("path-credential").unwrap();
+        runtime
+            .block_on(store.put(
+                request.scope.clone(),
+                handle.clone(),
+                SecretMaterial::from(secret_value.to_string()),
+                None,
+            ))
+            .unwrap();
+        request
+            .credential_injections
+            .push(RuntimeCredentialInjection {
+                handle,
+                source: RuntimeCredentialSource::SecretStoreLease,
+                target: RuntimeCredentialTarget::PathPlaceholder {
+                    placeholder: placeholder.to_string(),
+                },
+                required: true,
+            });
+        apply_credential_injections(&store, None, &mut request)?;
+        Ok(request.url.clone())
+    }
+
+    fn apply_body_pointer(
+        body: &[u8],
+        pointer: &str,
+        secret_value: &str,
+    ) -> Result<Vec<u8>, RuntimeHttpEgressError> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let store = SecretStore::ephemeral();
+        let mut request = request_with_url("https://vendor.example/api/setWebhook");
+        request.body = body.to_vec();
+        let handle = SecretHandle::new("body-credential").unwrap();
+        runtime
+            .block_on(store.put(
+                request.scope.clone(),
+                handle.clone(),
+                SecretMaterial::from(secret_value.to_string()),
+                None,
+            ))
+            .unwrap();
+        request
+            .credential_injections
+            .push(RuntimeCredentialInjection {
+                handle,
+                source: RuntimeCredentialSource::SecretStoreLease,
+                target: RuntimeCredentialTarget::BodyJsonPointer {
+                    pointer: pointer.to_string(),
+                },
+                required: true,
+            });
+        apply_credential_injections(&store, None, &mut request)?;
+        Ok(request.body.clone())
+    }
+
+    #[test]
+    fn body_json_pointer_inserts_the_secret_value_into_the_json_body() {
+        let body = apply_body_pointer(
+            br#"{"url":"https://hooks.example/updates"}"#,
+            "/secret_token",
+            "wh-secret-1",
+        )
+        .expect("body injection succeeds");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["secret_token"], "wh-secret-1");
+        assert_eq!(parsed["url"], "https://hooks.example/updates");
+    }
+
+    #[test]
+    fn body_json_pointer_supports_nested_parents_and_escaped_leaves() {
+        let body = apply_body_pointer(br#"{"outer":{}}"#, "/outer/se~1cret~0", "v")
+            .expect("nested injection succeeds");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["outer"]["se/cret~"], "v");
+    }
+
+    #[test]
+    fn body_json_pointer_fails_closed_on_bad_bodies_and_pointers() {
+        for (body, pointer) in [
+            // not JSON at all
+            (&b"not json"[..], "/secret_token"),
+            // the field is already present: never overwrite silently
+            (&br#"{"secret_token":"pre"}"#[..], "/secret_token"),
+            // parent object missing: never fabricate structure
+            (&br#"{}"#[..], "/missing/secret_token"),
+            // top-level is not an object
+            (&br#"[]"#[..], "/secret_token"),
+        ] {
+            let error = apply_body_pointer(body, pointer, "v").expect_err("must fail closed");
+            assert!(matches!(error, RuntimeHttpEgressError::Credential { .. }));
+        }
+    }
+
+    #[test]
+    fn braced_in_segment_placeholder_substitutes_bot_api_shaped_token() {
+        let url = apply_path_placeholder(
+            "https://bot-api.example.com/bot{vendor_bot_token}/sendMessage",
+            "vendor_bot_token",
+            "123456:AA-test_token.abc~",
+        )
+        .expect("in-segment substitution succeeds");
+        assert_eq!(
+            url,
+            "https://bot-api.example.com/bot123456:AA-test_token.abc~/sendMessage"
+        );
+    }
+
+    #[test]
+    fn braced_in_segment_value_rejects_structural_bytes() {
+        for value in ["a/b", "a%2Fb", "a{b}", "a?b", "a#b", "", "a b"] {
+            let error = apply_path_placeholder(
+                "https://bot-api.example.com/bot{vendor_bot_token}/sendMessage",
+                "vendor_bot_token",
+                value,
+            )
+            .expect_err("structural bytes must be rejected");
+            assert!(matches!(error, RuntimeHttpEgressError::Credential { .. }));
+        }
+    }
+
+    #[test]
+    fn braced_placeholder_must_appear_exactly_once() {
+        let error = apply_path_placeholder(
+            "https://bot-api.example.com/bot{vendor_bot_token}/x/{vendor_bot_token}",
+            "vendor_bot_token",
+            "123456:AAtoken",
+        )
+        .expect_err("duplicate placeholders must be rejected");
+        assert!(matches!(error, RuntimeHttpEgressError::Credential { .. }));
+    }
+
+    #[test]
+    fn mixed_whole_segment_and_braced_placeholders_are_rejected() {
+        let error = apply_path_placeholder(
+            "https://api.example.test/vendor_bot_token/bot{vendor_bot_token}/send",
+            "vendor_bot_token",
+            "tokenvalue",
+        )
+        .expect_err("mixed placeholder shapes must be rejected");
+        assert!(matches!(error, RuntimeHttpEgressError::Credential { .. }));
+    }
+
+    #[test]
+    fn whole_segment_mode_still_rejects_colon_values() {
+        let error = apply_path_placeholder(
+            "https://api.example.test/credential_slot/run",
+            "credential_slot",
+            "123456:AAtoken",
+        )
+        .expect_err("whole-segment values stay RFC3986-unreserved");
+        assert!(matches!(error, RuntimeHttpEgressError::Credential { .. }));
+    }
+
+    #[test]
+    fn whole_segment_mode_still_substitutes_unreserved_values() {
+        let url = apply_path_placeholder(
+            "https://api.example.test/credential_slot/run",
+            "credential_slot",
+            "plain-token_1.2~",
+        )
+        .expect("whole-segment substitution unchanged");
+        assert_eq!(url, "https://api.example.test/plain-token_1.2~/run");
     }
 }

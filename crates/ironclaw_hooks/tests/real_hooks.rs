@@ -16,11 +16,11 @@
 //!
 //! 2. **`large-stake-approval-gate`** — Installed-tier predicate hook
 //!    using `NumericSum` + `PauseApproval`. Requires resolved capability
-//!    arguments (the resolver wiring lives in `ironclaw_reborn`, so the
+//!    arguments (the resolver wiring lives in `ironclaw_runner`, so the
 //!    test here exercises only the manifest + registrar surface and
 //!    asserts the bound is well-formed; the end-to-end dispatch
 //!    against real numeric inputs lives in
-//!    `crates/ironclaw_reborn/tests/hooks_integration.rs`).
+//!    `crates/ironclaw_runner/tests/hooks_integration.rs`).
 //!
 //! 3. **`pii-redaction-warning`** — Trusted-tier Rust hook implementing
 //!    `PrivilegedBeforePromptHook`, injecting a trusted instruction
@@ -165,10 +165,10 @@ async fn polymarket_daily_cap_does_not_fire_for_other_capabilities() {
 
 /// Manifest entry for a `$1000/24h` cumulative-stake approval gate. The
 /// `NumericSum` predicate needs resolved capability arguments to fire;
-/// the resolver path lives in `ironclaw_reborn`, so this test only
+/// the resolver path lives in `ironclaw_runner`, so this test only
 /// exercises that the manifest is well-formed and that the registrar
 /// accepts it. The dispatch-time fire-or-not test is in
-/// `crates/ironclaw_reborn/tests/hooks_integration.rs::numeric_sum_predicate_caps_total_value_against_real_inputs`.
+/// `crates/ironclaw_runner/tests/hooks_integration.rs::numeric_sum_predicate_caps_total_value_against_real_inputs`.
 fn large_stake_approval_manifest() -> HookManifestEntry {
     HookManifestEntry::new(
         HookLocalId::new("large-stake-approval-gate").expect("valid HookLocalId in test"),
@@ -216,7 +216,7 @@ async fn large_stake_approval_with_unresolved_args_fails_closed() {
     // not wired in (the default in `ironclaw_hooks` standalone), a
     // NumericSum predicate dispatched against unresolved arguments
     // must NOT permit the call. Production wiring lives in
-    // `ironclaw_reborn`; here we confirm the fail-closed posture.
+    // `ironclaw_runner`; here we confirm the fail-closed posture.
     let extension = ExtensionId::new("polymarket-trader").expect("valid ext id");
     let registrar = HookRegistrar::new(Arc::new(PredicateEvaluator::new()));
     let builder = HookDispatcherBuilder::new(HookRegistry::new());
@@ -281,7 +281,8 @@ impl PrivilegedBeforePromptHook for PiiRedactionWarningHook {
         // `add_trusted_snippet` is the privileged path — only the
         // `PrivilegedMutatorSink` exposes it. An Installed hook trying
         // to call this method would not compile.
-        let _ = sink.add_trusted_snippet(self.instruction.to_string(), PatchOrdinalHint::NearTop);
+        sink.add_trusted_snippet(self.instruction.to_string(), PatchOrdinalHint::NearTop)
+            .expect("privileged trusted-snippet injection succeeds");
     }
 }
 

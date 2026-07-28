@@ -1,6 +1,78 @@
 use super::*;
 
 #[tokio::test]
+async fn fresh_subscription_hydrates_latest_live_state_then_tails_new_updates() {
+    let scope = projection_scope("thread-a");
+    let source = Arc::new(InMemoryProjectionUpdateSource::new(8));
+    let manager = manager_with_source(scope.clone(), Arc::clone(&source));
+    let run_id = TurnRunId::new();
+    let thread_id = scope.read_scope.thread_id.clone().unwrap();
+    let text_item = |body: &str| ThreadLiveProjectionItem::Text {
+        id: "text:active-run".to_string(),
+        run_id,
+        body: body.to_string(),
+    };
+    let thinking_item = ThreadLiveProjectionItem::Thinking {
+        id: "thinking:active-run".to_string(),
+        run_id,
+        body: "current reasoning".to_string(),
+    };
+    let live_update = |cursor, items| {
+        ProductProjectionEnvelope::ThreadLiveUpdate(ThreadLiveProjectionUpdate {
+            cursor: ProjectionCursor::for_scope(scope.clone(), EventCursor::new(cursor)),
+            thread_id: thread_id.clone(),
+            items,
+        })
+    };
+
+    for update in [
+        live_update(100, vec![text_item("partial"), thinking_item.clone()]),
+        live_update(101, vec![text_item("current partial")]),
+    ] {
+        let error = source
+            .publish(update)
+            .expect_err("an update without a subscriber is retained but not broadcast");
+        assert!(matches!(error, ProjectionStreamError::Source));
+    }
+
+    let mut subscription = manager
+        .subscribe(subscribe_request(scope.clone(), None))
+        .await
+        .expect("fresh subscription");
+    assert!(matches!(
+        subscription.next().await,
+        Some(ProjectionStreamItem::Snapshot(_))
+    ));
+    let current = subscription.next().await.expect("current live state");
+    let ProjectionStreamItem::Update(current) = current else {
+        panic!("expected current live update, got {current:?}");
+    };
+    let ProductProjectionEnvelope::ThreadLiveUpdate(current) = current.as_ref() else {
+        panic!("expected thread live update, got {current:?}");
+    };
+    assert_eq!(
+        current.items,
+        vec![text_item("current partial"), thinking_item],
+        "origin subscribers must receive the latest payload at its first-seen position rather than cumulative replay history"
+    );
+
+    source
+        .publish(live_update(102, vec![text_item("next partial")]))
+        .expect("active subscriber receives the next update");
+    let next = subscription.next().await.expect("next live update");
+    let ProjectionStreamItem::Update(next) = next else {
+        panic!("expected next live update, got {next:?}");
+    };
+    let ProductProjectionEnvelope::ThreadLiveUpdate(next) = next.as_ref() else {
+        panic!("expected thread live update, got {next:?}");
+    };
+    assert!(matches!(
+        next.items.as_slice(),
+        [ThreadLiveProjectionItem::Text { body, .. }] if body == "next partial"
+    ));
+}
+
+#[tokio::test]
 async fn no_exposure_validator_rejects_sentinel_payloads() {
     let scope = projection_scope("thread-a");
     let source = Arc::new(InMemoryProjectionUpdateSource::new(8));
@@ -110,7 +182,7 @@ async fn redaction_gate_blocks_sentinel_payloads_at_stream_boundary() {
             Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
             Arc::clone(&source),
             Arc::new(RejectLiveUpdateRedactionValidator),
-            Arc::new(InMemoryOutboundStateStore::default()),
+            Arc::new(in_memory_backed_outbound_state_store()),
         ),
         update_source: Arc::clone(&source),
     };
@@ -148,7 +220,7 @@ async fn live_validation_source_failure_is_not_reported_as_redaction() {
             Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
             Arc::clone(&source),
             Arc::new(SourceFailingLiveUpdateValidator),
-            Arc::new(InMemoryOutboundStateStore::default()),
+            Arc::new(in_memory_backed_outbound_state_store()),
         ),
         update_source: Arc::clone(&source),
     };
@@ -186,7 +258,7 @@ async fn repeated_snapshot_subscriptions_reuse_redaction_validation_decision() {
         Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
         Arc::new(InMemoryProjectionUpdateSource::new(8)),
         Arc::clone(&validator),
-        Arc::new(InMemoryOutboundStateStore::default()),
+        Arc::new(in_memory_backed_outbound_state_store()),
     );
 
     let mut first = manager
@@ -220,7 +292,7 @@ async fn validation_cache_revalidates_distinct_payloads_at_same_cursor() {
         Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
         Arc::new(InMemoryProjectionUpdateSource::new(8)),
         Arc::new(RejectTruncatedSnapshotValidator),
-        Arc::new(InMemoryOutboundStateStore::default()),
+        Arc::new(in_memory_backed_outbound_state_store()),
     );
 
     let mut first = manager
@@ -600,7 +672,7 @@ async fn live_subscription_registered_before_snapshot_prevents_gap() {
         Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
         Arc::clone(&source),
         Arc::new(NoExposureProjectionRedactionValidator),
-        Arc::new(InMemoryOutboundStateStore::default()),
+        Arc::new(in_memory_backed_outbound_state_store()),
     );
 
     let mut subscription = manager
@@ -631,7 +703,7 @@ async fn truncated_snapshot_emits_terminal_lag_before_live_tail() {
         Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
         Arc::clone(&source),
         Arc::new(NoExposureProjectionRedactionValidator),
-        Arc::new(InMemoryOutboundStateStore::default()),
+        Arc::new(in_memory_backed_outbound_state_store()),
     );
 
     let mut subscription = manager
@@ -669,7 +741,7 @@ async fn truncated_resume_replay_emits_terminal_lag_before_live_tail() {
         Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
         Arc::new(InMemoryProjectionUpdateSource::new(8)),
         Arc::new(NoExposureProjectionRedactionValidator),
-        Arc::new(InMemoryOutboundStateStore::default()),
+        Arc::new(in_memory_backed_outbound_state_store()),
     );
 
     let mut subscription = manager

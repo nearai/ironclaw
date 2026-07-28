@@ -1,8 +1,5 @@
-use ironclaw_host_api::DispatchInputIssueCode;
+use ironclaw_host_api::{DispatchInputIssueCode, FailureKind, HostRemediation};
 use serde::{Deserialize, Serialize};
-
-use super::host::CapabilityFailureKind;
-
 const MODEL_OBSERVATION_SUMMARY_MAX_BYTES: usize = 512;
 const MODEL_OBSERVATION_ARTIFACTS_MAX: usize = 16;
 const MODEL_OBSERVATION_REPAIRS_MAX: usize = 16;
@@ -12,7 +9,7 @@ pub const MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION: u32 = 1;
 
 /// Maximum size of a model-visible free-text diagnostic. Larger than the
 /// summary cap because the diagnostic carries raw (secret-scrubbed) error text.
-pub const MODEL_OBSERVATION_DETAIL_MAX_BYTES: usize = 4096;
+pub const MODEL_OBSERVATION_DETAIL_MAX_BYTES: usize = ironclaw_host_api::MODEL_DIAGNOSTIC_MAX_BYTES;
 
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,6 +23,23 @@ pub enum CapabilityFailureDetail {
     /// validator rejects — the producer redacts secret VALUES instead.
     Diagnostic {
         text: String,
+    },
+    /// Host-authored operator remediation — the TRUSTED text channel.
+    ///
+    /// Carries the validated [`HostRemediation`] newtype rather than a bare
+    /// `String` (unlike its siblings) precisely so PROVENANCE travels with the
+    /// value: a producer cannot land text on this arm without going through the
+    /// host-only constructor and its credential-value guard. Untrusted
+    /// capability output stays on [`Self::Diagnostic`], which now **preserves**
+    /// the scrubbed cause (paths, schema refs, codes) instead of collapsing to
+    /// the safe-summary placeholder — it fails closed to the fixed
+    /// `ModelDiagnostic::unavailable()` sentence only when a credential-shaped
+    /// value reaches the typed boundary. The distinction this arm exists for is
+    /// therefore PROVENANCE, not redaction strength: host-authored remediation
+    /// must survive intact even when it names a `config set` key or console URL,
+    /// which the untrusted arm's scrub would still rewrite.
+    HostRemediation {
+        text: HostRemediation,
     },
 }
 
@@ -92,13 +106,28 @@ pub enum ToolObservationDetail {
         issues: Vec<CapabilityInputIssue>,
     },
     GenericFailure {
-        failure_kind: CapabilityFailureKind,
+        failure_kind: FailureKind,
         /// Bounded, secret-scrubbed raw cause shown to the model alongside the
         /// fixed-template summary. Validated leniently — path and payload
         /// delimiters are allowed; only NUL/control chars and length are
         /// rejected. The producer is responsible for redacting secret VALUES.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
+    },
+    ResultReference {
+        result_ref: String,
+        byte_len: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preview: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        total_bytes: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next_offset: Option<u64>,
+        /// Element count when the full result is a top-level JSON array.
+        /// Attached only to truncated previews, so the model cannot misread
+        /// a byte-sliced array as the complete result.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item_count: Option<u64>,
     },
 }
 
@@ -119,6 +148,33 @@ impl ToolObservationDetail {
             Self::GenericFailure { detail, .. } => {
                 if let Some(detail) = detail {
                     validate_model_observation_detail(detail)?;
+                }
+                Ok(())
+            }
+            Self::ResultReference {
+                result_ref,
+                preview,
+                next_offset,
+                item_count,
+                ..
+            } => {
+                // `preview` is intentionally NOT content-checked here: this
+                // neutral gate has no graceful-degrade path, so an unsafe
+                // preview would drop the whole observation (losing
+                // `result_ref` too) instead of falling back to ref-only.
+                // `ironclaw_threads::ToolResultReferenceEnvelope::new` owns
+                // that canonical secret/control-char scan and degrades
+                // correctly; this arm only bounds shape (issue #5838).
+                validate_non_empty_text(result_ref, "model observation result ref")?;
+                validate_text_len(
+                    result_ref,
+                    "model observation result ref",
+                    MODEL_OBSERVATION_TEXT_MAX_BYTES,
+                )?;
+                if item_count.is_some() && (preview.is_none() || next_offset.is_none()) {
+                    return Err(
+                        "model observation item_count requires preview and next_offset".to_string(),
+                    );
                 }
                 Ok(())
             }
@@ -257,7 +313,24 @@ pub enum CapabilityRecoveryHint {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ObservationTrust {
+    /// The observation carries capability output — a WASM tool's result, an MCP
+    /// server's error body, a provider response. Every downstream text guard
+    /// applies in full.
     UntrustedToolOutput,
+    /// The observation was authored entirely by the host: a fixed remediation
+    /// template plus a fixed failure summary, with no capability output mixed
+    /// in. Set ONLY by the renderer for a
+    /// [`CapabilityFailureDetail::HostRemediation`] failure, whose payload
+    /// already passed [`HostRemediation`]'s credential-VALUE guard at
+    /// construction.
+    ///
+    /// This is what lets the persistence validator in `ironclaw_threads` know
+    /// the text's PROVENANCE instead of re-deriving it by sniffing content. It
+    /// exempts host-authored text from the credential-VOCABULARY scan (a
+    /// host-authored instruction must be able to say `client_secret`), and
+    /// nothing else — the control-character and credential-VALUE guards still
+    /// apply.
+    HostAuthored,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -374,6 +447,33 @@ mod tests {
         assert_eq!(value["trust"], "untrusted_tool_output");
     }
 
+    /// `item_count` is only meaningful alongside a truncated preview; a
+    /// `ResultReference` carrying `item_count` without both `preview` and
+    /// `next_offset` must fail validation.
+    #[test]
+    fn result_reference_rejects_item_count_without_preview_and_next_offset() {
+        let observation = ModelVisibleToolObservation {
+            schema_version: MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+            status: ToolObservationStatus::Success,
+            summary: "Tool completed.".to_string(),
+            detail: ToolObservationDetail::ResultReference {
+                result_ref: "result:item-count-without-preview".to_string(),
+                byte_len: 4096,
+                preview: None,
+                total_bytes: None,
+                next_offset: None,
+                item_count: Some(600),
+            },
+            artifacts: Vec::new(),
+            recovery: None,
+            trust: ObservationTrust::UntrustedToolOutput,
+        };
+
+        observation
+            .validate()
+            .expect_err("item_count without preview/next_offset must be rejected");
+    }
+
     #[test]
     fn generic_failure_detail_allows_paths_and_payload_delimiters() {
         let path = "missing input_schema_ref at /system/extensions/google-calendar/schemas/google-calendar/list_calendars.input.v1.json";
@@ -382,7 +482,7 @@ mod tests {
             status: ToolObservationStatus::Error,
             summary: "Capability failed with missing_runtime.".to_string(),
             detail: ToolObservationDetail::GenericFailure {
-                failure_kind: CapabilityFailureKind::MissingRuntime,
+                failure_kind: FailureKind::MissingRuntime,
                 detail: Some(path.to_string()),
             },
             artifacts: Vec::new(),
@@ -418,7 +518,21 @@ mod tests {
         assert!(matches!(
             detail,
             ToolObservationDetail::GenericFailure {
-                failure_kind: CapabilityFailureKind::Backend,
+                failure_kind: FailureKind::Backend,
+                detail: None
+            }
+        ));
+        // A retired coarse tag decodes through `from_tag`'s historical alias.
+        let aliased = serde_json::json!({
+            "kind": "generic_failure",
+            "failure_kind": "invalid_input"
+        });
+        let detail: ToolObservationDetail =
+            serde_json::from_value(aliased).expect("aliased legacy tag deserializes");
+        assert!(matches!(
+            detail,
+            ToolObservationDetail::GenericFailure {
+                failure_kind: FailureKind::InputEncode,
                 detail: None
             }
         ));

@@ -8,8 +8,9 @@ use async_trait::async_trait;
 use ironclaw_filesystem::FilesystemError;
 use ironclaw_host_api::{
     AgentId, CapabilityId, CapabilitySet, ExtensionId, HostApiError, InvocationId, MissionId,
-    MountView, ProcessId, ProjectId, ResourceEstimate, ResourceReservation, ResourceReservationId,
-    ResourceScope, RuntimeKind, TenantId, ThreadId, UserId, VirtualPath,
+    MountView, ProcessAuthorizedContinuation, ProcessId, ProjectId, ResourceEstimate,
+    ResourceReservation, ResourceReservationId, ResourceScope, RuntimeKind, TenantId, ThreadId,
+    UserId, VirtualPath,
 };
 use ironclaw_resources::ResourceError;
 use serde::{Deserialize, Serialize};
@@ -39,14 +40,25 @@ pub struct ProcessRecord {
     pub parent_process_id: Option<ProcessId>,
     pub invocation_id: InvocationId,
     pub scope: ResourceScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authenticated_actor_user_id: Option<UserId>,
     pub extension_id: ExtensionId,
     pub capability_id: CapabilityId,
+    // `ProcessRecord` is a durable host-written record the process store re-reads;
+    // its `runtime` may be a host-assigned `System`/`FirstParty` that the derived
+    // `RuntimeKind` deserialize rejects (anti-forgery for untrusted input). Read it
+    // back through the trusted path so the store round-trips privileged kinds
+    // (arch-simplification §4.3 exposed this when the InMemory store — which never
+    // serialized — was replaced by the serde-round-tripping filesystem store).
+    #[serde(deserialize_with = "ironclaw_host_api::deserialize_trusted_runtime_kind")]
     pub runtime: RuntimeKind,
     pub status: ProcessStatus,
     pub grants: CapabilitySet,
     pub mounts: MountView,
     pub estimated_resources: ResourceEstimate,
     pub resource_reservation_id: Option<ResourceReservationId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorized_continuation: Option<ProcessAuthorizedContinuation>,
     pub error_kind: Option<String>,
 }
 
@@ -56,6 +68,7 @@ pub struct ProcessStart {
     pub parent_process_id: Option<ProcessId>,
     pub invocation_id: InvocationId,
     pub scope: ResourceScope,
+    pub authenticated_actor_user_id: Option<UserId>,
     pub extension_id: ExtensionId,
     pub capability_id: CapabilityId,
     pub runtime: RuntimeKind,
@@ -63,6 +76,7 @@ pub struct ProcessStart {
     pub mounts: MountView,
     pub estimated_resources: ResourceEstimate,
     pub resource_reservation_id: Option<ResourceReservationId>,
+    pub authorized_continuation: Option<ProcessAuthorizedContinuation>,
     pub input: Value,
 }
 
@@ -192,12 +206,14 @@ pub struct ProcessExecutionRequest {
     pub process_id: ProcessId,
     pub invocation_id: InvocationId,
     pub scope: ResourceScope,
+    pub authenticated_actor_user_id: Option<UserId>,
     pub extension_id: ExtensionId,
     pub capability_id: CapabilityId,
     pub runtime: RuntimeKind,
     pub estimate: ResourceEstimate,
     pub mounts: MountView,
     pub resource_reservation: Option<ResourceReservation>,
+    pub authorized_continuation: Option<ProcessAuthorizedContinuation>,
     pub input: Value,
     pub cancellation: ProcessCancellationToken,
 }
@@ -235,7 +251,7 @@ pub trait ProcessManager: Send + Sync {
 }
 
 #[async_trait]
-pub trait ProcessResultStore: Send + Sync {
+pub trait ProcessResultStorePort: Send + Sync {
     /// Stores successful process output separately from the lifecycle record.
     async fn complete(
         &self,
@@ -280,7 +296,7 @@ pub trait ProcessResultStore: Send + Sync {
 }
 
 #[async_trait]
-pub trait ProcessStore: Send + Sync {
+pub trait ProcessStorePort: Send + Sync {
     /// Persists a running process record without storing raw input.
     async fn start(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError>;
 
@@ -372,6 +388,39 @@ pub(crate) fn same_scope_owner(left: &ResourceScope, right: &ResourceScope) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_process_record_without_authenticated_actor_deserializes() {
+        let invocation_id = InvocationId::new();
+        let scope =
+            ResourceScope::local_default(UserId::new("subject").unwrap(), invocation_id).unwrap();
+        let record = ProcessRecord {
+            process_id: ProcessId::new(),
+            parent_process_id: None,
+            invocation_id,
+            scope,
+            authenticated_actor_user_id: Some(UserId::new("slack-alice").unwrap()),
+            extension_id: ExtensionId::new("demo").unwrap(),
+            capability_id: CapabilityId::new("demo.background").unwrap(),
+            runtime: RuntimeKind::Script,
+            status: ProcessStatus::Running,
+            grants: CapabilitySet::default(),
+            mounts: MountView::default(),
+            estimated_resources: ResourceEstimate::default(),
+            resource_reservation_id: None,
+            authorized_continuation: None,
+            error_kind: None,
+        };
+        let mut legacy = serde_json::to_value(record).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("authenticated_actor_user_id");
+
+        let decoded: ProcessRecord = serde_json::from_value(legacy).unwrap();
+
+        assert_eq!(decoded.authenticated_actor_user_id, None);
+    }
 
     /// Regression: the broad `From<HostApiError> for ProcessError` impl previously
     /// mismapped every `HostApiError` shape (validation, invariant, mount, network)

@@ -3,10 +3,13 @@
 
 mod attachment;
 pub mod attachment_format;
+mod automation;
 pub mod env_helpers;
 mod event;
 pub mod hashing;
 mod identity;
+pub mod llm_costs;
+pub mod model_selection;
 pub mod paths;
 pub mod pkce;
 mod platform;
@@ -17,6 +20,7 @@ mod trust_boundary;
 mod util;
 
 pub use attachment::{AttachmentKind, AttachmentRef, IncomingAttachment, normalize_mime_type};
+pub use automation::{AutomationName, AutomationNameError, MAX_AUTOMATION_NAME_BYTES};
 // `attachment_format` is also a `pub mod`, but the registry query functions are
 // re-exported at the crate root because the whole attachment pipeline consumes
 // them as `ironclaw_common::is_supported_mime` / `kind_for_mime` / etc.

@@ -1,16 +1,37 @@
+#![allow(clippy::disallowed_methods)] // test helper constructs OutboundStateStore directly (arch-simplification §4.3)
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use async_trait::async_trait;
 use ironclaw_event_projections::{ProjectionCursor, ProjectionScope};
 use ironclaw_events::{EventCursor, EventStreamKey, ReadScope};
+use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
 use ironclaw_outbound::*;
 use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 
+fn in_memory_outbound_store() -> OutboundStateStore<InMemoryBackend> {
+    // §4.3: the deleted `OutboundStateStore<ironclaw_filesystem::InMemoryBackend>` is replaced by the one
+    // production store over a volatile in-memory backend (mirrors the merged
+    // budget-gate/run-state consolidations). A local helper because this crate's
+    // own integration tests cannot enable its `test-support` feature.
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/outbound").expect("alias"),
+        VirtualPath::new("/engine/outbound").expect("target"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+    let scoped = std::sync::Arc::new(ScopedFilesystem::with_fixed_view(
+        std::sync::Arc::new(InMemoryBackend::new()),
+        mounts,
+    ));
+    OutboundStateStore::new(scoped)
+}
+
 #[tokio::test]
 async fn subscription_access_policy_gates_cursor_checkpoint_creation() {
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_outbound_store();
     let access_policy = FakeThreadProjectionAccessPolicy::default();
     let validator = FakeReplyTargetBindingValidator::default();
     let service = OutboundPolicyService::new(&store, &access_policy, &validator);
@@ -78,8 +99,8 @@ async fn subscription_access_policy_gates_cursor_checkpoint_creation() {
 }
 
 #[tokio::test]
-async fn delivery_preparation_revalidates_each_push_and_records_auth_failure_without_target() {
-    let store = InMemoryOutboundStateStore::default();
+async fn delivery_preparation_revalidates_each_push_with_one_stable_attempt_identity() {
+    let store = in_memory_outbound_store();
     let access_policy = FakeThreadProjectionAccessPolicy::default();
     let validator = FakeReplyTargetBindingValidator::default();
     let service = OutboundPolicyService::new(&store, &access_policy, &validator);
@@ -94,7 +115,7 @@ async fn delivery_preparation_revalidates_each_push_and_records_auth_failure_wit
     let OutboundDeliveryDecision::Authorized { attempt, target } = first else {
         panic!("expected authorized delivery decision");
     };
-    assert_eq!(attempt.status, OutboundDeliveryStatus::Pending);
+    assert_eq!(attempt.status, OutboundDeliveryStatus::Prepared);
     assert_eq!(target.target(), &candidate.target);
 
     let second = service
@@ -102,9 +123,17 @@ async fn delivery_preparation_revalidates_each_push_and_records_auth_failure_wit
         .await
         .expect("second authorized delivery attempt");
     assert!(matches!(
-        second,
+        &second,
         OutboundDeliveryDecision::Authorized { .. }
     ));
+    let OutboundDeliveryDecision::Authorized {
+        attempt: second_attempt,
+        ..
+    } = second
+    else {
+        unreachable!("matched above")
+    };
+    assert_eq!(second_attempt.delivery_id, attempt.delivery_id);
     assert_eq!(
         validator.calls(),
         2,
@@ -129,26 +158,14 @@ async fn delivery_preparation_revalidates_each_push_and_records_auth_failure_wit
         .list_delivery_attempts(scope)
         .await
         .expect("list delivery attempts");
-    assert_eq!(attempts.len(), 3);
-    assert_eq!(
-        attempts
-            .iter()
-            .filter(|attempt| attempt.status == OutboundDeliveryStatus::Pending)
-            .count(),
-        2
-    );
-    assert_eq!(
-        attempts
-            .iter()
-            .filter(|attempt| attempt.status == OutboundDeliveryStatus::Failed)
-            .count(),
-        1
-    );
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].delivery_id, attempt.delivery_id);
+    assert_eq!(attempts[0].status, OutboundDeliveryStatus::Prepared);
 }
 
 #[tokio::test]
 async fn delivery_preparation_rejects_validator_target_substitution() {
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_outbound_store();
     let access_policy = FakeThreadProjectionAccessPolicy::default();
     let validator = FakeReplyTargetBindingValidator::default();
     let service = OutboundPolicyService::new(&store, &access_policy, &validator);
@@ -172,7 +189,7 @@ async fn delivery_preparation_rejects_validator_target_substitution() {
 
 #[tokio::test]
 async fn delivery_preparation_rejects_scope_candidate_mismatch_before_validator_io() {
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_outbound_store();
     let access_policy = FakeThreadProjectionAccessPolicy::default();
     let validator = FakeReplyTargetBindingValidator::default();
     let service = OutboundPolicyService::new(&store, &access_policy, &validator);
@@ -203,7 +220,7 @@ async fn delivery_preparation_rejects_scope_candidate_mismatch_before_validator_
 
 #[tokio::test]
 async fn delivery_preparation_fails_closed_when_candidate_skips_revalidation() {
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_outbound_store();
     let access_policy = FakeThreadProjectionAccessPolicy::default();
     let validator = FakeReplyTargetBindingValidator::default();
     let service = OutboundPolicyService::new(&store, &access_policy, &validator);
@@ -227,7 +244,7 @@ async fn delivery_preparation_fails_closed_when_candidate_skips_revalidation() {
 
 #[tokio::test]
 async fn delivery_preparation_records_transient_validator_error_separately_from_revocation() {
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_outbound_store();
     let access_policy = FakeThreadProjectionAccessPolicy::default();
     let validator = FakeReplyTargetBindingValidator::default();
     let service = OutboundPolicyService::new(&store, &access_policy, &validator);
@@ -262,7 +279,7 @@ async fn delivery_preparation_records_transient_validator_error_separately_from_
 
 #[tokio::test]
 async fn delivery_preparation_propagates_validator_caller_bug_errors() {
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_outbound_store();
     let access_policy = FakeThreadProjectionAccessPolicy::default();
     let validator = InvalidRequestValidator;
     let service = OutboundPolicyService::new(&store, &access_policy, &validator);
@@ -286,7 +303,7 @@ async fn delivery_preparation_propagates_validator_caller_bug_errors() {
 
 #[tokio::test]
 async fn communication_delivery_requested_outbound_validates_requested_target() {
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_outbound_store();
     let access_policy = FakeThreadProjectionAccessPolicy::default();
     let validator = FakeReplyTargetBindingValidator::default();
     let service = OutboundPolicyService::new(&store, &access_policy, &validator);
@@ -316,13 +333,13 @@ async fn communication_delivery_requested_outbound_validates_requested_target() 
     assert_eq!(attempt.candidate.target, reply_ref("reply:requested"));
     assert_eq!(attempt.candidate.kind, OutboundPushKind::FinalReply);
     assert_eq!(attempt.candidate.turn_run_id, Some(turn_run_id()));
-    assert_eq!(attempt.status, OutboundDeliveryStatus::Pending);
+    assert_eq!(attempt.status, OutboundDeliveryStatus::Prepared);
     assert_eq!(validator.calls(), 1);
 }
 
 #[tokio::test]
 async fn communication_delivery_live_source_route_final_reply_validates_source_target() {
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_outbound_store();
     let access_policy = FakeThreadProjectionAccessPolicy::default();
     let validator = FakeReplyTargetBindingValidator::default();
     let service = OutboundPolicyService::new(&store, &access_policy, &validator);
@@ -361,7 +378,7 @@ async fn communication_delivery_live_source_route_final_reply_validates_source_t
 
 #[tokio::test]
 async fn communication_delivery_triggered_default_target_validates_preference_target() {
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_outbound_store();
     let access_policy = FakeThreadProjectionAccessPolicy::default();
     let validator = FakeReplyTargetBindingValidator::default();
     let service = OutboundPolicyService::new(&store, &access_policy, &validator);
@@ -398,7 +415,7 @@ async fn communication_delivery_triggered_default_target_validates_preference_ta
 
 #[tokio::test]
 async fn communication_delivery_triggered_shared_agent_scope_validates_shared_preference_target() {
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_outbound_store();
     let access_policy = FakeThreadProjectionAccessPolicy::default();
     let validator = FakeReplyTargetBindingValidator::default();
     let service = OutboundPolicyService::new(&store, &access_policy, &validator);
@@ -455,7 +472,7 @@ async fn communication_delivery_triggered_shared_agent_scope_validates_shared_pr
 
 #[tokio::test]
 async fn communication_delivery_lowers_progress_update_to_progress_push_kind() {
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_outbound_store();
     let access_policy = FakeThreadProjectionAccessPolicy::default();
     let validator = FakeReplyTargetBindingValidator::default();
     let service = OutboundPolicyService::new(&store, &access_policy, &validator);
@@ -492,7 +509,7 @@ async fn communication_delivery_lowers_progress_update_to_progress_push_kind() {
 
 #[tokio::test]
 async fn communication_delivery_lowers_delivery_status_to_delivery_status_push_kind() {
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_outbound_store();
     let access_policy = FakeThreadProjectionAccessPolicy::default();
     let validator = FakeReplyTargetBindingValidator::default();
     let service = OutboundPolicyService::new(&store, &access_policy, &validator);
@@ -515,7 +532,7 @@ async fn communication_delivery_lowers_delivery_status_to_delivery_status_push_k
 
 #[tokio::test]
 async fn communication_delivery_auth_prompt_lowers_to_distinct_push_kind() {
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_outbound_store();
     let access_policy = FakeThreadProjectionAccessPolicy::default();
     let validator = FakeReplyTargetBindingValidator::default();
     let service = OutboundPolicyService::new(&store, &access_policy, &validator);
@@ -562,7 +579,7 @@ async fn communication_delivery_auth_prompt_lowers_to_distinct_push_kind() {
 
 #[tokio::test]
 async fn communication_delivery_propagates_preference_repository_errors() {
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_outbound_store();
     let access_policy = FakeThreadProjectionAccessPolicy::default();
     let validator = FakeReplyTargetBindingValidator::default();
     let preferences = BackendErrorPreferenceRepository;
@@ -597,7 +614,7 @@ async fn communication_delivery_propagates_preference_repository_errors() {
 
 #[tokio::test]
 async fn communication_delivery_triggered_from_source_route_final_reply_prefers_source_target() {
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_outbound_store();
     let access_policy = FakeThreadProjectionAccessPolicy::default();
     let validator = FakeReplyTargetBindingValidator::default();
     let service = OutboundPolicyService::new(&store, &access_policy, &validator);
@@ -637,7 +654,7 @@ async fn communication_delivery_triggered_from_source_route_final_reply_prefers_
 
 #[tokio::test]
 async fn communication_delivery_system_event_returns_no_delivery_without_records() {
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_outbound_store();
     let access_policy = FakeThreadProjectionAccessPolicy::default();
     let validator = FakeReplyTargetBindingValidator::default();
     let service = OutboundPolicyService::new(&store, &access_policy, &validator);
@@ -668,7 +685,7 @@ async fn communication_delivery_system_event_returns_no_delivery_without_records
 
 #[tokio::test]
 async fn communication_delivery_revoked_target_records_sanitized_failure_without_target() {
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_outbound_store();
     let access_policy = FakeThreadProjectionAccessPolicy::default();
     let validator = FakeReplyTargetBindingValidator::default();
     let service = OutboundPolicyService::new(&store, &access_policy, &validator);
@@ -704,7 +721,7 @@ async fn communication_delivery_revoked_target_records_sanitized_failure_without
 
 #[tokio::test]
 async fn communication_delivery_exact_owner_validation_rejects_target_substitution() {
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_outbound_store();
     let access_policy = FakeThreadProjectionAccessPolicy::default();
     let validator = FakeReplyTargetBindingValidator::default();
     let service = OutboundPolicyService::new(&store, &access_policy, &validator);
@@ -743,7 +760,7 @@ async fn communication_delivery_exact_owner_validation_rejects_target_substituti
 
 #[tokio::test]
 async fn communication_delivery_validator_can_enforce_prompt_actor_context() {
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_outbound_store();
     let access_policy = FakeThreadProjectionAccessPolicy::default();
     let validator = FakeReplyTargetBindingValidator::default();
     let service = OutboundPolicyService::new(&store, &access_policy, &validator);
@@ -794,7 +811,7 @@ async fn communication_delivery_validator_can_enforce_prompt_actor_context() {
 
 #[tokio::test]
 async fn communication_delivery_actor_and_modality_forwarded_through_lowering() {
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_outbound_store();
     let access_policy = FakeThreadProjectionAccessPolicy::default();
     let validator = FakeReplyTargetBindingValidator::default();
     let service = OutboundPolicyService::new(&store, &access_policy, &validator);
@@ -821,7 +838,7 @@ async fn communication_delivery_actor_and_modality_forwarded_through_lowering() 
     let OutboundDeliveryDecision::Authorized { attempt, target } = decision else {
         panic!("expected authorized delivery");
     };
-    assert_eq!(attempt.status, OutboundDeliveryStatus::Pending);
+    assert_eq!(attempt.status, OutboundDeliveryStatus::Prepared);
     assert_eq!(target.target(), &reply_ref("reply:requested"));
     assert_eq!(validator.calls(), 1);
     assert_eq!(
@@ -836,7 +853,7 @@ async fn communication_delivery_actor_and_modality_forwarded_through_lowering() 
 
 #[tokio::test]
 async fn communication_delivery_validator_can_enforce_requested_modality() {
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_outbound_store();
     let access_policy = FakeThreadProjectionAccessPolicy::default();
     let validator = FakeReplyTargetBindingValidator::default();
     let service = OutboundPolicyService::new(&store, &access_policy, &validator);
@@ -877,7 +894,7 @@ async fn communication_delivery_validator_can_enforce_requested_modality() {
 
 #[tokio::test]
 async fn communication_delivery_scope_candidate_mismatch_rejects_before_validator_io() {
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_outbound_store();
     let access_policy = FakeThreadProjectionAccessPolicy::default();
     let validator = FakeReplyTargetBindingValidator::default();
     let service = OutboundPolicyService::new(&store, &access_policy, &validator);

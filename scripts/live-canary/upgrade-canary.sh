@@ -48,16 +48,16 @@ common_env=(
 echo "[upgrade-canary] building previous release"
 (
   cd "${PREVIOUS_DIR}"
-  cargo build --no-default-features --features libsql
-  env "${common_env[@]}" cargo test --features libsql --test config_round_trip -- --nocapture
+  cargo build
+  env "${common_env[@]}" cargo test --test config_round_trip -- --nocapture
 )
 
 echo "[upgrade-canary] building current checkout"
 (
   cd "${CURRENT_DIR}"
-  cargo build --no-default-features --features libsql
-  env "${common_env[@]}" cargo test --features libsql --test config_round_trip -- --nocapture
-  env "${common_env[@]}" cargo test --features libsql --test workspace_integration -- --nocapture
+  cargo build
+  env "${common_env[@]}" cargo test --test config_round_trip -- --nocapture
+  env "${common_env[@]}" cargo test --test workspace_integration -- --nocapture
 )
 
 echo "[upgrade-canary] completed"

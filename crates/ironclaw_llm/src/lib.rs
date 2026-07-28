@@ -1,4 +1,5 @@
 //! LLM integration for the agent.
+// arch-exempt: large_file, provider service remains centralized pending crate split, plan #6175
 //!
 //! Supports multiple backends:
 //! - **NEAR AI** (default): Session token or API key auth via Chat Completions API
@@ -18,7 +19,6 @@ pub mod circuit_breaker;
 pub(crate) mod codex_auth;
 mod codex_chatgpt;
 pub mod config;
-pub mod costs;
 pub mod error;
 pub mod failover;
 pub(crate) mod gemini_oauth;
@@ -42,6 +42,7 @@ pub mod runtime;
 pub mod session;
 pub mod smart_routing;
 mod token_refreshing;
+pub mod trace_binding;
 // arch-exempt: scaffolding, Phase A helpers awaiting first per-provider caller, plan #4522
 // Remove the allow once any production call site references these items.
 #[allow(dead_code)]
@@ -50,7 +51,7 @@ pub mod tool_schema;
 pub mod transcription;
 mod url_check;
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 
 #[cfg(test)]
@@ -66,7 +67,7 @@ pub use config::{
     BedrockConfig, CacheRetention, GeminiOauthConfig, LlmBackendKind, LlmConfig, NearAiConfig,
     OAUTH_PLACEHOLDER, OpenAiCodexConfig, RegistryProviderConfig,
 };
-pub use error::{LlmConfigError, LlmError};
+pub use error::{LlmConfigError, LlmError, UNCONFIGURED_PROVIDER_ID};
 pub use failover::{CooldownConfig, FailoverProvider};
 pub(crate) use gemini_oauth::GeminiOauthProvider;
 pub use host::{
@@ -79,16 +80,16 @@ pub use openai_codex_provider::OpenAiCodexProvider;
 pub use openai_codex_session::{DeviceCodeStart, OpenAiCodexSessionManager};
 pub use provider::sanitize_tool_messages;
 pub use provider::{
-    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, ImageUrl,
-    LlmProvider, ModelMetadata, ReasoningDetail, ReasoningDetails, Role, ToolCall,
-    ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, ToolResult,
+    ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, ContentPart,
+    FinishReason, ImageUrl, LlmProvider, ModelMetadata, ReasoningDetail, ReasoningDetails, Role,
+    ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, ToolResult,
     generate_tool_call_id, normalized_model_override,
 };
 pub use reasoning::{
-    ActionPlan, Reasoning, ReasoningContext, RespondOutput, RespondResult, ResponseAnomaly,
-    ResponseMetadata, SILENT_REPLY_TOKEN, TOOL_INTENT_NUDGE, TRUNCATED_TOOL_CALL_NOTICE,
-    TokenUsage, ToolSelection, is_silent_reply, llm_signals_tool_intent,
-    user_signals_execution_intent,
+    ActionPlan, CommunicationPresentationPolicy, Reasoning, ReasoningContext, RespondOutput,
+    RespondResult, ResponseAnomaly, ResponseMetadata, SILENT_REPLY_TOKEN, TOOL_INTENT_NUDGE,
+    TRUNCATED_TOOL_CALL_NOTICE, TokenUsage, ToolSelection, is_silent_reply,
+    llm_signals_tool_intent, user_signals_execution_intent,
 };
 pub use reasoning::{
     clean_response, contains_codex_text_tool_call_syntax,

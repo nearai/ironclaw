@@ -1,7 +1,6 @@
 ---
 paths:
   - "crates/**/*.rs"
-  - "src/**/*.rs"
 ---
 # Type Placement — One Definition, Owned by Its Contract
 
@@ -23,9 +22,10 @@ Placement decision, in order:
    concept: `ironclaw_turns`, `ironclaw_threads`, `ironclaw_resources`,
    `ironclaw_events`, `ironclaw_run_state`, `ironclaw_host_api`, ...
 3. **API contract type** (request/response/config for a trait or HTTP surface)
-   → the crate that **defines the trait/route** (e.g. `RebornServicesApi`
-   types live in `ironclaw_product_workflow`). Both sides of the boundary
-   import from the contract owner.
+   → the crate that **defines the contract**. ProductSurface DTOs and
+   descriptors live in `ironclaw_product`; host caller/error vocabulary lives
+   in `ironclaw_host_api`; route-only wire types live in `ironclaw_webui`.
+   Consumers import from the contract owner.
 4. **Cross-domain primitive** (identity newtypes, paths, hashing, attachment
    format, timezone) → `ironclaw_common`. This is the ONLY thing common
    accepts.
@@ -84,11 +84,26 @@ Resolution order for an existing mirror:
    new owner fields flow downstream with zero intermediate edits.
 3. **Subtractive** (withholds fields) → keep the mirror; it is a redaction
    boundary and MUST stay manual so new sensitive fields do not auto-flow.
-4. `pub use` is legitimate ONLY at an architecture-mandated contract facade
-   (e.g. `product_workflow`, whose downstream is banned from depending on
-   lower crates) — never as a path-preservation shim or dependency dodge.
+4. `pub use` is legitimate only at an architecture-mandated contract facade;
+   never use it as a path-preservation shim or dependency dodge.
    This is the same exception CLAUDE.md's "no `pub use` re-exports unless
    exposing to downstream consumers" already draws.
+
+## Relocating a shared module — update imports, don't leave a re-export
+
+When a type or module used by several crates has to move to a lower crate so
+they can all reach it (the canonical case: a pure primitive shared across
+layers moves into `ironclaw_common`, and CLAUDE.md already permits *depending on
+`common`* from anywhere), **move it and update every consumer's import to the
+new path**. Do NOT leave a `pub use old_path::* ` shim in the original crate to
+preserve `old_crate::thing` call sites — that shim is exactly the
+path-preservation re-export §-item-1 and item-4 above forbid. A plain private
+`use new_crate::module as old_name;` alias at a call site is fine (it is an
+import, not a re-export); a crate-root `pub use` that keeps the old public path
+alive is not. Worked example: the LLM cost table moved
+`ironclaw_llm::costs` → `ironclaw_common::llm_costs`, and each consumer
+(`ironclaw_llm` providers, `ironclaw_runner`, `ironclaw_reborn_composition`,
+the root crate) had its import repointed — no shim was left behind.
 
 ## Duplicate detection — signatures, not names
 
@@ -138,8 +153,7 @@ out to be mocked seams).
 
 ## What this rule does NOT do
 
-Field-addition pain ("one new field touches trait + facade + wire + JS") is
-NOT a placement problem — those are distinct contract layers, each defined
-once. That cost is addressed by splitting `RebornServicesApi` into domain
-ports (JIT) and by the reborn-feature scaffold/recipes, not by moving types.
-Do not respond to that pain by relocating or merging types.
+Field-addition pain is a signal to reuse the ProductSurface conduits and
+descriptors before adding a new trait or facade layer. Distinct wire and
+domain types are still defined once at their contract owners; do not create
+mirrors or abstractions just to make field propagation feel uniform.

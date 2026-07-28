@@ -16,6 +16,13 @@ pub struct MemoryWriteOptions {
     pub changed_by: Option<String>,
 }
 
+impl MemoryWriteOptions {
+    pub fn set_changed_by(mut self, changed_by: impl Into<String>) -> Self {
+        self.changed_by = Some(changed_by.into());
+        self
+    }
+}
+
 /// Backend-facing options for a document write.
 #[derive(Debug, Clone, Default)]
 pub struct MemoryBackendWriteOptions {
@@ -42,6 +49,11 @@ impl MemoryBackendWriteOptions {
             metadata_overlay,
             prompt_safety_already_enforced: false,
         }
+    }
+
+    pub(crate) fn with_prompt_safety_already_enforced(mut self) -> Self {
+        self.prompt_safety_already_enforced = true;
+        self
     }
 }
 

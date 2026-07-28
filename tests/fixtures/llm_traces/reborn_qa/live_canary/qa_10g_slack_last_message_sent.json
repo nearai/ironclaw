@@ -1,0 +1,49 @@
+{
+  "model_name": "reborn-qa-qa_10g_slack_last_message_sent",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "What is the exact text of the most recent message I sent in the Slack conversation with ID SLACK_ID_REDACTED? Include the exact marker REBORN_QA_10G_LAST_SENT_1784642942705 in your answer."
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "What is the exact text of the most recent message I sent in the Slack conversati",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_c9dfa2e33414433ba806580c",
+            "name": "slack__get_conversation_history",
+            "arguments": {
+              "channel": "SLACK_ID_REDACTED",
+              "limit": 5
+            }
+          }
+        ],
+        "input_tokens": 17415,
+        "output_tokens": 80
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "What is the exact text of the most recent message I sent in the Slack conversati",
+        "min_message_count": 4
+      },
+      "response": {
+        "type": "text",
+        "content": "The most recent message you sent in that conversation is:\n\n**LASTSENT_1784642942705**\n\nREBORN_QA_10G_LAST_SENT_1784642942705",
+        "input_tokens": 17982,
+        "output_tokens": 41
+      }
+    }
+  ],
+  "expects": {
+    "tools_used": [
+      "slack.get_conversation_history"
+    ]
+  }
+}

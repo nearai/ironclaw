@@ -36,11 +36,13 @@ use std::borrow::Cow;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use serde::de::{self, Visitor};
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
+use crate::RebornProfile;
 use crate::secrets_guard::{InlineSecretError, reject_inline_secret};
 
 /// API version stamp this crate understands. Mirrors
@@ -53,7 +55,7 @@ pub const REBORN_CONFIG_API_VERSION: &str = "ironclaw.runtime/v1";
 /// Every section is optional so an operator can ship a sparse file that
 /// overrides only the fields they care about; the rest stays at the
 /// CLI-shaped defaults baked into composition.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RebornConfigFile {
     /// API version. When set, must be parseable as `ironclaw.runtime/vN.M`
@@ -79,15 +81,17 @@ pub struct RebornConfigFile {
     /// to populate `mission` ahead of time.
     pub llm: Option<std::collections::BTreeMap<String, LlmSlotSelection>>,
     /// WebChat v2 HTTP gateway settings. Consumed by
-    /// `ironclaw_reborn_webui_ingress` when the standalone CLI's
+    /// `ironclaw_webui` when the standalone CLI's
     /// `serve` subcommand is invoked. Optional — sparse configs
     /// fall back to compiled defaults documented on each field.
     pub webui: Option<WebuiSection>,
-    /// Slack Events API host-beta route settings. Consumed by
-    /// `ironclaw-reborn serve` only when the binary is built with the
-    /// Slack host-beta feature. Secrets are env-only; this section stores
-    /// IDs and environment variable names.
+    /// Legacy-compatible Slack host enablement and rejected setup fields.
     pub slack: Option<SlackSection>,
+    /// Telegram host enablement. Runtime setup remains extension-owned.
+    pub telegram: Option<TelegramSection>,
+    /// Google OAuth client identity for Gmail/Calendar/Drive extensions.
+    /// Public identifiers only; the client secret stays in the secret store.
+    pub google: Option<GoogleSection>,
     /// Cost-based budgets. Composition seeds defaults on first reservation
     /// for each user/project; per-account overrides happen through the
     /// `budget_set` tool or CLI at runtime. Setting any limit to `0` means
@@ -96,9 +100,56 @@ pub struct RebornConfigFile {
     /// Trigger poller lifecycle settings. All fields optional; absent section
     /// leaves the worker at the compiled defaults in the composition root.
     pub trigger_poller: Option<TriggerPollerConfigSection>,
+    /// Memory profile binding (issue #3537). Maps memory capability profiles to
+    /// the extensions that serve them; absent section means every required
+    /// memory profile defaults to the host-bundled native provider. The
+    /// `profile_id` semantics (valid profile ids, fail-closed resolution,
+    /// production rejection of disabled/unverified bindings) are enforced by the
+    /// host-runtime binding resolver, which owns the profile catalog; this
+    /// config layer only does deployment-agnostic structural validation.
+    pub memory: Option<MemorySection>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+/// `[memory]` config section (issue #3537).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemorySection {
+    /// The memory provider extension id backing the always-on memory adapter:
+    /// `ironclaw.memory` (native, the default), `memory.disabled`, or a
+    /// third-party id (e.g. `mem0`). Omitted binds native. The provider is
+    /// chosen at compose time and is immutable at runtime (no runtime swap).
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Admin overrides authorizing an otherwise-rejected production binding,
+    /// scoped to `(extension_id, deployment_profile)`. Production composition
+    /// still applies the resolver's fail-closed policy.
+    #[serde(default)]
+    pub admin_overrides: Vec<MemoryAdminOverride>,
+    /// Connection base URL for a third-party memory provider that needs one,
+    /// used only when a binding selects that provider (issue #5264). For mem0 this
+    /// is the self-hosted mem0 OSS server URL (never the hosted cloud). There is
+    /// no default: mem0 stays off unless explicitly bound AND given a base URL
+    /// here or via the `MEMORY_MEM0_BASE_URL` env override; a bound-but-unset mem0
+    /// fails closed. An API key is OPTIONAL (a self-hosted server with
+    /// `AUTH_DISABLED=true` needs none); when required it is supplied via
+    /// `MEMORY_MEM0_API_KEY` (a secret — never the config file). Inert when no
+    /// third-party binding needs it.
+    #[serde(default)]
+    pub mem0_base_url: Option<String>,
+}
+
+/// One admin override authorizing a production memory binding, scoped to
+/// `(extension_id, deployment_profile)`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryAdminOverride {
+    /// Extension id the override authorizes.
+    pub extension_id: String,
+    /// Deployment-profile wire name (e.g. `production`) or `*` for all.
+    pub deployment_profile: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BootSection {
     /// Composition profile name. Stringly typed; composition validates
@@ -109,7 +160,7 @@ pub struct BootSection {
     pub profile: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct IdentitySection {
     pub tenant: Option<String>,
@@ -118,7 +169,29 @@ pub struct IdentitySection {
     pub default_project: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+impl IdentitySection {
+    pub fn set_tenant(mut self, tenant: impl Into<String>) -> Self {
+        self.tenant = Some(tenant.into());
+        self
+    }
+
+    pub fn set_default_agent(mut self, default_agent: impl Into<String>) -> Self {
+        self.default_agent = Some(default_agent.into());
+        self
+    }
+
+    pub fn set_default_owner(mut self, default_owner: impl Into<String>) -> Self {
+        self.default_owner = Some(default_owner.into());
+        self
+    }
+
+    pub fn set_default_project(mut self, default_project: impl Into<String>) -> Self {
+        self.default_project = Some(default_project.into());
+        self
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicySection {
     /// One of `local_single_user`, `hosted_multi_tenant`,
@@ -132,7 +205,7 @@ pub struct PolicySection {
     pub default_approval_policy: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DriversSection {
     /// Default driver name. Composition matches against
@@ -143,7 +216,7 @@ pub struct DriversSection {
     pub additional: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HarnessSection {
     /// Active harness id. Composition logs the value at boot; takes
@@ -151,7 +224,7 @@ pub struct HarnessSection {
     pub id: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunnerSection {
     pub heartbeat_interval_secs: Option<u64>,
@@ -172,7 +245,7 @@ pub struct RunnerSection {
     pub max_concurrent_conversation_runs: Option<u32>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SkillsSection {
     /// When false, regex activation criteria no longer auto-load full skill context.
@@ -186,6 +259,18 @@ pub enum StorageBackend {
     Postgres,
     #[doc(hidden)]
     Unknown(String),
+}
+
+impl Serialize for StorageBackend {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(match self {
+            Self::Postgres => "postgres",
+            Self::Unknown(candidate) => candidate,
+        })
+    }
 }
 
 impl<'de> Deserialize<'de> for StorageBackend {
@@ -222,7 +307,7 @@ impl<'de> Deserialize<'de> for StorageBackend {
 /// `url_env` and `secret_master_key_env` are environment variable NAMES, not
 /// credential-bearing values. The parser rejects raw URL-shaped values so
 /// credentials cannot be pasted into `config.toml`.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct StorageSection {
     /// Storage backend name. First production slice supports `"postgres"`.
@@ -246,7 +331,7 @@ pub struct StorageSection {
 /// environment variable, never a token value. The `secrets_guard`
 /// inline-secret check fires at parse time if an operator pastes a
 /// token-shaped string into either field documented as a name.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebuiSection {
     /// IP address the WebChat v2 listener binds. Default `127.0.0.1`
@@ -299,54 +384,72 @@ pub struct WebuiSection {
     pub canonical_host: Option<String>,
 }
 
-/// Slack Events API host-beta enablement.
-///
-/// `enabled = true` or `IRONCLAW_REBORN_SLACK_ENABLED=true` mounts the Slack
-/// route. The env var overrides only this enablement gate. Installation
-/// identifiers, channel routing, and Slack secrets are configured through the
-/// WebUI channel setup surface. The deprecated fields below are accepted as a
-/// startup migration bridge for existing `config.toml` files; secret values
-/// still stay env-only.
-#[derive(Debug, Clone, Default, Deserialize)]
+/// Public Google OAuth client configuration. Secret material deliberately has
+/// no representation in `config.toml`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoogleSection {
+    pub client_id: Option<String>,
+    pub redirect_uri: Option<String>,
+    pub hosted_domain_hint: Option<String>,
+}
+
+/// Slack listener enablement. The additional fields remain parseable so old
+/// files receive a precise startup migration error rather than an unknown-key
+/// parse failure; new setup belongs to the extension lifecycle.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SlackSection {
-    /// Explicit host-beta enablement gate. Omitted/false means the Slack route
-    /// is not mounted by `ironclaw-reborn serve` unless
-    /// `IRONCLAW_REBORN_SLACK_ENABLED` overrides it.
     pub enabled: Option<bool>,
-    /// Deprecated: adapter installation id for legacy config-backed setup.
     pub installation_id: Option<String>,
-    /// Deprecated: Slack team id for legacy config-backed setup.
     pub team_id: Option<String>,
-    /// Deprecated: Slack app id for legacy config-backed setup.
     pub api_app_id: Option<String>,
-    /// Deprecated: optional Slack user id for legacy static personal binding.
     pub slack_user_id: Option<String>,
-    /// Deprecated: Reborn user id for legacy Slack setup.
     pub user_id: Option<String>,
-    /// Deprecated: Reborn user id whose scope owns shared Slack channel turns.
     pub shared_subject_user_id: Option<String>,
-    /// Deprecated: channel-specific shared subjects for Slack app mentions.
     #[serde(default)]
     pub channel_routes: Vec<SlackChannelRouteSection>,
-    /// Deprecated: environment variable name containing the Slack signing secret.
     pub signing_secret_env: Option<String>,
-    /// Deprecated: environment variable name containing the Slack bot token.
     pub bot_token_env: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+impl SlackSection {
+    pub fn set_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = Some(enabled);
+        self
+    }
+
+    pub fn set_user_id(mut self, value: impl Into<String>) -> Self {
+        self.user_id = Some(value.into());
+        self
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SlackChannelRouteSection {
     pub channel_id: Option<String>,
     pub subject_user_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TelegramSection {
+    pub enabled: Option<bool>,
+}
+
+impl TelegramSection {
+    pub fn set_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = Some(enabled);
+        self
+    }
+}
+
 /// `[budget]` section. All limits in USD. **0 = unlimited.**
 ///
 /// Composition uses these as defaults when first seeding a user/project
 /// account. Runtime tools can install per-account overrides at any time.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BudgetSection {
     /// Per-user daily ceiling. Default in composition is `5.00`.
@@ -377,12 +480,84 @@ pub struct BudgetSection {
     pub overestimate_factor: Option<f64>,
 }
 
+impl BudgetSection {
+    pub fn set_user_daily_usd(mut self, user_daily_usd: impl Into<Option<f64>>) -> Self {
+        self.user_daily_usd = user_daily_usd.into();
+        self
+    }
+
+    pub fn set_project_daily_usd(mut self, project_daily_usd: impl Into<Option<f64>>) -> Self {
+        self.project_daily_usd = project_daily_usd.into();
+        self
+    }
+
+    pub fn set_mission_per_tick_usd(
+        mut self,
+        mission_per_tick_usd: impl Into<Option<f64>>,
+    ) -> Self {
+        self.mission_per_tick_usd = mission_per_tick_usd.into();
+        self
+    }
+
+    pub fn set_heartbeat_per_tick_usd(
+        mut self,
+        heartbeat_per_tick_usd: impl Into<Option<f64>>,
+    ) -> Self {
+        self.heartbeat_per_tick_usd = heartbeat_per_tick_usd.into();
+        self
+    }
+
+    pub fn set_routine_lightweight_usd(
+        mut self,
+        routine_lightweight_usd: impl Into<Option<f64>>,
+    ) -> Self {
+        self.routine_lightweight_usd = routine_lightweight_usd.into();
+        self
+    }
+
+    pub fn set_routine_standard_usd(
+        mut self,
+        routine_standard_usd: impl Into<Option<f64>>,
+    ) -> Self {
+        self.routine_standard_usd = routine_standard_usd.into();
+        self
+    }
+
+    pub fn set_background_job_default_usd(
+        mut self,
+        background_job_default_usd: impl Into<Option<f64>>,
+    ) -> Self {
+        self.background_job_default_usd = background_job_default_usd.into();
+        self
+    }
+
+    pub fn set_default_tz(mut self, default_tz: impl Into<String>) -> Self {
+        self.default_tz = Some(default_tz.into());
+        self
+    }
+
+    pub fn set_warn_at(mut self, warn_at: impl Into<Option<f64>>) -> Self {
+        self.warn_at = warn_at.into();
+        self
+    }
+
+    pub fn set_pause_at(mut self, pause_at: impl Into<Option<f64>>) -> Self {
+        self.pause_at = pause_at.into();
+        self
+    }
+
+    pub fn set_overestimate_factor(mut self, overestimate_factor: impl Into<Option<f64>>) -> Self {
+        self.overestimate_factor = overestimate_factor.into();
+        self
+    }
+}
+
 /// `[trigger_poller]` section. Controls the background trigger-poller worker.
 ///
 /// All fields are optional so a sparse or absent section is valid; the
 /// composition root applies its own compiled defaults for any field not set
 /// here. Env vars (`IRONCLAW_TRIGGER_POLLER_*`) override this section.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TriggerPollerConfigSection {
     /// Enable or disable the trigger poller. Default `false` (off) in
@@ -410,13 +585,48 @@ pub struct TriggerPollerConfigSection {
     pub tick_jitter_max_secs: Option<u64>,
 }
 
+impl TriggerPollerConfigSection {
+    pub fn set_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = Some(enabled);
+        self
+    }
+
+    pub fn set_poll_interval_secs(mut self, poll_interval_secs: u64) -> Self {
+        self.poll_interval_secs = Some(poll_interval_secs);
+        self
+    }
+
+    pub fn set_fires_per_tick(mut self, fires_per_tick: u32) -> Self {
+        self.fires_per_tick = Some(fires_per_tick);
+        self
+    }
+
+    pub fn set_max_concurrent_fires_per_trigger(
+        mut self,
+        max_concurrent_fires_per_trigger: u32,
+    ) -> Self {
+        self.max_concurrent_fires_per_trigger = Some(max_concurrent_fires_per_trigger);
+        self
+    }
+
+    pub fn set_startup_jitter_max_secs(mut self, startup_jitter_max_secs: u64) -> Self {
+        self.startup_jitter_max_secs = Some(startup_jitter_max_secs);
+        self
+    }
+
+    pub fn set_tick_jitter_max_secs(mut self, tick_jitter_max_secs: u64) -> Self {
+        self.tick_jitter_max_secs = Some(tick_jitter_max_secs);
+        self
+    }
+}
+
 /// One `[llm.<slot>]` entry. The slot name (typically `"default"` or
 /// `"mission"`) is the TOML table key.
 ///
 /// References a provider by `provider_id` (resolved against the merged
 /// `ProviderRegistry` in the composition root) and optionally overrides
 /// the provider's `default_model` and `api_key_env`.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LlmSlotSelection {
     /// Provider id from `providers.json` (built-in or user catalog).
@@ -503,6 +713,127 @@ impl DefaultLlmSlotUpdateSession {
         apply_llm_slot_field(&mut self.doc, "base_url", &update.base_url);
         write_edit_document(&self.path, &self.doc)
     }
+}
+
+/// Field update for one `[google]` string field — mirrors
+/// [`LlmSlotFieldUpdate`]'s Keep/Set/Remove shape.
+pub type GoogleFieldUpdate = LlmSlotFieldUpdate;
+
+/// Typed patch for `[google]` in the operator config file. Only the three
+/// literal-value fields; `client_secret` has no config.toml representation
+/// (see [`GoogleSection`]'s doc) and so has no update variant here.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GoogleOauthConfigUpdate {
+    pub client_id: GoogleFieldUpdate,
+    pub redirect_uri: GoogleFieldUpdate,
+    pub hosted_domain_hint: GoogleFieldUpdate,
+}
+
+/// Held exclusive lock plus editable config document for one `[google]`
+/// config update. Mirrors [`DefaultLlmSlotUpdateSession`].
+pub struct GoogleOauthConfigUpdateSession {
+    path: PathBuf,
+    doc: toml_edit::DocumentMut,
+    _lock_file: fs::File,
+}
+
+impl GoogleOauthConfigUpdateSession {
+    pub fn google_section(&self) -> Result<Option<GoogleSection>, RebornConfigFileUpdateError> {
+        let Some(table) = self
+            .doc
+            .get("google")
+            .and_then(toml_edit::Item::as_table_like)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(GoogleSection {
+            client_id: table
+                .get("client_id")
+                .and_then(toml_edit::Item::as_str)
+                .map(str::to_string),
+            redirect_uri: table
+                .get("redirect_uri")
+                .and_then(toml_edit::Item::as_str)
+                .map(str::to_string),
+            hosted_domain_hint: table
+                .get("hosted_domain_hint")
+                .and_then(toml_edit::Item::as_str)
+                .map(str::to_string),
+        }))
+    }
+
+    pub fn apply(
+        mut self,
+        update: &GoogleOauthConfigUpdate,
+    ) -> Result<(), RebornConfigFileUpdateError> {
+        apply_google_field(&mut self.doc, "client_id", &update.client_id);
+        apply_google_field(&mut self.doc, "redirect_uri", &update.redirect_uri);
+        apply_google_field(
+            &mut self.doc,
+            "hosted_domain_hint",
+            &update.hosted_domain_hint,
+        );
+        write_edit_document(&self.path, &self.doc)
+    }
+}
+
+/// Apply a typed patch to `[google]` while preserving unrelated TOML.
+pub fn update_google_oauth_config(
+    path: &Path,
+    update: &GoogleOauthConfigUpdate,
+) -> Result<(), RebornConfigFileUpdateError> {
+    begin_google_oauth_config_update(path)?.apply(update)
+}
+
+pub fn begin_google_oauth_config_update(
+    path: &Path,
+) -> Result<GoogleOauthConfigUpdateSession, RebornConfigFileUpdateError> {
+    let lock_file = acquire_update_lock(path)?;
+    let doc = load_edit_document(path)?;
+    Ok(GoogleOauthConfigUpdateSession {
+        path: path.to_path_buf(),
+        doc,
+        _lock_file: lock_file,
+    })
+}
+
+fn apply_google_field(doc: &mut toml_edit::DocumentMut, field: &str, update: &GoogleFieldUpdate) {
+    match update {
+        LlmSlotFieldUpdate::Keep => {}
+        LlmSlotFieldUpdate::Set(value) => {
+            ensure_google_table(doc);
+            doc["google"][field] = toml_edit::value(value);
+        }
+        LlmSlotFieldUpdate::Remove => {
+            ensure_google_table(doc);
+            if let Some(table) = doc["google"].as_table_like_mut() {
+                table.remove(field);
+            }
+        }
+    }
+}
+
+fn ensure_google_table(doc: &mut toml_edit::DocumentMut) {
+    let root = doc.as_table_mut();
+    if root.get("google").is_none_or(|item| !item.is_table()) {
+        root.insert("google", toml_edit::Item::Table(toml_edit::Table::new()));
+    }
+}
+
+/// Set `[slack].enabled` while preserving unrelated TOML — the one Slack
+/// field `config set` may still write (see `SlackSection`'s doc: every
+/// other Slack field is boot-rejected). Deliberately a plain function
+/// rather than a full update-session type like the LLM/Google ones: a
+/// single bool field has no `Keep`/`Remove` distinction worth modeling.
+pub fn update_slack_enabled(path: &Path, enabled: bool) -> Result<(), RebornConfigFileUpdateError> {
+    let _lock_file = acquire_update_lock(path)?;
+    let mut doc = load_edit_document(path)?;
+    let root = doc.as_table_mut();
+    if root.get("slack").is_none_or(|item| !item.is_table()) {
+        root.insert("slack", toml_edit::Item::Table(toml_edit::Table::new()));
+    }
+    doc["slack"]["enabled"] = toml_edit::value(enabled);
+    write_edit_document(path, &doc)
 }
 
 // ─── Errors ─────────────────────────────────────────────────────────────────
@@ -828,6 +1159,20 @@ impl RebornConfigFile {
                 validate_env_var_reference("slack.bot_token_env", bot_token_env, attributed_path)?;
             }
         }
+        if let Some(google) = &self.google {
+            if let Some(client_id) = &google.client_id {
+                check_non_empty_trimmed(Cow::Borrowed("google.client_id"), client_id)?;
+            }
+            if let Some(redirect_uri) = &google.redirect_uri {
+                check_non_empty_trimmed(Cow::Borrowed("google.redirect_uri"), redirect_uri)?;
+            }
+            if let Some(hosted_domain_hint) = &google.hosted_domain_hint {
+                check_non_empty_trimmed(
+                    Cow::Borrowed("google.hosted_domain_hint"),
+                    hosted_domain_hint,
+                )?;
+            }
+        }
         if let Some(budget) = &self.budget {
             if let Some(tz) = &budget.default_tz {
                 check(Cow::Borrowed("budget.default_tz"), tz)?;
@@ -887,6 +1232,43 @@ impl RebornConfigFile {
                     found: format!("warn_at={w}, pause_at={p}"),
                     reason: "pause_at must be >= warn_at".to_string(),
                 });
+            }
+        }
+        // Memory binding (issue #3537). Structural + deployment-agnostic checks
+        // only: fail-closed production policy is owned by the host-runtime
+        // binding resolver (it knows the active deployment profile).
+        if let Some(memory) = &self.memory {
+            if let Some(provider) = &memory.provider {
+                check_non_empty_trimmed(Cow::Borrowed("memory.provider"), provider)?;
+            }
+            for (idx, over) in memory.admin_overrides.iter().enumerate() {
+                check_non_empty_trimmed(
+                    Cow::Owned(format!("memory.admin_overrides[{idx}].extension_id")),
+                    &over.extension_id,
+                )?;
+                check_non_empty_trimmed(
+                    Cow::Owned(format!("memory.admin_overrides[{idx}].deployment_profile")),
+                    &over.deployment_profile,
+                )?;
+                if !is_valid_memory_deployment_profile(&over.deployment_profile) {
+                    return Err(RebornConfigFileError::InvalidField {
+                        path: path_str(),
+                        field: format!("memory.admin_overrides[{idx}].deployment_profile"),
+                        reason: "must be a deployment profile name (local-dev, \
+                                 local-dev-yolo, hosted-single-tenant, production, \
+                                 migration-dry-run) or '*'"
+                            .to_string(),
+                    });
+                }
+            }
+            // The mem0 base URL is operator-pasteable; run the same inline-secret
+            // guard as the sibling fields (a credentialed URL is rejected at
+            // transport construction, but a pasted secret must be caught here too),
+            // plus non-empty + trimmed: a blank (`"   "`) or whitespace-padded
+            // (`" https://h "`) value otherwise parses here and only fails later,
+            // opaquely, at transport construction during startup.
+            if let Some(base_url) = memory.mem0_base_url.as_deref() {
+                check_non_empty_trimmed(Cow::Borrowed("memory.mem0_base_url"), base_url)?;
             }
         }
         Ok(())
@@ -1043,6 +1425,14 @@ fn write_edit_document(
     Ok(())
 }
 
+/// Valid `deployment_profile` values for a memory admin override: a
+/// `RebornProfile` wire name, or `*` (all deployments). Delegates to
+/// [`RebornProfile`]'s `FromStr` so the accepted set stays the single
+/// source of truth in `profile.rs` rather than a duplicated literal list.
+fn is_valid_memory_deployment_profile(value: &str) -> bool {
+    value == "*" || RebornProfile::from_str(value).is_ok()
+}
+
 fn validate_api_version(found: &str, path: &Path) -> Result<(), RebornConfigFileError> {
     // Expected shape: `ironclaw.runtime/vMAJOR.MINOR` (minor optional).
     let Some(rest) = found.strip_prefix("ironclaw.runtime/v") else {
@@ -1142,7 +1532,6 @@ mod tests {
         assert!(cfg.skills.is_none());
         assert!(cfg.storage.is_none());
         assert!(cfg.llm.is_none());
-        assert!(cfg.slack.is_none());
     }
 
     #[test]
@@ -1239,8 +1628,6 @@ provider_id = "anthropic"
 model = "claude-3-5-sonnet-latest"
 api_key_env = "ANTHROPIC_API_KEY"
 
-[slack]
-enabled = true
 "#;
         let cfg = RebornConfigFile::parse_text(toml, &attributed()).expect("must parse");
         assert_eq!(cfg.api_version.as_deref(), Some("ironclaw.runtime/v1"));
@@ -1277,8 +1664,6 @@ enabled = true
         assert_eq!(default_slot.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
         let llm = cfg.llm.as_ref().unwrap();
         assert!(llm.contains_key("mission"));
-        let slack = cfg.slack.as_ref().expect("slack section present");
-        assert_eq!(slack.enabled, Some(true));
     }
 
     #[test]
@@ -1378,6 +1763,191 @@ model = "gpt-5-mini"
     }
 
     #[test]
+    fn google_oauth_update_writes_new_section() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+
+        update_google_oauth_config(
+            &path,
+            &GoogleOauthConfigUpdate {
+                client_id: GoogleFieldUpdate::Set("abc123.apps.googleusercontent.com".to_string()),
+                redirect_uri: GoogleFieldUpdate::Set(
+                    "http://127.0.0.1:3000/oauth/google/callback".to_string(),
+                ),
+                hosted_domain_hint: GoogleFieldUpdate::Keep,
+            },
+        )
+        .expect("update config");
+
+        let cfg = RebornConfigFile::load(&path)
+            .expect("valid config")
+            .expect("config present");
+        let google = cfg.google.expect("google section present");
+        assert_eq!(
+            google.client_id.as_deref(),
+            Some("abc123.apps.googleusercontent.com")
+        );
+        assert_eq!(
+            google.redirect_uri.as_deref(),
+            Some("http://127.0.0.1:3000/oauth/google/callback")
+        );
+        assert!(google.hosted_domain_hint.is_none());
+    }
+
+    #[test]
+    fn google_oauth_update_preserves_unrelated_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"
+[identity]
+tenant = "acme"
+
+[google]
+client_id = "old-id.apps.googleusercontent.com"
+redirect_uri = "http://127.0.0.1:3000/oauth/google/callback"
+"#,
+        )
+        .expect("write config");
+
+        update_google_oauth_config(
+            &path,
+            &GoogleOauthConfigUpdate {
+                client_id: GoogleFieldUpdate::Set("new-id.apps.googleusercontent.com".to_string()),
+                redirect_uri: GoogleFieldUpdate::Keep,
+                hosted_domain_hint: GoogleFieldUpdate::Keep,
+            },
+        )
+        .expect("update config");
+
+        let text = fs::read_to_string(&path).expect("read config");
+        assert!(text.contains("[identity]"), "config: {text}");
+        assert!(text.contains("tenant = \"acme\""), "config: {text}");
+        assert!(
+            text.contains("client_id = \"new-id.apps.googleusercontent.com\""),
+            "config: {text}"
+        );
+        assert!(
+            text.contains("redirect_uri = \"http://127.0.0.1:3000/oauth/google/callback\""),
+            "config: {text}"
+        );
+
+        // Idempotence: re-setting the same key with the same value must
+        // edit the existing `[google]` section in place, not append a
+        // second one.
+        update_google_oauth_config(
+            &path,
+            &GoogleOauthConfigUpdate {
+                client_id: GoogleFieldUpdate::Set("new-id.apps.googleusercontent.com".to_string()),
+                redirect_uri: GoogleFieldUpdate::Keep,
+                hosted_domain_hint: GoogleFieldUpdate::Keep,
+            },
+        )
+        .expect("update config again with the same value");
+        let text_after_repeat = fs::read_to_string(&path).expect("read config");
+        assert_eq!(
+            text_after_repeat.matches("[google]").count(),
+            1,
+            "re-setting the same key must not duplicate the [google] section header: \
+             {text_after_repeat}"
+        );
+    }
+
+    #[test]
+    fn google_oauth_update_rejects_inline_secret_value_without_writing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        fs::write(&path, "[identity]\ntenant = \"acme\"\n").expect("write config");
+        let before = fs::read_to_string(&path).expect("read config");
+
+        let err = update_google_oauth_config(
+            &path,
+            &GoogleOauthConfigUpdate {
+                client_id: GoogleFieldUpdate::Set("sk-proj-1234567890abcdef1234567890".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect_err("inline secret should reject");
+
+        assert!(matches!(err, RebornConfigFileUpdateError::Validate { .. }));
+        assert_eq!(fs::read_to_string(&path).expect("read config"), before);
+    }
+
+    #[test]
+    fn google_oauth_config_session_reads_back_current_section() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        fs::write(
+            &path,
+            "[google]\nclient_id = \"abc.apps.googleusercontent.com\"\n",
+        )
+        .expect("write config");
+
+        let session = begin_google_oauth_config_update(&path).expect("open session");
+        let section = session
+            .google_section()
+            .expect("read section")
+            .expect("section present");
+        assert_eq!(
+            section.client_id.as_deref(),
+            Some("abc.apps.googleusercontent.com")
+        );
+    }
+
+    #[test]
+    fn update_slack_enabled_writes_new_section() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+
+        update_slack_enabled(&path, true).expect("update config");
+
+        let cfg = RebornConfigFile::load(&path)
+            .expect("valid config")
+            .expect("config present");
+        assert_eq!(
+            cfg.slack.expect("slack section present").enabled,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn update_slack_enabled_preserves_unrelated_config_and_flips_value() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        fs::write(
+            &path,
+            "[identity]\ntenant = \"acme\"\n\n[slack]\nenabled = true\n",
+        )
+        .expect("write config");
+
+        update_slack_enabled(&path, false).expect("update config");
+
+        let text = fs::read_to_string(&path).expect("read config");
+        assert!(text.contains("[identity]"), "config: {text}");
+        assert!(text.contains("tenant = \"acme\""), "config: {text}");
+        let cfg = RebornConfigFile::load(&path)
+            .expect("valid config")
+            .expect("config present");
+        assert_eq!(
+            cfg.slack.expect("slack section present").enabled,
+            Some(false)
+        );
+
+        // Idempotence: re-setting the same key with the same value must
+        // edit the existing `[slack]` section in place, not append a
+        // second one.
+        update_slack_enabled(&path, false).expect("update config again with the same value");
+        let text_after_repeat = fs::read_to_string(&path).expect("read config");
+        assert_eq!(
+            text_after_repeat.matches("[slack]").count(),
+            1,
+            "re-setting the same key must not duplicate the [slack] section header: \
+             {text_after_repeat}"
+        );
+    }
+
+    #[test]
     fn rejects_unknown_top_level_key() {
         let toml = r#"
 something_not_recognized = "foo"
@@ -1415,49 +1985,6 @@ api_key_env = "sk-proj-1234567890abcdef1234567890"
         assert!(
             rendered.contains("llm.default.api_key_env"),
             "slot-specific label should guide operator to the bad field: {rendered}"
-        );
-    }
-
-    #[test]
-    fn parses_legacy_slack_setup_fields() {
-        let toml = r#"
-[slack]
-enabled = true
-installation_id = "install-alpha"
-team_id = "T123"
-api_app_id = "A123"
-slack_user_id = "U123"
-user_id = "user:operator"
-shared_subject_user_id = "user:slack-shared"
-signing_secret_env = "IRONCLAW_REBORN_SLACK_SIGNING_SECRET"
-bot_token_env = "IRONCLAW_REBORN_SLACK_BOT_TOKEN"
-
-[[slack.channel_routes]]
-channel_id = "CENG"
-subject_user_id = "user:eng-team-agent"
-"#;
-        let cfg = RebornConfigFile::parse_text(toml, &attributed())
-            .expect("legacy Slack setup fields should remain parse-compatible");
-        let slack = cfg.slack.expect("slack section");
-        assert_eq!(slack.enabled, Some(true));
-        assert_eq!(slack.installation_id.as_deref(), Some("install-alpha"));
-        assert_eq!(slack.team_id.as_deref(), Some("T123"));
-        assert_eq!(slack.api_app_id.as_deref(), Some("A123"));
-        assert_eq!(slack.slack_user_id.as_deref(), Some("U123"));
-        assert_eq!(slack.user_id.as_deref(), Some("user:operator"));
-        assert_eq!(
-            slack.shared_subject_user_id.as_deref(),
-            Some("user:slack-shared")
-        );
-        assert_eq!(
-            slack.signing_secret_env.as_deref(),
-            Some("IRONCLAW_REBORN_SLACK_SIGNING_SECRET")
-        );
-        assert_eq!(slack.channel_routes.len(), 1);
-        assert_eq!(slack.channel_routes[0].channel_id.as_deref(), Some("CENG"));
-        assert_eq!(
-            slack.channel_routes[0].subject_user_id.as_deref(),
-            Some("user:eng-team-agent")
         );
     }
 
@@ -1604,36 +2131,6 @@ secret_master_key_env = "postgres://user:password.example.com/ironclaw"
         assert!(
             !err.to_string().contains("password"),
             "error must not echo credential-bearing value: {err}"
-        );
-    }
-
-    #[test]
-    fn rejects_inline_secret_in_legacy_slack_secret_env_name() {
-        let toml = r#"
-[slack]
-enabled = true
-signing_secret_env = "sk-proj-1234567890abcdef1234567890"
-"#;
-        let err = RebornConfigFile::parse_text(toml, &attributed())
-            .expect_err("legacy Slack env name must not accept raw secrets");
-        assert!(
-            err.to_string().contains("slack.signing_secret_env"),
-            "error should identify legacy Slack field: {err}"
-        );
-    }
-
-    #[test]
-    fn rejects_inline_secret_in_legacy_slack_bot_token_env_name() {
-        let toml = r#"
-[slack]
-enabled = true
-bot_token_env = "sk-proj-1234567890abcdef1234567890"
-"#;
-        let err = RebornConfigFile::parse_text(toml, &attributed())
-            .expect_err("legacy Slack bot token env name must not accept raw secrets");
-        assert!(
-            err.to_string().contains("slack.bot_token_env"),
-            "error should identify legacy Slack field: {err}"
         );
     }
 
@@ -1865,6 +2362,144 @@ tick_jitter_max_secs = 5
     }
 
     #[test]
+    fn memory_section_parses_provider_and_overrides() {
+        let toml = r#"
+[memory]
+provider = "mem0"
+
+[[memory.admin_overrides]]
+extension_id = "mem0"
+deployment_profile = "production"
+"#;
+        let cfg = RebornConfigFile::parse_text(toml, &attributed()).expect("memory section parses");
+        let memory = cfg.memory.as_ref().expect("memory section present");
+        assert_eq!(memory.provider.as_deref(), Some("mem0"));
+        assert_eq!(memory.admin_overrides.len(), 1);
+        assert_eq!(memory.admin_overrides[0].extension_id, "mem0");
+        assert_eq!(memory.admin_overrides[0].deployment_profile, "production");
+    }
+
+    #[test]
+    fn memory_absent_section_is_none() {
+        let cfg = RebornConfigFile::parse_text("", &attributed()).expect("empty config parses");
+        assert!(cfg.memory.is_none());
+    }
+
+    #[test]
+    fn memory_rejects_empty_provider() {
+        // `provider` is the extension id backing the always-on adapter
+        // (the v2 `profile_bindings[].extension_id` collapsed into it).
+        let toml = r#"
+[memory]
+provider = ""
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("empty provider must be rejected");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+    }
+
+    #[test]
+    fn memory_rejects_empty_override_extension_id() {
+        let toml = r#"
+[[memory.admin_overrides]]
+extension_id = ""
+deployment_profile = "production"
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("empty override extension_id must be rejected");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+    }
+
+    #[test]
+    fn memory_rejects_invalid_override_deployment_profile() {
+        let toml = r#"
+[[memory.admin_overrides]]
+extension_id = "acme.honcho"
+deployment_profile = "prod"
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("invalid deployment_profile must be rejected");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+        assert!(err.to_string().contains("deployment_profile"));
+    }
+
+    #[test]
+    fn memory_accepts_wildcard_override_deployment_profile() {
+        let toml = r#"
+[[memory.admin_overrides]]
+extension_id = "acme.honcho"
+deployment_profile = "*"
+"#;
+        let cfg = RebornConfigFile::parse_text(toml, &attributed())
+            .expect("wildcard deployment_profile accepted");
+        assert_eq!(
+            cfg.memory.unwrap().admin_overrides[0].deployment_profile,
+            "*"
+        );
+    }
+
+    #[test]
+    fn memory_rejects_inline_secret_in_mem0_base_url() {
+        // The mem0 base URL runs the same inline-secret guard as the sibling
+        // memory fields: a pasted API key (here an `sk-` token embedded in the
+        // URL) must be rejected rather than round-tripped through config/git.
+        let toml = r#"
+[memory]
+mem0_base_url = "https://mem0.example.com/?key=sk-proj-1234567890abcdef12345678"
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("an inline secret in mem0_base_url must be rejected");
+        assert!(matches!(err, RebornConfigFileError::InlineSecret { .. }));
+    }
+
+    #[test]
+    fn memory_rejects_blank_or_untrimmed_mem0_base_url() {
+        // A whitespace-only base URL must be rejected as empty at parse time, not
+        // round-tripped and deferred to an opaque transport-construction failure.
+        let blank = r#"
+[memory]
+mem0_base_url = "   "
+"#;
+        let err = RebornConfigFile::parse_text(blank, &attributed())
+            .expect_err("a whitespace-only mem0_base_url must be rejected");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+
+        // A URL padded with leading/trailing whitespace is rejected too: the pad
+        // would silently break URL parsing later.
+        let padded = r#"
+[memory]
+mem0_base_url = " https://mem0.example.com "
+"#;
+        let err = RebornConfigFile::parse_text(padded, &attributed())
+            .expect_err("an untrimmed mem0_base_url must be rejected");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+
+        // A clean, trimmed, secret-free URL still parses.
+        let ok = r#"
+[memory]
+mem0_base_url = "https://mem0.example.com"
+"#;
+        let cfg = RebornConfigFile::parse_text(ok, &attributed())
+            .expect("a clean mem0_base_url must parse");
+        assert_eq!(
+            cfg.memory.and_then(|m| m.mem0_base_url).as_deref(),
+            Some("https://mem0.example.com")
+        );
+    }
+
+    #[test]
+    fn memory_rejects_unknown_section_key() {
+        let toml = r#"
+[memory]
+provider = "ironclaw.memory"
+typo = true
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("deny_unknown_fields must catch typos in [memory]");
+        assert!(matches!(err, RebornConfigFileError::Toml { .. }));
+    }
+
+    #[test]
     fn trigger_poller_absent_section_yields_none() {
         let cfg = RebornConfigFile::parse_text("", &attributed()).expect("empty TOML must parse");
         assert!(cfg.trigger_poller.is_none());
@@ -1901,3 +2536,4 @@ not_a_field = true
         assert!(matches!(err, RebornConfigFileError::Toml { .. }));
     }
 }
+// arch-exempt: large_file, versioned config migration remains centralized, plan #6175

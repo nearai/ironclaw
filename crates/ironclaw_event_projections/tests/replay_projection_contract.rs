@@ -14,12 +14,16 @@ use ironclaw_events::{
     EventStreamKey, InMemoryDurableAuditLog, InMemoryDurableEventLog, ReadScope, RuntimeEvent,
     RuntimeEventId, RuntimeEventKind, UNCLASSIFIED_ERROR_KIND,
 };
+use ironclaw_filesystem::{
+    Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, ScopedFilesystem,
+};
 use ironclaw_host_api::{
     Action, ActionResultSummary, ActionSummary, AgentId, AuditEnvelope, AuditEventId, AuditStage,
-    CapabilityId, CapabilitySet, CorrelationId, DenyReason, ExtensionId, InvocationId, MountView,
-    ProcessId, ProjectId, ResourceScope, RuntimeKind, ScopedPath, TenantId, ThreadId, TrustClass,
-    UserId,
+    CapabilityId, CapabilitySet, CorrelationId, DenyReason, ExtensionId, InvocationId, MountAlias,
+    MountGrant, MountPermissions, MountView, ProcessId, ProjectId, ResourceScope, RuntimeKind,
+    ScopedPath, TenantId, ThreadId, TrustClass, UserId, VirtualPath,
 };
+use ironclaw_reborn_event_store::FilesystemDurableEventLog;
 
 #[test]
 fn audit_projection_stage_wire_strings_stay_compatible_with_audit_stage() {
@@ -1825,37 +1829,65 @@ async fn replay_projection_keeps_spawned_process_run_active_until_terminal_proce
 
 #[tokio::test]
 async fn replay_projection_orders_runs_by_recent_activity_descending() {
+    // Six invocations, not two. `RuntimeProjectionState::runs` is a `HashMap`,
+    // so with two entries its iteration order matches sorted order about half
+    // the time and this test passes by luck even when the sort is gone —
+    // mutation testing confirmed `sort_runs_for_projection` could be replaced
+    // with a no-op while the suite stayed green. Six entries make accidental
+    // agreement a 1-in-720 coincidence, and the UUIDs below are deliberately
+    // not in append order so hash order cannot trivially match it either.
     let log = Arc::new(InMemoryDurableEventLog::new());
     let service = ReplayEventProjectionService::new(Arc::clone(&log));
     let thread = ThreadId::new("thread-a").unwrap();
-    let older_invocation = InvocationId::parse("00000000-0000-4000-8000-000000000001").unwrap();
-    let newer_invocation = InvocationId::parse("ffffffff-ffff-4fff-8fff-ffffffffffff").unwrap();
-    let older_scope = scope_for_thread_with_invocation(thread.clone(), older_invocation);
-    let newer_scope = scope_for_thread_with_invocation(thread, newer_invocation);
     let capability = capability_id();
+    let invocations = [
+        "00000000-0000-4000-8000-000000000001",
+        "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        "7f7f7f7f-7f7f-4f7f-8f7f-7f7f7f7f7f7f",
+        "11111111-1111-4111-8111-111111111111",
+        "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "3a3a3a3a-3a3a-4a3a-8a3a-3a3a3a3a3a3a",
+    ]
+    .map(|raw| InvocationId::parse(raw).unwrap());
 
-    log.append(RuntimeEvent::dispatch_requested(
-        older_scope.clone(),
-        capability.clone(),
-    ))
-    .await
-    .unwrap();
-    log.append(RuntimeEvent::dispatch_requested(newer_scope, capability))
+    let mut scopes = Vec::new();
+    for invocation in &invocations {
+        let scope = scope_for_thread_with_invocation(thread.clone(), *invocation);
+        log.append(RuntimeEvent::dispatch_requested(
+            scope.clone(),
+            capability.clone(),
+        ))
         .await
         .unwrap();
+        scopes.push(scope);
+    }
 
     let snapshot = service
         .snapshot(ProjectionRequest {
-            scope: ProjectionScope::from_resource_scope(&older_scope),
+            scope: ProjectionScope::from_resource_scope(&scopes[0]),
             after: None,
             limit: 16,
         })
         .await
         .unwrap();
 
-    assert_eq!(snapshot.runs.len(), 2);
-    assert_eq!(snapshot.runs[0].invocation_id, newer_invocation);
-    assert_eq!(snapshot.runs[1].invocation_id, older_invocation);
+    assert_eq!(
+        snapshot.runs.len(),
+        invocations.len(),
+        "{:?}",
+        snapshot.runs
+    );
+    // Most recent activity first, so exactly the reverse of append order.
+    let expected = invocations.iter().rev().copied().collect::<Vec<_>>();
+    assert_eq!(
+        snapshot
+            .runs
+            .iter()
+            .map(|run| run.invocation_id)
+            .collect::<Vec<_>>(),
+        expected,
+        "runs must be ordered most-recent-first, not in HashMap iteration order"
+    );
 }
 
 #[tokio::test]
@@ -1901,7 +1933,7 @@ async fn replay_projection_output_does_not_expose_raw_runtime_details() {
 
 #[tokio::test]
 async fn replay_projection_errors_do_not_expose_backend_details() {
-    let service = ReplayEventProjectionService::new(Arc::new(FailingDurableEventLog));
+    let service = ReplayEventProjectionService::new(projection_source_failing_with_sentinels());
     let scope = scope_for_thread(ThreadId::new("thread-a").unwrap());
 
     let error = service
@@ -1927,42 +1959,49 @@ async fn replay_projection_errors_do_not_expose_backend_details() {
     assert!(message.contains("projection source failed"));
 }
 
-struct FailingDurableEventLog;
-
-#[async_trait]
-impl DurableEventLog for FailingDurableEventLog {
-    async fn append(
-        &self,
-        _event: RuntimeEvent,
-    ) -> Result<EventLogEntry<RuntimeEvent>, EventError> {
-        Err(EventError::DurableLog {
-            reason: "DATABASE_PROJECTION_SENTINEL /tmp/backend-private-path sk_live".to_string(),
-        })
-    }
-
-    async fn read_after_cursor(
-        &self,
-        _stream: &EventStreamKey,
-        _filter: &ReadScope,
-        _after: Option<EventCursor>,
-        _limit: usize,
-    ) -> Result<EventReplay<RuntimeEvent>, EventError> {
-        Err(EventError::DurableLog {
-            reason: "DATABASE_PROJECTION_SENTINEL /tmp/backend-private-path sk_live".to_string(),
-        })
-    }
-
-    async fn head_cursor(
-        &self,
-        _stream: &EventStreamKey,
-        _after: EventCursor,
-    ) -> Result<EventCursor, EventError> {
-        Err(EventError::DurableLog {
-            reason: "DATABASE_PROJECTION_SENTINEL /tmp/backend-private-path sk_live".to_string(),
-        })
-    }
+/// The real [`FilesystemDurableEventLog`] over a [`FaultInjecting`] backend
+/// armed to fail the replay `Tail` op with a backend reason that embeds
+/// sentinel tokens (a fake DB marker, a private host path, a secret-shaped
+/// string). Replaces the former whole-trait `FailingDurableEventLog` fake:
+/// the projection service now sanitizes an error produced by the *real*
+/// store's `FilesystemError -> EventError` mapping, whose `Backend` Display
+/// (`"filesystem backend error during {operation} at {path}: {reason}"`)
+/// threads the injected reason through `map_filesystem_tail_error` verbatim.
+/// This proves the projection boundary strips genuine backend detail the store
+/// actually surfaces, not just a fake's hand-returned string.
+fn projection_source_failing_with_sentinels()
+-> Arc<FilesystemDurableEventLog<FaultInjecting<InMemoryBackend>>> {
+    let backend = Arc::new(
+        FaultInjecting::new(InMemoryBackend::new()).with_fault(
+            Fault::on(FilesystemOperation::Tail)
+                .backend("DATABASE_PROJECTION_SENTINEL /tmp/backend-private-path sk_live"),
+        ),
+    );
+    // The filesystem log routes every stream through scoped paths under
+    // `/events`; grant the read/tail permissions the replay path needs.
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/events").expect("alias"),
+        VirtualPath::new("/events").expect("target"),
+        MountPermissions {
+            read: true,
+            write: true,
+            delete: false,
+            list: true,
+            execute: false,
+        },
+    )])
+    .expect("mount view");
+    Arc::new(FilesystemDurableEventLog::new(Arc::new(
+        ScopedFilesystem::with_fixed_view(backend, mounts),
+    )))
 }
 
+// domain-state fake, not an I/O fault — cannot move to
+// ironclaw_filesystem::FaultInjecting. Serves canned `entries` at fixed cursors
+// and records the `after` cursor of each `read_after_cursor` call to assert the
+// projection service's pagination/cursor-advance behavior. Those are
+// above-the-store observations (cursor arguments, not filesystem ops) that
+// FaultInjecting — which records only op+path — cannot reproduce.
 struct CountingDurableEventLog {
     entries: Vec<EventLogEntry<RuntimeEvent>>,
     reads: Mutex<Vec<Option<EventCursor>>>,
@@ -2063,12 +2102,15 @@ fn scope_for_thread_with_invocation(
 
 fn execution_context_for_scope(scope: ResourceScope) -> ironclaw_host_api::ExecutionContext {
     let context = ironclaw_host_api::ExecutionContext {
+        run_id: None,
+        origin: None,
         invocation_id: scope.invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,
         parent_process_id: None,
         tenant_id: scope.tenant_id.clone(),
         user_id: scope.user_id.clone(),
+        authenticated_actor_user_id: None,
         agent_id: scope.agent_id.clone(),
         project_id: scope.project_id.clone(),
         mission_id: scope.mission_id.clone(),
@@ -2433,6 +2475,12 @@ async fn replay_projection_updates_with_small_limit_handles_long_prefix() {
 /// the first `read_after_cursor(after=None, ..)` call and an empty page
 /// otherwise. Used for regressions that need to inject hand-built
 /// `RuntimeEvent`s that bypass the typed sanitizing constructors.
+//
+// domain-state fake, not an I/O fault — cannot move to
+// ironclaw_filesystem::FaultInjecting. Its whole purpose is to feed the
+// projection service hand-built events that bypass the typed sanitizing
+// constructors; the real store serializes/deserializes through that sanitizer,
+// so it structurally cannot carry these unsanitized records.
 struct StaticDurableEventLog {
     entries: Vec<EventLogEntry<RuntimeEvent>>,
 }

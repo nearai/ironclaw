@@ -32,6 +32,33 @@
 - [ ] Manual testing: <!-- describe what you tested -->
 - [ ] If a coding agent was used and supports it, `review-pr` or `pr-shepherd --fix` was run before requesting review
 
+## Test Strategy
+
+<!-- Complete every field. Use `Not applicable: <reason>` when a tier is not needed. See docs/internal/testing-playbook.md. -->
+
+User behavior:
+
+Risk areas:
+- [ ] Model behavior
+- [ ] Browser
+- [ ] Side effect
+- [ ] Persistence
+- [ ] Security or permissions
+- [ ] External provider
+- [ ] Cross-component behavior
+
+Tests added or updated:
+- Unit or contract:
+- Reborn integration:
+- Recorded fixture:
+- Browser E2E:
+- Backend or runtime:
+- Live canary:
+
+What the tests prove:
+
+Commands run:
+
 ## Security Impact
 
 <!-- Does this change affect: permissions, network calls, secrets, file access, tool execution, sandbox policy? If yes, describe. If no, write "None". -->

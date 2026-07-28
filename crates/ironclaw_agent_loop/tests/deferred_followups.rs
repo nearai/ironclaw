@@ -10,7 +10,7 @@ use ironclaw_turns::{
     run_profile::{LoopCancelReasonKind, LoopCancellationSignal, LoopRunInfoPort},
 };
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn cancellation_accessor_short_circuits_loop_when_ws13_lands() {
     let signal = LoopCancellationSignal {
         reason_kind: LoopCancelReasonKind::UserRequested,

@@ -627,10 +627,12 @@ mod tests {
             sink: &mut dyn RestrictedMutatorSink,
         ) {
             sink.add_milestone_metadata("source", "ignored-by-prompt-path".to_string());
-            let _ = sink.add_envelope_snippet(
+            if let Err(error) = sink.add_envelope_snippet(
                 "load-bearing snippet text".to_string(),
                 PatchOrdinalHint::Last,
-            );
+            ) {
+                tracing::debug!(?error, "hook failed to add envelope snippet");
+            }
         }
     }
 
@@ -684,7 +686,11 @@ mod tests {
             sink: &mut dyn RestrictedMutatorSink,
         ) {
             for snippet in &self.snippets {
-                let _ = sink.add_envelope_snippet(snippet.clone(), PatchOrdinalHint::Last);
+                if let Err(error) =
+                    sink.add_envelope_snippet(snippet.clone(), PatchOrdinalHint::Last)
+                {
+                    tracing::debug!(?error, "hook failed to add envelope snippet");
+                }
             }
         }
     }

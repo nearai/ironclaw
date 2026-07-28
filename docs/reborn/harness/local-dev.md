@@ -12,8 +12,9 @@ Current branch-local harness assets include:
 - `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs`;
 - E2E scenarios under `tests/e2e/scenarios/`;
 - replay fixtures under `tests/fixtures/llm_traces/`;
-- live/replay test guide at `tests/support/LIVE_TESTING.md`;
-- replay workflow at `.github/workflows/replay-gate.yml`.
+- the recorded-fixture gate in `.github/workflows/reborn-tests.yml`
+  (`Reborn QA recorded fixtures` + `scripts/ci/check-reborn-qa-fixtures.sh`),
+  which replaced the v1 `replay-gate.yml`.
 
 ## Goals
 

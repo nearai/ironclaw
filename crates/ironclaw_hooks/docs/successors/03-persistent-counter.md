@@ -329,7 +329,7 @@ backend, which is now the source of truth.
 
 - **Trait + in-memory + contract harness** (`ironclaw_hooks`, PR 1/4):
   the `predicate_state::contract` module + `predicate_backend_contract_test!`
-  macro behind the `contract-tests` feature.
+  macro behind the `test-support` feature.
 - **Postgres backend + contract + adversarial** (`ironclaw_hooks_postgres`,
   PR 2/4): env-gated on `IRONCLAW_HOOKS_POSTGRES_URL` / `DATABASE_URL`.
 - **libSQL backend + contract + adversarial** (`ironclaw_hooks_libsql`,
@@ -338,7 +338,6 @@ backend, which is now the source of truth.
   (`ironclaw_hooks_parity`, PR 4/4): one scripted sequence fed to all
   three backends with cross-assertion of identical observation logs;
   multi-host scenarios behind `--features integration`. The in-memory and
-  libSQL legs run unconditionally; the Postgres leg compiles under
-  `--features postgres` and runs only with a reachable DB URL (a
-  real-Postgres CI run is required to fully exercise the Postgres parity
-  leg before merge).
+  libSQL legs run unconditionally; the Postgres leg runs only with a
+  reachable DB URL (a real-Postgres CI run is required to fully exercise the
+  Postgres parity leg before merge).

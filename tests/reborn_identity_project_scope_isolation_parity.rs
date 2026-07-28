@@ -9,7 +9,7 @@ mod support;
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
     HostIdentityMessageContent, HostManagedModelMessageRole, HostManagedModelResponse,
     IdentityApplicability, IdentityFileName,
@@ -53,7 +53,7 @@ async fn reborn_identity_project_scope_isolation_parity() {
         RecordingTestCapabilityPort::echo(),
         project_alpha,
         identity_source.clone(),
-        ironclaw_product_adapters::ProductTriggerReason::DirectChat,
+        ironclaw_product::ProductTriggerReason::DirectChat,
         "reborn-test",
         "install-1",
         "alice",
@@ -69,7 +69,7 @@ async fn reborn_identity_project_scope_isolation_parity() {
         RecordingTestCapabilityPort::echo(),
         project_beta,
         identity_source.clone(),
-        ironclaw_product_adapters::ProductTriggerReason::DirectChat,
+        ironclaw_product::ProductTriggerReason::DirectChat,
         "reborn-test",
         "install-1",
         "alice",
@@ -148,7 +148,7 @@ async fn reborn_identity_project_scope_isolation_parity() {
     beta.shutdown().await;
 }
 
-fn system_prompt_text(request: &ironclaw_loop_support::HostManagedModelRequest) -> String {
+fn system_prompt_text(request: &ironclaw_loop_host::HostManagedModelRequest) -> String {
     request
         .messages
         .iter()

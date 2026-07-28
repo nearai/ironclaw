@@ -292,27 +292,36 @@ pub const AUXILIARY_REQUEST_TIMEOUT_SECS: u64 = 30;
 /// longer budget for large audio uploads.
 pub const TRANSCRIPTION_REQUEST_TIMEOUT_SECS: u64 = 120;
 
-/// Base reqwest builder carrying the timeout hygiene every LLM HTTP client
-/// shares: a total-request timeout, a connect-handshake cap, TCP keepalive, and
-/// a bounded idle connection pool.
+/// Base reqwest builder carrying the transport hygiene every LLM HTTP client
+/// shares: a connect-handshake cap, TCP keepalive, and a bounded idle
+/// connection pool.
 ///
-/// This is the single source of truth for those four settings — providers must
+/// This is the single source of truth for those settings — providers must
 /// build their client from this rather than re-applying the values inline, so
-/// the policy can only ever change in one place. The total request timeout is a
-/// parameter because it is legitimately per-call (a turn model stream and a
-/// one-shot OAuth token exchange should not share one budget); callers chain any
-/// site-specific options (`.redirect`, `.resolve_to_addrs`, `.default_headers`,
-/// …) onto the returned builder.
-///
-/// Pass [`DEFAULT_REQUEST_TIMEOUT_SECS`] for primary turn-model calls so the
-/// HTTP layer times out below the Reborn runner lease.
-pub fn hardened_client_builder(request_timeout_secs: u64) -> reqwest::ClientBuilder {
+/// the policy can only ever change in one place. Callers chain any site-specific
+/// options (`.redirect`, `.resolve_to_addrs`, `.default_headers`, …) onto the
+/// returned builder.
+fn hardened_client_builder_base() -> reqwest::ClientBuilder {
     use std::time::Duration;
     reqwest::Client::builder()
-        .timeout(Duration::from_secs(request_timeout_secs))
         .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
         .tcp_keepalive(Duration::from_secs(TCP_KEEPALIVE_SECS))
         .pool_idle_timeout(Duration::from_secs(POOL_IDLE_TIMEOUT_SECS))
+}
+
+/// Hardened client builder for one-shot requests with a total wall-clock
+/// timeout in addition to the shared transport bounds.
+pub fn hardened_client_builder(request_timeout_secs: u64) -> reqwest::ClientBuilder {
+    use std::time::Duration;
+    hardened_client_builder_base().timeout(Duration::from_secs(request_timeout_secs))
+}
+
+/// Hardened client builder for streaming responses whose health is measured by
+/// time-to-first-response and inter-event idle time rather than total wall time.
+/// The caller must apply those two bounds explicitly; a total request timeout
+/// would abort a healthy model that keeps producing output for a long answer.
+pub(crate) fn hardened_streaming_client_builder() -> reqwest::ClientBuilder {
+    hardened_client_builder_base()
 }
 
 /// LLM provider configuration.
@@ -456,6 +465,31 @@ impl LlmConfig {
                 .as_ref()
                 .map(|cfg| cfg.model.clone())
                 .unwrap_or_else(|| self.nearai.model.clone()),
+        }
+    }
+
+    /// Resolve the base URL of the backend `serve` actually boots with, when
+    /// the backend has one.
+    ///
+    /// Mirrors `active_model_name`'s per-backend dispatch. Exists so callers
+    /// outside this crate (the boot-time resolved-LLM debug trace, tests)
+    /// can observe the base URL without reaching into backend-specific
+    /// fields directly. `bedrock` and `gemini_oauth` authenticate via the AWS
+    /// credential chain / a fixed Google OAuth endpoint rather than an
+    /// operator-configurable base URL, so they return `None`.
+    pub fn active_base_url(&self) -> Option<String> {
+        match self.backend.as_str() {
+            "nearai" | "near_ai" | "near" => Some(self.nearai.base_url.clone()),
+            "bedrock" | "aws_bedrock" | "aws" | "gemini_oauth" | "gemini-oauth" => None,
+            "openai_codex" | "openai-codex" | "codex" => self
+                .openai_codex
+                .as_ref()
+                .map(|cfg| cfg.api_base_url.clone()),
+            _ => self
+                .provider
+                .as_ref()
+                .map(|cfg| cfg.base_url.clone())
+                .or_else(|| Some(self.nearai.base_url.clone())),
         }
     }
 }
@@ -698,5 +732,108 @@ mod tests {
         assert_eq!(cfg.client_id, "client-z");
         assert_eq!(cfg.session_path, PathBuf::from("/tmp/sess.json"));
         assert_eq!(cfg.token_refresh_margin_secs, 60);
+    }
+
+    /// Minimal `LlmConfig` with every optional backend-specific config left
+    /// `None` — the caller sets `backend` and populates whichever field the
+    /// case under test dispatches on.
+    fn base_llm_config(backend: &str) -> LlmConfig {
+        LlmConfig {
+            backend: backend.to_string(),
+            session: SessionConfig::default(),
+            nearai: NearAiConfig {
+                model: "test-model".to_string(),
+                cheap_model: None,
+                base_url: "https://cloud-api.near.ai".to_string(),
+                api_key: None,
+                fallback_model: None,
+                max_retries: 0,
+                circuit_breaker_threshold: None,
+                circuit_breaker_recovery_secs: 30,
+                response_cache_enabled: false,
+                response_cache_ttl_secs: 3600,
+                response_cache_max_entries: 1000,
+                failover_cooldown_secs: 300,
+                failover_cooldown_threshold: 3,
+                smart_routing_cascade: true,
+            },
+            provider: None,
+            bedrock: None,
+            gemini_oauth: None,
+            openai_codex: None,
+            request_timeout_secs: DEFAULT_REQUEST_TIMEOUT_SECS,
+            cheap_model: None,
+            smart_routing_cascade: true,
+            max_retries: 0,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 1000,
+        }
+    }
+
+    /// `active_base_url` dispatches per-backend, mirroring `active_model_name`:
+    /// nearai aliases resolve to the nearai base URL, bedrock/gemini_oauth
+    /// have none (fixed credential chain / OAuth endpoint), openai_codex
+    /// reads its own config (or `None` when unset), a registry-backed
+    /// provider reads its config, and an unknown backend with no provider
+    /// config falls back to the nearai base URL.
+    #[test]
+    fn active_base_url_dispatches_backend_aliases_and_fallbacks() {
+        for alias in ["nearai", "near_ai", "near"] {
+            let cfg = base_llm_config(alias);
+            assert_eq!(
+                cfg.active_base_url().as_deref(),
+                Some("https://cloud-api.near.ai")
+            );
+        }
+
+        for backend in [
+            "bedrock",
+            "aws_bedrock",
+            "aws",
+            "gemini_oauth",
+            "gemini-oauth",
+        ] {
+            let cfg = base_llm_config(backend);
+            assert_eq!(cfg.active_base_url(), None);
+        }
+
+        let mut cfg = base_llm_config("openai_codex");
+        cfg.openai_codex = Some(OpenAiCodexConfig::build(
+            None,
+            None,
+            Some("https://codex.example".to_string()),
+            None,
+            None,
+            None,
+        ));
+        assert_eq!(
+            cfg.active_base_url().as_deref(),
+            Some("https://codex.example")
+        );
+
+        let cfg_no_codex_config = base_llm_config("codex");
+        assert_eq!(cfg_no_codex_config.active_base_url(), None);
+
+        let mut cfg = base_llm_config("openai");
+        cfg.provider = Some(RegistryProviderConfig::generic(
+            ProviderProtocol::OpenAiCompletions,
+            "openai",
+            None,
+            "https://api.openai.com/v1",
+            "gpt-test",
+        ));
+        assert_eq!(
+            cfg.active_base_url().as_deref(),
+            Some("https://api.openai.com/v1")
+        );
+
+        let cfg_unknown_no_provider = base_llm_config("some_unknown_backend");
+        assert_eq!(
+            cfg_unknown_no_provider.active_base_url().as_deref(),
+            Some("https://cloud-api.near.ai")
+        );
     }
 }

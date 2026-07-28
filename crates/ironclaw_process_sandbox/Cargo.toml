@@ -4,16 +4,10 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-[dependencies]
-async-trait = "0.1"
-ironclaw_host_api = { path = "../ironclaw_host_api" }
-ironclaw_processes = { path = "../ironclaw_processes" }
-secrecy = "0.10"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-thiserror = "2"
-tokio = { version = "1", features = ["io-util", "macros", "process", "time"] }
+[package.metadata.ironclaw]
+layer = "runtimes"
 
-[dev-dependencies]
-tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt", "time"] }
+[dependencies]
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"

@@ -59,8 +59,8 @@ fn render_inference_payloads(
     out
 }
 
-/// Normalize the two nondeterministic values (clock, attachment date) — see
-/// module docs.
+/// Normalize the nondeterministic values (clock, attachment date, minted
+/// result refs) — see module docs.
 fn normalize_volatile(rendered: &str) -> String {
     let clock =
         regex::Regex::new(r"Current date/time at loop start: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z")
@@ -68,8 +68,15 @@ fn normalize_volatile(rendered: &str) -> String {
     let rendered = clock.replace_all(rendered, "Current date/time at loop start: <TIMESTAMP>");
     let attachment_date = regex::Regex::new(r"/attachments/\d{4}-\d{2}-\d{2}/")
         .expect("valid attachment-landing-date regex");
-    attachment_date
-        .replace_all(&rendered, "/attachments/<DATE>/")
+    let rendered = attachment_date.replace_all(&rendered, "/attachments/<DATE>/");
+    // Success observations carry the minted `result:<run>.<invocation>` ref
+    // (ToolObservationDetail::ResultReference); the ids are fresh per run.
+    let result_ref = regex::Regex::new(
+        r"result:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+    )
+    .expect("valid result-ref regex");
+    result_ref
+        .replace_all(&rendered, "result:<RESULT_REF>")
         .into_owned()
 }
 

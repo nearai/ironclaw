@@ -1,0 +1,11 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Slack get_conversation_info",
+  "description": "Retrieve one exact Slack conversation by its known conversation ID.",
+  "type": "object",
+  "properties": {
+    "channel": { "type": "string", "minLength": 1, "description": "Exact conversation ID (C… channel, D… DM, G…/mpdm group)." }
+  },
+  "required": ["channel"],
+  "additionalProperties": false
+}

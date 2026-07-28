@@ -384,6 +384,12 @@ pub(crate) enum GitHubAction {
         page: Option<u32>,
         limit: Option<u32>,
     },
+    #[serde(rename = "get_job_logs")]
+    GetJobLogs {
+        owner: String,
+        repo: String,
+        job_id: u64,
+    },
     #[serde(rename = "get_workflow_run_artifacts")]
     GetWorkflowRunArtifacts {
         owner: String,

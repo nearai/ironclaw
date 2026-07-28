@@ -2,14 +2,11 @@
 
 //! Reborn composition root.
 //!
-//! Two entry points:
+//! Main entry point:
 //!
-//! - [`build_reborn_services`] — substrate/product facades (host runtime,
-//!   turn coordinator, product auth). Useful when an outer harness wires the loop
-//!   drivers / turn-runner itself (e.g. v1 `AppBuilder`).
-//! - [`build_reborn_runtime`] — full runtime assembly: substrate + loop
-//!   driver registry + LLM model gateway (under `root-llm-provider`) +
-//!   turn-runner worker, spawned as one unit. This is the single entry
+//! - [`build_runtime`] — full runtime assembly: deployment config + loop
+//!   driver registry + LLM model gateway + turn-runner worker, spawned
+//!   as one unit. This is the single entry
 //!   point used by the standalone `ironclaw-reborn` binary and any
 //!   future Reborn ingress.
 //!
@@ -20,142 +17,114 @@
 
 use std::sync::Arc;
 
+mod admin_secrets;
+mod admin_token;
+mod admin_user_directory;
 #[cfg(test)]
 mod approval_test_support;
 mod automation;
-mod available_extensions;
-mod bundled_skills;
-#[cfg(feature = "slack-v2-host-beta")]
-mod channel_connection_resume;
-mod communication_context;
-mod default_system_prompt;
-mod error;
-mod extension_activation_credentials;
-mod extension_credential_requirements;
-mod extension_installation_store;
-mod extension_lifecycle;
-mod extension_lifecycle_capabilities;
+mod blocked_auth_resume;
+mod builtin_capability_policy;
 #[cfg(test)]
-mod extension_lifecycle_capabilities_auth_tests;
-mod extension_lifecycle_command;
+#[path = "extension_lifecycle_capabilities_auth_tests.rs"]
+mod composition_extension_lifecycle_auth_tests;
+pub mod deployment;
+mod error;
 mod factory;
-mod failure_lane;
-mod failure_summary;
-mod gsuite;
+mod google_oauth_secret_store;
 mod input;
-mod lifecycle;
 mod llm_admin;
 mod local_dev_authorization;
-mod local_dev_capability_policy;
 mod local_dev_mounts;
-mod local_runtime_profile;
-mod mcp;
-mod mcp_discovery;
+mod memory_binding;
+mod memory_provider_factory;
 mod observability;
+mod operator_tool_catalog;
 mod outbound;
-mod product_auth;
-mod product_live_adapters;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
+mod product_capability;
+mod product_surface;
 mod production_runtime_policy;
-mod profile;
 mod profile_approval_authorization;
-mod projection;
-pub use product_auth::api::auth_prompt::{
-    AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-mod delivered_gate_routing;
-#[cfg(feature = "slack-v2-host-beta")]
-mod host_ingress;
 mod readiness;
-mod retry_disposition;
+mod root;
 mod runtime;
 mod runtime_input;
 mod runtime_profile_approval_policy;
-mod skill_learning;
-mod skill_listing;
-#[cfg(feature = "slack-v2-host-beta")]
-mod slack_actor_identity;
-#[cfg(feature = "slack-v2-host-beta")]
-#[cfg(feature = "slack-v2-host-beta")]
-mod slack_channel_connection;
-#[cfg(feature = "slack-v2-host-beta")]
-mod slack_channel_routes;
-#[cfg(feature = "slack-v2-host-beta")]
-mod slack_connectable_channel;
-#[cfg(feature = "slack-v2-host-beta")]
-mod slack_delivery;
-#[cfg(feature = "slack-v2-host-beta")]
-mod slack_dm_open;
-#[cfg(feature = "slack-v2-host-beta")]
-mod slack_egress;
-#[cfg(feature = "slack-v2-host-beta")]
-mod slack_host_beta;
-#[cfg(feature = "slack-v2-host-beta")]
-mod slack_host_state;
-#[cfg(feature = "slack-v2-host-beta")]
-mod slack_outbound_targets;
-#[cfg(feature = "slack-v2-host-beta")]
-mod slack_pairing_notifier;
-#[cfg(feature = "slack-v2-host-beta")]
-mod slack_personal_binding;
-#[cfg(feature = "slack-v2-host-beta")]
-mod slack_personal_binding_pairing;
-#[cfg(feature = "slack-v2-host-beta")]
-mod slack_personal_binding_pairing_serve;
-#[cfg(feature = "slack-v2-host-beta")]
-mod slack_personal_binding_serve;
-#[cfg(feature = "slack-v2-host-beta")]
-pub mod slack_serve;
-#[cfg(feature = "slack-v2-host-beta")]
-mod slack_setup;
+mod storage_catalog;
 mod support;
 #[cfg(feature = "test-support")]
 pub mod test_support;
-mod trigger_poller;
-mod trigger_poller_trusted_submit;
+mod trigger_fire_access;
 mod turn_run_snapshot;
-mod web_access;
-mod webui;
-#[cfg(feature = "webui-v2-beta")]
-mod webui_body_limit;
-mod webui_extension_credentials;
-#[cfg(feature = "webui-v2-beta")]
-mod webui_operator_auth;
-#[cfg(feature = "webui-v2-beta")]
-mod webui_rate_limit;
-#[cfg(feature = "webui-v2-beta")]
-mod webui_route_match;
-#[cfg(feature = "webui-v2-beta")]
-mod webui_serve;
-#[cfg(feature = "webui-v2-beta")]
-mod webui_ws_origin;
 
-pub use automation::RebornAutomationProductFacade;
+pub use admin_token::AdminApiTokenMinter;
+pub use automation::service::RebornAutomationProductService;
+pub use automation::trigger_poller::PostSubmitDeliveryHook;
 pub use error::RebornBuildError;
-pub use extension_lifecycle_command::{
-    RebornExtensionLifecycleCommand, RebornExtensionLifecycleCommandError,
-    execute_reborn_extension_lifecycle_command, render_reborn_extension_lifecycle_response,
-};
 #[cfg(feature = "test-support")]
 pub use factory::AttachmentTestSupport;
 #[cfg(feature = "test-support")]
-pub use factory::RebornLocalDevApprovalTestParts;
-#[cfg(feature = "migration-support")]
-pub use factory::extension_installation_store_for_migration;
-pub use factory::{RebornServices, build_reborn_services, builtin_first_party_trust_policy};
-pub use failure_lane::{ALL_RUN_FAILURE_CATEGORIES, FailureLane, failure_lane};
-pub use failure_summary::reborn_failure_summary_for_category;
-pub use gsuite::{bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers};
-pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding};
-#[cfg(feature = "webui-v2-beta")]
-pub use ironclaw_auth::GoogleOAuthRouteConfig;
-pub use ironclaw_product_workflow::{
-    LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,
+pub use factory::ChannelHostAssemblyTestWiring;
+pub use factory::LOCAL_DEV_SECRETS_MASTER_KEY_PATH;
+#[cfg(feature = "test-support")]
+pub use factory::RebornApprovalTestParts;
+/// Crate-root alias for composition's own unit tests (the src `#[cfg(test)]`
+/// modules that build a production trust policy from the concrete inventory).
+#[cfg(test)]
+pub(crate) use factory::builtin_first_party_trust_policy;
+pub use factory::local_dev_db_path;
+pub use factory::open_local_dev_secret_store;
+/// Production first-party trust-policy builder over the neutral injected bundle
+/// set. Public so integration tests (which convert the concrete first-party
+/// inventory via the dev-dependency) can build the same trust policy the
+/// production binary composes at build time.
+pub use factory::production_first_party_trust_policy;
+pub use factory::{KeychainMasterKeyOutcome, provision_local_dev_keychain_master_key};
+pub use google_oauth_secret_store::{GoogleOauthSecretStore, GoogleOauthSecretStoreError};
+pub use input::{
+    ChannelExtensionBinding, OAuthClientConfig, RebornHostBindings, RebornRuntimeProcessBinding,
+};
+/// OAuth redirect-URI newtype re-exported for runtime input construction; the
+/// remaining product-auth contracts are named directly from `ironclaw_auth`.
+pub use ironclaw_auth::OAuthRedirectUri;
+#[cfg(any(test, feature = "test-support"))]
+pub use ironclaw_auth::{
+    AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountId, CredentialAccountLabel,
+    CredentialAccountStatus, CredentialOwnership, Timestamp,
+};
+pub use ironclaw_auth::{CredentialAccount, CredentialAccountSelectionRequest};
+pub use ironclaw_host_api::{
+    CapabilityId, HostApiError, NetworkScheme, NetworkTargetPattern, RuntimeCredentialRequirement,
+    RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeDispatchErrorKind,
+    SecretHandle,
+};
+pub use ironclaw_host_api::{
+    ExtensionId, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, VendorId,
+};
+pub use ironclaw_host_runtime::{
+    FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
+    FirstPartyCapabilityRequest, FirstPartyCapabilityResult, ProductAuthProviderRuntimePorts,
+};
+pub use ironclaw_product::PreferenceTargetCodec;
+/// Channel-adapter and codec contracts re-exported for the assembling
+/// binary's [`ChannelExtensionBinding`] construction.
+pub use ironclaw_product::{ChannelAdapter, NormalizedInboundMessage};
+pub use ironclaw_product::{
+    ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
+    RebornChannelConnectStrategy,
+};
+pub use ironclaw_product::{
+    LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleSearchExtensionSummary,
 };
-pub use ironclaw_reborn::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub use ironclaw_runner::failure_lane::{ALL_RUN_FAILURE_CATEGORIES, FailureLane, failure_lane};
+pub use ironclaw_runner::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
+// Re-exported for `ironclaw_reborn_cli` (`runtime/mod.rs` turn-failure display):
+// the CLI consumes composition as its facade and must not grow a direct
+// `ironclaw_runner` edge for one summary helper. All other run-failure
+// classifier items moved to `ironclaw_runner::{failure_lane, failure_summary,
+// retry_disposition}` with consumers repointed (no path-preservation shims).
+pub use ironclaw_runner::failure_summary::reborn_failure_summary_for_category;
 pub use ironclaw_runtime_policy::{
     ResolveRequest as RuntimePolicyResolveRequest, resolve as resolve_runtime_policy,
 };
@@ -165,36 +134,33 @@ pub use ironclaw_skills::{
 };
 pub use ironclaw_triggers::TriggerId;
 pub use ironclaw_turns::TurnStatus;
-#[cfg(feature = "root-llm-provider")]
-pub use llm_admin::llm_catalog::{
-    RebornLlmCatalogError, resolve_against_registry, resolve_llm_selection_against_catalog,
-    resolve_reborn_runtime_llm,
-};
-#[cfg(feature = "root-llm-provider")]
-pub use llm_admin::llm_config_service::{LlmReloadTrigger, RebornLlmConfigService};
-#[cfg(feature = "root-llm-provider")]
-pub use llm_admin::llm_key_store::{LlmKeyStore, LlmKeyStoreError};
-pub use llm_admin::nearai_mcp::{
-    NearAiMcpBootstrapConfig, NearAiMcpBootstrapConfigError, nearai_mcp_bootstrap_config_from_env,
-};
-#[cfg(feature = "openai-compat-beta")]
 pub use llm_admin::openai_compat_serve::build_openai_compat_route_mount;
-#[cfg(feature = "root-llm-provider")]
-pub use llm_admin::provider_admin::{
-    RebornModelRoutesState, RebornProviderAdmin, RebornProviderAdminError, RebornProviderInfo,
-    RebornProviderList, RebornProviderMetadata, RebornProviderSelection, RebornProviderStatus,
-    RebornProviderWriteOutcome, RebornV1State,
+pub use memory_binding::{memory_binding_diagnostics, resolve_memory_binding_policy};
+pub use memory_provider_factory::{
+    Mem0ConnectionConfig, MemoryLifecycleConsumers, MemoryProviderDeps, ResolvedMemoryProvider,
+    create_provider, memory_lifecycle_consumers, resolve_memory_provider,
 };
-#[cfg(feature = "root-llm-provider")]
-pub use llm_admin::provider_admin_product_command::RebornProviderAdminProductCommandService;
-#[cfg(feature = "root-llm-provider")]
-pub use llm_admin::provider_repo::{ProviderRepo, ProviderRepoError};
-pub use local_runtime_profile::{
-    RebornLocalRuntimeProfileError, RebornLocalRuntimeProfileOptions,
-    hosted_single_tenant_runtime_policy, hosted_single_tenant_volume_runtime_policy,
-    local_dev_runtime_policy, local_dev_yolo_runtime_policy, local_runtime_build_input,
+// Re-exported for the host-owned `ironclaw_webui::webui_v2_app`
+// (hoisted up from this crate): its bearer-auth middleware mints tenant-scoped
+// verified-bearer evidence for protected OpenAI-compatible mounts. Ingress must
+// not depend on `ironclaw_product` directly (architecture boundary), so
+// it reaches this helper through composition's facade.
+pub use deployment::{
+    RebornRuntimeProfileError, RebornRuntimeProfileOptions, hosted_single_tenant_runtime_policy,
+    hosted_single_tenant_volume_runtime_policy, local_dev_runtime_policy,
+    local_dev_yolo_runtime_policy, local_runtime_build_input,
     local_runtime_build_input_with_options,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use deployment::{local_dev_build_input, local_dev_build_input_with_profile};
+pub use ironclaw_extension_host::provider_identity::ProviderIdentityActorResolver;
+pub use ironclaw_host_api::{
+    RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
+    RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,
+    RebornUserIdentityBindingStore, RebornUserIdentityLookup, RebornUserIdentityLookupError,
+    installation_scoped_provider_user_id,
+};
+pub use ironclaw_product::mark_bearer_token_verified_for_tenant;
 pub use observability::budget::build_default_budget_accountant;
 pub use observability::budget_events::{BudgetEventObserver, TracingBudgetEventObserver};
 pub use observability::hooks::{
@@ -204,206 +170,46 @@ pub use observability::hooks::{
     build_hook_dispatcher_builder_factory_for_tenant, build_hook_projection_registry,
     tenant_extension_root,
 };
-pub use observability::operator_logs::{
-    OperatorLogLayer, capture_tracing_log, operator_log_buffer,
-};
 pub use observability::trajectory_observer::RebornTrajectoryObserver;
-pub use product_auth::api::auth::{
-    RebornAuthContinuationDispatcher, RebornAuthProductError, RebornCredentialLifecycleError,
-    RebornManualTokenChallenge, RebornManualTokenError, RebornManualTokenSetupRequest,
-    RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse, RebornOAuthCallbackError,
-    RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest, RebornOAuthCallbackResponse,
-    RebornProductAuthServicePorts, RebornProductAuthServices,
+pub use production_runtime_policy::RebornProductionRuntimePolicy;
+pub use readiness::{
+    RebornReadiness, RebornReadinessDiagnostic, RebornReadinessDiagnosticComponent,
+    RebornReadinessDiagnosticReason, RebornReadinessDiagnosticStatus, RebornReadinessState,
+    RebornServiceReadiness, RebornWorkerReadiness,
 };
-pub use product_live_adapters::{
+pub use root::product_live_adapters::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
     ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,
     ProductLivePlannedRuntimeAdapters, ProductLiveVisibleCapabilityRequestConfig,
     capability_allowlist, visible_capability_request_for_run,
 };
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-pub use production_runtime_policy::RebornProductionRuntimePolicy;
-pub use profile::{RebornCompositionProfile, RebornCompositionProfileParseError};
-pub use readiness::{
-    RebornFacadeReadiness, RebornReadiness, RebornReadinessDiagnostic,
-    RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
-    RebornReadinessDiagnosticStatus, RebornReadinessState, RebornWorkerReadiness,
-};
-pub use retry_disposition::{RetryDisposition, retry_disposition};
+pub use root::profile::{RebornCompositionProfile, RebornCompositionProfileParseError};
 #[cfg(any(test, feature = "test-support"))]
 pub use runtime::RebornTurnDriveOutcome;
 pub use runtime::{
     AssistantReply, ConversationId, RebornRuntime, RebornRuntimeError, RebornSkillActivation,
     RebornSkillActivationMode, RebornSkillAsset, RebornSkillBundle, RebornSkillExecutionPlan,
-    RebornSkillExecutionResult, RebornSkillSourceKind, build_reborn_runtime,
+    RebornSkillExecutionResult, RebornSkillSourceKind, blocked_auth_flow_canceller,
+    build_reborn_runtime, build_runtime, product_auth_challenge_provider,
 };
 pub use runtime_input::{
-    CredentialRefreshSettings, DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL,
-    DEFAULT_TURN_RUNNER_POLL_INTERVAL, PollSettings, RebornRuntimeIdentity, RebornRuntimeInput,
+    DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL, DEFAULT_TURN_RUNNER_POLL_INTERVAL,
+    KeepaliveSweepSettings, PollSettings, RebornRuntimeIdentity, RebornRuntimeInput,
     TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
-    TriggerFireAccessError, TriggerPollerSettings, TurnRunnerSettings,
+    TriggerFireAccessError, TriggerFireAccessGrant, TriggerFireAccessPolicy, TriggerPollerSettings,
+    TurnRunnerSettings,
 };
-#[cfg(feature = "root-llm-provider")]
 pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
-pub use skill_listing::{RebornSkillListError, list_reborn_local_skills};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack_actor_identity::{
-    RebornUserIdentityLookup, RebornUserIdentityLookupError, SlackUserIdentityActorResolver,
-    slack_user_identity_provider_user_id,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack_channel_routes::{
-    SlackChannelRouteAdminRouteConfig, WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH,
-    WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH, WEBUI_V2_CHANNELS_SLACK_SUBJECTS_PATH,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack_connectable_channel::{
-    SlackOperatorRouteVisibility, build_webui_services_with_slack_host_beta_mounts,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack_delivery::{
-    NoopPostSubmitDeliveryHook, PostSubmitDeliveryHook, TriggeredRunDeliveryDriver,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack_delivery::{
-    SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
-    SlackFinalReplyDeliverySettings,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack_egress::{
-    SlackEgressCredential, SlackEgressCredentialError, SlackEgressCredentialProvider,
-    SlackProtocolHttpEgress, StaticSlackEgressCredentialProvider,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack_host_beta::{
-    SlackHostBetaBuildError, SlackHostBetaChannelRoute, SlackHostBetaConfig,
-    SlackHostBetaConfigInput, SlackHostBetaLegacySetup, SlackHostBetaMounts,
-    SlackHostBetaRuntimeConfig, build_slack_events_route_mount,
-    build_slack_events_route_mount_with_actor_user_resolver, build_slack_host_beta_mounts,
-    build_slack_host_beta_runtime_mounts, build_triggered_run_delivery_hook,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack_personal_binding::{
-    RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
-    RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
-    SlackPersonalBindingInstallation, SlackPersonalBindingPrincipal, SlackPersonalUserBindingError,
-    SlackPersonalUserBindingRequest, SlackPersonalUserBindingService,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack_personal_binding_pairing::{
-    IssuedSlackPersonalBindingPairingChallenge, SlackPairingActorResolver,
-    SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingChallengeStore,
-    SlackPersonalBindingPairingCode, SlackPersonalBindingPairingError,
-    SlackPersonalBindingPairingNotification, SlackPersonalBindingPairingNotifier,
-    SlackPersonalBindingPairingService,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack_personal_binding_pairing_serve::{
-    SlackPersonalBindingPairingRedeemResponse, SlackPersonalBindingPairingRouteConfig,
-    WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack_personal_binding_serve::{
-    SLACK_PERSONAL_BINDING_OAUTH_CALLBACK_PATH, SLACK_PERSONAL_BINDING_OAUTH_START_PATH,
-    SlackPersonalBindingAuthorizationUrl, SlackPersonalBindingOAuthClient,
-    SlackPersonalBindingOAuthError, SlackPersonalBindingOAuthIdentity,
-    SlackPersonalBindingRouteConfig, SlackPersonalBindingRouteConfigError,
-    SlackPersonalBindingStartResponse,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack_serve::{
-    SLACK_EVENTS_PATH, SlackEventsRouteState, SlackEventsWebhookDispatcher,
-    SlackInstallationSelector, SlackTeamId, slack_events_route_descriptors,
-    slack_events_route_mount,
-};
-pub use web_access::register_bundled_web_access_first_party_handlers;
-pub use webui::{RebornWebuiBundle, build_webui_services};
-#[cfg(feature = "webui-v2-beta")]
-pub use webui_rate_limit::RateLimitConfigError;
-#[cfg(feature = "webui-v2-beta")]
-pub use webui_serve::{
-    ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount,
-    WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, WebuiServeConfigError,
-    WebuiServeError, WebuiV2App, webui_v2_app, webui_v2_app_with_lifecycle,
-};
 
 /// Re-exported identity vocabulary host binaries need to construct
 /// public runtime/WebUI types whose signatures mention a host-api identity.
 /// Kept narrow on purpose — the composition CLAUDE.md says "Expose
-/// facade-shaped handles only"; these four newtypes are the host-identity
-/// facade.
+/// facade-shaped handles only"; these host-api identity types are the
+/// host-identity facade.
 pub mod host_api {
-    pub use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
-}
-
-#[cfg(all(feature = "webui-v2-beta", feature = "postgres"))]
-pub use ironclaw_reborn::local_trigger_access::RebornFilesystemLocalTriggerAccessStore;
-/// Reborn-owned local trigger-fire access store, re-exported so host
-/// binaries reach it through this composition facade instead of taking a
-/// direct `ironclaw_reborn` dependency (the
-/// `reborn_cli_binary_crate_stays_separate_from_v1_root` architecture
-/// boundary forbids that). The store is a reborn-owned repository. Local-dev
-/// callers use [`open_local_trigger_access_store`]; hosted-single-tenant
-/// callers use the filesystem-backed store through the host filesystem
-/// abstraction.
-#[cfg(feature = "webui-v2-beta")]
-pub use ironclaw_reborn::local_trigger_access::{
-    LocalTriggerAccessReconciliation, LocalTriggerAccessRole, LocalTriggerAccessSeed,
-    LocalTriggerAccessSource, LocalTriggerAccessStore, RebornLibSqlLocalTriggerAccessStore,
-    RebornLocalTriggerAccessStoreError,
-};
-
-#[cfg(feature = "webui-v2-beta")]
-struct LocalTriggerAccessFireChecker {
-    store: std::sync::Arc<dyn LocalTriggerAccessStore>,
-}
-
-#[cfg(feature = "webui-v2-beta")]
-impl LocalTriggerAccessFireChecker {
-    fn new(store: std::sync::Arc<dyn LocalTriggerAccessStore>) -> Self {
-        Self { store }
-    }
-}
-
-/// Wrap a backend-neutral local trigger access store as the runtime fire-time
-/// authorizer.
-#[cfg(feature = "webui-v2-beta")]
-pub fn local_trigger_access_fire_checker(
-    store: std::sync::Arc<dyn LocalTriggerAccessStore>,
-) -> std::sync::Arc<dyn runtime_input::TriggerFireAccessChecker> {
-    std::sync::Arc::new(LocalTriggerAccessFireChecker::new(store))
-}
-
-#[cfg(feature = "webui-v2-beta")]
-#[async_trait::async_trait]
-impl runtime_input::TriggerFireAccessChecker for LocalTriggerAccessFireChecker {
-    async fn check_trigger_fire_access(
-        &self,
-        request: runtime_input::TriggerFireAccessCheck,
-    ) -> Result<runtime_input::TriggerFireAccessDecision, runtime_input::TriggerFireAccessError>
-    {
-        self.store
-            .has_active_local_access(
-                &request.tenant_id,
-                &request.creator_user_id,
-                request.agent_id.as_ref(),
-                request.project_id.as_ref(),
-            )
-            .await
-            .map_err(|error| runtime_input::TriggerFireAccessError::Unavailable {
-                reason: error.to_string(),
-            })
-            .map(|allowed| {
-                if allowed {
-                    runtime_input::TriggerFireAccessDecision::Allowed
-                } else {
-                    runtime_input::TriggerFireAccessDecision::Denied {
-                        reason: "trigger creator does not have active local access for this scope"
-                            .to_string(),
-                    }
-                }
-            })
-    }
+    pub use ironclaw_host_api::{
+        AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
+    };
 }
 
 /// Canonical Reborn identity resolver vocabulary (issue #4381): the one
@@ -415,7 +221,6 @@ impl runtime_input::TriggerFireAccessChecker for LocalTriggerAccessFireChecker {
 /// `ironclaw_reborn_identity` directly. The concrete filesystem-backed store
 /// stays private to this composition layer (composition CLAUDE.md: "keep
 /// lower substrate handles private").
-#[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_reborn_identity::{
     ExternalSubjectId, IdentityKeyError, ProviderInstanceId, ProviderKind, RebornIdentityError,
     RebornIdentityResolver, ResolveExternalIdentity, SurfaceKind,
@@ -431,7 +236,7 @@ pub use ironclaw_reborn_identity::{
 /// function exists only so tests (and downstream integration crates via
 /// `test-support`) can build a resolver without standing up a full runtime.
 /// Gated so it ships zero bytes in production binaries.
-#[cfg(all(feature = "webui-v2-beta", any(test, feature = "test-support")))]
+#[cfg(any(test, feature = "test-support"))]
 pub fn open_reborn_identity_resolver(
     tenant_id: &ironclaw_host_api::TenantId,
 ) -> std::sync::Arc<dyn RebornIdentityResolver> {
@@ -449,110 +254,21 @@ pub fn open_reborn_identity_resolver(
     let filesystem = std::sync::Arc::new(ironclaw_filesystem::ScopedFilesystem::with_fixed_view(
         root, view,
     ));
-    std::sync::Arc::new(
-        ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
-            filesystem,
-            tenant_id.clone(),
-            UserId::new("test-owner").expect("user"),
-            AgentId::new("test-agent").expect("agent"),
-            None,
-        ),
-    )
-}
-
-/// Open the reborn-owned local trigger access store on the substrate DB at
-/// `path`, creating the parent directory and running its idempotent
-/// migrations.
-#[cfg(feature = "webui-v2-beta")]
-pub async fn open_local_trigger_access_store(
-    path: &std::path::Path,
-) -> Result<std::sync::Arc<RebornLibSqlLocalTriggerAccessStore>, RebornLocalTriggerAccessStoreError>
-{
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|err| RebornLocalTriggerAccessStoreError::Backend(err.to_string()))?;
-    }
-    let db = std::sync::Arc::new(
-        libsql::Builder::new_local(path)
-            .build()
-            .await
-            .map_err(|err| RebornLocalTriggerAccessStoreError::Backend(err.to_string()))?,
-    );
-    Ok(std::sync::Arc::new(
-        RebornLibSqlLocalTriggerAccessStore::open(db).await?,
+    std::sync::Arc::new(ironclaw_reborn_identity::RebornIdentityStore::new(
+        filesystem,
+        tenant_id.clone(),
+        UserId::new("test-owner").expect("user"), // safety: test-support-only static valid ID
+        AgentId::new("test-agent").expect("agent"), // safety: test-support-only static valid ID
+        None,
     ))
-}
-
-#[cfg(all(test, feature = "webui-v2-beta"))]
-mod webui_user_access_checker_tests {
-    use super::*;
-    use crate::runtime_input::{TriggerFireAccessCheck, TriggerFireAccessDecision};
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
-
-    #[tokio::test]
-    async fn user_store_trigger_fire_checker_uses_exact_seeded_scope() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let store = open_local_trigger_access_store(&root.path().join("reborn-local-dev.db"))
-            .await
-            .expect("open local trigger access store");
-        let tenant_id = TenantId::new("checker-tenant").expect("tenant id");
-        let user_id = UserId::new("checker-user").expect("user id");
-        let other_user_id = UserId::new("checker-other-user").expect("user id");
-        let agent_id = AgentId::new("checker-agent").expect("agent id");
-        let project_id = ProjectId::new("checker-project").expect("project id");
-
-        store
-            .seed_local_access(LocalTriggerAccessSeed {
-                tenant_id: &tenant_id,
-                user_id: &user_id,
-                agent_id: Some(&agent_id),
-                project_id: Some(&project_id),
-                role: LocalTriggerAccessRole::Owner,
-                source: LocalTriggerAccessSource::LocalDevEnvBootstrap,
-            })
-            .await
-            .expect("seed local access");
-
-        let checker = local_trigger_access_fire_checker(store);
-
-        let allowed = checker
-            .check_trigger_fire_access(TriggerFireAccessCheck {
-                tenant_id: tenant_id.clone(),
-                creator_user_id: user_id,
-                agent_id: Some(agent_id.clone()),
-                project_id: Some(project_id.clone()),
-                trigger_id: TriggerId::new(),
-                fire_slot: chrono::Utc::now(),
-            })
-            .await
-            .expect("check access");
-        assert_eq!(allowed, TriggerFireAccessDecision::Allowed);
-
-        let denied = checker
-            .check_trigger_fire_access(TriggerFireAccessCheck {
-                tenant_id,
-                creator_user_id: other_user_id,
-                agent_id: Some(agent_id),
-                project_id: Some(project_id),
-                trigger_id: TriggerId::new(),
-                fire_slot: chrono::Utc::now(),
-            })
-            .await
-            .expect("check access");
-        assert!(matches!(
-            denied,
-            TriggerFireAccessDecision::Denied { reason }
-                if reason.contains("does not have active local access")
-        ));
-    }
 }
 
 /// Reborn model purpose slot names exposed for diagnostic callers.
 ///
 /// This keeps CLI diagnostics on the composition boundary instead of making
-/// the CLI mirror `ironclaw_reborn::model_routes::ModelSlot`.
+/// the CLI mirror `ironclaw_runner::model_routes::ModelSlot`.
 pub fn reborn_model_slot_names() -> Vec<&'static str> {
-    ironclaw_reborn::model_routes::ModelSlot::all()
+    ironclaw_runner::model_routes::ModelSlot::all()
         .iter()
         .map(|slot| slot.as_str())
         .collect()
@@ -594,17 +310,17 @@ impl RebornRuntimeComponentStatus {
 
 /// Side-effect-free runtime readiness snapshot for diagnostic callers.
 pub fn reborn_runtime_readiness_snapshot() -> RebornRuntimeReadinessSnapshot {
-    let mut registry = ironclaw_reborn::driver_registry::DriverRegistry::new();
+    let mut registry = ironclaw_runner::driver_registry::DriverRegistry::new();
     let text_only_driver = RebornRuntimeComponentStatus::from_result(
-        ironclaw_reborn::planned_driver_factory::register_default_text_only_driver(
+        ironclaw_runner::planned_driver_factory::register_default_text_only_driver(
             &mut registry,
-            ironclaw_reborn::text_loop_driver::TextOnlyModelReplyDriverConfig::default(),
+            ironclaw_runner::text_loop_driver::TextOnlyModelReplyDriverConfig::default(),
         ),
     );
-    let family_registry = ironclaw_reborn::app_loop_family::build_loop_family_registry();
+    let family_registry = ironclaw_runner::app_loop_family::build_loop_family_registry();
     let planned_driver = match &family_registry {
         Ok(family_registry) => RebornRuntimeComponentStatus::from_result(
-            ironclaw_reborn::planned_driver_factory::register_default_planned_driver(
+            ironclaw_runner::planned_driver_factory::register_default_planned_driver(
                 &mut registry,
                 Arc::clone(family_registry),
             ),
@@ -613,7 +329,7 @@ pub fn reborn_runtime_readiness_snapshot() -> RebornRuntimeReadinessSnapshot {
     };
     let subagent_planned_driver = match family_registry {
         Ok(family_registry) => RebornRuntimeComponentStatus::from_result(
-            ironclaw_reborn::planned_driver_factory::register_subagent_planned_driver(
+            ironclaw_runner::planned_driver_factory::register_subagent_planned_driver(
                 &mut registry,
                 family_registry,
             ),
@@ -621,7 +337,7 @@ pub fn reborn_runtime_readiness_snapshot() -> RebornRuntimeReadinessSnapshot {
         Err(error) => RebornRuntimeComponentStatus::Failed(error.to_string()),
     };
     let planned_default_profile = RebornRuntimeComponentStatus::from_result(
-        ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver(),
+        ironclaw_runner::planned_driver_factory::default_planned_run_profile_resolver(),
     );
     RebornRuntimeReadinessSnapshot {
         text_only_driver,
@@ -632,53 +348,39 @@ pub fn reborn_runtime_readiness_snapshot() -> RebornRuntimeReadinessSnapshot {
 }
 
 use ironclaw_authorization::CapabilityLeaseError;
-#[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
-#[cfg(feature = "postgres")]
 use ironclaw_filesystem::PostgresRootFilesystem;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::ProcessBackendKind;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{
-    MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, SYSTEM_RESERVED_ID,
-    VirtualPath,
+    MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, VirtualPath,
 };
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_processes::{FilesystemProcessResultStore, FilesystemProcessStore};
-#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_processes::{ProcessResultStore, ProcessStore};
 use ironclaw_reborn_event_store::RebornEventStoreConfig;
 use ironclaw_reborn_event_store::RebornEventStoreError;
+use ironclaw_resources::FilesystemResourceGovernor;
 use ironclaw_resources::ResourceError;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_resources::{FilesystemResourceGovernorStore, PersistentResourceGovernor};
 use ironclaw_run_state::RunStateError;
 use ironclaw_secrets::SecretError;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_secrets::SecretMaterial;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_trust::TrustPolicy;
 use ironclaw_turns::TurnError;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::TurnRunWakeNotifier;
 use thiserror::Error;
 
-#[cfg(feature = "libsql")]
 pub type LibSqlProductionHostRuntimeServices = HostRuntimeServices<
     LibSqlRootFilesystem,
-    PersistentResourceGovernor<FilesystemResourceGovernorStore<LibSqlRootFilesystem>>,
-    FilesystemProcessStore<LibSqlRootFilesystem>,
-    FilesystemProcessResultStore<LibSqlRootFilesystem>,
+    FilesystemResourceGovernor<LibSqlRootFilesystem>,
+    ProcessStore<LibSqlRootFilesystem>,
+    ProcessResultStore<LibSqlRootFilesystem>,
 >;
 
-#[cfg(feature = "postgres")]
 pub type PostgresProductionHostRuntimeServices = HostRuntimeServices<
     PostgresRootFilesystem,
-    PersistentResourceGovernor<FilesystemResourceGovernorStore<PostgresRootFilesystem>>,
-    FilesystemProcessStore<PostgresRootFilesystem>,
-    FilesystemProcessResultStore<PostgresRootFilesystem>,
+    FilesystemResourceGovernor<PostgresRootFilesystem>,
+    ProcessStore<PostgresRootFilesystem>,
+    ProcessResultStore<PostgresRootFilesystem>,
 >;
 
 /// Consumer-store mount aliases that are tenant-rewritten by
@@ -686,14 +388,16 @@ pub type PostgresProductionHostRuntimeServices = HostRuntimeServices<
 /// `/tenants/<tenant>/users/<user>/<alias>` for the caller's scope, so
 /// two tenants sharing one underlying [`RootFilesystem`] cannot collide
 /// on identically-shaped paths.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 const PER_USER_ALIASES: &[&str] = &[
+    "/product-results",
     "/processes",
     "/secrets",
     "/authorization",
     "/outbound",
     "/run-state",
     "/approvals",
+    "/gate-records",
+    "/replay-payloads",
     "/threads",
     "/conversations",
     "/turns",
@@ -703,6 +407,11 @@ const PER_USER_ALIASES: &[&str] = &[
     "/skills",
     "/workspace",
 ];
+
+/// The canonical global `/system` subroots, each exposed as its own read-only
+/// alias resolving to the same tenant-independent `VirtualPath`. Single source
+/// for the mount-grant wiring and its resolution test so the two cannot drift.
+const SYSTEM_SUBROOTS: [&str; 3] = ["/system/settings", "/system/extensions", "/system/skills"];
 
 /// Per-invocation [`MountView`] used as the production resolver.
 ///
@@ -719,7 +428,6 @@ const PER_USER_ALIASES: &[&str] = &[
 /// `/tenants/__system__/users/__system__/<alias>`. Production code uses
 /// it for process-global records whose paths already encode per-tenant
 /// identity (event-log stream keys, conversation singleton state).
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub fn invocation_mount_view(
     scope: &ResourceScope,
 ) -> Result<MountView, ironclaw_host_api::HostApiError> {
@@ -729,22 +437,20 @@ pub fn invocation_mount_view(
     )
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-fn resource_scope_path_segment(value: &str) -> &str {
-    if value == SYSTEM_RESERVED_ID {
+pub(crate) fn resource_scope_path_segment(value: &str) -> &str {
+    if value == ironclaw_host_api::SYSTEM_RESERVED_ID {
         "__system__"
     } else {
         value
     }
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn invocation_mount_view_for_segments(
     tenant_id: &str,
     user_id: &str,
 ) -> Result<MountView, ironclaw_host_api::HostApiError> {
     let tenant_user_prefix = format!("/tenants/{tenant_id}/users/{user_id}");
-    let mut grants = Vec::with_capacity(PER_USER_ALIASES.len() + 2);
+    let mut grants = Vec::with_capacity(PER_USER_ALIASES.len() + 3);
     for alias in PER_USER_ALIASES {
         let target = format!("{tenant_user_prefix}{alias}");
         grants.push(MountGrant::new(
@@ -756,15 +462,31 @@ fn invocation_mount_view_for_segments(
     grants.push(MountGrant::new(
         MountAlias::new("/tenant-shared")?,
         VirtualPath::new(format!("/tenants/{tenant_id}/shared"))?,
+        // Broad tenant-shared storage gets read + write + list, but NOT delete:
+        // no tenant-shared consumer other than the identity store needs to
+        // remove records, so withholding delete here keeps the blast radius of
+        // a compromised writer from spanning every tenant-shared subtree.
         MountPermissions::read_write(),
     ));
-    #[cfg(feature = "slack-v2-host-beta")]
     grants.push(MountGrant::new(
-        MountAlias::new("/tenant-shared/slack-channel-routes")?,
-        VirtualPath::new(format!("/tenants/{tenant_id}/shared/slack-channel-routes"))?,
-        MountPermissions::read_only(),
+        // Delete authority is scoped to the identity subtree specifically: the
+        // Reborn identity store's admin user-directory needs it for the delete
+        // cascade (removing a user's identity / verified-email records) that
+        // lives under `/tenant-shared/reborn-identity/…`. Longest-prefix mount
+        // matching routes identity paths here and everything else to the
+        // delete-less grant above.
+        MountAlias::new("/tenant-shared/reborn-identity")?,
+        VirtualPath::new(format!("/tenants/{tenant_id}/shared/reborn-identity"))?,
+        MountPermissions::read_write_list_delete(),
     ));
-    for system_subroot in ["/system/settings", "/system/extensions", "/system/skills"] {
+    grants.push(MountGrant::new(
+        MountAlias::new("/extension-admin-configuration")?,
+        VirtualPath::new(format!(
+            "/tenants/{tenant_id}/shared/extension-admin-configuration"
+        ))?,
+        MountPermissions::read_write_list_delete(),
+    ));
+    for system_subroot in SYSTEM_SUBROOTS {
         grants.push(MountGrant::new(
             MountAlias::new(system_subroot)?,
             VirtualPath::new(system_subroot)?,
@@ -774,47 +496,10 @@ fn invocation_mount_view_for_segments(
     MountView::new(grants)
 }
 
-#[cfg(all(
-    any(feature = "libsql", feature = "postgres"),
-    feature = "slack-v2-host-beta"
-))]
-pub(crate) fn slack_host_state_mount_view(
-    scope: &ResourceScope,
-) -> Result<MountView, ironclaw_host_api::HostApiError> {
-    let tenant_id = resource_scope_path_segment(scope.tenant_id.as_str());
-    MountView::new(vec![
-        MountGrant::new(
-            MountAlias::new("/tenant-shared/slack-personal-binding")?,
-            VirtualPath::new(format!(
-                "/tenants/{tenant_id}/shared/slack-personal-binding"
-            ))?,
-            MountPermissions::read_write_list_delete(),
-        ),
-        MountGrant::new(
-            MountAlias::new("/tenant-shared/slack-channel-routes")?,
-            VirtualPath::new(format!("/tenants/{tenant_id}/shared/slack-channel-routes"))?,
-            MountPermissions::read_write_list_delete(),
-        ),
-        MountGrant::new(
-            MountAlias::new("/tenant-shared/slack-setup")?,
-            VirtualPath::new(format!("/tenants/{tenant_id}/shared/slack-setup"))?,
-            MountPermissions::read_write_list_delete(),
-        ),
-        MountGrant::new(
-            MountAlias::new("/engine/product_workflow/idempotency")?,
-            VirtualPath::new(format!(
-                "/tenants/{tenant_id}/shared/slack-product-workflow/idempotency"
-            ))?,
-            MountPermissions::read_write_list_delete(),
-        ),
-    ])
-}
-
 /// Wrap `root` in a tenant-aware [`ScopedFilesystem`] whose resolver is
 /// [`invocation_mount_view`]. The returned filesystem is the single
 /// production handle — every consumer-store call routes per-scope
 /// through this one instance.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub fn wrap_scoped<F>(root: Arc<F>) -> Arc<ScopedFilesystem<F>>
 where
     F: RootFilesystem,
@@ -823,7 +508,6 @@ where
 }
 
 /// libSQL substrate handles needed to build production host-runtime services.
-#[cfg(feature = "libsql")]
 pub struct LibSqlProductionSubstrateConfig<TPolicy, TWake>
 where
     TPolicy: TrustPolicy + 'static,
@@ -831,6 +515,10 @@ where
 {
     pub database: Arc<libsql::Database>,
     pub event_store: RebornEventStoreConfig,
+    /// Set this only when deployment guarantees exactly one runtime process, or
+    /// one elected runtime owner, is allowed to enforce resource quotas for this
+    /// database. The filesystem governor keeps in-process tallies as authority.
+    pub process_local_resource_governor_singleton: bool,
     pub secret_master_key: Option<SecretMaterial>,
     pub trust_policy: Arc<TPolicy>,
     pub runtime_policy: RebornProductionRuntimePolicy,
@@ -839,7 +527,6 @@ where
 }
 
 /// PostgreSQL substrate handles needed to build production host-runtime services.
-#[cfg(feature = "postgres")]
 pub struct PostgresProductionSubstrateConfig<TPolicy, TWake>
 where
     TPolicy: TrustPolicy + 'static,
@@ -847,6 +534,10 @@ where
 {
     pub pool: deadpool_postgres::Pool,
     pub event_store: RebornEventStoreConfig,
+    /// Set this only when deployment guarantees exactly one runtime process, or
+    /// one elected runtime owner, is allowed to enforce resource quotas for this
+    /// database. The filesystem governor keeps in-process tallies as authority.
+    pub process_local_resource_governor_singleton: bool,
     pub secret_master_key: Option<SecretMaterial>,
     pub trust_policy: Arc<TPolicy>,
     pub runtime_policy: RebornProductionRuntimePolicy,
@@ -901,7 +592,6 @@ pub enum RebornCompositionError {
 /// sequentially against the shared database. Earlier successful migrations are
 /// not rolled back if a later substrate fails; each migration is expected to be
 /// idempotent so callers can fix the underlying failure and retry composition.
-#[cfg(feature = "libsql")]
 pub async fn build_libsql_production_host_runtime_services<TPolicy, TWake>(
     config: LibSqlProductionSubstrateConfig<TPolicy, TWake>,
 ) -> Result<LibSqlProductionHostRuntimeServices, RebornCompositionError>
@@ -918,7 +608,6 @@ where
 /// sequentially against the shared database. Earlier successful migrations are
 /// not rolled back if a later substrate fails; each migration is expected to be
 /// idempotent so callers can fix the underlying failure and retry composition.
-#[cfg(feature = "postgres")]
 pub async fn build_postgres_production_host_runtime_services<TPolicy, TWake>(
     config: PostgresProductionSubstrateConfig<TPolicy, TWake>,
 ) -> Result<PostgresProductionHostRuntimeServices, RebornCompositionError>
@@ -935,7 +624,6 @@ where
 /// Callers are responsible for validating that production boot selected the
 /// PostgreSQL storage backend and that the URL came from an env-only config
 /// reference before passing it here.
-#[cfg(feature = "postgres")]
 pub fn open_reborn_postgres_pool(
     url: secrecy::SecretString,
 ) -> Result<deadpool_postgres::Pool, RebornCompositionError> {
@@ -944,7 +632,6 @@ pub fn open_reborn_postgres_pool(
 
 /// Open a PostgreSQL pool for Reborn production storage with an explicit
 /// maximum connection count.
-#[cfg(feature = "postgres")]
 pub fn open_reborn_postgres_pool_with_max_size(
     url: secrecy::SecretString,
     max_size: usize,
@@ -952,7 +639,7 @@ pub fn open_reborn_postgres_pool_with_max_size(
     Ok(ironclaw_reborn_event_store::open_postgres_pool_with_max_size(url, max_size)?)
 }
 
-#[cfg(all(test, any(feature = "libsql", feature = "postgres")))]
+#[cfg(test)]
 mod mount_view_tests {
     use super::*;
     use ironclaw_filesystem::{FilesystemError, FilesystemOperation, InMemoryBackend};
@@ -1023,73 +710,22 @@ mod mount_view_tests {
         );
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[test]
-    fn invocation_mount_view_exposes_slack_channel_routes_read_only() {
+    fn invocation_mount_view_routes_admin_configuration_to_tenant_shared_storage() {
         let scope = sample_scope();
         let view = invocation_mount_view(&scope).unwrap();
-        let (resolved, grant) = view
-            .resolve_with_grant(
-                &ScopedPath::new("/tenant-shared/slack-channel-routes/install/team/route.json")
+        let resolved = view
+            .resolve(
+                &ScopedPath::new("/extension-admin-configuration/groups/extension.slack.json")
                     .unwrap(),
             )
             .unwrap();
         assert_eq!(
             resolved.as_str(),
             &format!(
-                "/tenants/{}/shared/slack-channel-routes/install/team/route.json",
-                scope.tenant_id.as_str()
-            )
-        );
-        assert_eq!(grant.alias.as_str(), "/tenant-shared/slack-channel-routes");
-        assert_eq!(grant.permissions, MountPermissions::read_only());
-    }
-
-    #[cfg(feature = "slack-v2-host-beta")]
-    #[test]
-    fn slack_host_state_mount_view_grants_delete_only_to_slack_state_roots() {
-        let scope = sample_scope();
-        let view = slack_host_state_mount_view(&scope).unwrap();
-        for (alias, path, target) in [
-            (
-                "/tenant-shared/slack-channel-routes",
-                "/tenant-shared/slack-channel-routes/install/team/route.json",
-                "slack-channel-routes/install/team/route.json",
+                "/tenants/{}/shared/extension-admin-configuration/groups/extension.slack.json",
+                scope.tenant_id.as_str(),
             ),
-            (
-                "/tenant-shared/slack-setup",
-                "/tenant-shared/slack-setup/installation.json",
-                "slack-setup/installation.json",
-            ),
-            (
-                "/engine/product_workflow/idempotency",
-                "/engine/product_workflow/idempotency/actions/action.json",
-                "slack-product-workflow/idempotency/actions/action.json",
-            ),
-        ] {
-            let (resolved, grant) = view
-                .resolve_with_grant(&ScopedPath::new(path).unwrap())
-                .unwrap();
-            assert_eq!(
-                resolved.as_str(),
-                &format!("/tenants/{}/shared/{target}", scope.tenant_id.as_str())
-            );
-            assert_eq!(grant.alias.as_str(), alias);
-            assert_eq!(
-                grant.permissions,
-                MountPermissions::read_write_list_delete()
-            );
-        }
-        // /outbound is no longer in the slack-host-state mount; outbound state is
-        // served via the composition-owned per-user scoped filesystem instead.
-        assert!(
-            view.resolve(&ScopedPath::new("/outbound/deliveries/delivery.json").unwrap())
-                .is_err(),
-            "/outbound must not resolve through the slack-host-state mount after store unification"
-        );
-        assert!(
-            view.resolve(&ScopedPath::new("/tenant-shared/other.json").unwrap())
-                .is_err()
         );
     }
 
@@ -1113,7 +749,7 @@ mod mount_view_tests {
         // read-only alias and resolves to the same VirtualPath
         // regardless of tenant — system data is global, not
         // per-tenant.
-        for system_subroot in ["/system/settings", "/system/extensions", "/system/skills"] {
+        for system_subroot in SYSTEM_SUBROOTS {
             let resolved = view
                 .resolve(&ScopedPath::new(format!("{system_subroot}/foo")).unwrap())
                 .unwrap();
@@ -1206,12 +842,12 @@ mod mount_view_tests {
     }
 }
 
-#[cfg(all(test, any(feature = "libsql", feature = "postgres")))]
+#[cfg(test)]
 mod two_tenant_isolation_tests {
     //! Regression test for the cross-tenant collision finding from the
     //! 2026-05-17 serrrfirat review.
     //!
-    //! Drives the public `SecretStore` surface from two distinct
+    //! Drives the public `SecretStorePort` surface from two distinct
     //! `(tenant, user)` scopes that share identical agent/project/handle,
     //! against the production-shape `wrap_scoped`/`invocation_mount_view`
     //! wiring over an `InMemoryBackend`. Without per-tenant path
@@ -1226,15 +862,15 @@ mod two_tenant_isolation_tests {
     use super::*;
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{AgentId, InvocationId, ProjectId, SecretHandle, TenantId, UserId};
-    use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore, SecretsCrypto};
+    use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStorePort, SecretsCrypto};
     use secrecy::ExposeSecret;
 
     fn scope(tenant: &str, user: &str) -> ResourceScope {
         ResourceScope {
-            tenant_id: TenantId::new(tenant).unwrap(),
-            user_id: UserId::new(user).unwrap(),
+            tenant_id: TenantId::new(tenant).unwrap(), // safety: fixed-valid test fixture
+            user_id: UserId::new(user).unwrap(),       // safety: fixed-valid test fixture
             agent_id: Some(AgentId::new("github").unwrap()),
-            project_id: Some(ProjectId::new("default").unwrap()),
+            project_id: Some(ProjectId::new("default").unwrap()), // safety: fixed-valid test fixture
             mission_id: None,
             thread_id: None,
             invocation_id: InvocationId::new(),
@@ -1254,7 +890,7 @@ mod two_tenant_isolation_tests {
     async fn two_tenants_with_same_agent_project_handle_do_not_collide_on_put() {
         let backend = Arc::new(InMemoryBackend::new());
         let scoped = wrap_scoped(Arc::clone(&backend));
-        let store = FilesystemSecretStore::new(Arc::clone(&scoped), test_crypto());
+        let store = SecretStore::new(Arc::clone(&scoped), test_crypto());
 
         let handle = SecretHandle::new("oauth_token").unwrap();
         let scope_a = scope("tenant_a", "alice");
@@ -1286,5 +922,57 @@ mod two_tenant_isolation_tests {
         let lease_b = store.lease_once(&scope_b, &handle).await.unwrap();
         let material_b = store.consume(&scope_b, lease_b.id).await.unwrap();
         assert_eq!(material_b.expose_secret(), "bob-secret");
+    }
+}
+
+#[cfg(test)]
+mod gate_record_production_mount_tests {
+    //! Production-shape mount coverage for the `/gate-records` alias: drives the
+    //! `GateRecordStorePort` seam over the real `wrap_scoped`/`invocation_mount_view`
+    //! wiring. Pins two things: the alias is actually registered in
+    //! [`PER_USER_ALIASES`] (an unregistered alias fails every save with
+    //! `MountNotFound`, making the store unusable in production), and the
+    //! per-tenant path rewriting keeps identically-shaped refs from colliding
+    //! across tenants.
+    use super::*;
+    use ironclaw_filesystem::InMemoryBackend;
+    use ironclaw_host_api::{
+        GateRecord, GateRef, InvocationId, ProjectId, SafeSummary, TenantId, UserId,
+    };
+    use ironclaw_run_state::{GateRecordStore, GateRecordStorePort};
+
+    fn scope(tenant: &str, user: &str) -> ResourceScope {
+        ResourceScope {
+            tenant_id: TenantId::new(tenant).unwrap(), // safety: fixed-valid test fixture
+            user_id: UserId::new(user).unwrap(),       // safety: fixed-valid test fixture
+            agent_id: None,
+            project_id: Some(ProjectId::new("default").unwrap()), // safety: fixed-valid test fixture
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn gate_records_save_and_load_through_the_production_mount_view() {
+        let scoped = wrap_scoped(Arc::new(InMemoryBackend::new()));
+        let store = GateRecordStore::new(scoped);
+        let record = GateRecord::Approval {
+            summary: SafeSummary::new("awaiting decision").unwrap(), // safety: fixed-valid test fixture
+        };
+        let gate_ref = GateRef::new();
+        let scope_a = scope("tenant_a", "alice");
+
+        // The alias must resolve (a missing PER_USER_ALIASES entry fails here
+        // with MountNotFound), and the owner must read the record back.
+        store
+            .save(scope_a.clone(), gate_ref, record.clone())
+            .await
+            .unwrap(); // safety: test assertion on an in-memory store
+        assert_eq!(store.load(&scope_a, gate_ref).await.unwrap(), Some(record)); // safety: test assertion
+
+        // Structural tenant isolation: same ref, different tenant → unknown.
+        let scope_b = scope("tenant_b", "bob");
+        assert_eq!(store.load(&scope_b, gate_ref).await.unwrap(), None); // safety: test assertion
     }
 }

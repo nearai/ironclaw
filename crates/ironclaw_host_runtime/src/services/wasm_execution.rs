@@ -1,68 +1,22 @@
 use std::sync::Arc;
 
 use serde::Deserialize;
-use static_assertions::const_assert;
+#[cfg(test)]
 use tokio::sync::Semaphore;
 
-use super::runtime_adapters::wasm_error_kind;
+use super::wasm_blocking::run_wasm_execution_blocking;
+#[cfg(test)]
+use super::wasm_blocking::{
+    MAX_CONCURRENT_WASM_EXEC, MAX_CONCURRENT_WASM_PREPARE, WASM_EXEC_SEMAPHORE,
+    WASM_PREPARE_SEMAPHORE, WasmBlockingError, run_wasm_prepare_blocking,
+};
 use super::wasm_diagnostics::{log_wasm_guest_error, log_wasm_runtime_error};
 use super::{
     CapabilityId, DispatchError, PreparedWitTool, ResourceGovernor, ResourceReservationId,
-    ResourceUsage, RootFilesystem, RuntimeAdapterRequest, RuntimeAdapterResult,
-    RuntimeDispatchErrorKind, WasmError, WitToolExecution, WitToolHost, WitToolRequest,
-    WitToolRuntime,
+    ResourceUsage, RootFilesystem, RuntimeAdapterResult, RuntimeDispatchErrorKind,
+    RuntimeLaneRequest, WasmError, WitToolHost, WitToolRuntime,
 };
 use ironclaw_host_api::ResourceReceipt;
-
-/// Upper bound on WASM tool executions running concurrently inside
-/// `spawn_blocking`.
-///
-/// Each WASM tool call runs a synchronous wasmtime guest call. We offload it to
-/// the blocking thread pool (see [`execute_prepared_wasm`]) so it never parks a
-/// tokio *worker* thread, but the blocking pool is itself finite. Without a
-/// bound, a burst of concurrent turns (the incident: ~40 turns fanning out at
-/// once) could occupy every blocking thread, starving every other
-/// `spawn_blocking` user (DB, filesystem, etc.) and re-creating the runtime
-/// wedge one layer down. This semaphore caps in-flight native WASM executions
-/// well below the default blocking-pool ceiling (512) while staying far above
-/// steady-state demand, so normal load never waits and a storm degrades to
-/// queuing instead of pool exhaustion.
-const MAX_CONCURRENT_WASM_EXEC: usize = 64;
-
-// Enforce the bound invariant at compile time: it must be positive and stay
-// below tokio's default blocking-pool ceiling (512) so native WASM execution
-// can never monopolize the pool and starve other `spawn_blocking` users.
-// `const_assert!` is evaluated at compile time and cannot panic at runtime.
-const_assert!(MAX_CONCURRENT_WASM_EXEC > 0 && MAX_CONCURRENT_WASM_EXEC < 512);
-
-/// Upper bound on WASM component compilations running concurrently inside
-/// `spawn_blocking`.
-///
-/// Preparation (wasmtime `Component::new`) is capped at one quarter of the
-/// execution bound so that a cold-compile storm cannot starve already-prepared
-/// hot executions waiting on [`WASM_EXEC_SEMAPHORE`]. The two gates are
-/// independent, so total blocking-pool usage is bounded by their sum
-/// (16 + 64 = 80) — still far below tokio's default blocking-pool ceiling (512).
-const MAX_CONCURRENT_WASM_PREPARE: usize = 16;
-
-// Enforce the prepare bound at compile time: positive, smaller than the exec
-// bound (so compiles cannot crowd out hot executions), and far below the pool
-// ceiling. `const_assert!` is evaluated at compile time and cannot panic at runtime.
-const_assert!(
-    MAX_CONCURRENT_WASM_PREPARE > 0 && MAX_CONCURRENT_WASM_PREPARE < MAX_CONCURRENT_WASM_EXEC
-);
-
-/// Process-wide gate over concurrent native WASM execution. Shared across all
-/// `WasmRuntimeAdapter` instances because they all draw from the same blocking
-/// thread pool.
-static WASM_EXEC_SEMAPHORE: std::sync::LazyLock<Arc<Semaphore>> =
-    std::sync::LazyLock::new(|| Arc::new(Semaphore::new(MAX_CONCURRENT_WASM_EXEC)));
-
-/// Process-wide gate over concurrent WASM component compilations. Independent
-/// of [`WASM_EXEC_SEMAPHORE`] so a cold-compile storm cannot consume all
-/// execution permits and starve already-prepared hot executions.
-static WASM_PREPARE_SEMAPHORE: std::sync::LazyLock<Arc<Semaphore>> =
-    std::sync::LazyLock::new(|| Arc::new(Semaphore::new(MAX_CONCURRENT_WASM_PREPARE)));
 
 /// RAII guard over an in-flight `ResourceGovernor` reservation.
 ///
@@ -206,7 +160,7 @@ pub(super) async fn execute_prepared_wasm<G>(
     runtime: WitToolRuntime,
     prepared: Arc<PreparedWitTool>,
     host: WitToolHost,
-    request: RuntimeAdapterRequest<'_, impl RootFilesystem, G>,
+    request: RuntimeLaneRequest<'_, impl RootFilesystem, G>,
 ) -> Result<RuntimeAdapterResult, DispatchError>
 where
     G: ResourceGovernor,
@@ -216,8 +170,9 @@ where
         None => request
             .governor
             .reserve(request.scope.clone(), request.estimate.clone())
-            .map_err(|_| DispatchError::Wasm {
+            .map_err(|error| DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::Resource,
+                model_visible_cause: Some(error.to_string()),
             })?,
     };
     // Hold the reservation in an RAII guard from here on. The guard is carried
@@ -228,13 +183,15 @@ where
     let guard = ReservationGuard::new(request.governor, reservation.id);
     let wasm_resource_error = || DispatchError::Wasm {
         kind: RuntimeDispatchErrorKind::Resource,
+        model_visible_cause: None,
     };
     let input_json = match serde_json::to_string(&request.input) {
         Ok(json) => json,
-        Err(_) => {
+        Err(error) => {
             // Dropping `guard` releases the reservation.
             return Err(DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::InputEncode,
+                model_visible_cause: Some(error.to_string()),
             });
         }
     };
@@ -257,16 +214,17 @@ where
     {
         Ok(execution) => execution,
         Err(error) => {
-            log_wasm_runtime_error(request.capability_id, &error);
+            log_wasm_runtime_error(request.capability_id, error.source());
             // `preserved_wasm_error_usage` returns `Some` only for accountable
             // `ExecutionFailed` usage; `account_failed` then reconciles, and
             // otherwise releases — matching the prior reserve/account split.
             guard.account_failed(
-                preserved_wasm_error_usage(&error).as_ref(),
+                preserved_wasm_error_usage(error.source()).as_ref(),
                 wasm_resource_error,
             )?;
             return Err(DispatchError::Wasm {
-                kind: wasm_error_kind(&error),
+                kind: error.kind(),
+                model_visible_cause: Some(error.source().to_string()),
             });
         }
     };
@@ -279,14 +237,16 @@ where
         guard.account_failed(Some(&execution.usage), wasm_resource_error)?;
         return Err(DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::InvalidResult,
+            model_visible_cause: Some("WASM execution returned no output".to_string()),
         });
     };
     let output = match serde_json::from_str(&output_json) {
         Ok(output) => output,
-        Err(_) => {
+        Err(error) => {
             guard.account_failed(Some(&execution.usage), wasm_resource_error)?;
             return Err(DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::OutputDecode,
+                model_visible_cause: Some(error.to_string()),
             });
         }
     };
@@ -298,74 +258,6 @@ where
         usage: execution.usage,
         receipt,
     })
-}
-
-/// Run the synchronous wasmtime guest call on the blocking thread pool.
-///
-/// The owned `runtime`/`prepared`/`host` are all cheap-to-move (`WitToolRuntime`
-/// is a cheap `Clone` that shares its `Engine` by reference count; `prepared` is
-/// an `Arc`; `WitToolHost` is `Clone`), so the closure is `Send + 'static`. A
-/// semaphore permit is acquired here and then moved into the `spawn_blocking`
-/// closure so its lifetime is tied to the blocking thread, not the outer async
-/// future — cancellation of the caller does not release the slot early. A
-/// `JoinError` (panic or cancellation of the blocking task) is surfaced as an
-/// execution failure.
-pub(super) async fn run_wasm_execution_blocking(
-    runtime: WitToolRuntime,
-    prepared: Arc<PreparedWitTool>,
-    host: WitToolHost,
-    input_json: String,
-    context_json: String,
-) -> Result<WitToolExecution, WasmError> {
-    let permit = WASM_EXEC_SEMAPHORE
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(|_| WasmError::execution_failed("wasm execution gate closed".to_string()))?;
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        runtime.execute(
-            &prepared,
-            host,
-            WitToolRequest::new(input_json).with_context(context_json),
-        )
-    })
-    .await
-    .map_err(|_| WasmError::execution_failed("wasm execution task panicked".to_string()))?
-}
-
-/// Run the synchronous wasmtime component compilation on the blocking thread pool.
-///
-/// `WitToolRuntime::prepare` performs `Component::new` (wasmtime compilation) plus
-/// metadata extraction — CPU-heavy and blocking, exactly like guest execution.
-/// Running it inline on the async worker would park that worker for the full
-/// compile; a burst of cold-cache misses (cold start or cache eviction) could then
-/// pin every async worker and re-create the runtime wedge that offloading
-/// execution fixes. So `prepare` is offloaded to the blocking pool behind the
-/// dedicated, smaller [`WASM_PREPARE_SEMAPHORE`] — separate from
-/// [`WASM_EXEC_SEMAPHORE`] — so a cold-compile storm cannot starve
-/// already-prepared hot executions that are waiting on their own gate. The owned
-/// `runtime` is a cheap `Clone` (shared `Engine`) and `wasm_bytes` is moved in,
-/// so the closure is `Send + 'static`. The semaphore permit is moved into the
-/// `spawn_blocking` closure so its lifetime is tied to the blocking thread, not
-/// the outer async future. A `JoinError` (panic or cancellation of the blocking
-/// task) is surfaced as an execution failure.
-pub(super) async fn run_wasm_prepare_blocking(
-    runtime: WitToolRuntime,
-    package_id: String,
-    wasm_bytes: Vec<u8>,
-) -> Result<PreparedWitTool, WasmError> {
-    let permit = WASM_PREPARE_SEMAPHORE
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(|_| WasmError::execution_failed("wasm preparation gate closed".to_string()))?;
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        runtime.prepare(&package_id, &wasm_bytes)
-    })
-    .await
-    .map_err(|_| WasmError::execution_failed("wasm preparation task panicked".to_string()))?
 }
 
 fn wasm_invocation_context(capability_id: &CapabilityId) -> String {
@@ -402,8 +294,34 @@ fn wasm_guest_dispatch_error(error: &str, capability: &CapabilityId) -> Dispatch
             required_secrets: Vec::new(),
             credential_requirements: Vec::new(),
         },
-        WasmGuestErrorKind::Runtime(kind) => DispatchError::Wasm { kind },
+        WasmGuestErrorKind::Runtime(kind) => DispatchError::Wasm {
+            kind,
+            model_visible_cause: wasm_guest_error_code(error)
+                .map(|code| format!("provider error code: {code}"))
+                .or_else(|| Some(error.to_string())),
+        },
     }
+}
+
+/// Extract the stable error `code` from a structured guest error payload so
+/// the model-visible failure keeps its actionable cause (e.g. a Slack
+/// `channel_not_found`) instead of collapsing to the kind's generic sentence.
+///
+/// Guests are sandboxed but not trusted with free text on this channel: the
+/// code is reduced to a short `[A-Za-z0-9_.-]` identifier, and the composed
+/// summary is still re-validated downstream (`LoopSafeSummary`) before it
+/// reaches the model. Returns `None` for legacy plain-string guest errors.
+fn wasm_guest_error_code(error: &str) -> Option<String> {
+    let payload = serde_json::from_str::<StructuredWasmGuestError>(error).ok()?;
+    let code: String = payload
+        .code
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+        })
+        .take(64)
+        .collect();
+    (!code.is_empty()).then_some(code)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -426,7 +344,6 @@ enum StructuredWasmGuestErrorKind {
 
 #[derive(Debug, Deserialize)]
 struct StructuredWasmGuestError {
-    #[allow(dead_code)]
     code: String,
     kind: StructuredWasmGuestErrorKind,
 }
@@ -515,7 +432,7 @@ mod tests {
 
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use ironclaw_host_api::{ReservationStatus, ResourceEstimate};
+    use ironclaw_host_api::{ReservationStatus, ResourceEstimate, ResourceReservation};
     use ironclaw_resources::{
         AccountSnapshot, ReservationOutcome, ResourceAccount, ResourceError, ResourceLimits,
     };
@@ -588,6 +505,15 @@ mod tests {
             Ok(Self::receipt(reservation_id, ReservationStatus::Reconciled))
         }
 
+        fn validate_reservation(
+            &self,
+            _reservation: &ResourceReservation,
+        ) -> Result<(), ResourceError> {
+            Err(ResourceError::Storage {
+                reason: "validate_reservation unused in guard unit tests".to_string(),
+            })
+        }
+
         fn release(
             &self,
             reservation_id: ResourceReservationId,
@@ -605,10 +531,7 @@ mod tests {
     }
 
     fn accountable_usage() -> ResourceUsage {
-        ResourceUsage {
-            output_bytes: 32,
-            ..ResourceUsage::default()
-        }
+        ResourceUsage::default().set_output_bytes(32)
     }
 
     #[test]
@@ -639,6 +562,7 @@ mod tests {
         let receipt = guard
             .reconcile(accountable_usage(), || DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::Resource,
+                model_visible_cause: None,
             })
             .expect("reconcile must succeed");
         assert_eq!(receipt.status, ReservationStatus::Reconciled);
@@ -659,6 +583,7 @@ mod tests {
         guard
             .account_failed(Some(&accountable_usage()), || DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::Resource,
+                model_visible_cause: None,
             })
             .expect("account_failed with accountable usage must reconcile");
         assert_eq!(governor.reconcile_calls(), 1);
@@ -678,6 +603,7 @@ mod tests {
         guard
             .account_failed(None, || DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::Resource,
+                model_visible_cause: None,
             })
             .expect("account_failed with no usage releases and returns Ok");
         assert_eq!(
@@ -966,13 +892,22 @@ mod tests {
         )
         .await;
 
-        // The JoinError from the panic must map to WasmError::ExecutionFailed
-        // with the static message — NOT the panic payload.
+        // The JoinError from the panic must retain host-executor provenance
+        // while preserving the static WasmError message — NOT the panic payload.
         assert!(
-            matches!(result, Err(WasmError::ExecutionFailed { .. })),
-            "expected Err(WasmError::ExecutionFailed), got: {result:?}"
+            matches!(
+                result.as_ref().map_err(WasmBlockingError::source),
+                Err(WasmError::ExecutionFailed { .. })
+            ),
+            "expected an execution-failed source, got: {result:?}"
         );
-        if let Err(WasmError::ExecutionFailed { message, .. }) = &result {
+        let error = result.as_ref().expect_err("panicking task must fail");
+        assert_eq!(
+            error.kind(),
+            RuntimeDispatchErrorKind::Executor,
+            "blocking-task panics are host executor failures, not guest traps"
+        );
+        if let WasmError::ExecutionFailed { message, .. } = error.source() {
             assert_eq!(
                 message, "wasm execution task panicked",
                 "panic message must be the static string, not the JoinError payload"
@@ -1296,13 +1231,16 @@ mod tests {
         let result = run_wasm_prepare_blocking(runtime, "invalid".to_string(), invalid_bytes).await;
 
         assert!(
-            matches!(result, Err(WasmError::CompilationFailed(_))),
+            matches!(
+                result.as_ref().map_err(WasmBlockingError::source),
+                Err(WasmError::CompilationFailed(_))
+            ),
             "invalid wasm bytes must surface as WasmError::CompilationFailed, got: {result:?}"
         );
         // Confirm the dispatch-path mapping is preserved end to end.
         if let Err(error) = &result {
             assert_eq!(
-                wasm_error_kind(error),
+                error.kind(),
                 RuntimeDispatchErrorKind::Manifest,
                 "compilation failure must map to the Manifest dispatch kind"
             );
@@ -1427,6 +1365,57 @@ mod tests {
 
         for (error, expected) in cases {
             assert_eq!(wasm_guest_error_kind(error), expected);
+        }
+    }
+
+    /// A structured guest error's `code` must ride the dispatch error as a
+    /// sanitized safe summary so the model sees the actionable cause (e.g.
+    /// `channel_not_found`), while hostile codes are reduced to identifier
+    /// characters and legacy plain-string errors stay summary-less.
+    #[test]
+    fn wasm_guest_dispatch_error_carries_sanitized_structured_code() {
+        let capability = CapabilityId::new("slack.get_conversation_history").unwrap();
+        match wasm_guest_dispatch_error(
+            r#"{"code":"channel_not_found","kind":"input"}"#,
+            &capability,
+        ) {
+            DispatchError::Wasm {
+                kind,
+                model_visible_cause,
+            } => {
+                assert_eq!(kind, RuntimeDispatchErrorKind::InputEncode);
+                assert_eq!(
+                    model_visible_cause.as_deref(),
+                    Some("provider error code: channel_not_found")
+                );
+            }
+            other => panic!("expected Wasm dispatch error, got {other:?}"),
+        }
+
+        // Hostile codes are reduced to identifier characters, never free text.
+        assert_eq!(
+            wasm_guest_error_code(r#"{"code":"bad {} `code` <script>","kind":"input"}"#).as_deref(),
+            Some("badcodescript")
+        );
+        // Legacy plain-string guest errors carry no structured code, but the
+        // raw text still rides `model_visible_cause` as the best available cause so
+        // the model can recover (secret VALUES are scrubbed downstream at the
+        // model-visible Diagnostic seam) instead of collapsing to the kind's
+        // generic sentence.
+        assert_eq!(wasm_guest_error_code("invalid_parameters"), None);
+        match wasm_guest_dispatch_error("invalid_parameters", &capability) {
+            DispatchError::Wasm {
+                model_visible_cause,
+                ..
+            } => {
+                assert!(
+                    model_visible_cause
+                        .as_deref()
+                        .is_some_and(|summary| summary.contains("invalid_parameters")),
+                    "legacy guest error text must survive as the raw cause: {model_visible_cause:?}"
+                );
+            }
+            other => panic!("expected Wasm dispatch error, got {other:?}"),
         }
     }
 }

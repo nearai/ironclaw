@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{CapabilityId, ExtensionId, RuntimeKind};
+use ironclaw_host_api::{CapabilityId, ExtensionId, FailureKind, RuntimeKind};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -10,12 +10,12 @@ use crate::{
 };
 
 use super::host::{
-    AgentLoopHostError, AgentLoopHostErrorKind, BatchPolicyKind, CapabilityFailureKind,
-    CapabilitySurfaceVersion, LoopCheckpointKind, LoopDriverNoteKind, LoopGateKind,
-    LoopPromptBundleRef, LoopRunContext, LoopSafeSummary, PromptMode,
+    AgentLoopHostError, AgentLoopHostErrorKind, BatchPolicyKind, CapabilitySurfaceVersion,
+    LoopCheckpointKind, LoopDriverNoteKind, LoopGateKind, LoopPromptBundleRef, LoopRunContext,
+    LoopSafeSummary, PromptMode,
 };
 use super::refs::{LoopDriverId, ModelProfileId};
-use super::{CompactionInitiator, SystemInferenceTaskId};
+use super::{CompactionInitiator, SkillTrustLevel, SystemInferenceTaskId};
 use crate::{LoopCompletionKind, LoopFailureKind};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,7 +51,7 @@ impl LoopHostMilestone {
 pub struct PromptSkillContextMetadata {
     pub ordinal: usize,
     pub source_name: String,
-    pub trust_level: String,
+    pub trust_level: SkillTrustLevel,
 }
 
 /// Public wire shape for host-loop milestones.
@@ -86,6 +86,9 @@ pub enum LoopHostMilestoneKind {
     ModelReasoningDelta {
         safe_delta: String,
     },
+    ModelTextDelta {
+        safe_text: String,
+    },
     ModelFailed {
         reason_kind: AgentLoopHostErrorKind,
     },
@@ -105,7 +108,7 @@ pub enum LoopHostMilestoneKind {
         capability_id: CapabilityId,
         provider: Option<ExtensionId>,
         runtime: Option<RuntimeKind>,
-        reason_kind: CapabilityFailureKind,
+        reason_kind: FailureKind,
         /// Bounded, host-authored failure summary (e.g. a builtin's
         /// `"invalid JSON: ..."` message). Additive; pre-existing producers
         /// emit `None`. Product projections and durable runtime events must
@@ -252,6 +255,7 @@ impl LoopHostMilestoneKind {
             Self::ModelStarted { .. } => "model_started",
             Self::ModelCompleted { .. } => "model_completed",
             Self::ModelReasoningDelta { .. } => "model_reasoning_delta",
+            Self::ModelTextDelta { .. } => "model_text_delta",
             Self::ModelFailed { .. } => "model_failed",
             Self::CapabilityInvoked { .. } => "capability_invoked",
             Self::CapabilityCompleted { .. } => "capability_completed",
@@ -289,7 +293,7 @@ pub trait LoopHostMilestoneSink: Send + Sync {
 /// that does not own a `LoopRunContext`. It therefore cannot construct a full
 /// [`LoopHostMilestone`] on its own. Instead, the dispatcher emits the
 /// hook-specific *kind* into a [`HookMilestoneSink`], and host composition in
-/// `ironclaw_reborn` wraps the real [`LoopHostMilestoneSink`] in an adapter
+/// `ironclaw_runner` wraps the real [`LoopHostMilestoneSink`] in an adapter
 /// that injects the active run's context before forwarding.
 ///
 /// The kinds emitted through this sink are always one of:
@@ -391,13 +395,24 @@ impl HookMilestoneSink for InMemoryHookMilestoneSink {
     }
 }
 
-#[derive(Clone)]
 pub struct LoopHostMilestoneEmitter<S>
 where
     S: LoopHostMilestoneSink + ?Sized,
 {
     context: LoopRunContext,
     sink: Arc<S>,
+}
+
+impl<S> Clone for LoopHostMilestoneEmitter<S>
+where
+    S: LoopHostMilestoneSink + ?Sized,
+{
+    fn clone(&self) -> Self {
+        Self {
+            context: self.context.clone(),
+            sink: Arc::clone(&self.sink),
+        }
+    }
 }
 
 impl<S> LoopHostMilestoneEmitter<S>
@@ -459,6 +474,11 @@ where
             .await
     }
 
+    pub async fn model_text_delta(&self, safe_text: String) -> Result<(), AgentLoopHostError> {
+        self.publish(LoopHostMilestoneKind::ModelTextDelta { safe_text })
+            .await
+    }
+
     pub async fn model_failed(
         &self,
         reason_kind: AgentLoopHostErrorKind,
@@ -503,10 +523,9 @@ where
         capability_id: CapabilityId,
         provider: Option<ExtensionId>,
         runtime: Option<RuntimeKind>,
-        reason_kind: CapabilityFailureKind,
-        safe_summary: Option<String>,
+        reason_kind: FailureKind,
+        safe_summary: Option<LoopSafeSummary>,
     ) -> Result<(), AgentLoopHostError> {
-        let safe_summary = safe_summary.map(LoopSafeSummary::capability_failure_summary);
         self.publish(LoopHostMilestoneKind::CapabilityFailed {
             activity_id,
             capability_id,
@@ -959,5 +978,37 @@ mod hook_milestone_schema_snapshots {
   }
 }"#;
         assert_eq!(pretty(&value), EXPECTED);
+    }
+}
+
+#[cfg(test)]
+mod prompt_skill_context_metadata_wire {
+    //! `PromptSkillContextMetadata.trust_level` was a `String` before it was
+    //! typed as `SkillTrustLevel`. The enum's snake_case serde produces the same
+    //! `"installed"`/`"trusted"` tokens, so historical milestone JSON still
+    //! deserializes and the round-trip is byte-stable.
+    use super::{PromptSkillContextMetadata, SkillTrustLevel};
+
+    #[test]
+    fn historical_string_trust_level_deserializes_and_round_trips() {
+        for (json, expected) in [
+            (
+                r#"{"ordinal":0,"source_name":"github","trust_level":"trusted"}"#,
+                SkillTrustLevel::Trusted,
+            ),
+            (
+                r#"{"ordinal":3,"source_name":"memory","trust_level":"installed"}"#,
+                SkillTrustLevel::Installed,
+            ),
+        ] {
+            let parsed: PromptSkillContextMetadata =
+                serde_json::from_str(json).expect("historical milestone JSON must still parse");
+            assert_eq!(parsed.trust_level, expected);
+            assert_eq!(
+                serde_json::to_string(&parsed).expect("serialize"),
+                json,
+                "trust_level must serialize back to the same wire token"
+            );
+        }
     }
 }

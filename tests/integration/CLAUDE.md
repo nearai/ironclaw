@@ -118,6 +118,7 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
   harness (`RecordingTestCapabilityPort`, `RecordingHostRuntime`,
   `RecordingRuntimeHttpEgress`, `RecordingNetworkHttpEgress`,
   `RecordingApprovalRequestStore`, `RecordingCapabilityResultWriter`,
+  `RecordingSecurityAuditSink`, `UnavailableProjectService`,
   `GithubHarnessAuthorizer`, `StaticSecretStore`,
   `StaticCapabilitySurfaceProfileResolver`,
   `FixedRuntimeCredentialAccountResolver`, `EmptyIdentityContextSource`,
@@ -136,7 +137,7 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
   `CommandExecutionRequest.command` and returns exit 0 / empty output without
   spawning any OS process. Injected by default when `with_builtin_http_tools()` is
   used; the `.with_live_shell()` opt-in skips injection so the real
-  `LocalHostProcessPort` executes instead.
+  `HostProcessPort` executes instead.
 - `http_matcher.rs` — `ScriptedHttpResponse`, the URL/method/capability-keyed
   HTTP scripting layer over `RecordingRuntimeHttpEgress` (install via
   `.with_keyed_http_responses([..])`).
@@ -147,13 +148,23 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
   model-prompt assertion `assert_system_prompt_contains` (reads the scripted
   `TraceLlm`'s captured requests via `captured_system_prompts`, not the egress
   log).
-- Tests live as flat `tests/integration/<name>.rs` bins (Cargo requires
-  top-level-per-bin test files), each registered as its own `[[test]]` in the
-  workspace `Cargo.toml` with `name = "reborn_integration_<name>"`.
+- Tests live as bins anywhere under `tests/integration/` — flat
+  (`tests/integration/<name>.rs`) or inside a domain folder — each registered
+  as its own `[[test]]` in the workspace `Cargo.toml` with
+  `name = "reborn_integration_<name>"`. Domain folders group related bins by
+  pointing the `[[test]]` `path` into the folder — `tests/integration/auth/`
+  holds the auth user-journey bins (`oauth_connect`, `oauth_popup_journeys`,
+  `oauth_refresh`, `auth_gate`, `auth_failure`, `reopen_resume_through_gate`;
+  binary names unchanged), with shared fixtures in `auth/common.rs` mounted
+  per-bin via `#[path = "common.rs"] mod common;`. Files one level deeper
+  mount the support trees as `#[path = "../support/mod.rs"]` and
+  `#[path = "../../support/mod.rs"]`. Extension-lifecycle journeys live as
+  scenarios under `group_extensions/` (see Group tests below).
 
-Module paths: each `tests/integration/<name>.rs` declares both
+Module paths: each flat `tests/integration/<name>.rs` declares both
 `#[path = "support/mod.rs"] mod reborn_support;` and
-`#[path = "../support/mod.rs"] mod support;`, then
+`#[path = "../support/mod.rs"] mod support;` (bins one folder deeper prepend
+one more `../` to each, as above), then
 `use reborn_support::builder::RebornIntegrationHarness;` /
 `use reborn_support::reply::RebornScriptedReply;`. Inside the support tree,
 siblings reference each other via `super::` and `trace_llm` via
@@ -256,7 +267,7 @@ spawning any OS process.
 - `assert_shell_ran_through_inert_port()` — at least one shell command was recorded by the inert port (proves no real OS process ran).
 
 **`.with_live_shell()`** — opt-in; skips recording-port injection so the real
-`LocalHostProcessPort` executes instead. Use only for hermetic commands
+`HostProcessPort` executes instead. Use only for hermetic commands
 (no network, no external state, reproducible on any machine).
 Implies `.with_builtin_http_tools()`.
 
@@ -350,7 +361,7 @@ over real `FilesystemAuthProductServices<InMemoryBackend>` alongside a
 drives one sweep tick with an always-leader lock and a frozen clock, exercising
 `sweep_once` → `ProviderBackedCredentialAccountService::refresh_account` →
 `HostOAuthProviderClient::refresh_token` → scripted egress. Requires
-`--features libsql`.
+the default backend build.
 
 ### Approvals (group tests only)
 
@@ -371,18 +382,18 @@ On a harness built from a `live_approvals` group:
 
 `HostRuntimeCapabilityHarness` (in `harness/mod.rs`, gated on `#[cfg(feature = "test-support")]`) exposes:
 
-- `extension_installation_store_for_test()` — returns the `Option<Arc<dyn ExtensionInstallationStore>>` wired into the local-dev extension management port; mirrors the production installation store for test read-back assertions. Returns `None` when the local runtime has no extension management wired.
+- `extension_installation_store_for_test()` — returns the `Option<Arc<dyn ExtensionInstallationStorePort>>` wired into the local-dev extension management port; mirrors the production installation store for test read-back assertions. Returns `None` when the local runtime has no extension management wired.
 
 `ironclaw_reborn_composition::test_support` exposes:
 
-- `build_local_dev_secret_store_for_test(root, scoped)` — constructs the `LocalDevSecretStore` used by production local-dev composition; for store read-back in secrets tests.
+- `build_secret_store_for_test(root, scoped)` — constructs the `LocalDevSecretStore` used by production local-dev composition; for store read-back in secrets tests.
 
-`RebornServices` (returned by `build_reborn_services`/exposed via `RebornRuntime::services()`, methods defined in `crates/ironclaw_reborn_composition/src/runtime/test_support.rs`) exposes:
+`RebornRuntime` (returned by `build_runtime`, methods defined in `crates/ironclaw_reborn_composition/src/runtime/test_support.rs`) exposes:
 
 - `local_dev_approval_interaction_service_for_test(turn_coordinator)` — real `DefaultApprovalInteractionService` wired like `build_reborn_runtime`. `None` without a local-dev runtime.
 - `local_dev_auth_interaction_service_for_test(turn_coordinator)` — WebUI auth-interaction service via the same `build_webui_auth_interaction_service` helper production uses. `None` only without a local-dev runtime; falls back to `UnavailableAuthInteractionService` when `product_auth` has no flow-record source.
 
-Both take `turn_coordinator: Arc<dyn TurnCoordinator>` explicitly rather than reading `self.turn_coordinator` — a `RebornServices` from `build_reborn_services` alone carries a different coordinator instance than a caller-built planned runtime; pass the coordinator your harness's turns actually run against.
+Both take `turn_coordinator: Arc<dyn TurnCoordinator>` explicitly rather than reading `self.turn_coordinator` — a `RebornRuntime` from `build_runtime` alone carries a different coordinator instance than a caller-built planned runtime; pass the coordinator your harness's turns actually run against.
 
 All of the above are zero-byte in production builds (gated on the `test-support` feature).
 
@@ -482,7 +493,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 |---|---|---|
 | `RebornIntegrationGroup::live_approvals()` | file tools (write_file/read_file @ Ask) | disabled |
 | `RebornIntegrationGroup::builtin_tools()` | core built-in (http/echo/time/json/shell) | enabled |
-| `RebornIntegrationGroup::extension_lifecycle()` | extension_search/install/activate/remove | enabled |
+| `RebornIntegrationGroup::extension_lifecycle()` | extension_search/install/remove | enabled |
 | `RebornIntegrationGroup::triggers()` | trigger_create/list/pause/resume/remove | enabled |
 | `RebornIntegrationGroup::skill_management_tools()` | skill_list/skill_install/skill_remove | enabled |
 | `RebornIntegrationGroup::attachment_tools()` | attachment lander + read port (no tool dispatch) | n/a (no capability dispatch) |
@@ -490,7 +501,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 | `RebornIntegrationGroup::builder().storage(LibSql).live_approvals()` | same + LibSql storage | disabled |
 | `RebornIntegrationGroup::multiuser_memory_tools()` | core built-in (memory/http/shell/…) with per-actor run-owner-scoped capability dispatch (C-MULTIUSER) | enabled |
 | `RebornIntegrationGroup::multiuser_approvals()` | file tools (write_file/read_file @ Ask) with per-actor capability scoping (C-MULTIUSER) | enabled per owner (default; toggle per-owner in test) |
-| `RebornIntegrationGroup::outbound_target_tools()` | `outbound_delivery_targets_list`/`target_set` over an injected `FakeOutboundPreferencesFacade` (C-SYNTH) | enabled |
+| `RebornIntegrationGroup::outbound_target_tools()` | `outbound_delivery_targets_list`/`target_set` over an injected `FakeOutboundPreferencesService` (C-SYNTH) | enabled |
 
 ### Auth-gate resolution (C-JOURNEY)
 

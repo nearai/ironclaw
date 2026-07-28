@@ -460,6 +460,11 @@ pub(crate) fn execute_inner(params: &str, context: Option<&str>) -> Result<Strin
             page,
             limit,
         } => get_workflow_run_jobs(&owner, &repo, run_id, filter, page, limit),
+        GitHubAction::GetJobLogs {
+            owner,
+            repo,
+            job_id,
+        } => get_job_logs(&owner, &repo, job_id),
         GitHubAction::GetWorkflowRunArtifacts {
             owner,
             repo,

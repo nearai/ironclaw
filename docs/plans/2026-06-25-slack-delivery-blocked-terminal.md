@@ -58,7 +58,7 @@ earlier `Delivered`.
   (l.60, set in `TriggeredRunDeliveryDriver::new`, l.1853-1869).
 
 `get_run_state` and the store are correct: executor and delivery share the same
-`Arc<FilesystemTurnStateStore>` (verified in `slack_host_beta.rs:507`,
+`Arc<TurnStateRowStore>` (verified in `slack_host_beta.rs:507`,
 `Arc::clone(&parts.turn_coordinator)`, and the runtime wiring), the blocked
 status is persisted (`block_claimed_record` sets status + gate_ref,
 `prune_terminal: false`), and the read cache TTL is 500ms. The bug is **not** a
@@ -170,7 +170,7 @@ The invariant lives as a doc comment directly on `deliver_triggered_run`
 
 This change touches ONLY `crates/ironclaw_reborn_composition/src/slack_delivery.rs`
 (+ its tests) and this plan doc. No edits to `ironclaw_turns/src/status.rs`,
-`ironclaw_reborn/src/runtime.rs`, `turn_scheduler.rs`, or any config — those are
+`ironclaw_runner/src/runtime.rs`, `turn_scheduler.rs`, or any config — those are
 owned by sibling tracks.
 
 ## Out of scope / follow-ups

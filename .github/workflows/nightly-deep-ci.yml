@@ -1,13 +1,10 @@
 name: Nightly Deep CI
 
-# This workflow intentionally reuses the Legacy Tests workflow instead of
-# duplicating job definitions here. The called .github/workflows/test.yml
-# workflow runs the legacy deterministic deep suite:
-# - full Rust test matrix: all-features, default, libsql-only
-# - heavy runtime integration tests
-# - Telegram integration partitions
-# - replay snapshot gate
-# - Telegram and Slack channel tests
+# The v1 legacy monolith (src/) and its deep suites (the former
+# .github/workflows/test.yml and .github/workflows/e2e.yml) were deleted
+# under Tier B ("Clean up old architecture" roadmap;
+# docs/plans/2026-07-02-reborn-internal-module-refactor.md §8). Only the
+# Reborn suites remain, reused below.
 #
 # Cross-cutting platform and compatibility coverage is reused from
 # .github/workflows/platform-and-compat.yml:
@@ -26,7 +23,8 @@ name: Nightly Deep CI
 #
 # Docker is intentionally excluded here because QA/release Docker images are
 # owned by the separate Docker pipeline and need release-team alignment.
-# Full browser E2E is scheduled separately by .github/workflows/e2e.yml.
+# Browser E2E runs against the Reborn WebChat surface via
+# .github/workflows/reborn-e2e.yml (reused below).
 
 on:
   schedule:
@@ -41,16 +39,19 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deterministic-deep-tests:
-    name: Legacy Tests
-    uses: ./.github/workflows/test.yml
-    with:
-      ref: ${{ github.sha }}
-      include_docker: false
-
   platform-and-compat:
     name: Platform & Compat
     uses: ./.github/workflows/platform-and-compat.yml
+    # The called workflow's version-check job declares job-level
+    # `pull-requests: read` + `issues: read`. A called workflow may not
+    # request more than the caller grants, and that is validated at trigger
+    # time even though the job itself is event-gated off schedule runs — the
+    # caller must grant the superset or the whole run is a startup_failure
+    # with zero jobs.
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
     secrets: inherit
     with:
       ref: ${{ github.sha }}
@@ -59,6 +60,20 @@ jobs:
   reborn-tests:
     name: Reborn Tests
     uses: ./.github/workflows/reborn-tests.yml
+    # Two call-contract requirements, both validated at trigger time; a
+    # violation turns the whole nightly run into a startup_failure with ZERO
+    # jobs — including nightly-alert, so nothing reports it. This workflow
+    # had no successful run from its creation (2026-05-06) through 2026-07-08
+    # (65 of 74 retained runs are startup_failures) because of stacked
+    # violations of exactly these rules:
+    # 1. The called workflow's coverage-report job declares job-level
+    #    `pull-requests: write`; the caller must grant it.
+    # 2. reborn-tests.yml references secrets.SCCACHE_*; the caller must pass
+    #    secrets (`secrets: inherit`).
+    permissions:
+      contents: read
+      pull-requests: write
+    secrets: inherit
     with:
       ref: ${{ github.sha }}
 
@@ -67,25 +82,15 @@ jobs:
     uses: ./.github/workflows/reborn-e2e.yml
     with:
       ref: ${{ github.sha }}
+      # Workstream 3 of #6524: mutating journeys share one provider world, so
+      # reversing them can expose state leaking from a different journey.
+      # Too slow to repeat per PR, cheap once a night.
+      reversed_journey_order: true
+      # Workstream 3 of #6524: proves each mutating journey stands on its own,
+      # which the shared ordinary lane cannot show. One server start per
+      # journey, so nightly only.
+      alone_journey_replay: true
 
-  nightly-alert:
-    name: Nightly Deep CI Alert
-    runs-on: ubuntu-latest
-    if: always() && github.event_name == 'schedule'
-    permissions:
-      actions: read
-      contents: read
-      issues: write
-    needs: [deterministic-deep-tests, platform-and-compat, reborn-tests, reborn-e2e]
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-      - name: Report nightly deep CI result
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          ALERT_WORKFLOW_NAME: Nightly Deep CI
-          ALERT_ISSUE_TITLE: Nightly Deep CI failed
-          ALERT_RESULT: ${{ (needs.deterministic-deep-tests.result == 'success' && needs.platform-and-compat.result == 'success' && needs.reborn-tests.result == 'success' && needs.reborn-e2e.result == 'success') && 'success' || 'failure' }}
-        run: .github/scripts/nightly-alert-issue.sh
+# Failure reporting: nightly-watchdog.yml checks this workflow's latest
+# scheduled run from outside and posts failures to Slack. An in-run alert
+# job cannot do that — it dies with its own run on a startup_failure.

@@ -1,12 +1,12 @@
 use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LocalHostWorkdirAlias {
+pub(crate) struct HostWorkdirAlias {
     alias: String,
     host_path: PathBuf,
 }
 
-impl LocalHostWorkdirAlias {
+impl HostWorkdirAlias {
     /// Create a new alias mapping.
     ///
     /// `host_path` must be an absolute, canonicalized host path from a trusted source
@@ -35,7 +35,7 @@ impl LocalHostWorkdirAlias {
 
 pub(crate) fn resolve_local_host_workdir(
     workdir: Option<&str>,
-    workdir_aliases: &[LocalHostWorkdirAlias],
+    workdir_aliases: &[HostWorkdirAlias],
 ) -> std::io::Result<PathBuf> {
     let Some(workdir) = workdir else {
         return std::env::current_dir();
@@ -52,7 +52,7 @@ pub(crate) fn resolve_local_host_workdir(
 
 pub(crate) fn rewrite_local_host_command_aliases(
     command: &str,
-    aliases: &[LocalHostWorkdirAlias],
+    aliases: &[HostWorkdirAlias],
 ) -> String {
     // NOTE: This rewriter handles single-quote, double-quote, and escape
     // contexts but does NOT model command-substitution context reset.
@@ -106,7 +106,7 @@ pub(crate) fn rewrite_local_host_command_aliases(
 /// to its virtual alias so model-facing output only ever speaks in alias terms.
 pub(crate) fn rewrite_local_host_output_aliases(
     output: &str,
-    aliases: &[LocalHostWorkdirAlias],
+    aliases: &[HostWorkdirAlias],
 ) -> String {
     if aliases.is_empty() || output.is_empty() {
         return output.to_string();
@@ -115,7 +115,7 @@ pub(crate) fn rewrite_local_host_output_aliases(
     // same root as `/host` (host home `/Users/alice`, workspace
     // `/Users/alice/proj`), the deeper mapping must win so `/Users/alice/proj/x`
     // becomes `/workspace/x`, not `/host/proj/x`.
-    let mut ordered: Vec<&LocalHostWorkdirAlias> = aliases.iter().collect();
+    let mut ordered: Vec<&HostWorkdirAlias> = aliases.iter().collect();
     ordered.sort_by_key(|alias| std::cmp::Reverse(alias.host_path.as_os_str().len()));
     let mut result = output.to_string();
     for alias in ordered {
@@ -185,7 +185,7 @@ fn relative_workdir_tail(relative: &str) -> Option<PathBuf> {
 
 fn push_rewritten_alias(
     rewritten: &mut String,
-    alias: &LocalHostWorkdirAlias,
+    alias: &HostWorkdirAlias,
     in_single_quote: bool,
     in_double_quote: bool,
 ) {
@@ -202,8 +202,8 @@ fn push_rewritten_alias(
 fn longest_matching_command_alias<'a>(
     command: &str,
     index: usize,
-    aliases: &'a [LocalHostWorkdirAlias],
-) -> Option<&'a LocalHostWorkdirAlias> {
+    aliases: &'a [HostWorkdirAlias],
+) -> Option<&'a HostWorkdirAlias> {
     aliases
         .iter()
         .filter(|alias| {
@@ -261,17 +261,17 @@ fn escape_for_double_quote_context(path: &str) -> String {
 mod tests {
     use super::*;
 
-    fn alias(alias: &str, host_path: &str) -> LocalHostWorkdirAlias {
-        LocalHostWorkdirAlias::try_new(alias, host_path).expect("valid alias")
+    fn alias(alias: &str, host_path: &str) -> HostWorkdirAlias {
+        HostWorkdirAlias::try_new(alias, host_path).expect("valid alias")
     }
 
     #[test]
     fn alias_normalization_requires_non_root_absolute_paths() {
-        assert!(LocalHostWorkdirAlias::try_new("workspace", "/tmp/workspace").is_err());
-        assert!(LocalHostWorkdirAlias::try_new("/", "/tmp/workspace").is_err());
-        assert!(LocalHostWorkdirAlias::try_new("/workspace/..", "/tmp/workspace").is_err());
+        assert!(HostWorkdirAlias::try_new("workspace", "/tmp/workspace").is_err());
+        assert!(HostWorkdirAlias::try_new("/", "/tmp/workspace").is_err());
+        assert!(HostWorkdirAlias::try_new("/workspace/..", "/tmp/workspace").is_err());
         assert_eq!(
-            LocalHostWorkdirAlias::try_new("/workspace/", "/tmp/workspace")
+            HostWorkdirAlias::try_new("/workspace/", "/tmp/workspace")
                 .expect("valid alias")
                 .alias,
             "/workspace"

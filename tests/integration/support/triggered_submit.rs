@@ -25,8 +25,8 @@ use ironclaw_conversations::{
 };
 use ironclaw_llm::testing::provider_chain_over;
 use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
-use ironclaw_loop_support::HostManagedModelGateway;
-use ironclaw_reborn::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
+use ironclaw_loop_host::HostManagedModelGateway;
+use ironclaw_runner::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
 use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerFire, TriggerFireIdentity, TriggerId,
@@ -76,6 +76,7 @@ impl RebornIntegrationHarness {
             agent_id: self.binding.agent_id.clone(),
             project_id: self.binding.project_id.clone(),
             prompt: prompt.to_string(),
+            delivery_target: None,
         }
     }
 

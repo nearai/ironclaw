@@ -1,4 +1,4 @@
-//! Skill context selection for the agent loop-support boundary.
+//! Skill context selection for the agent loop-host boundary.
 //!
 //! This module provides [`SkillContextService`] and the [`SkillContextSource`] trait,
 //! which select model-visible skill context from a host-approved run snapshot.
@@ -41,11 +41,11 @@ use thiserror::Error;
 
 use crate::LoopMessageRef;
 
-use super::snippet_ref::stable_skill_snippet_display_hash;
 use super::{
     AgentLoopHostError, AgentLoopHostErrorKind, LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES,
     LOOP_CONTEXT_TOTAL_MODEL_CONTENT_MAX_BYTES, LoopContextSnippet, LoopContextSnippetMetadata,
 };
+use crate::run_profile::snippet_ref::{sanitize_ref_suffix, stable_skill_snippet_display_hash};
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -292,7 +292,7 @@ impl SkillContextSnippet {
             safe_summary: self.safe_summary,
             metadata: Some(LoopContextSnippetMetadata {
                 source_name: self.skill_name,
-                trust_level: self.trust.as_str().to_string(),
+                trust_level: self.trust,
             }),
         }
     }
@@ -385,7 +385,7 @@ impl SkillContextSource for SkillContextService {
             } else {
                 entry.safe_description.clone()
             };
-            let safe_summary = entry.safe_description.clone();
+            let safe_summary = skill_snippet_safe_summary(&entry.name, &entry.safe_description);
 
             if model_content.len() > self.budget.max_snippet_bytes {
                 return Err(SkillContextError::ContextBudgetExceeded);
@@ -442,15 +442,23 @@ impl SkillContextSource for NoopSkillContextSource {
 /// Build the model-message ref for a skill snippet.
 ///
 /// Prompt construction and model-message resolution both use this exact helper
-/// so source/ordering drift fails closed instead of producing mismatched refs.
+/// so source/ordering/content drift fails closed instead of producing
+/// mismatched refs. The hash covers the FULL `model_content`, not just the
+/// bounded `safe_summary`: the summary is first-line-only (e.g. the constant
+/// available-skills listing header), so without the content field a changed
+/// listing body would silently resolve under the old ref. Refs are per-run
+/// ephemeral — built at prompt time and resolved live in the same run — so
+/// rotating the hash layout is safe.
 pub fn skill_snippet_model_message_ref(
     snippet_ref: &str,
     safe_summary: &str,
+    model_content: &str,
     ordinal: usize,
 ) -> Result<LoopMessageRef, AgentLoopHostError> {
     let slug = sanitize_ref_suffix(snippet_ref);
     let ordinal = ordinal.to_string();
-    let hash = stable_skill_snippet_display_hash([snippet_ref, safe_summary, &ordinal]);
+    let hash =
+        stable_skill_snippet_display_hash([snippet_ref, safe_summary, model_content, &ordinal]);
     LoopMessageRef::new(format!("msg:snippet.{slug}.{ordinal}.{hash:016x}")).map_err(|_| {
         AgentLoopHostError::new(
             AgentLoopHostErrorKind::Internal,
@@ -467,35 +475,101 @@ pub fn is_skill_snippet_model_message_ref(content_ref: &LoopMessageRef) -> bool 
 mod snippet_ref_tests {
     use super::*;
 
+    /// Pins the ref layout so accidental rotation fails loudly. The hash was
+    /// deliberately rotated once when `model_content` joined the hashed fields
+    /// (stale-ref detection must cover the full content, not just the
+    /// first-line summary); any further change here must be equally deliberate.
     #[test]
-    fn skill_snippet_model_message_ref_preserves_existing_hash() {
-        let content_ref =
-            skill_snippet_model_message_ref("skill:alpha", "summary", 0).expect("valid ref");
+    fn skill_snippet_model_message_ref_pins_current_hash_layout() {
+        let content_ref = skill_snippet_model_message_ref("skill:alpha", "summary", "summary", 0)
+            .expect("valid ref");
         assert_eq!(
             content_ref.as_str(),
-            "msg:snippet.skill.alpha.0.6e54cb74d742607c"
+            "msg:snippet.skill.alpha.0.754017343901aa5b"
+        );
+    }
+
+    #[test]
+    fn skill_snippet_model_message_ref_is_deterministic_for_identical_content() {
+        let first = skill_snippet_model_message_ref(
+            "skill:listing",
+            "Header line",
+            "Header line\n\n- alpha: a\n- bravo: b",
+            0,
+        )
+        .expect("valid ref");
+        let second = skill_snippet_model_message_ref(
+            "skill:listing",
+            "Header line",
+            "Header line\n\n- alpha: a\n- bravo: b",
+            0,
+        )
+        .expect("valid ref");
+        assert_eq!(first, second, "unchanged content must produce the same ref");
+    }
+
+    /// Stale-ref regression: the available-skills listing's first line (and
+    /// therefore its safe summary) is a constant header, so two listings that
+    /// differ only AFTER the first line — a skill added, removed, or reordered
+    /// — must still produce different refs. If the ref hash covered only the
+    /// summary, a changed listing would resolve under the old ref instead of
+    /// failing closed.
+    #[test]
+    fn skill_snippet_model_message_ref_differs_when_content_changes_after_first_line() {
+        let header = "Header line";
+        let original = skill_snippet_model_message_ref(
+            "skill:listing",
+            header,
+            "Header line\n\n- alpha: a\n- bravo: b",
+            0,
+        )
+        .expect("valid ref");
+        let changed = skill_snippet_model_message_ref(
+            "skill:listing",
+            header,
+            "Header line\n\n- alpha: a\n- bravo: b\n- charlie: c",
+            0,
+        )
+        .expect("valid ref");
+        let reordered = skill_snippet_model_message_ref(
+            "skill:listing",
+            header,
+            "Header line\n\n- bravo: b\n- alpha: a",
+            0,
+        )
+        .expect("valid ref");
+        assert_ne!(
+            original, changed,
+            "adding a listing entry must rotate the ref"
+        );
+        assert_ne!(
+            original, reordered,
+            "reordering listing entries must rotate the ref"
         );
     }
 }
 
-fn sanitize_ref_suffix(value: &str) -> String {
-    let mut suffix = String::with_capacity(value.len().min(96));
-    for character in value.chars() {
-        if character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.') {
-            suffix.push(character);
-        } else {
-            suffix.push('.');
-        }
-        if suffix.len() >= 96 {
-            break;
-        }
+/// Character bound for skill snippet safe summaries. Summaries are diagnostic
+/// strings capped at 4 KiB by the prompt layer (`MODEL_SAFE_SUMMARY_MAX_BYTES`
+/// in `prompt_text.rs`); 256 chars is at most 1 KiB of UTF-8, leaving headroom.
+const MAX_SKILL_SNIPPET_SAFE_SUMMARY_CHARS: usize = 256;
+
+/// Derive the bounded safe summary for a skill snippet.
+///
+/// The full description (which may be long or multi-line, e.g. the
+/// discoverable available-skills listing) belongs to `model_content`; the
+/// summary is the first line, character-bounded, so it always fits the
+/// prompt layer's safe-summary budget. Falls back to the (already validated)
+/// skill name when the description has no leading text.
+fn skill_snippet_safe_summary(name: &str, safe_description: &str) -> String {
+    let first_line = safe_description.lines().next().unwrap_or("").trim();
+    if first_line.is_empty() {
+        return name.to_string();
     }
-    let suffix = suffix.trim_matches('.');
-    if suffix.is_empty() {
-        "context".to_string()
-    } else {
-        suffix.to_string()
-    }
+    first_line
+        .chars()
+        .take(MAX_SKILL_SNIPPET_SAFE_SUMMARY_CHARS)
+        .collect()
 }
 
 fn validate_snapshot(snapshot: &SkillRunSnapshot) -> Result<(), SkillContextError> {
@@ -714,44 +788,22 @@ fn checked_context_total_bytes(
 /// Uses a SHA-256 digest over length-prefixed field data. The digest is collision-resistant
 /// for consistency checks, but is not an authenticity proof or authorization decision.
 fn compute_snapshot_version(sorted_entries: &[InstalledSkillSnapshot]) -> String {
-    let mut digest = Sha256::new();
-
-    for entry in sorted_entries {
-        feed_digest_field(&mut digest, entry.name.as_bytes());
-        feed_digest_field(
-            &mut digest,
-            match entry.trust {
-                SkillTrustLevel::Installed => b"installed",
-                SkillTrustLevel::Trusted => b"trusted",
-            },
-        );
-        feed_digest_field(
-            &mut digest,
-            match entry.visibility {
-                SkillVisibility::Visible => b"visible",
-                SkillVisibility::Hidden => b"hidden",
-                SkillVisibility::Denied => b"denied",
-            },
-        );
-        feed_digest_field(&mut digest, entry.activation_state.as_str().as_bytes());
-        match entry.prompt_content {
-            Some(ref content) => {
-                digest.update([1]);
-                feed_digest_field(&mut digest, content.as_bytes());
-            }
-            None => digest.update([0]),
-        }
-        feed_digest_field(&mut digest, entry.safe_description.as_bytes());
-        feed_digest_field(&mut digest, entry.ordering_key.as_bytes());
-        digest.update([0xFE]);
-    }
-
-    format!("sha256:{}", hex::encode(digest.finalize()))
+    compute_snapshot_version_inner(sorted_entries, true)
 }
 
 /// Compute the pre-activation-state snapshot version for persisted snapshots
 /// serialized before progressive skill disclosure was introduced.
 fn compute_legacy_snapshot_version(sorted_entries: &[InstalledSkillSnapshot]) -> String {
+    compute_snapshot_version_inner(sorted_entries, false)
+}
+
+/// Shared snapshot-version digest. The current and legacy versions differ only
+/// in whether `activation_state` is fed (progressive skill disclosure added it),
+/// so the byte stream — and thus every historical digest — is preserved exactly.
+fn compute_snapshot_version_inner(
+    sorted_entries: &[InstalledSkillSnapshot],
+    include_activation_state: bool,
+) -> String {
     let mut digest = Sha256::new();
 
     for entry in sorted_entries {
@@ -771,6 +823,9 @@ fn compute_legacy_snapshot_version(sorted_entries: &[InstalledSkillSnapshot]) ->
                 SkillVisibility::Denied => b"denied",
             },
         );
+        if include_activation_state {
+            feed_digest_field(&mut digest, entry.activation_state.as_str().as_bytes());
+        }
         match entry.prompt_content {
             Some(ref content) => {
                 digest.update([1]);

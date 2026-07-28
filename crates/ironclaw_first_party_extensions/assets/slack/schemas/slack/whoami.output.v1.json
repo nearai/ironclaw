@@ -1,0 +1,12 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Slack whoami output",
+  "type": "object",
+  "properties": {
+    "ok": { "type": "boolean" },
+    "user_id": { "type": "string", "description": "Raw Slack user ID of the connected account. Messages authored by this id are the requesting user's own." },
+    "user_display_name": { "type": "string", "description": "Human-readable name of the connected account, resolved via users.info. Absent when resolution failed." },
+    "team_id": { "type": "string", "description": "Slack workspace (team) ID of the connected account." }
+  },
+  "additionalProperties": true
+}

@@ -38,8 +38,10 @@
 
 pub mod gating;
 pub mod install_metadata;
+pub mod learning;
 pub mod management;
 mod parser;
+pub mod scoped_management;
 mod selector;
 pub mod types;
 pub mod v2;
@@ -72,6 +74,11 @@ pub use management::{
     skill_summary_json, update_skill,
 };
 pub use parser::{ParsedSkill, SkillParseError, parse_skill_md, set_skill_auto_activate};
+pub use scoped_management::{
+    ScopedSkillManagementBuildError, ScopedSkillManagementError,
+    ScopedSkillManagementMountResolver, ScopedSkillManagementPort,
+    build_existing_local_dev_skill_management_port, build_scoped_skill_management_port,
+};
 pub use selector::{
     MAX_SKILL_CONTEXT_TOKENS, SelectionOutcome, SkillSelectionOptions, extract_skill_mentions,
     prefilter_skills_with_options, skill_token_cost,

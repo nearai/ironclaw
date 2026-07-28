@@ -526,10 +526,8 @@ where
         // Direct repository writes pick up the same default
         // `changed_by` the native repos used so version-history
         // attribution survives bypass of the higher backend seam.
-        let options = MemoryWriteOptions {
-            changed_by: Some(scoped_memory_changed_by_key(path.scope())),
-            ..MemoryWriteOptions::default()
-        };
+        let options = MemoryWriteOptions::default()
+            .set_changed_by(scoped_memory_changed_by_key(path.scope()));
         self.write_document_with_options(path, bytes, &options)
             .await
     }
@@ -1179,10 +1177,7 @@ mod tests {
         let (_, repo) = fresh_repo();
         let path = doc("notes/skip-version.md");
         repo.write_document(&path, b"alpha").await.unwrap();
-        let mut options = MemoryWriteOptions {
-            changed_by: Some("test".to_string()),
-            ..Default::default()
-        };
+        let mut options = MemoryWriteOptions::default().set_changed_by("test");
         options.metadata.skip_versioning = Some(true);
         repo.write_document_with_options(&path, b"beta", &options)
             .await
@@ -1241,10 +1236,7 @@ mod tests {
         let path = doc("notes/append.md");
         repo.write_document(&path, b"hello").await.unwrap();
         let expected = content_sha256("hello");
-        let options = MemoryWriteOptions {
-            changed_by: Some("test".to_string()),
-            ..Default::default()
-        };
+        let options = MemoryWriteOptions::default().set_changed_by("test");
         let outcome = repo
             .compare_and_append_document_with_options(&path, Some(&expected), b" world", &options)
             .await

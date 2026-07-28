@@ -1,13 +1,11 @@
 # Set Up Slack for the Reborn Binary
 
-This guide is for the standalone `ironclaw-reborn serve` Slack host-beta path,
+This guide is for the standalone `ironclaw serve` Slack host path,
 not the legacy v1 Slack WASM channel.
 
-Slack support has two gates:
-
-1. The binary must be built with the `slack-v2-host-beta` Cargo feature.
-2. Runtime config must set `[slack].enabled = true`, or the deployment env
-   must set `IRONCLAW_REBORN_SLACK_ENABLED=true`.
+Slack support ships in the binary. It has one gate: runtime config must set
+`[slack].enabled = true`, or the deployment env must set
+`IRONCLAW_REBORN_SLACK_ENABLED=true`.
 
 Slack bot token and signing secret are configured in WebUI Slack setup and
 stored in the Reborn secret store. Do not put OAuth client secrets or LLM keys
@@ -19,9 +17,8 @@ For local source runs:
 
 ```bash
 cargo run -q \
-  -p ironclaw_reborn_cli \
-  --features slack-v2-host-beta \
-  --bin ironclaw-reborn \
+  -p ironclaw \
+  --bin ironclaw \
   -- serve
 ```
 
@@ -29,33 +26,25 @@ For a local source build:
 
 ```bash
 cargo build \
-  -p ironclaw_reborn_cli \
-  --features slack-v2-host-beta \
-  --bin ironclaw-reborn
+  -p ironclaw \
+  --bin ironclaw
 ```
 
-`slack-v2-host-beta` includes `webui-v2-beta`, so do not pass both unless you
-prefer to be explicit:
-
-```bash
---features webui-v2-beta,slack-v2-host-beta
-```
-
-`Dockerfile.reborn` already builds with `webui-v2-beta,slack-v2-host-beta`.
-Slack is still disabled unless the mounted or seeded Reborn config enables it.
+Slack is disabled unless the mounted or seeded Reborn config enables it.
 
 ## Public Endpoint
 
 Slack Events API must reach the Reborn listener over a public HTTPS URL:
 
 ```text
-https://<public-host>/webhooks/slack/events
+https://<public-host>/webhooks/extensions/slack/events
 ```
 
-The `/pair` slash command uses a second signed endpoint on the same listener:
+Slack user OAuth must also redirect back to the Reborn product-auth
+callback:
 
 ```text
-https://<public-host>/webhooks/slack/commands
+https://<public-host>/api/reborn/product-auth/oauth/slack/callback
 ```
 
 For local development, expose the local listener through a tunnel and use the
@@ -74,7 +63,7 @@ Minimum local env shape:
 export IRONCLAW_REBORN_HOME="$PWD/.reborn-home"
 export IRONCLAW_REBORN_PROFILE="local-dev"
 
-# WebUI env-bearer auth; required by `ironclaw-reborn serve`.
+# WebUI env-bearer auth; required by `ironclaw serve`.
 export IRONCLAW_REBORN_WEBUI_TOKEN="$(openssl rand -hex 32)"
 export IRONCLAW_REBORN_WEBUI_USER_ID="reborn-cli"
 
@@ -103,7 +92,7 @@ OPENAI_API_KEY=sk-...
 ## Reborn Config
 
 Edit `$IRONCLAW_REBORN_HOME/config.toml`. If the file does not exist yet, run
-`ironclaw-reborn config init` or start the Docker image once to seed it.
+`ironclaw config init` or start the Docker image once to seed it.
 
 Minimal Slack config:
 
@@ -117,26 +106,34 @@ enabled = true
 overrides only the route enablement gate: `true`/`1` mounts Slack, while
 `false`/`0` acts as a deployment kill switch.
 
-Slack enablement mounts `POST /webhooks/slack/events` and the `/pair`
-slash-command endpoint `POST /webhooks/slack/commands`, and exposes Slack
-channel setup in WebUI.
+Slack enablement mounts `POST /webhooks/extensions/slack/events`, exposes the
+manifest-declared Slack deployment fields in Admin Configuration, and makes a
+personal Slack connection available through the Slack extension's user OAuth
+flow.
 Slack installation ids, team/app ids, the bot token, the signing secret,
-and channel mappings are configured after startup from WebUI channel setup.
+OAuth client credentials, and channel mappings are configured after startup
+from Admin Configuration. These deployment values are never shown in a user's
+extension setup flow.
 
-In WebUI, open Extensions, Slack, then Slack workspace setup. Save:
+As an operator, open Admin, Configuration, then Slack deployment configuration.
+Save:
 
 | Field | Purpose |
 | --- | --- |
 | Installation ID | Stable local id for this Slack app/workspace installation. Choose a durable operator-owned string. |
 | Team ID | Slack workspace/team id, usually visible as `team_id` in Events API payloads. |
 | App ID | Slack app id, visible as `api_app_id` in Events API payloads. |
-| Bot user | Optional Reborn user id for Slack host-mediated egress. Defaults to the WebUI operator. |
+| Bot user ID | Slack member id for the app's bot user (for example, the `U…` id returned at installation). |
 | Shared subject | Optional Reborn user scope available for shared-channel routing. |
 | Bot token | Slack bot token. Stored in the Reborn secret store; never returned by the API. |
 | Signing secret | Slack signing secret. Stored in the Reborn secret store; never returned by the API. |
+| OAuth client ID | Client id for the Slack app's user OAuth flow. |
+| OAuth client secret | Client secret for the Slack app's user OAuth flow. Stored in the Reborn secret store. |
 
-After Slack setup is configured, use the same Slack channel setup section to
-map Slack channel ids to team agents.
+After Slack deployment configuration is saved, use its allowed-channel and
+subject-route fields to map Slack channel ids to team agents. Users separately
+install Slack from Extensions and complete their own OAuth flow; that personal
+membership and credential state does not mutate the operator configuration.
 
 Unrouted shared Slack channels fail closed instead of silently inheriting a
 personal/default user scope.
@@ -147,16 +144,20 @@ Create or edit a Slack app at `api.slack.com/apps`.
 
 Basic Information:
 
-- Copy `Signing Secret` into WebUI Slack workspace setup.
-- Copy `App ID` into WebUI Slack workspace setup.
+- Copy `Signing Secret` into Admin Configuration for Slack.
+- Copy `App ID` into Admin Configuration for Slack.
 
 OAuth & Permissions:
 
+- Add the redirect URL:
+
+```text
+https://<public-host>/api/reborn/product-auth/oauth/slack/callback
+```
+
 - Add bot token scopes:
   - `chat:write` for final replies and temporary working messages.
-  - `im:write` for opening DMs used by the pairing-code flow.
-  - `commands` for the `/pair` slash command (added automatically when you
-    register the command; listed here for completeness).
+  - `im:write` for opening DMs after a user has connected with OAuth.
   - `app_mentions:read` for channel mentions.
   - `im:history` for direct-message events.
   - `channels:history` if the bot should receive public-channel message events
@@ -164,6 +165,8 @@ OAuth & Permissions:
   - `groups:history` if the bot should receive private-channel message events.
   - `mpim:history` if the bot should receive group-DM message events.
   - `files:read` if Slack file attachments should be downloaded and processed.
+- Add user token scopes:
+  - `users:read` for binding the authenticated Slack user to the Reborn user.
 - Install or reinstall the app to the workspace after changing scopes.
 - Copy `Bot User OAuth Token` into WebUI Slack workspace setup.
 
@@ -173,7 +176,7 @@ Event Subscriptions:
 - Set Request URL to:
 
 ```text
-https://<public-host>/webhooks/slack/events
+https://<public-host>/webhooks/extensions/slack/events
 ```
 
 - Subscribe to bot events:
@@ -182,26 +185,6 @@ https://<public-host>/webhooks/slack/events
   - Optional: `message.channels`
   - Optional: `message.groups`
   - Optional: `message.mpim`
-
-Slash Commands:
-
-- Create a slash command named `/pair`.
-- Set the Request URL to:
-
-```text
-https://<public-host>/webhooks/slack/commands
-```
-
-- Short description: `Get a fresh Ironclaw pairing code`.
-- Usage hint: leave blank; `/pair` takes no arguments.
-- Registering a slash command adds the `commands` bot scope; reinstall the app
-  after adding it.
-
-`/pair` replies privately (ephemeral — only the invoking user sees it) with a
-fresh pairing code that expires in 10 minutes and invalidates any previous
-code. If the user is already linked, it replies that they are already
-connected. Paste the code into the caller-facing Slack connect flow to finish
-linking.
 
 App Home:
 
@@ -221,26 +204,24 @@ features:
   bot_user:
     display_name: IronClaw Reborn
     always_online: false
-  slash_commands:
-    - command: /pair
-      url: https://<public-host>/webhooks/slack/commands
-      description: Get a fresh Ironclaw pairing code
-      should_escape: false
 oauth_config:
+  redirect_urls:
+    - https://<public-host>/api/reborn/product-auth/oauth/slack/callback
   scopes:
     bot:
       - chat:write
       - im:write
-      - commands
       - app_mentions:read
       - im:history
       - channels:history
       - groups:history
       - mpim:history
       - files:read
+    user:
+      - users:read
 settings:
   event_subscriptions:
-    request_url: https://<public-host>/webhooks/slack/events
+    request_url: https://<public-host>/webhooks/extensions/slack/events
     bot_events:
       - app_mention
       - message.im
@@ -262,9 +243,8 @@ Start the service:
 
 ```bash
 cargo run -q \
-  -p ironclaw_reborn_cli \
-  --features slack-v2-host-beta \
-  --bin ironclaw-reborn \
+  -p ironclaw \
+  --bin ironclaw \
   -- serve --host 127.0.0.1 --port 3000
 ```
 
@@ -280,43 +260,40 @@ docker run --rm \
 Verification checklist:
 
 - Slack Event Subscriptions shows the Request URL as verified.
-- `POST /webhooks/slack/events` returns the Slack URL-verification challenge
+- `POST /webhooks/extensions/slack/events` returns the Slack URL-verification challenge
   during setup.
-- A DM to the app either produces a pairing code or routes through the paired
-  Reborn user.
-- `/pair` returns a private (ephemeral) reply containing a fresh pairing code.
+- After the operator saves deployment configuration and the user installs and
+  connects the Slack extension, the OAuth callback
+  binds that Slack user to the authenticated Reborn user.
+- A DM to the app routes through the OAuth-connected Reborn user.
 - A channel `@app` mention replies in the same channel thread.
 - Bot-originated and subtyped Slack messages are ignored.
 
 ## Troubleshooting
 
-### Slack enablement requires ... slack-v2-host-beta
+### Slack routes are not mounted
 
-Rebuild or rerun ironclaw-reborn with --features slack-v2-host-beta.
+Confirm the Reborn config sets [slack].enabled = true, or that the deployment env sets IRONCLAW_REBORN_SLACK_ENABLED=true, then restart `ironclaw`.
 
 ### Slack route never receives events
 
-Confirm the Slack Request URL is exactly https://<public-host>/webhooks/slack/events, the public URL reaches the Reborn listener, and Socket Mode is disabled for this host-beta path.
+Confirm the Slack Request URL is exactly https://<public-host>/webhooks/extensions/slack/events, the public URL reaches the Reborn listener, and Socket Mode is disabled for this host path.
 
 ### Slack URL verification fails
 
-Confirm the WebUI Slack setup signing secret matches the app signing secret and that any proxy preserves the raw request body and Slack signature headers.
+Confirm the Admin Configuration Slack signing secret matches the app signing secret and that any proxy preserves the raw request body and Slack signature headers.
 
 ### Slack replies fail with missing_scope
 
-Add or confirm chat:write, reinstall the Slack app, and update the bot token in WebUI Slack setup if Slack issued a new token.
+Add or confirm chat:write, reinstall the Slack app, and update the bot token in Admin Configuration if Slack issued a new token.
 
-### Pairing code DM fails
+### Slack OAuth callback fails
 
-Confirm im:write and chat:write, reinstall the app, and verify the bot token in WebUI Slack setup starts with xoxb-.
-
-### /pair returns a dispatch or signing error
-
-Confirm the slash command Request URL is exactly https://<public-host>/webhooks/slack/commands, the commands scope is granted, the app was reinstalled after adding the command, and the WebUI Slack setup signing secret matches the app signing secret. The /pair endpoint uses the same signed-request verification as the Events API.
+Confirm the Slack redirect URL is exactly https://<public-host>/api/reborn/product-auth/oauth/slack/callback, the user scope includes users:read, the app was reinstalled after changing OAuth settings, and the Admin Configuration Slack client id/client secret match the Slack app.
 
 ### Channel mention does not reach Reborn
 
-Confirm the app is invited to the channel, app_mention is subscribed, and the Team ID / App ID in WebUI Slack setup match the Slack app that emitted the event.
+Confirm the app is invited to the channel, app_mention is subscribed, and the Team ID / App ID in Admin Configuration match the Slack app that emitted the event.
 
 ### Shared-channel turns are rejected
 

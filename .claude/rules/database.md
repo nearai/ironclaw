@@ -1,97 +1,94 @@
 ---
 paths:
-  - "src/db/**"
-  - "src/history/**"
+  - "crates/**/*.rs"
   - "migrations/**"
 ---
-# Database Rules
+# Reborn persistence rules
 
-## Status & Direction
+## One storage plane
 
-The repo is migrating off per-crate `Store`/`Repository` traits onto a
-single universal `RootFilesystem` mount table (`crates/ironclaw_filesystem/`).
-Under the new model, every persistence concern is a mount path
-(`/system/secrets`, `/system/processes`, `/engine/threads`, …) backed by
-exactly one `RootFilesystem` implementation — typed stores become thin
-wrappers around `ScopedFilesystem` and own no backend dispatch of their
-own. See `crates/ironclaw_filesystem/CLAUDE.md` and the
-`2026-05-14-universal-fs-dispatch.md` plan/ADR.
+New persistence uses the `RootFilesystem` mount catalog. Consumers receive a
+`ScopedFilesystem` and typed domain wrappers; they do not choose backends or
+maintain parallel backend-dispatch traits.
 
-**New persistence features go on `ScopedFilesystem`, not into `src/db/`.**
-The rules below cover the *legacy* per-crate dual-backend pattern that
-still exists in `src/db/`, `src/history/`, and `migrations/`. Touch them
-only when fixing or extending code that already lives there; do not add
-new sub-traits or per-domain backends.
+Read `crates/ironclaw_filesystem/CLAUDE.md` and the owning domain contract before
+changing storage. Re-verify the core surface with:
 
-This file is `paths`-scoped to those legacy directories so the rule
-loads when (and only when) you're inside them. New code under
-`crates/ironclaw_filesystem/`, consumer crates routing through it, or
-any new mount-backed store should follow the unified-surface contract
-in `crates/ironclaw_filesystem/CLAUDE.md` instead.
+```bash
+rg -n "trait RootFilesystem|struct ScopedFilesystem|fn cas_update" crates/ironclaw_filesystem
+```
 
----
+## Ownership
 
-## Legacy: Dual-Backend Per-Crate Pattern
+- `ironclaw_filesystem` owns paths, mounts, containment, versions, and CAS.
+- Domain crates own record schemas, serialization, and invariants.
+- Composition chooses concrete backends and mounts them.
+- Product workflow consumes typed stores and never reaches through them to a
+  backend.
 
-Dual-backend persistence: PostgreSQL + libSQL/Turso. **All new persistence features must support both backends.** *(Applies only inside the legacy directories scoped above. For new crates, mount through `RootFilesystem` and let the wiring layer pick the backend.)*
+Do not add a domain DTO or policy branch to the filesystem crate merely because
+it is persisted.
 
-See `src/db/CLAUDE.md` for full schema, dialect differences, and libSQL limitations.
+## Adding a persistence operation
 
-## Adding a New Operation
+1. Identify the domain owner in `crates/AGENTS.md` and read its local contract.
+2. Define the typed operation and record shape in that domain crate.
+3. Use an existing scoped mount, or add a mount through the filesystem catalog
+   and composition wiring when the domain is genuinely new.
+4. Keep backend selection in composition. Domain stores do not branch on
+   PostgreSQL, libSQL, or local-filesystem configuration.
+5. Use `cas_update` for versioned filesystem mutation. Use a backend transaction
+   for a backend-native multi-statement invariant.
+6. Add contract tests at the public domain-operation or typed-wrapper seam, then
+   a production-composition test when mount selection, restart, or cross-domain
+   behavior is involved.
 
-1. Decide which sub-trait it belongs to (`ConversationStore`, `JobStore`, `SandboxStore`, `RoutineStore`, `ToolFailureStore`, `SettingsStore`, `WorkspaceStore`) or create a new one
-2. Add the async method signature to that sub-trait in `src/db/mod.rs`
-3. Implement in `src/db/postgres.rs` (delegate to `Store`/`Repository`)
-4. Implement in `src/db/libsql/<module>.rs` (use `self.connect().await?` per operation)
-5. Add migration if needed:
-   - PostgreSQL: new `migrations/VN__description.sql`
-   - libSQL: add entry to `INCREMENTAL_MIGRATIONS` in `libsql_migrations.rs`
-   - **Version numbering**: always number after the highest version on `main` — those migrations may already be in production. Check with `git ls-tree origin/main migrations/` and main's `INCREMENTAL_MIGRATIONS`. Never reuse or insert before an existing version.
-6. Test feature isolation:
-   ```bash
-   cargo check                                          # postgres (default)
-   cargo check --no-default-features --features libsql  # libsql only
-   cargo check --all-features                           # both
-   ```
+Review flags:
 
-## SQL Dialect Translation Checklist
+- a new `Store`/`Repository` trait whose only purpose is choosing a backend;
+- a consumer opening a concrete backend connection;
+- a typed store accepting `RootFilesystem` when `ScopedFilesystem` is enough;
+- a write that reads a version and later overwrites without CAS;
+- a per-record async mutex held across filesystem/backend I/O.
 
-When writing SQL for both backends, translate these types:
+## Atomicity and concurrency
 
-| PostgreSQL | libSQL |
-|-----------|--------|
-| `UUID` | `TEXT` |
-| `TIMESTAMPTZ` | `TEXT` (ISO-8601, write with `fmt_ts()`, read with `get_ts()`) |
-| `JSONB` | `TEXT` (JSON string) |
-| `BOOLEAN` | `INTEGER` (0/1 -- use `get_i64(row, idx) != 0` to read) |
-| `NUMERIC` | `TEXT` (preserves `rust_decimal` precision) |
-| `TEXT[]` | `TEXT` (JSON-encoded array) |
-| `VECTOR` | `BLOB` (flexible dimensions; vector index dropped, brute-force search fallback) |
-| `jsonb_set(col, '{key}', val)` | `json_patch(col, '{"key": val}')` -- replaces top-level keys entirely, cannot do partial nested updates |
-| `DEFAULT NOW()` | `DEFAULT (datetime('now'))` |
-| `tsvector` + `ts_rank_cd` | FTS5 virtual table + sync triggers |
+Every read-modify-write uses the shared bounded CAS update path. Do not hold a
+process-local mutex across backend I/O: it cannot coordinate multiple processes
+and can convoy the runtime. Multi-record invariants require an owning domain
+operation with an explicit failure and recovery contract.
 
-## Schema Translation Beyond DDL
+Backend-native stores that perform multiple SQL statements (`INSERT` plus
+`INSERT`, `UPDATE` plus `DELETE`, or read-then-write) must wrap the full invariant
+in one transaction. Sequential awaited calls are not atomic. Where both
+PostgreSQL and libSQL implementations exist, test the same commit/rollback and
+concurrency behavior through a shared conformance suite.
 
-Don't just translate `CREATE TABLE`. Also check:
-- **Indexes** -- diff `CREATE INDEX` statements between backends
-- **Seed data** -- check for `INSERT INTO` in migrations (e.g., `leak_detection_patterns`)
-- **Triggers** -- PostgreSQL functions vs SQLite triggers (no stored procs in SQLite)
+Persisted state must remain reconstructible after interruption. Test conflict,
+retry exhaustion, restart, and partial-failure behavior at the public
+domain-operation or typed-wrapper seam.
 
-## Transaction Safety
+## Backend parity
 
-Multi-step operations (INSERT+INSERT, UPDATE+DELETE, read-modify-write) MUST be wrapped in a transaction. Ask: "If this crashes between step N and N+1, is the database consistent?" If not, wrap in a transaction. Applies to both backends.
+When a domain explicitly supports multiple durable backends, keep behavioral
+parity for ordering, uniqueness, timestamps, indexes, transactions, and error
+classification. Put adversarial parity cases in a shared conformance suite
+instead of copying tests per implementation.
 
-For the `RootFilesystem`/`ScopedFilesystem` mount plane, a filesystem read-modify-write MUST go through `ironclaw_filesystem::cas_update` (the one shared bounded-CAS-retry helper). Never wrap it in a per-record `tokio::sync::Mutex` held across the backend `.await` — it is a redundant serializer over a backend that already does versioned CAS and convoys/wedges the runtime under burst. See `crates/ironclaw_filesystem/CLAUDE.md` invariant 2 and `docs/plans/2026-06-25-cas-migration.md`.
+Parity is behavioral, not merely schema-shaped. Compare uniqueness and indexes,
+timestamp precision and ordering, JSON/enum serialization, transaction rollback,
+concurrent-writer outcomes, seed/default records, migration replay, and error
+classification. When fixing one implementation, search its peers and the shared
+conformance suite for the same pattern.
 
-## libSQL Connection Model
+## Data safety
 
-`LibSqlBackend::connect()` creates a fresh connection per operation with `PRAGMA busy_timeout = 5000`. This is intentional -- no pool exists. Never hold connections open across `await` points. Satellite stores (`LibSqlSecretsStore`, `LibSqlWasmToolStore`) receive `Arc<LibSqlDatabase>` via `shared_db()` and call `.connect()` themselves -- never pass a live `Connection`.
+Never silently discard model output, audit events, transcripts, or user data.
+Destructive operations require an explicit product contract, authorization, and
+tests for scope isolation. Storage errors must retain their server-side cause
+while returning a sanitized boundary error.
 
-## Never Delete LLM Output Data
-
-All LLM execution data — thread messages, steps, events, tool call parameters and results — must **never** be deleted from the database. This is the most valuable data in the system. No `DELETE` statements, no `DROP`, no truncation of LLM-generated content. In-memory caches (HashMaps in `HybridStore`) may evict entries for memory pressure, but database rows are permanent. Load methods must fall back to the database on a cache miss.
-
-## Fix the Pattern, Not the Instance
-
-When fixing a bug in one backend's SQL, always grep for the same pattern in the other. A fix to `postgres.rs` that doesn't also fix `libsql/jobs.rs` is half a fix. Same applies to satellite stores.
+Cache eviction is not durable deletion. A cache miss reloads from the owning
+store. Retention or deletion features require explicit tenant/user scope,
+auditable evidence, restart-safe behavior, and tests proving unrelated records
+survive.

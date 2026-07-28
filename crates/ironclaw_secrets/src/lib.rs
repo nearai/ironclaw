@@ -1,3 +1,4 @@
+// arch-exempt: large_file, §4.3 secrets consolidation — this PR deletes ~660 lines (adapter + InMemorySecretStore); remaining size is pre-existing, plan #6168
 //! Tenant-scoped secret service boundary for IronClaw Reborn.
 //!
 //! This crate stores and leases secret material behind opaque
@@ -8,28 +9,31 @@
 #![warn(unreachable_pub)]
 
 mod crypto;
-mod filesystem_store;
 pub mod keychain;
 mod legacy_store;
+mod placeholder;
+mod secret_store;
 
-pub use filesystem_store::{FilesystemCredentialBroker, FilesystemSecretStore};
+pub use placeholder::{
+    CREDENTIAL_PLACEHOLDER_PREFIX, CREDENTIAL_PLACEHOLDER_SUFFIX_LEN, CredentialPlaceholderOwner,
+    CredentialPlaceholderRegistry, CredentialPlaceholderToken, CredentialSessionLease,
+};
+pub use secret_store::{CredentialBroker, SecretStore};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
-use chrono::{Duration, Utc};
 pub use crypto::{
     SecretsCrypto, credential_account_aad, credential_session_aad, filesystem_secret_aad,
     secret_record_aad, validate_master_key_material,
 };
 use ironclaw_host_api::{
-    AgentId, CapabilityId, ExtensionId, InvocationId, MissionId, NetworkMethod, ProjectId,
-    ResourceScope, SecretHandle, TenantId, ThreadId, Timestamp, UserId,
+    AgentId, CapabilityId, ExtensionId, InvocationId, NetworkMethod, ProjectId, ResourceScope,
+    SecretHandle, TenantId, Timestamp, UserId,
 };
-use legacy_store::InMemorySecretsStore;
-pub use legacy_store::{CreateSecretParams, SecretConsumeResult, SecretError, SecretsStore};
+pub use legacy_store::SecretError;
 pub use secrecy::SecretString as SecretMaterial;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -38,6 +42,22 @@ use uuid::Uuid;
 
 const CREDENTIAL_ID_MAX_LEN: usize = 128;
 const DEFAULT_SECRET_LEASE_TTL_SECONDS: i64 = 300;
+
+/// Default lifetime handed to a [`CredentialSession`] whose
+/// [`CredentialSessionRequest::expires_at`] is `None`. A caller that asks for
+/// "no expiry" still gets a bounded session — see
+/// [`CREDENTIAL_SESSION_MAX_TTL_SECONDS`] for why unbounded is never actually
+/// granted.
+const CREDENTIAL_SESSION_DEFAULT_TTL_SECONDS: i64 = 30 * 60;
+
+/// Hard cap on how far in the future any [`CredentialSession::expires_at`]
+/// may be set, regardless of what the caller requests. Explicit revocation
+/// (via [`CredentialSessionLease`]/[`InMemoryCredentialBroker::revoke_session`])
+/// is the primary way a session's life ends; this is only the backstop for a
+/// lease held or leaked past the caller's own error/timeout/panic handling —
+/// see `create_session`'s doc comment for why a background sweep task is not
+/// the fix here.
+const CREDENTIAL_SESSION_MAX_TTL_SECONDS: i64 = 30 * 60;
 
 /// Opaque identifier for a one-shot secret lease.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -69,7 +89,7 @@ pub struct SecretMetadata {
     pub handle: SecretHandle,
     /// When the secret material expires, if known.
     ///
-    /// Populated only for access tokens written through [`SecretStore::put`] with a
+    /// Populated only for access tokens written through [`SecretStorePort::put`] with a
     /// non-`None` `expires_at` argument (e.g. OAuth access tokens). Legacy records
     /// and secrets written without a TTL leave this `None`.
     pub expires_at: Option<Timestamp>,
@@ -252,17 +272,6 @@ impl CredentialSessionId {
         Uuid::parse_str(value).map(Self)
     }
 
-    /// Returns the underlying UUID as a storage-formatted string.
-    ///
-    /// This is the **only** way to obtain the bearer-like value of a
-    /// `CredentialSessionId`. It exists so durable backends can write the id
-    /// into their primary-key columns; callers must not log, audit, or echo
-    /// the result to runtime/plugin code. `Display` and `Debug` deliberately
-    /// redact, so `format!("{id}")` and `{id:?}` both refuse to leak.
-    ///
-    /// Kept feature-agnostic so private DTO conversion code does not depend on
-    /// backend feature gates. It may be unused in featureless builds.
-    #[allow(dead_code)]
     pub(crate) fn to_private_storage_string(self) -> String {
         self.0.to_string()
     }
@@ -392,7 +401,7 @@ pub struct CredentialSession {
 /// to avoid duplicating that constructor for every backend.
 // arch-exempt: too_many_args, needs CredentialSession reconstruction context, plan #4088
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn __internal_session_for_filesystem_store(
+pub(crate) fn __internal_session_for_secret_store(
     scope: ResourceScope,
     invocation_id: InvocationId,
     capability_id: CapabilityId,
@@ -477,6 +486,8 @@ pub enum CredentialBrokerError {
     CredentialExtensionMismatch { account_id: CredentialAccountId },
     #[error("credential account {account_id} is not allowed for requested target")]
     CredentialPolicyMismatch { account_id: CredentialAccountId },
+    #[error("credential placeholder token is invalid: {reason}")]
+    InvalidPlaceholderToken { reason: String },
 }
 
 impl CredentialBrokerError {
@@ -494,6 +505,7 @@ impl CredentialBrokerError {
             Self::CredentialRevoked { .. } => "CredentialRevoked",
             Self::CredentialExtensionMismatch { .. } => "CredentialPolicyMismatch",
             Self::CredentialPolicyMismatch { .. } => "CredentialPolicyMismatch",
+            Self::InvalidPlaceholderToken { .. } => "MissingCredential",
         }
     }
 
@@ -569,16 +581,90 @@ pub trait CredentialSessionStore: Send + Sync {
     ) -> Result<CredentialSession, CredentialBrokerError>;
 }
 
+/// All session-lifecycle bookkeeping `InMemoryCredentialBroker` keeps beyond
+/// account storage, collapsed under one lock.
+///
+/// `sessions`, `jit_minted`, and `sessions_by_placeholder` used to be three
+/// (really four, counting the outstanding-lease counter) separate `Mutex`es
+/// on the broker. They are not independent state — `jit_minted` and
+/// `sessions_by_placeholder` are both secondary indices over the same
+/// `sessions` entries — so five separately-lockable pieces of one logical
+/// session record was over-fragmentation: every mint/revoke sequence had to
+/// hand-synchronize removals across maps and reason about which lock was
+/// allowed to be held while acquiring which other one (see the
+/// `CredentialPlaceholderRegistry` / `RegistryState` pattern just above,
+/// which this mirrors). A single lock over all three makes every
+/// mint/reuse/revoke sequence atomic from an outside observer's perspective,
+/// and removes the need for lock-ordering rules or "ignoring" twin methods
+/// that used to exist purely to dodge self-deadlock across separate
+/// acquisitions of the same logical state.
+#[derive(Debug, Default)]
+struct SessionState {
+    sessions: HashMap<CredentialSessionId, CredentialSessionRecord>,
+    /// Secondary index for JIT minting: `(invocation, capability, account)` ->
+    /// the session already minted for it, so re-use within the same dispatch
+    /// does not mint a second session. See [`placeholder::JitMintKey`] and
+    /// [`InMemoryCredentialBroker::mint_on_first_use`]. Pruned (by session id)
+    /// on [`InMemoryCredentialBroker::revoke_session`] so a long-lived process
+    /// does not accumulate one entry per invocation forever.
+    jit_minted: HashMap<placeholder::JitMintKey, CredentialSessionId>,
+    /// Secondary index the egress proxy (W6-EGRESS-PROXY, not built yet) will
+    /// use: placeholder token -> the live session(s) currently bound to it.
+    /// Multi-valued because a placeholder is stable per `(tenant, user,
+    /// provider)` while sessions are minted per invocation/account, so more
+    /// than one live session can legitimately be bound to the same
+    /// placeholder at once (e.g. two overlapping invocations, or two
+    /// accounts under one provider) — a single-slot map would silently drop
+    /// one binding when the other was written. See
+    /// [`InMemoryCredentialBroker::find_session_by_placeholder`]. Choosing
+    /// among multiple scope-matching candidates by request target (e.g.
+    /// which of two same-provider accounts a specific outbound URL should
+    /// use) is the egress proxy's job, not this registry's — it is not built
+    /// yet, so `find_session_by_placeholder` returns the first scope-match it
+    /// finds. Pruned (by session id) on `revoke_session`.
+    sessions_by_placeholder: HashMap<CredentialPlaceholderToken, HashSet<CredentialSessionId>>,
+}
+
 #[derive(Debug, Default)]
 pub struct InMemoryCredentialBroker {
     accounts: Mutex<HashMap<CredentialAccountKey, CredentialAccount>>,
-    sessions: Mutex<HashMap<CredentialSessionId, CredentialSessionRecord>>,
+    /// See [`SessionState`] for why this is one lock rather than several.
+    /// `accounts` stays a separate `Mutex`: `create_session` (by way of
+    /// `build_session`) always drops the accounts guard before touching
+    /// session state, so it is cleanly separable and merging it would only
+    /// widen the critical section for no benefit.
+    session_state: Mutex<SessionState>,
 }
 
 #[derive(Debug, Clone)]
 struct CredentialSessionRecord {
     session: CredentialSession,
     uses: u64,
+    /// Outstanding-lease count for this session. `mint_on_first_use` can hand
+    /// out more than one [`crate::CredentialSessionLease`] for the *same*
+    /// session (its cache-hit path reuses a still-live session rather than
+    /// minting a second one), so revoking one lease must not revoke the
+    /// session out from under another lease still holding it — the session is
+    /// only actually revoked when the last outstanding lease releases it. See
+    /// [`InMemoryCredentialBroker::release_lease`]. Zero for sessions created
+    /// through [`InMemoryCredentialBroker::create_session`] /
+    /// [`CredentialSessionStore::issue_session`] directly (no lease tracking
+    /// applies outside the JIT-minting path).
+    lease_count: usize,
+}
+
+/// Locks `mutex`, recovering the inner guard on poison rather than silently
+/// no-op'ing. A poisoned lock here must never be treated as "nothing to
+/// clean up" — that would let a revoke path fail open and leave a standing
+/// grant, contradicting this crate's core invariant for session state.
+///
+/// Defined here (crate root) rather than in `placeholder.rs` so both that
+/// module's `session_state`-locking helpers and this module's own methods
+/// (`create_session`, `validate_session`, `consume_session_use`, the
+/// `CredentialSessionStore` impl) can use it: a private item defined in a
+/// child module is not visible to its parent, only to its own descendants.
+fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 fn ensure_credential_session_record_usable(
@@ -621,7 +707,59 @@ impl InMemoryCredentialBroker {
         Ok(())
     }
 
+    /// Mints a [`CredentialSession`] for `request`, capping its expiry so a
+    /// session can never be genuinely unbounded.
+    ///
+    /// `request.expires_at` and `request.max_uses` are both `Option`, and a
+    /// caller (in practice, `mint_on_first_use`'s upstream capability
+    /// dispatch) can legitimately pass `expires_at: None` meaning "I have no
+    /// opinion" rather than "never expire". Combined with revocation that
+    /// depends on `Drop` running (see [`CredentialSessionLease`]), a lease
+    /// held or leaked forever — a caller that never awaits its future to
+    /// completion or cancellation, for instance — would otherwise be a
+    /// standing grant for the process lifetime. So `expires_at` is always
+    /// defaulted-and-capped here: `None` becomes
+    /// [`CREDENTIAL_SESSION_DEFAULT_TTL_SECONDS`] out, and anything longer
+    /// than [`CREDENTIAL_SESSION_MAX_TTL_SECONDS`] (including an explicit
+    /// request for longer) is clamped down to it. Enforcement of the
+    /// resulting expiry is the existing lazy check in
+    /// `ensure_credential_session_record_usable` / `validate_session` — this
+    /// only ever narrows the stored value, it adds no new enforcement path.
+    ///
+    /// Deliberately **not** paired with a background sweep task: proactive
+    /// eviction of expired-but-unrevoked sessions would be standing
+    /// infrastructure (a spawn point, shutdown handling, interval tuning) for
+    /// a path with zero live callers today, and this crate owns no runtime to
+    /// host it on. Explicit revoke stays the primary mechanism; this cap is
+    /// only the backstop. Proactive eviction is deferred to whichever later
+    /// PR gives this store an owning runtime.
     pub fn create_session(
+        &self,
+        request: CredentialSessionRequest,
+    ) -> Result<CredentialSession, CredentialBrokerError> {
+        let session = self.build_session(request)?;
+        lock_or_recover(&self.session_state).sessions.insert(
+            session.correlation_id,
+            CredentialSessionRecord {
+                session: session.clone(),
+                uses: 0,
+                lease_count: 0,
+            },
+        );
+        Ok(session)
+    }
+
+    /// Validates `request` against its account and constructs the resulting
+    /// [`CredentialSession`], without publishing it anywhere.
+    ///
+    /// Split out of [`InMemoryCredentialBroker::create_session`] so
+    /// [`InMemoryCredentialBroker::mint_on_first_use`] (in `placeholder.rs`)
+    /// can hold `session_state` locked across the whole lookup-or-mint
+    /// sequence while still calling into this account-validation step: this
+    /// method only ever locks `accounts`, dropping that guard before
+    /// returning, so nesting it inside an already-held `session_state` lock
+    /// cannot deadlock and cannot widen `accounts`'s critical section.
+    fn build_session(
         &self,
         request: CredentialSessionRequest,
     ) -> Result<CredentialSession, CredentialBrokerError> {
@@ -678,7 +816,15 @@ impl InMemoryCredentialBroker {
                 account_id: request.account_id,
             });
         }
-        let session = CredentialSession {
+        let now = chrono::Utc::now();
+        let default_expires_at =
+            now + chrono::Duration::seconds(CREDENTIAL_SESSION_DEFAULT_TTL_SECONDS);
+        let max_expires_at = now + chrono::Duration::seconds(CREDENTIAL_SESSION_MAX_TTL_SECONDS);
+        let expires_at = request
+            .expires_at
+            .unwrap_or(default_expires_at)
+            .min(max_expires_at);
+        Ok(CredentialSession {
             scope: request.scope,
             invocation_id: request.invocation_id,
             capability_id: request.capability_id,
@@ -686,24 +832,10 @@ impl InMemoryCredentialBroker {
             account_id: account.id.clone(),
             secret_handles: account.secret_handles.clone(),
             allowed_targets: account.allowed_targets.clone(),
-            expires_at: request.expires_at,
+            expires_at: Some(expires_at),
             max_uses: request.max_uses,
             correlation_id: CredentialSessionId::new(),
-        };
-        drop(accounts);
-        self.sessions
-            .lock()
-            .map_err(|error| CredentialBrokerError::BrokerUnavailable {
-                reason: error.to_string(),
-            })?
-            .insert(
-                session.correlation_id,
-                CredentialSessionRecord {
-                    session: session.clone(),
-                    uses: 0,
-                },
-            );
-        Ok(session)
+        })
     }
 
     pub fn validate_session(
@@ -711,13 +843,9 @@ impl InMemoryCredentialBroker {
         session_id: CredentialSessionId,
         now: Timestamp,
     ) -> Result<CredentialSession, CredentialBrokerError> {
-        let mut sessions =
-            self.sessions
-                .lock()
-                .map_err(|error| CredentialBrokerError::BrokerUnavailable {
-                    reason: error.to_string(),
-                })?;
-        let record = sessions
+        let mut state = lock_or_recover(&self.session_state);
+        let record = state
+            .sessions
             .get_mut(&session_id)
             .ok_or(CredentialBrokerError::UnknownSession { session_id })?;
         ensure_credential_session_record_usable(record, session_id, now)?;
@@ -729,13 +857,9 @@ impl InMemoryCredentialBroker {
         session_id: CredentialSessionId,
         now: Timestamp,
     ) -> Result<CredentialSession, CredentialBrokerError> {
-        let mut sessions =
-            self.sessions
-                .lock()
-                .map_err(|error| CredentialBrokerError::BrokerUnavailable {
-                    reason: error.to_string(),
-                })?;
-        let record = sessions
+        let mut state = lock_or_recover(&self.session_state);
+        let record = state
+            .sessions
             .get_mut(&session_id)
             .ok_or(CredentialBrokerError::UnknownSession { session_id })?;
         ensure_credential_session_record_usable(record, session_id, now)?;
@@ -794,18 +918,14 @@ impl CredentialSessionStore for InMemoryCredentialBroker {
         &self,
         session: CredentialSession,
     ) -> Result<CredentialSession, CredentialBrokerError> {
-        self.sessions
-            .lock()
-            .map_err(|error| CredentialBrokerError::BrokerUnavailable {
-                reason: error.to_string(),
-            })?
-            .insert(
-                session.correlation_id,
-                CredentialSessionRecord {
-                    session: session.clone(),
-                    uses: 0,
-                },
-            );
+        lock_or_recover(&self.session_state).sessions.insert(
+            session.correlation_id,
+            CredentialSessionRecord {
+                session: session.clone(),
+                uses: 0,
+                lease_count: 0,
+            },
+        );
         Ok(session)
     }
 
@@ -814,13 +934,9 @@ impl CredentialSessionStore for InMemoryCredentialBroker {
         scope: &ResourceScope,
         session_id: CredentialSessionId,
     ) -> Result<Option<CredentialSession>, CredentialBrokerError> {
-        let sessions =
-            self.sessions
-                .lock()
-                .map_err(|error| CredentialBrokerError::BrokerUnavailable {
-                    reason: error.to_string(),
-                })?;
-        Ok(sessions
+        let state = lock_or_recover(&self.session_state);
+        Ok(state
+            .sessions
             .get(&session_id)
             .filter(|record| record.session.scope == *scope)
             .map(|record| record.session.clone()))
@@ -832,13 +948,9 @@ impl CredentialSessionStore for InMemoryCredentialBroker {
         session_id: CredentialSessionId,
         now: Timestamp,
     ) -> Result<CredentialSession, CredentialBrokerError> {
-        let sessions =
-            self.sessions
-                .lock()
-                .map_err(|error| CredentialBrokerError::BrokerUnavailable {
-                    reason: error.to_string(),
-                })?;
-        let record = sessions
+        let state = lock_or_recover(&self.session_state);
+        let record = state
+            .sessions
             .get(&session_id)
             .filter(|record| record.session.scope == *scope)
             .ok_or(CredentialBrokerError::UnknownSession { session_id })?;
@@ -852,13 +964,9 @@ impl CredentialSessionStore for InMemoryCredentialBroker {
         session_id: CredentialSessionId,
         now: Timestamp,
     ) -> Result<CredentialSession, CredentialBrokerError> {
-        let mut sessions =
-            self.sessions
-                .lock()
-                .map_err(|error| CredentialBrokerError::BrokerUnavailable {
-                    reason: error.to_string(),
-                })?;
-        let record = sessions
+        let mut state = lock_or_recover(&self.session_state);
+        let record = state
+            .sessions
             .get_mut(&session_id)
             .filter(|record| record.session.scope == *scope)
             .ok_or(CredentialBrokerError::UnknownSession { session_id })?;
@@ -988,7 +1096,7 @@ fn validate_credential_id(kind: &'static str, value: &str) -> Result<(), Credent
 
 /// Scoped secret store contract.
 #[async_trait]
-pub trait SecretStore: Send + Sync {
+pub trait SecretStorePort: Send + Sync {
     /// Stores or replaces a secret under the caller's tenant/user/project scope and returns redacted metadata.
     ///
     /// Intended for trusted setup, composition, migration, or storage-code paths that are already
@@ -1057,535 +1165,22 @@ pub trait SecretStore: Send + Sync {
     ) -> Result<Vec<SecretLease>, SecretStoreError>;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct SecretLeaseKey {
-    tenant_id: TenantId,
-    user_id: UserId,
-    agent_id: Option<AgentId>,
-    project_id: Option<ProjectId>,
-    mission_id: Option<MissionId>,
-    thread_id: Option<ThreadId>,
-    invocation_id: InvocationId,
-    lease_id: SecretLeaseId,
-}
-
-impl SecretLeaseKey {
-    fn new(scope: &ResourceScope, lease_id: SecretLeaseId) -> Self {
-        Self {
-            tenant_id: scope.tenant_id.clone(),
-            user_id: scope.user_id.clone(),
-            agent_id: scope.agent_id.clone(),
-            project_id: scope.project_id.clone(),
-            mission_id: scope.mission_id.clone(),
-            thread_id: scope.thread_id.clone(),
-            invocation_id: scope.invocation_id,
-            lease_id,
-        }
-    }
-
-    fn matches_scope(&self, scope: &ResourceScope) -> bool {
-        self.tenant_id == scope.tenant_id
-            && self.user_id == scope.user_id
-            && self.agent_id == scope.agent_id
-            && self.project_id == scope.project_id
-            && self.mission_id == scope.mission_id
-            && self.thread_id == scope.thread_id
-            && self.invocation_id == scope.invocation_id
-    }
-}
-
-#[derive(Debug, Clone)]
-struct LeaseRecord {
-    lease: SecretLease,
-    secret_id: Uuid,
-    lease_expires_at: Timestamp,
-    secret_expires_at: Option<Timestamp>,
-}
-
-/// Adapter that exposes the battle-tested encrypted [`SecretsStore`] contract
-/// through the scoped Reborn [`SecretStore`] lease boundary.
-#[derive(Debug)]
-pub struct ScopedSecretsStoreAdapter<S> {
-    inner: Arc<S>,
-    leases: Mutex<HashMap<SecretLeaseKey, LeaseRecord>>,
-    lease_ttl: Duration,
-}
-
-impl<S> ScopedSecretsStoreAdapter<S>
-where
-    S: SecretsStore + 'static,
-{
-    pub fn new(inner: Arc<S>) -> Self {
-        Self::with_lease_ttl(inner, Duration::seconds(DEFAULT_SECRET_LEASE_TTL_SECONDS))
-    }
-
-    pub fn with_lease_ttl(inner: Arc<S>, lease_ttl: Duration) -> Self {
-        Self {
-            inner,
-            leases: Mutex::new(HashMap::new()),
-            lease_ttl,
-        }
-    }
-
-    fn lock_leases(
-        &self,
-    ) -> Result<MutexGuard<'_, HashMap<SecretLeaseKey, LeaseRecord>>, SecretStoreError> {
-        self.leases
-            .lock()
-            .map_err(|error| SecretStoreError::StoreUnavailable {
-                reason: error.to_string(),
-            })
-    }
-
-    fn mark_consumed_lease(
-        &self,
-        scope: &ResourceScope,
-        lease_id: SecretLeaseId,
-        status: SecretLeaseStatus,
-    ) -> Result<(), SecretStoreError> {
-        let mut leases = self.lock_leases()?;
-        let key = SecretLeaseKey::new(scope, lease_id);
-        let record = leases
-            .get_mut(&key)
-            .ok_or_else(|| SecretStoreError::UnknownLease {
-                scope: Box::new(scope.clone()),
-                lease_id,
-            })?;
-        if record.lease.status == SecretLeaseStatus::Consumed {
-            record.lease.status = status;
-        }
-        Ok(())
-    }
-}
-
-fn scoped_legacy_user_id(scope: &ResourceScope) -> String {
-    serde_json::json!({
-        "tenant_id": scope.tenant_id.to_string(),
-        "user_id": scope.user_id.to_string(),
-        "agent_id": scope.agent_id.as_ref().map(ToString::to_string),
-        "project_id": scope.project_id.as_ref().map(ToString::to_string),
-    })
-    .to_string()
-}
-
-#[async_trait]
-impl<S> SecretStore for ScopedSecretsStoreAdapter<S>
-where
-    S: SecretsStore + 'static,
-{
-    async fn put(
-        &self,
-        scope: ResourceScope,
-        handle: SecretHandle,
-        material: SecretMaterial,
-        expires_at: Option<Timestamp>,
-    ) -> Result<SecretMetadata, SecretStoreError> {
-        let params = if let Some(t) = expires_at {
-            CreateSecretParams::from_secret(handle.to_string(), material).with_expiry(t)
-        } else {
-            CreateSecretParams::from_secret(handle.to_string(), material)
-        };
-        self.inner
-            .create(&scoped_legacy_user_id(&scope), params)
-            .await
-            .map_err(map_legacy_secret_error)?;
-        Ok(SecretMetadata {
-            scope,
-            handle,
-            expires_at,
-        })
-    }
-
-    async fn metadata(
-        &self,
-        scope: &ResourceScope,
-        handle: &SecretHandle,
-    ) -> Result<Option<SecretMetadata>, SecretStoreError> {
-        match self
-            .inner
-            .get(&scoped_legacy_user_id(scope), handle.as_str())
-            .await
-        {
-            Ok(secret) => Ok(Some(SecretMetadata {
-                scope: scope.clone(),
-                handle: handle.clone(),
-                expires_at: secret.expires_at,
-            })),
-            Err(SecretError::NotFound(_)) => Ok(None),
-            Err(error) => Err(map_legacy_secret_error(error)),
-        }
-    }
-
-    async fn metadata_for_scope(
-        &self,
-        scope: &ResourceScope,
-    ) -> Result<Vec<SecretMetadata>, SecretStoreError> {
-        let legacy_user_id = scoped_legacy_user_id(scope);
-        self.inner
-            .list(&legacy_user_id)
-            .await
-            .map_err(map_legacy_secret_error)?
-            .into_iter()
-            .map(|secret| {
-                SecretHandle::new(secret.name)
-                    .map(|handle| SecretMetadata {
-                        scope: scope.clone(),
-                        handle,
-                        expires_at: None,
-                    })
-                    .map_err(|error| SecretStoreError::StoreUnavailable {
-                        reason: format!("legacy secret handle is invalid: {error}"),
-                    })
-            })
-            .collect()
-    }
-
-    async fn delete(
-        &self,
-        scope: &ResourceScope,
-        handle: &SecretHandle,
-    ) -> Result<bool, SecretStoreError> {
-        let legacy_user_id = scoped_legacy_user_id(scope);
-        let removed = self
-            .inner
-            .delete(&legacy_user_id, handle.as_str())
-            .await
-            .map_err(map_legacy_secret_error)?;
-        if removed {
-            self.lock_leases()?.retain(|key, record| {
-                !(key.matches_scope(scope) && record.lease.handle == *handle)
-            });
-        }
-        Ok(removed)
-    }
-
-    async fn lease_once(
-        &self,
-        scope: &ResourceScope,
-        handle: &SecretHandle,
-    ) -> Result<SecretLease, SecretStoreError> {
-        let legacy_user_id = scoped_legacy_user_id(scope);
-        let secret = self
-            .inner
-            .get(&legacy_user_id, handle.as_str())
-            .await
-            .map_err(|error| match error {
-                SecretError::NotFound(_) => SecretStoreError::UnknownSecret {
-                    scope: Box::new(scope.clone()),
-                    handle: handle.clone(),
-                },
-                other => map_legacy_secret_error(other),
-            })?;
-        let lease = SecretLease {
-            id: SecretLeaseId::new(),
-            scope: scope.clone(),
-            handle: handle.clone(),
-            status: SecretLeaseStatus::Active,
-        };
-        self.lock_leases()?.insert(
-            SecretLeaseKey::new(scope, lease.id),
-            LeaseRecord {
-                lease: lease.clone(),
-                secret_id: secret.id,
-                lease_expires_at: Utc::now() + self.lease_ttl,
-                secret_expires_at: secret.expires_at,
-            },
-        );
-        Ok(lease)
-    }
-
-    async fn consume(
-        &self,
-        scope: &ResourceScope,
-        lease_id: SecretLeaseId,
-    ) -> Result<SecretMaterial, SecretStoreError> {
-        let (handle, secret_id) = {
-            let mut leases = self.lock_leases()?;
-            expire_stale_active_leases(&mut leases, Utc::now());
-            let key = SecretLeaseKey::new(scope, lease_id);
-            let record = leases
-                .get_mut(&key)
-                .ok_or_else(|| SecretStoreError::UnknownLease {
-                    scope: Box::new(scope.clone()),
-                    lease_id,
-                })?;
-            match record.lease.status {
-                SecretLeaseStatus::Active => {
-                    record.lease.status = SecretLeaseStatus::Consumed;
-                    (record.lease.handle.clone(), record.secret_id)
-                }
-                SecretLeaseStatus::Consumed => {
-                    return Err(SecretStoreError::LeaseConsumed { lease_id });
-                }
-                SecretLeaseStatus::Revoked => {
-                    return Err(SecretStoreError::LeaseRevoked { lease_id });
-                }
-                SecretLeaseStatus::Expired => {
-                    return Err(SecretStoreError::LeaseExpired { lease_id });
-                }
-            }
-        };
-        let material = match self
-            .inner
-            .get_decrypted(&scoped_legacy_user_id(scope), handle.as_str())
-            .await
-        {
-            Ok(material) => material,
-            Err(SecretError::Expired) => {
-                self.mark_consumed_lease(scope, lease_id, SecretLeaseStatus::Expired)?;
-                return Err(SecretStoreError::LeaseExpired { lease_id });
-            }
-            Err(error) => {
-                self.mark_consumed_lease(scope, lease_id, SecretLeaseStatus::Active)?;
-                return Err(map_legacy_secret_error(error));
-            }
-        };
-        if let Err(error) = self.inner.record_usage(secret_id).await {
-            self.mark_consumed_lease(scope, lease_id, SecretLeaseStatus::Active)?;
-            return Err(map_legacy_secret_error(error));
-        }
-        Ok(SecretMaterial::from(material.expose().to_string()))
-    }
-
-    async fn revoke(
-        &self,
-        scope: &ResourceScope,
-        lease_id: SecretLeaseId,
-    ) -> Result<SecretLease, SecretStoreError> {
-        let mut leases = self.lock_leases()?;
-        expire_stale_active_leases(&mut leases, Utc::now());
-        let key = SecretLeaseKey::new(scope, lease_id);
-        let record = leases
-            .get_mut(&key)
-            .ok_or_else(|| SecretStoreError::UnknownLease {
-                scope: Box::new(scope.clone()),
-                lease_id,
-            })?;
-        if record.lease.status == SecretLeaseStatus::Active {
-            record.lease.status = SecretLeaseStatus::Revoked;
-        }
-        Ok(record.lease.clone())
-    }
-
-    async fn leases_for_scope(
-        &self,
-        scope: &ResourceScope,
-    ) -> Result<Vec<SecretLease>, SecretStoreError> {
-        let mut leases = self.lock_leases()?;
-        expire_stale_active_leases(&mut leases, Utc::now());
-        Ok(leases
-            .iter()
-            .filter(|(key, _)| key.matches_scope(scope))
-            .map(|(_, record)| record.lease.clone())
-            .collect())
-    }
-}
-
-fn expire_stale_active_leases(leases: &mut HashMap<SecretLeaseKey, LeaseRecord>, now: Timestamp) {
-    for record in leases.values_mut() {
-        let lease_expired = record.lease_expires_at <= now;
-        let secret_expired = record
-            .secret_expires_at
-            .is_some_and(|secret_expires_at| secret_expires_at <= now);
-        if record.lease.status == SecretLeaseStatus::Active && (lease_expired || secret_expired) {
-            record.lease.status = SecretLeaseStatus::Expired;
-        }
-    }
-}
-
-fn map_legacy_secret_error(error: SecretError) -> SecretStoreError {
-    match error {
-        SecretError::NotFound(name) => SecretStoreError::StoreUnavailable {
-            reason: format!("legacy secret missing: {name}"),
-        },
-        SecretError::Expired => SecretStoreError::SecretExpired,
-        SecretError::InvalidMasterKey => SecretStoreError::BackendMisconfigured {
-            reason: "legacy secrets master key unavailable".to_string(),
-        },
-        SecretError::AccessDenied => SecretStoreError::StoreUnavailable {
-            reason: "legacy secret access denied".to_string(),
-        },
-        SecretError::InvalidUtf8
-        | SecretError::Database(_)
-        | SecretError::DecryptionFailed(_)
-        | SecretError::EncryptionFailed(_)
-        | SecretError::KeychainError(_) => SecretStoreError::StoreUnavailable {
-            reason: error.to_string(),
-        },
-    }
-}
-
-/// In-memory secret store for contract tests and non-durable demos.
-///
-/// This is a thin encrypted adapter over the ported legacy [`InMemorySecretsStore`];
-/// it intentionally does not keep a second raw-material store implementation.
-#[derive(Debug)]
-pub struct InMemorySecretStore {
-    inner: ScopedSecretsStoreAdapter<InMemorySecretsStore>,
-}
-
-impl InMemorySecretStore {
-    pub fn new() -> Self {
-        let crypto = Arc::new(SecretsCrypto::from_valid_master_key(
-            Uuid::new_v4().simple().to_string(),
-        ));
-        Self {
-            inner: ScopedSecretsStoreAdapter::new(Arc::new(InMemorySecretsStore::new(crypto))),
-        }
-    }
-
-    pub fn with_crypto(crypto: Arc<SecretsCrypto>) -> Self {
-        Self {
-            inner: ScopedSecretsStoreAdapter::new(Arc::new(InMemorySecretsStore::new(crypto))),
-        }
-    }
-}
-
-impl Default for InMemorySecretStore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait]
-impl SecretStore for InMemorySecretStore {
-    async fn put(
-        &self,
-        scope: ResourceScope,
-        handle: SecretHandle,
-        material: SecretMaterial,
-        expires_at: Option<Timestamp>,
-    ) -> Result<SecretMetadata, SecretStoreError> {
-        self.inner.put(scope, handle, material, expires_at).await
-    }
-
-    async fn metadata(
-        &self,
-        scope: &ResourceScope,
-        handle: &SecretHandle,
-    ) -> Result<Option<SecretMetadata>, SecretStoreError> {
-        self.inner.metadata(scope, handle).await
-    }
-
-    async fn metadata_for_scope(
-        &self,
-        scope: &ResourceScope,
-    ) -> Result<Vec<SecretMetadata>, SecretStoreError> {
-        self.inner.metadata_for_scope(scope).await
-    }
-
-    async fn delete(
-        &self,
-        scope: &ResourceScope,
-        handle: &SecretHandle,
-    ) -> Result<bool, SecretStoreError> {
-        self.inner.delete(scope, handle).await
-    }
-
-    async fn lease_once(
-        &self,
-        scope: &ResourceScope,
-        handle: &SecretHandle,
-    ) -> Result<SecretLease, SecretStoreError> {
-        self.inner.lease_once(scope, handle).await
-    }
-
-    async fn consume(
-        &self,
-        scope: &ResourceScope,
-        lease_id: SecretLeaseId,
-    ) -> Result<SecretMaterial, SecretStoreError> {
-        self.inner.consume(scope, lease_id).await
-    }
-
-    async fn revoke(
-        &self,
-        scope: &ResourceScope,
-        lease_id: SecretLeaseId,
-    ) -> Result<SecretLease, SecretStoreError> {
-        self.inner.revoke(scope, lease_id).await
-    }
-
-    async fn leases_for_scope(
-        &self,
-        scope: &ResourceScope,
-    ) -> Result<Vec<SecretLease>, SecretStoreError> {
-        self.inner.leases_for_scope(scope).await
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use chrono::Utc;
     use ironclaw_host_api::{
-        AgentId, CapabilityId, ExtensionId, InvocationId, MissionId, NetworkMethod, ProjectId,
+        CapabilityId, ExtensionId, InvocationId, MissionId, NetworkMethod, ProjectId,
         ResourceScope, SecretHandle, TenantId, ThreadId, UserId,
     };
-    use secrecy::ExposeSecret;
     use serde_json::json;
 
-    use crate::legacy_store::InMemorySecretsStore;
     use crate::{
-        CREDENTIAL_ID_MAX_LEN, CredentialAccount, CredentialAccountId, CredentialAccountStatus,
-        CredentialBrokerError, CredentialPathPolicy, CredentialSessionId, CredentialSessionRequest,
-        CredentialTargetPolicy, InMemoryCredentialBroker, InMemorySecretStore, RedactedJson,
-        ScopedSecretsStoreAdapter, SecretLeaseKey, SecretMaterial, SecretStore, SecretStoreError,
-        SecretsCrypto, SecretsStore, scoped_legacy_user_id,
+        CREDENTIAL_ID_MAX_LEN, CREDENTIAL_SESSION_DEFAULT_TTL_SECONDS,
+        CREDENTIAL_SESSION_MAX_TTL_SECONDS, CredentialAccount, CredentialAccountId,
+        CredentialAccountStatus, CredentialBrokerError, CredentialPathPolicy, CredentialSessionId,
+        CredentialSessionRequest, CredentialTargetPolicy, InMemoryCredentialBroker, RedactedJson,
+        SecretStoreError,
     };
-
-    #[test]
-    fn scoped_legacy_user_id_uses_unambiguous_json_encoding() {
-        let none_agent = sample_scope("tenant-a", "user-a");
-        let dash_agent = ResourceScope {
-            agent_id: Some(AgentId::new("-").unwrap()),
-            ..none_agent.clone()
-        };
-        let delimiter_scope = sample_scope("tenant=a;agent=-", "user=a;project=-");
-
-        assert_ne!(
-            scoped_legacy_user_id(&none_agent),
-            scoped_legacy_user_id(&dash_agent)
-        );
-        assert_ne!(
-            scoped_legacy_user_id(&none_agent),
-            scoped_legacy_user_id(&delimiter_scope)
-        );
-        assert!(scoped_legacy_user_id(&none_agent).contains("\"agent_id\":null"));
-    }
-
-    #[tokio::test]
-    async fn scoped_secret_delete_removes_only_matching_scope() {
-        let store = InMemorySecretStore::new();
-        let owner = sample_scope("tenant-a", "user-a");
-        let other = sample_scope("tenant-a", "user-b");
-        let handle = SecretHandle::new("google-refresh").unwrap();
-
-        store
-            .put(
-                owner.clone(),
-                handle.clone(),
-                SecretMaterial::from("owner-secret"),
-                None,
-            )
-            .await
-            .unwrap();
-        store
-            .put(
-                other.clone(),
-                handle.clone(),
-                SecretMaterial::from("other-secret"),
-                None,
-            )
-            .await
-            .unwrap();
-
-        assert!(store.delete(&owner, &handle).await.unwrap());
-        assert!(!store.delete(&owner, &handle).await.unwrap());
-        assert!(store.metadata(&owner, &handle).await.unwrap().is_none());
-        assert!(store.metadata(&other, &handle).await.unwrap().is_some());
-    }
 
     #[test]
     fn credential_account_id_validates_and_round_trips() {
@@ -1731,6 +1326,13 @@ mod tests {
             .stable_reason(),
             "BackendMisconfigured"
         );
+        assert_eq!(
+            CredentialBrokerError::InvalidPlaceholderToken {
+                reason: "must start with 'icsbx_'".to_string(),
+            }
+            .stable_reason(),
+            "MissingCredential"
+        );
     }
 
     #[test]
@@ -1776,6 +1378,69 @@ mod tests {
             "CredentialSession Debug must not include the raw correlation UUID"
         );
         assert!(debug.contains("CredentialSessionId([REDACTED])"));
+    }
+
+    #[test]
+    fn create_session_defaults_and_caps_expires_at() {
+        // A request with no opinion on expiry (`None`) must not come back
+        // genuinely unbounded — it gets the default TTL. A request asking
+        // for longer than the hard cap must be clamped down to the cap
+        // rather than honored as requested. Both defend the same invariant:
+        // a leaked/held-forever lease can never be a standing grant for the
+        // process lifetime (see `create_session`'s doc comment).
+        let broker = InMemoryCredentialBroker::new();
+        let scope = sample_scope("tenant-a", "user-a");
+        let account_id = CredentialAccountId::new("openai_prod").unwrap();
+        broker
+            .put_account(sample_account(
+                scope.clone(),
+                account_id.clone(),
+                SecretHandle::new("openai_key").unwrap(),
+            ))
+            .unwrap();
+
+        let before = Utc::now();
+        let defaulted = broker
+            .create_session(CredentialSessionRequest {
+                expires_at: None,
+                ..session_request(
+                    scope.clone(),
+                    account_id.clone(),
+                    "https://api.example.com/v1/models",
+                )
+            })
+            .unwrap();
+        let after = Utc::now();
+        let defaulted_expiry = defaulted
+            .expires_at()
+            .expect("None must be defaulted, not left unbounded");
+        assert!(
+            defaulted_expiry
+                >= before + chrono::Duration::seconds(CREDENTIAL_SESSION_DEFAULT_TTL_SECONDS)
+                && defaulted_expiry
+                    <= after + chrono::Duration::seconds(CREDENTIAL_SESSION_DEFAULT_TTL_SECONDS),
+            "expires_at: None must default to ~{CREDENTIAL_SESSION_DEFAULT_TTL_SECONDS}s out, got {defaulted_expiry}"
+        );
+
+        let requested_far_future = Utc::now() + chrono::Duration::days(365);
+        let capped = broker
+            .create_session(CredentialSessionRequest {
+                expires_at: Some(requested_far_future),
+                ..session_request(scope, account_id, "https://api.example.com/v1/models")
+            })
+            .unwrap();
+        let capped_expiry = capped
+            .expires_at()
+            .expect("capped session must still carry an expiry");
+        assert!(
+            capped_expiry < requested_far_future,
+            "a request for a 1-year expiry must be clamped down to the cap, got {capped_expiry}"
+        );
+        assert!(
+            capped_expiry
+                <= Utc::now() + chrono::Duration::seconds(CREDENTIAL_SESSION_MAX_TTL_SECONDS),
+            "clamped expiry must not exceed the {CREDENTIAL_SESSION_MAX_TTL_SECONDS}s cap, got {capped_expiry}"
+        );
     }
 
     #[test]
@@ -1981,145 +1646,6 @@ mod tests {
             revoked_result,
             Err(CredentialBrokerError::CredentialRevoked { .. })
         ));
-    }
-
-    #[tokio::test]
-    async fn scoped_adapter_reuses_encrypted_legacy_store_for_scoped_leases() {
-        let crypto = Arc::new(
-            SecretsCrypto::new(SecretMaterial::from(
-                "0123456789abcdef0123456789abcdef".to_string(),
-            ))
-            .unwrap(),
-        );
-        let legacy = Arc::new(InMemorySecretsStore::new(crypto));
-        let adapter = ScopedSecretsStoreAdapter::new(Arc::clone(&legacy));
-        let scope = sample_scope("tenant-a", "user-a");
-        let other_scope = sample_scope("tenant-b", "user-a");
-        let handle = SecretHandle::new("api_key").unwrap();
-
-        adapter
-            .put(
-                scope.clone(),
-                handle.clone(),
-                SecretMaterial::from("sk-live-sentinel".to_string()),
-                None,
-            )
-            .await
-            .unwrap();
-
-        assert!(adapter.metadata(&scope, &handle).await.unwrap().is_some());
-        assert!(
-            adapter
-                .metadata(&other_scope, &handle)
-                .await
-                .unwrap()
-                .is_none()
-        );
-        let legacy_debug = format!(
-            "{:?}",
-            legacy
-                .get(&scoped_legacy_user_id(&scope), handle.as_str())
-                .await
-                .unwrap()
-        );
-        assert!(!legacy_debug.contains("sk-live-sentinel"));
-
-        let lease = adapter.lease_once(&scope, &handle).await.unwrap();
-        let material = adapter.consume(&scope, lease.id).await.unwrap();
-        assert_eq!(material.expose_secret(), "sk-live-sentinel");
-        let used_secret = legacy
-            .get(&scoped_legacy_user_id(&scope), handle.as_str())
-            .await
-            .unwrap();
-        assert_eq!(used_secret.usage_count, 1);
-        assert!(used_secret.last_used_at.is_some());
-        let second_consume = adapter.consume(&scope, lease.id).await;
-        assert!(matches!(
-            second_consume,
-            Err(SecretStoreError::LeaseConsumed { .. })
-        ));
-    }
-
-    #[tokio::test]
-    async fn expired_lease_drops_material_and_cannot_be_consumed() {
-        let store = InMemorySecretStore::new();
-        let scope = sample_scope("tenant-a", "user-a");
-        let handle = SecretHandle::new("api_key").unwrap();
-        store
-            .put(
-                scope.clone(),
-                handle.clone(),
-                SecretMaterial::from("super-secret"),
-                None,
-            )
-            .await
-            .unwrap();
-
-        let lease = store.lease_once(&scope, &handle).await.unwrap();
-        {
-            let mut leases = store.inner.leases.lock().unwrap();
-            let record = leases
-                .get_mut(&SecretLeaseKey::new(&scope, lease.id))
-                .unwrap();
-            record.lease_expires_at = Utc::now() - chrono::Duration::seconds(1);
-        }
-
-        assert!(matches!(
-            store.consume(&scope, lease.id).await,
-            Err(SecretStoreError::LeaseExpired { .. })
-        ));
-        let leases_debug = format!("{store:?}");
-        assert!(!leases_debug.contains("SecretBox"));
-    }
-
-    #[tokio::test]
-    async fn consumed_lease_record_drops_retained_material() {
-        let store = InMemorySecretStore::new();
-        let scope = sample_scope("tenant-a", "user-a");
-        let handle = SecretHandle::new("api_key").unwrap();
-        store
-            .put(
-                scope.clone(),
-                handle.clone(),
-                SecretMaterial::from("super-secret"),
-                None,
-            )
-            .await
-            .unwrap();
-
-        let lease = store.lease_once(&scope, &handle).await.unwrap();
-        store.consume(&scope, lease.id).await.unwrap();
-
-        let leases_debug = format!("{store:?}");
-        assert!(
-            !leases_debug.contains("SecretBox"),
-            "consumed lease records must not retain cloned secret material: {leases_debug}"
-        );
-    }
-
-    #[tokio::test]
-    async fn revoked_lease_record_drops_retained_material() {
-        let store = InMemorySecretStore::new();
-        let scope = sample_scope("tenant-a", "user-a");
-        let handle = SecretHandle::new("api_key").unwrap();
-        store
-            .put(
-                scope.clone(),
-                handle.clone(),
-                SecretMaterial::from("super-secret"),
-                None,
-            )
-            .await
-            .unwrap();
-
-        let lease = store.lease_once(&scope, &handle).await.unwrap();
-        store.revoke(&scope, lease.id).await.unwrap();
-
-        let leases_debug = format!("{store:?}");
-        assert!(
-            !leases_debug.contains("SecretBox"),
-            "revoked lease records must not retain cloned secret material: {leases_debug}"
-        );
     }
 
     fn sample_account(
