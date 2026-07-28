@@ -100,9 +100,12 @@ Aggregate `ExtensionInstallation` values are reconstructed at the typed
 store boundary for existing callers, with `manifest_ref` derived from the
 embedded definition so an installation can never disagree with its pin.
 
-Only a leased update sweeps child rows omitted from its aggregate. Creation
-and reactivation hold no lease and merge (activate-only), so they never
-tombstone a membership a concurrent creator or joiner wrote. A health update
+Every aggregate write sweeps child rows omitted from its member and binding
+sets, including creation and reactivation, which hold no lease. Under the
+single-writer-per-root contract an omitted-but-active row can only be debris
+from an earlier failed write — an interrupted install's membership row, a
+crashed update's leftovers — and merging it in would grant membership to a
+user whose install never succeeded. A health update
 writes only the health row — never the installation record — so it cannot
 race a removal into resurrecting a tombstone. A mutation's outcome is
 decided by the v2 records alone: once they commit, a failed
