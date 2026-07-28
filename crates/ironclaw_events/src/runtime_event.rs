@@ -241,6 +241,7 @@ enum TrustedRuntimeKindWire {
     Script,
     FirstParty,
     System,
+    Sandbox,
 }
 
 impl From<TrustedRuntimeKindWire> for RuntimeKind {
@@ -251,6 +252,7 @@ impl From<TrustedRuntimeKindWire> for RuntimeKind {
             TrustedRuntimeKindWire::Script => Self::Script,
             TrustedRuntimeKindWire::FirstParty => Self::FirstParty,
             TrustedRuntimeKindWire::System => Self::System,
+            TrustedRuntimeKindWire::Sandbox => Self::Sandbox,
         }
     }
 }
@@ -1478,6 +1480,35 @@ mod tests {
         assert!(
             runtime_event_from_trusted_json_str(&serde_json::to_string(&wire).unwrap()).is_err()
         );
+    }
+
+    // `RuntimeEvent`'s normal `Serialize` emits `"sandbox"` for
+    // `RuntimeKind::Sandbox` (it isn't `#[serde(skip_deserializing)]` like
+    // `FirstParty`/`System`, so untrusted decode must also accept it).
+    // `TrustedRuntimeKindWire` previously enumerated only
+    // Wasm/Mcp/Script/FirstParty/System, so `runtime_event_from_trusted_json_slice`
+    // — used for durable-log replay — rejected `"sandbox"` even though normal
+    // encode produced it. Pin the round trip on both the untrusted and
+    // trusted decode paths.
+    #[test]
+    fn sandbox_runtime_kind_round_trips_through_untrusted_and_trusted_decode() {
+        let event = RuntimeEvent::dispatch_succeeded(
+            scope(),
+            capability(),
+            ExtensionId::new("builtin").expect("valid extension id"),
+            RuntimeKind::Sandbox,
+            0,
+        );
+        let encoded = serde_json::to_string(&event).expect("runtime event should serialize");
+        assert!(encoded.contains("\"sandbox\""));
+
+        let untrusted: RuntimeEvent =
+            serde_json::from_str(&encoded).expect("untrusted decode must accept sandbox runtime");
+        assert_eq!(untrusted.runtime, Some(RuntimeKind::Sandbox));
+
+        let trusted = runtime_event_from_trusted_json_str(&encoded)
+            .expect("trusted decode (durable-log replay) must accept sandbox runtime");
+        assert_eq!(trusted.runtime, Some(RuntimeKind::Sandbox));
     }
 
     #[test]
