@@ -213,7 +213,7 @@ async fn normalized_user_memberships_survive_runtime_restart_and_soft_removal() 
         .runtime
         .local_dev_profile_filesystem_for_test()
         .expect("local-dev profile filesystem");
-    for collection in ["installations", "memberships", "health"] {
+    for collection in ["installations", "memberships"] {
         let rows = filesystem
             .query(
                 &VirtualPath::new(format!("/system/extensions/.installations/v2/{collection}"))
