@@ -7,6 +7,15 @@ on:
         description: Commit SHA or ref to test
         required: false
         type: string
+      reversed_journey_order:
+        description: >-
+          Also replay the mutating provider journeys back to front in one
+          shared provider world, without resetting between cases. Off for pull
+          requests (it repeats the slowest lane); the nightly deep run turns it
+          on.
+        required: false
+        default: false
+        type: boolean
   workflow_dispatch:
   # pull_request deliberately has no `paths:` filter: the "Reborn E2E"
   # roll-up must report on every PR so it can be a required status check (a
@@ -223,6 +232,19 @@ jobs:
           tests/e2e/scenarios/test_provider_fault_proxy.py
           tests/e2e/scenarios/test_reborn_qa_trace_replay.py
           tests/e2e/scenarios/test_reborn_qa_trace_full_path.py
+          -m
+          "not shared_world"
+          -v
+          --timeout=120
+
+      - name: Replay provider journeys in reverse order
+        if: inputs.reversed_journey_order
+        env:
+          IRONCLAW_EMULATE_CLI: ${{ github.workspace }}/.emulate/packages/emulate/dist/index.js
+          IRONCLAW_JOURNEY_ORDER: reverse
+        run: >-
+          pytest
+          tests/e2e/scenarios/test_reborn_qa_trace_full_path.py::test_mutating_qa_journeys_replay_in_reverse_against_shared_provider_world
           -v
           --timeout=120
 
