@@ -945,6 +945,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
                 runtime: RuntimeKind::FirstParty,
                 safe_name: self.capability.capability_id.clone(),
                 safe_description: "harness capability".to_string(),
+                description_trust: Default::default(),
                 parameters_schema: serde_json::json!({ "type": "object" }),
                 concurrency_hint: ConcurrencyHint::Exclusive,
             }],

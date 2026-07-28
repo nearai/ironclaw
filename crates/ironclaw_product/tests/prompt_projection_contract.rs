@@ -54,6 +54,7 @@ impl AuthChallengeProvider for OAuthChallenge {
                     .expect("authorization URL"),
             ),
             expires_at: None,
+            pairing: None,
         }))
     }
 }

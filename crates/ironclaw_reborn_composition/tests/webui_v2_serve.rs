@@ -19,7 +19,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use ironclaw_host_api::{
-    ActivityId, AgentId, InstallationState, NetworkMethod, Outcome, OutcomeRefs,
+    ActivityId, AgentId, LifecyclePublicState, NetworkMethod, Outcome, OutcomeRefs,
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
     ProjectId, Resolution, ResultPreviewMeta, ResultProgress, ResultRef, SafeSummary, TenantId,
     TerminateHint, ThreadId, ToolVerdict, UserId,
@@ -211,7 +211,7 @@ fn trace_credits_response(caller: &ProductSurfaceCaller) -> RebornTraceCreditsRe
 fn extension_setup_response(package_ref: LifecyclePackageRef) -> RebornSetupExtensionResponse {
     RebornSetupExtensionResponse {
         package_ref,
-        phase: InstallationState::Unsupported,
+        phase: LifecyclePublicState::SetupNeeded,
         blockers: Vec::new(),
         payload: None,
         secrets: Vec::new(),

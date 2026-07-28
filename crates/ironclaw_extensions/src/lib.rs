@@ -704,12 +704,24 @@ fn capability_descriptors_from_manifest(
     manifest: &ExtensionManifest,
 ) -> Result<Vec<CapabilityDescriptor>, ExtensionError> {
     let expected_prefix = format!("{}.", manifest.id.as_str());
+    // Descriptor-layer mirror of the parse-time provider-prefix rule. The one
+    // extra namespace: a HOST-BUNDLED manifest may declare tools under the
+    // reserved stable memory-tool namespace (`ironclaw.memory.*`), so a
+    // swapped memory backend keeps the stable tool ids. The primary
+    // enforcement is the v3 parser (`[memory]` requires a first_party runtime,
+    // which requires a host-bundled source); this check keeps the namespace
+    // closed to every non-host-bundled package as defense in depth.
+    let reserved_memory_prefix = format!("{}.", ironclaw_host_api::MEMORY_TOOL_ID_NAMESPACE);
     let mut seen_capabilities = HashSet::new();
     manifest
         .capabilities
         .iter()
         .map(|capability| {
-            if !capability.id.as_str().starts_with(&expected_prefix) {
+            let in_reserved_memory_namespace = manifest.source == ManifestSource::HostBundled
+                && capability.id.as_str().starts_with(&reserved_memory_prefix);
+            if !capability.id.as_str().starts_with(&expected_prefix)
+                && !in_reserved_memory_namespace
+            {
                 return Err(ExtensionError::InvalidManifest {
                     reason: format!(
                         "capability id {} must be provider-prefixed with {}",

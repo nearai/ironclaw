@@ -346,7 +346,7 @@ where
     /// memory rather than failing the turn, the same optionality as
     /// `user_profile_source`.
     pub memory_context_service: Option<Arc<dyn MemoryPromptContextService>>,
-    /// After-turn memory writer (#3537 / mem0 `add` flow). The RAW document-store
+    /// After-turn memory writer (#3537 / mem0 `add` flow). The RAW bound memory
     /// provider — the same `Arc<dyn MemoryService>` the memory tools resolve, NOT
     /// wrapped in a prompt-context adapter. When `Some`, the executor forwards each
     /// `Completed` run's full transcript to `record_interaction`, skipping only
@@ -773,7 +773,7 @@ where
         .safety_context
         .unwrap_or_else(local_development_noop_safety_context);
     // Build the after-turn memory recorder before `parts.thread_scope` is moved
-    // into the host factory below. Present only when a memory document-store
+    // into the host factory below. Present only when a bound memory
     // provider was resolved; it owner-rewrites the base thread scope per run
     // before reading the just-finished exchange back.
     let after_turn_memory_recorder = parts.after_turn_memory_writer.clone().map(|memory_writer| {
@@ -1306,6 +1306,7 @@ mod tests {
             runtime: RuntimeKind::Wasm,
             safe_name: capability_id.to_string(),
             safe_description: format!("{capability_id} description"),
+            description_trust: Default::default(),
             concurrency_hint: ConcurrencyHint::SafeForParallel,
             parameters_schema: serde_json::json!({"type": "object"}),
         }

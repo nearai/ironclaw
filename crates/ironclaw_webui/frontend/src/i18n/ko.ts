@@ -527,7 +527,7 @@ registerPack("ko", {
   "tools.description.builtin.trace_commons.credits": "현재 사용자의 Trace Commons 크레딧 상태, 잔액, 제출 수, 최근 설명을 보고합니다.",
   "tools.description.builtin.trace_commons.profile_token": "브라우저 또는 수동 프로필 설정을 위한 단기 Trace Commons 프로필 관리 값을 발급합니다.",
   "tools.description.builtin.trace_commons.profile_set": "명시적 동의 후 현재 사용자의 공개 Trace Commons 커뮤니티 프로필을 만들거나 업데이트합니다.",
-  "tools.description.builtin.profile_set": "사용자의 에이전트 컨텍스트에 대한 비공개 로컬 사실을 기록합니다: 시간대, 로케일 또는 위치.",
+  "tools.description.ironclaw.memory.profile_set": "사용자의 에이전트 컨텍스트에 대한 비공개 로컬 사실을 기록합니다: 시간대, 로케일 또는 위치.",
   "tools.description.builtin.memory_search": "현재 범위의 Reborn 영구 메모리 문서를 검색합니다",
   "tools.description.builtin.memory_write": "현재 범위의 Reborn 영구 메모리 문서를 쓰기, 추가 또는 패치합니다",
   "tools.description.builtin.memory_read": "현재 범위의 Reborn 영구 메모리 문서를 읽습니다",

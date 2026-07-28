@@ -570,6 +570,7 @@ impl SubagentSpawnCapabilityPort {
             runtime: RuntimeKind::FirstParty,
             safe_name: self.spawn_id.as_str().to_string(),
             safe_description: SPAWN_SUBAGENT_DESCRIPTION.to_string(),
+            description_trust: Default::default(),
             concurrency_hint: ConcurrencyHint::Exclusive,
             parameters_schema: (*self.parameters_schema).clone(),
         }

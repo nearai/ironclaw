@@ -46,6 +46,7 @@ use ironclaw_host_runtime::{
     builtin_first_party_handlers_for_process_backend,
     builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
     builtin_first_party_package_for_process_backend, native_memory_first_party_package,
+    register_native_memory_tools,
 };
 #[cfg(feature = "test-support")]
 use ironclaw_host_runtime::{
@@ -272,7 +273,6 @@ async fn builtin_first_party_package_declares_behavior_neutral_origin_gate_matri
         JSON_CAPABILITY_ID,
         READ_FILE_CAPABILITY_ID,
         TRIGGER_LIST_CAPABILITY_ID,
-        PROFILE_SET_CAPABILITY_ID,
     ] {
         assert_eq!(loop_run(ungated), OriginGatePolicy::Ungated, "{ungated}");
     }
@@ -3367,7 +3367,7 @@ async fn memory_write_rejects_protected_prompt_write_through_runtime() {
 }
 
 #[tokio::test]
-async fn builtin_profile_set_rejects_missing_memory_mount_authority() {
+async fn memory_profile_set_rejects_missing_memory_mount_authority() {
     // profile_set routes through ensure_memory_mount(request, /*write*/ true) in
     // profile_merge_write. This test verifies that the guard fires when the invocation
     // context carries only a /workspace mount (no /memory write grant), mirroring
@@ -3388,7 +3388,7 @@ async fn builtin_profile_set_rejects_missing_memory_mount_authority() {
 }
 
 #[tokio::test]
-async fn builtin_profile_set_rejects_memory_mount_without_delete_permission() {
+async fn memory_profile_set_rejects_memory_mount_without_delete_permission() {
     // ensure_memory_mount(write=true) requires read + list + write + delete.
     // A /memory grant with read+list+write but NO delete must be rejected with
     // Authorization, locking the current contract.
@@ -8571,9 +8571,14 @@ where
         ironclaw_processes::ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_first_party_capabilities(Arc::new(
-        builtin_first_party_handlers(trigger_repository).unwrap(),
-    ))
+    .with_first_party_capabilities(Arc::new({
+        // Local-testing analog of the composition registration: builtin
+        // handlers + the bound (native) memory provider's registry-routed
+        // tools.
+        let mut handlers = builtin_first_party_handlers(trigger_repository).unwrap();
+        register_native_memory_tools(&mut handlers).unwrap();
+        handlers
+    }))
     .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
     .with_audit_sink(Arc::new(InMemoryAuditSink::new()))
     .with_runtime_policy(policy)
@@ -9280,9 +9285,12 @@ where
         ironclaw_processes::ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_first_party_capabilities(Arc::new(
-        builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
-    ))
+    .with_first_party_capabilities(Arc::new({
+        let mut handlers =
+            builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap();
+        register_native_memory_tools(&mut handlers).unwrap();
+        handlers
+    }))
     .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
     .with_audit_sink(audit_sink)
     .with_runtime_policy(local_dev_policy())
@@ -9534,7 +9542,6 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
         TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
         TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
-        PROFILE_SET_CAPABILITY_ID,
         OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
         READ_FILE_CAPABILITY_ID,
         WRITE_FILE_CAPABILITY_ID,

@@ -854,6 +854,7 @@ fn bridge_descriptor(definition: &ProviderToolDefinition) -> CapabilityDescripto
         runtime: RuntimeKind::FirstParty,
         safe_name: definition.name.to_string(),
         safe_description: definition.description.clone(),
+        description_trust: Default::default(),
         concurrency_hint: ConcurrencyHint::Exclusive,
         parameters_schema: definition.parameters.clone(),
     }
@@ -866,6 +867,7 @@ fn catalog_descriptor(entry: &CatalogEntry) -> CapabilityDescriptorView {
         runtime: RuntimeKind::FirstParty,
         safe_name: entry.definition.name.to_string(),
         safe_description: entry.definition.description.clone(),
+        description_trust: Default::default(),
         concurrency_hint: ConcurrencyHint::Exclusive,
         parameters_schema: entry.definition.parameters.clone(),
     }

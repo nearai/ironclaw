@@ -6,6 +6,7 @@ import vm from "node:vm";
 
 import { channelConnectionDisplayName } from "../../../lib/channel-connection-events";
 import { channelConnectionFromGate } from "./gates";
+import { messageBelongsToActiveRun } from "./message-types";
 
 function chatSourceForTest() {
   const source = readFileSync(new URL("../chat.tsx", import.meta.url), "utf8");
@@ -128,6 +129,7 @@ function renderChat({
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     channelConnectionDisplayName,
     channelConnectionFromGate,
+    messageBelongsToActiveRun,
     setThreadState: (threadId, state) =>
       threadStateUpdates.push({ threadId, state }),
     toast: (message, options) => toastCalls.push({ message, options }),
@@ -410,6 +412,42 @@ test("Chat keeps typing indicator when streamed text belongs to another run", ()
       cooldownSeconds: 0,
       recoveryNotice: null,
       activeRun: { runId: "run-1", threadId: "thread-1", status: "running" },
+      send: async () => ({}),
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+
+  assert.ok(findComponent(tree, components.TypingIndicator));
+});
+
+test("Chat keeps typing indicator for a historical assistant draft without an active run", () => {
+  const { tree, components } = renderChat({
+    hookState: {
+      messages: [
+        { id: "message-1", role: "user", content: "hello" },
+        {
+          id: "msg-draft",
+          role: "assistant",
+          content: "historical draft",
+          isFinalReply: false,
+          turnRunId: "run-old",
+        },
+      ],
+      isProcessing: true,
+      pendingGate: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: null,
       send: async () => ({}),
       cancelRun: async () => {},
       retryMessage: () => {},

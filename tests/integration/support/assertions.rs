@@ -208,6 +208,28 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// A tool with this model-facing wire name (e.g. `ironclaw__memory__search`)
+    /// was offered to the model on at least one captured request.
+    pub fn assert_model_tool_offered(&self, tool_name: &str) -> HarnessResult<()> {
+        let names = self.captured_model_tool_names();
+        if names.contains(tool_name) {
+            return Ok(());
+        }
+        Err(format!("tool {tool_name:?} was not offered to the model; offered: {names:?}").into())
+    }
+
+    /// No captured request offered a tool with this model-facing wire name.
+    pub fn assert_model_tool_not_offered(&self, tool_name: &str) -> HarnessResult<()> {
+        let names = self.captured_model_tool_names();
+        if names.contains(tool_name) {
+            return Err(format!(
+                "tool {tool_name:?} must NOT be offered to the model; offered: {names:?}"
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     /// Assert some model-visible `System`-role prompt captured across all
     /// requests captured by the harness so far contains `text`. Reads the
     /// scripted `TraceLlm` retained before the `dyn LlmProvider` upcast —

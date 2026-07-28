@@ -342,6 +342,7 @@ fn descriptor_with_provider(
         runtime: ironclaw_host_api::RuntimeKind::Wasm,
         safe_name: capability_id.to_string(),
         safe_description: format!("test capability {capability_id}"),
+        description_trust: Default::default(),
         concurrency_hint: ironclaw_turns::run_profile::ConcurrencyHint::Exclusive,
         parameters_schema: serde_json::Value::Null,
     }

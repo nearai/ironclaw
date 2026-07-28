@@ -397,6 +397,7 @@ impl MockHost {
             runtime: RuntimeKind::FirstParty,
             safe_name: "demo".to_string(),
             safe_description: "demo capability".to_string(),
+            description_trust: Default::default(),
             concurrency_hint: ironclaw_turns::run_profile::ConcurrencyHint::SafeForParallel,
             parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
         }];

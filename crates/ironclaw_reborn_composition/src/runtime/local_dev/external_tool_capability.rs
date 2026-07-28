@@ -87,6 +87,7 @@ impl ToolSpec {
             runtime: RuntimeKind::System,
             safe_name: self.tool_name.as_str().to_string(),
             safe_description: self.description.clone(),
+            description_trust: Default::default(),
             // External tools are client-side; the host never runs them in
             // parallel, and they always park, so mark them exclusive.
             concurrency_hint: ConcurrencyHint::Exclusive,

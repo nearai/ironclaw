@@ -1,10 +1,13 @@
 use futures_util::{StreamExt, stream};
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
-use ironclaw_extensions::{CapabilityVisibility, ExtensionPackage, ExtensionRegistry};
+use ironclaw_extensions::{
+    CapabilityVisibility, ExtensionPackage, ExtensionRegistry, ManifestSource,
+};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityGrant, Decision, EffectKind, ResourceEstimate, RuntimeKind,
-    canonical_json_v1, runtime_policy::EffectiveRuntimePolicy, sha256_digest_token,
+    CapabilityDescriptionTrust, CapabilityDescriptor, CapabilityGrant, Decision, EffectKind,
+    ResourceEstimate, RuntimeKind, canonical_json_v1, runtime_policy::EffectiveRuntimePolicy,
+    sha256_digest_token,
 };
 use ironclaw_trust::TrustDecision;
 use serde_json::{Value, json};
@@ -13,8 +16,8 @@ use crate::{
     CapabilitySurfaceVersion, HostRuntimeError, VisibleCapabilityRequest, VisibleCapabilitySurface,
     capability_catalog::read_json_ref,
     first_party_tools::{
-        BUILTIN_FIRST_PARTY_PROVIDER, NATIVE_MEMORY_FIRST_PARTY_PROVIDER,
-        resolve_builtin_input_schema_ref, resolve_native_memory_input_schema_ref,
+        BUILTIN_FIRST_PARTY_PROVIDER, resolve_builtin_input_schema_ref,
+        resolve_native_memory_input_schema_ref,
     },
 };
 use ironclaw_runtime_policy::plan_capability;
@@ -114,6 +117,10 @@ pub enum VisibleCapabilityAccess {
 pub struct VisibleCapability {
     /// Redacted declarative capability descriptor from the extension registry.
     pub descriptor: CapabilityDescriptor,
+    /// Provenance-backed trust for the model-visible description. Unknown
+    /// sources remain untrusted; only registry-installed packages cross the
+    /// signature/digest-verifying catalog boundary.
+    pub description_trust: CapabilityDescriptionTrust,
     /// Current visibility status for this context and policy.
     pub access: VisibleCapabilityAccess,
     /// Host-selected estimate used for the visibility authorization check.
@@ -274,9 +281,23 @@ impl<'a> CapabilityCatalog<'a> {
 
         Ok(Some(VisibleCapability {
             descriptor: self.surface_descriptor(descriptor).await?,
+            description_trust: self.description_trust(descriptor),
             access,
             estimated_resources: estimate,
         }))
+    }
+
+    fn description_trust(&self, descriptor: &CapabilityDescriptor) -> CapabilityDescriptionTrust {
+        match self
+            .registry
+            .get_extension(&descriptor.provider)
+            .map(|package| package.manifest.source)
+        {
+            Some(ManifestSource::RegistryInstalled) => CapabilityDescriptionTrust::VerifiedCatalog,
+            Some(ManifestSource::HostBundled | ManifestSource::InstalledLocal) | None => {
+                CapabilityDescriptionTrust::Untrusted
+            }
+        }
     }
 
     fn is_model_visible(&self, descriptor: &CapabilityDescriptor) -> bool {
@@ -314,20 +335,25 @@ impl<'a> CapabilityCatalog<'a> {
             return Ok(descriptor);
         }
 
-        // Native memory rides the same always-on inline-schema lane as builtin,
-        // under its own provider id, so its model-facing tools resolve without
-        // any asset materialization.
-        if descriptor.provider.as_str() == NATIVE_MEMORY_FIRST_PARTY_PROVIDER {
+        // The bound memory provider's package rides the same always-on
+        // inline-schema lane as builtin, under its own provider id, so its
+        // model-facing tools resolve without any asset materialization. Every
+        // bundled memory provider (native, mem0) declares the shared
+        // `schemas/memory/*` refs, served from one compiled-in source of
+        // truth.
+        if crate::memory_native_extension::MEMORY_PROVIDER_PACKAGE_IDS
+            .contains(&descriptor.provider.as_str())
+        {
             let Some(reference) = reference else {
                 return Err(HostRuntimeError::invalid_request(format!(
-                    "native memory capability {} must publish from an input schema ref",
+                    "memory capability {} must publish from an input schema ref",
                     descriptor.id
                 )));
             };
             descriptor.parameters_schema = resolve_native_memory_input_schema_ref(&reference)
                 .ok_or_else(|| {
                     HostRuntimeError::invalid_request(format!(
-                        "native memory capability {} references unknown input schema {}",
+                        "memory capability {} references unknown input schema {}",
                         descriptor.id, reference
                     ))
                 })?;
@@ -400,6 +426,7 @@ fn surface_version(
                 capability_version_key(capability),
                 json!({
                     "descriptor": descriptor,
+                    "description_trust": capability.description_trust,
                     "estimated_resources": &capability.estimated_resources,
                     "access": access_token(capability.access),
                     "provider_trust": trust,
@@ -633,7 +660,10 @@ mod tests {
     async fn native_memory_surface_descriptor_requires_input_schema_ref() {
         let descriptor = CapabilityDescriptor {
             id: CapabilityId::new("ironclaw.memory.bad").unwrap(),
-            provider: ExtensionId::new(NATIVE_MEMORY_FIRST_PARTY_PROVIDER).unwrap(),
+            provider: ExtensionId::new(
+                crate::first_party_tools::NATIVE_MEMORY_FIRST_PARTY_PROVIDER,
+            )
+            .unwrap(),
             runtime: RuntimeKind::FirstParty,
             trust_ceiling: TrustClass::UserTrusted,
             description: "bad native memory descriptor".to_string(),

@@ -515,6 +515,7 @@ mod tests {
                             runtime: RuntimeKind::FirstParty,
                             safe_name: id.to_string(),
                             safe_description: format!("{id} description"),
+                            description_trust: Default::default(),
                             concurrency_hint: ConcurrencyHint::SafeForParallel,
                             parameters_schema: serde_json::json!({"type":"object"}),
                         })

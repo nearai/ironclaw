@@ -268,6 +268,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
             runtime: RuntimeKind::FirstParty,
             safe_name: self.primary_tool_name().to_string(),
             safe_description: "Echo a test payload".to_string(),
+            description_trust: Default::default(),
             concurrency_hint: ConcurrencyHint::SafeForParallel,
             parameters_schema: json!({"type": "object"}),
         }];
@@ -278,6 +279,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
                 runtime: RuntimeKind::FirstParty,
                 safe_name: DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID.to_string(),
                 safe_description: "Spawn a child subagent run and wait for its result".to_string(),
+                description_trust: Default::default(),
                 concurrency_hint: ConcurrencyHint::Exclusive,
                 parameters_schema: build_spawn_subagent_parameters_schema(&[]),
             });
