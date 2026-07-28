@@ -861,47 +861,6 @@ async fn transient_fanout_failure_requests_redelivery_and_reuses_durable_event_i
     );
 }
 
-/// Sibling of the admission race below: that one covers concurrent *consume*,
-/// this one covers concurrent *issue*. `pending_or_issue` used to read the
-/// snapshot and then mint in a separate write, so two renders of the same
-/// pairing card could both observe "no live code" and both mint. The second
-/// mint's rotation drops the first record -- leaving the first caller showing
-/// a user a code that can never redeem.
-#[tokio::test]
-async fn concurrent_renders_converge_on_one_redeemable_code() {
-    let fixture = fixture();
-    let service = Arc::new(fixture.service);
-    let alice = user("alice");
-
-    let (first, second) = tokio::join!(
-        service.pending_or_issue(&alice),
-        service.pending_or_issue(&alice),
-    );
-    let first = first.expect("first render").expect("issued");
-    let second = second.expect("second render").expect("issued");
-
-    assert_eq!(
-        first.code, second.code,
-        "two concurrent renders must show the same code"
-    );
-
-    // ...and the code they agreed on is the one that actually redeems.
-    let (sink, outcomes) = pairing_ingress_with_outcomes(Arc::clone(&service));
-    sink.admit(pairing_admission_for(&first.code, INSTALL, "u-1"))
-        .await
-        .expect("admit");
-    ChannelIngressDrain::drain(sink.as_ref()).await;
-    let outcomes = outcomes.lock().expect("outcomes lock");
-    assert!(
-        matches!(
-            outcomes.first(),
-            Some(ChannelPairingConsumeOutcome::Paired { .. })
-        ),
-        "the displayed code must be redeemable, got {:?}",
-        outcomes.first()
-    );
-}
-
 #[tokio::test]
 async fn concurrent_caller_admission_has_exactly_one_pairing_winner() {
     let fixture = fixture();

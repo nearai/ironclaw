@@ -668,62 +668,10 @@ impl ChannelPairingService {
         if status.connected {
             return Ok(None);
         }
-        // Deliberately NOT `status.pending` + a separate `issue_or_rotate`:
-        // that read-then-write let two concurrent renders both observe "no
-        // live code" and both mint. The second mint's rotation drops the first
-        // record -- but the first caller has already shown its code to a user,
-        // who can then never redeem it. Reuse-or-mint has to be one CAS.
-        let record = self.reuse_or_issue_record(caller).await?;
-        self.issue_for_record(&record).await.map(Some)
-    }
-
-    /// Return the caller's live pairing record, minting one only if there is
-    /// genuinely none -- decided *inside* the compare-and-swap so concurrent
-    /// callers converge on a single redeemable code.
-    ///
-    /// The loser of a mint race re-runs the closure against the winner's
-    /// snapshot, finds the winner's live record, and returns that instead of
-    /// its own speculative code. Every caller therefore receives a code that
-    /// is actually in the store.
-    async fn reuse_or_issue_record(
-        &self,
-        caller: &UserId,
-    ) -> Result<ChannelPairingRecord, ChannelPairingError> {
-        let installation_id = self
-            .installation
-            .current_installation(caller)
-            .await
-            .map_err(store_unavailable)?
-            .ok_or(ChannelPairingError::NotConfigured)?;
-        let now = Utc::now();
-        // Minted up front so the closure stays `Fn` (it is re-run on CAS
-        // conflict). An unused speculative code is never written.
-        let minted = ChannelPairingRecord {
-            code: mint_pairing_code(),
-            user_id: caller.clone(),
-            installation_id: installation_id.clone(),
-            created_at: now,
-            expires_at: now + Duration::minutes(PAIRING_TTL_MINUTES),
-            consumed_at: None,
-        };
-        self.store
-            .update_snapshot(move |mut snapshot| {
-                if let Some(live) = snapshot.pairings.iter().find(|existing| {
-                    &existing.user_id == &minted.user_id
-                        && existing.installation_id == minted.installation_id
-                        && existing.is_live(Utc::now())
-                }) {
-                    let live = live.clone();
-                    return (snapshot, live);
-                }
-                // Rotation: at most one live code per user.
-                snapshot.pairings.retain(|existing| {
-                    existing.user_id != minted.user_id || existing.consumed_at.is_some()
-                });
-                snapshot.pairings.push(minted.clone());
-                (snapshot, minted.clone())
-            })
-            .await
+        match status.pending {
+            Some(issue) => Ok(Some(issue)),
+            None => self.issue_or_rotate(caller).await.map(Some),
+        }
     }
 
     /// Consume a code arriving over the verified webhook from a direct

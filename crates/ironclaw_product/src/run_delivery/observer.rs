@@ -55,13 +55,6 @@ struct ActionableNotification {
     /// and auth prompts, so a bare reply next to the prompt resolves the
     /// gate. `None` for other kinds.
     gate_ref_for_routing: Option<String>,
-    /// Set when the rendered text still carries bearer material (an OAuth
-    /// setup link or a pairing code). The privacy strip above decides from the
-    /// INBOUND envelope; the delivery coordinator resolves the OUTBOUND target
-    /// separately through `communication_preferences`. When those two disagree
-    /// this flag is the only thing stopping a live credential from landing in a
-    /// shared conversation, so it fails the delivery instead.
-    require_direct_message_target: bool,
 }
 
 /// Bound on the delivered-run memory. Evicted oldest-first; an evicted entry
@@ -593,7 +586,6 @@ impl RunDeliveryObserver {
                     intent: DeliveryIntent::FinalReply,
                     text,
                     gate_ref_for_routing: None,
-                    require_direct_message_target: false,
                 }
             }
             TurnStatus::BlockedApproval => {
@@ -619,7 +611,6 @@ impl RunDeliveryObserver {
                     intent: DeliveryIntent::GatePrompt,
                     text: prompts::gate_prompt_text(&view, direct_message),
                     gate_ref_for_routing: Some(gate_ref.as_str().to_string()),
-                    require_direct_message_target: false,
                 }
             }
             TurnStatus::BlockedAuth => {
@@ -686,16 +677,11 @@ impl RunDeliveryObserver {
                                 ) => prompts::AUTH_UNAVAILABLE_MESSAGE.to_string(),
                             };
                         }
-                        // Computed AFTER the strip above, so it reflects what
-                        // the rendered text actually carries.
-                        let require_direct_message_target =
-                            view.authorization_url.is_some() || view.pairing.is_some();
                         ActionableNotification {
                             event_kind: RunNotificationEventKind::AuthRequired,
                             intent: DeliveryIntent::AuthPrompt,
                             text: prompts::auth_prompt_text(&view, direct_message),
                             gate_ref_for_routing: Some(gate_ref.as_str().to_string()),
-                            require_direct_message_target,
                         }
                     }
                     view => {
@@ -784,7 +770,15 @@ impl RunDeliveryObserver {
                     delivery,
                     parts: vec![OutboundPart::Text(notification.text)],
                     thread_anchor: None,
-                    require_direct_message_target: notification.require_direct_message_target,
+                    // MUST stay false on this path. `ObservedReplyTargetAuthority`
+                    // (below) has no DM classification for the raw source
+                    // conversation and hard-fails any request that sets this,
+                    // so setting it would drop every DM auth prompt instead of
+                    // protecting it. The privacy strip on the inbound envelope
+                    // is this path's enforcement; the flag belongs to the
+                    // triggered path, whose resolver can classify the target
+                    // (`triggered.rs` passes true for auth prompts).
+                    require_direct_message_target: false,
                     extension_id: &self.services.extension_id,
                 },
             )
