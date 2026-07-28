@@ -254,11 +254,15 @@ PRODUCT_JOURNEY_CASES = (
         mutable_provider_worlds=(),
         ingress=JourneyIngress.EXTENSION_WEBHOOK,
         execution=JourneyExecution.REBORN_INTEGRATION,
-        delivery_target=JourneyDeliveryTarget.WEBUI,
-        assertions=(
-            ObservableAssertion.DURABLE_STATE,
-            ObservableAssertion.CREDENTIAL_INJECTION,
-        ),
+        # The cited test ends at durable turn admission: its scripted reply is
+        # never consulted and nothing is delivered, so naming a delivery
+        # target would overstate it.
+        delivery_target=JourneyDeliveryTarget.NONE,
+        # Admission only. The test registers its ingress secret directly, so
+        # the webhook never crosses the runtime credential-injection path --
+        # claiming that assertion would credit this row with coverage that
+        # lives elsewhere.
+        assertions=(ObservableAssertion.DURABLE_STATE,),
         evidence=CargoEvidence(
             source="tests/integration/extension_ingress.rs",
             test="signed_acme_post_flows_through_the_production_mount_into_a_turn",
