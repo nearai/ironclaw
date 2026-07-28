@@ -5,7 +5,6 @@
 //! constructor both the delivery path and the projection layer render
 //! through. Composition consumes these — it must not re-declare them.
 
-use crate::ChannelConnectionRequirement;
 use crate::{
     AuthPromptChallengeKind, AuthPromptView, ConnectionPromptContext, ProductAdapterError,
     RedactedString,
@@ -14,7 +13,7 @@ use async_trait::async_trait;
 use ironclaw_auth::{
     AuthProductError, AuthProviderId, CredentialAccountLabel, OAuthAuthorizationUrl,
 };
-use ironclaw_host_api::PairingPromptView;
+use ironclaw_host_api::{ChannelConnectionRequirement, PairingPromptView};
 use ironclaw_host_api::{
     InvocationId, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, UserId,
 };

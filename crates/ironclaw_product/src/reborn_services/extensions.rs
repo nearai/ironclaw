@@ -389,11 +389,21 @@ fn channel_requires_personal_binding(summary: &LifecycleExtensionSummary) -> boo
         .channel_connection
         .as_ref()
         .is_some_and(|connection| {
-            matches!(
-                connection.strategy,
+            // Exhaustive on purpose: a new strategy must not silently default
+            // to "no personal binding required", which reads as Active for a
+            // caller who never connected. No wildcard arm -- adding a variant
+            // is a compile error until someone classifies it.
+            match connection.strategy {
+                // Per-user proofs: the caller personally completes these, so
+                // an extension is not connected for them until they do.
                 crate::RebornChannelConnectStrategy::WebGeneratedCode
-                    | crate::RebornChannelConnectStrategy::OAuth
-            )
+                | crate::RebornChannelConnectStrategy::OAuth
+                | crate::RebornChannelConnectStrategy::InboundProofCode
+                | crate::RebornChannelConnectStrategy::QrCode => true,
+                // Operator-configured for the whole tenant; there is no
+                // per-user binding to wait on.
+                crate::RebornChannelConnectStrategy::AdminManagedChannels => false,
+            }
         })
 }
 

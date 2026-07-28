@@ -670,10 +670,20 @@ impl RunDeliveryObserver {
                                 Some(AuthPromptChallengeKind::Pairing) => {
                                     prompts::PAIRING_PRIVATE_SETUP_MESSAGE.to_string()
                                 }
-                                Some(AuthPromptChallengeKind::OAuthUrl) => {
+                                // `None` reaches here only through
+                                // `auth_prompt_is_serviceable`'s legacy arm,
+                                // which admits a prompt on a non-empty
+                                // `authorization_url` alone -- i.e. an OAuth
+                                // prompt predating the `challenge_kind` wire
+                                // field. It gets the OAuth redirect, not the
+                                // generic dead end.
+                                Some(AuthPromptChallengeKind::OAuthUrl) | None => {
                                     prompts::OAUTH_PRIVATE_SETUP_MESSAGE.to_string()
                                 }
-                                _ => prompts::AUTH_UNAVAILABLE_MESSAGE.to_string(),
+                                Some(
+                                    AuthPromptChallengeKind::ManualToken
+                                    | AuthPromptChallengeKind::Other,
+                                ) => prompts::AUTH_UNAVAILABLE_MESSAGE.to_string(),
                             };
                         }
                         // Computed AFTER the strip above, so it reflects what
