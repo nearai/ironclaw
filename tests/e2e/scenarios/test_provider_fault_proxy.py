@@ -8,6 +8,7 @@ import gzip
 import httpx
 import pytest
 from aiohttp import web
+from helpers import AUTH_TOKEN
 from provider_fault_proxy import (
     PROVIDER_FAULT_PROFILES,
     ProviderFaultProfile,
@@ -377,7 +378,7 @@ async def test_reset_clears_recorded_evidence_from_the_previous_case(fault_proxy
     async with httpx.AsyncClient() as client:
         await client.get(
             f"{proxy.url}/objects/1",
-            headers={"Authorization": "Bearer previous-case-token"},
+            headers={"Authorization": f"Bearer {AUTH_TOKEN}"},
         )
     assert proxy.state["requests"]
 
@@ -386,7 +387,7 @@ async def test_reset_clears_recorded_evidence_from_the_previous_case(fault_proxy
     assert proxy.state["requests"] == []
     # An assertion like `assert_network_egress_count(1)` in the next case would
     # silently pass on a leftover request, so the fingerprint must go too.
-    assert "previous-case-token" not in str(proxy.state)
+    assert AUTH_TOKEN not in str(proxy.state)
 
 
 async def test_reset_leaves_no_delayed_fault_task_pending(fault_proxy):
@@ -426,7 +427,7 @@ async def test_world_reset_covers_every_provider_not_just_the_first():
     proxies = {}
     try:
         for service in ("google", "slack", "github"):
-            url, requests, runner = await _start_upstream()
+            url, _requests, runner = await _start_upstream()
             upstreams.append(runner)
             proxies[service] = url
         world = ProviderFaultProxyWorld(proxies)
