@@ -2153,7 +2153,7 @@ mod tests {
     #[tokio::test]
     async fn record_query_seeks_the_path_index_instead_of_scanning() {
         let (fs, _dir) = fresh_backend().await;
-        let parent = VirtualPath::new("/system/extensions/.installations/v2/memberships").unwrap();
+        let parent = VirtualPath::new("/memory/extensions/.installations/v2/memberships").unwrap();
         let (prefix_lower, prefix_upper) = descendant_path_range(&parent);
         let conn = fs.connect().await.unwrap();
         for sql in [RECORD_QUERY_PREFIX_SQL, INDEXED_QUERY_PREFIX_SQL] {
@@ -2179,6 +2179,86 @@ mod tests {
                     .iter()
                     .any(|detail| detail.contains("root_filesystem_entries USING")),
                 "record query must use the path index, plan: {details:?}"
+            );
+        }
+    }
+
+    /// Differential proof that the range bounds select exactly what the
+    /// `LIKE ... ESCAPE` predicate they replaced selected. The range form is
+    /// only equivalent because '/' (0x2F) and '0' (0x30) are adjacent under
+    /// the BINARY collation `path` uses, so ["{prefix}/", "{prefix}0") is
+    /// precisely the descendant set. That argument is easy to state and easy
+    /// to get wrong, so assert it against an adversarial corpus instead:
+    /// sibling prefixes, LIKE metacharacters (`%`, `_`, and the `!` escape
+    /// itself), the boundary code points either side of '/', and multi-byte
+    /// paths. Both predicates must return identical rows for every prefix.
+    #[tokio::test]
+    async fn range_bounds_select_exactly_what_the_like_predicate_did() {
+        let (fs, _dir) = fresh_backend().await;
+        let conn = fs.connect().await.unwrap();
+        let corpus = [
+            "/memory/a",
+            "/memory/a/b",
+            "/memory/a/b/c",
+            "/memory/a/b/c/d",
+            "/memory/a/bc", // sibling whose name extends the prefix
+            "/memory/a/b-2",
+            "/memory/a/b.hidden", // '.' is 0x2E, immediately below '/'
+            "/memory/a/b0",       // '0' is 0x30, immediately above '/'
+            "/memory/a/b0/child",
+            "/memory/a/b1",
+            "/memory/ab",
+            "/memory/a%pct", // LIKE wildcard in a real path
+            "/memory/a%pct/child",
+            "/memory/a_us", // LIKE single-char wildcard
+            "/memory/a_us/child",
+            "/memory/a!bang", // the ESCAPE character itself
+            "/memory/a!bang/child",
+            "/memory/a/b/%",
+            "/memory/a/b/_",
+            "/memory/a/b/!",
+            "/memory/a/ünïcode",
+            "/memory/a/ünïcode/child",
+            "/memory/a/b/\u{10FFFF}",
+        ];
+        for path in corpus {
+            conn.execute(
+                "INSERT INTO root_filesystem_entries(path, contents, is_dir, content_type, \
+                 kind, indexed, version) VALUES (?1, X'', 0, 'application/json', NULL, '{}', 1)",
+                libsql::params![path],
+            )
+            .await
+            .unwrap();
+        }
+
+        async fn rows(conn: &libsql::Connection, sql: &str, params: Vec<String>) -> Vec<String> {
+            let params: Vec<libsql::Value> = params.into_iter().map(libsql::Value::Text).collect();
+            let mut out = Vec::new();
+            let mut rows = conn.query(sql, params).await.unwrap();
+            while let Some(row) = rows.next().await.unwrap() {
+                out.push(row.get::<String>(0).unwrap());
+            }
+            out.sort();
+            out
+        }
+
+        const LIKE_SQL: &str = "SELECT path FROM root_filesystem_entries \
+             WHERE is_dir = 0 AND (path = ?1 OR path LIKE ?2 ESCAPE '!')";
+        const RANGE_SQL: &str = "SELECT path FROM root_filesystem_entries \
+             WHERE is_dir = 0 AND (path = ?1 OR (path >= ?2 AND path < ?3))";
+
+        for prefix in corpus {
+            let vpath = VirtualPath::new(prefix).unwrap();
+            let (lower, upper) = descendant_path_range(&vpath);
+            let legacy_pattern =
+                crate::db::escape_like_with_trailing_wildcard(&format!("{prefix}/%"));
+
+            let via_like = rows(&conn, LIKE_SQL, vec![prefix.to_string(), legacy_pattern]).await;
+            let via_range = rows(&conn, RANGE_SQL, vec![prefix.to_string(), lower, upper]).await;
+
+            assert_eq!(
+                via_like, via_range,
+                "range bounds must select exactly the LIKE match set for prefix {prefix:?}"
             );
         }
     }
