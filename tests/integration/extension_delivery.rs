@@ -1131,12 +1131,13 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
             ],
         )
         .await;
+    ingress.drain().await;
     assert_eq!(
         status,
         StatusCode::OK,
-        "the signed event must be accepted; response: {response_body}"
+        "the signed event must be accepted; response: {response_body}; admission errors: {:?}",
+        observer.errors()
     );
-    ingress.drain().await;
     assert_eq!(
         observer.accepted_count(),
         1,
