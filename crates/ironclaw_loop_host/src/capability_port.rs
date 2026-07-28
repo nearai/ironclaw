@@ -544,14 +544,8 @@ pub trait LoopCapabilityPortFactory: Send + Sync {
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError>;
 }
 
-#[async_trait]
 pub trait LoopCapabilityPortDecorator: Send + Sync {
-    /// Async so a decorator that needs a value not yet known at construction
-    /// time (e.g. the caller's `CapabilityAllowSet`, resolved via an async
-    /// `CapabilitySurfaceProfileResolver`) can await it once per turn here,
-    /// rather than re-resolving it lazily inside later port methods. See
-    /// `ToolDisclosureCapabilityDecorator::decorate` for the motivating case.
-    async fn decorate(
+    fn decorate(
         &self,
         run_context: &LoopRunContext,
         inner: Arc<dyn LoopCapabilityPort>,
@@ -585,7 +579,7 @@ impl LoopCapabilityPortFactory for DecoratingLoopCapabilityPortFactory {
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
         let mut port = self.inner.create_capability_port(run_context).await?;
         for decorator in &self.decorators {
-            port = decorator.decorate(run_context, port).await;
+            port = decorator.decorate(run_context, port);
         }
         Ok(port)
     }
@@ -9573,9 +9567,8 @@ mod tests {
         log: Arc<Mutex<Vec<&'static str>>>,
     }
 
-    #[async_trait]
     impl LoopCapabilityPortDecorator for LoggingDecorator {
-        async fn decorate(
+        fn decorate(
             &self,
             _run_context: &LoopRunContext,
             inner: Arc<dyn LoopCapabilityPort>,
@@ -9626,9 +9619,8 @@ mod tests {
         decorate_calls: Arc<AtomicUsize>,
     }
 
-    #[async_trait]
     impl LoopCapabilityPortDecorator for NoopDecorator {
-        async fn decorate(
+        fn decorate(
             &self,
             _run_context: &LoopRunContext,
             inner: Arc<dyn LoopCapabilityPort>,

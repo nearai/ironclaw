@@ -44,17 +44,16 @@ use ironclaw_host_runtime::{
 use ironclaw_loop_host::{
     AwaitEdgeSettler, CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
     CapabilitySurfaceProfileResolver, CapabilityWriteResult, CheckpointStateStore,
-    EmptyLoopCapabilityPort, EmptyUserProfileSource, HostIdentityContextBuildError,
-    HostIdentityContextCandidate, HostIdentityContextSource, HostIdentityMessageContent,
-    HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError, HostManagedModelError,
-    HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessageRole,
-    HostManagedModelRequest, HostManagedModelResponse, HostManagedModelStreamSink,
-    HostRuntimeLoopCapabilityPort, HostSkillContextBuildError, HostSkillContextCandidate,
-    HostSkillContextSource, HostUserProfileSource, IdentityApplicability, IdentityFileName,
-    JsonSpawnSubagentInputCodec, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
-    LoopCapabilityResultWriter, ProductLiveCancellationProbe, RunCancellationFactory,
-    RunCancellationHandle, SubagentSpawnGoalStore, identity_message_ref,
-    loop_driver_execution_extension_id,
+    EmptyUserProfileSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
+    HostIdentityContextSource, HostIdentityMessageContent, HostInputBatch, HostInputEnvelope,
+    HostInputQueue, HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind,
+    HostManagedModelGateway, HostManagedModelMessageRole, HostManagedModelRequest,
+    HostManagedModelResponse, HostManagedModelStreamSink, HostRuntimeLoopCapabilityPort,
+    HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
+    HostUserProfileSource, IdentityApplicability, IdentityFileName, JsonSpawnSubagentInputCodec,
+    LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    ProductLiveCancellationProbe, RunCancellationFactory, RunCancellationHandle,
+    SubagentSpawnGoalStore, identity_message_ref, loop_driver_execution_extension_id,
 };
 use ironclaw_memory::{MemoryInvocation, MemoryService, MemoryServiceReadRequest};
 use ironclaw_memory_native::NativeMemoryService;
@@ -4765,7 +4764,6 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
 #[tokio::test]
 async fn planned_host_factory_create_host_resolves_allow_set_exactly_once_with_tool_disclosure() {
     let fixture = HostFixture::new_unsubmitted("thread-product-live-single-resolve", "hello").await;
-    let turn_store = Arc::new(InMemoryTurnStateStore::default());
     let allowed_id = CapabilityId::new("demo.allowed").unwrap();
     let denied_id = CapabilityId::new("demo.denied").unwrap();
     let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
@@ -4779,65 +4777,18 @@ async fn planned_host_factory_create_host_resolves_allow_set_exactly_once_with_t
         io: io.clone(),
         milestone_sink: fixture.milestone_sink.clone(),
     });
-    let model_route_resolver: Arc<dyn ModelRouteResolver> = Arc::new(
-        StaticModelRouteResolver::new(ModelRoutePolicy::new(
-            ModelSelectionMode::DeveloperAnyConfigured,
-        ))
-        .with_route(
-            ModelSlot::Default,
-            ModelRoute::new("nearai", "qwen3-coder").unwrap(),
-        ),
-    );
     let counting_resolver = Arc::new(CountingCapabilitySurfaceProfileResolver::new(
         CapabilityAllowSet::allowlist([allowed_id.clone()]),
     ));
-
-    let subagent_gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
-    let config = DefaultPlannedRuntimeConfig {
-        tool_disclosure: ToolDisclosureMode::Bridged,
-        ..Default::default()
-    };
-    let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
-        attachment_read_port: None,
-        turn_state: turn_store.clone(),
-        thread_service: fixture.thread_service.clone() as Arc<dyn SessionThreadService>,
-        thread_scope: fixture.thread_scope.clone(),
-        model_gateway: fixture.gateway.clone(),
-        checkpoint_state_store: fixture.checkpoint_state_store.clone(),
-        loop_checkpoint_store: turn_store.clone(),
-        milestone_sink: fixture.milestone_sink.clone(),
-        capability_factory,
-        capability_surface_resolver: Arc::clone(&counting_resolver)
-            as Arc<dyn CapabilitySurfaceProfileResolver>,
-        capability_result_writer: io.clone(),
-        subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
-        subagent_gate_store: subagent_gate_store.clone(),
-        subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
-        subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
-        subagent_spawn_limits: ironclaw_loop_host::SubagentSpawnLimits::default(),
-        loop_exit_evidence: Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
-            fixture.thread_service.clone(),
-            turn_state_store_dyn(&turn_store),
-            turn_store,
-            subagent_gate_store,
-        )),
-        config,
-        model_route_resolver: Some(model_route_resolver),
-        cancellation_factory: Some(Arc::new(ReadyRunCancellationFactory::default())),
-        skill_context_source: None,
-        input_queue: Some(Arc::new(EmptyHostInputQueue)),
-        identity_context_source: Arc::new(EmptyIdentityContextSource),
-        user_profile_source: Arc::new(EmptyUserProfileSource),
-        model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
-        model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
-        safety_context: Some(test_safety_context()),
-        hook_dispatcher_builder_factory: None,
-        communication_context_provider: None,
-        hook_security_audit_sink: None,
-        turn_event_sink: None,
-        scheduler_wake_wiring: None,
-    })
-    .expect("all product-live adapters should satisfy readiness");
+    let mut parts = product_live_parts_for_fixture(&fixture).await;
+    parts.capability_factory = capability_factory;
+    parts.capability_surface_resolver =
+        Arc::clone(&counting_resolver) as Arc<dyn CapabilitySurfaceProfileResolver>;
+    parts.capability_result_writer = io.clone();
+    parts.subagent_spawn_input_codec = Arc::new(JsonSpawnSubagentInputCodec::new(io));
+    parts.config.tool_disclosure = ToolDisclosureMode::Bridged;
+    let composition = build_product_live_planned_runtime(parts)
+        .expect("all product-live adapters should satisfy readiness");
 
     let planned = composition
         .run_profile_resolver
@@ -4870,7 +4821,7 @@ async fn planned_host_factory_create_host_resolves_allow_set_exactly_once_with_t
         .unwrap();
     let _descriptor = only_runtime_surface_descriptor(&surface, &allowed_id);
     let outcome = host
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: denied_id,
@@ -4882,8 +4833,8 @@ async fn planned_host_factory_create_host_resolves_allow_set_exactly_once_with_t
         .unwrap();
     assert!(matches!(
         outcome,
-        CapabilityOutcome::Denied(denied)
-            if denied.reason_kind.as_str() == "surface_profile_denied"
+        Resolution::Denied(denied)
+            if denied.reason_kind == Some(DenyReason::PolicyDenied)
     ));
     assert!(runtime.invocations().is_empty());
 }
@@ -4895,6 +4846,12 @@ async fn product_live_parts_for_gate_test(
     thread_label: &'static str,
 ) -> DefaultPlannedRuntimeParts<RecordingGateway> {
     let fixture = HostFixture::new_unsubmitted(thread_label, "hello").await;
+    product_live_parts_for_fixture(&fixture).await
+}
+
+async fn product_live_parts_for_fixture(
+    fixture: &HostFixture,
+) -> DefaultPlannedRuntimeParts<RecordingGateway> {
     let turn_store = Arc::new(in_memory_turn_state_store());
     let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
         capability_descriptor("demo.allowed"),
@@ -4902,7 +4859,7 @@ async fn product_live_parts_for_gate_test(
     let io = Arc::new(InMemoryCapabilityIo::default());
     let capability_factory = Arc::new(TestHostRuntimeCapabilityFactory {
         runtime,
-        visible_request: host_runtime_visible_request(&fixture, ["demo"]),
+        visible_request: host_runtime_visible_request(fixture, ["demo"]),
         io: io.clone(),
         milestone_sink: fixture.milestone_sink.clone(),
     });
@@ -4969,6 +4926,49 @@ async fn product_live_parts_for_gate_test(
         turn_event_sink: None,
         scheduler_wake_wiring: None,
     }
+}
+
+#[tokio::test]
+async fn planned_host_factory_discards_primed_allow_set_after_capability_factory_failure() {
+    let fixture = HostFixture::new_unsubmitted("thread-product-live-prime-cleanup", "hello").await;
+    let mut parts = product_live_parts_for_fixture(&fixture).await;
+    let fail_once_factory = Arc::new(FailOnceCapabilityPortFactory::new(Arc::clone(
+        &parts.capability_factory,
+    )));
+    parts.capability_factory = Arc::clone(&fail_once_factory) as Arc<dyn LoopCapabilityPortFactory>;
+    parts.config.tool_disclosure = ToolDisclosureMode::Bridged;
+    let composition = build_product_live_planned_runtime(parts)
+        .expect("product-live runtime should satisfy readiness");
+
+    let planned = composition
+        .run_profile_resolver
+        .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+        .await
+        .expect("resolve planned profile");
+    let mut claimed = fixture.claimed.clone();
+    claimed.state.resolved_run_profile_id = planned.profile_id.clone();
+    claimed.state.resolved_run_profile_version = planned.loop_driver.version;
+    claimed.resolved_run_profile = planned;
+
+    let first_error = composition
+        .host_factory
+        .create_host(&claimed)
+        .await
+        .err()
+        .expect("first capability factory attempt should fail");
+    assert!(
+        first_error
+            .to_string()
+            .contains("induced capability factory failure"),
+        "host build should preserve the capability factory error: {first_error}"
+    );
+
+    composition
+        .host_factory
+        .create_host(&claimed)
+        .await
+        .expect("same claimed run should build after the transient factory failure");
+    assert_eq!(fail_once_factory.attempt_count(), 2);
 }
 
 #[tokio::test]
@@ -8431,6 +8431,40 @@ struct TestHostRuntimeCapabilityFactory {
     visible_request: ironclaw_host_runtime::VisibleCapabilityRequest,
     io: Arc<InMemoryCapabilityIo>,
     milestone_sink: Arc<InMemoryLoopHostMilestoneSink>,
+}
+
+struct FailOnceCapabilityPortFactory {
+    inner: Arc<dyn LoopCapabilityPortFactory>,
+    attempts: AtomicUsize,
+}
+
+impl FailOnceCapabilityPortFactory {
+    fn new(inner: Arc<dyn LoopCapabilityPortFactory>) -> Self {
+        Self {
+            inner,
+            attempts: AtomicUsize::new(0),
+        }
+    }
+
+    fn attempt_count(&self) -> usize {
+        self.attempts.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl LoopCapabilityPortFactory for FailOnceCapabilityPortFactory {
+    async fn create_capability_port(
+        &self,
+        run_context: &LoopRunContext,
+    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+        if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "induced capability factory failure",
+            ));
+        }
+        self.inner.create_capability_port(run_context).await
+    }
 }
 
 #[async_trait]

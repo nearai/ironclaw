@@ -61,12 +61,17 @@ pub(crate) struct ToolDisclosureCapabilityDecorator {
     /// `CapabilitySurfaceProfileFilter` observe the identical resolved value
     /// instead of two independent resolves that could diverge under a
     /// transient resolver failure. Keyed by `(turn_id, run_id)` and consumed
-    /// exactly once in `decorate` so concurrent turns sharing this long-lived
-    /// decorator never observe another turn's primed value.
+    /// exactly once in `decorate`, or discarded if capability-port creation
+    /// fails, so concurrent turns sharing this long-lived decorator never
+    /// observe another turn's primed value.
     primed_allow_sets: Mutex<HashMap<(TurnId, TurnRunId), Arc<CapabilityAllowSet>>>,
 }
 
 impl ToolDisclosureCapabilityDecorator {
+    fn primed_allow_set_key(run_context: &LoopRunContext) -> (TurnId, TurnRunId) {
+        (run_context.turn_id, run_context.run_id)
+    }
+
     pub(crate) fn new(result_writer: Arc<dyn LoopCapabilityResultWriter>) -> Self {
         Self {
             result_writer,
@@ -85,6 +90,27 @@ impl ToolDisclosureCapabilityDecorator {
         run_context: &LoopRunContext,
         allow_set: Arc<CapabilityAllowSet>,
     ) -> Result<(), AgentLoopHostError> {
+        let key = Self::primed_allow_set_key(run_context);
+        let mut primed = self.primed_allow_sets.lock().map_err(|e| {
+            invalid_invocation(format!(
+                "tool disclosure primed allow-set lock is poisoned: {e}"
+            ))
+        })?;
+        if primed.contains_key(&key) {
+            return Err(invalid_invocation(
+                "tool disclosure allow-set is already primed for this turn",
+            ));
+        }
+        primed.insert(key, allow_set);
+        Ok(())
+    }
+
+    /// Discard a prime that the decorator chain could not consume because the
+    /// capability factory failed before running its decorators.
+    pub(crate) fn discard_primed_allow_set(
+        &self,
+        run_context: &LoopRunContext,
+    ) -> Result<(), AgentLoopHostError> {
         self.primed_allow_sets
             .lock()
             .map_err(|e| {
@@ -92,14 +118,13 @@ impl ToolDisclosureCapabilityDecorator {
                     "tool disclosure primed allow-set lock is poisoned: {e}"
                 ))
             })?
-            .insert((run_context.turn_id, run_context.run_id), allow_set);
+            .remove(&Self::primed_allow_set_key(run_context));
         Ok(())
     }
 }
 
-#[async_trait]
 impl LoopCapabilityPortDecorator for ToolDisclosureCapabilityDecorator {
-    async fn decorate(
+    fn decorate(
         &self,
         run_context: &LoopRunContext,
         inner: Arc<dyn LoopCapabilityPort>,
@@ -116,7 +141,7 @@ impl LoopCapabilityPortDecorator for ToolDisclosureCapabilityDecorator {
         // falling back to an unnarrowed index — this should never happen when
         // wired through `create_host`, which primes before it asks the
         // capability factory to build this decorator's port.
-        let key = (run_context.turn_id, run_context.run_id);
+        let key = Self::primed_allow_set_key(run_context);
         let primed = self
             .primed_allow_sets
             .lock()
@@ -1587,6 +1612,38 @@ mod tests {
                 write.output.to_string().len() as u64,
             ))
         }
+    }
+
+    #[tokio::test]
+    async fn priming_rejects_duplicates_and_discard_removes_only_failed_build_entry() {
+        let decorator = ToolDisclosureCapabilityDecorator::new(Arc::new(TestWriter));
+        let failed_context = run_context(TurnId::new()).await;
+        let concurrent_context = run_context(TurnId::new()).await;
+
+        decorator
+            .prime_allow_set(&failed_context, Arc::new(CapabilityAllowSet::All))
+            .expect("prime failed build");
+        let duplicate_error = decorator
+            .prime_allow_set(&failed_context, Arc::new(CapabilityAllowSet::All))
+            .expect_err("duplicate prime must not overwrite unconsumed state");
+        assert_eq!(
+            duplicate_error.kind,
+            AgentLoopHostErrorKind::InvalidInvocation
+        );
+        decorator
+            .prime_allow_set(&concurrent_context, Arc::new(CapabilityAllowSet::All))
+            .expect("prime concurrent build");
+        decorator
+            .discard_primed_allow_set(&failed_context)
+            .expect("discard failed build prime");
+
+        let primed = decorator
+            .primed_allow_sets
+            .lock()
+            .expect("primed allow-set lock");
+        assert_eq!(primed.len(), 1);
+        assert!(!primed.contains_key(&(failed_context.turn_id, failed_context.run_id)));
+        assert!(primed.contains_key(&(concurrent_context.turn_id, concurrent_context.run_id)));
     }
 
     #[tokio::test]
