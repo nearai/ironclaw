@@ -14,6 +14,7 @@ import pytest
 from journey_cases import (
     _HISTORICAL_MUTATING_PROVIDER_TOOLS,
     _MUTATING_PROVIDER_TOOLS,
+    _TOOL_WORLD_PREFIXES,
     ALL_JOURNEY_CASES,
     JOURNEY_ORDER_ENV,
     PROVIDER_JOURNEY_CASES,
@@ -832,11 +833,31 @@ def test_provider_write_derivation_still_finds_the_tools_it_replaced():
         "whether that key or the tool ids were renamed. Until this is fixed no "
         "journey resets its provider world."
     )
-    # A floor of five would still pass if the manifests shrank to just those.
-    # Production declares dozens; a collapse to single digits is the symptom
-    # worth failing on.
-    assert len(_MUTATING_PROVIDER_TOOLS) >= 20, (
+    # A count alone is a weak check: discovery could break for one provider
+    # and still clear any global floor on the strength of the others. Assert
+    # per world instead, so a single provider's manifests going unread fails
+    # here and names that provider.
+    derived_by_world: dict[str, list[str]] = {}
+    for tool_name, world in _MUTATING_PROVIDER_TOOLS.items():
+        derived_by_world.setdefault(str(world), []).append(tool_name)
+    resettable_worlds = {str(world) for world in _TOOL_WORLD_PREFIXES.values()}
+    empty_worlds = sorted(resettable_worlds - set(derived_by_world))
+    assert not empty_worlds, (
+        f"no provider writes were derived for {empty_worlds}, but every world "
+        "the harness can reset ships write tools. Journeys touching those "
+        "providers would declare no mutable world and skip their reset. Check "
+        "whether those manifests moved or their tool ids were renamed."
+    )
+
+    # Production currently declares 70 provider writes. Hold the floor close
+    # to that rather than at a token value: a partial discovery failure that
+    # still finds most tools is exactly what a low floor would wave through.
+    # Deliberately removing write tools should require moving this number, and
+    # noticing that you are.
+    assert len(_MUTATING_PROVIDER_TOOLS) >= 60, (
         f"only {len(_MUTATING_PROVIDER_TOOLS)} provider writes were derived from "
-        "the shipped manifests; production declares far more. The derivation "
-        "is probably reading the wrong manifests or the wrong key."
+        "the shipped manifests; production declares about 70. Either the "
+        "derivation is reading the wrong manifests or key, or write tools were "
+        "removed -- if the removal is intentional, lower this floor in the same "
+        "change so the drop is reviewed rather than absorbed."
     )
