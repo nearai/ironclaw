@@ -15,7 +15,7 @@ from __future__ import annotations
 import httpx
 import pytest
 from conftest import ResettableEmulateProviderWorld
-from emulate_provider import github_json
+from emulate_provider import github_json, slack_post
 
 ISSUES_PATH = "/repos/nearai/ironclaw/issues"
 
@@ -28,6 +28,12 @@ async def github_world():
         yield world
     finally:
         await world.close()
+
+
+@pytest.fixture
+async def github_slack_world(github_world):
+    await github_world.start({"slack"})
+    return github_world
 
 
 async def _issue_titles(base_url: str) -> list[str]:
@@ -77,28 +83,55 @@ async def test_reset_keeps_the_url_stable_so_a_running_reborn_still_reaches_it(
     assert await _issue_titles(before) == seeded
 
 
-async def test_reset_of_one_service_is_scoped_to_that_service(github_world):
+async def test_reset_of_one_service_is_scoped_to_that_service(github_slack_world):
     """Resetting one provider must not disturb another's process.
 
     The journey fixtures reset only the worlds a case actually mutated, so a
     reset that reached further would silently discard state a concurrent or
     later assertion still depends on.
     """
-    base_url = github_world.servers["github"]["url"]
+    github_url = github_slack_world.servers["github"]["url"]
+    slack_url = github_slack_world.servers["slack"]["url"]
+    github_marker = "discarded-by-the-selected-reset"
+    slack_marker = "survives-an-unrelated-reset"
+
     async with httpx.AsyncClient(timeout=15) as client:
         await github_json(
             client,
-            base_url,
+            github_url,
             "POST",
             ISSUES_PATH,
-            payload={"title": "survives-an-unrelated-reset"},
+            payload={"title": github_marker},
             expected_status=201,
         )
 
-    # Nothing else is running in this world, so the observable contract is that
-    # resetting an empty selection leaves github's process untouched: same URL,
-    # still serving, and its data NOT discarded out from under a caller.
-    await github_world.reset(set())
+        channels = await slack_post(
+            client,
+            slack_url,
+            "conversations.list",
+            {"types": "public_channel"},
+        )
+        channel_id = next(
+            channel["id"]
+            for channel in channels["channels"]
+            if channel["name"] == "reborn-alerts"
+        )
+        await slack_post(
+            client,
+            slack_url,
+            "chat.postMessage",
+            {"channel": channel_id, "text": slack_marker},
+        )
 
-    assert github_world.servers["github"]["url"] == base_url
-    assert "survives-an-unrelated-reset" in await _issue_titles(base_url)
+        await github_slack_world.reset({"github"})
+
+        history = await slack_post(
+            client,
+            slack_url,
+            "conversations.history",
+            {"channel": channel_id},
+        )
+
+    assert github_marker not in await _issue_titles(github_url)
+    assert github_slack_world.servers["slack"]["url"] == slack_url
+    assert any(message["text"] == slack_marker for message in history["messages"])
