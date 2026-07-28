@@ -126,6 +126,21 @@ pub type Timestamp = chrono::DateTime<chrono::Utc>;
 
 If the implementation prefers `time::OffsetDateTime`, choose it once in PR 1 and use it everywhere in `ironclaw_host_api`.
 
+### 4.1 Model-visible failure diagnostics
+
+`ModelFailureDiagnostic::Diagnostic` is the narrow exception to the
+single-line `SafeSummary` contract. It carries a producer-scrubbed failure cause
+to the model so a `LoopDiagnosticRef` is only a log correlation handle, not the
+only way to learn why an operation failed.
+
+The diagnostic value is bounded to 4096 bytes, rejects empty text, disallowed
+control characters, and known credential-token shapes, and revalidates on
+deserialize. It intentionally allows paths, URLs, payload delimiters, and
+credential vocabulary such as “password field” because those can be necessary
+recovery context. Producers remain responsible for applying the canonical
+secret-value scrubber and injection fence before construction. Public summaries,
+events, logs, and projections continue to use their stricter redacted contracts.
+
 ---
 
 ## 5. ID and name contracts
