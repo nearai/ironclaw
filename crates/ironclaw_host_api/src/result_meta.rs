@@ -1141,6 +1141,65 @@ mod tests {
         assert!(serde_json::from_value::<ModelFailureDiagnostic>(oversize).is_err());
     }
 
+    /// Guard against the scrubber ratcheting tighter unnoticed.
+    ///
+    /// Every other test here proves the guard REJECTS what it should. Nothing
+    /// proved it still ACCEPTS what it should, so tightening a detector could
+    /// only ever break silently — a summary that says nothing is indistinguishable
+    /// from one that had nothing to say. This corpus is the other direction:
+    /// realistic diagnostics an operator or the model genuinely needs, which must
+    /// survive the values-only rules this channel is built on.
+    ///
+    /// Credential *vocabulary* is deliberately legal here. The distinction this
+    /// channel draws is value-vs-word: "the api key is missing" is the most useful
+    /// sentence we can hand back for a missing key, and scrubbing it leaves the
+    /// model with nothing to act on. Add to this list whenever a real diagnostic
+    /// is found to be over-scrubbed; a failure here means a detector got greedy,
+    /// not that the corpus is wrong.
+    #[test]
+    fn legitimate_diagnostics_survive_the_credential_guard() {
+        for text in [
+            // Bare vocabulary — the words alone carry no secret.
+            "password field is required",
+            "the api key is missing from the request",
+            "secret sharing failed between nodes",
+            "credential setup is unavailable for this provider",
+            "token bucket exhausted; retry after the window resets",
+            // Remediation prose, the highest-value case: it must name the thing
+            // the user has to go fix.
+            "rotate your client secret in the provider console and retry",
+            "no api key is configured for this extension",
+            // Paths and schema refs — diagnostic context the strict summary
+            // validator drops, which is why this channel exists.
+            "missing input_schema_ref at /system/extensions/google-calendar/schemas/list_calendars.input.v1.json",
+            "failed to read /workspace/project/config.json at line 17",
+            // Already-redacted payloads must not be double-rejected.
+            r#"{"password":"[REDACTED]"}"#,
+            r#"{"api_key":"[redacted]"}"#,
+        ] {
+            ModelDiagnostic::new(text).unwrap_or_else(|error| {
+                panic!(
+                    "over-scrubbed a legitimate diagnostic: {text:?} rejected as {error:?} — \
+                     a detector got greedy; the model needs this sentence"
+                )
+            });
+        }
+
+        // The other direction still holds: real values are refused. Kept beside
+        // the corpus so tightening one side cannot quietly loosen the other.
+        for text in [
+            "password=hunter2",
+            r#"{"api_key":"opaque-live-value"}"#,
+            "https://user:pass@example.com/path",
+            "provider returned ghp_0123456789abcdef",
+        ] {
+            assert!(
+                ModelDiagnostic::new(text).is_err(),
+                "credential value survived the guard: {text:?}"
+            );
+        }
+    }
+
     #[test]
     fn model_diagnostic_truncates_on_a_utf8_boundary() {
         let text = format!("a{}", "é".repeat(MODEL_DIAGNOSTIC_MAX_BYTES));
