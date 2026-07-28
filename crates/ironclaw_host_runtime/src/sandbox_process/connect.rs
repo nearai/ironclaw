@@ -91,7 +91,28 @@ pub enum SandboxDockerReadiness {
 /// Single connection attempt: env override first, then local-default
 /// discovery, then well-known unix socket candidates. No retry here — see
 /// [`connect_docker_with_retry`] for the retrying entrypoint.
+///
+/// The whole attempt (all three sub-branches, sequentially) is bounded by
+/// [`CONNECT_ATTEMPT_TIMEOUT`] here, in one place, so every caller — the
+/// retry loop *and* the one-shot [`sandbox_docker_readiness`] probe —
+/// inherits the same bound automatically. This matters most for the
+/// local-default branch: `Docker::connect_with_local_defaults()` uses
+/// Bollard's own internal client timeout, which this module does not
+/// parameterize, so without an outer timeout here a stalled (connects but
+/// never answers `ping()`) local daemon would block past what either caller
+/// promises.
 async fn connect_once() -> Result<Docker, RuntimeProcessError> {
+    match tokio::time::timeout(CONNECT_ATTEMPT_TIMEOUT, connect_once_attempt()).await {
+        Ok(result) => result,
+        Err(_elapsed) => Err(RuntimeProcessError::ExecutionFailed(format!(
+            "docker connect attempt timed out after {CONNECT_ATTEMPT_TIMEOUT:?}"
+        ))),
+    }
+}
+
+/// The actual connect logic for a single attempt, unbounded — wrapped by
+/// [`connect_once`], which is the only caller.
+async fn connect_once_attempt() -> Result<Docker, RuntimeProcessError> {
     if let Some(override_host) = env_or_override(DOCKER_HOST_ENV) {
         return connect_override(&override_host).await;
     }
@@ -273,35 +294,28 @@ where
 /// Worst-case wall-clock bound: `MAX_ATTEMPTS` (4) attempts, each capped at
 /// `CONNECT_ATTEMPT_TIMEOUT` (5s), plus cumulative doubling backoff between
 /// attempts (250ms + 500ms + 1000ms = 1.75s, none after the last attempt) —
-/// about 21.75s, comfortably under 30s. `connect_once` tries local-default
-/// discovery first, which uses Bollard's own internal client timeout rather
-/// than a parameter this module controls; each attempt is wrapped in
-/// [`tokio::time::timeout`] so that path is bounded too, regardless of what
-/// Bollard does internally. `retry_worst_case_wall_clock_is_bounded` (below)
-/// pins this arithmetic so a future change to the constants can't silently
-/// blow the bound back out.
+/// about 21.75s, comfortably under 30s. The per-attempt bound is enforced
+/// inside [`connect_once`] itself (see its doc comment), including the
+/// local-default discovery branch, which otherwise uses Bollard's own
+/// internal client timeout rather than a parameter this module controls.
+/// `retry_worst_case_wall_clock_is_bounded` (below) pins this arithmetic so a
+/// future change to the constants can't silently blow the bound back out.
 ///
 /// CRITICAL: on retry exhaustion this returns `Err`, which callers MUST
 /// propagate as a hard failure. There is no fallback to running the sandbox
 /// command unsandboxed on the host — see module docs and
 /// `docs/safety-and-sandbox.md`.
 pub async fn connect_docker_with_retry() -> Result<Docker, RuntimeProcessError> {
-    run_with_retry(MAX_ATTEMPTS, BASE_BACKOFF, || async {
-        match tokio::time::timeout(CONNECT_ATTEMPT_TIMEOUT, connect_once()).await {
-            Ok(result) => result,
-            Err(_elapsed) => Err(RuntimeProcessError::ExecutionFailed(format!(
-                "docker connect attempt timed out after {CONNECT_ATTEMPT_TIMEOUT:?}"
-            ))),
-        }
-    })
-    .await
+    run_with_retry(MAX_ATTEMPTS, BASE_BACKOFF, connect_once).await
 }
 
 /// Boot-time Docker daemon readiness probe.
 ///
 /// Thin wrapper around a single connect attempt (not the retry loop — this
 /// is meant to be a fast, one-shot diagnostic reported at startup, not a
-/// gate that blocks boot waiting for the daemon to come up).
+/// gate that blocks boot waiting for the daemon to come up). Bounded by
+/// [`CONNECT_ATTEMPT_TIMEOUT`] via [`connect_once`] — a daemon that accepts
+/// the connection but never answers cannot stall this past that bound.
 pub async fn sandbox_docker_readiness() -> SandboxDockerReadiness {
     match connect_once().await {
         Ok(_) => SandboxDockerReadiness::Ready,
@@ -592,6 +606,113 @@ mod tests {
             "connect_docker_with_retry's worst-case wall clock ({worst_case:?}) \
              no longer matches its documented \"about 21.75s, comfortably \
              under 30s\" bound",
+        );
+    }
+
+    // ironloop review finding (PR #6746): sandbox_docker_readiness() called
+    // connect_once() directly with nothing wrapping the local-default
+    // discovery branch, which uses Bollard's own internal 120s client
+    // timeout rather than CONNECT_ATTEMPT_TIMEOUT. A daemon that accepts the
+    // connection but never answers `ping()` (the dangerous case — a closed
+    // port fails fast and proves nothing) could stall the "cheap one-shot
+    // probe" documented on `SandboxDockerReadiness` for up to two minutes.
+    //
+    // This reproduces that exact daemon shape: a real unix-socket listener
+    // that accepts the connection and then never writes a response. Real
+    // `DOCKER_HOST` (Bollard's own env var, not this module's
+    // `IRONCLAW_REBORN_DOCKER_HOST` override) is pointed at it so
+    // `connect_once` takes the `Docker::connect_with_local_defaults()`
+    // branch — the one with no parameterized timeout — rather than the
+    // override branch, which already threaded `CONNECT_ATTEMPT_TIMEOUT`
+    // through to Bollard before this fix.
+    //
+    // Plain `#[test]` (not `#[tokio::test]`), same reasoning as
+    // `docker_host_env_override_is_consulted_first` above: `lock_env()`'s
+    // guard must not be held across an `.await` in an outer async fn
+    // (clippy `await_holding_lock`), so a current-thread runtime's
+    // `block_on` drives the probe to completion synchronously inside the
+    // guarded section instead. `block_on` also drives the
+    // `tokio::time::timeout` wrapper, so the ceiling assertion still holds.
+    #[cfg(unix)]
+    #[test]
+    fn sandbox_docker_readiness_bounded_when_daemon_accepts_but_never_answers() {
+        let _guard = lock_env();
+        remove_runtime_env(DOCKER_HOST_ENV);
+
+        // Unix socket paths are capped at `SUN_LEN` (~104 bytes on macOS),
+        // which `std::env::temp_dir()` can blow through on some CI/dev
+        // layouts — use `/tmp` directly, kept short.
+        let dir = std::path::PathBuf::from("/tmp").join(format!(
+            "ic-dsock-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                % 1_000_000
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir for stalled docker socket");
+        let socket_path = dir.join("d.sock");
+
+        let listener = std::os::unix::net::UnixListener::bind(&socket_path)
+            .expect("bind stalled docker socket");
+        // Detached on purpose: the process exits when the test binary's main
+        // thread returns, which tears this down regardless of whether the
+        // 300s sleep below ever completes.
+        let _accept_thread = std::thread::spawn(move || {
+            if let Ok((stream, _addr)) = listener.accept() {
+                std::thread::sleep(Duration::from_secs(300));
+                drop(stream);
+            }
+        });
+
+        let original_docker_host = std::env::var_os("DOCKER_HOST");
+        // SAFETY: guarded by `lock_env()`, same pattern as
+        // `runtime_mask_hides_real_env` above — no other test mutates
+        // `DOCKER_HOST` concurrently.
+        unsafe {
+            std::env::set_var("DOCKER_HOST", format!("unix://{}", socket_path.display()));
+        }
+
+        // Generous ceiling, not a tight window: comfortably more than
+        // 2x CONNECT_ATTEMPT_TIMEOUT so ordinary CI scheduling jitter can't
+        // flake it, but far short of Bollard's 120s internal default —
+        // enough to prove the bound without a slow test.
+        let ceiling = CONNECT_ATTEMPT_TIMEOUT * 2 + Duration::from_secs(2);
+        let started = std::time::Instant::now();
+        let outcome = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build current-thread runtime for test")
+            .block_on(async { tokio::time::timeout(ceiling, sandbox_docker_readiness()).await });
+        let elapsed = started.elapsed();
+
+        // SAFETY: still under the same `lock_env()` guard as the set above.
+        unsafe {
+            match original_docker_host {
+                Some(value) => std::env::set_var("DOCKER_HOST", value),
+                None => std::env::remove_var("DOCKER_HOST"),
+            }
+        }
+        remove_runtime_env(DOCKER_HOST_ENV);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let readiness = outcome.unwrap_or_else(|_| {
+            panic!(
+                "sandbox_docker_readiness() did not return within {ceiling:?} \
+                 (2x CONNECT_ATTEMPT_TIMEOUT + slack) even though it is \
+                 documented as a cheap, bounded one-shot probe; a daemon \
+                 that accepts the connection and never answers must not be \
+                 able to stall it past that bound (elapsed={elapsed:?})"
+            )
+        });
+
+        assert_eq!(
+            readiness,
+            SandboxDockerReadiness::Unreachable {
+                reason: "docker daemon unreachable".to_string(),
+            },
+            "expected the stalled daemon to be reported Unreachable, not Ready"
         );
     }
 }
