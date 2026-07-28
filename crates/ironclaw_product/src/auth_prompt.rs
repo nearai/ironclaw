@@ -73,7 +73,7 @@ impl AuthChallengeView {
             // These are `Option` because the field may be genuinely ABSENT, and
             // the projection validator rejects a present-but-empty display
             // string. A manifest legitimately ships empty values for a recipe
-            // that has no such affordance -- Telegram's `web_generated_code`
+            // that has no such affordance -- a `web_generated_code`
             // pairing has no text input, so `input_placeholder = ""` -- so an
             // empty string must map to `None`, not `Some("")`. Emitting
             // `Some("")` fails `ConnectionPromptContext::validate` and takes the
@@ -278,10 +278,9 @@ mod tests {
 
     fn requirement(setup: RuntimeCredentialAccountSetup) -> RuntimeCredentialAuthRequirement {
         RuntimeCredentialAuthRequirement {
-            provider: VendorId::new("telegram").expect("vendor"),
+            provider: VendorId::new("acme").expect("vendor"),
             setup,
-            requester_extension: ironclaw_host_api::ExtensionId::new("telegram")
-                .expect("extension id"),
+            requester_extension: ironclaw_host_api::ExtensionId::new("acme").expect("extension id"),
             provider_scopes: Vec::new(),
         }
     }
@@ -305,8 +304,8 @@ mod tests {
 
     fn connection() -> ChannelConnectionRequirement {
         ChannelConnectionRequirement {
-            channel: "telegram".to_string(),
-            display_name: "Telegram".to_string(),
+            channel: "acme".to_string(),
+            display_name: "Acme Chat".to_string(),
             strategy: ChannelConnectStrategy::WebGeneratedCode,
             instructions: "Send this code to the bot.".to_string(),
             // Real `web_generated_code` recipes ship this BLANK — keep it so.
@@ -333,7 +332,7 @@ mod tests {
             Some(AuthPromptChallengeKind::Pairing),
             "a pairing setup is a serviceable challenge, not an unknown one"
         );
-        assert_eq!(view.provider.as_deref(), Some("telegram"));
+        assert_eq!(view.provider.as_deref(), Some("acme"));
     }
 
     /// Positive control for `non_empty`. The blank-maps-to-None assertion alone
@@ -343,13 +342,13 @@ mod tests {
     fn populated_connection_fields_reach_the_projection() {
         let challenge = AuthChallengeView {
             kind: AuthPromptChallengeKind::Pairing,
-            provider: AuthProviderId::new("telegram".to_string()).expect("provider"),
+            provider: AuthProviderId::new("acme".to_string()).expect("provider"),
             account_label: None,
             authorization_url: None,
             expires_at: None,
             pairing: Some(PairingAuthChallengeView {
                 code: "ABCD2345".to_string(),
-                deep_link: Some("https://t.me/bot?start=ABCD2345".to_string()),
+                deep_link: Some("https://acme.test/pair?start=ABCD2345".to_string()),
                 expires_at: chrono::Utc::now(),
                 connection: connection(),
             }),
@@ -376,7 +375,7 @@ mod tests {
         assert_eq!(pairing.code, "ABCD2345");
         assert_eq!(
             pairing.deep_link.as_deref(),
-            Some("https://t.me/bot?start=ABCD2345")
+            Some("https://acme.test/pair?start=ABCD2345")
         );
     }
 
@@ -387,7 +386,7 @@ mod tests {
     fn blank_pairing_deep_link_projects_as_absent() {
         let challenge = AuthChallengeView {
             kind: AuthPromptChallengeKind::Pairing,
-            provider: AuthProviderId::new("telegram".to_string()).expect("provider"),
+            provider: AuthProviderId::new("acme".to_string()).expect("provider"),
             account_label: None,
             authorization_url: None,
             expires_at: None,
