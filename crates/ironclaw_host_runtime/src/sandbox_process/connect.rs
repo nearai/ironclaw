@@ -148,6 +148,31 @@ async fn connect_once_attempt() -> Result<Docker, RuntimeProcessError> {
 /// Connect to the daemon at an explicit `IRONCLAW_REBORN_DOCKER_HOST`
 /// override: tried as a unix socket path first (when it looks like one),
 /// otherwise as an HTTP(S) address.
+///
+/// SANITIZATION: every error constructed in this function is fixed text
+/// naming only the env var, the endpoint KIND (unix socket / http
+/// endpoint), and a safe failure CATEGORY (connect / ping / rejected). It
+/// never embeds `host` or a backend (Bollard) error's `Display`. This is
+/// deliberate and applies at every branch, not just the ones that reach
+/// Bollard: this crate's `AGENTS.md` bans "raw host paths, backend error
+/// details ... in errors, events, snapshots, logs, or docs" outright, with
+/// no carve-out for `debug!`-level logging. A previous fix here sanitized
+/// only `SandboxDockerReadiness.reason`, which papered over the symptom —
+/// the underlying `RuntimeProcessError` still carried the full endpoint and
+/// raw Bollard error text into debug logs and every retry consumer, and an
+/// `IRONCLAW_REBORN_DOCKER_HOST` containing `user:pass@host` user-info would
+/// have leaked that credential into both.
+///
+/// This does cost operator debuggability: today nothing in this crate
+/// records which literal endpoint or backend error caused a connect
+/// failure, not even at debug level. That's an intentional trade rather
+/// than an oversight — the operator already knows the value they put in
+/// `IRONCLAW_REBORN_DOCKER_HOST`, so the software doesn't need to echo it
+/// back to them, and the fixed kind+category (e.g. "unix socket ping
+/// failed") is enough to tell them whether the daemon is unreachable
+/// (connect) or unhealthy (ping) without re-introducing a host/credential
+/// leak into a surface (debug logs, boot diagnostics) that isn't
+/// necessarily trusted-internal-only.
 async fn connect_override(host: &str) -> Result<Docker, RuntimeProcessError> {
     if host.starts_with("unix://") || host.starts_with('/') {
         let docker = Docker::connect_with_socket(
@@ -155,14 +180,14 @@ async fn connect_override(host: &str) -> Result<Docker, RuntimeProcessError> {
             CONNECT_ATTEMPT_TIMEOUT.as_secs(),
             bollard::API_DEFAULT_VERSION,
         )
-        .map_err(|e| {
+        .map_err(|_e| {
             RuntimeProcessError::ExecutionFailed(format!(
-                "{DOCKER_HOST_ENV} unix socket connect failed for {host}: {e}"
+                "{DOCKER_HOST_ENV} unix socket connect failed"
             ))
         })?;
-        docker.ping().await.map_err(|e| {
+        docker.ping().await.map_err(|_e| {
             RuntimeProcessError::ExecutionFailed(format!(
-                "{DOCKER_HOST_ENV} unix socket ping failed for {host}: {e}"
+                "{DOCKER_HOST_ENV} unix socket ping failed"
             ))
         })?;
         return Ok(docker);
@@ -170,7 +195,7 @@ async fn connect_override(host: &str) -> Result<Docker, RuntimeProcessError> {
 
     if !is_loopback_docker_host(host) && !docker_host_allow_remote() {
         return Err(RuntimeProcessError::ExecutionFailed(format!(
-            "{DOCKER_HOST_ENV}={host} is not a unix socket or loopback address; \
+            "{DOCKER_HOST_ENV} target is not a unix socket or loopback address; \
              plaintext access to a remote Docker Engine API is host-root-equivalent \
              (it can create containers and mount host paths). Set \
              {DOCKER_HOST_ALLOW_REMOTE_ENV}=1 to explicitly allow a non-loopback \
@@ -183,15 +208,13 @@ async fn connect_override(host: &str) -> Result<Docker, RuntimeProcessError> {
         CONNECT_ATTEMPT_TIMEOUT.as_secs(),
         bollard::API_DEFAULT_VERSION,
     )
-    .map_err(|e| {
+    .map_err(|_e| {
         RuntimeProcessError::ExecutionFailed(format!(
-            "{DOCKER_HOST_ENV} http connect failed for {host}: {e}"
+            "{DOCKER_HOST_ENV} http endpoint connect failed"
         ))
     })?;
-    docker.ping().await.map_err(|e| {
-        RuntimeProcessError::ExecutionFailed(format!(
-            "{DOCKER_HOST_ENV} http ping failed for {host}: {e}"
-        ))
+    docker.ping().await.map_err(|_e| {
+        RuntimeProcessError::ExecutionFailed(format!("{DOCKER_HOST_ENV} http endpoint ping failed"))
     })?;
     Ok(docker)
 }
@@ -320,13 +343,16 @@ pub async fn sandbox_docker_readiness() -> SandboxDockerReadiness {
     match connect_once().await {
         Ok(_) => SandboxDockerReadiness::Ready,
         Err(err) => {
-            // The underlying error embeds the configured socket path /
-            // remote address and Bollard's raw backend error (see
-            // `connect_override`). This probe is documented as a boot
-            // diagnostic surfaced on "a startup log line or health
-            // endpoint" — a surface that is not necessarily
-            // trusted-internal-only — so the public `reason` stays a fixed
-            // string and the detail goes to a debug log instead.
+            // `err` is already sanitized at construction time
+            // (`connect_once`/`connect_override`): fixed endpoint-kind +
+            // failure-category text only, never the configured socket path,
+            // remote address, or Bollard's raw backend error. That holds
+            // for this `debug!` field too, not just the public `reason`
+            // below — this probe is documented as a boot diagnostic
+            // surfaced on "a startup log line or health endpoint", a
+            // surface that is not necessarily trusted-internal-only, and
+            // this crate's `AGENTS.md` bans raw host paths/backend error
+            // details in logs outright (no debug-level carve-out).
             tracing::debug!(error = %err, "sandbox docker readiness probe failed");
             SandboxDockerReadiness::Unreachable {
                 reason: "docker daemon unreachable".to_string(),
@@ -476,9 +502,16 @@ mod tests {
             "error must name the opt-in env var so an operator doesn't have \
              to read Rust source to proceed, got: {message}"
         );
+        // ironloop review finding (PR #6746): this rejection is constructed
+        // from the operator-supplied host without ever touching Bollard, so
+        // it's easy to assume echoing it back is harmless — but the same
+        // host string can carry `user:pass@` credentials, and this crate's
+        // `AGENTS.md` bans raw host paths in errors outright. The host must
+        // NOT appear in the message.
         assert!(
-            message.contains("203.0.113.5"),
-            "error must name the disallowed host, got: {message}"
+            !message.contains("203.0.113.5"),
+            "error must not echo the disallowed host back (raw host paths \
+             are banned from errors — see AGENTS.md), got: {message}"
         );
     }
 
@@ -713,6 +746,106 @@ mod tests {
                 reason: "docker daemon unreachable".to_string(),
             },
             "expected the stalled daemon to be reported Unreachable, not Ready"
+        );
+    }
+
+    // ironloop review finding (PR #6746): the earlier fix in this file
+    // (`readiness_surfaces_reason_on_unreachable_daemon`) only sanitized
+    // `SandboxDockerReadiness.reason`. The underlying `RuntimeProcessError`
+    // built by `connect_override` still embedded the full configured
+    // endpoint and Bollard's raw error text, so every *other* consumer of
+    // that error (debug logs, the retry loop's exhausted error) still saw
+    // it — and if `IRONCLAW_REBORN_DOCKER_HOST` carried `user:pass@host`
+    // user-info, that credential leaked into both. This pins the fix at
+    // its source (`connect_override`'s error constructors), covering the
+    // http connect/ping branch where the credential-bearing case actually
+    // lives.
+    //
+    // `readiness`'s `debug!(error = %err, ...)` field logs `err`'s exact
+    // `Display` output — the same string asserted on below — so proving
+    // this string is clean also proves the log field is clean; there is no
+    // separate log-formatting path to test independently.
+    //
+    // RED evidence: reverting the `_e` param names in `connect_override`
+    // back to `e` and re-inserting `for {host}: {e}` into the four
+    // Bollard-facing format! calls (the pre-fix shape) makes this test fail
+    // with the host and "hunter2" both present in the message — see the
+    // task report for the captured failure output.
+    #[test]
+    fn connect_override_http_errors_never_leak_host_or_userinfo_credential() {
+        let _guard = lock_env();
+
+        // `docker_host_component` parses the host out by splitting on the
+        // last `:`, so a `user:pass@host` URL's parsed "host" is
+        // `user:pass@host` — never equal to `localhost` nor a valid
+        // `IpAddr` — and `is_loopback_docker_host` (correctly, fail-closed)
+        // treats any user-info-bearing URL as non-loopback regardless of
+        // the real host. Set the remote opt-in so this test reaches the
+        // connect/ping error branches under test rather than the separate
+        // rejection branch (covered by
+        // `connect_override_rejects_non_loopback_host_without_opt_in`).
+        set_runtime_env(DOCKER_HOST_ALLOW_REMOTE_ENV, "1");
+        let host = "http://user:hunter2@127.0.0.1:1";
+
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build current-thread runtime for test")
+            .block_on(connect_override(host));
+
+        remove_runtime_env(DOCKER_HOST_ALLOW_REMOTE_ENV);
+
+        let err = result.expect_err("nothing is listening on 127.0.0.1:1");
+        let message = err.to_string();
+
+        assert!(
+            !message.contains("hunter2"),
+            "error must never leak a credential supplied via user-info in \
+             {DOCKER_HOST_ENV}, got: {message}"
+        );
+        assert!(
+            !message.contains("user:hunter2"),
+            "error must never leak the user-info component of {DOCKER_HOST_ENV}, \
+             got: {message}"
+        );
+        assert!(
+            !message.contains("127.0.0.1"),
+            "error must not embed the configured host at all (fixed kind + \
+             category only), got: {message}"
+        );
+        assert!(
+            message.contains(DOCKER_HOST_ENV) && message.contains("http endpoint"),
+            "error should still name the env var and endpoint kind so an \
+             operator gets a safe category, got: {message}"
+        );
+    }
+
+    // Companion to the http-branch test above, covering the unix socket
+    // connect/ping error branch with a path that looks like it could carry
+    // sensitive topology (a nonstandard, identifying socket path).
+    #[test]
+    fn connect_override_unix_socket_errors_never_leak_the_configured_path() {
+        let _guard = lock_env();
+
+        let host = "/nonexistent/ironclaw-test-docker-leak-check.sock";
+
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build current-thread runtime for test")
+            .block_on(connect_override(host));
+
+        let err = result.expect_err("no daemon reachable at nonexistent override path");
+        let message = err.to_string();
+
+        assert!(
+            !message.contains(host),
+            "error must not embed the configured unix socket path, got: {message}"
+        );
+        assert!(
+            message.contains(DOCKER_HOST_ENV) && message.contains("unix socket"),
+            "error should still name the env var and endpoint kind so an \
+             operator gets a safe category, got: {message}"
         );
     }
 }
