@@ -66,8 +66,8 @@ first-party extension manifests, Cargo test/clippy.
 - `crates/ironclaw_product/src/lib.rs`
   re-exports only the registry/policy interfaces needed by the generic host.
 - `crates/ironclaw_product/src/run_delivery/observer.rs`
-  renders the policy's redacted, channel-scoped invalid-request feedback
-  instead of the global inventory.
+  renders channel-scoped invalid-request feedback configured from the same
+  validated manifest instead of the global inventory.
 - `crates/ironclaw_product/tests/product_command_surface_contract.rs`
   proves exact-token admission context and fail-closed handler behavior.
 - `crates/ironclaw_extension_host/src/channel_host.rs`
@@ -315,13 +315,14 @@ git commit -m "feat(product): enforce channel command allowlists"
 - Modify: `crates/ironclaw_product/src/run_delivery/observer.rs`
 
 **Interfaces:**
-- Consume the redacted reason produced by command admission for
-  `InvalidRequest`.
+- Consume enabled-command help configured from the same validated manifest as
+  command admission.
 - Keep fixed host text for `PolicyDenied` shared-conversation feedback.
 
 - [ ] **Step 1: Write a failing observer test**
 
-Add an observer test that posts a rejected command ack with:
+Add an observer test that configures only `status` and posts a rejected command
+ack with:
 
 ```rust
 ProductRejection::permanent(
@@ -330,8 +331,9 @@ ProductRejection::permanent(
 )
 ```
 
-Assert the delivered command feedback is exactly the scoped reason and does not
-contain `/model`, `/extension_configure`, or another global command.
+Assert the delivered command feedback is exactly
+`Available commands:\n/status` and does not contain `/model`,
+`/extension_configure`, or another global command.
 
 - [ ] **Step 2: Run the test and observe the global inventory leak**
 
@@ -342,15 +344,18 @@ cargo test -p ironclaw_product command_feedback_uses_scoped_invalid_request_reas
   -- --nocapture
 ```
 
-Expected: the current observer replaces the rejection reason with
-`command_help_text()` and exposes the global inventory.
+Expected: the current observer calls `command_help_text()` and exposes the
+global inventory.
 
-- [ ] **Step 3: Render the policy's redacted invalid-request reason**
+- [ ] **Step 3: Configure enabled-only invalid-request feedback**
 
-Change only the `InvalidRequest` feedback arm to render the
-`ProductRejection.reason` value already created by the trusted product parser
-or admission policy. Preserve the fixed shared-conversation message for
-`PolicyDenied` and the existing behavior for all other rejection families.
+Keep `ProductRejection.reason` opaque: `RedactedString` intentionally exposes no
+inner value. Add an observer setting/builder for enabled command tokens,
+default it to the empty fail-closed inventory, and change only the
+`InvalidRequest` feedback arm to render that precomputed enabled-only help.
+Configure the observer from the same resolved channel descriptor used to build
+admission. Preserve the fixed shared-conversation message for `PolicyDenied`
+and the existing behavior for all other rejection families.
 
 Remove the now-unused global `command_help_text` import from the observer; do
 not remove the global helper if other callers/tests still use it.

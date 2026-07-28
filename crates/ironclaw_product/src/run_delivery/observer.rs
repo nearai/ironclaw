@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tokio::time::Instant;
 
-use crate::commands::{CommandResultView, command_help_text, render_command_result_text};
+use crate::commands::{CommandResultView, declared_command_help_text, render_command_result_text};
 use crate::{
     AuthPromptChallengeKind, ExternalActorRef, ExternalConversationRef, ExternalEventId,
     OutboundPart, ProductAdapterError, ProductInboundAck, ProductInboundEnvelope,
@@ -141,6 +141,7 @@ pub struct RunDeliveryObserver {
     services: RunDeliveryServices,
     settings: RunDeliverySettings,
     connection_notices: ChannelConnectionNoticePolicy,
+    command_help_text: String,
     delivery_permits: Arc<Semaphore>,
     /// Per-observer, per-conversation connect-nudge reservations. Reserving
     /// before delivery prevents concurrent unbound events from racing.
@@ -183,11 +184,21 @@ impl RunDeliveryObserver {
             services,
             settings,
             connection_notices,
+            command_help_text: declared_command_help_text(std::iter::empty::<&str>()),
             delivery_permits: Arc::new(Semaphore::new(settings.max_concurrent_deliveries.get())),
             connect_nudge_reservations: Mutex::new(HashMap::new()),
             hint_seen: Mutex::new((std::collections::VecDeque::new(), HashSet::new())),
             delivery_runs: Mutex::new(DeliveryRunLedger::default()),
         }
+    }
+
+    pub fn with_enabled_commands<I, S>(mut self, commands: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.command_help_text = declared_command_help_text(commands);
+        self
     }
 
     pub async fn post_connection_status_notice(
@@ -885,7 +896,7 @@ impl RunDeliveryObserver {
                 render_command_result(command, payload)
             }
             ProductInboundAck::Rejected(rejection) => match rejection.kind {
-                ProductRejectionKind::InvalidRequest => command_help_text(),
+                ProductRejectionKind::InvalidRequest => self.command_help_text.clone(),
                 ProductRejectionKind::PolicyDenied => {
                     "Commands can only be used in a direct conversation with Ironclaw.".to_string()
                 }

@@ -153,17 +153,9 @@ mod tests {
             observer: None,
         });
         let cases = [
-            ("/model openai/gpt-5", "/model openai/gpt-5", "model"),
-            (
-                "/model@configured_bot openai/gpt-5",
-                "/model openai/gpt-5",
-                "model",
-            ),
-            (
-                "/model@other_bot openai/gpt-5",
-                "/model@other_bot openai/gpt-5",
-                "model@other_bot",
-            ),
+            ("/status", "/status", Some("status")),
+            ("/status@configured_bot", "/status", Some("status")),
+            ("/status@other_bot", "/status@other_bot", None),
         ];
 
         for (index, (wire_text, _, _)) in cases.iter().enumerate() {
@@ -219,14 +211,22 @@ mod tests {
         for (request, (_, expected_text, expected_command)) in requests.iter().zip(cases) {
             assert_eq!(request.message.text, expected_text);
             assert_eq!(request.message.trigger, ProductTriggerReason::DirectChat);
-            let Some(ChannelInboundClassification::Command(command)) =
-                request.classification.as_ref()
-            else {
-                panic!("normalized Telegram command must reach generic classification");
-            };
-            assert_eq!(command.command, expected_command);
-            assert_eq!(command.arguments, "openai/gpt-5");
-            assert_eq!(command.trigger, ProductTriggerReason::DirectChat);
+            match expected_command {
+                Some(expected_command) => {
+                    let Some(ChannelInboundClassification::Command(command)) =
+                        request.classification.as_ref()
+                    else {
+                        panic!("normalized Telegram command must reach generic classification");
+                    };
+                    assert_eq!(command.command, expected_command);
+                    assert!(command.arguments.is_empty());
+                    assert_eq!(command.trigger, ProductTriggerReason::DirectChat);
+                }
+                None => assert!(
+                    request.classification.is_none(),
+                    "a command addressed to another bot must not reach product command dispatch"
+                ),
+            }
         }
     }
 }

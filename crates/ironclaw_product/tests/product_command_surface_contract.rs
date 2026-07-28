@@ -10,11 +10,12 @@ use ironclaw_host_api::{
     ProductSurfaceInvokeResponse,
 };
 use ironclaw_product::{
-    ActionDispatchKind, DefaultProductSurface, FakeConversationBindingService,
-    FakeIdempotencyLedger, FakeInboundTurnService, PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID,
-    PRODUCT_MODEL_COMMAND_OPERATION_ID, PRODUCT_STATUS_COMMAND_OPERATION_ID, ProductCommand,
-    ProductCommandAdmission, ProductCommandAdmissionService, ProductCommandContext,
-    ProductInboundAck, ProductSurfaceFailure,
+    ActionDispatchKind, DefaultProductSurface, DirectConversationCommandAdmission,
+    FakeConversationBindingService, FakeIdempotencyLedger, FakeInboundTurnService,
+    PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID, PRODUCT_MODEL_COMMAND_OPERATION_ID,
+    PRODUCT_STATUS_COMMAND_OPERATION_ID, ProductCommand, ProductCommandAdmission,
+    ProductCommandAdmissionService, ProductCommandContext, ProductInboundAck, ProductRejectionKind,
+    ProductSurfaceFailure,
 };
 use ironclaw_product::{
     AdapterInstallationId, AuthRequirement, ConversationBindingService, ExternalActorRef,
@@ -27,6 +28,20 @@ fn sample_command_envelope(
     event_suffix: &str,
     command: &str,
     arguments: &str,
+) -> ProductInboundEnvelope {
+    sample_command_envelope_with_trigger(
+        event_suffix,
+        command,
+        arguments,
+        ProductTriggerReason::BotCommand,
+    )
+}
+
+fn sample_command_envelope_with_trigger(
+    event_suffix: &str,
+    command: &str,
+    arguments: &str,
+    trigger: ProductTriggerReason,
 ) -> ProductInboundEnvelope {
     let adapter_id = ProductAdapterId::new("test_adapter").expect("valid adapter");
     let installation_id = AdapterInstallationId::new("install_alpha").expect("valid installation");
@@ -48,8 +63,7 @@ fn sample_command_envelope(
         ExternalActorRef::new("test", "user1", Option::<String>::None).expect("valid actor"),
         ExternalConversationRef::new(None, "conv1", None, None).expect("valid conversation"),
         ProductInboundPayload::Command(
-            InboundCommandPayload::new(command, arguments, ProductTriggerReason::BotCommand)
-                .expect("valid command"),
+            InboundCommandPayload::new(command, arguments, trigger).expect("valid command"),
         ),
     )
     .expect("parsed");
@@ -379,7 +393,7 @@ async fn command_admission_receives_authority_context_and_action_metadata() {
     let workflow = DefaultProductSurface::new(inbound.clone(), ledger.clone(), binding)
         .with_product_command_admission_service(admission_service.clone())
         .with_product_command_surface(command_surface);
-    let envelope = sample_command_envelope("command-context", "status", "");
+    let envelope = sample_command_envelope("command-context", "progress", "");
     let expected_adapter_id = envelope.adapter_id().clone();
     let expected_installation_id = envelope.installation_id().clone();
     let expected_actor = envelope.external_actor_ref().clone();
@@ -397,6 +411,7 @@ async fn command_admission_receives_authority_context_and_action_metadata() {
     assert_eq!(records.len(), 1);
     let (context, command) = &records[0];
     assert_eq!(command, &ProductCommand::Status);
+    assert_eq!(context.requested_command, "progress");
     assert_eq!(context.adapter_id, expected_adapter_id);
     assert_eq!(context.installation_id, expected_installation_id);
     assert_eq!(context.external_actor_ref, expected_actor);
@@ -409,6 +424,141 @@ async fn command_admission_receives_authority_context_and_action_metadata() {
     assert_eq!(settled.len(), 1);
     assert_eq!(context.action_id, settled[0].action_id);
     assert_eq!(context.fingerprint, settled[0].fingerprint);
+}
+
+#[tokio::test]
+async fn manifest_command_admission_is_exact_and_blocks_sensitive_handlers() {
+    for (suffix, command, arguments) in [
+        ("alias", "progress", ""),
+        (
+            "model-provider",
+            "model",
+            "set-provider openai --model gpt-5",
+        ),
+        ("extension-configure", "extension_configure", "slack"),
+        ("skill-remove", "skill_remove", "demo"),
+    ] {
+        let inbound = Arc::new(FakeInboundTurnService::new());
+        let ledger = Arc::new(FakeIdempotencyLedger::new());
+        let binding = Arc::new(FakeConversationBindingService::new());
+        let admission = Arc::new(
+            DirectConversationCommandAdmission::new(["status"])
+                .expect("status is a registered command"),
+        );
+        let command_surface = Arc::new(RecordingCommandSurface::output(serde_json::json!({})));
+        let workflow = DefaultProductSurface::new(inbound.clone(), ledger.clone(), binding)
+            .with_product_command_admission_service(admission)
+            .with_product_command_surface(command_surface.clone());
+        let envelope = sample_command_envelope_with_trigger(
+            suffix,
+            command,
+            arguments,
+            ProductTriggerReason::DirectChat,
+        );
+
+        let ack = workflow.submit_inbound(envelope).await.expect("settle");
+
+        assert!(
+            matches!(
+                ack,
+                ProductInboundAck::Rejected(ref rejection)
+                    if rejection.kind == ProductRejectionKind::InvalidRequest
+            ),
+            "disabled command {command} must be rejected: {ack:?}"
+        );
+        assert!(
+            command_surface.invokes().is_empty(),
+            "disabled command {command} reached its handler"
+        );
+        assert_eq!(inbound.accepted_count(), 0);
+        assert_eq!(ledger.settled_count(), 1);
+    }
+}
+
+#[tokio::test]
+async fn manifest_command_admission_is_fail_closed_when_empty() {
+    let inbound = Arc::new(FakeInboundTurnService::new());
+    let ledger = Arc::new(FakeIdempotencyLedger::new());
+    let binding = Arc::new(FakeConversationBindingService::new());
+    let admission = Arc::new(
+        DirectConversationCommandAdmission::new(std::iter::empty::<&str>())
+            .expect("empty allowlist is valid"),
+    );
+    let command_surface = Arc::new(RecordingCommandSurface::output(serde_json::json!({})));
+    let workflow = DefaultProductSurface::new(inbound.clone(), ledger.clone(), binding)
+        .with_product_command_admission_service(admission)
+        .with_product_command_surface(command_surface.clone());
+
+    let ack = workflow
+        .submit_inbound(sample_command_envelope_with_trigger(
+            "empty-status",
+            "status",
+            "",
+            ProductTriggerReason::DirectChat,
+        ))
+        .await
+        .expect("settle");
+
+    assert!(matches!(
+        ack,
+        ProductInboundAck::Rejected(ref rejection)
+            if rejection.kind == ProductRejectionKind::InvalidRequest
+    ));
+    assert!(command_surface.invokes().is_empty());
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(ledger.settled_count(), 1);
+}
+
+#[tokio::test]
+async fn manifest_command_admission_allows_status_only_in_direct_conversations() {
+    for (suffix, trigger, expected_kind) in [
+        ("direct", ProductTriggerReason::DirectChat, None),
+        (
+            "shared",
+            ProductTriggerReason::BotCommand,
+            Some(ProductRejectionKind::PolicyDenied),
+        ),
+    ] {
+        let inbound = Arc::new(FakeInboundTurnService::new());
+        let ledger = Arc::new(FakeIdempotencyLedger::new());
+        let binding = Arc::new(FakeConversationBindingService::new());
+        let admission = Arc::new(
+            DirectConversationCommandAdmission::new(["status"])
+                .expect("status is a registered command"),
+        );
+        let command_surface = Arc::new(RecordingCommandSurface::output(serde_json::json!({
+            "title": "Status"
+        })));
+        let workflow = DefaultProductSurface::new(inbound.clone(), ledger.clone(), binding)
+            .with_product_command_admission_service(admission)
+            .with_product_command_surface(command_surface.clone());
+
+        let ack = workflow
+            .submit_inbound(sample_command_envelope_with_trigger(
+                suffix, "status", "", trigger,
+            ))
+            .await
+            .expect("settle");
+
+        match expected_kind {
+            None => {
+                assert!(matches!(
+                    ack,
+                    ProductInboundAck::CommandResult { ref command, .. } if command == "status"
+                ));
+                assert_eq!(command_surface.invokes().len(), 1);
+            }
+            Some(kind) => {
+                assert!(matches!(
+                    ack,
+                    ProductInboundAck::Rejected(ref rejection) if rejection.kind == kind
+                ));
+                assert!(command_surface.invokes().is_empty());
+            }
+        }
+        assert_eq!(inbound.accepted_count(), 0);
+        assert_eq!(ledger.settled_count(), 1);
+    }
 }
 
 #[tokio::test]

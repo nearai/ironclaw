@@ -761,7 +761,15 @@ impl GenericChannelHostAssembly {
         }
         workflow = workflow
             .with_product_command_admission_service(Arc::new(
-                ironclaw_product::DirectConversationCommandAdmission,
+                ironclaw_product::DirectConversationCommandAdmission::new(
+                    channel.commands.iter().map(String::as_str),
+                )
+                .map_err(|error| {
+                    format!(
+                        "invalid command declaration for extension `{}`: {error}",
+                        source.extension_id()
+                    )
+                })?,
             ))
             .with_product_command_surface(Arc::new(self.command_surface.clone()));
 
@@ -981,11 +989,20 @@ impl GenericChannelHostAssembly {
             .and_then(|registry| registry.get(source.extension_id()))
             .map(|service| service.connection_notices().clone())
             .unwrap_or_else(|| ChannelConnectionNoticePolicy::generic(&source.resolved().name));
-        let observer = Arc::new(RunDeliveryObserver::with_settings_and_connection_notices(
-            services,
-            delivery.settings,
-            connection_notices.clone(),
-        ));
+        let enabled_commands = source
+            .resolved()
+            .channel
+            .as_ref()
+            .map(|channel| channel.commands.as_slice())
+            .unwrap_or_default();
+        let observer = Arc::new(
+            RunDeliveryObserver::with_settings_and_connection_notices(
+                services,
+                delivery.settings,
+                connection_notices.clone(),
+            )
+            .with_enabled_commands(enabled_commands.iter().map(String::as_str)),
+        );
         Ok(Arc::new(RunDeliveryPostAdmissionObserver {
             observer,
             connection_notices,

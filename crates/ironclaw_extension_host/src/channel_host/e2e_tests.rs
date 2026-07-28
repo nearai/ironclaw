@@ -283,6 +283,7 @@ struct HarnessOptions {
     mode: TurnMode,
     max_wait: Duration,
     auth_challenges: Option<Arc<dyn AuthChallengeProvider>>,
+    manifest_commands: Option<Vec<&'static str>>,
     /// Wrap the recording approval service in [`ForeignScopeApprovalService`]
     /// (empty `list_pending`) so bare gate replies exercise the
     /// delivered-gate-route fallback.
@@ -295,6 +296,7 @@ impl HarnessOptions {
             mode,
             max_wait: Duration::from_secs(2),
             auth_challenges: None,
+            manifest_commands: None,
             foreign_scope_approvals: false,
         }
     }
@@ -316,6 +318,15 @@ async fn build_harness_with_auth_challenges(
 ) -> Harness {
     let mut options = HarnessOptions::new(mode);
     options.auth_challenges = auth_challenges;
+    build_harness_with_options(options).await
+}
+
+async fn build_harness_with_manifest_commands(
+    mode: TurnMode,
+    commands: Vec<&'static str>,
+) -> Harness {
+    let mut options = HarnessOptions::new(mode);
+    options.manifest_commands = Some(commands);
     build_harness_with_options(options).await
 }
 
@@ -379,7 +390,9 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound.clone();
     let egress = RecordingEgress::default();
 
-    let host = slack_test_extension_host().await;
+    let host =
+        slack_test_extension_host_with_manifest_commands(options.manifest_commands.as_deref())
+            .await;
     let ingress = build_extension_ingress(
         host.snapshot_watch(),
         Arc::new(ironclaw_extension_host::DeploymentChannelRegistry::default()),
@@ -619,6 +632,12 @@ impl ChannelConfigReactivation for NoopChannelConfigReactivation {
 /// (binding the real `SlackChannelAdapter`) — the snapshot both the ingress
 /// router and the delivery resolver read.
 async fn slack_test_extension_host() -> Arc<ironclaw_extension_host::ExtensionHost> {
+    slack_test_extension_host_with_manifest_commands(None).await
+}
+
+async fn slack_test_extension_host_with_manifest_commands(
+    manifest_commands: Option<&[&str]>,
+) -> Arc<ironclaw_extension_host::ExtensionHost> {
     use ironclaw_extension_host::test_support::{
         FakeEgressFactory, FakeToolAdapter, RecordingDrain,
     };
@@ -648,8 +667,18 @@ async fn slack_test_extension_host() -> Arc<ironclaw_extension_host::ExtensionHo
     let resolved = {
         let host_ports = ironclaw_host_runtime::default_host_port_catalog().expect("host ports"); // safety: default catalog is valid in tests.
         let contracts = product_extension_host_api_contract_registry().expect("contracts"); // safety: default registry is valid in tests.
+        let mut manifest = slack_manifest_from_bundled_inventory();
+        if let Some(commands) = manifest_commands {
+            manifest = manifest.replace(
+                "commands = [\"status\"]",
+                &format!(
+                    "commands = {}",
+                    serde_json::to_string(commands).expect("serialize test commands")
+                ),
+            );
+        }
         ironclaw_extensions::ExtensionManifestRecord::from_toml(
-            slack_manifest_from_bundled_inventory(),
+            manifest,
             ironclaw_extensions::ManifestSource::HostBundled,
             &host_ports,
             None,
@@ -3216,17 +3245,23 @@ impl ironclaw_host_api::ProductSurface for RecordingCommandExecutionSurface {
         ironclaw_host_api::ProductSurfaceInvokeResponse,
         ironclaw_host_api::ProductSurfaceError,
     > {
+        let operation_id = request.operation_id.as_str().to_string();
+        let title = if operation_id == "product.status.command" {
+            "Status"
+        } else {
+            "Model"
+        };
         self.invokes
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push((
-                request.operation_id.as_str().to_string(),
+                operation_id,
                 caller.user_id.as_str().to_string(),
                 request.input,
             ));
         Ok(ironclaw_host_api::ProductSurfaceInvokeResponse {
             output: serde_json::json!({
-                "title": "Model",
+                "title": title,
                 "fields": [{"label": "Provider", "value": "stub-provider"}],
             }),
         })
@@ -3464,7 +3499,7 @@ const DM_COMMAND: &str = r#"{
   "team_id":"T-A",
   "api_app_id":"A-slack",
   "event_id":"Ev-command",
-	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"/model","ts":"1710000000.000021"}
+	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"/status","ts":"1710000000.000021"}
 	}"#;
 
 const DM_UNKNOWN_COMMAND: &str = r#"{
@@ -3475,12 +3510,36 @@ const DM_UNKNOWN_COMMAND: &str = r#"{
 	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"/notacommand","ts":"1710000000.000022"}
 	}"#;
 
+const DM_DISABLED_MODEL_COMMAND: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-command-model-disabled",
+  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"/model set-provider openai --model gpt-5","ts":"1710000000.000024"}
+}"#;
+
+const DM_DISABLED_EXTENSION_COMMAND: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-command-extension-disabled",
+  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"/extension_configure slack","ts":"1710000000.000025"}
+}"#;
+
+const DM_DISABLED_SKILL_COMMAND: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-command-skill-disabled",
+  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"/skill_remove demo","ts":"1710000000.000026"}
+}"#;
+
 const APP_MENTION_COMMAND: &str = r#"{
   "type":"event_callback",
   "team_id":"T-A",
   "api_app_id":"A-slack",
   "event_id":"Ev-command-channel",
-  "event":{"type":"app_mention","user":"U123","channel":"C123","text":"<@UBOT> /model","ts":"1710000000.000023"}
+  "event":{"type":"app_mention","user":"U123","channel":"C123","text":"<@UBOT> /status","ts":"1710000000.000023"}
 }"#;
 
 const DM_APPROVAL: &str = r#"{
@@ -4602,12 +4661,12 @@ async fn dm_slash_command_executes_and_delivers_rendered_result() {
         wait_for_post_messages_matching(&harness.egress, "rendered command result", |payload| {
             payload["text"]
                 .as_str()
-                .is_some_and(|text| text.contains("Model"))
+                .is_some_and(|text| text.contains("Status"))
         })
         .await;
     let invokes = harness.command_executions.invokes();
     assert_eq!(invokes.len(), 1, "exactly one command operation invoke");
-    assert_eq!(invokes[0].0, "product.model.command");
+    assert_eq!(invokes[0].0, "product.status.command");
     assert_eq!(invokes[0].1, USER, "caller is the bound user");
     assert_eq!(feedback[0]["channel"], CHANNEL);
     assert_eq!(
@@ -4632,12 +4691,88 @@ async fn unknown_dm_slash_command_returns_inventory_help_without_a_turn() {
         wait_for_post_messages_matching(&harness.egress, "command inventory help", |payload| {
             payload["text"]
                 .as_str()
-                .is_some_and(|text| text.contains("Available commands:") && text.contains("/model"))
+                .is_some_and(|text| text == "Available commands:\n/status")
         })
         .await;
+    let text = feedback[0]["text"].as_str().expect("feedback text");
+    assert!(!text.contains("/model"));
+    assert!(!text.contains("/extension_configure"));
+    assert!(!text.contains("/skill_remove"));
     assert_eq!(feedback[0]["channel"], CHANNEL);
     assert!(harness.command_executions.invokes().is_empty());
     assert_eq!(harness.coordinator.submitted_turn_count(), 0);
+}
+
+#[tokio::test]
+async fn disabled_dm_slash_commands_are_rejected_without_execution() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "unused".to_string(),
+    })
+    .await;
+
+    for payload in [
+        DM_DISABLED_MODEL_COMMAND,
+        DM_DISABLED_EXTENSION_COMMAND,
+        DM_DISABLED_SKILL_COMMAND,
+    ] {
+        let response = harness.post_event(payload).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        harness.drain().await;
+    }
+
+    let scoped_help = harness
+        .slack_messages()
+        .into_iter()
+        .filter(|payload| payload["text"] == "Available commands:\n/status")
+        .count();
+    assert_eq!(scoped_help, 3, "one scoped rejection per disabled command");
+    assert!(harness.command_executions.invokes().is_empty());
+    assert_eq!(harness.coordinator.submitted_turn_count(), 0);
+}
+
+#[tokio::test]
+async fn empty_manifest_commands_are_fail_closed() {
+    let harness = build_harness_with_manifest_commands(
+        TurnMode::Complete {
+            assistant_text: "unused".to_string(),
+        },
+        Vec::new(),
+    )
+    .await;
+
+    let response = harness.post_event(DM_COMMAND).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let feedback = wait_for_post_messages_matching(
+        &harness.egress,
+        "empty command inventory help",
+        |payload| payload["text"] == "Commands are not available in this channel.",
+    )
+    .await;
+    assert_eq!(feedback[0]["channel"], CHANNEL);
+    assert!(harness.command_executions.invokes().is_empty());
+    assert_eq!(harness.coordinator.submitted_turn_count(), 0);
+}
+
+#[tokio::test]
+async fn unknown_manifest_command_fails_generic_graph_assembly() {
+    let harness = build_harness_with_manifest_commands(
+        TurnMode::Complete {
+            assistant_text: "unused".to_string(),
+        },
+        vec!["syntactically_valid_but_unknown"],
+    )
+    .await;
+
+    assert!(
+        harness
+            .assembly
+            .binding_service_for_extension_for_test("slack")
+            .is_none(),
+        "unknown manifest commands must prevent the generic graph from registering"
+    );
+    assert!(harness.command_executions.invokes().is_empty());
 }
 
 #[tokio::test]

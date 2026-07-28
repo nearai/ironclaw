@@ -8,6 +8,7 @@ use crate::{InboundCommandPayload, ProductRejection, ProductRejectionKind};
 use ironclaw_host_api::HostApiError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeSet;
 
 use crate::lifecycle::{
     LifecycleCommandKind, LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef,
@@ -91,6 +92,42 @@ pub fn product_command_descriptors() -> impl Iterator<Item = ProductCommandDescr
             aliases: &[],
         })
         .chain(COMMAND_SPECS.iter().map(|spec| spec.descriptor.clone()))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown product command `{name}`")]
+pub struct UnknownProductCommandName {
+    name: String,
+}
+
+pub fn validate_declared_product_command(name: &str) -> Result<(), UnknownProductCommandName> {
+    if product_command_descriptors()
+        .any(|descriptor| descriptor.name == name || descriptor.aliases.contains(&name))
+    {
+        return Ok(());
+    }
+    Err(UnknownProductCommandName {
+        name: name.to_string(),
+    })
+}
+
+pub fn declared_command_help_text<I, S>(commands: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let names = commands
+        .into_iter()
+        .map(|command| command.as_ref().to_string())
+        .collect::<BTreeSet<_>>();
+    if names.is_empty() {
+        return "Commands are not available in this channel.".to_string();
+    }
+    let names = names
+        .into_iter()
+        .map(|name| format!("/{name}"))
+        .collect::<Vec<_>>();
+    format!("Available commands:\n{}", names.join("\n"))
 }
 
 pub fn command_help_text() -> String {

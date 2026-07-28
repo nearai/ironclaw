@@ -599,11 +599,14 @@ fn build_harness_with_settings(
         auth_flow_cancel: None,
     };
     let connection_notices = ChannelConnectionNoticePolicy::generic("Acme");
-    let observer = Arc::new(RunDeliveryObserver::with_settings_and_connection_notices(
-        services,
-        settings,
-        connection_notices.clone(),
-    ));
+    let observer = Arc::new(
+        RunDeliveryObserver::with_settings_and_connection_notices(
+            services,
+            settings,
+            connection_notices.clone(),
+        )
+        .with_enabled_commands(["status"]),
+    );
     Harness {
         observer,
         connection_notices,
@@ -724,6 +727,38 @@ async fn observer_delivers_command_result_through_the_coordinator() {
     assert_eq!(envelopes.len(), 1);
     assert_eq!(envelopes[0].target.conversation.conversation_id(), "conv-1");
     assert_eq!(envelopes[0].extension_id, EXTENSION_ID);
+}
+
+#[tokio::test]
+async fn observer_delivers_scoped_command_help_for_invalid_request() {
+    let harness = build_harness(
+        vec![scripted_state(TurnStatus::Completed, None)],
+        false,
+        None,
+        Duration::from_secs(5),
+    );
+    let command = InboundCommandPayload::new("notacommand", "", ProductTriggerReason::DirectChat)
+        .expect("command");
+    let command_envelope = envelope(
+        ProductInboundPayload::Command(command),
+        "evt-command-invalid",
+    );
+
+    harness
+        .observer
+        .observe_ack(
+            command_envelope,
+            ProductInboundAck::Rejected(ProductRejection::permanent(
+                ProductRejectionKind::InvalidRequest,
+                "opaque parser or admission detail",
+            )),
+        )
+        .await;
+
+    assert_eq!(
+        harness.adapter.texts(),
+        vec!["Available commands:\n/status".to_string()]
+    );
 }
 
 /// Regression (the channel-host e2e race, made deterministic): a
