@@ -4753,14 +4753,10 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
     );
 }
 
-// `create_host` resolves the caller's allow-set exactly once and
-// primes the tool-disclosure decorator with that same resolved `Arc`, rather
-// than the decorator and the `CapabilitySurfaceProfileFilter` each resolving
-// independently (which, under a transient resolver failure, could let the
-// two observe different profiles). A resolver that counts its own calls
-// pins the "exactly once per host build" contract directly; the surface
-// assertion below pins that the single resolved value is what both the
-// filter (and, transitively, the primed decorator) actually enforce.
+// The runner-private profiled factory resolves the caller's allow-set exactly
+// once and passes that same `Arc` directly to tool disclosure and the outer
+// `CapabilitySurfaceProfileFilter`. A counting resolver pins the per-build
+// contract; the surface assertion pins enforcement of the resolved value.
 #[tokio::test]
 async fn planned_host_factory_create_host_resolves_allow_set_exactly_once_with_tool_disclosure() {
     let fixture = HostFixture::new_unsubmitted("thread-product-live-single-resolve", "hello").await;
@@ -4926,92 +4922,6 @@ async fn product_live_parts_for_fixture(
         turn_event_sink: None,
         scheduler_wake_wiring: None,
     }
-}
-
-#[tokio::test]
-async fn planned_host_factory_discards_primed_allow_set_after_capability_factory_failure() {
-    let fixture = HostFixture::new_unsubmitted("thread-product-live-prime-cleanup", "hello").await;
-    let mut parts = product_live_parts_for_fixture(&fixture).await;
-    let fail_once_factory = Arc::new(FailOnceCapabilityPortFactory::new(Arc::clone(
-        &parts.capability_factory,
-    )));
-    parts.capability_factory = Arc::clone(&fail_once_factory) as Arc<dyn LoopCapabilityPortFactory>;
-    parts.config.tool_disclosure = ToolDisclosureMode::Bridged;
-    let composition = build_product_live_planned_runtime(parts)
-        .expect("product-live runtime should satisfy readiness");
-
-    let planned = composition
-        .run_profile_resolver
-        .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
-        .await
-        .expect("resolve planned profile");
-    let mut claimed = fixture.claimed.clone();
-    claimed.state.resolved_run_profile_id = planned.profile_id.clone();
-    claimed.state.resolved_run_profile_version = planned.loop_driver.version;
-    claimed.resolved_run_profile = planned;
-
-    let first_error = composition
-        .host_factory
-        .create_host(&claimed)
-        .await
-        .err()
-        .expect("first capability factory attempt should fail");
-    assert!(
-        first_error
-            .to_string()
-            .contains("induced capability factory failure"),
-        "host build should preserve the capability factory error: {first_error}"
-    );
-
-    composition
-        .host_factory
-        .create_host(&claimed)
-        .await
-        .expect("same claimed run should build after the transient factory failure");
-    assert_eq!(fail_once_factory.attempt_count(), 2);
-}
-
-#[tokio::test]
-async fn planned_host_factory_releases_primed_allow_set_when_factory_future_is_cancelled() {
-    let fixture = HostFixture::new_unsubmitted("thread-product-live-prime-cancel", "hello").await;
-    let mut parts = product_live_parts_for_fixture(&fixture).await;
-    let block_once_factory = Arc::new(BlockOnceCapabilityPortFactory::new(Arc::clone(
-        &parts.capability_factory,
-    )));
-    parts.capability_factory =
-        Arc::clone(&block_once_factory) as Arc<dyn LoopCapabilityPortFactory>;
-    parts.config.tool_disclosure = ToolDisclosureMode::Bridged;
-    let composition = build_product_live_planned_runtime(parts)
-        .expect("product-live runtime should satisfy readiness");
-
-    let planned = composition
-        .run_profile_resolver
-        .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
-        .await
-        .expect("resolve planned profile");
-    let mut claimed = fixture.claimed.clone();
-    claimed.state.resolved_run_profile_id = planned.profile_id.clone();
-    claimed.state.resolved_run_profile_version = planned.loop_driver.version;
-    claimed.resolved_run_profile = planned;
-
-    let host_factory = Arc::clone(&composition.host_factory);
-    let cancelled_claimed = claimed.clone();
-    let first_build =
-        tokio::spawn(async move { host_factory.create_host(&cancelled_claimed).await });
-    block_once_factory.wait_until_blocked().await;
-    first_build.abort();
-    let cancelled = match first_build.await {
-        Err(cancelled) => cancelled,
-        Ok(_) => panic!("aborted host build must report cancellation"),
-    };
-    assert!(cancelled.is_cancelled());
-
-    composition
-        .host_factory
-        .create_host(&claimed)
-        .await
-        .expect("same claimed run should build after the first future is dropped");
-    assert_eq!(block_once_factory.attempt_count(), 2);
 }
 
 #[tokio::test]
@@ -8474,82 +8384,6 @@ struct TestHostRuntimeCapabilityFactory {
     visible_request: ironclaw_host_runtime::VisibleCapabilityRequest,
     io: Arc<InMemoryCapabilityIo>,
     milestone_sink: Arc<InMemoryLoopHostMilestoneSink>,
-}
-
-struct FailOnceCapabilityPortFactory {
-    inner: Arc<dyn LoopCapabilityPortFactory>,
-    attempts: AtomicUsize,
-}
-
-struct BlockOnceCapabilityPortFactory {
-    inner: Arc<dyn LoopCapabilityPortFactory>,
-    attempts: AtomicUsize,
-    first_started: tokio::sync::Notify,
-}
-
-impl BlockOnceCapabilityPortFactory {
-    fn new(inner: Arc<dyn LoopCapabilityPortFactory>) -> Self {
-        Self {
-            inner,
-            attempts: AtomicUsize::new(0),
-            first_started: tokio::sync::Notify::new(),
-        }
-    }
-
-    fn attempt_count(&self) -> usize {
-        self.attempts.load(Ordering::SeqCst)
-    }
-
-    async fn wait_until_blocked(&self) {
-        let started = self.first_started.notified();
-        if self.attempt_count() == 0 {
-            started.await;
-        }
-    }
-}
-
-#[async_trait]
-impl LoopCapabilityPortFactory for BlockOnceCapabilityPortFactory {
-    async fn create_capability_port(
-        &self,
-        run_context: &LoopRunContext,
-    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
-        if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
-            self.first_started.notify_waiters();
-            std::future::pending().await
-        } else {
-            self.inner.create_capability_port(run_context).await
-        }
-    }
-}
-
-impl FailOnceCapabilityPortFactory {
-    fn new(inner: Arc<dyn LoopCapabilityPortFactory>) -> Self {
-        Self {
-            inner,
-            attempts: AtomicUsize::new(0),
-        }
-    }
-
-    fn attempt_count(&self) -> usize {
-        self.attempts.load(Ordering::SeqCst)
-    }
-}
-
-#[async_trait]
-impl LoopCapabilityPortFactory for FailOnceCapabilityPortFactory {
-    async fn create_capability_port(
-        &self,
-        run_context: &LoopRunContext,
-    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
-        if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::Unavailable,
-                "induced capability factory failure",
-            ));
-        }
-        self.inner.create_capability_port(run_context).await
-    }
 }
 
 #[async_trait]

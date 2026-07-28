@@ -6,14 +6,14 @@ use ironclaw_events::SecurityAuditSink;
 use ironclaw_host_api::CapabilityId;
 use ironclaw_loop_host::{
     AwaitEdgeSettler, AwaitEdgeWriter, CapabilitySurfaceProfileResolver,
-    CompositeTurnRunWakeNotifier, DecoratingLoopCapabilityPortFactory, HostIdentityContextSource,
-    HostInputQueue, HostManagedModelGateway, HostSkillContextSource, HostUserProfileSource,
-    LoopAttachmentReadPort, LoopCapabilityPortDecorator, LoopCapabilityPortFactory,
-    LoopCapabilityResultWriter, PerSurfaceCapabilityDenyDecorator,
-    ProductLiveCancellationReadiness, RunCancellationFactory, SpawnSubagentFlavorDescriptor,
-    SpawnSubagentInputCodec, SubagentDefinitionResolver, SubagentPromptComposer,
-    SubagentPromptMaterialSource, SubagentSpawnCapabilityPort, SubagentSpawnDeps,
-    SubagentSpawnGoalStore, SubagentSpawnLimits, verify_product_live_cancellation_probe,
+    CompositeTurnRunWakeNotifier, HostIdentityContextSource, HostInputQueue,
+    HostManagedModelGateway, HostSkillContextSource, HostUserProfileSource, LoopAttachmentReadPort,
+    LoopCapabilityPortDecorator, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    PerSurfaceCapabilityDenyDecorator, ProductLiveCancellationReadiness, RunCancellationFactory,
+    SpawnSubagentFlavorDescriptor, SpawnSubagentInputCodec, SubagentDefinitionResolver,
+    SubagentPromptComposer, SubagentPromptMaterialSource, SubagentSpawnCapabilityPort,
+    SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits,
+    verify_product_live_cancellation_probe,
 };
 use ironclaw_memory::MemoryService;
 use ironclaw_threads::{SessionThreadService, ThreadScope};
@@ -37,6 +37,7 @@ use crate::{
     driver_registry::{DriverRegistry, DriverRegistryError},
     loop_driver_host::{
         HookDispatcherBuilderFactory, RebornLoopDriverHostFactory, TextOnlyLoopHostConfig,
+        apply_capability_surface_profile, capability_resolve_error_to_agent_host_error,
     },
     loop_exit_applier::{
         AwaitDependentRunEvidenceStore, LoopExitApplier, ThreadCheckpointLoopExitEvidencePort,
@@ -710,33 +711,24 @@ where
         parts.subagent_spawn_limits,
         flavors::builtin_flavor_catalog(),
     )?);
-    let mut capability_factory_builder =
-        DecoratingLoopCapabilityPortFactory::new(parts.capability_factory)
-            .with_decorator(spawn_decorator);
-    // Built before the disclosure decorator: threads the SAME
-    // resolved allow-set (resolved once at the host-build boundary — see
-    // `RebornLoopDriverHostFactory::create_host`) into it so
-    // tool_search/tool_describe results are narrowed by the identical
-    // allow-set the profile filter enforces, rather than a second
-    // independent resolve that could diverge under a transient failure.
+    // Resolve once inside the runner-private factory below, then thread the
+    // exact same Arc through disclosure and the outer profile filter.
     let capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver> =
         Arc::new(SubagentCapabilitySurfaceResolver::new(
             parts.capability_surface_resolver,
             Arc::clone(&subagent_prompt_source),
         ));
-    let mut tool_disclosure_decorator: Option<Arc<ToolDisclosureCapabilityDecorator>> = None;
-    if parts.config.tool_disclosure.is_bridged() {
+    let tool_disclosure_decorator = if parts.config.tool_disclosure.is_bridged() {
         tracing::debug!(
             target: "ironclaw::reborn::runtime",
             "reborn tool disclosure decorator wired (bridged)"
         );
-        let decorator = Arc::new(ToolDisclosureCapabilityDecorator::new(Arc::clone(
-            &parts.capability_result_writer,
-        )));
-        capability_factory_builder = capability_factory_builder
-            .with_decorator(Arc::clone(&decorator) as Arc<dyn LoopCapabilityPortDecorator>);
-        tool_disclosure_decorator = Some(decorator);
-    }
+        Some(Arc::new(ToolDisclosureCapabilityDecorator::new(
+            Arc::clone(&parts.capability_result_writer),
+        )))
+    } else {
+        None
+    };
     // TEMP(disable-spawn-subagents): explicit composition decision to remove the
     // spawn_subagent capability from the model-facing surface across all
     // profiles. Applied as the OUTERMOST decorator so it strips the capability
@@ -765,8 +757,8 @@ where
     // re-enable `trigger_create` for scheduled fires. Kept as the OUTERMOST
     // decorator (added last, after the tool-disclosure decorator above) so
     // it strips capabilities regardless of what surfaced them.
-    capability_factory_builder = capability_factory_builder.with_decorator(Arc::new(
-        PerSurfaceCapabilityDenyDecorator::new(
+    let deny_decorator: Arc<dyn LoopCapabilityPortDecorator> =
+        Arc::new(PerSurfaceCapabilityDenyDecorator::new(
             global_denied,
             vec![(
                 ironclaw_turns::run_profile::CapabilitySurfaceProfileId::new(
@@ -775,10 +767,15 @@ where
                 .map_err(|error| DefaultPlannedRuntimeBuildError::RunProfile(error.to_string()))?,
                 scheduled_trigger_denied,
             )],
-        ),
-    ));
+        ));
     let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
-        Arc::new(capability_factory_builder);
+        Arc::new(RuntimeProfiledCapabilityPortFactory {
+            inner: parts.capability_factory,
+            surface_resolver: capability_surface_resolver,
+            spawn_decorator,
+            tool_disclosure_decorator,
+            deny_decorator,
+        });
     let safety_context = parts
         .safety_context
         .unwrap_or_else(local_development_noop_safety_context);
@@ -804,12 +801,9 @@ where
         parts.config.host,
         safety_context,
     )
-    .with_profiled_capability_port_factory(capability_factory, capability_surface_resolver)
+    .with_resolved_profiled_capability_port_factory(capability_factory)
     .with_subagent_prompt_composer(subagent_prompt_composer)
     .with_driver_requirements(driver_registry.requirements_snapshot());
-    if let Some(decorator) = tool_disclosure_decorator {
-        host_factory = host_factory.with_tool_disclosure_decorator(decorator);
-    }
     if let Some(resolver) = parts.model_route_resolver {
         host_factory = host_factory.with_model_route_resolver(resolver);
     }
@@ -897,6 +891,43 @@ const SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS: &[&str] = &[
     ironclaw_host_runtime::TRIGGER_PAUSE_CAPABILITY_ID,
     ironclaw_host_runtime::TRIGGER_RESUME_CAPABILITY_ID,
 ];
+
+/// Runner-private per-run factory that preserves the canonical wrapper order
+/// while passing one resolved allow-set directly to every consumer that needs
+/// it. The neutral loop-host decorator contract remains synchronous.
+struct RuntimeProfiledCapabilityPortFactory {
+    inner: Arc<dyn LoopCapabilityPortFactory>,
+    surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver>,
+    spawn_decorator: Arc<dyn LoopCapabilityPortDecorator>,
+    tool_disclosure_decorator: Option<Arc<ToolDisclosureCapabilityDecorator>>,
+    deny_decorator: Arc<dyn LoopCapabilityPortDecorator>,
+}
+
+#[async_trait::async_trait]
+impl LoopCapabilityPortFactory for RuntimeProfiledCapabilityPortFactory {
+    async fn create_capability_port(
+        &self,
+        run_context: &LoopRunContext,
+    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+        let allow_set = Arc::new(
+            self.surface_resolver
+                .resolve(run_context)
+                .await
+                .map_err(capability_resolve_error_to_agent_host_error)?,
+        );
+        let mut capabilities = self.inner.create_capability_port(run_context).await?;
+        capabilities = self.spawn_decorator.decorate(run_context, capabilities);
+        if let Some(decorator) = self.tool_disclosure_decorator.as_ref() {
+            capabilities = decorator.decorate_with_allow_set(
+                run_context,
+                capabilities,
+                Arc::clone(&allow_set),
+            );
+        }
+        capabilities = self.deny_decorator.decorate(run_context, capabilities);
+        Ok(apply_capability_surface_profile(capabilities, allow_set))
+    }
+}
 
 struct SubagentSpawnCapabilityDecorator {
     spawn_deps: Arc<SubagentSpawnDeps>,

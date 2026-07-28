@@ -9,11 +9,10 @@ use ironclaw_host_api::{
     TenantId, ThreadId,
 };
 use ironclaw_loop_host::{
-    CapabilityAllowSet, CapabilityResultWrite, DurablePersistence, LoopCapabilityPortDecorator,
-    LoopCapabilityResultWriter,
+    CapabilityAllowSet, CapabilityResultWrite, DurablePersistence, LoopCapabilityResultWriter,
 };
 use ironclaw_turns::{
-    CapabilityActivityId, TurnId, TurnRunId,
+    CapabilityActivityId, TurnId,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, CapabilityInputRef,
         CapabilityProgress, CapabilitySurfaceVersion, LoopCapabilityPort, LoopRequest,
@@ -54,128 +53,25 @@ pub(crate) struct ToolDisclosureCapabilityDecorator {
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     promoted_by_scope: Arc<Mutex<HashMap<PromotionScopeKey, PromotedSet>>>,
     caps: DisclosureCaps,
-    /// This decorator no longer resolves its own allow-set. The
-    /// host-build boundary (`RebornLoopDriverHostFactory::create_host`)
-    /// resolves once and calls `prime_allow_set` for this turn before the
-    /// capability-port decorator chain runs, so `decorate` and the outer
-    /// `CapabilitySurfaceProfileFilter` observe the identical resolved value
-    /// instead of two independent resolves that could diverge under a
-    /// transient resolver failure. Keyed by `(turn_id, run_id)` and consumed
-    /// exactly once in `decorate`, or released by the build reservation if
-    /// capability-port creation fails or is cancelled, so concurrent turns
-    /// sharing this long-lived decorator never observe another turn's value.
-    primed_allow_sets: Mutex<HashMap<(TurnId, TurnRunId), Arc<CapabilityAllowSet>>>,
-}
-
-/// Owns one primed allow-set until the capability decorator consumes it.
-/// Dropping a host-build future before capability-port construction completes
-/// releases the reservation so a retry of the same run is not rejected as a
-/// duplicate prime.
-pub(crate) struct PrimedAllowSetReservation {
-    decorator: Arc<ToolDisclosureCapabilityDecorator>,
-    key: (TurnId, TurnRunId),
-}
-
-impl Drop for PrimedAllowSetReservation {
-    fn drop(&mut self) {
-        if let Err(error) = self.decorator.discard_primed_allow_set(&self.key) {
-            tracing::error!(
-                error = %error.safe_summary,
-                "failed to release tool disclosure allow-set reservation"
-            );
-        }
-    }
 }
 
 impl ToolDisclosureCapabilityDecorator {
-    fn primed_allow_set_key(run_context: &LoopRunContext) -> (TurnId, TurnRunId) {
-        (run_context.turn_id, run_context.run_id)
-    }
-
     pub(crate) fn new(result_writer: Arc<dyn LoopCapabilityResultWriter>) -> Self {
         Self {
             result_writer,
             promoted_by_scope: Arc::new(Mutex::new(HashMap::new())),
             caps: DisclosureCaps::default(),
-            primed_allow_sets: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Prime this turn's already-resolved allow-set before `decorate` runs.
-    /// Called by the host-build boundary immediately after its single
-    /// resolve, before it asks the capability factory to build (and
-    /// decorate) the port for `run_context`.
-    pub(crate) fn prime_allow_set(
-        self: &Arc<Self>,
-        run_context: &LoopRunContext,
-        allow_set: Arc<CapabilityAllowSet>,
-    ) -> Result<PrimedAllowSetReservation, AgentLoopHostError> {
-        let key = Self::primed_allow_set_key(run_context);
-        let mut primed = self.primed_allow_sets.lock().map_err(|e| {
-            invalid_invocation(format!(
-                "tool disclosure primed allow-set lock is poisoned: {e}"
-            ))
-        })?;
-        if primed.contains_key(&key) {
-            return Err(invalid_invocation(
-                "tool disclosure allow-set is already primed for this turn",
-            ));
-        }
-        primed.insert(key, allow_set);
-        Ok(PrimedAllowSetReservation {
-            decorator: Arc::clone(self),
-            key,
-        })
-    }
-
-    /// Release a prime that the decorator chain did not consume before its
-    /// host-build reservation was dropped.
-    fn discard_primed_allow_set(
-        &self,
-        key: &(TurnId, TurnRunId),
-    ) -> Result<(), AgentLoopHostError> {
-        self.primed_allow_sets
-            .lock()
-            .map_err(|e| {
-                invalid_invocation(format!(
-                    "tool disclosure primed allow-set lock is poisoned: {e}"
-                ))
-            })?
-            .remove(key);
-        Ok(())
-    }
-}
-
-impl LoopCapabilityPortDecorator for ToolDisclosureCapabilityDecorator {
-    fn decorate(
+    /// Wrap one run's capability port with disclosure using the exact
+    /// allow-set already resolved by the runner-private profiled factory.
+    pub(crate) fn decorate_with_allow_set(
         &self,
         run_context: &LoopRunContext,
         inner: Arc<dyn LoopCapabilityPort>,
+        allow_set: Arc<CapabilityAllowSet>,
     ) -> Arc<dyn LoopCapabilityPort> {
-        // Consume this turn's primed allow-set (see `prime_allow_set`). Never
-        // resolves here: `tool_definitions()` is a *sync* trait method with no
-        // `.await` point, so the tool_search bridge's own advertised
-        // `description` (the always-on discoverable-tool-name index, built
-        // inside `turn_state()`) could never be narrowed by an async-resolved
-        // allow-set otherwise — only tool_search/tool_describe *results*, which
-        // run on an already-async path, could. A missing prime (the host-build
-        // boundary skipped it, or a lock is poisoned) fails closed (denies
-        // every real capability's *name* from the index) rather than silently
-        // falling back to an unnarrowed index — this should never happen when
-        // wired through `create_host`, which primes before it asks the
-        // capability factory to build this decorator's port.
-        let key = Self::primed_allow_set_key(run_context);
-        let primed = self
-            .primed_allow_sets
-            .lock()
-            .ok()
-            .and_then(|mut guard| guard.remove(&key));
-        let allow_set = primed.unwrap_or_else(|| {
-            tracing::error!(
-                "tool disclosure allow-set was not primed before decorate; failing closed to an empty allow-set for this turn's tool_search index"
-            );
-            Arc::new(CapabilityAllowSet::allowlist([]))
-        });
         Arc::new(ToolDisclosureCapabilityPort {
             inner,
             run_context: run_context.clone(),
@@ -1642,37 +1538,6 @@ mod tests {
                 write.output.to_string().len() as u64,
             ))
         }
-    }
-
-    #[tokio::test]
-    async fn priming_rejects_duplicates_and_discard_removes_only_failed_build_entry() {
-        let decorator = Arc::new(ToolDisclosureCapabilityDecorator::new(Arc::new(TestWriter)));
-        let failed_context = run_context(TurnId::new()).await;
-        let concurrent_context = run_context(TurnId::new()).await;
-
-        let failed_reservation = decorator
-            .prime_allow_set(&failed_context, Arc::new(CapabilityAllowSet::All))
-            .expect("prime failed build");
-        let duplicate_error = decorator
-            .prime_allow_set(&failed_context, Arc::new(CapabilityAllowSet::All))
-            .err()
-            .expect("duplicate prime must not overwrite unconsumed state");
-        assert_eq!(
-            duplicate_error.kind,
-            AgentLoopHostErrorKind::InvalidInvocation
-        );
-        let _concurrent_reservation = decorator
-            .prime_allow_set(&concurrent_context, Arc::new(CapabilityAllowSet::All))
-            .expect("prime concurrent build");
-        drop(failed_reservation);
-
-        let primed = decorator
-            .primed_allow_sets
-            .lock()
-            .expect("primed allow-set lock");
-        assert_eq!(primed.len(), 1);
-        assert!(!primed.contains_key(&(failed_context.turn_id, failed_context.run_id)));
-        assert!(primed.contains_key(&(concurrent_context.turn_id, concurrent_context.run_id)));
     }
 
     #[tokio::test]
