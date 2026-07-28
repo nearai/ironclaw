@@ -3,20 +3,20 @@ use std::ops::ControlFlow;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    ApprovalRequestId, Blocked, CorrelationId, DenyReason, DependentRunResult, FailureKind,
-    INPUT_ENCODE_HUMAN_SUMMARY, LoopRef, ModelFailureDiagnostic, ModelInputIssue, Outcome,
-    Resolution, ResultProgress, ResumeToken, Suspension, ToolVerdict,
+    ApprovalRequestId, Blocked, CapabilityRecoveryHint, CorrelationId, DenyReason,
+    DependentRunResult, FailureKind, INPUT_ENCODE_HUMAN_SUMMARY, LoopRef, ModelFailureDiagnostic,
+    ModelInputIssue, Outcome, Resolution, ResultProgress, ResumeToken, SameCallRetryConstraint,
+    Suspension, ToolVerdict,
 };
 use ironclaw_turns::{
     LoopFailureKind, LoopGateRef, LoopResultRef,
     run_profile::{
         AuthResumeApprovalIdentity, CapabilityActivityId, CapabilityApprovalResume,
         CapabilityAuthResume, CapabilityCallCandidate, CapabilityFailure, CapabilityFailureDetail,
-        CapabilityInputIssue, CapabilityProgress, CapabilityRecoveryHint, CapabilityResultMessage,
-        CapabilityResumeToken, ContentDigest, LoopDriverNoteKind, LoopProcessRef,
-        LoopProgressEvent, LoopRequestBatch, MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
-        ModelVisibleToolObservation, ObservationTrust, SameCallRetryConstraint,
-        ToolObservationDetail, ToolObservationStatus, ToolRecoveryObservation,
+        CapabilityInputIssue, CapabilityProgress, CapabilityResultMessage, CapabilityResumeToken,
+        ContentDigest, LoopDriverNoteKind, LoopProcessRef, LoopProgressEvent, LoopRequestBatch,
+        MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleToolObservation,
+        ObservationTrust, ToolObservationDetail, ToolObservationStatus, ToolRecoveryObservation,
         VisibleCapabilitySurface,
     },
 };

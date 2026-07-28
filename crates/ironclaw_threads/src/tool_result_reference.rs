@@ -975,31 +975,41 @@ fn validate_model_observation_recovery(value: &serde_json::Value) -> Result<(), 
     let object = expect_object(value, "model observation recovery")?;
     validate_object_keys(
         object,
-        &["same_call_retry", "repairs", "recovery_hint"],
+        &[
+            "same_call_retry",
+            "repairs",
+            "recovery_hint",
+            "retry_after_ms",
+        ],
         "model observation recovery",
     )?;
-    validate_enum_string(
-        required_string(object, "same_call_retry", "model observation recovery")?,
-        &[
-            "allowed",
-            "allowed_after_delay",
-            "requires_changed_input",
-            "not_useful",
-            "forbidden",
-        ],
-        "model observation same-call retry",
-    )?;
+    // Parse against the OWNING enums in `host_api` rather than re-declaring
+    // their variants here.
+    //
+    // This used to be two hand-copied string lists. Nothing kept them in step
+    // with `host_api`, and the failure mode was silent and total: an unknown
+    // value did not surface as a validation error to anyone — the caller
+    // DROPPED THE WHOLE OBSERVATION, so the model lost the cause *and* the
+    // recovery guidance and saw only a bare summary. #6284 item 4 added six
+    // recovery hints, missed the copy here, and every denial it was meant to
+    // improve persisted with no observation at all.
+    //
+    // Deserializing the real type makes that drift impossible: a variant added
+    // in `host_api` is accepted here the moment it exists.
+    let retry = required_string(object, "same_call_retry", "model observation recovery")?;
+    serde_json::from_value::<ironclaw_host_api::SameCallRetryConstraint>(
+        serde_json::Value::String(retry.to_string()),
+    )
+    .map_err(|_| format!("model observation same-call retry `{retry}` is unsupported"))?;
     if let Some(repairs) = object.get("repairs") {
         validate_model_observation_repairs(repairs)?;
     }
-    validate_enum_string(
-        required_string(object, "recovery_hint", "model observation recovery")?,
-        &[
-            "correct_arguments_before_retry",
-            "respect_failure_constraint",
-        ],
-        "model observation recovery hint",
-    )
+    let hint = required_string(object, "recovery_hint", "model observation recovery")?;
+    serde_json::from_value::<ironclaw_host_api::CapabilityRecoveryHint>(serde_json::Value::String(
+        hint.to_string(),
+    ))
+    .map_err(|_| format!("model observation recovery hint `{hint}` is unsupported"))?;
+    Ok(())
 }
 
 fn validate_model_observation_repairs(value: &serde_json::Value) -> Result<(), String> {
@@ -1238,8 +1248,6 @@ mod tests {
     /// *and* the advice. Degrade the text, keep the structure (#6284 item 3).
     #[test]
     fn an_unstorable_diagnostic_degrades_instead_of_dropping_the_guidance() {
-        use super::normalized_model_observation;
-
         // A traceback carrying a marker word the untrusted content scan
         // rejects. This is the realistic agent-built-code failure.
         let observation = serde_json::json!({
@@ -1258,7 +1266,19 @@ mod tests {
             "trust": "untrusted_tool_output"
         });
 
-        let normalized = normalized_model_observation("result:skill-crash", observation)
+        // Driven through the public constructor, not `normalized_model_observation`
+        // directly: the normalizer is a transform gating what gets persisted,
+        // with a wrapper between it and that effect, so a helper-only test does
+        // not satisfy `.claude/rules/testing.md` ("Test through the caller").
+        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+            "result:skill-crash",
+            ToolResultSafeSummary::new("Capability failed with exit_failure.").expect("summary"),
+            Some(observation),
+        )
+        .expect("envelope constructs");
+        let normalized = envelope
+            .model_observation
+            .as_ref()
             .expect("the observation must survive with its guidance intact");
 
         // The unsafe text is gone...
@@ -1279,8 +1299,6 @@ mod tests {
     /// text that was storable all along.
     #[test]
     fn a_storable_diagnostic_keeps_its_text() {
-        use super::normalized_model_observation;
-
         let observation = serde_json::json!({
             "schema_version": 1,
             "status": "error",
@@ -1293,7 +1311,15 @@ mod tests {
             "trust": "untrusted_tool_output"
         });
 
-        let normalized = normalized_model_observation("result:skill-ok", observation)
+        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+            "result:skill-ok",
+            ToolResultSafeSummary::new("Capability failed with exit_failure.").expect("summary"),
+            Some(observation),
+        )
+        .expect("envelope constructs");
+        let normalized = envelope
+            .model_observation
+            .as_ref()
             .expect("a clean observation survives");
         assert_eq!(
             normalized["detail"]["detail"],

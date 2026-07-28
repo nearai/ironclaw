@@ -2,7 +2,8 @@
 use std::{collections::VecDeque, sync::Arc};
 
 use ironclaw_host_api::{
-    ApprovalRequestId, CorrelationId, DispatchInputIssueCode, FailureKind, ProviderToolName,
+    ApprovalRequestId, CapabilityRecoveryHint, CorrelationId, DispatchInputIssueCode, FailureKind,
+    ProviderToolName, SameCallRetryConstraint,
 };
 use ironclaw_turns::{
     CapabilityActivityId, GateResumeDisposition, LoopCancelledReasonKind, LoopCompletionKind,
@@ -10,15 +11,14 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
         CapabilityCallCandidate, CapabilityFailureDetail, CapabilityInputIssue, CapabilityInputRef,
-        CapabilityInputRepair, CapabilityRecoveryHint, CapabilityResumeToken, LoopCancelReasonKind,
-        LoopCancellationSignal, LoopCheckpointKind, LoopCompactionError, LoopCompactionOutcome,
-        LoopCompactionResponse, LoopContextCompactionKind, LoopInput, LoopInputAckToken,
-        LoopInputBatch, LoopInputCursor, LoopInterruptKind, LoopModelCapabilityView,
-        LoopProcessRef, LoopProgressEvent, LoopRunInfoPort, LoopSafeSummary, LoopSummaryArtifactId,
+        CapabilityInputRepair, CapabilityResumeToken, LoopCancelReasonKind, LoopCancellationSignal,
+        LoopCheckpointKind, LoopCompactionError, LoopCompactionOutcome, LoopCompactionResponse,
+        LoopContextCompactionKind, LoopInput, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
+        LoopInterruptKind, LoopModelCapabilityView, LoopProcessRef, LoopProgressEvent,
+        LoopRunInfoPort, LoopSafeSummary, LoopSummaryArtifactId,
         MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleToolObservation,
         ObservationTrust, ParentLoopOutput, PromptMode, ProviderToolCallReplay,
-        SameCallRetryConstraint, ToolObservationDetail, ToolObservationStatus,
-        VisibleCapabilityRequest, resolution,
+        ToolObservationDetail, ToolObservationStatus, VisibleCapabilityRequest, resolution,
     },
 };
 
@@ -4572,8 +4572,6 @@ async fn retry_uses_single_call_invocation() {
 /// naming the next move.
 #[tokio::test]
 async fn a_denial_tells_the_model_what_would_unlock_it() {
-    use ironclaw_turns::run_profile::{CapabilityRecoveryHint, SameCallRetryConstraint};
-
     // `auth_denied` is minted by the capability port for a real authorization
     // failure; #6781 maps it to `DenyReason::UnknownSecret`. Provider replay
     // metadata is required for a denial to mint a result ref, so this uses the

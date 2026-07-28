@@ -1,16 +1,19 @@
 use std::collections::{HashMap, HashSet};
 
-use ironclaw_host_api::{CapabilityId, DispatchInputIssueCode, FailureKind};
+use ironclaw_host_api::{
+    CapabilityId, CapabilityRecoveryHint, DispatchInputIssueCode, FailureKind,
+    SameCallRetryConstraint,
+};
 use ironclaw_turns::{
     LoopResultRef,
     run_profile::{
         AgentLoopDriverHost, AppendCapabilityResultRef, CapabilityApprovalResume,
         CapabilityAuthResume, CapabilityCallCandidate, CapabilityDescriptorView, CapabilityFailure,
         CapabilityFailureDetail, CapabilityInputIssue, CapabilityInputRepair,
-        CapabilityRecoveryHint, CapabilityResultMessage, CapabilitySurfaceVersion, LoopRequest,
+        CapabilityResultMessage, CapabilitySurfaceVersion, LoopRequest,
         ModelVisibleToolObservation, ObservationTrust, ProviderToolCall, ProviderToolCallReference,
-        RegisterProviderToolCallRequest, SameCallRetryConstraint, ToolObservationDetail,
-        ToolObservationStatus, ToolRecoveryObservation, VisibleCapabilitySurface,
+        RegisterProviderToolCallRequest, ToolObservationDetail, ToolObservationStatus,
+        ToolRecoveryObservation, VisibleCapabilitySurface,
     },
 };
 
