@@ -127,7 +127,16 @@ pub(super) fn model_error_class(error: &AgentLoopHostError) -> Option<ModelError
         // Deliberately unclassified (terminal with diagnostics): deterministic
         // request-invalid errors must not masquerade as stale/retryable, while
         // policy denial and scope mismatch remain host/config-shaped. The
-        // runner preserves the original kind when categorizing the failure.
+        // runner names each of these with its own failure category
+        // (`model_stage_request_invalid` / `_policy_denied` / `_scope_mismatch`
+        // in `ironclaw_runner::failure_categories`), none of which is
+        // auto-retriable.
+        //
+        // This comment previously claimed the runner "preserves the original
+        // kind" — it did not. All four fell through to
+        // `host_stage_unavailable_model`, which the runner lists as a transient
+        // outage that re-drives cleanly, so a permanently-failing call was
+        // silently retried and reported as a generic host outage.
         AgentLoopHostErrorKind::InvalidInvocation
         | AgentLoopHostErrorKind::Invalid
         | AgentLoopHostErrorKind::ScopeMismatch

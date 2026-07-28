@@ -57,7 +57,7 @@ impl RetryDisposition {
 /// store / provider / tool faults where re-running the *identical* request from
 /// the checkpoint is likely to succeed without any change. Conservative by
 /// design — anything not clearly transient falls to `UserInitiated`.
-fn is_auto_retriable_category(category: &str) -> bool {
+pub(crate) fn is_auto_retriable_category(category: &str) -> bool {
     matches!(
         category,
         // Host-stage transient outages

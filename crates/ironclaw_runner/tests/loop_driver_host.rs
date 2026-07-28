@@ -1594,9 +1594,16 @@ async fn text_only_model_reply_driver_sanitizes_model_failures_and_skips_transcr
         .await
         .unwrap_err();
 
+    // A model-stage `PolicyDenied` now names its own cause instead of the
+    // generic `model_error`. That generic label routed through
+    // `host_stage_unavailable_model`, which `is_auto_retriable_category` treats
+    // as a transient outage — so a permanently-refused call was silently
+    // re-driven. `model_stage_policy_denied` is not auto-retriable, which is
+    // the point of the change.
     assert!(matches!(
         error,
-        AgentLoopDriverError::Failed { ref reason_kind, detail: _ } if reason_kind == "model_error"
+        AgentLoopDriverError::Failed { ref reason_kind, detail: _ }
+            if reason_kind == "model_stage_policy_denied"
     ));
     assert_driver_error_hides_raw_payloads(&error);
     assert_no_assistant_message(&fixture).await;
