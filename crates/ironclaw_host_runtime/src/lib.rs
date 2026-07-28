@@ -133,8 +133,8 @@ pub use process_port::{
 pub use production::DefaultHostRuntime;
 pub use sandbox_process::{
     RebornSandboxConfig, RebornSandboxContainerIdentity, RebornSandboxNetworkBroker,
-    RebornSandboxScopeKey, RebornSandboxSecretBroker, RebornSandboxWorkspaceMode,
-    RebornScopedSandboxCommandTransport,
+    RebornSandboxScopeKey, RebornSandboxSecretBroker, RebornSandboxUserKey,
+    RebornSandboxWorkspaceMode, RebornScopedSandboxCommandTransport, SandboxActivityRegistry,
 };
 /// Scoped cleanup guard consumed by the generic extension activation
 /// transaction's composition adapter. Raw obligation handoff stores remain

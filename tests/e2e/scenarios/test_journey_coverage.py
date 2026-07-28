@@ -3,17 +3,20 @@
 import ast
 import json
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
-import tomllib
+
 from journey_cases import (
     ALL_JOURNEY_CASES,
+    JOURNEY_ORDER_ENV,
     PROVIDER_JOURNEY_CASES,
-    PROVIDER_JOURNEY_RUN_IDS,
-    PROVIDER_JOURNEY_RUNS,
+    journey_order_is_reversed,
+    provider_journey_runs,
     required_delivery_targets,
     required_ingresses,
+    shared_world_provider_journey_runs,
     uncovered_surfaces,
 )
 from journey_types import (
@@ -311,6 +314,19 @@ def test_provider_journey_registry_matches_every_harvested_emulate_journey():
     assert registered == _manifest_provider_journeys()
 
 
+def _expected_forward_ids() -> list[str]:
+    expected_repeat_cases = {
+        "qa_5d_slack_strategy_doc_answer",
+        "qa_10f_slack_mention_encoding",
+    }
+    expected_ids = []
+    for case in PROVIDER_JOURNEY_CASES:
+        expected_ids.append(case.case_id)
+        if case.case_id in expected_repeat_cases:
+            expected_ids.append(f"{case.case_id}-isolated-repeat")
+    return expected_ids
+
+
 def test_provider_journey_runs_preserve_isolated_repeat_cases():
     """The two isolation probes remain doubled while ordinary cases run once."""
     expected_repeat_cases = {
@@ -322,15 +338,73 @@ def test_provider_journey_runs_preserve_isolated_repeat_cases():
     }
     assert actual_repeat_cases == expected_repeat_cases
 
-    expected_ids = []
-    for case in PROVIDER_JOURNEY_CASES:
-        expected_ids.append(case.case_id)
-        if case.case_id in expected_repeat_cases:
-            expected_ids.append(f"{case.case_id}-isolated-repeat")
-    assert list(PROVIDER_JOURNEY_RUN_IDS) == expected_ids
-    assert [case.case_id for case in PROVIDER_JOURNEY_RUNS] == [
+    expected_ids = _expected_forward_ids()
+    forward_runs, forward_ids = provider_journey_runs(reverse=False)
+    assert list(forward_ids) == expected_ids
+    assert [case.case_id for case in forward_runs] == [
         case_id.removesuffix("-isolated-repeat") for case_id in expected_ids
     ]
+
+
+def test_reversed_journey_order_runs_every_case_back_to_front():
+    """The reversed lane must actually reverse, and drop nothing.
+
+    A reversed lane that quietly ran forward would pass exactly like the
+    ordinary lane and retire the proof it exists to provide — the same
+    silent-no-op shape as a guard that never fires. Asserting the order flipped
+    AND that the multiset is unchanged catches both halves: a lane that does
+    not reverse, and a "reversal" that loses or duplicates a case.
+    """
+    forward_runs, forward_ids = provider_journey_runs(reverse=False)
+    reversed_runs, reversed_ids = provider_journey_runs(reverse=True)
+
+    assert list(reversed_ids) == list(reversed(forward_ids))
+    assert sorted(reversed_ids) == sorted(forward_ids)
+    assert [case.case_id for case in reversed_runs] == [
+        case.case_id for case in reversed(forward_runs)
+    ]
+    # Guards the degenerate case: with fewer than two runs, "reversed" and
+    # "forward" are the same list and every assertion above passes vacuously.
+    assert len(forward_ids) > 1, forward_ids
+    assert list(reversed_ids) != list(forward_ids)
+
+
+def test_shared_world_replay_reverses_each_mutating_journey_once():
+    """The shared lane excludes read-only cases and self-colliding repeats."""
+    forward_runs, forward_ids = shared_world_provider_journey_runs(reverse=False)
+    reversed_runs, reversed_ids = shared_world_provider_journey_runs(reverse=True)
+
+    assert forward_runs
+    assert all(case.mutable_provider_worlds for case in forward_runs)
+    assert len(forward_ids) == len(set(forward_ids))
+    assert list(reversed_ids) == list(reversed(forward_ids))
+    assert [case.case_id for case in reversed_runs] == [
+        case.case_id for case in reversed(forward_runs)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("reverse", True),
+        ("REVERSE", True),
+        ("  reverse  ", True),
+        ("forward", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_journey_order_env_selects_the_reversed_lane(monkeypatch, value, expected):
+    """The lane switch is the part CI sets, so parse it deliberately.
+
+    A typo or a stray space silently selecting the forward lane is the failure
+    that makes a green reversed run meaningless.
+    """
+    if value is None:
+        monkeypatch.delenv(JOURNEY_ORDER_ENV, raising=False)
+    else:
+        monkeypatch.setenv(JOURNEY_ORDER_ENV, value)
+    assert journey_order_is_reversed() is expected
 
 
 def test_every_journey_has_complete_typed_executable_evidence():
