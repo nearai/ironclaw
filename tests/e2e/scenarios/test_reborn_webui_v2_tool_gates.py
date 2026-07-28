@@ -13,10 +13,9 @@ import json
 import uuid
 from urllib.parse import quote
 
-import aiohttp
 import httpx
 
-from helpers import REBORN_V2_AUTH_TOKEN
+from helpers import REBORN_V2_AUTH_TOKEN, sse_stream, wait_for_sse_line
 from reborn_webui_harness import (
     client_action_id,
     create_thread,
@@ -29,66 +28,38 @@ from reborn_webui_harness import (
 )
 
 
-def _events_url(base_url: str, thread_id: str) -> str:
-    return (
-        f"{base_url}/api/webchat/v2/threads/{thread_id}/events"
-        f"?token={REBORN_V2_AUTH_TOKEN}"
-    )
-
-
 async def _wait_for_sse_event(
     response,
     *event_types: str,
     timeout: float = 60.0,
     match=None,
 ) -> dict:
-    """Return the first complete JSON SSE frame with a requested event type."""
-    deadline = asyncio.get_running_loop().time() + timeout
-    current_event = ""
-    data_lines: list[str] = []
-    seen_events: list[str] = []
+    """Return the first matching WebChat JSON payload from the canonical stream."""
+    matched_payload = None
 
-    while asyncio.get_running_loop().time() < deadline:
-        remaining = deadline - asyncio.get_running_loop().time()
+    def matches(line: str) -> bool:
+        nonlocal matched_payload
+        if not line.startswith("data:"):
+            return False
         try:
-            raw = await asyncio.wait_for(response.content.readline(), timeout=remaining)
-        except asyncio.TimeoutError:
-            break
-        if not raw:
-            raise AssertionError(
-                "SSE stream closed before a matching event arrived; "
-                f"wanted={event_types}, seen={seen_events}"
-            )
-
-        line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
-        if line.startswith("event:"):
-            current_event = line.removeprefix("event:").strip()
-            continue
-        if line.startswith("data:"):
-            data_lines.append(line.removeprefix("data:").strip())
-            continue
-        if line or not data_lines:
-            continue
-
-        try:
-            payload = json.loads("\n".join(data_lines))
+            payload = json.loads(line.removeprefix("data:").strip())
         except json.JSONDecodeError:
-            current_event = ""
-            data_lines = []
-            continue
-
-        event_type = current_event or payload.get("type", "")
-        seen_events.append(event_type)
-        if event_type in event_types and (
-            match is None or match(event_type, payload)
+            return False
+        event_type = payload.get("type", "")
+        if event_type not in event_types or (
+            match is not None and not match(event_type, payload)
         ):
-            return payload
-        current_event = ""
-        data_lines = []
+            return False
+        matched_payload = payload
+        return True
 
-    raise AssertionError(
-        f"Timed out waiting for SSE event {event_types}; seen={seen_events}"
+    await wait_for_sse_line(
+        response,
+        predicate=matches,
+        timeout=timeout,
     )
+    assert matched_payload is not None
+    return matched_payload
 
 
 async def _set_llm_delay(mock_llm_server: str, marker: str) -> None:
@@ -174,59 +145,59 @@ async def test_reborn_v2_cancel_in_flight_turn_ends_cancelled(
     async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
         thread_id = await create_thread(client, reborn_v2_server)
 
-        timeout = aiohttp.ClientTimeout(total=75, sock_read=75)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(
-                _events_url(reborn_v2_server, thread_id),
-                headers={"Accept": "text/event-stream"},
-            ) as stream:
-                assert stream.status == 200
-                submitted = await client.post(
-                    f"{reborn_v2_server}/api/webchat/v2/threads/{thread_id}/messages",
-                    json={
-                        "client_action_id": client_action_id(),
-                        "content": f"{marker}: hold this response",
-                    },
-                    timeout=30,
-                )
-                assert submitted.status_code in (200, 202), submitted.text
-                run_id = submitted.json()["run_id"]
-                await _wait_for_mock_request(mock_llm_server, marker)
+        async with sse_stream(
+            reborn_v2_server,
+            path=f"/api/webchat/v2/threads/{thread_id}/events",
+            token=REBORN_V2_AUTH_TOKEN,
+            timeout=75,
+        ) as stream:
+            assert stream.status == 200
+            submitted = await client.post(
+                f"{reborn_v2_server}/api/webchat/v2/threads/{thread_id}/messages",
+                json={
+                    "client_action_id": client_action_id(),
+                    "content": f"{marker}: hold this response",
+                },
+                timeout=30,
+            )
+            assert submitted.status_code in (200, 202), submitted.text
+            run_id = submitted.json()["run_id"]
+            await _wait_for_mock_request(mock_llm_server, marker)
 
-                cancelled = await client.post(
-                    f"{reborn_v2_server}/api/webchat/v2/threads/{thread_id}"
-                    f"/runs/{run_id}/cancel",
-                    json={
-                        "client_action_id": client_action_id(),
-                        "reason": "user_requested",
-                    },
-                    timeout=15,
-                )
-                assert cancelled.status_code == 200, cancelled.text
-                assert cancelled.json()["run_id"] == run_id
+            cancelled = await client.post(
+                f"{reborn_v2_server}/api/webchat/v2/threads/{thread_id}"
+                f"/runs/{run_id}/cancel",
+                json={
+                    "client_action_id": client_action_id(),
+                    "reason": "user_requested",
+                },
+                timeout=15,
+            )
+            assert cancelled.status_code == 200, cancelled.text
+            assert cancelled.json()["run_id"] == run_id
 
-                def is_cancelled(event_type: str, payload: dict) -> bool:
-                    if event_type == "cancelled":
-                        response = payload.get("response") or {}
-                        return (
-                            response.get("run_id") == run_id
-                            and response.get("status") == "Cancelled"
-                        )
-                    for item in payload.get("state", {}).get("items", []):
-                        status = item.get("run_status") or {}
-                        if status.get("status") == "cancelled":
-                            return True
-                    return False
+            def is_cancelled(event_type: str, payload: dict) -> bool:
+                if event_type == "cancelled":
+                    response = payload.get("response") or {}
+                    return (
+                        response.get("run_id") == run_id
+                        and response.get("status") == "Cancelled"
+                    )
+                for item in payload.get("state", {}).get("items", []):
+                    status = item.get("run_status") or {}
+                    if status.get("status") == "cancelled":
+                        return True
+                return False
 
-                event = await _wait_for_sse_event(
-                    stream,
-                    "cancelled",
-                    "projection_snapshot",
-                    "projection_update",
-                    timeout=45,
-                    match=is_cancelled,
-                )
-                assert is_cancelled(event.get("type", "projection_update"), event)
+            event = await _wait_for_sse_event(
+                stream,
+                "cancelled",
+                "projection_snapshot",
+                "projection_update",
+                timeout=45,
+                match=is_cancelled,
+            )
+            assert is_cancelled(event.get("type", "projection_update"), event)
 
 
 async def test_reborn_v2_approval_gate_resolves_and_resumes(
@@ -242,40 +213,40 @@ async def test_reborn_v2_approval_gate_resolves_and_resumes(
         assert permission.status_code == 200, permission.text
         thread_id = await create_thread(client, reborn_v2_server)
 
-        timeout = aiohttp.ClientTimeout(total=90, sock_read=90)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(
-                _events_url(reborn_v2_server, thread_id),
-                headers={"Accept": "text/event-stream"},
-            ) as stream:
-                assert stream.status == 200
-                submitted = await client.post(
-                    f"{reborn_v2_server}/api/webchat/v2/threads/{thread_id}/messages",
-                    json={
-                        "client_action_id": client_action_id(),
-                        "content": f"reborn builtin echo {marker}",
-                    },
-                    timeout=30,
-                )
-                assert submitted.status_code in (200, 202), submitted.text
+        async with sse_stream(
+            reborn_v2_server,
+            path=f"/api/webchat/v2/threads/{thread_id}/events",
+            token=REBORN_V2_AUTH_TOKEN,
+            timeout=90,
+        ) as stream:
+            assert stream.status == 200
+            submitted = await client.post(
+                f"{reborn_v2_server}/api/webchat/v2/threads/{thread_id}/messages",
+                json={
+                    "client_action_id": client_action_id(),
+                    "content": f"reborn builtin echo {marker}",
+                },
+                timeout=30,
+            )
+            assert submitted.status_code in (200, 202), submitted.text
 
-                event = await _wait_for_sse_event(stream, "gate", timeout=60)
-                prompt = event["prompt"]
-                assert prompt["approval_context"]["tool_name"] == "builtin.echo"
+            event = await _wait_for_sse_event(stream, "gate", timeout=60)
+            prompt = event["prompt"]
+            assert prompt["approval_context"]["tool_name"] == "builtin.echo"
 
-                resolved = await client.post(
-                    f"{reborn_v2_server}/api/webchat/v2/threads/{thread_id}"
-                    f"/runs/{prompt['turn_run_id']}"
-                    f"/gates/{quote(prompt['gate_ref'], safe='')}/resolve",
-                    json={
-                        "client_action_id": client_action_id(),
-                        "resolution": "approved",
-                        "always": False,
-                    },
-                    timeout=15,
-                )
-                assert resolved.status_code == 200, resolved.text
-                assert resolved.json()["outcome"] == "resumed", resolved.text
+            resolved = await client.post(
+                f"{reborn_v2_server}/api/webchat/v2/threads/{thread_id}"
+                f"/runs/{prompt['turn_run_id']}"
+                f"/gates/{quote(prompt['gate_ref'], safe='')}/resolve",
+                json={
+                    "client_action_id": client_action_id(),
+                    "resolution": "approved",
+                    "always": False,
+                },
+                timeout=15,
+            )
+            assert resolved.status_code == 200, resolved.text
+            assert resolved.json()["outcome"] == "resumed", resolved.text
 
         assistant = await wait_for_assistant_message(
             client,
@@ -296,46 +267,46 @@ async def test_reborn_v2_manual_token_auth_gate_resolves_and_resumes(
     async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
         thread_id = await create_thread(client, reborn_v2_yolo_server)
 
-        timeout = aiohttp.ClientTimeout(total=120, sock_read=120)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(
-                _events_url(reborn_v2_yolo_server, thread_id),
-                headers={"Accept": "text/event-stream"},
-            ) as stream:
-                assert stream.status == 200
-                submitted = await client.post(
-                    f"{reborn_v2_yolo_server}/api/webchat/v2/threads/{thread_id}/messages",
-                    json={
-                        "client_action_id": client_action_id(),
-                        "content": "reborn install github for auth gate",
-                    },
-                    timeout=30,
-                )
-                assert submitted.status_code in (200, 202), submitted.text
+        async with sse_stream(
+            reborn_v2_yolo_server,
+            path=f"/api/webchat/v2/threads/{thread_id}/events",
+            token=REBORN_V2_AUTH_TOKEN,
+            timeout=120,
+        ) as stream:
+            assert stream.status == 200
+            submitted = await client.post(
+                f"{reborn_v2_yolo_server}/api/webchat/v2/threads/{thread_id}/messages",
+                json={
+                    "client_action_id": client_action_id(),
+                    "content": "reborn install github for auth gate",
+                },
+                timeout=30,
+            )
+            assert submitted.status_code in (200, 202), submitted.text
 
-                event = await _wait_for_sse_event(stream, "auth_required", timeout=75)
-                prompt = event["prompt"]
-                assert prompt["provider"] == "github", prompt
-                assert prompt["challenge_kind"] == "manual_token", prompt
+            event = await _wait_for_sse_event(stream, "auth_required", timeout=75)
+            prompt = event["prompt"]
+            assert prompt["provider"] == "github", prompt
+            assert prompt["challenge_kind"] == "manual_token", prompt
 
-                token_submit = await client.post(
-                    f"{reborn_v2_yolo_server}"
-                    "/api/reborn/product-auth/manual-token/submit",
-                    json={
-                        "provider": "github",
-                        "account_label": "Reborn E2E GitHub",
-                        "token": raw_token,
-                        "thread_id": thread_id,
-                        "run_id": prompt["turn_run_id"],
-                        "gate_ref": prompt["auth_request_ref"],
-                    },
-                    timeout=15,
-                )
-                assert token_submit.status_code == 200, token_submit.text
-                token_body = token_submit.json()
-                assert token_body["credential_ref"], token_body
-                assert token_body["continuation"]["type"] == "turn_gate_resume"
-                assert raw_token not in token_submit.text
+            token_submit = await client.post(
+                f"{reborn_v2_yolo_server}"
+                "/api/reborn/product-auth/manual-token/submit",
+                json={
+                    "provider": "github",
+                    "account_label": "Reborn E2E GitHub",
+                    "token": raw_token,
+                    "thread_id": thread_id,
+                    "run_id": prompt["turn_run_id"],
+                    "gate_ref": prompt["auth_request_ref"],
+                },
+                timeout=15,
+            )
+            assert token_submit.status_code == 200, token_submit.text
+            token_body = token_submit.json()
+            assert token_body["credential_ref"], token_body
+            assert token_body["continuation"]["type"] == "turn_gate_resume"
+            assert raw_token not in token_submit.text
 
         assistant = await wait_for_assistant_message(
             client,
