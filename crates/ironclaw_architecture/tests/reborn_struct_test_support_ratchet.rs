@@ -89,6 +89,12 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         count: 5,
     },
     FrozenPathCount {
+        category: "dead-code",
+        item_kind: "method",
+        path: "crates/ironclaw_host_runtime/src/sandbox_process/attribution.rs",
+        count: 4,
+    },
+    FrozenPathCount {
         category: "test-support",
         item_kind: "field",
         path: "crates/ironclaw_extension_host/src/channel_host.rs",
@@ -278,6 +284,12 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         category: "test-support",
         item_kind: "method",
         path: "crates/ironclaw_host_runtime/src/obligations.rs",
+        count: 1,
+    },
+    FrozenPathCount {
+        category: "test-support",
+        item_kind: "method",
+        path: "crates/ironclaw_host_runtime/src/sandbox_process/attribution.rs",
         count: 1,
     },
     FrozenPathCount {
