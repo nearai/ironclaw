@@ -9,7 +9,7 @@ export function AutomationsSummaryStrip({ summary, activeFilter, onSelectFilter 
       key: "scheduled",
       label: t("automations.summary.scheduled"),
       value: summary?.scheduled ?? 0,
-      tone: "muted",
+      tone: "muted" as const,
       detail: t("automations.summary.scheduledDetail"),
       filter: "all",
     },
@@ -17,7 +17,7 @@ export function AutomationsSummaryStrip({ summary, activeFilter, onSelectFilter 
       key: "active",
       label: t("automations.summary.active"),
       value: summary?.active ?? 0,
-      tone: "signal",
+      tone: "signal" as const,
       detail: t("automations.summary.activeDetail"),
       filter: "active",
     },
@@ -25,7 +25,7 @@ export function AutomationsSummaryStrip({ summary, activeFilter, onSelectFilter 
       key: "running",
       label: t("automations.summary.running"),
       value: summary?.running ?? 0,
-      tone: "info",
+      tone: "info" as const,
       detail: t("automations.summary.runningDetail"),
       filter: "running",
     },
@@ -33,7 +33,7 @@ export function AutomationsSummaryStrip({ summary, activeFilter, onSelectFilter 
       key: "failures",
       label: t("automations.summary.failures"),
       value: summary?.failures ?? 0,
-      tone: (summary?.failures ?? 0) > 0 ? "danger" : "success",
+      tone: (summary?.failures ?? 0) > 0 ? ("danger" as const) : ("success" as const),
       detail: t("automations.summary.failuresDetail"),
       // The failures card is the primary actionable card (#5004): clicking it
       // filters the list down to the automations with failed runs so the user
@@ -45,7 +45,7 @@ export function AutomationsSummaryStrip({ summary, activeFilter, onSelectFilter 
       key: "nextRun",
       label: t("automations.summary.nextRun"),
       value: summary?.nextRun || t("automations.summary.none"),
-      tone: "info",
+      tone: "info" as const,
       detail: t("automations.summary.nextRunDetail"),
       // NEXT RUN is a date string, not a count — use a smaller size so it isn't
       // truncated to "Jun…" inside a narrow card.

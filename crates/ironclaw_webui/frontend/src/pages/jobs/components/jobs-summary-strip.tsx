@@ -1,12 +1,12 @@
 import { Panel, StatCard } from "@ironclaw/design-system";
 
 const SUMMARY_CARDS = [
-  { key: "total", label: "Total jobs", tone: "muted", detail: "All tracked work across agent and sandbox execution." },
-  { key: "pending", label: "Pending", tone: "warning", detail: "Queued work waiting for a worker or container slot." },
-  { key: "in_progress", label: "In progress", tone: "signal", detail: "Actively running jobs and live bridges." },
-  { key: "completed", label: "Completed", tone: "success", detail: "Finished without intervention." },
-  { key: "failed", label: "Failed", tone: "danger", detail: "Runs that terminated with an error or interruption." },
-  { key: "stuck", label: "Stuck", tone: "danger", detail: "Agent work needing recovery or operator attention." },
+  { key: "total", label: "Total jobs", tone: "muted" as const, detail: "All tracked work across agent and sandbox execution." },
+  { key: "pending", label: "Pending", tone: "warning" as const, detail: "Queued work waiting for a worker or container slot." },
+  { key: "in_progress", label: "In progress", tone: "signal" as const, detail: "Actively running jobs and live bridges." },
+  { key: "completed", label: "Completed", tone: "success" as const, detail: "Finished without intervention." },
+  { key: "failed", label: "Failed", tone: "danger" as const, detail: "Runs that terminated with an error or interruption." },
+  { key: "stuck", label: "Stuck", tone: "danger" as const, detail: "Agent work needing recovery or operator attention." },
 ];
 
 export function JobsSummaryStrip({ summary }) {

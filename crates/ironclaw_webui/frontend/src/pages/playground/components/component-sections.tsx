@@ -40,6 +40,7 @@ import { Switch } from "@ironclaw/design-system";
 import { Tabs } from "@ironclaw/design-system";
 import { Tooltip, TooltipProvider } from "@ironclaw/design-system";
 import { STATUS_CANON } from "@ironclaw/design-system/tokens";
+import type { BadgeTone } from "@ironclaw/design-system";
 import { Section } from "./token-sections";
 
 /* ── Shared bits ───────────────────────────────────────────────────── */
@@ -135,7 +136,7 @@ export function ButtonSection() {
 
 /* ── Badge ────────────────────────────────────────────────────────── */
 
-const BADGE_TONES = ["success", "warning", "danger", "info", "accent", "muted"];
+const BADGE_TONES = ["success", "warning", "danger", "info", "accent", "muted"] as const;
 
 export function BadgeSection() {
   return (
@@ -162,7 +163,7 @@ export function BadgeSection() {
               <span className="w-64 shrink-0 text-[0.8125rem] text-[var(--v2-text)]">
                 {entry.status}
               </span>
-              <Badge tone={entry.tone} label={entry.tone} />
+              <Badge tone={entry.tone as BadgeTone} label={entry.tone} />
               <span
                 className="h-2 w-24 shrink-0 overflow-hidden rounded-full"
                 style={{ background: `var(${entry.fill})` }}
@@ -197,7 +198,7 @@ export function BadgeSection() {
 
 /* ── Card ─────────────────────────────────────────────────────────── */
 
-const CARD_VARIANTS = ["default", "bordered", "flat", "subtle", "inset"];
+const CARD_VARIANTS = ["default", "bordered", "flat", "subtle", "inset"] as const;
 
 export function CardSection() {
   return (

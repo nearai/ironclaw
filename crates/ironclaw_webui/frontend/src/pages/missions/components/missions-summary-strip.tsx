@@ -3,10 +3,10 @@ import { Panel, StatCard } from "@ironclaw/design-system";
 
 function buildCards(t) {
   return [
-    { key: "total", label: t("missions.summary.totalMissions"), tone: "muted" },
-    { key: "active", label: t("missions.summary.active"), tone: "signal" },
-    { key: "paused", label: t("missions.summary.paused"), tone: "warning" },
-    { key: "threads", label: t("missions.summary.spawnedThreads"), tone: "success" },
+    { key: "total", label: t("missions.summary.totalMissions"), tone: "muted" as const },
+    { key: "active", label: t("missions.summary.active"), tone: "signal" as const },
+    { key: "paused", label: t("missions.summary.paused"), tone: "warning" as const },
+    { key: "threads", label: t("missions.summary.spawnedThreads"), tone: "success" as const },
   ];
 }
 

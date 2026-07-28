@@ -306,7 +306,7 @@ function BuiltinRow({
   detail,
   children = null,
   statusLabel = null,
-  statusTone = enabled ? "success" : "muted",
+  statusTone = enabled ? ("success" as const) : ("muted" as const),
 }) {
   const t = useT();
   const effectiveStatusLabel = statusLabel || (enabled ? t("channels.statusOn") : t("channels.statusOff"));

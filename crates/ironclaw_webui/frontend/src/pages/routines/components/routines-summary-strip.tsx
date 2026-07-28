@@ -4,37 +4,37 @@ const SUMMARY_CARDS = [
   {
     key: "total",
     label: "Total routines",
-    tone: "muted",
+    tone: "muted" as const,
     detail: "All saved schedules and event handlers.",
   },
   {
     key: "enabled",
     label: "Enabled",
-    tone: "signal",
+    tone: "signal" as const,
     detail: "Ready to run from schedule, event, or manual trigger.",
   },
   {
     key: "disabled",
     label: "Disabled",
-    tone: "muted",
+    tone: "muted" as const,
     detail: "Paused until explicitly re-enabled.",
   },
   {
     key: "unverified",
     label: "Unverified",
-    tone: "warning",
+    tone: "warning" as const,
     detail: "Needs a successful validation run.",
   },
   {
     key: "failing",
     label: "Failing",
-    tone: "danger",
+    tone: "danger" as const,
     detail: "Recent run status needs operator attention.",
   },
   {
     key: "runs_today",
     label: "Runs today",
-    tone: "success",
+    tone: "success" as const,
     detail: "Routines with activity since local day start.",
   },
 ];

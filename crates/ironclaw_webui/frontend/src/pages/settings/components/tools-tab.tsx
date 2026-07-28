@@ -87,10 +87,10 @@ function ToolRow({ tool, pendingPermission, onPermissionChange, isSaved }) {
   const t = useT();
   const description = translatedToolDescription(t, tool);
   const permissionStates = [
-    { value: "default", label: t("tools.followDefault"), tone: "neutral" },
-    { value: "always_allow", label: t("tools.alwaysAllow"), tone: "positive" },
-    { value: "ask_each_time", label: t("tools.askEachTime"), tone: "warning" },
-    { value: "disabled", label: t("tools.disabled"), tone: "danger" },
+    { value: "default", label: t("tools.followDefault"), tone: "neutral" as const },
+    { value: "always_allow", label: t("tools.alwaysAllow"), tone: "positive" as const },
+    { value: "ask_each_time", label: t("tools.askEachTime"), tone: "warning" as const },
+    { value: "disabled", label: t("tools.disabled"), tone: "danger" as const },
   ];
   const sourceLabels = {
     default: t("tools.sourceDefault"),
@@ -150,7 +150,7 @@ function ToolRow({ tool, pendingPermission, onPermissionChange, isSaved }) {
 
       <div className="flex shrink-0 items-center gap-3">
         {isLocked
-          ? (<Badge tone={current.tone} label={current.label} size="sm" />)
+          ? (<Badge tone={current.tone === "neutral" ? "muted" : current.tone} label={current.label} size="sm" />)
           : (
               <SelectMenu
                 value={selectedState}
