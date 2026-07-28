@@ -24,10 +24,12 @@
 //! ## Charter
 //!
 //! Every type here is **plain redacted vocabulary** (host_api charter): a bounded
-//! enum, a fixed-width hash value, or a bounded validated safe identifier. None
-//! carries a secret, a raw `HostPath`, a backend error string, or a runtime
-//! handle. A [`LoopRef`] is a bounded correlation identifier with path delimiters
-//! and control characters refused at construction — not free text, and distinct
+//! enum, a fixed-width hash value, or a bounded validated safe identifier. The
+//! narrow exception is [`ModelDiagnostic`], which carries a bounded,
+//! producer-scrubbed cause needed for model recovery. No type carries a secret,
+//! a typed raw `HostPath`, an unscrubbed backend error, or a runtime handle. A
+//! [`LoopRef`] is a bounded correlation identifier with path delimiters and
+//! control characters refused at construction — not free text, and distinct
 //! from the kernel record refs ([`GateRef`](crate::GateRef) et al.), which stay
 //! opaque uuids precisely so a caller cannot compose one from a string.
 
@@ -691,12 +693,10 @@ impl ModelInputIssue {
 /// flip prep).
 ///
 /// Both arms are plain redacted vocabulary (host_api charter): enums, a
-/// [`DispatchInputIssueCode`], and bounded [`SafeSummary`] values — never a raw
-/// cause, secret, host path, or backend error string. The free-text `Diagnostic`
-/// arm is deliberately stricter than the loop's lenient diagnostic channel (which
-/// permits paths): at this sanitized boundary the text must satisfy the full
-/// [`SafeSummary`] redaction contract, so a path-shaped diagnostic is redacted
-/// rather than carried raw.
+/// [`DispatchInputIssueCode`], bounded [`SafeSummary`] values, or a bounded
+/// [`ModelDiagnostic`]. `ModelDiagnostic` is the narrow exception for a
+/// producer-scrubbed cause: it may retain paths and payload delimiters that are
+/// necessary for recovery, but never an unscrubbed backend error.
 ///
 /// Internally tagged (`kind`) to mirror the loop enum's shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -705,15 +705,14 @@ pub enum ModelFailureDiagnostic {
     /// The tool input failed schema validation; carries the bounded, redacted
     /// structured issues the model corrects from.
     InvalidInput { issues: ModelInputIssues },
-    /// A bounded, redacted free-text cause.
-    Diagnostic { text: SafeSummary },
+    /// A bounded, producer-scrubbed free-text cause.
+    Diagnostic { text: ModelDiagnostic },
     /// Host-authored operator remediation — the TRUSTED text channel.
     ///
     /// Separate from [`Self::Diagnostic`] by PROVENANCE: `Diagnostic` holds an
-    /// untrusted cause squeezed through the full [`SafeSummary`] contract (so a
-    /// URL- or path-shaped value degrades to the placeholder), while this arm
-    /// holds a host-authored instruction that must reach the model intact. Only
-    /// host code constructs the payload — see [`HostRemediation`].
+    /// untrusted cause scrubbed and fenced by its producer, while this arm holds
+    /// a host-authored instruction that must reach the model intact. Only host
+    /// code constructs the remediation payload — see [`HostRemediation`].
     HostRemediation { text: HostRemediation },
 }
 
@@ -751,13 +750,115 @@ impl ModelFailureDiagnostic {
 
     /// The redacted free-text cause, present exactly on
     /// [`ModelFailureDiagnostic::Diagnostic`].
-    pub fn diagnostic_text(&self) -> Option<&SafeSummary> {
+    pub fn diagnostic_text(&self) -> Option<&ModelDiagnostic> {
         match self {
             ModelFailureDiagnostic::Diagnostic { text } => Some(text),
             ModelFailureDiagnostic::InvalidInput { .. }
             | ModelFailureDiagnostic::HostRemediation { .. } => None,
         }
     }
+}
+
+/// Maximum serialized size of a model-visible diagnostic.
+///
+/// This matches the loop observation cap so the cause can cross the sanitized
+/// resolution boundary without a second, lossy summary conversion.
+pub const MODEL_DIAGNOSTIC_MAX_BYTES: usize = 4096;
+
+const MODEL_DIAGNOSTIC_UNAVAILABLE: &str =
+    "The capability runtime did not provide additional diagnostic detail.";
+
+/// A bounded, model-visible diagnostic cause.
+///
+/// This type validates transport safety, not natural-language vocabulary.
+/// Paths, URLs, JSON, and words such as "password" remain legal because they can
+/// be essential diagnostic context. The producer must scrub secret values and
+/// fence injection-shaped text before construction. As defense in depth, known
+/// credential-token shapes are still rejected here.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct ModelDiagnostic(String);
+
+impl ModelDiagnostic {
+    pub fn new(value: impl Into<String>) -> Result<Self, HostApiError> {
+        let value = value.into();
+        validate_model_diagnostic(&value)?;
+        Ok(Self(value))
+    }
+
+    /// Construct after truncating to the model-observation byte budget on a
+    /// valid UTF-8 boundary.
+    pub fn truncating(value: impl Into<String>) -> Result<Self, HostApiError> {
+        let mut value = value.into();
+        if value.len() > MODEL_DIAGNOSTIC_MAX_BYTES {
+            let mut end = MODEL_DIAGNOSTIC_MAX_BYTES;
+            while end > 0 && !value.is_char_boundary(end) {
+                end -= 1;
+            }
+            value.truncate(end);
+        }
+        Self::new(value)
+    }
+
+    /// Fixed fallback used when a backend supplied no usable cause.
+    pub fn unavailable() -> Self {
+        Self(MODEL_DIAGNOSTIC_UNAVAILABLE.to_string())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl TryFrom<String> for ModelDiagnostic {
+    type Error = HostApiError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl AsRef<str> for ModelDiagnostic {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for ModelDiagnostic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+fn validate_model_diagnostic(value: &str) -> Result<(), HostApiError> {
+    if value.is_empty() {
+        return Err(HostApiError::invalid_model_diagnostic("must not be empty"));
+    }
+    if value.len() > MODEL_DIAGNOSTIC_MAX_BYTES {
+        return Err(HostApiError::invalid_model_diagnostic(format!(
+            "must be at most {MODEL_DIAGNOSTIC_MAX_BYTES} bytes"
+        )));
+    }
+    if value.chars().any(|character| {
+        character == '\0' || character.is_control() && !matches!(character, '\n' | '\r' | '\t')
+    }) {
+        return Err(HostApiError::invalid_model_diagnostic(
+            "must not contain NUL/disallowed control characters",
+        ));
+    }
+    let lower = value.to_ascii_lowercase();
+    if crate::credential_redaction::contains_secret_like_token(&lower)
+        || crate::credential_redaction::contains_unredacted_credential_value(&lower)
+    {
+        return Err(HostApiError::invalid_model_diagnostic(
+            "must not contain an unredacted credential value",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -990,28 +1091,129 @@ mod tests {
     #[test]
     fn model_failure_diagnostic_free_text_roundtrips() {
         let diagnostic = ModelFailureDiagnostic::Diagnostic {
-            text: SafeSummary::new("backend returned an error").unwrap(),
+            text: ModelDiagnostic::new("failed reading /workspace/project/config.json").unwrap(),
         };
         let wire = serde_json::to_value(&diagnostic).unwrap();
         // Internally tagged like the loop's CapabilityFailureDetail mirror.
         assert_eq!(
             wire,
-            serde_json::json!({ "kind": "diagnostic", "text": "backend returned an error" })
+            serde_json::json!({
+                "kind": "diagnostic",
+                "text": "failed reading /workspace/project/config.json"
+            })
         );
         let back: ModelFailureDiagnostic = serde_json::from_value(wire).unwrap();
         assert_eq!(back, diagnostic);
         assert_eq!(
-            back.diagnostic_text().map(SafeSummary::as_str),
-            Some("backend returned an error")
+            back.diagnostic_text().map(ModelDiagnostic::as_str),
+            Some("failed reading /workspace/project/config.json")
         );
     }
 
     #[test]
-    fn model_failure_diagnostic_rejects_an_unsafe_free_text_on_the_wire() {
-        // A hostile persisted diagnostic (path-shaped) cannot rehydrate: the
-        // SafeSummary redaction contract fires on deserialize.
-        let json = serde_json::json!({ "kind": "diagnostic", "text": "leaked /etc/passwd" });
-        assert!(serde_json::from_value::<ModelFailureDiagnostic>(json).is_err());
+    fn model_failure_diagnostic_wire_validation_preserves_vocabulary_but_rejects_values() {
+        let vocabulary = serde_json::json!({
+            "kind": "diagnostic",
+            "text": "password field is required at /workspace/config.json"
+        });
+        assert!(
+            serde_json::from_value::<ModelFailureDiagnostic>(vocabulary).is_ok(),
+            "credential vocabulary and paths are diagnostic context, not secret values"
+        );
+
+        for text in [
+            "",
+            "invalid\u{7}control",
+            "provider returned ghp_0123456789abcdef",
+            "password=hunter2",
+            "https://user:pass@example.com/path",
+        ] {
+            let json = serde_json::json!({ "kind": "diagnostic", "text": text });
+            assert!(
+                serde_json::from_value::<ModelFailureDiagnostic>(json).is_err(),
+                "unsafe diagnostic unexpectedly rehydrated: {text:?}"
+            );
+        }
+        let oversize = serde_json::json!({
+            "kind": "diagnostic",
+            "text": "x".repeat(MODEL_DIAGNOSTIC_MAX_BYTES + 1)
+        });
+        assert!(serde_json::from_value::<ModelFailureDiagnostic>(oversize).is_err());
+    }
+
+    /// Guard against the scrubber ratcheting tighter unnoticed.
+    ///
+    /// Every other test here proves the guard REJECTS what it should. Nothing
+    /// proved it still ACCEPTS what it should, so tightening a detector could
+    /// only ever break silently — a summary that says nothing is indistinguishable
+    /// from one that had nothing to say. This corpus is the other direction:
+    /// realistic diagnostics an operator or the model genuinely needs, which must
+    /// survive the values-only rules this channel is built on.
+    ///
+    /// Credential *vocabulary* is deliberately legal here. The distinction this
+    /// channel draws is value-vs-word: "the api key is missing" is the most useful
+    /// sentence we can hand back for a missing key, and scrubbing it leaves the
+    /// model with nothing to act on. Add to this list whenever a real diagnostic
+    /// is found to be over-scrubbed; a failure here means a detector got greedy,
+    /// not that the corpus is wrong.
+    #[test]
+    fn legitimate_diagnostics_survive_the_credential_guard() {
+        for text in [
+            // Bare vocabulary — the words alone carry no secret.
+            "password field is required",
+            "the api key is missing from the request",
+            "secret sharing failed between nodes",
+            "credential setup is unavailable for this provider",
+            "token bucket exhausted; retry after the window resets",
+            // Remediation prose, the highest-value case: it must name the thing
+            // the user has to go fix.
+            "rotate your client secret in the provider console and retry",
+            "no api key is configured for this extension",
+            // Paths and schema refs — diagnostic context the strict summary
+            // validator drops, which is why this channel exists.
+            "missing input_schema_ref at /system/extensions/google-calendar/schemas/list_calendars.input.v1.json",
+            "failed to read /workspace/project/config.json at line 17",
+            // Already-redacted payloads must not be double-rejected.
+            r#"{"password":"[REDACTED]"}"#,
+            r#"{"api_key":"[redacted]"}"#,
+        ] {
+            ModelDiagnostic::new(text).unwrap_or_else(|error| {
+                panic!(
+                    "over-scrubbed a legitimate diagnostic: {text:?} rejected as {error:?} — \
+                     a detector got greedy; the model needs this sentence"
+                )
+            });
+        }
+
+        // The other direction still holds: real values are refused. Kept beside
+        // the corpus so tightening one side cannot quietly loosen the other.
+        for text in [
+            "password=hunter2",
+            r#"{"api_key":"opaque-live-value"}"#,
+            "https://user:pass@example.com/path",
+            "provider returned ghp_0123456789abcdef",
+        ] {
+            assert!(
+                ModelDiagnostic::new(text).is_err(),
+                "credential value survived the guard: {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn model_diagnostic_truncates_on_a_utf8_boundary() {
+        let text = format!("a{}", "é".repeat(MODEL_DIAGNOSTIC_MAX_BYTES));
+        let diagnostic = ModelDiagnostic::truncating(text).unwrap();
+        assert_eq!(diagnostic.as_str().len(), MODEL_DIAGNOSTIC_MAX_BYTES - 1);
+        assert!(diagnostic.as_str().ends_with('é'));
+        assert!(ModelDiagnostic::new(diagnostic.into_inner()).is_ok());
+    }
+
+    #[test]
+    fn model_diagnostic_accepts_exact_byte_limit() {
+        let text = "x".repeat(MODEL_DIAGNOSTIC_MAX_BYTES);
+        let diagnostic = ModelDiagnostic::new(text.clone()).unwrap();
+        assert_eq!(diagnostic.as_str(), text);
     }
 
     #[test]
