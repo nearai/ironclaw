@@ -6818,10 +6818,13 @@ async fn text_only_host_rejects_outside_surface_capability_before_host_runtime()
         .await
         .unwrap();
 
-    // Flip consequence (§5.2.9, confirmed): outside_visible_surface collapsed to PolicyDenied (was CapabilityDeniedReasonKind Unknown "outside_visible_surface")
+    // The capability is not in this caller's view at all: there is nothing to
+    // unlock and re-issuing the same call cannot succeed, which is a different
+    // instruction to the model than a policy refusal. (Restored with the
+    // explicit classification in `deny_reason_from_kind`.)
     assert!(matches!(
         denied,
-        Resolution::Denied(denied) if denied.reason_kind == Some(DenyReason::PolicyDenied)
+        Resolution::Denied(denied) if denied.reason_kind == Some(DenyReason::UnknownCapability)
     ));
     assert!(runtime.invocations().is_empty());
 
@@ -7963,11 +7966,14 @@ async fn text_only_host_denies_capability_without_provider_trust_before_host_run
         .await
         .unwrap();
 
-    // Flip consequence (§5.2.9, confirmed): missing_provider_trust collapsed to PolicyDenied (was CapabilityDeniedReasonKind Unknown "missing_provider_trust")
+    // No trust decision is on record for the provider, so what is missing is a
+    // grant — not a permission the caller has already been refused. (This read
+    // was lost while `deny_reason_from_kind` bucketed every non-DenyReason-tag
+    // string into `PolicyDenied`; the explicit classification restores it.)
     assert!(matches!(
         denied,
         Resolution::Denied(denied)
-            if denied.reason_kind == Some(DenyReason::PolicyDenied)
+            if denied.reason_kind == Some(DenyReason::MissingGrant)
                 && denied.summary.as_ref().map(|summary| summary.as_str())
                     == Some("capability provider trust is unavailable")
     ));
