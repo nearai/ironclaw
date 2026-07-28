@@ -1254,17 +1254,28 @@ impl RebornIntegrationHarness {
     /// Assert the named capability was invoked exactly `expected` times through
     /// the real capability path. Uses the same per-thread delta as
     /// [`Self::assert_tool_invoked`].
+    /// How many times `capability_id` was dispatched through the real
+    /// capability path since this thread's baseline.
+    ///
+    /// The assertion below answers "was it exactly N"; a generated sequence
+    /// needs the number itself, because the bound it checks ("at most once,
+    /// and zero unless something approved") depends on the sequence rather
+    /// than being a fixed expectation.
+    pub async fn tool_invocation_count(&self, capability_id: &str) -> HarnessResult<usize> {
+        let all = self.capability_recorder.invocations();
+        let delta = &all[self.baseline_invocation_count..];
+        Ok(delta
+            .iter()
+            .filter(|invocation| invocation.capability_id.as_str() == capability_id)
+            .count())
+    }
+
     pub async fn assert_tool_invocation_count(
         &self,
         capability_id: &str,
         expected: usize,
     ) -> HarnessResult<()> {
-        let all = self.capability_recorder.invocations();
-        let delta = &all[self.baseline_invocation_count..];
-        let actual = delta
-            .iter()
-            .filter(|invocation| invocation.capability_id.as_str() == capability_id)
-            .count();
+        let actual = self.tool_invocation_count(capability_id).await?;
         if actual == expected {
             return Ok(());
         }
@@ -1325,16 +1336,28 @@ impl RebornIntegrationHarness {
     /// as an invocation attempt before the gate parks the run (no result is
     /// written yet), so `invocations()` legitimately counts 2 for any
     /// gate-then-resume flow — that is not a double-execution signal.
+    /// How many recorded RESULTS `capability_id` produced.
+    ///
+    /// Distinct from `tool_invocation_count`, and the distinction matters for
+    /// effect counting: a gated attempt is recorded as an invocation but
+    /// produces no result, so a single approve-then-resume shows two
+    /// invocations and one result. "Was the effect performed" is the result
+    /// count; the invocation count would report a duplicate that never
+    /// happened.
+    pub async fn capability_result_count(&self, capability_id: &str) -> HarnessResult<usize> {
+        Ok(self
+            .captured_capability_results()
+            .iter()
+            .filter(|result| result.capability_id.as_str() == capability_id)
+            .count())
+    }
+
     pub async fn assert_capability_result_count(
         &self,
         capability_id: &str,
         expected: usize,
     ) -> HarnessResult<()> {
-        let results = self.captured_capability_results();
-        let actual = results
-            .iter()
-            .filter(|result| result.capability_id.as_str() == capability_id)
-            .count();
+        let actual = self.capability_result_count(capability_id).await?;
         if actual == expected {
             return Ok(());
         }
@@ -1628,6 +1651,22 @@ impl RebornIntegrationHarness {
             &format!("{expected:?}"),
         )
         .await
+    }
+
+    /// Read the run's current state once, without waiting for a condition.
+    ///
+    /// The waiting variants above answer "did it get here eventually", which
+    /// cannot express "it never passed through there". Generated sequence
+    /// tests assert after every transition, so they need the instantaneous
+    /// value rather than a settled one.
+    pub async fn run_state(&self, run_id: TurnRunId) -> HarnessResult<TurnRunState> {
+        Ok(self
+            .turn_store
+            .get_run_state(GetRunStateRequest {
+                scope: self.turn_scope.clone(),
+                run_id,
+            })
+            .await?)
     }
 
     /// Poll until ANY terminal status (#5466): unlike `wait_for_status`, does

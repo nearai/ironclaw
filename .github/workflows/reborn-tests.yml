@@ -7,6 +7,14 @@ on:
         description: Commit SHA or ref to test
         required: false
         type: string
+      deep_generations:
+        description: >-
+          Enumerate longer generated lifecycle sequences (#6524 workstream 9).
+          Pull requests stay at the fast depth; the nightly deep run raises it.
+          Depth 3 is 84 sequences (~70s) against depth 2's 20 (~20s).
+        required: false
+        default: false
+        type: boolean
   workflow_dispatch:
     inputs:
       ref:
@@ -39,6 +47,12 @@ env:
   # cfg!(test) covers unit tests; this covers integration/e2e that link the
   # non-cfg(test) library.
   IRONCLAW_DISABLE_OS_KEYCHAIN: "1"
+  # Generated-sequence depth for tests/integration/generated_gate_sequences.rs.
+  # Evaluates to the fast depth on every trigger except a workflow_call that
+  # explicitly asks for more, so a PR never pays the nightly cost. The test
+  # parses this strictly and fails on a bad value rather than falling back,
+  # so a typo here cannot silently downgrade the nightly lane.
+  IRONCLAW_GENERATED_SEQUENCE_DEPTH: ${{ inputs.deep_generations && '3' || '2' }}
   # Pin wall-clock rendering inputs so a test cannot pass or fail on the
   # runner's locale. Reborn renders model-visible time slices, and date/number
   # formatting differs by locale, so an unpinned runner turns a formatting
