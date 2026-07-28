@@ -27,8 +27,9 @@
 use async_trait::async_trait;
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityDisplayOutputPreview, CapabilityId, CorrelationId,
-    DispatchFailureDetail, ExecutionContext, ExtensionId, ProcessId, ResourceEstimate,
-    ResourceScope, ResourceUsage, RuntimeCredentialAuthRequirement, RuntimeKind, SecretHandle,
+    DispatchFailureDetail, ExecutionContext, ExtensionId, FailureFate, FailureKind, ProcessId,
+    ResourceEstimate, ResourceScope, ResourceUsage, RuntimeCredentialAuthRequirement, RuntimeKind,
+    SecretHandle,
     runtime_policy::{DeploymentMode, EffectiveRuntimePolicy, RuntimeProfile},
 };
 use ironclaw_trust::TrustDecision;
@@ -444,7 +445,7 @@ pub struct RuntimeProcessHandle {
 #[derive(Clone, Eq)]
 pub struct RuntimeCapabilityFailure {
     pub capability_id: CapabilityId,
-    pub kind: RuntimeFailureKind,
+    pub kind: FailureKind,
     pub message: Option<String>,
     pub detail: Option<DispatchFailureDetail>,
     /// Registry-scrubbed descriptive cause for the model-visible Diagnostic
@@ -598,60 +599,6 @@ mod raw_http_diagnostic_policy_tests {
     }
 }
 
-/// Stable, sanitized failure categories.
-///
-// Deliberately NOT `#[non_exhaustive]`: the `Unknown` variant is the open-set
-// escape hatch for unrecognized runtime failures, so the attribute would only
-// force classifiers to keep a wildcard arm that silently buckets a new named
-// variant. Without it, disposition/classification matches are exhaustive and a
-// new named variant fails to compile until classified. See
-// `docs/plans/2026-06-28-reborn-error-recoverability-audit.md` §6.1.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RuntimeFailureKind {
-    Authorization,
-    Backend,
-    Cancelled,
-    Dispatcher,
-    GateDeclined,
-    Internal,
-    InvalidInput,
-    InvalidOutput,
-    MissingRuntime,
-    Network,
-    OperationFailed,
-    OutputTooLarge,
-    PolicyDenied,
-    Process,
-    Resource,
-    Transient,
-    Unavailable,
-}
-
-impl RuntimeFailureKind {
-    /// Returns a stable, snake_case identifier for use in metrics/tracing.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Authorization => "authorization",
-            Self::Backend => "backend",
-            Self::Cancelled => "cancelled",
-            Self::Dispatcher => "dispatcher",
-            Self::GateDeclined => "gate_declined",
-            Self::Internal => "internal",
-            Self::InvalidInput => "invalid_input",
-            Self::InvalidOutput => "invalid_output",
-            Self::MissingRuntime => "missing_runtime",
-            Self::Network => "network",
-            Self::OperationFailed => "operation_failed",
-            Self::OutputTooLarge => "output_too_large",
-            Self::PolicyDenied => "policy_denied",
-            Self::Process => "process",
-            Self::Resource => "resource",
-            Self::Transient => "transient",
-            Self::Unavailable => "unavailable",
-        }
-    }
-}
-
 /// Agent-loop handling decision for a sanitized runtime capability failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CapabilityFailureDisposition {
@@ -666,11 +613,7 @@ pub enum CapabilityFailureDisposition {
 const MAX_RUNTIME_FAILURE_SUMMARY_CHARS: usize = 512;
 
 impl RuntimeCapabilityFailure {
-    pub fn new(
-        capability_id: CapabilityId,
-        kind: RuntimeFailureKind,
-        message: Option<String>,
-    ) -> Self {
+    pub fn new(capability_id: CapabilityId, kind: FailureKind, message: Option<String>) -> Self {
         Self {
             capability_id,
             kind,
@@ -731,33 +674,25 @@ fn bounded_runtime_failure_summary(summary: &str) -> String {
 
 /// Central disposition policy for runtime capability failures.
 ///
-/// Runtime failures should be surfaced through normal model-visible tool-error
-/// handling whenever they are not retryable infrastructure outages. Security
+/// Delegates the recoverability decision to the unified
+/// [`FailureKind::fate`] projection instead of re-deriving a local retryable
+/// set — re-declared domains drift, and the drift is where recoverability
+/// died (#6284). Only `Retry`-fated kinds are retried before the model sees
+/// anything. `Park` and `Terminal` fates are not expected to reach this
+/// disposition on the production paths (gates suspend as
+/// `AuthRequired`/`ApprovalRequired` outcomes and cancellation ends the run
+/// upstream — intent, not a code-enforced invariant); if a lane nevertheless
+/// mints one, it conservatively surfaces as a model-visible tool error rather
+/// than burning retry budget. Security
 /// isolation failures must use a separate quarantine path instead of this
 /// generic failure disposition.
-pub const fn capability_failure_disposition(
-    kind: RuntimeFailureKind,
-) -> CapabilityFailureDisposition {
-    if matches!(kind, RuntimeFailureKind::InvalidInput) {
-        return CapabilityFailureDisposition::ModelVisibleToolError;
+pub fn capability_failure_disposition(kind: FailureKind) -> CapabilityFailureDisposition {
+    match kind.fate() {
+        FailureFate::Retry => CapabilityFailureDisposition::RetrySameCall,
+        FailureFate::ModelVisible | FailureFate::Park | FailureFate::Terminal => {
+            CapabilityFailureDisposition::ModelVisibleToolError
+        }
     }
-
-    if runtime_failure_is_retryable(kind) {
-        return CapabilityFailureDisposition::RetrySameCall;
-    }
-
-    CapabilityFailureDisposition::ModelVisibleToolError
-}
-
-const fn runtime_failure_is_retryable(kind: RuntimeFailureKind) -> bool {
-    matches!(
-        kind,
-        RuntimeFailureKind::Internal
-            | RuntimeFailureKind::Backend
-            | RuntimeFailureKind::Network
-            | RuntimeFailureKind::Transient
-            | RuntimeFailureKind::Unavailable
-    )
 }
 
 /// Work ids tracked by the host runtime for status/cancellation.
@@ -884,6 +819,13 @@ pub trait HostRuntime: Send + Sync {
         request: RuntimeInvocation,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError>;
 
+    /// Default: this host runtime does not implement capability spawn.
+    ///
+    /// The kind is [`FailureKind::UnsupportedRunner`] — model-visible and
+    /// **non-retryable** — because "this implementation does not provide the
+    /// operation" is a permanent property of the implementation, not a
+    /// temporary outage. `Unavailable` would be `FailureFate::Retry` and would
+    /// burn the whole capability retry budget on a call that can never succeed.
     async fn spawn_capability(
         &self,
         request: RuntimeInvocation,
@@ -892,7 +834,7 @@ pub trait HostRuntime: Send + Sync {
         Ok(RuntimeCapabilityOutcome::Failed(
             RuntimeCapabilityFailure::new(
                 capability_id,
-                RuntimeFailureKind::Unavailable,
+                FailureKind::UnsupportedRunner,
                 Some("capability spawn is unsupported by this host runtime".to_string()),
             ),
         ))
@@ -915,6 +857,10 @@ pub trait HostRuntime: Send + Sync {
     /// bypass run-state validation and the approval-lease-claim path).  Any
     /// `HostRuntime` implementation that participates in auth-resume flows must
     /// provide an explicit override.
+    ///
+    /// The kind is [`FailureKind::UnsupportedRunner`] (non-retryable) for the
+    /// same reason as [`HostRuntime::spawn_capability`]: a missing override is
+    /// permanent, so retrying it only burns budget.
     async fn auth_resume_capability(
         &self,
         request: RuntimeAuthResume,
@@ -923,7 +869,7 @@ pub trait HostRuntime: Send + Sync {
         Ok(RuntimeCapabilityOutcome::Failed(
             RuntimeCapabilityFailure::new(
                 capability_id,
-                RuntimeFailureKind::Unavailable,
+                FailureKind::UnsupportedRunner,
                 Some("capability auth-resume is unsupported by this host runtime".to_string()),
             ),
         ))
@@ -942,6 +888,9 @@ pub trait HostRuntime: Send + Sync {
         ))
     }
 
+    /// Default: this host runtime does not implement spawn resume. Permanent,
+    /// so [`FailureKind::UnsupportedRunner`] rather than the retryable
+    /// `Unavailable` — see [`HostRuntime::spawn_capability`].
     async fn resume_spawn_capability(
         &self,
         request: RuntimeApprovalResume,
@@ -950,7 +899,7 @@ pub trait HostRuntime: Send + Sync {
         Ok(RuntimeCapabilityOutcome::Failed(
             RuntimeCapabilityFailure::new(
                 capability_id,
-                RuntimeFailureKind::Unavailable,
+                FailureKind::UnsupportedRunner,
                 Some("capability spawn resume is unsupported by this host runtime".to_string()),
             ),
         ))
@@ -993,6 +942,150 @@ impl HostRuntimeError {
     pub fn unavailable(reason: impl Into<String>) -> Self {
         Self::Unavailable {
             reason: reason.into(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod unsupported_operation_default_tests {
+    use super::*;
+    use ironclaw_host_api::{CapabilitySet, MountView, TrustClass, UserId};
+
+    /// A `HostRuntime` that implements only the required methods, so every
+    /// optional operation falls through to the trait's default body.
+    struct DefaultsOnlyRuntime;
+
+    #[async_trait]
+    impl HostRuntime for DefaultsOnlyRuntime {
+        async fn invoke_capability(
+            &self,
+            _request: RuntimeInvocation,
+        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+            unreachable!("test only exercises the optional-operation defaults")
+        }
+
+        async fn resume_capability(
+            &self,
+            _request: RuntimeApprovalResume,
+        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+            unreachable!("test only exercises the optional-operation defaults")
+        }
+
+        async fn visible_capabilities(
+            &self,
+            _request: VisibleCapabilityRequest,
+        ) -> Result<VisibleCapabilitySurface, HostRuntimeError> {
+            unreachable!("test only exercises the optional-operation defaults")
+        }
+
+        async fn cancel_work(
+            &self,
+            _request: CancelRuntimeWorkRequest,
+        ) -> Result<CancelRuntimeWorkOutcome, HostRuntimeError> {
+            unreachable!("test only exercises the optional-operation defaults")
+        }
+
+        async fn runtime_status(
+            &self,
+            _request: RuntimeStatusRequest,
+        ) -> Result<HostRuntimeStatus, HostRuntimeError> {
+            unreachable!("test only exercises the optional-operation defaults")
+        }
+
+        async fn health(&self) -> Result<HostRuntimeHealth, HostRuntimeError> {
+            unreachable!("test only exercises the optional-operation defaults")
+        }
+    }
+
+    fn context() -> ExecutionContext {
+        ExecutionContext::local_default(
+            UserId::new("user").expect("user id"),
+            ExtensionId::new("caller").expect("extension id"),
+            RuntimeKind::Wasm,
+            TrustClass::UserTrusted,
+            CapabilitySet::default(),
+            MountView::default(),
+        )
+        .expect("execution context")
+    }
+
+    fn capability_id() -> CapabilityId {
+        CapabilityId::new("echo.say").expect("capability id")
+    }
+
+    fn failure(outcome: RuntimeCapabilityOutcome) -> RuntimeCapabilityFailure {
+        match outcome {
+            RuntimeCapabilityOutcome::Failed(failure) => failure,
+            other => panic!("expected a Failed outcome, got {}", other.kind()),
+        }
+    }
+
+    /// Regression (#6684 review): "this host runtime does not implement the
+    /// operation" is a **permanent** property of the implementation — it cannot
+    /// become true on the next attempt. Minting `FailureKind::Unavailable`
+    /// (fate `Retry`) made the capability retry budget burn down to zero on a
+    /// call that can never succeed, the same budget-burn class this PR fixed
+    /// for `NetworkDenied`. The honest kind is `UnsupportedRunner`:
+    /// model-visible, non-retryable.
+    #[tokio::test]
+    async fn unsupported_operation_defaults_are_permanent_not_retryable() {
+        let runtime = DefaultsOnlyRuntime;
+
+        let spawn = failure(
+            runtime
+                .spawn_capability((
+                    context(),
+                    capability_id(),
+                    ResourceEstimate::default(),
+                    Value::Null,
+                ))
+                .await
+                .expect("default spawn body returns an outcome, not an error"),
+        );
+        let auth_resume = failure(
+            runtime
+                .auth_resume_capability((
+                    context(),
+                    capability_id(),
+                    ResourceEstimate::default(),
+                    Value::Null,
+                    None,
+                ))
+                .await
+                .expect("default auth-resume body returns an outcome, not an error"),
+        );
+        let spawn_resume = failure(
+            runtime
+                .resume_spawn_capability((
+                    context(),
+                    ApprovalRequestId::new(),
+                    capability_id(),
+                    ResourceEstimate::default(),
+                    Value::Null,
+                ))
+                .await
+                .expect("default spawn-resume body returns an outcome, not an error"),
+        );
+
+        for (label, failure) in [
+            ("spawn_capability", spawn),
+            ("auth_resume_capability", auth_resume),
+            ("resume_spawn_capability", spawn_resume),
+        ] {
+            assert_eq!(
+                failure.kind,
+                FailureKind::UnsupportedRunner,
+                "{label} default must name the permanent unsupported-operation kind"
+            );
+            assert!(
+                !failure.kind.is_retryable(),
+                "{label} default must not consume retry budget on a permanently unsupported operation"
+            );
+            assert_eq!(
+                failure.kind.fate(),
+                FailureFate::ModelVisible,
+                "{label} default must surface to the model so it can route around the gap"
+            );
         }
     }
 }

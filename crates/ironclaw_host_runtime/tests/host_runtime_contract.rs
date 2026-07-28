@@ -23,6 +23,7 @@ use ironclaw_extensions::{
 use ironclaw_filesystem::{
     Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, ScopedFilesystem,
 };
+use ironclaw_host_api::FailureKind;
 use ironclaw_host_api::dispatch_test_support::TestDispatcher;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
@@ -294,10 +295,7 @@ async fn default_runtime_returns_failed_for_unknown_capability() {
     match outcome {
         ironclaw_host_runtime::RuntimeCapabilityOutcome::Failed(failure) => {
             assert_eq!(failure.capability_id, capability_id());
-            assert_eq!(
-                failure.kind,
-                ironclaw_host_runtime::RuntimeFailureKind::MissingRuntime
-            );
+            assert_eq!(failure.kind, FailureKind::MissingRuntime);
         }
         other => panic!("expected Failed outcome, got {:?}", other),
     }
@@ -345,10 +343,7 @@ async fn default_runtime_surfaces_authorization_failure_when_authorizer_denies()
     match outcome {
         ironclaw_host_runtime::RuntimeCapabilityOutcome::Failed(failure) => {
             assert_eq!(failure.capability_id, capability_id());
-            assert_eq!(
-                failure.kind,
-                ironclaw_host_runtime::RuntimeFailureKind::Authorization
-            );
+            assert_eq!(failure.kind, FailureKind::Authorization);
         }
         other => panic!("expected Failed(Authorization), got {:?}", other),
     }

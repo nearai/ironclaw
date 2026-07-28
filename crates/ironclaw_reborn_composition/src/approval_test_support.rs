@@ -2,8 +2,10 @@ use ironclaw_approvals::{
     ApprovalResolver, AutoApproveSettingInput, AutoApproveSettingStorePort as _,
 };
 use ironclaw_host_api::MountView;
-use ironclaw_host_api::{Action, CapabilityId, ExecutionContext, Principal, ResourceEstimate};
-use ironclaw_host_runtime::{HostRuntime, RuntimeCapabilityOutcome, RuntimeFailureKind};
+use ironclaw_host_api::{
+    Action, CapabilityId, ExecutionContext, FailureKind, Principal, ResourceEstimate,
+};
+use ironclaw_host_runtime::{HostRuntime, RuntimeCapabilityOutcome};
 use ironclaw_run_state::ApprovalRequestStorePort as _;
 use std::sync::Arc;
 
@@ -95,7 +97,7 @@ pub(crate) async fn invoke_json_with_standalone_approval(
     capability_id: &str,
     context: ExecutionContext,
     input: serde_json::Value,
-) -> Result<serde_json::Value, RuntimeFailureKind> {
+) -> Result<serde_json::Value, FailureKind> {
     match invoke_with_standalone_approval(runtime, capability_id, context, input).await {
         RuntimeCapabilityOutcome::Completed(completed) => Ok(completed.output),
         RuntimeCapabilityOutcome::Failed(failure) => Err(failure.kind),

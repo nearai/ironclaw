@@ -32,12 +32,13 @@ use ironclaw_events::{
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::{DiskFilesystem, FilesystemOperation, RootFilesystem};
+use ironclaw_host_api::FailureKind;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationServices, CancelReason, CancelRuntimeWorkRequest, CapabilitySurfaceVersion,
     HostRuntime, HostRuntimeServices, ProductionWiringComponent, ProductionWiringConfig,
-    ProductionWiringIssueKind, RuntimeCapabilityOutcome, RuntimeFailureKind, RuntimeStatusRequest,
-    RuntimeWorkId, TenantSandboxProcessPort, builtin_first_party_handlers,
+    ProductionWiringIssueKind, RuntimeCapabilityOutcome, RuntimeStatusRequest, RuntimeWorkId,
+    TenantSandboxProcessPort, builtin_first_party_handlers,
 };
 use ironclaw_processes::{
     BackgroundProcessManager, ProcessError, ProcessHost, ProcessManager, ProcessResultStore,
@@ -79,7 +80,7 @@ fn with_authenticated_actor(
 fn assert_actor_policy_denied(outcome: RuntimeCapabilityOutcome) {
     match outcome {
         RuntimeCapabilityOutcome::Failed(failure) => {
-            assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
+            assert_eq!(failure.kind, FailureKind::Authorization);
             assert!(
                 failure
                     .message
@@ -2604,7 +2605,7 @@ async fn host_runtime_services_resumes_approved_capability_and_consumes_lease_on
         .await
         .unwrap();
 
-    assert_failed_outcome(second, RuntimeFailureKind::Authorization);
+    assert_failed_outcome(second, FailureKind::Authorization);
     assert_eq!(
         fixture.events.events().len(),
         3,
@@ -2720,7 +2721,7 @@ async fn host_runtime_services_resume_changed_input_fails_before_lease_claim_or_
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::Authorization);
+    assert_failed_outcome(outcome, FailureKind::Authorization);
     assert!(fixture.events.events().is_empty());
     // The approval request stores the original invocation fingerprint; changed input
     // computes a different resume fingerprint, so no matching lease is claimable.
@@ -2767,7 +2768,7 @@ async fn host_runtime_services_resume_wrong_user_scope_is_hidden_before_dispatch
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::Backend);
+    assert_failed_outcome(outcome, FailureKind::Backend);
     assert!(fixture.events.events().is_empty());
     let original_run = fixture
         .run_state
@@ -2820,7 +2821,7 @@ async fn host_runtime_services_resume_expired_lease_fails_before_dispatch() {
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::Authorization);
+    assert_failed_outcome(outcome, FailureKind::Authorization);
     assert!(fixture.events.events().is_empty());
     assert_eq!(
         fixture
@@ -2863,7 +2864,7 @@ async fn host_runtime_services_resume_trust_preflight_failure_fails_only_matchin
         ))
         .await
         .unwrap();
-    assert_failed_outcome(wrong_scope_outcome, RuntimeFailureKind::MissingRuntime);
+    assert_failed_outcome(wrong_scope_outcome, FailureKind::MissingRuntime);
     assert_blocked_approval_run(
         &fixture,
         &scope,
@@ -2906,7 +2907,7 @@ async fn host_runtime_services_resume_trust_preflight_failure_fails_only_matchin
         ))
         .await
         .unwrap();
-    assert_failed_outcome(matching_outcome, RuntimeFailureKind::MissingRuntime);
+    assert_failed_outcome(matching_outcome, FailureKind::MissingRuntime);
 
     let failed_run = fixture
         .run_state
@@ -2959,7 +2960,7 @@ async fn host_runtime_services_resume_runtime_policy_denial_fails_matching_block
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::Authorization);
+    assert_failed_outcome(outcome, FailureKind::Authorization);
     let failed_run = fixture
         .run_state
         .get(&scope, context.invocation_id)
@@ -3057,7 +3058,7 @@ async fn host_runtime_services_resume_rejects_changed_actor_before_preflight_mut
         .await
         .unwrap();
 
-    assert_failed_outcome(valid_alice_outcome, RuntimeFailureKind::MissingRuntime);
+    assert_failed_outcome(valid_alice_outcome, FailureKind::MissingRuntime);
     assert_alice_run_status(
         fixture.run_state.as_ref(),
         &scope,
@@ -3125,7 +3126,7 @@ async fn host_runtime_services_auth_resume_rejects_changed_actor_before_prefligh
         .await
         .unwrap();
 
-    assert_failed_outcome(valid_alice_outcome, RuntimeFailureKind::MissingRuntime);
+    assert_failed_outcome(valid_alice_outcome, FailureKind::MissingRuntime);
     assert_alice_run_status(
         fixture.run_state.as_ref(),
         &scope,
@@ -3163,7 +3164,7 @@ async fn host_runtime_services_auth_decline_terminalizes_matching_blocked_invoca
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::GateDeclined);
+    assert_failed_outcome(outcome, FailureKind::GateDeclined);
     let record = fixture
         .run_state
         .get(&scope, invocation_id)
@@ -3319,7 +3320,7 @@ async fn host_runtime_services_auth_decline_keeps_run_blocked_when_store_is_unav
         .decline_auth_capability((context, script_capability_id()))
         .await
         .expect("retry terminalizes the exact blocked invocation");
-    assert_failed_outcome(retry, RuntimeFailureKind::GateDeclined);
+    assert_failed_outcome(retry, FailureKind::GateDeclined);
     assert_alice_run_status(
         fixture.run_state.as_ref(),
         &scope,
@@ -3466,7 +3467,7 @@ async fn host_runtime_services_resume_spawn_rejects_changed_actor_before_input_a
         .await
         .unwrap();
 
-    assert_failed_outcome(valid_alice_outcome, RuntimeFailureKind::MissingRuntime);
+    assert_failed_outcome(valid_alice_outcome, FailureKind::MissingRuntime);
     assert_alice_run_status(
         run_state.as_ref(),
         &scope,
@@ -3666,7 +3667,7 @@ async fn host_runtime_services_auth_resume_trust_preflight_failure_fails_blocked
         ))
         .await
         .unwrap();
-    assert_failed_outcome(wrong_outcome, RuntimeFailureKind::MissingRuntime);
+    assert_failed_outcome(wrong_outcome, FailureKind::MissingRuntime);
 
     // Matching run must still be BlockedAuth (wrong scope → guard skips it).
     let run_after_wrong = fixture
@@ -3694,7 +3695,7 @@ async fn host_runtime_services_auth_resume_trust_preflight_failure_fails_blocked
         ))
         .await
         .unwrap();
-    assert_failed_outcome(matching_outcome, RuntimeFailureKind::MissingRuntime);
+    assert_failed_outcome(matching_outcome, FailureKind::MissingRuntime);
 
     let failed_run = fixture
         .run_state
@@ -3785,7 +3786,7 @@ async fn host_runtime_services_auth_resume_with_approval_id_fails_blocked_auth_r
         ))
         .await
         .unwrap();
-    assert_failed_outcome(outcome, RuntimeFailureKind::MissingRuntime);
+    assert_failed_outcome(outcome, FailureKind::MissingRuntime);
 
     // The BlockedAuth run must now be Failed, not stuck as BlockedAuth.
     let after = fixture
@@ -3834,7 +3835,7 @@ async fn host_runtime_services_resume_without_backing_stores_fails_closed() {
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::Backend);
+    assert_failed_outcome(outcome, FailureKind::Backend);
 }
 
 #[tokio::test]
@@ -3987,7 +3988,7 @@ async fn host_runtime_spawn_process_sandbox_rejects_invalid_plan_before_executor
 
     match outcome {
         RuntimeCapabilityOutcome::Failed(failure) => {
-            assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+            assert_eq!(failure.kind, FailureKind::InputEncode);
             assert_eq!(
                 failure.disposition(),
                 ironclaw_host_runtime::CapabilityFailureDisposition::ModelVisibleToolError,
@@ -4041,7 +4042,7 @@ async fn host_runtime_spawn_process_sandbox_runtime_policy_denial_fails_before_e
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::Authorization);
+    assert_failed_outcome(outcome, FailureKind::Authorization);
     assert!(
         sandbox_executor.requests().is_empty(),
         "runtime policy denial must fail before process spawn"
@@ -4075,7 +4076,7 @@ async fn host_runtime_spawn_process_sandbox_host_failure_fails_after_preflight()
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::Backend);
+    assert_failed_outcome(outcome, FailureKind::Backend);
     assert!(
         sandbox_executor.requests().is_empty(),
         "host spawn failure must not reach the process sandbox executor"
@@ -4213,7 +4214,7 @@ async fn host_runtime_spawn_process_sandbox_resume_changed_input_fails_before_ex
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::Authorization);
+    assert_failed_outcome(outcome, FailureKind::Authorization);
     assert!(
         sandbox_executor.requests().is_empty(),
         "changed resume input must fail before process spawn"
@@ -4291,7 +4292,7 @@ async fn host_runtime_spawn_process_sandbox_resume_invalid_plan_fails_before_exe
 
     match outcome {
         RuntimeCapabilityOutcome::Failed(failure) => {
-            assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+            assert_eq!(failure.kind, FailureKind::InputEncode);
             assert_eq!(
                 failure.disposition(),
                 ironclaw_host_runtime::CapabilityFailureDisposition::ModelVisibleToolError,
@@ -4386,7 +4387,7 @@ async fn host_runtime_spawn_process_sandbox_resume_host_failure_fails_after_appr
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::Backend);
+    assert_failed_outcome(outcome, FailureKind::Backend);
     assert!(
         sandbox_executor.requests().is_empty(),
         "host resume-spawn failure must not reach the process sandbox executor"
@@ -4469,7 +4470,7 @@ async fn host_runtime_services_maps_script_exit_failure_through_private_adapter(
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::Process);
+    assert_failed_outcome(outcome, FailureKind::ExitFailure);
 }
 
 #[tokio::test]
@@ -4496,7 +4497,7 @@ async fn host_runtime_services_maps_mcp_client_failure_through_private_adapter()
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::Backend);
+    assert_failed_outcome(outcome, FailureKind::Client);
 }
 
 #[tokio::test]
@@ -4525,7 +4526,7 @@ async fn host_runtime_services_surfaces_invalid_mcp_catalog_without_retrying() {
 
     match outcome {
         RuntimeCapabilityOutcome::Failed(failure) => {
-            assert_eq!(failure.kind, RuntimeFailureKind::InvalidOutput);
+            assert_eq!(failure.kind, FailureKind::OutputDecode);
             assert_eq!(
                 failure.disposition(),
                 ironclaw_host_runtime::CapabilityFailureDisposition::ModelVisibleToolError,
@@ -4630,7 +4631,7 @@ async fn host_runtime_services_rejects_broader_scoped_mount_before_dispatch() {
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::Authorization);
+    assert_failed_outcome(outcome, FailureKind::Authorization);
     assert!(
         script_runtime.recorded_mounts().is_empty(),
         "broader mount obligation must fail before runtime dispatch"
@@ -4920,7 +4921,7 @@ async fn host_runtime_services_enforces_output_limit_and_reconciles_resource_usa
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::OutputTooLarge);
+    assert_failed_outcome(outcome, FailureKind::OutputTooLarge);
     assert_eq!(governor.reserved_for(&account), Default::default());
     assert!(
         governor.usage_for(&account).output_bytes > 8,
@@ -4976,7 +4977,7 @@ async fn host_runtime_services_releases_reservation_when_dispatch_preflight_fail
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::MissingRuntime);
+    assert_failed_outcome(outcome, FailureKind::MissingRuntimeBackend);
     assert_eq!(governor.reserved_for(&account), Default::default());
     assert!(matches!(
         governor.release(reservation_id).unwrap_err(),
@@ -5029,7 +5030,7 @@ async fn host_runtime_services_fails_closed_when_durable_obligation_audit_append
 
     match outcome {
         RuntimeCapabilityOutcome::Failed(failure) => {
-            assert_eq!(failure.kind, RuntimeFailureKind::Backend);
+            assert_eq!(failure.kind, FailureKind::Backend);
             let message = failure.message.unwrap_or_default();
             assert!(message.contains("obligation handling failed: Audit"));
             assert!(
@@ -6178,7 +6179,7 @@ async fn host_runtime_services_wasm_operation_failed_reconciles_usage_after_host
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::OperationFailed);
+    assert_failed_outcome(outcome, FailureKind::OperationFailed);
     assert_eq!(runtime.http.requests().len(), 1);
     assert_eq!(
         runtime
@@ -6217,7 +6218,7 @@ async fn host_runtime_services_wasm_invalid_output_reconciles_usage_after_host_e
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::InvalidOutput);
+    assert_failed_outcome(outcome, FailureKind::OutputDecode);
     assert_eq!(runtime.http.requests().len(), 1);
     assert_eq!(
         runtime
@@ -6256,7 +6257,7 @@ async fn host_runtime_services_wasm_operation_failed_reconciles_wall_clock_after
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::OperationFailed);
+    assert_failed_outcome(outcome, FailureKind::OperationFailed);
     assert_eq!(runtime.http.requests().len(), 1);
     let usage = runtime.governor.usage_for(&sample_account());
     assert!(
@@ -6665,7 +6666,7 @@ async fn invoke_capability_no_credential_requirement_with_wired_store_proceeds_n
 ///    (`secret_obligation_failed`), so the resumed call is `Failed`.
 ///
 /// To prove the resume failure comes from the obligation backstop and not from a
-/// premature authorization denial (both surface as `RuntimeFailureKind::Authorization`),
+/// premature authorization denial (both surface as `FailureKind::Authorization`),
 /// the store counts `metadata()` calls. The counter is reset after step 1, so a
 /// non-zero count after resume can only come from the obligation handler probing the
 /// store — `resume_capability` does not itself run the pre-flight. `ApprovalThenGrantAuthorizer`
@@ -6804,7 +6805,7 @@ async fn invoke_capability_secret_store_error_skips_preflight() {
     // the store via `metadata()` at least once on the resume path. A premature
     // authorization denial (the wrong reason) would block BEFORE the obligation handler
     // and never probe the store — so this distinguishes the two even though both map to
-    // `RuntimeFailureKind::Authorization`.
+    // `FailureKind::Authorization`.
     assert!(
         secret_backend.count(FilesystemOperation::ReadFile) > read_probes_before_resume,
         "resume must reach the dispatch-time obligation backstop and re-probe the store; \

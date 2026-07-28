@@ -15,12 +15,13 @@ use ironclaw_capabilities::{
 use ironclaw_events::InMemoryAuditSink;
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_filesystem::InMemoryBackend;
+use ironclaw_host_api::FailureKind;
 use ironclaw_host_api::dispatch_test_support::TestDispatcher;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationHandler, BuiltinObligationServices, CapabilitySurfaceVersion,
     DefaultHostRuntime, HostRuntime, RuntimeCapabilityOutcome, RuntimeCredentialAccessSecret,
-    RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver, RuntimeFailureKind,
+    RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver,
 };
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
 use ironclaw_secrets::{
@@ -1011,7 +1012,7 @@ async fn default_host_runtime_fails_closed_when_resource_ceiling_lacks_required_
 
     match outcome {
         RuntimeCapabilityOutcome::Failed(failure) => {
-            assert_eq!(failure.kind, RuntimeFailureKind::Resource);
+            assert_eq!(failure.kind, FailureKind::Resource);
         }
         other => panic!("expected failed outcome, got {other:?}"),
     }

@@ -15,10 +15,11 @@ use ironclaw_capabilities::{
 };
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
+use ironclaw_host_api::FailureKind;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime,
-    RuntimeCapabilityOutcome, RuntimeFailureKind,
+    RuntimeCapabilityOutcome,
 };
 use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceGovernor, ResourceTally,
@@ -138,7 +139,7 @@ async fn default_host_runtime_fails_unsupported_obligations_before_runtime_dispa
         panic!("expected failed host-runtime outcome, got {outcome:?}");
     };
     assert_eq!(failure.capability_id, capability_id());
-    assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
+    assert_eq!(failure.kind, FailureKind::Authorization);
     let message = failure
         .message
         .expect("failure should carry stable message");

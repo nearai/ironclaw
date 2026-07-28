@@ -328,11 +328,10 @@ impl DefaultExecutorPipeline {
                         ),
                     )? {
                         StopStep::Stop {
-                            state: stop_state,
+                            state: mut stop_state,
                             kind,
                             pending_input_ack: mut ack,
                         } => {
-                            let mut stop_state = stop_state;
                             if completion_nudge_should_fire(host, &stop_state, &kind) {
                                 // Instead of terminating, re-enter the loop for one
                                 // more iteration with the full tool surface and a
@@ -340,8 +339,7 @@ impl DefaultExecutorPipeline {
                                 // the task (e.g. write a required output file) before
                                 // answering. Mirrors the drained-follow-up continue
                                 // (defer the ack returned by stop.decide to the next
-                                // iteration) rather than the terminal, tool-free
-                                // final-answer nudge.
+                                // iteration) rather than terminating.
                                 stop_state.completion_nudges_used += 1;
                                 stop_state.completion_nudge_pending = true;
                                 stop_state.last_reply_trailed_off = false;
@@ -457,16 +455,22 @@ impl DefaultExecutorPipeline {
                         ),
                     )? {
                         StopStep::Stop {
-                            state,
+                            state: stopped_state,
                             kind,
                             pending_input_ack: mut ack,
                         } => {
-                            let exit_iteration = state.iteration;
+                            let exit_iteration = stopped_state.iteration;
                             let exit = latency::stage!(
                                 "exit_resume",
                                 host.run_context(),
                                 exit_iteration,
-                                self.exit.process(ctx, ExitInput { state, kind }),
+                                self.exit.process(
+                                    ctx,
+                                    ExitInput {
+                                        state: stopped_state,
+                                        kind,
+                                    },
+                                ),
                             )?;
                             latency::stage!(
                                 "ack_pending_input_before_exit_resume",
@@ -546,16 +550,22 @@ impl DefaultExecutorPipeline {
                         ),
                     )? {
                         StopStep::Stop {
-                            state,
+                            state: stopped_state,
                             kind,
                             pending_input_ack: mut ack,
                         } => {
-                            let exit_iteration = state.iteration;
+                            let exit_iteration = stopped_state.iteration;
                             let exit = latency::stage!(
                                 "exit_skip_model",
                                 host.run_context(),
                                 exit_iteration,
-                                self.exit.process(ctx, ExitInput { state, kind }),
+                                self.exit.process(
+                                    ctx,
+                                    ExitInput {
+                                        state: stopped_state,
+                                        kind,
+                                    },
+                                ),
                             )?;
                             latency::stage!(
                                 "ack_pending_input_before_exit_skip_model",
@@ -622,7 +632,7 @@ fn completion_nudge_should_fire(
         return false;
     }
     match kind {
-        StopKind::NoProgressDetected => true,
+        StopKind::NoProgressDetected => false,
         StopKind::GracefulStop => state.last_reply_trailed_off,
         StopKind::Aborted(_) => false,
     }

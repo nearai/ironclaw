@@ -37,9 +37,9 @@ use ironclaw_host_runtime::{
     HostRuntimeError, HostRuntimeHealth, HostRuntimeServices, HostRuntimeStatus,
     RuntimeApprovalGate, RuntimeApprovalResume, RuntimeAuthGate, RuntimeBlockedReason,
     RuntimeCapabilityCompleted, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
-    RuntimeCapabilityUnknown, RuntimeFailureKind, RuntimeGateId, RuntimeInvocation,
-    RuntimeProcessHandle, RuntimeResourceGate, RuntimeStatusRequest, SurfaceKind,
-    VisibleCapability, VisibleCapabilityAccess,
+    RuntimeCapabilityUnknown, RuntimeGateId, RuntimeInvocation, RuntimeProcessHandle,
+    RuntimeResourceGate, RuntimeStatusRequest, SurfaceKind, VisibleCapability,
+    VisibleCapabilityAccess,
 };
 use ironclaw_loop_host::{
     AwaitEdgeSettler, CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
@@ -2961,7 +2961,7 @@ async fn turn_runner_worker_full_reborn_continues_after_tool_network_outage() {
     runtime.push_outcome(RuntimeCapabilityOutcome::Failed(
         RuntimeCapabilityFailure::new(
             capability_id.clone(),
-            RuntimeFailureKind::Network,
+            FailureKind::Network,
             Some("offline transport sk-secret /host/path".to_string()),
         ),
     ));
@@ -6850,7 +6850,8 @@ async fn text_only_host_sanitizes_runtime_failure_message_before_driver_output()
     runtime.push_outcome(RuntimeCapabilityOutcome::Failed(
         RuntimeCapabilityFailure::new(
             capability_id.clone(),
-            RuntimeFailureKind::Dispatcher,
+            // Retired `Dispatcher` merged into the unified retryable `Internal`.
+            FailureKind::Internal,
             Some("raw provider error sk-secret /host/path tool_input".to_string()),
         ),
     ));
@@ -7089,10 +7090,16 @@ async fn text_only_host_maps_explicit_unknown_runtime_outcome_to_failure() {
     let Resolution::Done(o) = outcome else {
         panic!("expected failed capability outcome");
     };
-    assert_eq!(
-        o.verdict.error_kind(),
-        Some(&FailureKind::unknown("streaming").expect("valid failure kind"))
-    );
+    // The closed FailureKind has no open `Unknown`; an unrecognized runtime
+    // outcome tag falls back to the explicit non-retryable `Unclassified`
+    // sink — surfaced to the model, never silently retried.
+    assert!(matches!(
+        o.verdict,
+        ToolVerdict::RecoverableFailure {
+            error_kind: FailureKind::Unclassified,
+            ..
+        }
+    ));
     assert_eq!(
         o.summary.as_str(),
         "streaming outcomes are not supported by this loop port"
@@ -7270,7 +7277,7 @@ async fn text_only_host_does_not_reinvoke_runtime_after_failed_outcome_retry() {
         capability_descriptor(capability_id.as_str()),
     ])));
     runtime.push_outcome(RuntimeCapabilityOutcome::Failed(
-        RuntimeCapabilityFailure::new(capability_id.clone(), RuntimeFailureKind::Dispatcher, None),
+        RuntimeCapabilityFailure::new(capability_id.clone(), FailureKind::Internal, None),
     ));
     let io = Arc::new(InMemoryCapabilityIo::default());
     let input_ref = CapabilityInputRef::new("input:failed-idempotent-request").unwrap();

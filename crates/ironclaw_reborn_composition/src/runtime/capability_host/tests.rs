@@ -2996,7 +2996,7 @@ mod tests {
         };
         assert_eq!(
             invalid_reference.verdict.error_kind(),
-            Some(&FailureKind::InvalidInput)
+            Some(&FailureKind::InputEncode)
         );
         assert_eq!(
             invalid_reference.summary.as_str(),
@@ -3145,7 +3145,7 @@ mod tests {
         };
         assert_eq!(
             missing_record.verdict.error_kind(),
-            Some(&FailureKind::InvalidInput)
+            Some(&FailureKind::OperationFailed)
         );
         assert_eq!(
             missing_record.summary.as_str(),
@@ -3196,7 +3196,7 @@ mod tests {
         };
         assert_eq!(
             binary.verdict.error_kind(),
-            Some(&FailureKind::InvalidInput)
+            Some(&FailureKind::OutputDecode)
         );
         assert_eq!(
             binary.summary.as_str(),
@@ -3234,7 +3234,7 @@ mod tests {
         };
         assert_eq!(
             unavailable.verdict.error_kind(),
-            Some(&FailureKind::InvalidInput)
+            Some(&FailureKind::OperationFailed)
         );
     }
 
@@ -3567,7 +3567,7 @@ mod tests {
             };
             assert_eq!(
                 failure.verdict.error_kind(),
-                Some(&FailureKind::InvalidInput),
+                Some(&FailureKind::InputEncode),
                 "{label}: expected InvalidInput verdict"
             );
             assert_eq!(
@@ -3751,7 +3751,7 @@ mod tests {
         };
         assert_eq!(
             failure.verdict.error_kind(),
-            Some(&FailureKind::InvalidInput)
+            Some(&FailureKind::OperationFailed)
         );
         assert_eq!(
             failure.summary.as_str(),
@@ -4165,7 +4165,7 @@ mod tests {
                 // gives a fixed, host-authored summary.
                 assert_eq!(
                     failure.verdict.error_kind(),
-                    Some(&FailureKind::InvalidInput)
+                    Some(&FailureKind::InputEncode)
                 );
                 assert_eq!(
                     failure.summary.as_str(),
@@ -4613,7 +4613,7 @@ mod tests {
                 // function gives a fixed, host-authored summary.
                 assert_eq!(
                     failure.verdict.error_kind(),
-                    Some(&FailureKind::InvalidInput)
+                    Some(&FailureKind::InputEncode)
                 );
                 assert_eq!(
                     failure.summary.as_str(),
@@ -5317,7 +5317,7 @@ mod tests {
             Resolution::Done(failure) => {
                 assert_eq!(
                     failure.verdict.error_kind(),
-                    Some(&FailureKind::InvalidInput)
+                    Some(&FailureKind::InputEncode)
                 );
             }
             other => panic!("expected raw workspace read to be denied, got {other:?}"),

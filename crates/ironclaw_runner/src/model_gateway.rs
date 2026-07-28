@@ -2759,6 +2759,32 @@ mod tests {
         );
     }
 
+    /// Regression (#6684 review): a malformed model-supplied provider tool
+    /// call (e.g. bad `spawn_subagent` JSON) is rejected by the port at
+    /// validate/register time as `InvalidInvocation`. The gateway must route
+    /// that into the model-stage `InvalidOutput` lane (invalid-output repair
+    /// retries with a model-visible observation) — never a run-ending host
+    /// fault. `map_provider_tool_output_error` is the single mapping seam
+    /// both the validation and the registration loops call.
+    #[test]
+    fn malformed_provider_tool_call_registration_errors_stay_model_repairable() {
+        for kind in [
+            AgentLoopHostErrorKind::InvalidInvocation,
+            AgentLoopHostErrorKind::Invalid,
+            AgentLoopHostErrorKind::InvalidOutput,
+        ] {
+            let mapped = map_provider_tool_output_error(AgentLoopHostError::new(
+                kind,
+                "invalid spawn_subagent input: missing field mission",
+            ));
+            assert_eq!(
+                mapped.kind,
+                HostManagedModelErrorKind::InvalidOutput,
+                "mapping for {kind:?}"
+            );
+        }
+    }
+
     #[test]
     fn capability_model_request_errors_preserve_stale_distinction() {
         for (host_kind, gateway_kind) in [

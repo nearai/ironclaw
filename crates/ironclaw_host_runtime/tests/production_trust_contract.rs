@@ -6,11 +6,11 @@ use std::sync::Arc;
 
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
+use ironclaw_host_api::FailureKind;
 use ironclaw_host_api::dispatch_test_support::TestDispatcher;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime, RuntimeCapabilityOutcome,
-    RuntimeFailureKind,
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy, InvalidationBus,
@@ -134,7 +134,7 @@ fn assert_authorization_failed(outcome: RuntimeCapabilityOutcome) {
     match outcome {
         RuntimeCapabilityOutcome::Failed(failure) => {
             assert_eq!(failure.capability_id, capability_id());
-            assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
+            assert_eq!(failure.kind, FailureKind::Authorization);
         }
         other => panic!("expected Failed(Authorization), got {other:?}"),
     }

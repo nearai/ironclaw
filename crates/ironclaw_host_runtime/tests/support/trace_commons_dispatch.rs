@@ -26,6 +26,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::DiskFilesystem;
+use ironclaw_host_api::FailureKind;
 use ironclaw_host_api::{
     runtime_policy::{
         ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
@@ -35,7 +36,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome,
-    RuntimeFailureKind, builtin_first_party_handlers, builtin_first_party_package,
+    builtin_first_party_handlers, builtin_first_party_package,
 };
 use ironclaw_network::{PolicyNetworkHttpEgress, ReqwestNetworkTransport};
 use ironclaw_resources::InMemoryResourceGovernor;
@@ -347,7 +348,7 @@ pub async fn invoke_with_context(
     capability: &str,
     input: Value,
     context: ExecutionContext,
-) -> Result<Value, RuntimeFailureKind> {
+) -> Result<Value, FailureKind> {
     let outcome = runtime
         .invoke_capability((
             context,

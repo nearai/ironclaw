@@ -4,14 +4,14 @@ use std::sync::Arc;
 
 use crate::{ProjectCaller, ProjectService, ProjectServiceError, RebornCreateProjectRequest};
 use async_trait::async_trait;
-use ironclaw_host_api::{InvocationId, Resolution, UserId};
+use ironclaw_host_api::{FailureKind, InvocationId, Resolution, UserId};
 use ironclaw_loop_host::{
     CapabilityResultWrite, DurablePersistence, SyntheticCapability, SyntheticCapabilityDescriptor,
     SyntheticCapabilityHandler, SyntheticCapabilityInvocation,
 };
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureKind, CapabilityProgress,
-    ConcurrencyHint, LoopRunContext, resolution,
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityProgress, ConcurrencyHint,
+    LoopRunContext, resolution,
 };
 
 pub const PROJECT_CREATE_CAPABILITY_ID: &str = "builtin.project_create";
@@ -193,23 +193,23 @@ fn project_service_outcome(error: ProjectServiceError) -> Result<Resolution, Age
         // Invariant 2). The offending field name is the model's own input,
         // which it already has; it does not belong in the summary.
         ProjectServiceError::InvalidInput { .. } => (
-            CapabilityFailureKind::InvalidInput,
+            FailureKind::InputEncode,
             "invalid project input".to_string(),
         ),
         ProjectServiceError::Conflict => (
-            CapabilityFailureKind::OperationFailed,
+            FailureKind::OperationFailed,
             "a project with that identity already exists".to_string(),
         ),
         ProjectServiceError::Denied => (
-            CapabilityFailureKind::PolicyDenied,
+            FailureKind::PolicyDenied,
             "not permitted to create this project".to_string(),
         ),
         ProjectServiceError::NotFound => (
-            CapabilityFailureKind::OperationFailed,
+            FailureKind::OperationFailed,
             "project creation failed".to_string(),
         ),
         ProjectServiceError::Unavailable => (
-            CapabilityFailureKind::Unavailable,
+            FailureKind::Unavailable,
             "project service temporarily unavailable".to_string(),
         ),
         ProjectServiceError::Internal => {
@@ -296,7 +296,7 @@ mod tests {
         })
         .expect("invalid input must be a model-visible failure, not terminal");
 
-        assert_recoverable_failure(&outcome, ironclaw_host_api::FailureKind::InvalidInput);
+        assert_recoverable_failure(&outcome, ironclaw_host_api::FailureKind::InputEncode);
     }
 
     #[test]

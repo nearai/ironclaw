@@ -3,13 +3,13 @@
 use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{InvocationId, Resolution};
+use ironclaw_host_api::{FailureKind, InvocationId, Resolution};
 use ironclaw_loop_host::{
     CapabilityResultWrite, DurablePersistence, SkillBundleSource, SyntheticCapability,
     SyntheticCapabilityDescriptor, SyntheticCapabilityHandler, SyntheticCapabilityInvocation,
 };
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureKind, ConcurrencyHint, resolution,
+    AgentLoopHostError, AgentLoopHostErrorKind, ConcurrencyHint, resolution,
 };
 
 use crate::{
@@ -230,13 +230,16 @@ fn skill_activation_selection_outcome(
 ) -> Result<Resolution, AgentLoopHostError> {
     use crate::SkillActivationSelectionError as SelectionError;
     match error {
+        // A resource limit, not an encoding fault — `Resource` keeps the
+        // precise kind for downstream fate/wire/UI projections (both kinds
+        // are ModelVisible, so recoverability is unchanged).
         SelectionError::ContextBudgetExceeded => Ok(resolution::failed(
-            CapabilityFailureKind::InvalidInput,
+            FailureKind::Resource,
             "skill activation exceeds the per-run skill context budget; activate fewer or smaller skills".to_string(),
             None,
         )),
         SelectionError::AmbiguousSkill { .. } => Ok(resolution::failed(
-            CapabilityFailureKind::InvalidInput,
+            FailureKind::InputEncode,
             "ambiguous skill name; specify a single unique skill to activate".to_string(),
             None,
         )),
@@ -289,7 +292,8 @@ mod tests {
         )
         .expect("budget-exceeded must be a model-visible failure, not a terminal host error");
 
-        assert_recoverable_invalid_input(&outcome);
+        // A budget limit is a resource failure, not an input-encoding fault.
+        assert_recoverable_failure(&outcome, ironclaw_host_api::FailureKind::Resource);
     }
 
     #[test]
@@ -301,19 +305,20 @@ mod tests {
             })
             .expect("ambiguous skill must be a model-visible failure, not a terminal host error");
 
-        assert_recoverable_invalid_input(&outcome);
+        assert_recoverable_failure(&outcome, ironclaw_host_api::FailureKind::InputEncode);
     }
 
     /// A recoverable model-visible failure is `Resolution::Done` carrying a
-    /// `RecoverableFailure(InvalidInput)` verdict (the §5.3 collapse of the old
-    /// `CapabilityOutcome::Failed { InvalidInput }`).
-    fn assert_recoverable_invalid_input(resolution: &ironclaw_host_api::Resolution) {
+    /// `RecoverableFailure` verdict with the per-case precise kind (the §5.3
+    /// collapse of the old `CapabilityOutcome::Failed { .. }`).
+    fn assert_recoverable_failure(
+        resolution: &ironclaw_host_api::Resolution,
+        expected_kind: ironclaw_host_api::FailureKind,
+    ) {
         match resolution {
             ironclaw_host_api::Resolution::Done(outcome) => assert_eq!(
                 outcome.verdict,
-                ironclaw_host_api::ToolVerdict::recoverable_failure(
-                    ironclaw_host_api::FailureKind::InvalidInput
-                )
+                ironclaw_host_api::ToolVerdict::recoverable_failure(expected_kind)
             ),
             other => panic!("expected Resolution::Done recoverable failure, got {other:?}"),
         }

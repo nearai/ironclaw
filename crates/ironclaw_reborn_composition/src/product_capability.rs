@@ -17,7 +17,7 @@ use ironclaw_host_api::{
     ResourceEstimate, ResourceScope, ResultPreviewMeta, ResultProgress, ResultRef, ResumeToken,
     RuntimeKind, SafeSummary, ScopedPath, Suspension, TerminateHint, ToolVerdict, TrustClass,
 };
-use ironclaw_host_runtime::{HostRuntime, RuntimeCapabilityOutcome, RuntimeFailureKind};
+use ironclaw_host_runtime::{HostRuntime, RuntimeCapabilityOutcome};
 use ironclaw_product::{
     EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
     EXTENSION_REMOVE_CAPABILITY_ID, ProductCapabilityInvoker,
@@ -368,12 +368,12 @@ async fn product_resolution(
         RuntimeCapabilityOutcome::Failed(failure)
             if matches!(
                 failure.kind,
-                RuntimeFailureKind::Authorization | RuntimeFailureKind::PolicyDenied
+                FailureKind::Authorization | FailureKind::PolicyDenied
             ) =>
         {
             let reason = match failure.kind {
-                RuntimeFailureKind::Authorization => DenyReason::MissingGrant,
-                RuntimeFailureKind::PolicyDenied => DenyReason::PolicyDenied,
+                FailureKind::Authorization => DenyReason::MissingGrant,
+                FailureKind::PolicyDenied => DenyReason::PolicyDenied,
                 _ => DenyReason::InternalInvariantViolation,
             };
             Ok(Resolution::Denied(

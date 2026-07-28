@@ -47,11 +47,11 @@ use ironclaw_turns::{
     TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnScope,
     TurnStateRowStore, TurnStateStore, TurnStatus,
     run_profile::{
-        AgentLoopHostErrorKind, BatchPolicyKind, CapabilityFailureKind, FinalizeAssistantMessage,
-        HookDecisionSummary, InstructionSafetyContext, LoopCheckpointKind, LoopDriverId,
-        LoopGateKind, LoopHostMilestone, LoopHostMilestoneEmitter, LoopHostMilestoneKind,
-        LoopHostMilestoneSink, LoopModelPort, LoopModelRequest, LoopPromptBundleRequest,
-        LoopPromptPort, LoopRunContext, LoopTranscriptPort, ParentLoopOutput, PromptMode,
+        AgentLoopHostErrorKind, BatchPolicyKind, FinalizeAssistantMessage, HookDecisionSummary,
+        InstructionSafetyContext, LoopCheckpointKind, LoopDriverId, LoopGateKind,
+        LoopHostMilestone, LoopHostMilestoneEmitter, LoopHostMilestoneKind, LoopHostMilestoneSink,
+        LoopModelPort, LoopModelRequest, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
+        LoopTranscriptPort, ParentLoopOutput, PromptMode,
     },
     runner::ClaimedTurnRun,
 };
@@ -1029,7 +1029,7 @@ async fn publish_loop_milestone_projects_capability_lifecycle_to_runtime_events(
             capability_id: second_capability_id.clone(),
             provider: Some(provider_id.clone()),
             runtime: Some(RuntimeKind::FirstParty),
-            reason_kind: CapabilityFailureKind::OperationFailed,
+            reason_kind: ironclaw_host_api::FailureKind::OperationFailed,
             safe_summary: None,
         },
     ] {

@@ -52,10 +52,10 @@ use loop_exit::{
     reply_trailed_off,
 };
 use mapping::{
-    batch_policy_kind, blocked_kind, capability_batch_counts, capability_error_class,
-    capability_error_failure_category, capability_failure_kind, capability_host_error,
-    checkpoint_kind_to_host, honor_retry_alteration, loop_gate_kind, model_error_class,
-    model_error_failure_summary, model_preference_to_host, sanitized_strategy_summary_or_fallback,
+    batch_policy_kind, blocked_kind, capability_batch_counts, capability_error_failure_category,
+    capability_host_error, capability_port_error_is_terminal, checkpoint_kind_to_host,
+    honor_retry_alteration, loop_gate_kind, model_error_class, model_error_failure_summary,
+    model_preference_to_host, sanitized_strategy_summary_or_fallback,
 };
 use model::{ModelInput, ModelStage, ModelStep};
 use pipeline::{DefaultExecutorPipeline, ExecutorStage, StageContext};
@@ -121,7 +121,7 @@ pub enum AgentLoopExecutorError {
     #[error("checkpoint write failed at {stage:?}")]
     CheckpointFailed { stage: CheckpointKind },
     /// Constructed when a model or capability call returns a cancelled outcome
-    /// (i.e. `AgentLoopHostErrorKind::Cancelled` or `CapabilityFailureKind::Cancelled`
+    /// (i.e. `AgentLoopHostErrorKind::Cancelled` or `FailureKind::Cancelled`
     /// surfaces from an in-flight external call). Between-call boundary cancellation
     /// — detected cooperatively by `CheckpointStage::cancel_if_requested` — returns
     /// `LoopExit::Cancelled` directly and never constructs this variant.
