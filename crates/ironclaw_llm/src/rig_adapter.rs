@@ -1848,7 +1848,6 @@ mod tests {
         );
     }
 
-    #[test]
     /// A number that merely *contains* 401 or 403 is not an auth failure.
     ///
     /// `is_auth_error_message` matched `"401"`/`"403"` with a bare `contains`,
@@ -1926,6 +1925,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn map_rig_error_unrelated_still_request_failed() {
         let err = map_rig_error("openai", "connection reset by peer");
         assert!(
