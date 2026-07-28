@@ -611,39 +611,58 @@ fn safe_summary_or_placeholder(raw: String) -> SafeSummary {
 /// `model_view_denied`); host_api's [`DenyReason`] is a fixed closed enum whose
 /// variants originate on the host authorize path, not the loop. There is no
 /// faithful 1:1, so this is a best-effort match: a reason string that already
-/// spells a `DenyReason` snake_case tag is honored, and everything else — every
-/// loop-originated denial — buckets into the model-visible catch-all
-/// [`DenyReason::PolicyDenied`].
-/// Map a denial's producer-side reason onto the model-visible [`DenyReason`].
+/// Every denial reason string a producer in this workspace can mint.
 ///
-/// This was a serde parse over `DenyReason`'s snake_case tags, which silently
-/// fell back to `PolicyDenied`. Twelve of the thirteen reason strings
-/// production actually mints are not `DenyReason` tags, so nearly every denial
-/// reached the model as a flat "policy denied" — *no capabilities are
-/// available to you*, *a hook blocked this*, *you need to authenticate*, and
-/// *an approval is waiting for a human* were all indistinguishable. Only
-/// `network_denied` happened to coincide with a tag and survive.
+/// Verified by enumerating the mint sites — `CapabilityDeniedReasonKind::unknown`,
+/// `capability_denied_reason_kind`, the named `EmptySurface` variant, and
+/// `denied_reason_kind_for` (guarded to `Authorization | PolicyDenied`, so it
+/// yields exactly `auth_denied` and `policy_denied`). `PRODUCTION_DENY_REASONS`
+/// pins that list; [`classify_deny_reason`] must have an answer for each, so a
+/// newly minted reason cannot silently inherit the conservative fallback.
 ///
-/// The distinction the model needs is **what would unlock the call** (#6284
-/// item 4): a permanent block, a missing credential, and a pending approval
-/// call for three different next actions, and collapsing them leaves the model
-/// guessing. This is an explicit table so a new reason has to choose, rather
-/// than defaulting into the flattest answer available.
-fn deny_reason_from_kind(kind: &CapabilityDeniedReasonKind) -> DenyReason {
-    match kind.as_str() {
+/// Deliberately excluded: `expected_approval` and `host_policy_denied`, which
+/// [`classify_deny_reason`] handles but which appear only in contract-test
+/// fixtures. Listing them here would claim producer coverage this crate does
+/// not have.
+#[cfg(test)]
+const PRODUCTION_DENY_REASONS: [&str; 12] = [
+    "auth_denied",
+    "policy_denied",
+    "empty_surface",
+    "hook_denied",
+    "hook_gate_ref_unavailable",
+    "invalid_spawn_input",
+    "missing_provider_trust",
+    "model_view_denied",
+    "network_denied",
+    "outbound_delivery_approval_required",
+    "outside_visible_surface",
+    "surface_profile_denied",
+];
+
+/// Classify a denial's producer-side reason, or `None` if nobody has classified
+/// it yet.
+///
+/// Split out from [`deny_reason_from_kind`] so the "unclassified" case stays
+/// *visible*. Folded into the function, an unclassified reason is
+/// indistinguishable from a deliberate `PolicyDenied`, which is precisely how
+/// the original collapse hid: every reason looked like a decision.
+fn classify_deny_reason(tag: &str) -> Option<DenyReason> {
+    Some(match tag {
         // Named a capability that is not in this caller's view: nothing to
         // unlock, and retrying the same call cannot succeed.
         //
         // `empty_surface` deliberately stays `PolicyDenied` below rather than
         // joining these. An empty surface is normally a profile/policy outcome
-        // ("this loop is configured without tools"), and two existing tests pin
-        // that reading — `deny_record_reason_maps_best_effort_with_policy_fallback`
+        // ("this loop is configured without tools"), and four sites pin that
+        // reading — `deny_record_reason_maps_best_effort_with_policy_fallback`
         // names it outright. Reclassifying it is arguable but unproven, so the
         // pinned decision stands.
         "model_view_denied" | "outside_visible_surface" => DenyReason::UnknownCapability,
         // A credential is missing or refused: an auth flow is the unlock.
         "auth_denied" => DenyReason::UnknownSecret,
         // A human approval is pending or was refused — re-asking can succeed.
+        // `expected_approval` is a contract-test tag, not a producer tag.
         "outbound_delivery_approval_required" | "expected_approval" => DenyReason::ApprovalDenied,
         // Egress refused by network policy.
         "network_denied" => DenyReason::NetworkDenied,
@@ -652,13 +671,41 @@ fn deny_reason_from_kind(kind: &CapabilityDeniedReasonKind) -> DenyReason {
         "hook_gate_ref_unavailable" => DenyReason::InternalInvariantViolation,
         // Model-supplied input the model itself can correct.
         "invalid_spawn_input" => DenyReason::MissingGrant,
+        // The provider has no trust decision on record — a grant is what is
+        // missing, not a permission the caller already lacks.
+        "missing_provider_trust" => DenyReason::MissingGrant,
         // Genuine policy refusals: nothing the caller does unlocks these.
-        "host_policy_denied" | "hook_denied" | "surface_profile_denied" => DenyReason::PolicyDenied,
-        // An unrecognised reason is a *new* one, and the honest answer is the
-        // conservative one — but it is now reachable only by a reason nobody
-        // has classified, not by every reason in the product.
-        _ => DenyReason::PolicyDenied,
-    }
+        // `host_policy_denied` is a contract-test tag, not a producer tag.
+        "policy_denied"
+        | "host_policy_denied"
+        | "hook_denied"
+        | "surface_profile_denied"
+        | "empty_surface" => DenyReason::PolicyDenied,
+        _ => return None,
+    })
+}
+
+/// Map a denial's producer-side reason onto the model-visible [`DenyReason`].
+///
+/// This was a serde parse over `DenyReason`'s snake_case tags, which silently
+/// fell back to `PolicyDenied`. Of the twelve reason strings production
+/// actually mints, only `network_denied` and `policy_denied` coincide with a
+/// tag; the other ten fell through, so nearly every denial reached the model as
+/// a flat "policy denied" — *no capabilities are available to you*, *a hook
+/// blocked this*, *you need to authenticate*, and *an approval is waiting for a
+/// human* were all indistinguishable.
+///
+/// The distinction the model needs is **what would unlock the call** (#6284
+/// item 4): a permanent block, a missing credential, and a pending approval
+/// call for three different next actions, and collapsing them leaves the model
+/// guessing.
+///
+/// An unclassified reason still resolves to `PolicyDenied` — the honest
+/// conservative answer — but that path is now reachable only by a reason nobody
+/// has classified, and `every_production_deny_reason_is_classified` fails if a
+/// producer adds one without choosing.
+fn deny_reason_from_kind(kind: &CapabilityDeniedReasonKind) -> DenyReason {
+    classify_deny_reason(kind.as_str()).unwrap_or(DenyReason::PolicyDenied)
 }
 
 #[cfg(test)]
@@ -671,9 +718,9 @@ mod deny_reason_tests {
 
     /// Denials must tell the model *what would unlock the call*.
     ///
-    /// The previous serde parse matched `DenyReason`'s own tags, and twelve of
-    /// the thirteen reasons production mints are not among them — so a missing
-    /// credential, a pending human approval, a blocked egress and a genuine
+    /// The previous serde parse matched `DenyReason`'s own tags, and ten of the
+    /// twelve reasons production mints are not among them — so a missing
+    /// credential, a pending human approval, an absent grant and a genuine
     /// policy block all arrived as `PolicyDenied`. Each of those wants a
     /// different next action from the model, and it had no way to tell them
     /// apart. This pins that they stay distinguishable.
@@ -724,6 +771,74 @@ mod deny_reason_tests {
             deny_reason_from_kind(&reason("hook_gate_ref_unavailable")),
             DenyReason::InternalInvariantViolation
         );
+        // A grant is what is missing here, not a permission already refused.
+        for tag in ["invalid_spawn_input", "missing_provider_trust"] {
+            assert_eq!(
+                deny_reason_from_kind(&reason(tag)),
+                DenyReason::MissingGrant,
+                "{tag} should read as a missing grant"
+            );
+        }
+    }
+
+    /// Every reason a producer in this workspace can mint must be classified
+    /// deliberately. Without this, a new producer tag silently inherits the
+    /// conservative `PolicyDenied` fallback and is indistinguishable from a
+    /// real policy refusal — which is exactly how the original collapse hid.
+    ///
+    /// If this fails after adding a denial site, classify the new tag in
+    /// `classify_deny_reason` and add it to `PRODUCTION_DENY_REASONS`.
+    #[test]
+    fn every_production_deny_reason_is_classified() {
+        for tag in PRODUCTION_DENY_REASONS {
+            assert!(
+                classify_deny_reason(tag).is_some(),
+                "{tag} is minted by a producer but nobody classified it; it \
+                 would reach the model as an undifferentiated policy refusal"
+            );
+        }
+    }
+
+    /// Drive the real `denied()` constructor, not the mapper in isolation.
+    ///
+    /// `denied()` writes the reason to two places the model and the audit trail
+    /// read separately — `Resolution::Denied`'s `reason_kind` and the
+    /// `DenyRecord` — and a mapper-only test cannot catch either channel losing
+    /// the distinction or the two disagreeing. (`.claude/rules/testing.md`:
+    /// test through the caller.)
+    #[test]
+    fn denied_surfaces_the_distinction_on_both_channels() {
+        let matrix = [
+            ("model_view_denied", DenyReason::UnknownCapability),
+            ("auth_denied", DenyReason::UnknownSecret),
+            (
+                "outbound_delivery_approval_required",
+                DenyReason::ApprovalDenied,
+            ),
+            ("network_denied", DenyReason::NetworkDenied),
+            (
+                "hook_gate_ref_unavailable",
+                DenyReason::InternalInvariantViolation,
+            ),
+            ("missing_provider_trust", DenyReason::MissingGrant),
+            ("hook_denied", DenyReason::PolicyDenied),
+            ("some_future_reason", DenyReason::PolicyDenied),
+        ];
+        for (tag, expected) in matrix {
+            let result = denied(reason(tag), format!("denied: {tag}"));
+            match &result.resolution {
+                Resolution::Denied(denial) => assert_eq!(
+                    denial.reason_kind,
+                    Some(expected),
+                    "{tag}: the model-facing channel lost the distinction"
+                ),
+                other => panic!("{tag}: expected Denied, got {other:?}"),
+            }
+            assert_eq!(
+                result.deny_record.reason, expected,
+                "{tag}: the audit record lost the distinction"
+            );
+        }
     }
 
     /// The conservative fallback must remain reachable only by a reason nobody
@@ -740,20 +855,7 @@ mod deny_reason_tests {
     /// reason maps to one value again, this fails.
     #[test]
     fn production_denial_reasons_do_not_collapse_to_one_value() {
-        let produced = [
-            "empty_surface",
-            "model_view_denied",
-            "outside_visible_surface",
-            "auth_denied",
-            "outbound_delivery_approval_required",
-            "network_denied",
-            "hook_gate_ref_unavailable",
-            "invalid_spawn_input",
-            "host_policy_denied",
-            "hook_denied",
-            "surface_profile_denied",
-        ];
-        let distinct: std::collections::HashSet<DenyReason> = produced
+        let distinct: std::collections::HashSet<DenyReason> = PRODUCTION_DENY_REASONS
             .iter()
             .map(|tag| deny_reason_from_kind(&reason(tag)))
             .collect();
