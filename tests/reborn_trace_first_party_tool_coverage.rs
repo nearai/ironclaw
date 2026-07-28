@@ -90,13 +90,18 @@ fn isolated_trace_commons_base_dir(test_name: &str) -> Option<std::path::PathBuf
     }
 
     let dir = tempfile::tempdir().expect("tempdir for IRONCLAW_BASE_DIR");
-    let status = std::process::Command::new(std::env::current_exe().expect("current test binary"))
+    let output = std::process::Command::new(std::env::current_exe().expect("current test binary"))
         .args(["--exact", test_name, "--nocapture"])
         .env(TRACE_COMMONS_TEST_CHILD, dir.path())
         .env("IRONCLAW_BASE_DIR", dir.path())
-        .status()
+        .output()
         .expect("run isolated Trace Commons test process");
-    assert!(status.success(), "isolated Trace Commons test failed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("test result: ok. 1 passed; 0 failed;"),
+        "isolated Trace Commons test did not run exactly one test\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     // ponytail: a child process isolates the existing env-based API; inject a
     // base path into the capability harness if production gains that seam.
     None
