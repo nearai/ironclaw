@@ -48,6 +48,7 @@ fn first_party_test_package(service: &str, capability_id: &str) -> ExtensionPack
                 origin_gate_matrix: None,
             }],
             hooks: Vec::new(),
+            mcp_attribution: None,
         },
         VirtualPath::new(format!("/system/extensions/{service}")).unwrap(),
     )

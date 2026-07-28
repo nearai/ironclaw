@@ -587,6 +587,17 @@ impl ExtensionRuntimeV2 {
     }
 }
 
+/// Attribution contract a hosted-MCP provider opted into (v3 `[mcp]
+/// attribution`). Absent for every provider that did not explicitly request
+/// caller attribution — the host stamps nothing for them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum McpAttribution {
+    /// SEP-414 `_meta` block (`io.ironclaw/userId` / `invocationId` /
+    /// optional `threadId`) on outbound `tools/list` + `tools/call`.
+    #[serde(rename = "sep414")]
+    Sep414,
+}
+
 /// Validated v2 manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtensionManifestV2 {
@@ -638,6 +649,9 @@ pub struct ExtensionManifestV2 {
     /// declare no hooks (the common case). See [`HookSectionEntryV2`] for
     /// the clean-boundary rationale.
     pub hooks: Vec<HookSectionEntryV2>,
+    /// Hosted-MCP caller attribution the provider opted into (v3 `[mcp]
+    /// attribution`); `None` = never stamp.
+    pub mcp_attribution: Option<McpAttribution>,
 }
 
 /// v2 manifest parser/validator errors.
@@ -985,6 +999,8 @@ impl ExtensionManifestV2 {
             capabilities: Vec::new(),
             host_api_surfaces: Vec::new(),
             hooks,
+            // v2 manifests predate hosted-MCP attribution — never stamped.
+            mcp_attribution: None,
         })
     }
 }

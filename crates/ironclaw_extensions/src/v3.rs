@@ -32,6 +32,7 @@ use thiserror::Error;
 use crate::ExtensionAdminConfigurationDescriptor;
 use crate::resolved::{ResolvedAuthSurface, ResolvedExtensionManifest, ResolvedMcpDeclaration};
 use crate::v2::{
+    McpAttribution,
     CapabilityDeclV2, CapabilitySurfaceDeclV2, ExtensionManifestV2, ExtensionRuntimeV2,
     MAX_MANIFEST_BYTES, ManifestSource, RESERVED_HOST_BUNDLED_ID_PREFIX, RawCapabilityV2,
     RawRuntimeCredentialV2, requested_trust_to_descriptor_trust,
@@ -200,10 +201,21 @@ struct RawMcpV3 {
     effects: Vec<EffectKind>,
     #[serde(default)]
     credentials: Vec<RawMcpCredentialV3>,
+    /// Opt-in caller attribution on outbound tools/list + tools/call. Absent
+    /// (the default) means the host stamps nothing for this provider.
+    #[serde(default)]
+    attribution: Option<RawMcpAttributionV3>,
 }
 
 fn default_mcp_permission() -> PermissionMode {
     PermissionMode::Ask
+}
+
+/// Raw `[mcp] attribution` value.
+#[derive(Debug, Clone, Copy, Deserialize)]
+enum RawMcpAttributionV3 {
+    #[serde(rename = "sep414")]
+    Sep414,
 }
 
 #[derive(Debug, Deserialize)]
@@ -565,6 +577,9 @@ pub(crate) fn parse_v3(
         capabilities,
         host_api_surfaces,
         hooks: Vec::new(),
+        mcp_attribution: mcp.as_ref().and_then(|m| m.attribution).map(|a| match a {
+            RawMcpAttributionV3::Sep414 => McpAttribution::Sep414,
+        }),
     };
 
     let auth = recipes
@@ -608,6 +623,7 @@ pub(crate) fn parse_v3(
                         .collect()
                 })
                 .unwrap_or_default(),
+            attribution: manifest.mcp_attribution,
         }),
         tools: manifest.capabilities.clone(),
         channel: raw.channel,

@@ -85,6 +85,17 @@ impl McpHostHttpEgressPlanner for RegistryMcpEgressPlanner {
         }
         let credential_injections =
             self.credential_injections(request.provider, request.capability_id, &endpoint);
+        // Caller attribution is strictly opt-in: only a provider whose
+        // manifest declares `[mcp] attribution = "sep414"` gets the SEP-414
+        // `_meta` block stamped on its tool calls.
+        let sep414_attribution = self
+            .registry
+            .snapshot()
+            .get_extension(request.provider)
+            .is_some_and(|package| {
+                package.manifest.mcp_attribution
+                    == Some(ironclaw_extensions::McpAttribution::Sep414)
+            });
         McpHostHttpEgressPlan {
             // Credential-free hosted MCP providers are valid: the manifest may
             // expose a public/unauthenticated server, and host network policy
@@ -98,6 +109,7 @@ impl McpHostHttpEgressPlanner for RegistryMcpEgressPlanner {
             credential_injections,
             response_body_limit: Some(MCP_RESPONSE_BODY_LIMIT),
             timeout_ms: Some(MCP_TIMEOUT_MS),
+            sep414_attribution,
         }
     }
 }
@@ -500,6 +512,7 @@ mod tests {
                         host_apis: Vec::new(),
                         host_api_surfaces: Vec::new(),
                         hooks: Vec::new(),
+                        mcp_attribution: None,
                         capabilities: vec![ironclaw_extensions::CapabilityManifest {
                             id: CapabilityId::new(capability_id).unwrap(),
                             description: "Search".to_string(),

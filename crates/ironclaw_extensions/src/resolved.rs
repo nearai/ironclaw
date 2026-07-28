@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ExtensionAdminConfigurationDescriptor;
 
-use crate::v2::{
+use crate::v2::{McpAttribution, 
     CapabilityDeclV2, CapabilitySurfaceDeclV2, ExtensionManifestV2, ExtensionRuntimeV2,
     HookSectionEntryV2, HostApiId, HostApiRefV2, ManifestSectionPath, ManifestSource,
     ManifestV2Error, requested_trust_to_descriptor_trust,
@@ -87,6 +87,11 @@ pub struct ResolvedMcpDeclaration {
     /// The server-connection credential handles (injected on every server
     /// call; discovered tools cannot declare their own).
     pub credential_handles: Vec<SecretHandle>,
+    /// Caller-attribution contract the provider opted into (`[mcp]
+    /// attribution`); `None` = the host stamps nothing. `serde(default)`
+    /// keeps installation records persisted before this field readable.
+    #[serde(default)]
+    pub attribution: Option<McpAttribution>,
 }
 
 /// One vendor the extension authenticates against: the account setup this
@@ -243,6 +248,7 @@ impl ResolvedExtensionManifest {
             capabilities: self.tools.clone(),
             host_api_surfaces,
             hooks: self.hooks.clone(),
+            mcp_attribution: self.mcp.as_ref().and_then(|m| m.attribution),
         })
     }
 }

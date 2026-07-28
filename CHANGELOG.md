@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Opt-in SEP-414 `_meta` attribution on outbound hosted-MCP calls:** a
+  provider whose manifest declares `[mcp] attribution = "sep414"` receives a
+  host-derived `_meta` block (`io.ironclaw/userId`,
+  `io.ironclaw/invocationId`, optional `io.ironclaw/threadId`) on
+  `tools/list` + `tools/call`, so it can dedupe retried side-effecting calls
+  and scope state to the calling conversation. Strictly opt-in: providers
+  that don't declare it — all existing ones — keep today's wire shape and
+  receive no caller identifiers. `initialize` is never stamped.
+
 ### Fixed
 
 - **Agent-loop termination recovery:** tell the model when no-progress or the

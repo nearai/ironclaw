@@ -237,6 +237,7 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
             // first-party builtin hooks are installed by the composition
             // loader directly, not via this manifest surface.
             hooks: Vec::new(),
+            mcp_attribution: None,
         },
         VirtualPath::new("/system/extensions/builtin")?,
     )
