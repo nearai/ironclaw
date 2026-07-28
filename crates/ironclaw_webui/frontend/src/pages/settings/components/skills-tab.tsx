@@ -1,7 +1,6 @@
 // @ts-nocheck
 import React from "react";
-import { Card } from "../../../design-system/card";
-import { Button } from "../../../design-system/button";
+import { Button, Card } from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
 import { useSkills } from "../hooks/useSkills";
 import { matchesSearch } from "../lib/settings-search";

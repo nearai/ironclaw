@@ -1,8 +1,5 @@
 // @ts-nocheck
-import { Button } from "../../../design-system/button";
-import { Card } from "../../../design-system/card";
-import { FormField, Input, Textarea } from "../../../design-system/input";
-import { Icon } from "../../../design-system/icons";
+import { Button, Card, FormField, Icon, Input, Textarea } from "@ironclaw/ui";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 

@@ -1,4 +1,4 @@
-import { Icon } from "../../../design-system/icons";
+import { Icon } from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
 import { ChatInput } from "./chat-input";
 

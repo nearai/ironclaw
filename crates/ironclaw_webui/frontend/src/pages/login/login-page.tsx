@@ -1,12 +1,7 @@
 import { useForm } from "react-hook-form";
-import { Button } from "../../design-system/button";
-import { Card } from "../../design-system/card";
-import { Input, FormField } from "../../design-system/input";
-import { Icon } from "../../design-system/icons";
-import { useInterfaceTheme } from "../../design-system/theme";
+import { Button, Card, FormField, Icon, Input, cn, useInterfaceTheme } from "@ironclaw/ui";
 import { useT } from "../../lib/i18n";
 import { isLocalDevOrigin } from "../../lib/browser-origin";
-import { cn } from "../../utils/cn";
 import { OAuthProviderButtons } from "./components/oauth-provider-buttons";
 import { useOAuthProviders } from "./hooks/useOAuthProviders";
 

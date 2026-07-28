@@ -1,4 +1,4 @@
-import { Panel, StatCard } from "../../../design-system/primitives";
+import { Panel, StatCard } from "@ironclaw/ui";
 
 const SUMMARY_CARDS = [
   {

@@ -1,6 +1,5 @@
 import { useNavigate, useParams } from "react-router";
-import { Button } from "../../design-system/button";
-import { StatusPill } from "../../design-system/primitives";
+import { Badge, Button, Callout } from "@ironclaw/ui";
 import React from "react";
 import { useT } from "../../lib/i18n";
 import { FeedbackBanner } from "../projects/components/feedback-banner";
@@ -33,11 +32,11 @@ export function WorkspacePage() {
               <div className="flex items-center gap-2">
                 <h1
                   data-testid="workspace-heading"
-                  className="text-lg font-semibold text-white"
+                  className="text-lg font-semibold text-[var(--v2-text-strong)]"
                 >{t("workspace.title")}</h1>
-                <StatusPill tone="muted" label={t("workspace.readOnly")} />
+                <Badge tone="muted" label={t("workspace.readOnly")} />
               </div>
-              <p className="mt-0.5 text-sm text-iron-400">{t("workspace.subtitle")}</p>
+              <p className="mt-0.5 text-sm text-[var(--v2-text-muted)]">{t("workspace.subtitle")}</p>
             </div>
             <Button
               variant="secondary"
@@ -51,12 +50,9 @@ export function WorkspacePage() {
 
           {workspace.error &&
           (
-            <div
-              role="alert"
-              className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
-            >
+            <Callout tone="danger" role="alert">
               {workspace.error.message}
-            </div>
+            </Callout>
           )}
           <FeedbackBanner
             result={workspace.result}

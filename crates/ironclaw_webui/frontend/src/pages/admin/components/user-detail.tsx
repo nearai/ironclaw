@@ -1,9 +1,7 @@
 // @ts-nocheck
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Panel, StatusPill } from "../../../design-system/primitives";
-import { Button } from "../../../design-system/button";
-import { SelectMenu } from "../../../design-system/select-menu";
+import { Button, Panel, SelectMenu, StatusPill } from "@ironclaw/ui";
 import { useAdminUserDetail, useAdminUsers } from "../hooks/useAdminUsers";
 import { useUsage } from "../hooks/useAdminUsage";
 import { UserSecretsPanel } from "./user-secrets-panel";

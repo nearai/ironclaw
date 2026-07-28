@@ -13,8 +13,7 @@
 // no bearer); object URLs created for previews are revoked when the modal closes.
 
 import React from "react";
-import { Modal, ModalBody, ModalFooter, ModalHeader } from "../../../design-system/modal";
-import { Icon } from "../../../design-system/icons";
+import { Icon, Modal, ModalBody, ModalFooter, ModalHeader } from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
 import { fetchAttachmentBlob, blobToDataUrl } from "../../../lib/api";
 import { saveBlob } from "../../../lib/download";

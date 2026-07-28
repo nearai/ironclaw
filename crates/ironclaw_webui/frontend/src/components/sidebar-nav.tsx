@@ -1,9 +1,8 @@
 import { NavLink, useLocation } from "react-router";
 import { primaryRoutes, EXPANDABLE_SUB_ROUTES } from "../app/routes";
-import { Icon } from "../design-system/icons";
+import { Icon, cn } from "@ironclaw/ui";
 import React from "react";
 import { useT } from "../lib/i18n";
-import { cn } from "../utils/cn";
 
 const ROUTE_ICONS = {
   chat: "chat",

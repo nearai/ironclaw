@@ -1,6 +1,6 @@
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Icon } from "../../../design-system/icons";
+import { Icon } from "@ironclaw/ui";
 import { ExtensionCard, RegistryCard } from "./extension-card";
 import type {
   ConfigureFocusHandler,

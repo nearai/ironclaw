@@ -1,6 +1,5 @@
 import { useT } from "../../../lib/i18n";
-import { Button } from "../../../design-system/button";
-import { EmptyPanel, Panel, StatusPill } from "../../../design-system/primitives";
+import { Button, EmptyPanel, Panel, StatusPill } from "@ironclaw/ui";
 import { MarkdownRenderer } from "../../chat/components/markdown-renderer";
 import { formatMissionDate, missionTone } from "../lib/missions-presenters";
 

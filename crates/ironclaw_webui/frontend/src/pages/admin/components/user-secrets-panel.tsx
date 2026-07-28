@@ -1,10 +1,7 @@
 // @ts-nocheck
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Panel } from "../../../design-system/primitives";
-import { Button } from "../../../design-system/button";
-import { Input } from "../../../design-system/input";
-import { Modal, ModalBody, ModalFooter } from "../../../design-system/modal";
+import { Button, Input, Modal, ModalBody, ModalFooter, Panel } from "@ironclaw/ui";
 import { useAdminUserSecrets } from "../hooks/useAdminUsers";
 
 export function UserSecretsPanel({ userId }) {

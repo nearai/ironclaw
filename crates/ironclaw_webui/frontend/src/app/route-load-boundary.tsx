@@ -1,6 +1,6 @@
 import React from "react";
 import { useLocation } from "react-router";
-import { Button } from "../design-system/button";
+import { Button } from "@ironclaw/ui";
 import { useT } from "../lib/i18n";
 
 export function RouteLoading() {

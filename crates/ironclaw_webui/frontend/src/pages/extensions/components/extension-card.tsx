@@ -1,8 +1,6 @@
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Badge } from "../../../design-system/badge";
-import { Button } from "../../../design-system/button";
-import { Icon } from "../../../design-system/icons";
+import { Badge, Button, Icon } from "@ironclaw/ui";
 import {
   RUNTIME_LABELS,
   STATE_TONES,

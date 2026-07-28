@@ -1,8 +1,6 @@
-import { Button } from "../design-system/button";
-import { Icon } from "../design-system/icons";
+import { Button, Icon, IconButton, cn } from "@ironclaw/ui";
 import React from "react";
 import { useT } from "../lib/i18n";
-import { cn } from "../utils/cn";
 import { useTeeAttestation } from "../hooks/useTeeAttestation";
 
 const SUMMARY_FIELDS = [
@@ -35,20 +33,19 @@ export function TeeShield() {
 
   return (
     <div className="relative">
-      <button
-        type="button"
+      <IconButton
+        variant="plain"
         onClick={toggleOpen}
         aria-expanded={open}
         title={t("tee.title")}
         className={cn(
-          "grid h-8 w-8 place-items-center rounded-[8px]",
           "border border-[color-mix(in_srgb,var(--v2-positive-text)_28%,transparent)]",
           "bg-[var(--v2-positive-soft)] text-[var(--v2-positive-text)]",
           "hover:border-[color-mix(in_srgb,var(--v2-positive-text)_52%,transparent)]"
         )}
       >
         <Icon name="shield" className="h-4 w-4" />
-      </button>
+      </IconButton>
 
       {open &&
       (

@@ -1,7 +1,4 @@
-import { Icon } from "../../../design-system/icons";
-import { Badge } from "../../../design-system/badge";
-import { Card } from "../../../design-system/card";
-import { SelectMenu } from "../../../design-system/select-menu";
+import { Badge, Card, Icon, SelectMenu } from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
 import { useTools } from "../hooks/useTools";
 import { matchesSearch } from "../lib/settings-search";

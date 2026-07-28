@@ -18,21 +18,12 @@ function classNameOf(element: unknown): string {
   return element.props.className ?? "";
 }
 
-test("the root and semantic control type scale stay stable across viewports (#6702)", () => {
-  const appCss = readFileSync(new URL("../styles/app.css", import.meta.url), "utf8");
+test("the semantic control type scale stays stable across viewports (#6702)", () => {
+  const tokensCss = readFileSync(new URL("../tokens/tokens.css", import.meta.url), "utf8");
 
-  assert.match(appCss, /--text-ui-sm:\s*0\.75rem;/);
-  assert.match(appCss, /--text-ui:\s*0\.8125rem;/);
-  assert.match(appCss, /--text-ui-lg:\s*1rem;/);
-  assert.match(appCss, /html\s*\{[^}]*font-size:\s*16px;/s);
-  assert.match(
-    appCss,
-    /@layer base\s*\{[^{}]*button, input, select, textarea\s*\{[^}]*font:\s*inherit;/s
-  );
-  assert.doesNotMatch(
-    appCss,
-    /@media\s*\(min-width:\s*1024px\)\s*\{[^}]*html\s*\{[^}]*font-size:/s
-  );
+  assert.match(tokensCss, /--text-ui-sm:\s*0\.75rem;/);
+  assert.match(tokensCss, /--text-ui:\s*0\.8125rem;/);
+  assert.match(tokensCss, /--text-ui-lg:\s*1rem;/);
 });
 
 test("medium shared controls use one viewport-independent semantic size (#6702)", () => {

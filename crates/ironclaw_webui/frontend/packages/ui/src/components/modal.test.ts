@@ -2,9 +2,9 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
-import { runVmModuleForTest } from "../test-support/vm-module-harness";
+import { runVmModuleForTest } from "../../../../src/test-support/vm-module-harness";
 
-function setupModalContext(translate = (key) => key) {
+function setupModalContext(uiText = { close: "common.close", cancel: "common.cancel" }) {
   const context = {
     React: {
       useEffect: () => {},
@@ -12,7 +12,7 @@ function setupModalContext(translate = (key) => key) {
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     cn: (...classes) => classes.filter(Boolean).join(" "),
     Icon() {},
-    useT: () => translate,
+    useUiText: () => uiText,
     document: { body: { style: {} } },
     window: {
       addEventListener() {},
@@ -38,10 +38,8 @@ function renderedNodeOfType(rendered, type) {
   return undefined;
 }
 
-test("ModalHeader falls back to the localized close label", () => {
-  const context = setupModalContext((key) =>
-    key === "common.close" ? "Localized close" : key,
-  );
+test("ModalHeader falls back to the UiText close label", () => {
+  const context = setupModalContext({ close: "Localized close", cancel: "Cancel" });
   const { ModalHeader } = context.globalThis.__testExports;
 
   const rendered = ModalHeader({

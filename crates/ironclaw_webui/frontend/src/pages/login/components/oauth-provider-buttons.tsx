@@ -1,5 +1,4 @@
-import { Button } from "../../../design-system/button";
-import { Icon } from "../../../design-system/icons";
+import { Button, Icon } from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
 
 const OAUTH_PROVIDER_LABELS = {

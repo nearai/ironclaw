@@ -20,7 +20,7 @@
  */
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Icon } from "../../../design-system/icons";
+import { Icon } from "@ironclaw/ui";
 
 export function AuthGateShell({
   icon = "lock",

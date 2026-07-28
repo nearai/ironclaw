@@ -17,6 +17,12 @@ export default defineConfig({
     // export, which lets Rolldown tree-shake unused code.
     dedupe: ["react", "react-dom"],
   },
+  optimizeDeps: {
+    // @ironclaw/ui resolves to workspace TypeScript source (packages/ui);
+    // keep it out of the dependency pre-bundle so edits hot-reload like
+    // first-party code.
+    exclude: ["@ironclaw/ui"],
+  },
   server: {
     host: "127.0.0.1",
     port: 5173,
@@ -55,6 +61,7 @@ export default defineConfig({
     environment: "node",
     include: [
       "src/**/*.{test,spec}.{ts,tsx}",
+      "packages/ui/src/**/*.{test,spec}.{ts,tsx}",
       "src/pages/extensions/hooks/useExtensions-oauth.test.mjs",
     ],
     setupFiles: ["src/test/vm-tsx-setup.ts"],

@@ -19,7 +19,7 @@
  *   <CardFooter>   — bottom section, optional top divider
  *   <CardLabel>    — mono-caps eyebrow label
  */
-import { cn } from "../utils/cn";
+import { cn } from "../primitives/cn";
 
 /* ─── Variant ─────────────────────────────────────────────────────── */
 // --v2-card-bg     : solid panel surface
@@ -80,6 +80,12 @@ export function Card({
     </Element>
   );
 }
+
+/**
+ * Alias kept for backwards-compat with existing imports.
+ * Prefer <Card> in new code.
+ */
+export const Panel = Card;
 
 /* ─── CardHeader ──────────────────────────────────────────────────── */
 

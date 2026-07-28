@@ -1,7 +1,6 @@
 import { NavLink } from "react-router";
 import React from "react";
-import { Icon } from "../design-system/icons";
-import { ConfirmDialog } from "../design-system/confirm-dialog";
+import { ConfirmDialog, Icon, cn } from "@ironclaw/ui";
 import { useT } from "../lib/i18n";
 import { getPinnedIds, subscribePins, togglePin } from "../lib/pin-store";
 import { deleteThreadErrorMessage } from "../lib/thread-errors";
@@ -21,7 +20,6 @@ import {
   threadActivityIso,
 } from "../lib/thread-meta";
 import { displaySidebarTitle } from "../lib/thread-title";
-import { cn } from "../utils/cn";
 
 /* Single source of truth for how a thread state renders in the sidebar.
  *

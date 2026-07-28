@@ -1,7 +1,7 @@
 // @ts-nocheck
 import React from "react";
-import { cn } from "../utils/cn";
-import { Icon } from "./icons";
+import { cn } from "../primitives/cn";
+import { Icon } from "../primitives/icon";
 
 let nextSelectMenuId = 0;
 const openSelectMenuEntries = new Set();

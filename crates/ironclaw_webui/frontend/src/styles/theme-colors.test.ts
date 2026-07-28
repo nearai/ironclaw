@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "vitest";
 
 const SRC_ROOT = fileURLToPath(new URL("../", import.meta.url));
+const UI_PACKAGE_ROOT = fileURLToPath(new URL("../../packages/ui/src", import.meta.url));
 
 function productionTypeScriptFiles(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -17,7 +18,10 @@ function productionTypeScriptFiles(directory: string): string[] {
 
 test("semantic states and secondary text use theme-aware colors (#6039)", () => {
   const violations: string[] = [];
-  const sourceFiles = productionTypeScriptFiles(SRC_ROOT);
+  const sourceFiles = [
+    ...productionTypeScriptFiles(SRC_ROOT),
+    ...productionTypeScriptFiles(UI_PACKAGE_ROOT),
+  ];
 
   assert.ok(
     sourceFiles.length > 0,

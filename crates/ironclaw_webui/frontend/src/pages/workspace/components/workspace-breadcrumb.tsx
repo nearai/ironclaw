@@ -1,3 +1,4 @@
+import { Breadcrumb } from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
 import { areaDisplayName, pathSegments, routeForWorkspacePath } from "../lib/workspace-presenters";
 
@@ -12,36 +13,22 @@ export function WorkspaceBreadcrumb({ path, onNavigate }) {
   const parts = pathSegments(path);
   let current = "";
 
-  return (
-    <nav
-      aria-label={t("workspace.breadcrumbRoot")}
-      className="flex min-w-0 flex-wrap items-center gap-2 font-mono text-sm"
-    >
-      <button
-        type="button"
-        onClick={() => onNavigate("/workspace")}
-        className="text-signal hover:underline"
-      >
-        {t("workspace.breadcrumbRoot")}
-      </button>
-      {parts.map((part, index) => {
-        current = current ? `${current}/${part}` : part;
-        const target = current;
-        const label = index === 0 ? areaDisplayName(part, t) : part;
-        return (
-          <>
-          <span key={target} className="text-iron-400">/</span>
-          <button
-            key={`${target}-button`}
-            type="button"
-            onClick={() => onNavigate(routeForWorkspacePath(target))}
-            className="max-w-[220px] truncate text-signal hover:underline"
-          >
-            {label}
-          </button>
-          </>
-        );
-      })}
-    </nav>
-  );
+  const items = [
+    {
+      key: "/workspace",
+      label: t("workspace.breadcrumbRoot"),
+      onSelect: () => onNavigate("/workspace"),
+    },
+    ...parts.map((part, index) => {
+      current = current ? `${current}/${part}` : part;
+      const target = current;
+      return {
+        key: target,
+        label: index === 0 ? areaDisplayName(part, t) : part,
+        onSelect: () => onNavigate(routeForWorkspacePath(target)),
+      };
+    }),
+  ];
+
+  return (<Breadcrumb label={t("workspace.breadcrumbRoot")} items={items} />);
 }

@@ -1,9 +1,8 @@
 import { NavLink, useLocation } from "react-router";
 import React from "react";
 import { primaryRoutes, EXPANDABLE_SUB_ROUTES } from "../app/routes";
-import { Icon } from "../design-system/icons";
+import { Icon, IconButton, cn, iconButtonClasses } from "@ironclaw/ui";
 import { useT } from "../lib/i18n";
-import { cn } from "../utils/cn";
 import { TeeShield } from "./tee-shield";
 import { NotificationCenter } from "./notification-center";
 
@@ -65,17 +64,15 @@ export function PageHeader({
         "bg-[color-mix(in_srgb,var(--v2-canvas-strong)_88%,transparent)] backdrop-blur-xl"
       )}
     >
-      <button
-        type="button"
+      <IconButton
         onClick={onToggleSidebar}
-        className="grid h-8 w-8 shrink-0 place-items-center rounded-[8px] text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)]"
         aria-label={toggleSidebarLabel}
         aria-controls="gateway-sidebar"
         aria-expanded={sidebarOpen ? "true" : "false"}
         title={toggleSidebarLabel}
       >
         <Icon name="list" className="h-4 w-4" />
-      </button>
+      </IconButton>
 
       {breadcrumb
         ? (
@@ -107,27 +104,23 @@ export function PageHeader({
         <NavLink
           to="/logs"
           data-testid="header-logs-link"
-          className={({ isActive }) =>
-            cn(
-              "grid h-8 w-8 place-items-center rounded-[8px] text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]",
-              isActive && "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
-            )}
+          className={({ isActive }) => iconButtonClasses({ active: isActive })}
           title={t("nav.logs")}
           aria-label={t("nav.logs")}
         >
           <Icon name="terminal" className="h-4 w-4" />
         </NavLink>
-        <a
+        <IconButton
+          as="a"
           href={DOCS_URL}
           target="_blank"
           rel="noopener noreferrer"
           data-testid="header-docs-link"
-          className="grid h-8 w-8 place-items-center rounded-[8px] text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
           title={t("nav.docs")}
           aria-label={t("nav.docs")}
         >
           <Icon name="bookOpen" className="h-4 w-4" />
-        </a>
+        </IconButton>
       </div>
     </header>
   );

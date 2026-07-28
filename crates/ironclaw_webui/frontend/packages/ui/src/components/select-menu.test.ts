@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
-import { runVmModuleForTest } from "../test-support/vm-module-harness";
+import { runVmModuleForTest } from "../../../../src/test-support/vm-module-harness";
 
 function html(strings, ...values) {
   return { strings: Array.from(strings), values };

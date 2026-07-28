@@ -1,7 +1,6 @@
-import { Icon } from "../design-system/icons";
+import { Icon, IconButton, cn } from "@ironclaw/ui";
 import React from "react";
 import { useT } from "../lib/i18n";
-import { cn } from "../utils/cn";
 
 function profileName(profile) {
   return profile?.display_name || profile?.email || profile?.id || "IronClaw";
@@ -79,20 +78,18 @@ export function SidebarFooter({ theme, toggleTheme, profile, onSignOut }) {
           </span>
         </span>
       </button>
-      <button
+      <IconButton
         onClick={toggleTheme}
-        className="grid h-8 w-8 shrink-0 place-items-center rounded-[8px] text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
         title={theme === "dark" ? t("theme.light") : t("theme.dark")}
       >
         <Icon name={theme === "dark" ? "sun" : "moon"} className="h-4 w-4" />
-      </button>
-      <button
+      </IconButton>
+      <IconButton
         onClick={onSignOut}
-        className="grid h-8 w-8 shrink-0 place-items-center rounded-[8px] text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
         title={t("header.signOut")}
       >
         <Icon name="logout" className="h-4 w-4" />
-      </button>
+      </IconButton>
     </div>
   );
 }

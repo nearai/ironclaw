@@ -2,7 +2,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import QRCode from "qrcode";
 import React from "react";
-import { Button } from "../design-system/button";
+import { Button } from "@ironclaw/ui";
 import { useT } from "../lib/i18n";
 import { notifyChannelConnected } from "../lib/channel-connection-events";
 import {

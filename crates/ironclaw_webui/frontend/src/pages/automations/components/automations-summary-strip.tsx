@@ -1,6 +1,5 @@
 import { useT } from "../../../lib/i18n";
-import { Panel, StatCard } from "../../../design-system/primitives";
-import { cn } from "../../../utils/cn";
+import { Panel, StatCard, cn } from "@ironclaw/ui";
 
 export function AutomationsSummaryStrip({ summary, activeFilter, onSelectFilter }) {
   const t = useT();

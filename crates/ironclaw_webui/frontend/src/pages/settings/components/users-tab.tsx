@@ -1,8 +1,4 @@
-import { Button } from "../../../design-system/button";
-import { Badge } from "../../../design-system/badge";
-import { Card } from "../../../design-system/card";
-import { Icon } from "../../../design-system/icons";
-import { Input, FormField, Label } from "../../../design-system/input";
+import { Badge, Button, Card, FormField, Icon, Input, Label } from "@ironclaw/ui";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import { useUsers } from "../hooks/useUsers";

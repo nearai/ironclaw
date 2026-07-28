@@ -1,7 +1,6 @@
 // @ts-nocheck
 import { useNavigate, useParams } from "react-router";
-import { Button } from "../../design-system/button";
-import { EmptyPanel } from "../../design-system/primitives";
+import { Button, EmptyPanel } from "@ironclaw/ui";
 import React from "react";
 import { useT } from "../../lib/i18n";
 import { JobActivityTab } from "./components/job-activity-tab";

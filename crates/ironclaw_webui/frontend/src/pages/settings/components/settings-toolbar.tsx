@@ -1,6 +1,5 @@
 // @ts-nocheck
-import { Button } from "../../../design-system/button";
-import { Icon } from "../../../design-system/icons";
+import { Button, Icon } from "@ironclaw/ui";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import { saveBlob } from "../../../lib/download";

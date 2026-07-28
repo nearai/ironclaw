@@ -1,5 +1,4 @@
-import { Button } from "../../../design-system/button";
-import { StatusPill } from "../../../design-system/primitives";
+import { Button, StatusPill } from "@ironclaw/ui";
 import {
   formatRoutineDate,
   routineStatusTone,

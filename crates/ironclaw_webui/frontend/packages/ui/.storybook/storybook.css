@@ -1,0 +1,26 @@
+@import "tailwindcss";
+@import "../src/tokens/tokens.css";
+@source "../src";
+@source "../stories";
+
+/* Minimal mirror of the app-level resets components rely on. */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+body {
+  background: var(--v2-canvas);
+  color: var(--v2-text);
+  font-family: var(--font-sans);
+}
+
+@layer base {
+  button, input, select, textarea {
+    font: inherit;
+  }
+}
+
+button {
+  -webkit-tap-highlight-color: transparent;
+  cursor: pointer;
+}

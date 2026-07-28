@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
-import { useT } from "../lib/i18n";
-import { Button } from "./button";
-import { Modal, ModalBody, ModalFooter } from "./modal";
+import { useUiText } from "../theme/ui-text";
+import { Button } from "../components/button";
+import { Modal, ModalBody, ModalFooter } from "../components/modal";
 
 type ConfirmDialogProps = {
   open: boolean;
@@ -24,8 +24,8 @@ export function ConfirmDialog({
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
-  const t = useT();
-  const resolvedCancelLabel = cancelLabel || t("common.cancel");
+  const uiText = useUiText();
+  const resolvedCancelLabel = cancelLabel || uiText.cancel;
   const handleCancel = () => {
     if (!isConfirming) onCancel();
   };

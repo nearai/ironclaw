@@ -18,9 +18,9 @@
  *   <ModalFooter>  — action button row with top divider
  */
 import React from "react";
-import { useT } from "../lib/i18n";
-import { cn } from "../utils/cn";
-import { Icon } from "./icons";
+import { useUiText } from "../theme/ui-text";
+import { cn } from "../primitives/cn";
+import { Icon } from "../primitives/icon";
 
 /* ─── Size ────────────────────────────────────────────────────────── */
 
@@ -102,8 +102,8 @@ export function Modal({
 /* ─── ModalHeader ─────────────────────────────────────────────────── */
 
 export function ModalHeader({ children, onClose, className = "", closeLabel }) {
-  const t = useT();
-  const effectiveCloseLabel = closeLabel || t("common.close");
+  const uiText = useUiText();
+  const effectiveCloseLabel = closeLabel || uiText.close;
   return (
     <div
       className={cn(

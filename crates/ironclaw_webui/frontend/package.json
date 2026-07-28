@@ -21,6 +21,7 @@
     "all": "bash build.sh"
   },
   "dependencies": {
+    "@ironclaw/ui": "workspace:*",
     "@tanstack/react-query": "5.87.4",
     "dompurify": "3.2.3",
     "highlight.js": "11.11.1",

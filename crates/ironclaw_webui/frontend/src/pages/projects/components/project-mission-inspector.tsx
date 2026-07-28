@@ -1,5 +1,4 @@
-import { Button } from "../../../design-system/button";
-import { Panel, StatusPill } from "../../../design-system/primitives";
+import { Button, Panel, StatusPill } from "@ironclaw/ui";
 import { useT } from "../../../lib/i18n";
 import { MarkdownRenderer } from "../../chat/components/markdown-renderer";
 import {

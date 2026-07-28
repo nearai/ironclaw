@@ -1,7 +1,6 @@
 // @ts-nocheck
 import { useT } from "../../../lib/i18n";
-import { Panel, StatusPill } from "../../../design-system/primitives";
-import { Button } from "../../../design-system/button";
+import { Button, Panel, StatusPill } from "@ironclaw/ui";
 import {
   formatThreadState,
   formatProjectRelativeTime,

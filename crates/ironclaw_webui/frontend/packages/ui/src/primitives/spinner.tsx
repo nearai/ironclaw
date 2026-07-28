@@ -10,7 +10,7 @@
  * Props
  *   className  extra classes (e.g. sizing / color); defaults to h-4 w-4.
  */
-import { cn } from "../utils/cn";
+import { cn } from "./cn";
 
 export function Spinner({ className = "" } = {}) {
   return (

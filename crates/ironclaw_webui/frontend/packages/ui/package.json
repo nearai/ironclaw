@@ -1,0 +1,29 @@
+{
+  "name": "@ironclaw/ui",
+  "version": "0.0.0",
+  "private": true,
+  "description": "IronClaw WebUI design system: tokens, primitives, components, and composites. Consumed as TypeScript source by the SPA so changes hot-reload instantly.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./tokens.css": "./src/tokens/tokens.css"
+  },
+  "scripts": {
+    "storybook": "storybook dev -p 6006",
+    "build-storybook": "storybook build"
+  },
+  "peerDependencies": {
+    "react": "^19.0.0"
+  },
+  "devDependencies": {
+    "@storybook/react-vite": "10.5.5",
+    "@tailwindcss/vite": "4.3.2",
+    "@types/react": "19.2.17",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "storybook": "10.5.5",
+    "tailwindcss": "4.3.2",
+    "typescript": "6.0.3",
+    "vite": "8.1.3"
+  }
+}

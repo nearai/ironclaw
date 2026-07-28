@@ -3,7 +3,7 @@ import { isValidElement, type ReactElement } from "react";
 import { test } from "vitest";
 
 import { Button } from "./button";
-import { Spinner } from "./spinner";
+import { Spinner } from "../primitives/spinner";
 
 type ButtonElementProps = {
   className?: string;

@@ -1,4 +1,4 @@
-import { EmptyPanel, Panel } from "../../../design-system/primitives";
+import { EmptyPanel, Panel } from "@ironclaw/ui";
 
 function TreeNodes({ nodes, depth = 0, selectedPath, expandingPath, onToggleDirectory, onSelectPath }) {
   return (

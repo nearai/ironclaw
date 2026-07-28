@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { Navigate, Outlet, useLocation, useNavigate } from "react-router";
-import { useInterfaceTheme } from "../design-system/theme";
+import { Callout, cn, useInterfaceTheme } from "@ironclaw/ui";
 import { useGatewayStatus } from "../hooks/useGatewayStatus";
 import { useNotifications } from "../hooks/useNotifications";
 import { useLlmProviders } from "../pages/settings/hooks/useLlmProviders";
@@ -19,7 +19,6 @@ import { PageHeader } from "../components/page-header";
 import { CommandPalette } from "../components/command-palette";
 import { ToastViewport } from "../components/toast-viewport";
 import React from "react";
-import { cn } from "../utils/cn";
 
 export function GatewayLayout({
   token,
@@ -156,15 +155,9 @@ export function GatewayLayout({
         <main className="min-h-0 min-w-0 flex-1 overflow-hidden">
           {statusQuery.error &&
           (
-            <div
-              className={cn(
-                "m-4 rounded-[14px] border px-4 py-3 text-sm",
-                "border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))]",
-                "bg-[var(--v2-danger-soft)] text-[var(--v2-danger-text)]"
-              )}
-            >
+            <Callout tone="danger" className="m-4">
               {statusQuery.error.message || t("error.gatewayConnection")}
-            </div>
+            </Callout>
           )}
           <Outlet
             context={{

@@ -18,8 +18,8 @@
  *   ...rest   forwarded to the element (type, onClick, href, …)
  */
 import type { ComponentPropsWithoutRef, ElementType, ReactNode } from "react";
-import { cn } from "../utils/cn";
-import { Spinner } from "./spinner";
+import { cn } from "../primitives/cn";
+import { Spinner } from "../primitives/spinner";
 
 /* ── Gradient assets (Tailwind can't express these) ────────────────── */
 

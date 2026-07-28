@@ -1,5 +1,5 @@
 import React from "react";
-import { Button } from "../../../design-system/button";
+import { Button } from "@ironclaw/ui";
 import { PairingWebCodePanel } from "../../../components/pairing-web-code-panel";
 import { useT } from "../../../lib/i18n";
 import { channelConnectionDisplayName } from "../../../lib/channel-connection-events";
