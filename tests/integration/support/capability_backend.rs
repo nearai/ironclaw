@@ -25,6 +25,11 @@ pub(super) enum RebornCapabilityBackend {
     /// Echo-shaped capability whose successful results are typed `NoChange`,
     /// used to drive the production no-progress detector deterministically.
     NoProgressEcho,
+    /// Echo-shaped capability whose port returns a caller-shaped
+    /// `AgentLoopHostError` (`InvalidInvocation`) instead of a resolution. Drives
+    /// the #6284 capability-stage contract: a port error the model can act on
+    /// surfaces as a tool error and the run continues, rather than ending it.
+    RecoverablePortErrorEcho,
     /// Real first-party tool runtime (`builtin.http` + friends) with the recording
     /// `RuntimeHttpEgress` (scripted body, no network) — the §3.7 Tier-2 capture.
     BuiltinHttpTools,
@@ -133,6 +138,9 @@ impl RebornCapabilityBackend {
         Ok(match self {
             RebornCapabilityBackend::Echo => GroupCapability::Recording,
             RebornCapabilityBackend::NoProgressEcho => GroupCapability::RecordingNoProgress,
+            RebornCapabilityBackend::RecoverablePortErrorEcho => {
+                GroupCapability::RecordingRecoverablePortError
+            }
             RebornCapabilityBackend::BuiltinHttpTools => {
                 // Slice 5: `.with_live_shell()` opts into the real HostProcessPort;
                 // `Inert`/`Scripted` both use the inert RecordingProcessPort (the

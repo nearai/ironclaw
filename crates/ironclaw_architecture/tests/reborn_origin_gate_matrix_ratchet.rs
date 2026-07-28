@@ -91,7 +91,7 @@ const EXPECTED_UNGATED_SEED: &[&str] = &[
     "builtin.trace_commons.status",
     "builtin.trace_commons.credits",
     "builtin.trace_commons.onboard",
-    "builtin.profile_set",
+    "ironclaw.memory.profile_set",
     // Reviewed rename, not an addition: the memory tools moved from the builtin
     // package (`builtin.memory_*`) to the always-on `ironclaw.memory` package
     // (#3537) with the same read-only effect posture; `ironclaw.memory.write`

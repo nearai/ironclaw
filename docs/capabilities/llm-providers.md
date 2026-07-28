@@ -3,40 +3,69 @@ title: Inference Providers
 description: IronClaw readily supports multiple LLM providers
 ---
 
-IronClaw supports multiple LLM providers out of the box, including NEAR AI , Anthropic, OpenAI, Google Gemini, GitHub Copilot, Ollama, AWS Bedrock, and any OpenAI-compatible endpoint.
+IronClaw ships with a catalog of more than twenty inference providers, including NEAR AI, Anthropic, OpenAI, Google Gemini, GitHub Copilot, Ollama, AWS Bedrock, and any OpenAI-compatible endpoint.
 
-Providers can be configured via environment variables or the onboarding wizard. IronClaw's modular architecture allows seamless integration with new providers by implementing the `LLMProvider` trait.
+## Configuring a Provider
 
-#### Configuring a Provider
-To config a new provider, simply run the onboarding wizard:
+List what your install knows about, then pick one:
 
 ```bash
-ironclaw onboard --provider-only
+ironclaw models list
+ironclaw models set-provider anthropic --model claude-sonnet-4-20250514
+ironclaw models status
 ```
+
+You can also choose a provider during [onboarding](/onboard), or from **Settings → Inference** in the [web interface](/using/webui).
+
+Whichever route you take, the selection is written to `config.toml` as a model slot:
+
+```toml
+[llm.default]
+provider_id = "anthropic"
+model       = "claude-sonnet-4-20250514"
+api_key_env = "ANTHROPIC_API_KEY"
+```
+
+`api_key_env` names the environment variable holding your key. Never paste the key itself — that is rejected at parse time. See [Configuration](/capabilities/configuration).
+
+If no slot is configured, IronClaw falls back to whichever provider environment variables are set.
 
 ---
 
 ## Provider Overview
 
-| Provider              | Backend value       | Requires API key       | Notes                           |
-|-----------------------|---------------------|------------------------|---------------------------------|
-| NEAR AI               | `nearai`            | OAuth (browser)        | Multi-model                     |
-| Anthropic             | `anthropic`         | `ANTHROPIC_API_KEY`    | Claude models                   |
-| OpenAI                | `openai`            | `OPENAI_API_KEY`       | GPT models                      |
-| Google Gemini         | `gemini_oauth`      | OAuth (browser)        | Gemini models; function calling |
-| io.net                | `ionet`             | `IONET_API_KEY`        | Intelligence API                |
-| Mistral               | `mistral`           | `MISTRAL_API_KEY`      | Mistral models                  |
-| Yandex AI Studio      | `yandex`            | `YANDEX_API_KEY`       | YandexGPT models                |
-| MiniMax               | `minimax`           | `MINIMAX_API_KEY`      | MiniMax-M2.7 models             |
-| Cloudflare Workers AI | `cloudflare`        | `CLOUDFLARE_API_KEY`   | Access to Workers AI            |
-| GitHub Copilot        | `github_copilot`    | `GITHUB_COPILOT_TOKEN` | Multi-models                    |
-| Ollama                | `ollama`            | No                     | Local inference                 |
-| AWS Bedrock           | `bedrock`           | AWS credentials        | Native Converse API             |
-| OpenRouter            | `openai_compatible` | `LLM_API_KEY`          | 300+ models                     |
-| Together AI           | `openai_compatible` | `LLM_API_KEY`          | Fast inference                  |
-| Fireworks AI          | `openai_compatible` | `LLM_API_KEY`          | Fast inference                  |
-| vLLM / LiteLLM        | `openai_compatible` | Optional               | Self-hosted                     |
-| LM Studio             | `openai_compatible` | No                     | Local GUI                       |
+`provider_id` is the value used with `models set-provider` and in `[llm.default]`.
+
+| Provider              | `provider_id`       | Requires               | Notes                                        |
+|-----------------------|---------------------|------------------------|----------------------------------------------|
+| NEAR AI               | `nearai`            | `NEARAI_API_KEY`       | Default; multi-model access via NEAR account |
+| Anthropic             | `anthropic`         | `ANTHROPIC_API_KEY`    | Claude models                                |
+| OpenAI                | `openai`            | `OPENAI_API_KEY`       | GPT models                                   |
+| OpenAI (Codex)        | `openai_codex`      | ChatGPT subscription   | Plus, Pro, or Max plans                      |
+| Google Gemini         | `gemini`            | `GEMINI_API_KEY`       | Native API; preserves thought signatures     |
+| Google Gemini (OAuth) | `gemini_oauth`      | OAuth (browser)        | Official API via Gemini CLI sign-in          |
+| GitHub Copilot        | `github_copilot`    | `GITHUB_COPILOT_TOKEN` | Copilot Chat API; token from IDE sign-in     |
+| AWS Bedrock           | `bedrock`           | AWS credentials        | IAM or SSO                                   |
+| Ollama                | `ollama`            | No                     | Local inference                              |
+| Tinfoil               | `tinfoil`           | `TINFOIL_API_KEY`      | Hardware-attested TEE private inference       |
+| OpenRouter            | `openrouter`        | `OPENROUTER_API_KEY`   | 200+ models; preserves reasoning across turns |
+| Groq                  | `groq`              | `GROQ_API_KEY`         | LPU inference                                 |
+| DeepSeek              | `deepseek`          | `DEEPSEEK_API_KEY`     | Preserves reasoning content                   |
+| Mistral               | `mistral`           | `MISTRAL_API_KEY`      | Mistral models                                |
+| Together AI           | `together`          | `TOGETHER_API_KEY`     | Together inference                            |
+| Fireworks AI          | `fireworks`         | `FIREWORKS_API_KEY`    | Fireworks inference                           |
+| Cerebras              | `cerebras`          | `CEREBRAS_API_KEY`     | Wafer-scale inference                         |
+| SambaNova             | `sambanova`         | `SAMBANOVA_API_KEY`    | SambaNova Cloud                               |
+| NVIDIA                | `nvidia`            | `NVIDIA_API_KEY`       | NIM API                                       |
+| Venice                | `venice`            | `VENICE_API_KEY`       | Privacy-focused inference                     |
+| Z.AI                  | `zai`               | `ZAI_API_KEY`          | GLM models                                    |
+| MiniMax               | `minimax`           | `MINIMAX_API_KEY`      | MiniMax-M2 models                             |
+| Cloudflare Workers AI | `cloudflare`        | `CLOUDFLARE_API_KEY`   | Workers AI                                    |
+| io.net                | `ionet`             | `IONET_API_KEY`        | Intelligence API                              |
+| Yandex AI Studio      | `yandex`            | `YANDEX_API_KEY`       | YandexGPT models                              |
+| OpenAI-compatible     | `openai_compatible` | `LLM_API_KEY`          | vLLM, LiteLLM, LM Studio, any compatible host |
+
+Run `ironclaw models list` for the catalog on your install, including the default model for each provider and any entries you have added yourself through `providers.json`.
 
 ---
 
@@ -230,18 +259,33 @@ Set `BEDROCK_CROSS_REGION` to route requests across AWS regions for capacity:
 
 ## OpenAI-Compatible Endpoints
 
-All providers below use `LLM_BACKEND=openai_compatible`. Set `LLM_BASE_URL` to the
-provider's OpenAI-compatible endpoint and `LLM_API_KEY` to your API key.
+OpenRouter, Together AI, Fireworks and the rest now have their own `provider_id` entries — use those directly rather than the generic adapter.
+
+Reach for `openai_compatible` when your endpoint has no dedicated entry: vLLM, LiteLLM, LM Studio, or an internal gateway. It needs a `base_url`, because the generic adapter has no default host of its own:
+
+```toml
+[llm.default]
+provider_id = "openai_compatible"
+base_url    = "http://localhost:8000/v1"
+model       = "meta-llama/Llama-3.3-70B-Instruct"
+api_key_env = "LLM_API_KEY"
+```
+
+Omitting `base_url` leaves the slot pointing nowhere and model resolution fails. `base_url` also works on any other provider when you need to route it through a proxy or a regional endpoint.
+
+The sections below list model ids for popular hosts. Each is reachable through its own `provider_id`; set `model` to the id you want.
+
+Several examples on this page use the `LLM_BACKEND` / `LLM_MODEL` / `LLM_BASE_URL` / `LLM_API_KEY` environment variables instead of a TOML slot. Both work: the environment form is the fallback IronClaw uses when `[llm.default]` is not configured. Prefer the TOML slot for a permanent install, and the environment form for one-off runs and containers.
 
 ### OpenRouter
 
 [OpenRouter](https://openrouter.ai) routes to 300+ models from a single API key.
 
-```env
-LLM_BACKEND=openai_compatible
-LLM_BASE_URL=https://openrouter.ai/api/v1
-LLM_API_KEY=sk-or-...
-LLM_MODEL=anthropic/claude-sonnet-4
+```toml
+[llm.default]
+provider_id = "openrouter"
+model       = "anthropic/claude-sonnet-4"
+api_key_env = "OPENROUTER_API_KEY"
 ```
 
 Popular OpenRouter model IDs:
@@ -260,11 +304,9 @@ Browse all models at [openrouter.ai/models](https://openrouter.ai/models).
 
 [Together AI](https://www.together.ai) provides fast inference for open-source models.
 
-```env
-LLM_BACKEND=openai_compatible
-LLM_BASE_URL=https://api.together.xyz/v1
-LLM_API_KEY=...
-LLM_MODEL=meta-llama/Llama-3.3-70B-Instruct-Turbo
+```bash
+ironclaw models set-provider together --model meta-llama/Llama-3.3-70B-Instruct-Turbo
+export TOGETHER_API_KEY=...
 ```
 
 Popular Together AI model IDs:
@@ -279,11 +321,9 @@ Popular Together AI model IDs:
 
 [Fireworks AI](https://fireworks.ai) offers fast inference with compound AI system support.
 
-```env
-LLM_BACKEND=openai_compatible
-LLM_BASE_URL=https://api.fireworks.ai/inference/v1
-LLM_API_KEY=fw_...
-LLM_MODEL=accounts/fireworks/models/llama4-maverick-instruct-basic
+```bash
+ironclaw models set-provider fireworks --model accounts/fireworks/models/llama4-maverick-instruct-basic
+export FIREWORKS_API_KEY=fw_...
 ```
 
 ### vLLM / LiteLLM (self-hosted)

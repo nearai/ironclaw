@@ -886,7 +886,7 @@ async fn product_surface_channel_extension_remove_deletes_the_durable_membership
     match install {
         Resolution::Done(ref outcome) if outcome.verdict.is_success() => {}
         Resolution::Done(ref outcome)
-            if outcome.verdict.error_kind() == Some(&FailureKind::InvalidInput) => {}
+            if outcome.verdict.error_kind() == Some(&FailureKind::InputEncode) => {}
         Resolution::Blocked(Blocked::Auth(_)) => {}
         other => panic!("telegram install failed: {other:?}"),
     }

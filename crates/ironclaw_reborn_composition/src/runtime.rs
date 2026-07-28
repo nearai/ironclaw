@@ -97,8 +97,6 @@ use ironclaw_turns::{
 };
 
 use ironclaw_host_runtime::HostRuntime;
-use ironclaw_host_runtime::MemoryBackedUserProfileSource;
-use ironclaw_host_runtime::memory_context::ProductionMemoryPromptContextService;
 use ironclaw_outbound::CommunicationPreferenceRepository;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_outbound::OutboundDeliveryTargetRegistrationOutcome;
@@ -107,7 +105,6 @@ use ironclaw_outbound::OutboundError;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_product::RebornOutboundDeliveryTargetId;
 use ironclaw_turns::ExternalToolCatalog;
-use ironclaw_turns::run_profile::{MemoryPromptContextService, UserProfileContext};
 
 use self::latency::{trace_runtime_latency_error, trace_runtime_latency_ok};
 use self::runtime_turn_scheduler::RuntimeTurnScheduler;
@@ -258,6 +255,8 @@ fn auth_challenge_to_view(
             account_label: None,
             authorization_url: Some(authorization_url.clone()),
             expires_at: Some(*expires_at),
+            // Product-auth OAuth relay: no channel-connection context.
+            pairing: None,
         },
         AuthChallenge::ManualTokenRequired {
             provider,
@@ -270,6 +269,7 @@ fn auth_challenge_to_view(
             account_label: Some(label.clone()),
             authorization_url: None,
             expires_at: Some(*expires_at),
+            pairing: None,
         },
         AuthChallenge::AccountSelectionRequired { .. }
         | AuthChallenge::ReauthorizeRequired { .. }
@@ -279,6 +279,7 @@ fn auth_challenge_to_view(
             account_label: None,
             authorization_url: None,
             expires_at: None,
+            pairing: None,
         },
     }
 }
@@ -337,31 +338,6 @@ use production::{
 };
 
 const MAX_DESCENDANT_CANCEL_NODES: usize = 1_000;
-
-// Adapter: wraps `MemoryBackedUserProfileSource` (in `ironclaw_host_runtime`) and
-// implements `HostUserProfileSource` (in `ironclaw_loop_host`). A direct
-// `impl HostUserProfileSource for MemoryBackedUserProfileSource` is forbidden by
-// the orphan rule — neither the trait nor the type is defined in this crate. The
-// newtype wrapper is defined here, so the impl is allowed. This mirrors how
-// `WorkspaceIdentityContextSource` (defined in `src/workspace/`) implements
-// `HostIdentityContextSource` (defined in `ironclaw_loop_host`) — the impl
-// lives in the crate that owns the *concrete type* and can see the trait.
-//
-// `pub(crate)` so the `test_support::build_user_profile_source_for_test`
-// forwarder can reuse this single adapter instead of duplicating the orphan-rule
-// workaround in the test harness.
-pub(crate) struct MemoryBackedUserProfileSourceAdapter(pub(crate) MemoryBackedUserProfileSource);
-
-#[async_trait::async_trait]
-impl HostUserProfileSource for MemoryBackedUserProfileSourceAdapter {
-    async fn resolve_user_profile(
-        &self,
-        run_context: &LoopRunContext,
-    ) -> Option<UserProfileContext> {
-        // Delegate to the inherent method on `MemoryBackedUserProfileSource`.
-        self.0.resolve_user_profile(run_context).await
-    }
-}
 
 struct RuntimeStoreParts {
     scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
@@ -4104,19 +4080,30 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
     // disclosure-protocol injection agree on a single value.
     let resolved_tool_disclosure = tool_disclosure.unwrap_or_else(ToolDisclosureMode::from_env);
     let default_runtime_config = DefaultPlannedRuntimeConfig::default();
-    // Resolve the bound memory document-store provider once (issue #3537): the
+    // Resolve the bound memory provider once (issue #3537): the
     // profile source, prompt-context lane, and after-turn writer all fan out from
     // this single resolution, so they agree on the bound provider (native, or
-    // `None` for a disabled/third-party-without-a-provider binding).
-    let resolved_memory_document_store = local_runtime.and_then(|local_runtime| {
-        local_runtime
-            .memory_service_resolver
-            .resolve_document_store(
-                Arc::clone(&local_runtime.extension_filesystem)
-                    as Arc<dyn ironclaw_filesystem::RootFilesystem>,
-                None,
-            )
+    // `None` for a disabled/third-party-without-a-provider binding). The bound
+    // provider's DECLARED lifecycle set gates each consumer below: a hook the
+    // manifest does not declare is never wired, so it is never called.
+    let resolved_memory_provider = local_runtime.and_then(|local_runtime| {
+        local_runtime.memory_service_resolver.resolve_provider(
+            Arc::clone(&local_runtime.extension_filesystem)
+                as Arc<dyn ironclaw_filesystem::RootFilesystem>,
+            None,
+        )
     });
+    let memory_lifecycle = local_runtime
+        .map(|local_runtime| local_runtime.memory_lifecycle.clone())
+        .unwrap_or_default();
+    let crate::memory_provider_factory::MemoryLifecycleConsumers {
+        memory_context_service: wired_memory_context_service,
+        after_turn_memory_writer: wired_after_turn_memory_writer,
+        user_profile_source: wired_memory_user_profile_source,
+    } = crate::memory_provider_factory::memory_lifecycle_consumers(
+        resolved_memory_provider,
+        &memory_lifecycle,
+    );
 
     // Deferred bind (§ await-edge resolver ordering note above,
     // `RuntimeStoreParts`'s doc comment): the resolver was assembled inside
@@ -4252,35 +4239,29 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         // wire only one of them here, or they will diverge. See issue #5013.
         //
         // Profile reads go through the same memory provider resolver as the
-        // memory tools (issue #3537): the profile source is native-backed only
-        // when the resolver yields a document-store provider. A disabled or
-        // third-party binding resolves to `None`, so this degrades to `Empty`
+        // memory tools (issue #3537), AND only when the bound provider's
+        // manifest declares the `profile_read` lifecycle hook. A disabled /
+        // unconstructible binding, or an undeclared hook, degrades to `Empty`
         // (profile unknown) rather than silently reading native — keeping
         // profile reads and tools consistent, from one construction point.
-        user_profile_source: match resolved_memory_document_store
-            .clone()
-            .map(MemoryBackedUserProfileSource::new)
-        {
-            Some(source) => Arc::new(MemoryBackedUserProfileSourceAdapter(source))
-                as Arc<dyn HostUserProfileSource>,
-            None => Arc::new(EmptyUserProfileSource) as Arc<dyn HostUserProfileSource>,
-        },
+        user_profile_source: wired_memory_user_profile_source
+            .unwrap_or_else(|| Arc::new(EmptyUserProfileSource) as Arc<dyn HostUserProfileSource>),
         // Proactive memory (#3537 / mem0 flow): fan out from the SAME resolved
-        // document-store provider the profile source and after-turn writer use,
-        // wrap it in the host's prompt-context adapter, and let the loop surface
-        // both lanes into the prompt once per run. A disabled or
-        // third-party-without-a-provider binding resolves to `None` — degrading to
-        // no memory rather than silently reading native (issue #5013).
-        memory_context_service: resolved_memory_document_store
-            .clone()
-            .map(ProductionMemoryPromptContextService::new)
-            .map(|service| Arc::new(service) as Arc<dyn MemoryPromptContextService>),
-        // After-turn memory recording (#3537 / mem0 `add`): the RAW document-store
+        // provider the profile source and after-turn writer use, wrap it in
+        // the host's prompt-context adapter with the provider's DECLARED
+        // lifecycle (each retrieval lane is queried only if declared), and let
+        // the loop surface the declared lanes into the prompt once per run. A
+        // disabled or third-party-without-a-provider binding resolves to
+        // `None` — degrading to no memory rather than silently reading native
+        // (issue #5013).
+        memory_context_service: wired_memory_context_service,
+        // After-turn memory recording (#3537 / mem0 `add`): the RAW bound
         // provider — the SAME resolved provider the profile source and prompt-context
         // lane use, NOT wrapped in `ProductionMemoryPromptContextService`. The
-        // executor forwards each Completed run's transcript to `record_interaction`.
-        // `None` degrades to no after-turn recording (issue #5013).
-        after_turn_memory_writer: resolved_memory_document_store,
+        // executor forwards each Completed run's transcript to `record_interaction`
+        // ONLY when the provider's manifest declares that hook; `None` degrades
+        // to no after-turn recording (issue #5013).
+        after_turn_memory_writer: wired_after_turn_memory_writer,
         model_policy_guard: None,
         model_budget_accountant,
         safety_context: None,
@@ -4363,7 +4344,11 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
     // external-channel delivery. OAuth/manual challenges delegate to
     // product-auth; host-issued pairing delegates to the canonical pairing
     // service and reuses its live code/deep-link/expiry presentation.
-    let auth_challenges = product_auth_challenge_provider(&services.product_auth);
+    let auth_challenges =
+        ironclaw_extension_host::run_delivery_ports::RecipeAuthChallengeProvider::compose(
+            product_auth_challenge_provider(&services.product_auth),
+            services.channel_pairing.clone(),
+        );
     let projection_services = if let Some(provider) = auth_challenges.clone() {
         projection_services.with_auth_challenges(provider)
     } else {

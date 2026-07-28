@@ -1,17 +1,16 @@
 use std::collections::{HashMap, HashSet};
 
-use ironclaw_host_api::{CapabilityId, DispatchInputIssueCode};
+use ironclaw_host_api::{CapabilityId, DispatchInputIssueCode, FailureKind};
 use ironclaw_turns::{
     LoopResultRef,
     run_profile::{
         AgentLoopDriverHost, AppendCapabilityResultRef, CapabilityApprovalResume,
         CapabilityAuthResume, CapabilityCallCandidate, CapabilityDescriptorView, CapabilityFailure,
-        CapabilityFailureDetail, CapabilityFailureKind, CapabilityInputIssue,
-        CapabilityInputRepair, CapabilityRecoveryHint, CapabilityResultMessage,
-        CapabilitySurfaceVersion, LoopRequest, ModelVisibleToolObservation, ObservationTrust,
-        ProviderToolCall, ProviderToolCallReference, RegisterProviderToolCallRequest,
-        SameCallRetryConstraint, ToolObservationDetail, ToolObservationStatus,
-        ToolRecoveryObservation, VisibleCapabilitySurface,
+        CapabilityFailureDetail, CapabilityInputIssue, CapabilityInputRepair,
+        CapabilityRecoveryHint, CapabilityResultMessage, CapabilitySurfaceVersion, LoopRequest,
+        ModelVisibleToolObservation, ObservationTrust, ProviderToolCall, ProviderToolCallReference,
+        RegisterProviderToolCallRequest, SameCallRetryConstraint, ToolObservationDetail,
+        ToolObservationStatus, ToolRecoveryObservation, VisibleCapabilitySurface,
     },
 };
 
@@ -384,13 +383,13 @@ pub(super) fn model_visible_capability_failure_observation(
                 schema_version:
                     ironclaw_turns::run_profile::MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
                 status: ToolObservationStatus::Error,
-                summary: model_visible_failure_summary(&failure.error_kind),
+                summary: model_visible_failure_summary(failure.error_kind),
                 detail: ToolObservationDetail::GenericFailure {
-                    failure_kind: failure.error_kind.clone(),
+                    failure_kind: failure.error_kind,
                     detail: diagnostic,
                 },
                 artifacts: Vec::new(),
-                recovery: Some(generic_failure_recovery(&failure.error_kind)),
+                recovery: Some(generic_failure_recovery(failure.error_kind)),
                 trust,
             }
         }
@@ -411,9 +410,9 @@ fn bounded_diagnostic_detail(value: &str) -> String {
     value[..end].to_string() // safety: `end` reduced to a valid UTF-8 boundary.
 }
 
-fn model_visible_failure_summary(error_kind: &CapabilityFailureKind) -> String {
+fn model_visible_failure_summary(error_kind: FailureKind) -> String {
     match error_kind {
-        CapabilityFailureKind::GateDeclined => "Capability declined by user.".to_string(),
+        FailureKind::GateDeclined => "Capability declined by user.".to_string(),
         _ => format!("Capability failed with {}.", error_kind.as_str()),
     }
 }
@@ -469,27 +468,52 @@ fn invalid_input_observation(issues: Vec<CapabilityInputIssue>) -> ModelVisibleT
     }
 }
 
-fn generic_failure_recovery(error_kind: &CapabilityFailureKind) -> ToolRecoveryObservation {
+fn generic_failure_recovery(error_kind: FailureKind) -> ToolRecoveryObservation {
+    // Wildcard-free over the unified kind vocabulary: a new kind must choose
+    // its same-call retry constraint deliberately. Buckets preserve the
+    // retired coarse mapping and place each precise kind beside its ancestor:
+    // policy denials forbid the same call, model-correctable shapes require a
+    // changed call, world hiccups allow retry after a delay, and
+    // setup/cancellation faults make a same-call retry useless.
     let same_call_retry = match error_kind {
-        CapabilityFailureKind::Authorization
-        | CapabilityFailureKind::GateDeclined
-        | CapabilityFailureKind::PolicyDenied => SameCallRetryConstraint::Forbidden,
-        CapabilityFailureKind::InvalidInput
-        | CapabilityFailureKind::InvalidOutput
-        | CapabilityFailureKind::OutputTooLarge => SameCallRetryConstraint::RequiresChangedInput,
-        CapabilityFailureKind::Backend
-        | CapabilityFailureKind::Network
-        | CapabilityFailureKind::Transient
-        | CapabilityFailureKind::Unavailable => SameCallRetryConstraint::AllowedAfterDelay,
-        CapabilityFailureKind::Cancelled
-        | CapabilityFailureKind::MissingRuntime
-        | CapabilityFailureKind::Permanent => SameCallRetryConstraint::NotUseful,
-        CapabilityFailureKind::Dispatcher
-        | CapabilityFailureKind::OperationFailed
-        | CapabilityFailureKind::Process
-        | CapabilityFailureKind::Resource
-        | CapabilityFailureKind::Internal
-        | CapabilityFailureKind::Unknown(_) => SameCallRetryConstraint::Allowed,
+        FailureKind::Authorization
+        | FailureKind::GateDeclined
+        | FailureKind::PolicyDenied
+        | FailureKind::NetworkDenied
+        | FailureKind::FilesystemDenied
+        | FailureKind::SecretDenied
+        | FailureKind::AuthRequired => SameCallRetryConstraint::Forbidden,
+        FailureKind::InputEncode
+        | FailureKind::OutputDecode
+        | FailureKind::InvalidResult
+        | FailureKind::OutputTooLarge
+        | FailureKind::MethodMissing
+        | FailureKind::UndeclaredCapability
+        | FailureKind::UnknownCapability
+        | FailureKind::UnknownProvider => SameCallRetryConstraint::RequiresChangedInput,
+        FailureKind::Backend
+        | FailureKind::Network
+        | FailureKind::Transient
+        | FailureKind::Unavailable => SameCallRetryConstraint::AllowedAfterDelay,
+        FailureKind::Cancelled
+        | FailureKind::MissingRuntime
+        | FailureKind::MissingRuntimeBackend
+        | FailureKind::UnsupportedRunner
+        | FailureKind::RuntimeMismatch
+        | FailureKind::ExtensionRuntimeMismatch
+        | FailureKind::Manifest => SameCallRetryConstraint::NotUseful,
+        FailureKind::OperationFailed
+        | FailureKind::ExitFailure
+        | FailureKind::Resource
+        | FailureKind::Internal
+        | FailureKind::Guest
+        | FailureKind::Memory
+        | FailureKind::Client
+        | FailureKind::Executor
+        // Unclassifiable: the constraint is unknown, so do not forbid a
+        // retry the model judges worthwhile.
+        | FailureKind::Unclassified
+        | FailureKind::StaleSurface => SameCallRetryConstraint::Allowed,
     };
     ToolRecoveryObservation {
         same_call_retry,
@@ -789,7 +813,7 @@ mod tests {
     fn generic_failure_observation_carries_diagnostic_detail_to_model() {
         let path = "missing input_schema_ref at /system/extensions/google-calendar/schemas/google-calendar/list_calendars.input.v1.json";
         let failure = CapabilityFailure {
-            error_kind: CapabilityFailureKind::MissingRuntime,
+            error_kind: FailureKind::MissingRuntime,
             safe_summary: "capability invocation failed".to_string(),
             detail: Some(CapabilityFailureDetail::Diagnostic {
                 text: path.to_string(),
@@ -814,7 +838,7 @@ mod tests {
     #[test]
     fn generic_failure_observation_without_diagnostic_has_no_detail() {
         let failure = CapabilityFailure {
-            error_kind: CapabilityFailureKind::Backend,
+            error_kind: FailureKind::Backend,
             safe_summary: "capability invocation failed".to_string(),
             detail: None,
         };

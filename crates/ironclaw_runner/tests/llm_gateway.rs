@@ -961,6 +961,138 @@ async fn gateway_preserves_invalid_output_from_provider_tool_validation() {
     assert!(capabilities.registered.lock().unwrap().is_empty());
 }
 
+/// Regression (#6684 review, caller pin): a malformed model-supplied
+/// `spawn_subagent` call is rejected by the capability port as
+/// `InvalidInvocation` — at validation time, and (for inputs the port only
+/// decodes on registration) at registration time. Both rejections must reach
+/// the loop as a **model-visible** `InvalidOutput`, which the loop's recovery
+/// strategy turns into `RetryAlteration::RepairInvalidModelOutput`, never as a
+/// run-ending host fault.
+///
+/// This drives the real caller (`LlmProviderModelGateway::stream_model_with_capabilities`
+/// → `complete_model_request` → `tool_response_to_host`) rather than
+/// `map_provider_tool_output_error` directly, per `.claude/rules/testing.md`
+/// ("Test Through the Caller"): the gateway derives the classifier's input from
+/// the provider response and two separate loops call it.
+///
+/// The rest of the chain is pinned downstream: `HostManagedModelErrorKind::InvalidOutput`
+/// → `AgentLoopHostErrorKind::InvalidOutput` (`ironclaw_loop_host`), →
+/// `ModelErrorClass::InvalidOutput` (`ironclaw_agent_loop` `executor::mapping`
+/// tests), → `RetryAlteration::RepairInvalidModelOutput`
+/// (`model_invalid_output_retries_then_observes_once_before_abort` in
+/// `ironclaw_agent_loop` `strategies::recovery`). Those seams are `pub(crate)`
+/// / `pub(super)` in their own crates, so this crate asserts at the gateway
+/// boundary — the nearest reachable seam.
+#[tokio::test]
+async fn malformed_spawn_subagent_input_is_model_repairable_through_the_gateway() {
+    for (stage, port) in [
+        (
+            "validation",
+            GatewayCapabilityPort::with_spawn_subagent_surface()
+                .with_provider_tool_validation_error(AgentLoopHostErrorKind::InvalidInvocation),
+        ),
+        (
+            "registration",
+            GatewayCapabilityPort::with_spawn_subagent_surface()
+                .with_provider_tool_registration_error(AgentLoopHostErrorKind::InvalidInvocation),
+        ),
+    ] {
+        // Malformed spawn input: the required `mission` field is absent.
+        let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
+            id: "call_1".to_string(),
+            name: "builtin__spawn_subagent".to_string(),
+            arguments: serde_json::json!({"flavor": "explorer"}),
+            reasoning: None,
+            signature: None,
+            arguments_parse_error: None,
+        }]));
+        let gateway = LlmProviderModelGateway::with_provider_identity(
+            STATIC_PROVIDER_ID,
+            Arc::clone(&provider),
+            LlmModelProfilePolicy::new()
+                .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+        );
+        let capabilities = Arc::new(port);
+
+        let error = gateway
+            .stream_model_with_capabilities(
+                model_request(interactive_model()),
+                capabilities.clone(),
+            )
+            .await
+            .expect_err("malformed spawn input must not produce a successful response");
+
+        assert_eq!(
+            error.kind,
+            HostManagedModelErrorKind::InvalidOutput,
+            "{stage}-stage rejection must reach the loop as model-repairable invalid output"
+        );
+        assert!(
+            capabilities.registered.lock().unwrap().is_empty(),
+            "{stage}-stage rejection must not register a capability call"
+        );
+        // The rejection is not an arguments-parse/oversized error, so the
+        // gateway's in-gateway repair retry must NOT fire: the error is handed
+        // to the loop, which owns the invalid-output repair budget.
+        assert_eq!(
+            provider.tool_requests.lock().unwrap().len(),
+            1,
+            "{stage}-stage rejection must surface to the loop, not trigger a second provider call"
+        );
+    }
+
+    // Control: the same armed errors with a WELL-FORMED payload must not
+    // reject — at BOTH stages. Without this, either double could reject
+    // unconditionally and every assertion above would still pass, proving
+    // error routing rather than malformed-input handling.
+    for (stage, port) in [
+        (
+            "validation",
+            GatewayCapabilityPort::with_spawn_subagent_surface()
+                .with_provider_tool_validation_error(AgentLoopHostErrorKind::InvalidInvocation),
+        ),
+        (
+            "registration",
+            GatewayCapabilityPort::with_spawn_subagent_surface()
+                .with_provider_tool_registration_error(AgentLoopHostErrorKind::InvalidInvocation),
+        ),
+    ] {
+        let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
+            id: "call_1".to_string(),
+            name: "builtin__spawn_subagent".to_string(),
+            arguments: serde_json::json!({"flavor": "explorer", "mission": "survey the repo"}),
+            reasoning: None,
+            signature: None,
+            arguments_parse_error: None,
+        }]));
+        let gateway = LlmProviderModelGateway::with_provider_identity(
+            STATIC_PROVIDER_ID,
+            Arc::clone(&provider),
+            LlmModelProfilePolicy::new()
+                .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+        );
+        let capabilities = Arc::new(port);
+
+        gateway
+            .stream_model_with_capabilities(
+                model_request(interactive_model()),
+                capabilities.clone(),
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{stage}: a well-formed spawn payload must pass with the error armed: {error:?}"
+                )
+            });
+
+        assert_eq!(
+            capabilities.registered.lock().unwrap().len(),
+            1,
+            "{stage}: a well-formed spawn payload must reach registration"
+        );
+    }
+}
+
 fn repair_request_messages(
     tool_requests: &[ToolCompletionRequest],
 ) -> &[ironclaw_llm::ChatMessage] {
@@ -2261,6 +2393,47 @@ async fn gateway_rejects_unknown_finish_reason_provider_responses() {
         .unwrap_err();
 
     assert_eq!(error.kind, HostManagedModelErrorKind::Unavailable);
+}
+
+/// An explicitly-failed provider response must not dispatch its tool calls.
+///
+/// Gemini reports `MALFORMED_FUNCTION_CALL` / `UNEXPECTED_TOOL_CALL` — both
+/// `FinishReason::Unknown` — on responses that *do* carry function-call parts.
+/// `ironclaw_llm` refuses to refine those into `ToolUse`; this pins the other
+/// half of the contract: when a response reaches the gateway as `Unknown`, the
+/// parsed tool calls are never registered as capability activity, however
+/// well-formed and advertised they look.
+#[tokio::test]
+async fn gateway_does_not_register_capability_calls_for_unknown_finish_reason() {
+    let provider = Arc::new(ToolAwareProvider::tool_calls_with_finish_reason(
+        vec![ToolCall {
+            id: "call_malformed".to_string(),
+            name: "demo__echo".to_string(),
+            arguments: serde_json::json!({"message":"hello"}),
+            reasoning: None,
+            signature: None,
+            arguments_parse_error: None,
+        }],
+        FinishReason::Unknown,
+    ));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_tool_surface());
+
+    let error = gateway
+        .stream_model_with_capabilities(model_request(interactive_model()), capabilities.clone())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, HostManagedModelErrorKind::Unavailable);
+    assert!(
+        capabilities.registered.lock().unwrap().is_empty(),
+        "an explicitly-failed provider response must not dispatch its tool calls"
+    );
 }
 
 #[tokio::test]
@@ -4062,6 +4235,23 @@ impl ToolAwareProvider {
         })
     }
 
+    fn tool_calls_with_finish_reason(
+        tool_calls: Vec<ToolCall>,
+        finish_reason: FinishReason,
+    ) -> Self {
+        Self::tool_response(ToolCompletionResponse {
+            content: None,
+            tool_calls,
+            input_tokens: 1,
+            output_tokens: 1,
+            finish_reason,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            reasoning: None,
+            reasoning_details: None,
+        })
+    }
+
     fn tool_stop_reply(content: &str) -> Self {
         Self::tool_response(ToolCompletionResponse {
             content: Some(content.to_string()),
@@ -4145,6 +4335,10 @@ struct GatewayCapabilityPort {
     resolvable_definitions: Vec<ProviderToolDefinition>,
     registered: Mutex<Vec<ProviderToolCall>>,
     validation_error: Option<AgentLoopHostErrorKind>,
+    /// Rejection injected at the *registration* stage only, so the gateway's
+    /// second provider-tool loop is genuinely reached (setting
+    /// `validation_error` would short-circuit in the earlier validation loop).
+    registration_error: Option<AgentLoopHostErrorKind>,
 }
 
 impl GatewayCapabilityPort {
@@ -4165,6 +4359,32 @@ impl GatewayCapabilityPort {
             definitions,
             registered: Mutex::new(Vec::new()),
             validation_error: None,
+            registration_error: None,
+        }
+    }
+
+    /// The `builtin.spawn_subagent` surface, so a malformed model-supplied
+    /// spawn input can be driven through the real gateway path.
+    fn with_spawn_subagent_surface() -> Self {
+        let definitions = vec![ProviderToolDefinition {
+            capability_id: CapabilityId::new("builtin.spawn_subagent").unwrap(),
+            name: provider_name("builtin__spawn_subagent"),
+            description: "Spawn a subagent".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "mission": { "type": "string" },
+                    "flavor": { "type": "string" }
+                },
+                "required": ["mission"]
+            }),
+        }];
+        Self {
+            resolvable_definitions: definitions.clone(),
+            definitions,
+            registered: Mutex::new(Vec::new()),
+            validation_error: None,
+            registration_error: None,
         }
     }
 
@@ -4222,11 +4442,17 @@ impl GatewayCapabilityPort {
             definitions,
             registered: Mutex::new(Vec::new()),
             validation_error: None,
+            registration_error: None,
         }
     }
 
     fn with_provider_tool_validation_error(mut self, kind: AgentLoopHostErrorKind) -> Self {
         self.validation_error = Some(kind);
+        self
+    }
+
+    fn with_provider_tool_registration_error(mut self, kind: AgentLoopHostErrorKind) -> Self {
+        self.registration_error = Some(kind);
         self
     }
 
@@ -4276,7 +4502,14 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
         &self,
         tool_call: &ProviderToolCall,
     ) -> Result<(), ironclaw_turns::run_profile::AgentLoopHostError> {
-        if let Some(kind) = self.validation_error {
+        // Payload-sensitive for the same reason as the registration stage
+        // below: an unconditional rejection would prove that an injected error
+        // maps correctly, while saying nothing about the malformed input the
+        // spawn test is named for. A well-formed `mission` must pass.
+        if let Some(kind) = self
+            .validation_error
+            .filter(|_| tool_call.arguments.get("mission").is_none())
+        {
             return Err(ironclaw_turns::run_profile::AgentLoopHostError::new(
                 kind,
                 "provider tool output was structurally invalid",
@@ -4318,6 +4551,19 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
         ironclaw_turns::run_profile::AgentLoopHostError,
     > {
         let tool_call = request.tool_call;
+        // Reject at registration only when the payload is actually malformed —
+        // the injected error is armed, but the *missing field* is what fires it.
+        // An unconditional rejection here would prove error routing while
+        // saying nothing about the malformed input the test is named for.
+        if let Some(kind) = self
+            .registration_error
+            .filter(|_| tool_call.arguments.get("mission").is_none())
+        {
+            return Err(ironclaw_turns::run_profile::AgentLoopHostError::new(
+                kind,
+                "invalid spawn_subagent input: missing field mission",
+            ));
+        }
         self.validate_provider_tool_call(&tool_call)?;
         let definition = self
             .definition_for(tool_call.name.as_str())

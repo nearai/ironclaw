@@ -85,9 +85,10 @@ fn project_capabilities(
     for raw in parsed.capabilities {
         // `from_raw` errors keep their typed `ManifestV2Error` variants so
         // capability validation reports identically however the capability
-        // is declared.
+        // is declared. v2 contract projection opens no extra id namespace
+        // (the reserved memory-tool namespace is a v3 `[memory]` allowance).
         let capability =
-            CapabilityDeclV2::from_raw(raw, context.extension_id, context.host_port_catalog)?;
+            CapabilityDeclV2::from_raw(raw, context.extension_id, context.host_port_catalog, None)?;
         if !seen.insert(capability.id.clone()) {
             return Err(ManifestV2Error::DuplicateCapability { id: capability.id }.into());
         }

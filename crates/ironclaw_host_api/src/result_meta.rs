@@ -24,10 +24,12 @@
 //! ## Charter
 //!
 //! Every type here is **plain redacted vocabulary** (host_api charter): a bounded
-//! enum, a fixed-width hash value, or a bounded validated safe identifier. None
-//! carries a secret, a raw `HostPath`, a backend error string, or a runtime
-//! handle. A [`LoopRef`] is a bounded correlation identifier with path delimiters
-//! and control characters refused at construction — not free text, and distinct
+//! enum, a fixed-width hash value, or a bounded validated safe identifier. The
+//! narrow exception is [`ModelDiagnostic`], which carries a bounded,
+//! producer-scrubbed cause needed for model recovery. No type carries a secret,
+//! a typed raw `HostPath`, an unscrubbed backend error, or a runtime handle. A
+//! [`LoopRef`] is a bounded correlation identifier with path delimiters and
+//! control characters refused at construction — not free text, and distinct
 //! from the kernel record refs ([`GateRef`](crate::GateRef) et al.), which stay
 //! opaque uuids precisely so a caller cannot compose one from a string.
 
@@ -115,116 +117,263 @@ impl TerminateHint {
     }
 }
 
-/// The recovery classification of a recoverable failure — the host_api mirror of
-/// `ironclaw_turns`' `CapabilityFailureKind`. This is the class that drives
-/// retry-vs-terminal handling; it is a bounded *taxonomy* (`network`, `backend`,
-/// `authorization`, …), never a raw backend error string — the raw cause stays
-/// host-side. An open `Unknown` escape hatch keeps a newer producer's unrecognized
-/// tag representable (forward compatibility), mirroring the loop enum.
-///
-/// Deliberately NOT `#[non_exhaustive]`: the `Unknown` variant is the open-set
-/// escape hatch, and the manual `as_str`/`from_tag` route every value through it,
-/// so downstream classifiers can match exhaustively (a new *named* variant fails
-/// to compile until it is deliberately classified).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum FailureKind {
-    Authorization,
-    Backend,
-    Cancelled,
-    Dispatcher,
-    GateDeclined,
-    InvalidInput,
-    InvalidOutput,
-    MissingRuntime,
-    Network,
-    OperationFailed,
-    OutputTooLarge,
-    PolicyDenied,
-    Process,
-    Resource,
-    Transient,
-    Unavailable,
-    Internal,
-    Permanent,
-    /// A tag outside the closed set above (forward compatibility). Bounded and
-    /// validated at construction; never a raw error string.
-    Unknown(FailureKindValue),
+/// Declares the closed [`FailureKind`] vocabulary exactly once: the enum, its
+/// wire tags ([`FailureKind::as_str`] and the primary [`FailureKind::from_tag`]
+/// arms), and [`FailureKind::ALL`] all expand from this single list. The
+/// compiler owns completeness — a variant cannot exist without its tag or its
+/// `ALL` membership, so downstream exhaustiveness pins that iterate `ALL`
+/// cannot silently stop covering a newly added kind.
+macro_rules! declare_failure_kinds {
+    ($( $(#[$meta:meta])* $variant:ident => $tag:literal ),+ $(,)?) => {
+        /// The single failure vocabulary — one closed enum naming every way an
+        /// operation can fail, carried unchanged from the mint site to the loop.
+        ///
+        /// This unifies what were five overlapping enums (`RuntimeDispatchErrorKind`'s
+        /// precise mechanism names, the loop's `CapabilityFailureKind`, host_runtime's
+        /// `RuntimeFailureKind`, and the loop-private `CapabilityErrorClass`) into one
+        /// list plus projection functions. Layers above the mint site ask questions
+        /// ([`fate`](Self::fate), [`is_retryable`](Self::is_retryable)) instead of
+        /// re-declaring the domain — re-declared domains drift, and the drift is
+        /// where recoverability died (#6284).
+        ///
+        /// Deliberately NOT `#[non_exhaustive]` and deliberately **closed** (no open
+        /// `Unknown(String)` escape hatch): every producer knows what it is minting.
+        /// The one sanctioned sink for values the system genuinely cannot classify
+        /// is the explicit [`Unclassified`](Self::Unclassified) variant — surfaced,
+        /// never retried. Downstream matches are exhaustive, so a new variant fails
+        /// to compile until every projection deliberately classifies it — that
+        /// compile error *is* the recoverability review.
+        ///
+        /// Wire tags are lowercase snake_case ([`as_str`](Self::as_str)) — they must
+        /// pass `ironclaw_events`' `is_safe_error_kind` (first byte lowercase ASCII) or
+        /// the event layer silently rewrites the tag to `Unclassified`. Historical tags
+        /// from the retired coarse vocabularies remain readable via
+        /// [`from_tag`](Self::from_tag) aliases.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum FailureKind {
+            $( $(#[$meta])* $variant, )+
+        }
+
+        impl FailureKind {
+            /// Every variant, for conformance tests (tag/validator round-trips).
+            /// Compiler-derived from the single declaration list — a variant
+            /// cannot exist outside `ALL`.
+            pub const ALL: &'static [FailureKind] = &[ $(Self::$variant),+ ];
+
+            /// The stable wire tag. Lowercase snake_case — every tag here passes the
+            /// event layer's `is_safe_error_kind` validator (pinned by test).
+            pub fn as_str(&self) -> &'static str {
+                match self {
+                    $( Self::$variant => $tag, )+
+                }
+            }
+
+            /// The primary tag decode: exactly the tags [`as_str`](Self::as_str)
+            /// emits. Aliases and the fallback live in
+            /// [`from_tag`](Self::from_tag).
+            fn from_primary_tag(tag: &str) -> Option<Self> {
+                match tag {
+                    $( $tag => Some(Self::$variant), )+
+                    _ => None,
+                }
+            }
+        }
+    };
 }
 
-/// A validated, bounded tag for [`FailureKind::Unknown`]. Safe-identifier
-/// charset, so it can never carry a raw payload/path/secret.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct FailureKindValue(String);
+declare_failure_kinds! {
+    // ── Model-visible: the model did something wrong and can correct it ──
+    /// Invoked a method the capability does not expose.
+    MethodMissing => "method_missing",
+    /// Invoked a capability the extension never declared in its manifest.
+    UndeclaredCapability => "undeclared_capability",
+    /// Invoked a capability no installed extension provides.
+    UnknownCapability => "unknown_capability",
+    /// Named a provider that does not exist.
+    UnknownProvider => "unknown_provider",
+    /// The input failed to encode against the tool's declared schema.
+    InputEncode => "input_encode",
+    /// The capability ran and reported a domain failure ("no such file").
+    OperationFailed => "operation_failed",
+    /// The result exceeded the output size cap.
+    OutputTooLarge => "output_too_large",
+    /// Hit a resource quota/limit the model could work around.
+    Resource => "resource",
+    /// Blocked by policy — permanently forbidden, not a gate.
+    PolicyDenied => "policy_denied",
+    /// Network egress denied by policy. Never retryable: policy does not
+    /// change between attempts (retrying burns budget on a call that cannot
+    /// succeed).
+    NetworkDenied => "network_denied",
+    /// Filesystem path access refused.
+    FilesystemDenied => "filesystem_denied",
+    /// Secret/credential access refused.
+    SecretDenied => "secret_denied",
+    /// Authorization failed (general case; the two `*Denied` variants above
+    /// are specific causes).
+    Authorization => "authorization",
+    /// The capability surface changed between disclosure and invocation —
+    /// re-issue the call against the fresh surface.
+    StaleSurface => "stale_surface",
+    /// The user declined the gate. Model-visible so the loop can pursue
+    /// another approach; wire tag is load-bearing in the WebUI frontend.
+    GateDeclined => "gate_declined",
 
-impl FailureKindValue {
-    pub fn new(value: impl Into<String>) -> Result<Self, HostApiError> {
-        let value = value.into();
-        validate_safe_tag("failure_kind", &value, 128)?;
-        Ok(Self(value))
-    }
+    // ── Retry quietly: the world hiccuped, the model did nothing wrong ──
+    /// Transport-level network failure (timeout, connection reset) — distinct
+    /// from [`NetworkDenied`](Self::NetworkDenied), which is policy.
+    Network => "network",
+    /// Temporary fault; try again.
+    Transient => "transient",
+    /// The backing service is down right now.
+    Unavailable => "unavailable",
+    /// An upstream/backend service errored.
+    Backend => "backend",
+    /// Host internal fault, retryable.
+    Internal => "internal",
 
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
+    // ── Model-visible: the extension itself is broken ──
+    /// Extension guest code crashed/trapped.
+    Guest => "guest",
+    /// A sandboxed process exited with failure.
+    ExitFailure => "exit_failure",
+    /// The tool returned output that could not be decoded.
+    OutputDecode => "output_decode",
+    /// The result violated the declared result schema.
+    InvalidResult => "invalid_result",
+    /// The extension exceeded its memory limit.
+    Memory => "memory",
+
+    // ── Model-visible with user-setup remediation: configuration faults ──
+    /// The extension manifest is invalid.
+    Manifest => "manifest",
+    /// The extension was built for a different runtime than it was routed to.
+    ExtensionRuntimeMismatch => "extension_runtime_mismatch",
+    /// Dispatch routed to the wrong runtime lane.
+    RuntimeMismatch => "runtime_mismatch",
+    /// The required runtime backend is not installed.
+    MissingRuntimeBackend => "missing_runtime_backend",
+    /// The runtime kind is not supported in this deployment.
+    UnsupportedRunner => "unsupported_runner",
+    /// The runtime for this capability is absent.
+    MissingRuntime => "missing_runtime",
+    /// Host-side client machinery fault.
+    Client => "client",
+    /// Host-side executor machinery fault.
+    Executor => "executor",
+
+    // ── Model-visible: the system could not classify the failure ──
+    /// The failure could not be classified: an unrecognized wire tag (a future
+    /// build's kind, a legacy open-set tag) or a lane's redacted unknown
+    /// bucket. Deliberately NOT retryable — an unclassifiable failure may be
+    /// permanent, so it surfaces to the model instead of silently consuming
+    /// retry budget. Distinct from [`Internal`](Self::Internal), which is a
+    /// *classified* retryable host fault.
+    Unclassified => "unclassified",
+
+    // ── Park: waiting on a human or a gate ──
+    /// A credential is required — park the run, launch the auth flow, resume.
+    AuthRequired => "auth_required",
+
+    // ── Terminal: the only honest run-ender in this vocabulary ──
+    /// Someone stopped the run. Nothing failed.
+    Cancelled => "cancelled",
+}
+
+/// What the loop does with a [`FailureKind`] — the single fate decision,
+/// decided once beside the enum instead of re-derived per layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureFate {
+    /// Retry with backoff; the model is not consulted until budget exhausts.
+    Retry,
+    /// Surface to the model as a tool error it can act on; the run continues.
+    ModelVisible,
+    /// Park the run on a gate (auth/approval) and resume when resolved.
+    Park,
+    /// End the run. Reserved for genuine invariants (cancellation).
+    Terminal,
 }
 
 impl FailureKind {
-    /// Construct an open-set [`FailureKind::Unknown`] from a validated tag.
-    pub fn unknown(value: impl Into<String>) -> Result<Self, HostApiError> {
-        FailureKindValue::new(value).map(Self::Unknown)
-    }
-
-    /// The stable wire tag (matches the loop enum's `as_str`, so a value maps
-    /// losslessly across the two vocabularies).
-    pub fn as_str(&self) -> &str {
+    /// The one fate decision for this kind. Exhaustive and wildcard-free:
+    /// adding a variant refuses to compile until its fate is chosen here.
+    pub fn fate(self) -> FailureFate {
         match self {
-            FailureKind::Authorization => "authorization",
-            FailureKind::Backend => "backend",
-            FailureKind::Cancelled => "cancelled",
-            FailureKind::Dispatcher => "dispatcher",
-            FailureKind::GateDeclined => "gate_declined",
-            FailureKind::InvalidInput => "invalid_input",
-            FailureKind::InvalidOutput => "invalid_output",
-            FailureKind::MissingRuntime => "missing_runtime",
-            FailureKind::Network => "network",
-            FailureKind::OperationFailed => "operation_failed",
-            FailureKind::OutputTooLarge => "output_too_large",
-            FailureKind::PolicyDenied => "policy_denied",
-            FailureKind::Process => "process",
-            FailureKind::Resource => "resource",
-            FailureKind::Transient => "transient",
-            FailureKind::Unavailable => "unavailable",
-            FailureKind::Internal => "internal",
-            FailureKind::Permanent => "permanent",
-            FailureKind::Unknown(value) => value.as_str(),
+            // The world hiccuped — retry quietly.
+            Self::Network
+            | Self::Transient
+            | Self::Unavailable
+            | Self::Backend
+            | Self::Internal => FailureFate::Retry,
+            // Waiting on a human/credential gate.
+            Self::AuthRequired => FailureFate::Park,
+            // The only sanctioned run-ender here.
+            Self::Cancelled => FailureFate::Terminal,
+            // Everything else the model sees and survives — including config
+            // faults (the model relays the setup step to the user) and policy
+            // denials (the model routes around them).
+            Self::MethodMissing
+            | Self::UndeclaredCapability
+            | Self::UnknownCapability
+            | Self::UnknownProvider
+            | Self::InputEncode
+            | Self::OperationFailed
+            | Self::OutputTooLarge
+            | Self::Resource
+            | Self::PolicyDenied
+            | Self::NetworkDenied
+            | Self::FilesystemDenied
+            | Self::SecretDenied
+            | Self::Authorization
+            | Self::StaleSurface
+            | Self::GateDeclined
+            | Self::Guest
+            | Self::ExitFailure
+            | Self::OutputDecode
+            | Self::InvalidResult
+            | Self::Memory
+            | Self::Manifest
+            | Self::ExtensionRuntimeMismatch
+            | Self::RuntimeMismatch
+            | Self::MissingRuntimeBackend
+            | Self::UnsupportedRunner
+            | Self::MissingRuntime
+            | Self::Client
+            | Self::Executor
+            // Unclassifiable is NOT retryable: it may be permanent, and
+            // quiet retries would burn budget on a call that cannot succeed.
+            | Self::Unclassified => FailureFate::ModelVisible,
         }
     }
 
-    /// Reconstruct a `FailureKind` from a wire tag. A known tag yields its named
-    /// variant; anything else buckets into a validated [`FailureKind::Unknown`].
-    /// Total: an unvalidatable tag (never produced by the loop's own validator)
-    /// falls back to [`FailureKind::Internal`].
+    /// Whether the host should quietly retry before surfacing anything.
+    pub fn is_retryable(self) -> bool {
+        matches!(self.fate(), FailureFate::Retry)
+    }
+
+    /// Reconstruct from a wire tag. Total over history: every tag any retired
+    /// vocabulary ever emitted maps to its nearest surviving variant
+    /// (`.claude/rules/types.md` — migrations preserve every historical value);
+    /// an unrecognized tag falls back to [`Unclassified`](Self::Unclassified),
+    /// the non-retryable model-visible sink — an unknown tag may name a
+    /// permanent failure, so it must not silently consume retry budget.
     pub fn from_tag(tag: &str) -> Self {
+        if let Some(kind) = Self::from_primary_tag(tag) {
+            return kind;
+        }
         match tag {
-            "authorization" => Self::Authorization,
-            "backend" => Self::Backend,
-            "cancelled" => Self::Cancelled,
-            "dispatcher" => Self::Dispatcher,
-            "gate_declined" => Self::GateDeclined,
-            "invalid_input" => Self::InvalidInput,
-            "invalid_output" => Self::InvalidOutput,
-            "missing_runtime" => Self::MissingRuntime,
-            "network" => Self::Network,
-            "operation_failed" => Self::OperationFailed,
-            "output_too_large" => Self::OutputTooLarge,
-            "policy_denied" => Self::PolicyDenied,
-            "process" => Self::Process,
-            "resource" => Self::Resource,
-            "transient" => Self::Transient,
-            "unavailable" => Self::Unavailable,
-            "internal" => Self::Internal,
-            "permanent" => Self::Permanent,
-            other => Self::unknown(other).unwrap_or(Self::Internal),
+            // Historical tags from the retired coarse vocabularies.
+            "invalid_input" => Self::InputEncode,
+            "invalid_output" => Self::OutputDecode,
+            "process" => Self::ExitFailure,
+            "dispatcher" => Self::Internal,
+            "permanent" => Self::OperationFailed,
+            "auth_denied" => Self::Authorization,
+            // Unrecognized (legacy open-set tags from the retired `Unknown`
+            // funnel, or a future build's kind): the explicit non-retryable
+            // unclassified sink.
+            _ => Self::Unclassified,
         }
     }
 }
@@ -544,12 +693,10 @@ impl ModelInputIssue {
 /// flip prep).
 ///
 /// Both arms are plain redacted vocabulary (host_api charter): enums, a
-/// [`DispatchInputIssueCode`], and bounded [`SafeSummary`] values — never a raw
-/// cause, secret, host path, or backend error string. The free-text `Diagnostic`
-/// arm is deliberately stricter than the loop's lenient diagnostic channel (which
-/// permits paths): at this sanitized boundary the text must satisfy the full
-/// [`SafeSummary`] redaction contract, so a path-shaped diagnostic is redacted
-/// rather than carried raw.
+/// [`DispatchInputIssueCode`], bounded [`SafeSummary`] values, or a bounded
+/// [`ModelDiagnostic`]. `ModelDiagnostic` is the narrow exception for a
+/// producer-scrubbed cause: it may retain paths and payload delimiters that are
+/// necessary for recovery, but never an unscrubbed backend error.
 ///
 /// Internally tagged (`kind`) to mirror the loop enum's shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -558,15 +705,14 @@ pub enum ModelFailureDiagnostic {
     /// The tool input failed schema validation; carries the bounded, redacted
     /// structured issues the model corrects from.
     InvalidInput { issues: ModelInputIssues },
-    /// A bounded, redacted free-text cause.
-    Diagnostic { text: SafeSummary },
+    /// A bounded, producer-scrubbed free-text cause.
+    Diagnostic { text: ModelDiagnostic },
     /// Host-authored operator remediation — the TRUSTED text channel.
     ///
     /// Separate from [`Self::Diagnostic`] by PROVENANCE: `Diagnostic` holds an
-    /// untrusted cause squeezed through the full [`SafeSummary`] contract (so a
-    /// URL- or path-shaped value degrades to the placeholder), while this arm
-    /// holds a host-authored instruction that must reach the model intact. Only
-    /// host code constructs the payload — see [`HostRemediation`].
+    /// untrusted cause scrubbed and fenced by its producer, while this arm holds
+    /// a host-authored instruction that must reach the model intact. Only host
+    /// code constructs the remediation payload — see [`HostRemediation`].
     HostRemediation { text: HostRemediation },
 }
 
@@ -604,7 +750,7 @@ impl ModelFailureDiagnostic {
 
     /// The redacted free-text cause, present exactly on
     /// [`ModelFailureDiagnostic::Diagnostic`].
-    pub fn diagnostic_text(&self) -> Option<&SafeSummary> {
+    pub fn diagnostic_text(&self) -> Option<&ModelDiagnostic> {
         match self {
             ModelFailureDiagnostic::Diagnostic { text } => Some(text),
             ModelFailureDiagnostic::InvalidInput { .. }
@@ -613,32 +759,103 @@ impl ModelFailureDiagnostic {
     }
 }
 
-/// Shared validator for bounded safe-identifier tags (the `FailureKind::Unknown`
-/// tag): non-empty, bounded, and restricted to a safe identifier charset so no
-/// raw payload/path/secret can ride along.
-fn validate_safe_tag(
-    kind: &'static str,
-    value: &str,
-    max_bytes: usize,
-) -> Result<(), HostApiError> {
-    if value.is_empty() {
-        return Err(HostApiError::invalid_id(kind, value, "must not be empty"));
+/// Maximum serialized size of a model-visible diagnostic.
+///
+/// This matches the loop observation cap so the cause can cross the sanitized
+/// resolution boundary without a second, lossy summary conversion.
+pub const MODEL_DIAGNOSTIC_MAX_BYTES: usize = 4096;
+
+const MODEL_DIAGNOSTIC_UNAVAILABLE: &str =
+    "The capability runtime did not provide additional diagnostic detail.";
+
+/// A bounded, model-visible diagnostic cause.
+///
+/// This type validates transport safety, not natural-language vocabulary.
+/// Paths, URLs, JSON, and words such as "password" remain legal because they can
+/// be essential diagnostic context. The producer must scrub secret values and
+/// fence injection-shaped text before construction. As defense in depth, known
+/// credential-token shapes are still rejected here.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct ModelDiagnostic(String);
+
+impl ModelDiagnostic {
+    pub fn new(value: impl Into<String>) -> Result<Self, HostApiError> {
+        let value = value.into();
+        validate_model_diagnostic(&value)?;
+        Ok(Self(value))
     }
-    if value.len() > max_bytes {
-        return Err(HostApiError::invalid_id(
-            kind,
-            value,
-            format!("must be at most {max_bytes} bytes"),
+
+    /// Construct after truncating to the model-observation byte budget on a
+    /// valid UTF-8 boundary.
+    pub fn truncating(value: impl Into<String>) -> Result<Self, HostApiError> {
+        let mut value = value.into();
+        if value.len() > MODEL_DIAGNOSTIC_MAX_BYTES {
+            let mut end = MODEL_DIAGNOSTIC_MAX_BYTES;
+            while end > 0 && !value.is_char_boundary(end) {
+                end -= 1;
+            }
+            value.truncate(end);
+        }
+        Self::new(value)
+    }
+
+    /// Fixed fallback used when a backend supplied no usable cause.
+    pub fn unavailable() -> Self {
+        Self(MODEL_DIAGNOSTIC_UNAVAILABLE.to_string())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl TryFrom<String> for ModelDiagnostic {
+    type Error = HostApiError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl AsRef<str> for ModelDiagnostic {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for ModelDiagnostic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+fn validate_model_diagnostic(value: &str) -> Result<(), HostApiError> {
+    if value.is_empty() {
+        return Err(HostApiError::invalid_model_diagnostic("must not be empty"));
+    }
+    if value.len() > MODEL_DIAGNOSTIC_MAX_BYTES {
+        return Err(HostApiError::invalid_model_diagnostic(format!(
+            "must be at most {MODEL_DIAGNOSTIC_MAX_BYTES} bytes"
+        )));
+    }
+    if value.chars().any(|character| {
+        character == '\0' || character.is_control() && !matches!(character, '\n' | '\r' | '\t')
+    }) {
+        return Err(HostApiError::invalid_model_diagnostic(
+            "must not contain NUL/disallowed control characters",
         ));
     }
-    if !value
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b':'))
+    let lower = value.to_ascii_lowercase();
+    if crate::credential_redaction::contains_secret_like_token(&lower)
+        || crate::credential_redaction::contains_unredacted_credential_value(&lower)
     {
-        return Err(HostApiError::invalid_id(
-            kind,
-            value,
-            "must contain only ASCII letters, digits, _, -, ., or :",
+        return Err(HostApiError::invalid_model_diagnostic(
+            "must not contain an unredacted credential value",
         ));
     }
     Ok(())
@@ -733,49 +950,96 @@ mod tests {
     }
 
     #[test]
-    fn failure_kind_tags_round_trip_for_every_named_variant() {
-        let named = [
-            FailureKind::Authorization,
-            FailureKind::Backend,
-            FailureKind::Cancelled,
-            FailureKind::Dispatcher,
-            FailureKind::GateDeclined,
-            FailureKind::InvalidInput,
-            FailureKind::InvalidOutput,
-            FailureKind::MissingRuntime,
-            FailureKind::Network,
-            FailureKind::OperationFailed,
-            FailureKind::OutputTooLarge,
-            FailureKind::PolicyDenied,
-            FailureKind::Process,
-            FailureKind::Resource,
-            FailureKind::Transient,
-            FailureKind::Unavailable,
-            FailureKind::Internal,
-            FailureKind::Permanent,
-        ];
-        for kind in named {
+    fn failure_kind_tags_round_trip_for_every_variant() {
+        for &kind in FailureKind::ALL {
             let tag = kind.as_str();
             assert_eq!(
                 FailureKind::from_tag(tag),
                 kind,
                 "from_tag round-trip: {tag}"
             );
-            let wire = serde_json::to_value(&kind).unwrap();
+            let wire = serde_json::to_value(kind).unwrap();
             assert_eq!(wire, serde_json::Value::String(tag.to_string()));
             assert_eq!(serde_json::from_value::<FailureKind>(wire).unwrap(), kind);
         }
     }
 
     #[test]
-    fn failure_kind_unknown_tag_is_preserved_not_dropped() {
-        // A newer producer's tag survives round-trip through Unknown.
-        let kind = FailureKind::from_tag("quota_exceeded");
-        assert_eq!(kind, FailureKind::unknown("quota_exceeded").unwrap());
-        assert_eq!(kind.as_str(), "quota_exceeded");
-        let back: FailureKind =
-            serde_json::from_value(serde_json::to_value(&kind).unwrap()).unwrap();
-        assert_eq!(back, kind);
+    fn failure_kind_all_is_complete_and_distinct() {
+        // ALL covers every variant exactly once. Membership is compiler-owned:
+        // `declare_failure_kinds!` expands the enum, the tags, and `ALL` from
+        // one list, so a variant cannot exist outside `ALL`. This test pins
+        // the remaining runtime property — tag distinctness.
+        let tags: std::collections::HashSet<&str> =
+            FailureKind::ALL.iter().map(|kind| kind.as_str()).collect();
+        assert_eq!(tags.len(), FailureKind::ALL.len());
+    }
+
+    #[test]
+    fn failure_kind_historical_tags_stay_readable() {
+        // Every tag a retired vocabulary ever emitted maps to a surviving
+        // variant (types.md: migrations preserve every historical value).
+        let historical = [
+            ("invalid_input", FailureKind::InputEncode),
+            ("invalid_output", FailureKind::OutputDecode),
+            ("process", FailureKind::ExitFailure),
+            ("dispatcher", FailureKind::Internal),
+            ("permanent", FailureKind::OperationFailed),
+            ("auth_denied", FailureKind::Authorization),
+        ];
+        for (tag, expected) in historical {
+            assert_eq!(FailureKind::from_tag(tag), expected, "historical: {tag}");
+        }
+        // Legacy open-set tags (the retired `Unknown` funnel) and future
+        // builds' tags fall back to the explicit non-retryable `Unclassified`
+        // sink instead of the retryable host-fault bucket — an unknown tag
+        // may name a permanent failure, so it must not burn retry budget.
+        assert_eq!(
+            FailureKind::from_tag("quota_exceeded"),
+            FailureKind::Unclassified
+        );
+    }
+
+    #[test]
+    fn failure_kind_fates_pin_the_recoverability_contract() {
+        // The epic's invariant (#6284): exactly one variant may end a run.
+        let terminal: Vec<FailureKind> = FailureKind::ALL
+            .iter()
+            .copied()
+            .filter(|kind| kind.fate() == FailureFate::Terminal)
+            .collect();
+        assert_eq!(terminal, vec![FailureKind::Cancelled]);
+        // Policy denials never retry (a denied call cannot succeed on retry).
+        assert!(!FailureKind::NetworkDenied.is_retryable());
+        assert!(!FailureKind::PolicyDenied.is_retryable());
+        // Transport faults do retry.
+        assert!(FailureKind::Network.is_retryable());
+        // The unclassifiable sink surfaces model-visibly and never retries —
+        // it may be permanent, so quiet retries would burn budget.
+        assert_eq!(FailureKind::Unclassified.fate(), FailureFate::ModelVisible);
+        assert!(!FailureKind::Unclassified.is_retryable());
+        assert_eq!(FailureKind::Unclassified.as_str(), "unclassified");
+        // The frontend's load-bearing literal survives the merge.
+        assert_eq!(FailureKind::GateDeclined.as_str(), "gate_declined");
+    }
+
+    #[test]
+    fn failure_kind_tags_pass_the_event_layer_shape() {
+        // ironclaw_events' `is_safe_error_kind` silently rewrites tags that do
+        // not start with lowercase ASCII to "Unclassified" — a lossy write.
+        // Pin the shape here (host_api cannot depend on ironclaw_events).
+        for kind in FailureKind::ALL {
+            let tag = kind.as_str();
+            assert!(
+                tag.chars().next().is_some_and(|c| c.is_ascii_lowercase()),
+                "tag must start lowercase or the event layer drops it: {tag}"
+            );
+            assert!(
+                tag.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+                "tag must stay in the safe charset: {tag}"
+            );
+        }
     }
 
     #[test]
@@ -827,28 +1091,129 @@ mod tests {
     #[test]
     fn model_failure_diagnostic_free_text_roundtrips() {
         let diagnostic = ModelFailureDiagnostic::Diagnostic {
-            text: SafeSummary::new("backend returned an error").unwrap(),
+            text: ModelDiagnostic::new("failed reading /workspace/project/config.json").unwrap(),
         };
         let wire = serde_json::to_value(&diagnostic).unwrap();
         // Internally tagged like the loop's CapabilityFailureDetail mirror.
         assert_eq!(
             wire,
-            serde_json::json!({ "kind": "diagnostic", "text": "backend returned an error" })
+            serde_json::json!({
+                "kind": "diagnostic",
+                "text": "failed reading /workspace/project/config.json"
+            })
         );
         let back: ModelFailureDiagnostic = serde_json::from_value(wire).unwrap();
         assert_eq!(back, diagnostic);
         assert_eq!(
-            back.diagnostic_text().map(SafeSummary::as_str),
-            Some("backend returned an error")
+            back.diagnostic_text().map(ModelDiagnostic::as_str),
+            Some("failed reading /workspace/project/config.json")
         );
     }
 
     #[test]
-    fn model_failure_diagnostic_rejects_an_unsafe_free_text_on_the_wire() {
-        // A hostile persisted diagnostic (path-shaped) cannot rehydrate: the
-        // SafeSummary redaction contract fires on deserialize.
-        let json = serde_json::json!({ "kind": "diagnostic", "text": "leaked /etc/passwd" });
-        assert!(serde_json::from_value::<ModelFailureDiagnostic>(json).is_err());
+    fn model_failure_diagnostic_wire_validation_preserves_vocabulary_but_rejects_values() {
+        let vocabulary = serde_json::json!({
+            "kind": "diagnostic",
+            "text": "password field is required at /workspace/config.json"
+        });
+        assert!(
+            serde_json::from_value::<ModelFailureDiagnostic>(vocabulary).is_ok(),
+            "credential vocabulary and paths are diagnostic context, not secret values"
+        );
+
+        for text in [
+            "",
+            "invalid\u{7}control",
+            "provider returned ghp_0123456789abcdef",
+            "password=hunter2",
+            "https://user:pass@example.com/path",
+        ] {
+            let json = serde_json::json!({ "kind": "diagnostic", "text": text });
+            assert!(
+                serde_json::from_value::<ModelFailureDiagnostic>(json).is_err(),
+                "unsafe diagnostic unexpectedly rehydrated: {text:?}"
+            );
+        }
+        let oversize = serde_json::json!({
+            "kind": "diagnostic",
+            "text": "x".repeat(MODEL_DIAGNOSTIC_MAX_BYTES + 1)
+        });
+        assert!(serde_json::from_value::<ModelFailureDiagnostic>(oversize).is_err());
+    }
+
+    /// Guard against the scrubber ratcheting tighter unnoticed.
+    ///
+    /// Every other test here proves the guard REJECTS what it should. Nothing
+    /// proved it still ACCEPTS what it should, so tightening a detector could
+    /// only ever break silently — a summary that says nothing is indistinguishable
+    /// from one that had nothing to say. This corpus is the other direction:
+    /// realistic diagnostics an operator or the model genuinely needs, which must
+    /// survive the values-only rules this channel is built on.
+    ///
+    /// Credential *vocabulary* is deliberately legal here. The distinction this
+    /// channel draws is value-vs-word: "the api key is missing" is the most useful
+    /// sentence we can hand back for a missing key, and scrubbing it leaves the
+    /// model with nothing to act on. Add to this list whenever a real diagnostic
+    /// is found to be over-scrubbed; a failure here means a detector got greedy,
+    /// not that the corpus is wrong.
+    #[test]
+    fn legitimate_diagnostics_survive_the_credential_guard() {
+        for text in [
+            // Bare vocabulary — the words alone carry no secret.
+            "password field is required",
+            "the api key is missing from the request",
+            "secret sharing failed between nodes",
+            "credential setup is unavailable for this provider",
+            "token bucket exhausted; retry after the window resets",
+            // Remediation prose, the highest-value case: it must name the thing
+            // the user has to go fix.
+            "rotate your client secret in the provider console and retry",
+            "no api key is configured for this extension",
+            // Paths and schema refs — diagnostic context the strict summary
+            // validator drops, which is why this channel exists.
+            "missing input_schema_ref at /system/extensions/google-calendar/schemas/list_calendars.input.v1.json",
+            "failed to read /workspace/project/config.json at line 17",
+            // Already-redacted payloads must not be double-rejected.
+            r#"{"password":"[REDACTED]"}"#,
+            r#"{"api_key":"[redacted]"}"#,
+        ] {
+            ModelDiagnostic::new(text).unwrap_or_else(|error| {
+                panic!(
+                    "over-scrubbed a legitimate diagnostic: {text:?} rejected as {error:?} — \
+                     a detector got greedy; the model needs this sentence"
+                )
+            });
+        }
+
+        // The other direction still holds: real values are refused. Kept beside
+        // the corpus so tightening one side cannot quietly loosen the other.
+        for text in [
+            "password=hunter2",
+            r#"{"api_key":"opaque-live-value"}"#,
+            "https://user:pass@example.com/path",
+            "provider returned ghp_0123456789abcdef",
+        ] {
+            assert!(
+                ModelDiagnostic::new(text).is_err(),
+                "credential value survived the guard: {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn model_diagnostic_truncates_on_a_utf8_boundary() {
+        let text = format!("a{}", "é".repeat(MODEL_DIAGNOSTIC_MAX_BYTES));
+        let diagnostic = ModelDiagnostic::truncating(text).unwrap();
+        assert_eq!(diagnostic.as_str().len(), MODEL_DIAGNOSTIC_MAX_BYTES - 1);
+        assert!(diagnostic.as_str().ends_with('é'));
+        assert!(ModelDiagnostic::new(diagnostic.into_inner()).is_ok());
+    }
+
+    #[test]
+    fn model_diagnostic_accepts_exact_byte_limit() {
+        let text = "x".repeat(MODEL_DIAGNOSTIC_MAX_BYTES);
+        let diagnostic = ModelDiagnostic::new(text.clone()).unwrap();
+        assert_eq!(diagnostic.as_str(), text);
     }
 
     #[test]

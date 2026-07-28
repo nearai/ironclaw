@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { afterEach, test, vi } from "vitest";
 
-// `renderMarkdown` is memo-cached by the renderer (markdown-renderer.tsx), so
-// the security-relevant invariant — every parsed payload passes through
-// DOMPurify.sanitize — must be pinned so a future change to the memo deps or to
-// this function cannot silently drop sanitization.
+// `renderMarkdown` is loaded only after a response stabilizes, so the
+// security-relevant invariant — every parsed payload passes through
+// DOMPurify.sanitize — must be pinned so deferred loading cannot silently drop
+// sanitization.
 //
 // Stub the npm imports per test so each case is isolated and the real browser
 // DOMPurify implementation is never needed under Vitest's node environment.

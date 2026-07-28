@@ -336,7 +336,6 @@ impl Suspension {
 /// recoverable failure. `FailureKind` is a bounded taxonomy, never the raw backend
 /// cause — that stays host-side.
 ///
-/// Not `Copy` (unlike the earlier slice): `FailureKind::Unknown` owns a `String`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolVerdict {
@@ -840,17 +839,19 @@ mod tests {
             serde_json::Value::String("success".to_string())
         );
         assert_eq!(ToolVerdict::Success.kind(), "success");
-        let failure = ToolVerdict::recoverable_failure(FailureKind::InvalidInput);
+        let failure = ToolVerdict::recoverable_failure(FailureKind::InputEncode);
         assert_eq!(failure.kind(), "recoverable_failure");
         assert_eq!(
             serde_json::to_value(&failure).unwrap(),
-            serde_json::json!({ "recoverable_failure": { "error_kind": "invalid_input" } })
+            // New writes emit the precise tag; historical "invalid_input" rows
+            // stay readable via `FailureKind::from_tag`'s alias.
+            serde_json::json!({ "recoverable_failure": { "error_kind": "input_encode" } })
         );
         assert!(ToolVerdict::Success.is_success());
         assert!(!failure.is_success());
         assert_eq!(ToolVerdict::Success.child_run(), None);
         assert_eq!(ToolVerdict::Success.error_kind(), None);
-        assert_eq!(failure.error_kind(), Some(&FailureKind::InvalidInput));
+        assert_eq!(failure.error_kind(), Some(&FailureKind::InputEncode));
     }
 
     #[test]
@@ -858,10 +859,10 @@ mod tests {
         // The structured, model-visible diagnostic rides the verdict so a later
         // slice can render the correction hint without reading host storage.
         let diagnostic = ModelFailureDiagnostic::Diagnostic {
-            text: SafeSummary::new("tool input rejected").unwrap(),
+            text: crate::ModelDiagnostic::new("tool input rejected").unwrap(),
         };
         let verdict = ToolVerdict::RecoverableFailure {
-            error_kind: FailureKind::InvalidInput,
+            error_kind: FailureKind::InputEncode,
             diagnostic: Some(diagnostic.clone()),
         };
         assert_eq!(verdict.diagnostic(), Some(&diagnostic));
@@ -908,11 +909,8 @@ mod tests {
     fn recoverable_failure_carries_its_error_kind_across_the_wire() {
         // The recovery classification (retry-vs-terminal) survives round-trip —
         // the field the old mapping dropped as "G1".
-        for kind in [
-            FailureKind::Network,
-            FailureKind::unknown("quota_exceeded").unwrap(),
-        ] {
-            let verdict = ToolVerdict::recoverable_failure(kind.clone());
+        for kind in [FailureKind::Network, FailureKind::MethodMissing] {
+            let verdict = ToolVerdict::recoverable_failure(kind);
             let back: ToolVerdict =
                 serde_json::from_value(serde_json::to_value(&verdict).unwrap()).unwrap();
             assert_eq!(back.error_kind(), Some(&kind));
@@ -956,7 +954,7 @@ mod tests {
                 origin: None,
                 output_digest: None,
             },
-            verdict: ToolVerdict::recoverable_failure(FailureKind::InvalidInput),
+            verdict: ToolVerdict::recoverable_failure(FailureKind::InputEncode),
             summary: SafeSummary::new("tool input rejected").unwrap(),
             progress: ResultProgress::default(),
             terminate_hint: TerminateHint::default(),
@@ -1069,7 +1067,7 @@ mod tests {
     }
 
     fn recoverable_failure() -> ToolVerdict {
-        ToolVerdict::recoverable_failure(FailureKind::InvalidInput)
+        ToolVerdict::recoverable_failure(FailureKind::InputEncode)
     }
 
     fn outcome(verdict: ToolVerdict) -> Outcome {

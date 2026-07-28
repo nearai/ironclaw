@@ -4,7 +4,10 @@ description: Create your first Agent in minutes
 icon: rocket
 ---
 
-This guide will get you from zero to a running IronClaw instance in under 10 minutes
+This guide will get you from zero to a running IronClaw instance in under 10 minutes.
+
+IronClaw ships as a single binary. You install it, run one setup command, and open the
+web interface in your browser.
 
 ---
 
@@ -15,6 +18,22 @@ This guide will get you from zero to a running IronClaw instance in under 10 min
 <Step title="Get IronClaw">
 
 <Tabs>
+  <Tab title="Local">
+    Best for personal use on your own machine. Everything runs locally and no separate
+    database server is required. For hosted or multi-user setups, see
+    [Storage](/capabilities/database).
+
+    ```bash
+    curl --proto '=https' --tlsv1.2 -LsSf https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-installer.sh | sh
+    ```
+
+    On Windows, use the PowerShell installer:
+
+    ```powershell
+    irm https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-installer.ps1 | iex
+    ```
+  </Tab>
+
   <Tab title="Agent Hub">
   Go to https://agent.near.ai/ and login with your preferred method, then create an IronClaw agent in a private instance.
 
@@ -44,60 +63,104 @@ This guide will get you from zero to a running IronClaw instance in under 10 min
 
   </Accordion>
   </Tab>
-
-  <Tab title="Local">
-    Best for personal use on your own machine. Uses libSQL (embedded SQLite) by default — no separate database server required. For production or multi-user setups, see [Database Backends](/capabilities/database).
-
-    ```bash
-    # Install IronClaw
-    curl --proto '=https' --tlsv1.2 -LsSf https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-installer.sh | sh
-    ```
-  </Tab>
 </Tabs>
+
+Verify the install:
+
+```bash
+ironclaw --version
+```
+
+</Step>
+
+<Step title="Run Setup">
+
+Run the setup command once. It creates your IronClaw home directory, writes a starter
+configuration, provisions a web login token, and asks which inference provider and model
+you want to use.
+
+```bash
+ironclaw onboard
+```
+
+When it finishes it prints a login link containing your token:
+
+```
+login_link: http://127.0.0.1:3000/login?token=<your-token>
+```
+
+<Note>
+We recommend using [NEAR AI](https://cloud.near.ai/) as your inference provider for
+maximum privacy and security. See [Inference Providers](/capabilities/llm-providers) for
+the full list of supported providers.
+</Note>
+
+<Accordion title="What onboarding creates">
+
+Everything lives under `~/.ironclaw/reborn`:
+
+| File | Purpose |
+| --- | --- |
+| `config.toml` | Your configuration — profile, identity, model selection |
+| `providers.json` | The catalog of inference providers available to this install |
+| `webui-token` | Bearer token used by the web interface |
+| `.onboard-completed.json` | Marks setup as complete |
+
+Your master encryption key is stored in the OS keychain, not on disk. See
+[Security](/security).
+
+</Accordion>
+
+<Accordion title="Running setup non-interactively">
+
+In a script or CI, onboarding skips the interactive prompts and the service install:
+
+```bash
+ironclaw onboard --no-service < /dev/null
+```
+
+Configure your provider separately with `ironclaw models set-provider <provider> --model <model>`,
+or by exporting the provider's environment variables before running `serve`.
+
+Use `--dry-run` to see exactly what would be written without touching the filesystem.
+
+</Accordion>
 
 </Step>
 
 <Step title="Start the Agent">
 
-Start your agent for the first time:
+Start the web interface:
 
 ```bash
-ironclaw
+ironclaw serve
 ```
 
-<Accordion title="⚠️ Error: Another IronClaw instance is already running">
+By default it listens on `127.0.0.1:3000` — local only. Open the login link from the
+previous step in your browser, and you'll land in the chat interface.
 
-If you get the error `Error: Another IronClaw instance is already running (PID 38). If this is incorrect, remove the stale PID file: /home/agent/.ironclaw/ironclaw.pid`, simply run the following command to remove the stale PID file and try starting the agent again:
+<Accordion title="⚠️ Port already in use">
 
+If port 3000 is taken, pass a different one:
+
+```bash
+ironclaw serve --port 3100
 ```
-# Remove the stale PID file
-rm /home/agent/.ironclaw/ironclaw.pid
 
-# Then start the agent again
-ironclaw
-```
+Use `--port 0` to let the operating system pick any free port.
 
 </Accordion>
 
-Since this is the first time you are starting your agent, it will ask you to configure your inference provider, and the LLM you want to use.
+<Accordion title="Lost your login link?">
 
-![setup](/images/quickstart/setup-wizard.png)
+Print your configuration paths and read the token back:
 
-<Note>
-We recommend using [NEAR AI](https://cloud.near.ai/) as your inference provider for maximum privacy and security, and the `Qwen3-30B` model for its cost-effectiveness
-</Note>
-
-<Accordion title="⚠️ Error: Failed to start webhook server">
-
-If you encounter the error `Error: Channel webhook_server failed to start: Failed to bind to 0.0.0.0:8080: Address already in use (os error 98)`, simply try setting a different HTTP port:
-
+```bash
+ironclaw config path
+cat ~/.ironclaw/reborn/webui-token
 ```
-# Change the default HTTP port to 8081
-export HTTP_PORT=8081
 
-# Then start the agent again
-ironclaw
-```
+Then visit `http://127.0.0.1:3000/login?token=<token>`.
 
 </Accordion>
 
@@ -105,16 +168,42 @@ ironclaw
 
 <Step title="Talk with your Agent">
 
-Once your agent is up and running, you can start interacting with it through the terminal, simply type your message and the agent will respond
+Type a message in the chat and the agent will respond. From here you can also reach
+Projects, Jobs, Routines, and Settings from the sidebar.
 
-![hello-ai](/images/quickstart/hello-ai.png)
+If you prefer the terminal, IronClaw has a REPL and a one-shot mode:
 
+```bash
+ironclaw repl
+ironclaw run -m "Summarize my last three emails"
+```
+
+</Step>
+
+<Step title="Keep It Running">
+
+To have IronClaw start automatically in the background, install it as a system service
+(launchd on macOS, systemd on Linux). Skip this step on a NEAR AI hosted instance — the
+agent already runs for you, and `ironclaw service` does not work there. Use the
+[Agent Dashboard](https://agent.near.ai/) to start, stop, or restart it.
+
+<Warning>
+Stop the foreground `ironclaw serve` first. The service runs `serve` too, so starting it
+while your terminal still holds the port fails with an address-already-in-use error.
+</Warning>
+
+```bash
+# Ctrl-C the foreground server, then:
+ironclaw service install
+ironclaw service start
+ironclaw service status
+```
 
 </Step>
 
 <Step title="Update IronClaw">
 
-Finally, make sure to regularly update IronClaw to get the latest features and improvements. You can update IronClaw by running the following command in your terminal:
+Update to the latest release:
 
 ```bash
 ironclaw-update
@@ -124,19 +213,20 @@ ironclaw-update
 
 </Steps>
 
-
 ---
 
 ## Next Steps
 
-Now that you have your agent up and running, it is time to configure a new [channel](./channels/telegram) to interact with your agent from your preferred messaging platform, and add some [tools](/extensions/web-search) to give your agent more capabilities.
+Now that your agent is running, connect a [channel](/channels/overview) so you can reach
+it from a messaging app, and add [extensions](/extensions/overview) to give it more
+capabilities.
 
 <CardGroup cols={2}>
-  <Card title="Channels" icon="plug" href="/channels/telegram">
-    Connect your agent to your favorite messaging platform.
+  <Card title="Channels" icon="plug" href="/channels/overview">
+    Connect your agent to Slack or Telegram.
   </Card>
 
-  <Card title="Tools" icon="wrench" href="/extensions/web-search">
+  <Card title="Extensions" icon="wrench" href="/extensions/overview">
     Give your agent access to external APIs and services.
   </Card>
 </CardGroup>

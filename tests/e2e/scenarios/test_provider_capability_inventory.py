@@ -253,14 +253,55 @@ def _scope_nodes(node: ast.AST, *, top: bool = False):
         yield from _scope_nodes(child)
 
 
+def _module_functions(
+    source: str,
+) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    return {
+        node.name: node
+        for node in ast.parse(source).body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+
+def _executed_nodes(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+    module_functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef],
+):
+    """This function's scope, plus the module-level helpers it awaits.
+
+    A test may delegate its body to a shared helper so a second scenario can
+    reuse the same replay. The readback still runs, so refusing to follow that
+    one hop would reject real evidence. Only *awaited* module-level calls are
+    followed, and only one level deep: an un-awaited coroutine never executes,
+    and following arbitrary depth would let a call buried behind several hops
+    of indirection vouch for a readback nobody can see at the call site.
+    """
+    nodes = list(_scope_nodes(function, top=True))
+    awaited = {id(node.value) for node in nodes if isinstance(node, ast.Await)}
+    for node in list(nodes):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and id(node) in awaited
+            and (delegate := module_functions.get(node.func.id)) is not None
+            and delegate is not function
+        ):
+            nodes.extend(_scope_nodes(delegate, top=True))
+    return nodes
+
+
 def _assert_python_symbol_called(
     function: ast.FunctionDef | ast.AsyncFunctionDef,
     helper: ast.FunctionDef | ast.AsyncFunctionDef,
     caller: str,
     source_label: str,
+    module_functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef]
+    | None = None,
 ) -> None:
+    # Defaults to following nothing, so an omitted argument makes the check
+    # stricter rather than quietly accepting indirection it never inspected.
     symbol = helper.name
-    nodes = list(_scope_nodes(function, top=True))
+    nodes = _executed_nodes(function, module_functions or {})
     calls = [
         node
         for node in nodes
@@ -317,6 +358,7 @@ def _assert_journey_evidence_is_executable(evidence: dict) -> None:
         helper,
         evidence["test"],
         evidence["source"],
+        _module_functions(source),
     )
 
 
@@ -425,6 +467,72 @@ def test_journey_evidence_rejects_a_call_inside_an_uninvoked_nested_function():
     with pytest.raises(AssertionError, match="is never called by 'test_journey'"):
         _assert_python_symbol_called(
             test, helper, "test_journey", "synthetic.py"
+        )
+
+
+def test_journey_evidence_accepts_a_readback_reached_through_an_awaited_delegate():
+    """A test may share its body with another scenario via one helper hop.
+
+    The readback still executes, so refusing to follow that hop would reject
+    real evidence and push authors back into duplicating the replay.
+    """
+    source = (
+        "async def test_journey(world):\n"
+        "    await _replay(world)\n"
+        "\n"
+        "async def _replay(world):\n"
+        "    await _assert_readback(world)\n"
+        "\n"
+        "async def _assert_readback(url):\n"
+        "    ...\n"
+    )
+    test = _python_function(source, "test_journey", "synthetic.py", "test")
+    helper = _python_function(source, "_assert_readback", "synthetic.py", "helper")
+    _assert_python_symbol_called(
+        test, helper, "test_journey", "synthetic.py", _module_functions(source)
+    )
+
+
+def test_journey_evidence_rejects_a_readback_behind_an_unawaited_delegate():
+    """An un-awaited delegate never runs, so nothing inside it is evidence."""
+    source = (
+        "async def test_journey(world):\n"
+        "    _replay(world)\n"
+        "\n"
+        "async def _replay(world):\n"
+        "    await _assert_readback(world)\n"
+        "\n"
+        "async def _assert_readback(url):\n"
+        "    ...\n"
+    )
+    test = _python_function(source, "test_journey", "synthetic.py", "test")
+    helper = _python_function(source, "_assert_readback", "synthetic.py", "helper")
+    with pytest.raises(AssertionError, match="is never called by 'test_journey'"):
+        _assert_python_symbol_called(
+            test, helper, "test_journey", "synthetic.py", _module_functions(source)
+        )
+
+
+def test_journey_evidence_does_not_follow_two_levels_of_delegation():
+    """One hop is reviewable at the call site; arbitrary depth is not."""
+    source = (
+        "async def test_journey(world):\n"
+        "    await _replay(world)\n"
+        "\n"
+        "async def _replay(world):\n"
+        "    await _deeper(world)\n"
+        "\n"
+        "async def _deeper(world):\n"
+        "    await _assert_readback(world)\n"
+        "\n"
+        "async def _assert_readback(url):\n"
+        "    ...\n"
+    )
+    test = _python_function(source, "test_journey", "synthetic.py", "test")
+    helper = _python_function(source, "_assert_readback", "synthetic.py", "helper")
+    with pytest.raises(AssertionError, match="is never called by 'test_journey'"):
+        _assert_python_symbol_called(
+            test, helper, "test_journey", "synthetic.py", _module_functions(source)
         )
 
 

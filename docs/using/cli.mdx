@@ -1,0 +1,158 @@
+---
+title: "CLI Reference"
+description: "Every command the ironclaw binary provides"
+icon: terminal
+---
+
+IronClaw ships as a single binary named `ironclaw`. Every command is a subcommand — running
+`ironclaw` on its own prints usage and exits without starting anything.
+
+```bash
+ironclaw --help
+ironclaw --version
+```
+
+---
+
+## Running the Agent
+
+| Command | What it does |
+| --- | --- |
+| `ironclaw serve` | Start the [web interface](/using/webui) on `127.0.0.1:3000` |
+| `ironclaw repl` | Start an interactive terminal session with the agent |
+| `ironclaw run -m "<message>"` | Send a single message and exit |
+| `ironclaw status` | Print a runtime status snapshot |
+| `ironclaw doctor` | Check configuration and driver health without creating state |
+
+```bash
+ironclaw run -m "What changed in my repo today?"
+```
+
+`doctor` is the first thing to run when something isn't working. It reports your home
+directory, active profile, whether configuration files were found, and whether each
+driver initialized.
+
+---
+
+## Setup and Configuration
+
+| Command | What it does |
+| --- | --- |
+| `ironclaw onboard` | One-time setup — see [Onboard](/onboard) |
+| `ironclaw config path` | Show resolved configuration paths without creating state |
+| `ironclaw config init` | Write a commented `config.toml` and `providers.json` stub |
+| `ironclaw config list` | List every configuration key and its current value |
+| `ironclaw config get <key>` | Read one value by dot-separated key |
+| `ironclaw config set <key> [value]` | Write one value; secret keys omit it and prompt |
+| `ironclaw profile list` | List the available boot profiles |
+
+```bash
+ironclaw config get llm.default.provider_id
+ironclaw config set google.client_id <your-client-id>
+```
+
+`config init` refuses to overwrite existing files unless you pass `--force`.
+
+`config list` and `config get` read every key. `config set` is narrower: it accepts only
+`<provider>.api_key`, `google.client_id`, `google.client_secret`, `google.redirect_uri`,
+`slack.enabled`, and `webui.token --rotate`, routing each to the configuration file, the
+encrypted secret store, or the web token file. Everything else is edited in `config.toml`
+directly.
+
+`config set` does not restart the running instance — it prints `to apply: ironclaw service
+restart`. See [Configuration](/capabilities/configuration).
+
+---
+
+## Models and Providers
+
+| Command | What it does |
+| --- | --- |
+| `ironclaw models list` | List available inference providers, or show one |
+| `ironclaw models status` | Show which model route is active |
+| `ironclaw models set <model>` | Set the default model for the active provider |
+| `ironclaw models set-provider <provider>` | Set the default provider |
+
+```bash
+ironclaw models list
+ironclaw models set-provider anthropic --model claude-sonnet-4-20250514
+ironclaw models status
+```
+
+See [Inference Providers](/capabilities/llm-providers) for the full catalog.
+
+---
+
+## Extensions and Skills
+
+| Command | What it does |
+| --- | --- |
+| `ironclaw extension search <query>` | Search available extension packages |
+| `ironclaw extension install <name>` | Install an extension package |
+| `ironclaw extension activate <name>` | Activate an installed extension |
+| `ironclaw extension remove <name>` | Remove an installed extension |
+| `ironclaw skills list` | List configured skills |
+| `ironclaw hooks list` | *Not implemented yet* — reports that and exits |
+| `ironclaw channels list` | *Not implemented yet* — reports that and exits |
+| `ironclaw logs` | *Not implemented yet* — reports that and exits |
+
+Add `--verbose` to `skills list` for extra detail.
+
+Activating an extension that needs credentials starts its setup flow. Complete that from
+**Extensions** in the [web interface](/using/webui), which is also where you connect
+channels while `channels list` remains unimplemented.
+
+For service logs, read the files directly — see [Run as a Service](/using/service#logs).
+
+---
+
+## Running as a Service
+
+| Command | What it does |
+| --- | --- |
+| `ironclaw service install` | Install the OS service (launchd or systemd) |
+| `ironclaw service start` | Start the installed service |
+| `ironclaw service stop` | Stop the running service |
+| `ironclaw service restart` | Restart, or start if stopped |
+| `ironclaw service status` | Show service status |
+| `ironclaw service uninstall` | Remove the service and its unit file |
+
+See [Run as a Service](/using/service).
+
+<Note>
+`service` subcommands do not work on a NEAR AI hosted instance — there is no user service
+manager for them to drive. Restart a hosted agent from the
+[Agent Dashboard](https://agent.near.ai/) instead.
+</Note>
+
+---
+
+## Trace Commons
+
+`ironclaw traces` manages optional, redacted contribution of your agent traces. It is off
+until you explicitly opt in.
+
+| Command | What it does |
+| --- | --- |
+| `traces status` | Show your current contribution policy |
+| `traces opt-in` / `traces opt-out` | Turn contribution on or off |
+| `traces preview <file>` | Preview a redacted contribution envelope |
+| `traces submit` / `traces enqueue` / `traces flush-queue` | Submit contributions |
+| `traces queue-status` | Show local queue diagnostics |
+| `traces credit` | Show credit totals and explanations |
+| `traces list-submissions` / `traces revoke` | Review or withdraw past contributions |
+| `traces enroll-instance` | Enroll an entire instance with an operator invite link |
+| `traces profile set` / `withdraw` / `token` | Manage the optional public community profile |
+| `traces ingest-health` | Check an ingestion service health endpoint |
+
+See [Trace Commons](/capabilities/traces).
+
+---
+
+## Shell Completion
+
+```bash
+ironclaw completion zsh > "${fpath[1]}/_ironclaw"
+```
+
+Bash, fish, and PowerShell are also supported.

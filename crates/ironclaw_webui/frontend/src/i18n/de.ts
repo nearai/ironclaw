@@ -527,7 +527,7 @@ registerPack("de", {
   "tools.description.builtin.trace_commons.credits": "Trace-Commons-Creditstatus, Salden, Einreichungszahlen und aktuelle Erläuterungen des aktuellen Benutzers melden.",
   "tools.description.builtin.trace_commons.profile_token": "Einen kurzlebigen Trace-Commons-Profilverwaltungswert für Browser- oder manuelle Profileinrichtung ausstellen.",
   "tools.description.builtin.trace_commons.profile_set": "Das öffentliche Trace-Commons-Community-Profil des aktuellen Benutzers nach ausdrücklicher Zustimmung erstellen oder aktualisieren.",
-  "tools.description.builtin.profile_set": "Eine private lokale Tatsache zum Agentenkontext des Benutzers speichern: Zeitzone, Locale oder Standort.",
+  "tools.description.ironclaw.memory.profile_set": "Eine private lokale Tatsache zum Agentenkontext des Benutzers speichern: Zeitzone, Locale oder Standort.",
   "tools.description.builtin.memory_search": "Persistente Reborn-Speicherdokumente im aktuellen Geltungsbereich suchen",
   "tools.description.builtin.memory_write": "Persistente Reborn-Speicherdokumente im aktuellen Geltungsbereich schreiben, anhängen oder patchen",
   "tools.description.builtin.memory_read": "Ein persistentes Reborn-Speicherdokument im aktuellen Geltungsbereich lesen",

@@ -4,64 +4,64 @@ sidebarTitle: MCP 服务器
 description: 连接 Model Context Protocol 服务器扩展 IronClaw
 ---
 
-IronClaw 可连接任意 [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) 服务器，并把其工具暴露给代理。MCP 是开放标准，生态中已有大量数据库、API、云服务连接器。
+[Model Context Protocol](https://modelcontextprotocol.io/) 是工具服务器的开放标准，生态中已有大量数据库、API 和云服务连接器。IronClaw 会把 MCP 工具适配为代理能力。
 
-<Info>
-当前通过 **HTTP 传输**（JSON-RPC 2.0）连接 MCP。`stdio` 传输暂不支持。
-</Info>
+MCP 是扩展可以声明的运行时之一，与 WASM、first-party 并列。MCP 服务器通过被打包为扩展来接入代理，其清单会声明工具与访问端点 —— 系统中没有单独的 MCP 服务器注册表。
 
 ---
 
 ## 添加服务器
 
-可直接要求代理使用 MCP，或通过 CLI 添加：
+安装封装该 MCP 服务器的扩展：
 
 ```bash
-ironclaw mcp add <server_name> <server_url>
+ironclaw extension search notion
+ironclaw extension install notion
+ironclaw extension activate notion
+```
+
+随后在 [Web 界面](/using/webui)的 **Extensions** 中完成凭据设置。激活后，该服务器的工具会与代理可调用的其他工具一同出现。
+
+按照移除任何扩展的方式移除它：
+
+```bash
+ironclaw extension remove notion
 ```
 
 ---
 
-## 认证
+## 传输方式
 
-如果服务器需要认证：
+IronClaw 通过 **HTTP(S)** 上的 JSON-RPC 2.0 连接 MCP 服务器。
 
-```bash
-ironclaw mcp auth <server_name>
-```
-
----
-
-## 查看已连接服务器
-
-```bash
-ironclaw mcp list
-```
-
-连接成功后，MCP 工具会出现在代理工具列表中。
+<Warning>
+不支持 `stdio` 传输。由于进程级出站管控尚未落地，IronClaw 会直接拒绝该传输方式，而不会启动本地服务器进程。仅支持 stdio 的服务器目前无法接入。
+</Warning>
 
 ---
 
-## 移除服务器
+## 安全性
 
-```bash
-ironclaw mcp remove <server_name>
-```
+MCP 服务器不受信任。服务器不会因为代理可以调用其工具，就获得对文件系统、密钥或网络的隐式权限：
+
+- 调用统一经由宿主选定的客户端，这是唯一的集成点
+- 出站请求由宿主的出站管控规划并授权，而非由服务器决定
+- 资源占用与其他能力一样，通过宿主的资源治理器计量
+- 凭据在出站边界注入，并从结果与错误中脱敏
+
+参见[安全](/zh/security)与[沙箱工具](/zh/capabilities/sandboxed-tools)。
 
 ---
 
-## WASM 与 MCP 如何选择
+## 选择 WASM 还是 MCP？
 
-| 维度 | WASM | MCP |
-|------|------|-----|
-| 隔离性 | 强（wasmtime 沙箱、fuel、内存限制） | 较弱（独立进程） |
-| 凭据处理 | 代理层注入，模块看不到原始密钥 | 由 MCP 服务自行处理 |
-| 网络控制 | `capabilities.json` 白名单 | 由 MCP 服务控制 |
-| 生态 | 自建为主 | 现成生态丰富 |
-| 语言 | 任意 `wasm32-wasi` 目标 | 任意语言 |
-| 启动成本 | 首次需编译缓存 | 服务需预先运行 |
-| 适合场景 | 强隔离的定制集成 | 复用现有 MCP 服务 |
+| | WASM 扩展 | MCP 扩展 |
+| --- | --- | --- |
+| 运行位置 | IronClaw 内部沙箱 | 远程服务器，经 HTTP 访问 |
+| 适用场景 | 确定性逻辑、离线任务、严格沙箱 | 已有的 MCP 服务器与托管 SaaS 工具 |
+| 网络 | 沙箱内的允许列表出站 | 服务器自身的端点 |
+| 延迟 | 进程内 | 一次网络往返 |
 
-<Note>
-涉及敏感凭据或不可信外部数据时，优先使用 WASM 工具，可获得更强隔离保障。
-</Note>
+自行编写工具并希望其运行在沙箱中时，优先选择 WASM 扩展；当工具已经以 MCP 服务器形式存在时，选择 MCP。
+
+参见[构建扩展](/zh/extensions/building-a-tool)。

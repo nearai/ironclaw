@@ -3,8 +3,8 @@ use ironclaw_host_api::RuntimeKind;
 use ironclaw_turns::{
     CapabilityActivityId, TurnId,
     run_profile::{
-        CapabilityFailureKind, InMemoryLoopHostMilestoneSink, LoopDriverId, LoopHostMilestone,
-        LoopHostMilestoneKind, LoopHostMilestoneSink, LoopSafeSummary,
+        InMemoryLoopHostMilestoneSink, LoopDriverId, LoopHostMilestone, LoopHostMilestoneKind,
+        LoopHostMilestoneSink, LoopSafeSummary,
     },
 };
 use std::sync::Arc;
@@ -842,7 +842,7 @@ async fn product_event_stream_projects_live_tool_failure() {
                 capability_id: capability_id.clone(),
                 provider: None,
                 runtime: Some(RuntimeKind::FirstParty),
-                reason_kind: CapabilityFailureKind::InvalidInput,
+                reason_kind: ironclaw_host_api::FailureKind::InputEncode,
                 safe_summary: Some(
                     LoopSafeSummary::new("invalid JSON: expected value at line 1")
                         .expect("safe summary"),
@@ -884,7 +884,9 @@ async fn product_event_stream_projects_live_tool_failure() {
     assert_eq!(&activity.capability_id, &capability_id);
     assert_eq!(activity.status, CapabilityActivityStatusView::Failed);
     assert_eq!(activity.runtime.as_ref(), Some(&RuntimeKind::FirstParty));
-    assert_eq!(activity.error_kind.as_deref(), Some("invalid_input"));
+    // Unified FailureKind wire tag: the retired "invalid_input" tag is now
+    // "input_encode" (from_tag still accepts the historical spelling).
+    assert_eq!(activity.error_kind.as_deref(), Some("input_encode"));
     // Regression: the sanitized failure summary on the milestone must reach the
     // live activity view's `error_detail`, so the per-tool UI card shows the
     // real reason instead of only the bare kind.
@@ -917,7 +919,7 @@ async fn product_event_stream_redacts_live_tool_failure_filename_detail() {
                 capability_id: capability_id.clone(),
                 provider: None,
                 runtime: Some(RuntimeKind::FirstParty),
-                reason_kind: CapabilityFailureKind::OperationFailed,
+                reason_kind: ironclaw_host_api::FailureKind::OperationFailed,
                 safe_summary: Some(
                     LoopSafeSummary::new("failed to read AGENTS.md").expect("safe summary"),
                 ),
@@ -987,7 +989,7 @@ async fn product_event_stream_preserves_redacted_loop_safe_failure_detail() {
                 capability_id: capability_id.clone(),
                 provider: None,
                 runtime: Some(RuntimeKind::FirstParty),
-                reason_kind: CapabilityFailureKind::OperationFailed,
+                reason_kind: ironclaw_host_api::FailureKind::OperationFailed,
                 safe_summary: Some(LoopSafeSummary::capability_failure_summary(
                     "provider returned ghp_live_secret",
                 )),
