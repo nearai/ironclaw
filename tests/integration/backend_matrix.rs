@@ -100,58 +100,97 @@ async fn persistence_assertion_fails_on_mismatch_after_reopen() {
 /// gate — all three variants happen to be exercised today, and nothing would
 /// have said so if a fourth arrived uncovered.
 mod backend_inventory {
-    use super::*;
-
-    /// Every backend the harness can run. Adding a variant to `StorageMode`
-    /// without adding it here fails to compile at `exhaustiveness_guard`
-    /// below, so this list cannot silently fall behind the enum.
-    const ALL_STORAGE_MODES: [StorageMode; 3] = [
-        StorageMode::InMemory,
-        StorageMode::LibSql,
-        StorageMode::Postgres,
-    ];
-
-    /// Compile-time half of the gate.
+    /// Every backend the harness can run, read from the enum's own source.
     ///
-    /// A non-exhaustive match is a compile error, so a new `StorageMode`
-    /// variant breaks the build here rather than slipping through as an
-    /// untested backend. This function is never called; its body is the
-    /// assertion.
-    #[allow(dead_code)]
-    fn exhaustiveness_guard(mode: StorageMode) {
-        match mode {
-            StorageMode::InMemory | StorageMode::LibSql | StorageMode::Postgres => {}
-        }
+    /// Deliberately not a hand-kept array. A list restating the enum can be
+    /// left behind: a new `StorageMode` variant only has to satisfy the
+    /// compiler, and extending a `|` pattern is easier to remember than an
+    /// array three screens away. Parsing the declaration means the
+    /// denominator cannot disagree with the type it describes.
+    fn declared_storage_modes() -> Vec<String> {
+        let source = include_str!("support/builder.rs");
+        let body = source
+            .split_once("pub enum StorageMode {")
+            .expect("StorageMode is declared in support/builder.rs")
+            .1
+            .split_once("\n}")
+            .expect("the enum declaration is brace-terminated")
+            .0;
+        body.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with("//") && !line.starts_with("#["))
+            // Variants are bare identifiers here; a payload-carrying variant
+            // would need its own handling, and the assertion below would
+            // notice the parse going wrong before it went quiet.
+            .map(|line| line.trim_end_matches(',').trim().to_string())
+            .filter(|name| {
+                !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|character| character.is_alphanumeric() || character == '_')
+            })
+            .collect()
     }
 
-    /// Runtime half: every backend in the list is actually run by the parity
-    /// case above.
+    /// The attribute block attached to the parity test, and nothing else.
     ///
-    /// Reads this file's own source rather than trusting the list, because
-    /// the failure being prevented is a variant that exists and is declared
-    /// but never handed to a test.
+    /// Scoped to that one item on purpose: scanning the whole file would let
+    /// an unrelated `#[case(StorageMode::Postgres)]` elsewhere stand in for
+    /// the parity coverage this gate is about. Returning the block as one
+    /// string also makes multiline attributes work without parsing them.
+    fn parity_attribute_block() -> String {
+        let source = include_str!("backend_matrix.rs");
+        let lines: Vec<&str> = source.lines().collect();
+        let signature = lines
+            .iter()
+            .position(|line| line.contains("async fn backend_parity_replies_to_greeting"))
+            .expect("the parity matrix test is declared in this file");
+        // Walk back to the blank line separating this item from the previous
+        // one; everything between is this item's own doc and attributes.
+        let mut first = signature;
+        while first > 0 && !lines[first - 1].trim().is_empty() {
+            first -= 1;
+        }
+        lines[first..signature].join("\n")
+    }
+
+    /// Every declared backend is exercised by the parity matrix.
     #[test]
     fn every_storage_backend_is_exercised_by_the_parity_matrix() {
-        let source = include_str!("backend_matrix.rs");
-        // Only the `#[case(...)]` attributes count as coverage. Searching the
-        // whole file would match this module's own list and pass vacuously.
-        let cases: Vec<&str> = source
-            .lines()
-            .filter(|line| line.trim_start().starts_with("#[case"))
-            .collect();
+        let modes = declared_storage_modes();
+        // Guard against a silent parse failure: an empty or truncated list
+        // would make every assertion below vacuous.
         assert!(
-            !cases.is_empty(),
-            "no #[case] attributes found; the gate would pass vacuously"
+            modes.len() >= 3,
+            "parsed only {modes:?} from the StorageMode declaration; the \
+             parser has drifted from the enum's shape and this gate would \
+             pass vacuously"
+        );
+        for expected in ["InMemory", "LibSql", "Postgres"] {
+            assert!(
+                modes.iter().any(|mode| mode == expected),
+                "the StorageMode parser stopped finding `{expected}`; it reads \
+                 `pub enum StorageMode` from support/builder.rs -- check \
+                 whether the declaration moved or changed shape. Until this is \
+                 fixed the gate cannot see new backends either. Parsed: {modes:?}"
+            );
+        }
+
+        let attributes = parity_attribute_block();
+        assert!(
+            attributes.contains("#[case"),
+            "found no #[case] attributes on the parity matrix; the gate would \
+             pass vacuously. Block was:\n{attributes}"
         );
 
-        for mode in ALL_STORAGE_MODES {
-            let needle = format!("StorageMode::{mode:?}");
+        for mode in &modes {
+            let needle = format!("StorageMode::{mode}");
             assert!(
-                cases.iter().any(|line| line.contains(&needle)),
-                "storage backend {mode:?} is declared but never exercised by \
-                 the parity matrix; add `#[case({needle})]` or remove the \
-                 variant. Backends without a case are the shape the capability \
-                 inventory exists to prevent."
+                attributes.contains(&needle),
+                "storage backend `{mode}` is declared in StorageMode but never \
+                 exercised by the parity matrix; add `#[case({needle})]` to \
+                 `backend_parity_replies_to_greeting`, or remove the variant. \
+                 A backend with no case is the shape this gate exists to catch."
             );
         }
     }
