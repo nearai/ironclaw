@@ -2,13 +2,14 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_filesystem::{
-    CasExpectation, DiskFilesystem, Entry, FilesystemError, Filter, InMemoryBackend, IndexKey,
-    LibSqlRootFilesystem, Page, ScopedFilesystem,
+    CasExpectation, DiskFilesystem, Entry, Fault, FaultInjecting, FilesystemError,
+    FilesystemOperation, Filter, InMemoryBackend, IndexKey, LibSqlRootFilesystem, Page,
+    ScopedFilesystem,
 };
 use ironclaw_host_api::{
     AgentId, HostPath, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
-    ProcessId, ProjectId, ResourceScope, ScopedPath, TenantId, ThreadId, TurnGateRef, UserId,
-    VirtualPath,
+    ProcessId, ProjectId, ResourceScope, ScopedPath, TenantId, ThreadId, TurnCheckpointId,
+    TurnGateRef, TurnId, TurnRunId, UserId, VirtualPath,
 };
 use ironclaw_processes::{
     CancelProcessRequest, ClaimProcessesRequest, CloseProcessDependencyRequest,
@@ -401,7 +402,7 @@ async fn explicit_legacy_materialized_state_imports_before_row_native_commands()
 }
 
 #[tokio::test]
-async fn normal_process_request_requires_migration_when_legacy_state_exists() {
+async fn normal_process_request_runs_pre_start_migration_and_rejects_malformed_legacy_state() {
     let filesystem = in_memory_backed_processes_filesystem();
     filesystem
         .put(
@@ -434,8 +435,11 @@ async fn normal_process_request_requires_migration_when_legacy_state_exists() {
             metadata: serde_json::Value::Null,
         })
         .await
-        .expect_err("normal traffic must not close the legacy import path");
-    assert!(matches!(error, ProcessJournalStoreError::MigrationRequired));
+        .expect_err("pre-start migration must reject malformed legacy state");
+    assert!(matches!(
+        error,
+        ProcessJournalStoreError::Deserialization(_)
+    ));
 }
 
 #[tokio::test]
@@ -543,8 +547,11 @@ async fn normal_process_request_cannot_hide_deployed_turn_authority() {
             metadata: serde_json::Value::Null,
         })
         .await
-        .expect_err("normal traffic must not initialize over deployed turn state");
-    assert!(matches!(error, ProcessJournalStoreError::MigrationRequired));
+        .expect_err("pre-start migration must not initialize over malformed deployed turn state");
+    assert!(matches!(
+        error,
+        ProcessJournalStoreError::Deserialization(_)
+    ));
     assert!(
         filesystem
             .get(
@@ -555,6 +562,332 @@ async fn normal_process_request_cannot_hide_deployed_turn_authority() {
             .expect("metadata lookup")
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn deployed_turn_blob_and_run_state_import_before_first_process_request() {
+    let mounts = MountView::new(vec![
+        MountGrant::new(
+            MountAlias::new("/processes").expect("processes alias"),
+            VirtualPath::new("/engine/processes").expect("processes target"),
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/turns").expect("turns alias"),
+            VirtualPath::new("/engine/turns").expect("turns target"),
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/run-state").expect("run-state alias"),
+            VirtualPath::new("/engine/run-state").expect("run-state target"),
+            MountPermissions::read_write_list_delete(),
+        ),
+    ])
+    .expect("legacy migration mount view");
+    let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::new(InMemoryBackend::new()),
+        mounts,
+    ));
+    let run_id = TurnRunId::new();
+    let turn_id = TurnId::new();
+    let checkpoint_id = TurnCheckpointId::new();
+    let root_run_id = TurnRunId::new();
+    let capability_invocation_id = InvocationId::new();
+    let turn_scope = json!({
+        "tenant_id": "tenant-process-test",
+        "agent_id": "agent-process-test",
+        "project_id": "project-process-test",
+        "thread_id": "thread-process-test",
+        "thread_owner": {
+            "mode": "explicit_user",
+            "owner_user_id": "user-process-test"
+        }
+    });
+    let legacy = json!({
+        "turns": [{
+            "turn_id": turn_id,
+            "actor": {"user_id": "user-process-test"},
+            "created_at": "2026-01-01T00:00:00Z"
+        }],
+        "runs": [{
+            "run_id": run_id,
+            "turn_id": turn_id,
+            "scope": turn_scope,
+            "accepted_message_ref": "accepted:migration",
+            "source_binding_ref": "source:migration",
+            "reply_target_binding_ref": "reply:migration",
+            "status": "BlockedApproval",
+            "profile": {
+                "id": "default",
+                "version": 1,
+                "allow_steering": false,
+                "auto_queue_followups": false
+            },
+            "checkpoint_id": checkpoint_id,
+            "gate_ref": "gate:migration-approval",
+            "credential_requirements": [],
+            "failure": null,
+            "event_cursor": 41,
+            "runner_id": null,
+            "lease_token": null,
+            "lease_expires_at": null,
+            "last_heartbeat_at": null,
+            "claim_count": 2,
+            "received_at": "2026-01-01T00:00:00Z",
+            "parent_run_id": null,
+            "subagent_depth": 0,
+            "spawn_tree_root_run_id": root_run_id,
+            "product_context": null
+        }],
+        "loop_checkpoints": [{
+            "checkpoint_id": checkpoint_id,
+            "scope": turn_scope,
+            "turn_id": turn_id,
+            "run_id": run_id,
+            "state_ref": "state:migration",
+            "payload": [114, 101, 115, 117, 109, 101],
+            "schema_id": "interactive_checkpoint_v1",
+            "schema_version": 1,
+            "kind": "Gate",
+            "gate_ref": "gate:migration-approval",
+            "created_at": "2026-01-01T00:00:01Z"
+        }],
+        "idempotency_records": [{
+            "scope": turn_scope,
+            "operation": "Submit",
+            "key": "migration-submit-key",
+            "run_id": run_id,
+            "created_at": "2026-01-01T00:00:00Z"
+        }],
+        "spawn_tree_reservations": [{
+            "scope": turn_scope,
+            "root_run_id": root_run_id,
+            "descendant_count": 1,
+            "released_children": []
+        }]
+    });
+    filesystem
+        .put(
+            &ResourceScope::system(),
+            &ScopedPath::new("/turns/state.json").expect("legacy turn state path"),
+            Entry::bytes(serde_json::to_vec(&legacy).expect("serialize legacy turns")),
+            CasExpectation::Absent,
+        )
+        .await
+        .expect("seed deployed turn blob");
+    let capability_scope = scope();
+    filesystem
+        .put(
+            &ResourceScope::system(),
+            &ScopedPath::new(format!(
+                "/run-state/agents/agent-process-test/runs/{capability_invocation_id}.json"
+            ))
+            .expect("legacy capability path"),
+            Entry::bytes(
+                serde_json::to_vec(&json!({
+                    "invocation_id": capability_invocation_id,
+                    "capability_id": "builtin.echo",
+                    "scope": capability_scope,
+                    "authenticated_actor_user_id": "user-process-test",
+                    "status": "BlockedAuth",
+                    "approval_request_id": null,
+                    "error_kind": null
+                }))
+                .expect("serialize capability run"),
+            ),
+            CasExpectation::Absent,
+        )
+        .await
+        .expect("seed deployed capability run");
+
+    let store = ProcessJournalStore::new(Arc::clone(&filesystem));
+    assert_eq!(
+        store
+            .migrate_legacy_journal()
+            .await
+            .expect("pre-start deployed migration"),
+        2
+    );
+    let imported_rows = filesystem
+        .query(
+            &ResourceScope::system(),
+            &ScopedPath::new("/processes/materialized/process").expect("process rows"),
+            &Filter::All,
+            Page::default(),
+        )
+        .await
+        .expect("query imported process rows");
+    assert_eq!(imported_rows.len(), 2, "all imported snapshots persist");
+    let turn_process_id = ProcessId::from_uuid(run_id.as_uuid());
+    let mut imported_scope = ResourceScope::system();
+    imported_scope.tenant_id = TenantId::new("tenant-process-test").expect("tenant");
+    imported_scope.user_id = UserId::new("user-process-test").expect("user");
+    imported_scope.agent_id = Some(AgentId::new("agent-process-test").expect("agent"));
+    imported_scope.project_id = Some(ProjectId::new("project-process-test").expect("project"));
+    imported_scope.thread_id = Some(ThreadId::new("thread-process-test").expect("thread"));
+    imported_scope.invocation_id = InvocationId::from_uuid(run_id.as_uuid());
+    let turn = store
+        .get_process_snapshot(GetProcessSnapshotRequest {
+            scope: imported_scope.clone(),
+            process_id: turn_process_id,
+        })
+        .await
+        .expect("first process request imports deployed state");
+    assert_eq!(turn.status, ProcessLifecycleStatus::Suspended);
+    assert_eq!(
+        turn.suspension
+            .as_ref()
+            .and_then(|suspension| suspension.gate_ref.as_ref())
+            .map(TurnGateRef::as_str),
+        Some("gate:migration-approval")
+    );
+    let checkpoint = store
+        .get_process_checkpoint(GetProcessCheckpointRequest {
+            checkpoint_id: ProcessCheckpointId::from_trusted(checkpoint_id.as_uuid().to_string()),
+            process_id: turn_process_id,
+            scope: imported_scope.clone(),
+        })
+        .await
+        .expect("read imported checkpoint")
+        .expect("checkpoint exists");
+    assert_eq!(checkpoint.payload.as_bytes(), b"resume");
+
+    let replay = store
+        .submit_process(SubmitProcessRequest {
+            process_id: turn_process_id,
+            process_kind: ProcessKind::AgentTurn,
+            scope: imported_scope,
+            exclusive_within_scope: true,
+            operation_id: Some(ProcessOperationId::from_trusted("migration-submit-key")),
+            owner_user_id: Some(UserId::new("user-process-test").expect("owner")),
+            concurrency_class: None,
+            parent_process_id: None,
+            root_process_id: None,
+            spawn_tree_descendant_cap: None,
+            dependency: None,
+            checkpoint_ref: None,
+            input: None,
+            created_at: Utc::now(),
+            metadata: json!({}),
+        })
+        .await
+        .expect("legacy submit idempotency replays");
+    assert_eq!(replay.status, ProcessLifecycleStatus::Suspended);
+
+    let capability = store
+        .get_process_snapshot(GetProcessSnapshotRequest {
+            scope: capability_scope,
+            process_id: ProcessId::from_uuid(capability_invocation_id.as_uuid()),
+        })
+        .await
+        .expect("read imported capability invocation");
+    assert_eq!(capability.status, ProcessLifecycleStatus::Suspended);
+    assert_eq!(
+        store
+            .migrate_legacy_journal()
+            .await
+            .expect("migration rerun is idempotent"),
+        0
+    );
+}
+
+#[tokio::test]
+async fn deployed_turn_row_layout_imports_materialized_run_rows() {
+    let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::new(InMemoryBackend::new()),
+        MountView::new(vec![
+            MountGrant::new(
+                MountAlias::new("/processes").expect("processes alias"),
+                VirtualPath::new("/engine/processes").expect("processes target"),
+                MountPermissions::read_write_list_delete(),
+            ),
+            MountGrant::new(
+                MountAlias::new("/turns").expect("turns alias"),
+                VirtualPath::new("/engine/turns").expect("turns target"),
+                MountPermissions::read_write_list_delete(),
+            ),
+        ])
+        .expect("migration mounts"),
+    ));
+    let run_id = TurnRunId::new();
+    let turn_id = TurnId::new();
+    let row = json!({
+        "run_id": run_id,
+        "turn_id": turn_id,
+        "scope": {
+            "tenant_id": "tenant-process-test",
+            "agent_id": "agent-process-test",
+            "project_id": "project-process-test",
+            "thread_id": "thread-row-migration",
+            "thread_owner": {
+                "mode": "explicit_user",
+                "owner_user_id": "user-process-test"
+            }
+        },
+        "accepted_message_ref": "accepted:row-migration",
+        "source_binding_ref": "source:row-migration",
+        "reply_target_binding_ref": "reply:row-migration",
+        "status": "Completed",
+        "profile": {
+            "id": "default",
+            "version": 1,
+            "allow_steering": false,
+            "auto_queue_followups": false
+        },
+        "checkpoint_id": null,
+        "gate_ref": null,
+        "credential_requirements": [],
+        "failure": null,
+        "event_cursor": 7,
+        "runner_id": null,
+        "lease_token": null,
+        "lease_expires_at": null,
+        "last_heartbeat_at": null,
+        "claim_count": 0,
+        "received_at": "2026-01-02T00:00:00Z",
+        "parent_run_id": null,
+        "subagent_depth": 0,
+        "spawn_tree_root_run_id": null,
+        "product_context": null
+    });
+    for (path, body) in [
+        (
+            "/turns/rows/v1/meta/state.json".to_string(),
+            json!({"journal_seq": 1, "event_retention_floor": 0}),
+        ),
+        (
+            format!("/turns/rows/v1/runs/{run_id}.json"),
+            json!({"journal_seq": 1, "value": row}),
+        ),
+    ] {
+        filesystem
+            .put(
+                &ResourceScope::system(),
+                &ScopedPath::new(path).expect("legacy row path"),
+                Entry::bytes(serde_json::to_vec(&body).expect("serialize legacy row")),
+                CasExpectation::Absent,
+            )
+            .await
+            .expect("seed legacy row");
+    }
+
+    let store = ProcessJournalStore::new(filesystem);
+    let mut imported_scope = ResourceScope::system();
+    imported_scope.tenant_id = TenantId::new("tenant-process-test").expect("tenant");
+    imported_scope.user_id = UserId::new("user-process-test").expect("user");
+    imported_scope.agent_id = Some(AgentId::new("agent-process-test").expect("agent"));
+    imported_scope.project_id = Some(ProjectId::new("project-process-test").expect("project"));
+    imported_scope.thread_id = Some(ThreadId::new("thread-row-migration").expect("thread"));
+    imported_scope.invocation_id = InvocationId::from_uuid(run_id.as_uuid());
+    let imported = store
+        .get_process_snapshot(GetProcessSnapshotRequest {
+            scope: imported_scope,
+            process_id: ProcessId::from_uuid(run_id.as_uuid()),
+        })
+        .await
+        .expect("row-native deployed run imports");
+    assert_eq!(imported.status, ProcessLifecycleStatus::Completed);
+    assert_eq!(imported.journal_cursor, ProcessJournalCursor(7));
 }
 
 #[tokio::test]
@@ -614,6 +947,61 @@ async fn explicit_row_native_migration_rebuilds_sparse_process_indexes() {
         .expect("claim rebuilt queue");
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].state.process_id, process_id);
+}
+
+#[tokio::test]
+async fn interrupted_row_native_index_migration_retries_from_a_stable_boundary() {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&backend),
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/processes").expect("process alias"),
+            VirtualPath::new("/engine/processes").expect("process target"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("process mount"),
+    ));
+    let store = ProcessJournalStore::new(Arc::clone(&filesystem));
+    let resource_scope = scope();
+    let mut last_process_id = None;
+    for _ in 0..=Page::MAX_LIMIT {
+        let process_id = ProcessId::new();
+        submit_internal_process(&store, &resource_scope, process_id).await;
+        last_process_id = Some(process_id);
+    }
+
+    backend.add_fault(
+        Fault::on(FilesystemOperation::WriteFile)
+            .path("/processes/materialized/process")
+            .nth(Page::MAX_LIMIT as usize + 1)
+            .backend("interrupt after first committed migration batch"),
+    );
+    let error = store
+        .migrate_row_native_indexes()
+        .await
+        .expect_err("injected second-batch write interrupts migration");
+    assert!(matches!(
+        error,
+        ProcessJournalStoreError::Filesystem(FilesystemError::Backend { .. })
+    ));
+
+    let migrated = store
+        .migrate_row_native_indexes()
+        .await
+        .expect("retry converges after the one-shot interruption");
+    assert!(
+        migrated >= (Page::MAX_LIMIT as usize + 1) * 2,
+        "journal and process collections are both replayed"
+    );
+    let last_process_id = last_process_id.expect("at least one process");
+    let snapshot = store
+        .get_process_snapshot(GetProcessSnapshotRequest {
+            scope: resource_scope,
+            process_id: last_process_id,
+        })
+        .await
+        .expect("last row beyond the first migration batch remains queryable");
+    assert_eq!(snapshot.process_id, last_process_id);
 }
 
 #[tokio::test]

@@ -4188,6 +4188,7 @@ dependencies = [
  "async-trait",
  "blake3",
  "chrono",
+ "deadpool-postgres",
  "futures",
  "ironclaw_event_projections",
  "ironclaw_events",
@@ -4201,7 +4202,9 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-postgres",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

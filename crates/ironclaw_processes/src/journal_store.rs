@@ -46,7 +46,7 @@ mod rows;
 mod state;
 mod validation;
 use command::StoredProcessCommand;
-use migration::legacy_turn_record_contains_data;
+use migration::{import_deployed_legacy_authorities, legacy_turn_record_contains_data};
 use observer::RegisteredProcessObserver;
 use state::ProcessJournalMaterializedState;
 use validation::{
@@ -359,10 +359,8 @@ where
             self.materialized_ready.store(true, Ordering::Release);
             return Ok(());
         }
-        if self.legacy_process_journal_present().await? {
-            return Err(ProcessJournalStoreError::MigrationRequired);
-        }
-        self.initialize_materialized(false).await?;
+        let import_legacy = self.legacy_process_journal_present().await?;
+        self.initialize_materialized(import_legacy).await?;
         self.materialized_ready.store(true, Ordering::Release);
         Ok(())
     }
@@ -375,13 +373,8 @@ where
         let _guard = self.migration.lock().await;
         rows::ensure_indexes(self.filesystem.as_ref()).await?;
         if rows::is_initialized(self.filesystem.as_ref()).await? {
-            return Err(ProcessJournalStoreError::InvalidRequest(
-                "legacy process journal migration must run before row-native initialization"
-                    .to_string(),
-            ));
-        }
-        if self.deployed_legacy_authority_present().await? {
-            return Err(ProcessJournalStoreError::MigrationRequired);
+            self.materialized_ready.store(true, Ordering::Release);
+            return Ok(0);
         }
         let imported = self.initialize_materialized(true).await?;
         self.materialized_ready.store(true, Ordering::Release);
@@ -616,6 +609,7 @@ where
                         })?;
                     }
                 }
+                import_deployed_legacy_authorities(self.filesystem.as_ref(), &mut state).await?;
             }
             let entries = std::mem::take(&mut state.journal);
             let imported = entries.len();

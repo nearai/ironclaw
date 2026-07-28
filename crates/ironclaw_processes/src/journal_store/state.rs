@@ -66,6 +66,97 @@ impl Default for ProcessJournalMaterializedState {
 }
 
 impl ProcessJournalMaterializedState {
+    pub(super) fn import_deployed_snapshot(&mut self, mut snapshot: JournaledProcessSnapshot) {
+        if self.processes.contains_key(&snapshot.process_id) {
+            return;
+        }
+        let cursor = if snapshot.journal_cursor.0 == 0
+            || self
+                .journal
+                .iter()
+                .any(|entry| entry.cursor == snapshot.journal_cursor)
+        {
+            self.next_cursor()
+        } else {
+            self.next_cursor = self
+                .next_cursor
+                .max(snapshot.journal_cursor.0.saturating_add(1));
+            snapshot.journal_cursor
+        };
+        snapshot.journal_cursor = cursor;
+        let kind = match snapshot.status {
+            ProcessLifecycleStatus::Queued => ProcessJournalKind::Submitted,
+            ProcessLifecycleStatus::Running => ProcessJournalKind::Claimed,
+            ProcessLifecycleStatus::Suspended => ProcessJournalKind::Suspended,
+            ProcessLifecycleStatus::StopRequested => ProcessJournalKind::StopRequested,
+            ProcessLifecycleStatus::CancelRequested => ProcessJournalKind::CancelRequested,
+            ProcessLifecycleStatus::Stopped => ProcessJournalKind::Stopped,
+            ProcessLifecycleStatus::Cancelled => ProcessJournalKind::Cancelled,
+            ProcessLifecycleStatus::Completed => ProcessJournalKind::Completed,
+            ProcessLifecycleStatus::Failed => ProcessJournalKind::Failed,
+            ProcessLifecycleStatus::Killed => ProcessJournalKind::Killed,
+            ProcessLifecycleStatus::RecoveryRequired => ProcessJournalKind::RecoveryRequired,
+        };
+        self.push_entry(ProcessJournalEntry::from_snapshot(&snapshot, cursor, kind));
+        self.processes.insert(snapshot.process_id, snapshot);
+        self.legacy_imported = true;
+    }
+
+    pub(super) fn import_deployed_checkpoint(&mut self, checkpoint: ProcessCheckpointRecord) {
+        self.checkpoints
+            .entry(checkpoint.checkpoint_id.clone())
+            .or_insert(checkpoint);
+        self.legacy_imported = true;
+    }
+
+    pub(super) fn import_deployed_tree_reservation(&mut self, reservation: ProcessTreeReservation) {
+        self.tree_reservations
+            .entry(reservation.root_process_id)
+            .or_insert(reservation);
+        self.legacy_imported = true;
+    }
+
+    pub(super) fn import_deployed_submit_idempotency(
+        &mut self,
+        operation_id: &str,
+        snapshot: JournaledProcessSnapshot,
+    ) -> Result<(), ProcessJournalStoreError> {
+        let scope = &snapshot.scope;
+        let scope = serde_json::to_string(&(
+            &scope.tenant_id,
+            &scope.user_id,
+            &scope.agent_id,
+            &scope.project_id,
+            &scope.mission_id,
+            &scope.thread_id,
+        ))
+        .map_err(|error| ProcessJournalStoreError::Serialization(error.to_string()))?;
+        self.remember_submission_result(
+            Some(format!(
+                "submit:{scope}:{:?}:{operation_id}",
+                snapshot.process_kind
+            )),
+            snapshot,
+        );
+        Ok(())
+    }
+
+    pub(super) fn import_deployed_control_idempotency(
+        &mut self,
+        action: &str,
+        operation_id: &str,
+        snapshot: JournaledProcessSnapshot,
+    ) {
+        self.remember_control_result(
+            Some(format!("{action}:{}:{operation_id}", snapshot.process_id)),
+            ProcessControlResult {
+                already_terminal: snapshot.status.is_terminal(),
+                state: snapshot,
+                changed: false,
+            },
+        );
+    }
+
     pub(super) fn apply_command(
         &mut self,
         command: StoredProcessCommand,

@@ -15,7 +15,7 @@ use tracing::{Instrument, debug};
 
 use crate::{
     ClaimProcessesRequest, ClaimedProcess, FailProcessRequest, ProcessJournalStoreError,
-    ProcessKind, ProcessLeaseRequest, ProcessLeaseToken, ProcessRuntimePort, ProcessWorkerId,
+    ProcessKind, ProcessLeaseRequest, ProcessLeaseToken, ProcessTransitionPort, ProcessWorkerId,
     RecoverExpiredProcessLeasesRequest,
 };
 
@@ -205,7 +205,7 @@ pub trait JournalProcessExecutor: Send + Sync {
 }
 
 pub struct ProcessSupervisor {
-    runtime: Arc<dyn ProcessRuntimePort>,
+    runtime: Arc<dyn ProcessTransitionPort<Error = ProcessJournalStoreError>>,
     executor: Arc<dyn JournalProcessExecutor>,
     process_kind: ProcessKind,
     config: ProcessSupervisorConfig,
@@ -214,7 +214,7 @@ pub struct ProcessSupervisor {
 
 impl ProcessSupervisor {
     pub fn new(
-        runtime: Arc<dyn ProcessRuntimePort>,
+        runtime: Arc<dyn ProcessTransitionPort<Error = ProcessJournalStoreError>>,
         executor: Arc<dyn JournalProcessExecutor>,
         process_kind: ProcessKind,
         config: ProcessSupervisorConfig,
@@ -352,7 +352,7 @@ struct ClaimedIdentity {
 
 struct SupervisorLoop {
     command_tx: mpsc::Sender<SupervisorCommand>,
-    runtime: Arc<dyn ProcessRuntimePort>,
+    runtime: Arc<dyn ProcessTransitionPort<Error = ProcessJournalStoreError>>,
     executor: Arc<dyn JournalProcessExecutor>,
     process_kind: ProcessKind,
     config: ProcessSupervisorConfig,
@@ -362,7 +362,7 @@ struct SupervisorLoop {
 
 struct DrainContext {
     command_tx: mpsc::Sender<SupervisorCommand>,
-    runtime: Arc<dyn ProcessRuntimePort>,
+    runtime: Arc<dyn ProcessTransitionPort<Error = ProcessJournalStoreError>>,
     executor: Arc<dyn JournalProcessExecutor>,
     process_kind: ProcessKind,
     config: ProcessSupervisorConfig,
@@ -607,7 +607,7 @@ impl InFlightHeartbeat {
 
     fn spawn(
         &mut self,
-        runtime: Arc<dyn ProcessRuntimePort>,
+        runtime: Arc<dyn ProcessTransitionPort<Error = ProcessJournalStoreError>>,
         process_id: ProcessId,
         worker_id: ProcessWorkerId,
         lease_token: ProcessLeaseToken,
@@ -652,7 +652,7 @@ fn heartbeat_outcome(result: Result<HeartbeatOutcome, tokio::task::JoinError>) -
 }
 
 async fn record_failure(
-    runtime: &Arc<dyn ProcessRuntimePort>,
+    runtime: &Arc<dyn ProcessTransitionPort<Error = ProcessJournalStoreError>>,
     identity: &ClaimedIdentity,
     failure: SanitizedFailure,
     config: &ProcessSupervisorConfig,
@@ -726,7 +726,10 @@ async fn shutdown_supervisor(
     }
 }
 
-async fn relinquish(runtime: &Arc<dyn ProcessRuntimePort>, identity: &ClaimedIdentity) {
+async fn relinquish(
+    runtime: &Arc<dyn ProcessTransitionPort<Error = ProcessJournalStoreError>>,
+    identity: &ClaimedIdentity,
+) {
     if let Err(error) = runtime
         .relinquish_process(ProcessLeaseRequest {
             process_id: identity.process_id,
@@ -756,15 +759,134 @@ mod tests {
 
     use super::*;
     use crate::{
-        GetProcessSnapshotRequest, JournaledProcessSnapshot, ProcessJournalSource,
-        ProcessLifecycleStatus, ProcessStateTransitionRequest, ProcessSubmissionPort,
-        SubmitProcessRequest, test_support::in_memory_backed_processes_filesystem,
+        GetProcessSnapshotRequest, JournaledProcessSnapshot, ProcessJournalCursor,
+        ProcessJournalSource, ProcessLifecycleStatus, ProcessStateTransitionRequest,
+        ProcessSubmissionPort, SubmitProcessRequest, SuspendProcessRequest,
+        test_support::in_memory_backed_processes_filesystem,
     };
+    use ironclaw_filesystem::{FilesystemError, FilesystemOperation, InMemoryBackend};
+    use ironclaw_host_api::VirtualPath;
     use ironclaw_host_api::{AgentId, InvocationId, ProjectId, TenantId, ThreadId, UserId};
     use tokio::sync::Notify;
 
+    #[derive(Clone, Copy)]
+    enum HeartbeatFault {
+        None,
+        Error,
+        Pending,
+    }
+
+    struct FaultRuntime {
+        inner: Arc<crate::ProcessJournalStore<InMemoryBackend>>,
+        heartbeat: HeartbeatFault,
+        fail_errors_remaining: AtomicUsize,
+        fail_attempts: AtomicUsize,
+        relinquishes: AtomicUsize,
+    }
+
+    impl FaultRuntime {
+        fn new(
+            inner: Arc<crate::ProcessJournalStore<InMemoryBackend>>,
+            heartbeat: HeartbeatFault,
+            fail_errors: usize,
+        ) -> Self {
+            Self {
+                inner,
+                heartbeat,
+                fail_errors_remaining: AtomicUsize::new(fail_errors),
+                fail_attempts: AtomicUsize::new(0),
+                relinquishes: AtomicUsize::new(0),
+            }
+        }
+
+        fn injected_error() -> ProcessJournalStoreError {
+            ProcessJournalStoreError::Filesystem(FilesystemError::Backend {
+                path: VirtualPath::new("/engine/injected/process-supervisor")
+                    .unwrap_or_else(|error| panic!("test path must be valid: {error}")),
+                operation: FilesystemOperation::WriteFile,
+                reason: "injected supervisor persistence fault".to_string(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl ProcessTransitionPort for FaultRuntime {
+        type Error = ProcessJournalStoreError;
+
+        async fn claim_next_processes(
+            &self,
+            request: ClaimProcessesRequest,
+        ) -> Result<Vec<ClaimedProcess>, Self::Error> {
+            self.inner.claim_next_processes(request).await
+        }
+
+        async fn heartbeat_process(
+            &self,
+            request: ProcessLeaseRequest,
+        ) -> Result<ProcessJournalCursor, Self::Error> {
+            match self.heartbeat {
+                HeartbeatFault::None => self.inner.heartbeat_process(request).await,
+                HeartbeatFault::Error => Err(Self::injected_error()),
+                HeartbeatFault::Pending => std::future::pending().await,
+            }
+        }
+
+        async fn recover_expired_process_leases(
+            &self,
+            request: RecoverExpiredProcessLeasesRequest,
+        ) -> Result<crate::RecoverExpiredProcessLeasesResponse, Self::Error> {
+            self.inner.recover_expired_process_leases(request).await
+        }
+
+        async fn suspend_process(
+            &self,
+            request: SuspendProcessRequest,
+        ) -> Result<JournaledProcessSnapshot, Self::Error> {
+            self.inner.suspend_process(request).await
+        }
+
+        async fn complete_process(
+            &self,
+            request: ProcessStateTransitionRequest,
+        ) -> Result<JournaledProcessSnapshot, Self::Error> {
+            self.inner.complete_process(request).await
+        }
+
+        async fn cancel_process(
+            &self,
+            request: ProcessStateTransitionRequest,
+        ) -> Result<JournaledProcessSnapshot, Self::Error> {
+            self.inner.cancel_process(request).await
+        }
+
+        async fn fail_process(
+            &self,
+            request: FailProcessRequest,
+        ) -> Result<JournaledProcessSnapshot, Self::Error> {
+            self.fail_attempts.fetch_add(1, Ordering::SeqCst);
+            if self
+                .fail_errors_remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(Self::injected_error());
+            }
+            self.inner.fail_process(request).await
+        }
+
+        async fn relinquish_process(
+            &self,
+            request: ProcessLeaseRequest,
+        ) -> Result<JournaledProcessSnapshot, Self::Error> {
+            self.relinquishes.fetch_add(1, Ordering::SeqCst);
+            self.inner.relinquish_process(request).await
+        }
+    }
+
     struct CompletingExecutor {
-        runtime: Arc<dyn ProcessRuntimePort>,
+        runtime: Arc<dyn ProcessTransitionPort<Error = ProcessJournalStoreError>>,
     }
 
     #[async_trait]
@@ -814,6 +936,7 @@ mod tests {
 
     struct BlockingExecutor {
         started: Arc<Notify>,
+        executions: Option<Arc<AtomicUsize>>,
     }
 
     #[async_trait]
@@ -822,13 +945,16 @@ mod tests {
             &self,
             _claimed: ClaimedProcess,
         ) -> Result<(), ProcessExecutorFailure> {
+            if let Some(executions) = &self.executions {
+                executions.fetch_add(1, Ordering::SeqCst);
+            }
             self.started.notify_one();
             std::future::pending().await
         }
     }
 
     struct CountingExecutor {
-        runtime: Arc<dyn ProcessRuntimePort>,
+        runtime: Arc<dyn ProcessTransitionPort<Error = ProcessJournalStoreError>>,
         active: AtomicUsize,
         maximum: AtomicUsize,
     }
@@ -864,7 +990,8 @@ mod tests {
         let store = Arc::new(crate::ProcessJournalStore::new(
             in_memory_backed_processes_filesystem(),
         ));
-        let runtime: Arc<dyn ProcessRuntimePort> = store.clone();
+        let runtime: Arc<dyn ProcessTransitionPort<Error = ProcessJournalStoreError>> =
+            store.clone();
         let process_id = submit(&store, ProcessKind::Internal).await;
         let executor = Arc::new(CompletingExecutor {
             runtime: Arc::clone(&runtime),
@@ -888,7 +1015,8 @@ mod tests {
             in_memory_backed_processes_filesystem(),
         ));
         let process_id = submit(&store, ProcessKind::Internal).await;
-        let runtime: Arc<dyn ProcessRuntimePort> = store.clone();
+        let runtime: Arc<dyn ProcessTransitionPort<Error = ProcessJournalStoreError>> =
+            store.clone();
         let handle = ProcessSupervisor::new(
             runtime,
             Arc::new(FailingExecutor),
@@ -912,7 +1040,8 @@ mod tests {
             in_memory_backed_processes_filesystem(),
         ));
         let process_id = submit(&store, ProcessKind::Internal).await;
-        let runtime: Arc<dyn ProcessRuntimePort> = store.clone();
+        let runtime: Arc<dyn ProcessTransitionPort<Error = ProcessJournalStoreError>> =
+            store.clone();
         let handle = ProcessSupervisor::new(
             runtime,
             Arc::new(PanickingExecutor),
@@ -938,7 +1067,8 @@ mod tests {
         for _ in 0..6 {
             process_ids.push(submit(&store, ProcessKind::Internal).await);
         }
-        let runtime: Arc<dyn ProcessRuntimePort> = store.clone();
+        let runtime: Arc<dyn ProcessTransitionPort<Error = ProcessJournalStoreError>> =
+            store.clone();
         let executor = Arc::new(CountingExecutor {
             runtime: Arc::clone(&runtime),
             active: AtomicUsize::new(0),
@@ -966,12 +1096,14 @@ mod tests {
             in_memory_backed_processes_filesystem(),
         ));
         let process_id = submit(&store, ProcessKind::Internal).await;
-        let runtime: Arc<dyn ProcessRuntimePort> = store.clone();
+        let runtime: Arc<dyn ProcessTransitionPort<Error = ProcessJournalStoreError>> =
+            store.clone();
         let started = Arc::new(Notify::new());
         let handle = ProcessSupervisor::new(
             runtime,
             Arc::new(BlockingExecutor {
                 started: Arc::clone(&started),
+                executions: None,
             }),
             ProcessKind::Internal,
             fast_config(),
@@ -992,6 +1124,136 @@ mod tests {
 
         assert_eq!(snapshot.status, ProcessLifecycleStatus::Queued);
         assert!(snapshot.lease.is_none());
+    }
+
+    #[tokio::test]
+    async fn blocked_executor_heartbeat_timeouts_fail_once_without_duplicate_execution() {
+        let store = Arc::new(crate::ProcessJournalStore::new(
+            in_memory_backed_processes_filesystem(),
+        ));
+        let process_id = submit(&store, ProcessKind::Internal).await;
+        let faults = Arc::new(FaultRuntime::new(
+            Arc::clone(&store),
+            HeartbeatFault::Pending,
+            0,
+        ));
+        let runtime: Arc<dyn ProcessTransitionPort<Error = ProcessJournalStoreError>> =
+            faults.clone();
+        let executions = Arc::new(AtomicUsize::new(0));
+        let handle = ProcessSupervisor::new(
+            runtime,
+            Arc::new(BlockingExecutor {
+                started: Arc::new(Notify::new()),
+                executions: Some(Arc::clone(&executions)),
+            }),
+            ProcessKind::Internal,
+            fast_config()
+                .with_heartbeat_interval(Duration::from_millis(5))
+                .with_max_consecutive_heartbeat_failures(2),
+        )
+        .start();
+
+        let snapshot = wait_for_status(&store, process_id, ProcessLifecycleStatus::Failed).await;
+        assert_eq!(
+            snapshot.failure.as_ref().map(SanitizedFailure::category),
+            Some("process_heartbeat_failed")
+        );
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn repeated_heartbeat_errors_use_the_same_bounded_failure_path() {
+        let store = Arc::new(crate::ProcessJournalStore::new(
+            in_memory_backed_processes_filesystem(),
+        ));
+        let process_id = submit(&store, ProcessKind::Internal).await;
+        let faults = Arc::new(FaultRuntime::new(
+            Arc::clone(&store),
+            HeartbeatFault::Error,
+            0,
+        ));
+        let runtime: Arc<dyn ProcessTransitionPort<Error = ProcessJournalStoreError>> =
+            faults.clone();
+        let handle = ProcessSupervisor::new(
+            runtime,
+            Arc::new(BlockingExecutor {
+                started: Arc::new(Notify::new()),
+                executions: None,
+            }),
+            ProcessKind::Internal,
+            fast_config()
+                .with_heartbeat_interval(Duration::from_millis(5))
+                .with_max_consecutive_heartbeat_failures(2),
+        )
+        .start();
+
+        wait_for_status(&store, process_id, ProcessLifecycleStatus::Failed).await;
+        assert_eq!(faults.fail_attempts.load(Ordering::SeqCst), 1);
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn terminal_failure_write_retries_then_commits() {
+        let store = Arc::new(crate::ProcessJournalStore::new(
+            in_memory_backed_processes_filesystem(),
+        ));
+        let process_id = submit(&store, ProcessKind::Internal).await;
+        let faults = Arc::new(FaultRuntime::new(
+            Arc::clone(&store),
+            HeartbeatFault::None,
+            2,
+        ));
+        let runtime: Arc<dyn ProcessTransitionPort<Error = ProcessJournalStoreError>> =
+            faults.clone();
+        let handle = ProcessSupervisor::new(
+            runtime,
+            Arc::new(FailingExecutor),
+            ProcessKind::Internal,
+            fast_config()
+                .with_terminal_failure_record_attempts(3)
+                .with_terminal_failure_record_backoff(Duration::from_millis(1)),
+        )
+        .start();
+
+        wait_for_status(&store, process_id, ProcessLifecycleStatus::Failed).await;
+        assert_eq!(faults.fail_attempts.load(Ordering::SeqCst), 3);
+        assert_eq!(faults.relinquishes.load(Ordering::SeqCst), 0);
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn terminal_failure_write_exhaustion_relinquishes_the_lease() {
+        let store = Arc::new(crate::ProcessJournalStore::new(
+            in_memory_backed_processes_filesystem(),
+        ));
+        submit(&store, ProcessKind::Internal).await;
+        let faults = Arc::new(FaultRuntime::new(
+            Arc::clone(&store),
+            HeartbeatFault::None,
+            usize::MAX,
+        ));
+        let runtime: Arc<dyn ProcessTransitionPort<Error = ProcessJournalStoreError>> =
+            faults.clone();
+        let handle = ProcessSupervisor::new(
+            runtime,
+            Arc::new(FailingExecutor),
+            ProcessKind::Internal,
+            fast_config()
+                .with_terminal_failure_record_attempts(2)
+                .with_terminal_failure_record_backoff(Duration::from_millis(1)),
+        )
+        .start();
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while faults.relinquishes.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("supervisor relinquishes after terminal-write exhaustion");
+        assert!(faults.fail_attempts.load(Ordering::SeqCst) >= 2);
+        handle.shutdown().await;
     }
 
     fn fast_config() -> ProcessSupervisorConfig {

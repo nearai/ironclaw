@@ -447,10 +447,15 @@ where
         scope: &ThreadScope,
     ) -> Result<usize, SessionThreadError> {
         let root = scoped_path(&format!("{}/threads", scope_axes_string(scope)))?;
-        let entries = self
+        let entries = match self
             .filesystem
             .list_dir(&scope.to_resource_scope(), &root)
-            .await?;
+            .await
+        {
+            Ok(entries) => entries,
+            Err(error) if is_not_found(&error) => Vec::new(),
+            Err(error) => return Err(error.into()),
+        };
         let thread_ids = entries
             .into_iter()
             .filter(|entry| entry.file_type == FileType::Directory)
@@ -467,11 +472,16 @@ where
             .map(ThreadId::as_str)
             .collect::<HashSet<_>>();
         let index_root = thread_index_root(scope)?;
-        for entry in self
+        let index_entries = match self
             .filesystem
             .list_dir(&scope.to_resource_scope(), &index_root)
-            .await?
+            .await
         {
+            Ok(entries) => entries,
+            Err(error) if is_not_found(&error) => Vec::new(),
+            Err(error) => return Err(error.into()),
+        };
+        for entry in index_entries {
             let Some(raw_id) = entry.name.strip_suffix(".json") else {
                 continue;
             };
@@ -489,10 +499,15 @@ where
         scope: &ThreadScope,
     ) -> Result<usize, SessionThreadError> {
         let root = scoped_path(&format!("{}/threads", scope_axes_string(scope)))?;
-        let entries = self
+        let entries = match self
             .filesystem
             .list_dir(&scope.to_resource_scope(), &root)
-            .await?;
+            .await
+        {
+            Ok(entries) => entries,
+            Err(error) if is_not_found(&error) => Vec::new(),
+            Err(error) => return Err(error.into()),
+        };
         let thread_ids = entries
             .into_iter()
             .filter(|entry| entry.file_type == FileType::Directory)
@@ -528,6 +543,14 @@ where
                         )
                         .await?;
                     for row in rows {
+                        let expected_kind = if messages {
+                            crate::filesystem_service::THREAD_MESSAGE_KIND
+                        } else {
+                            crate::filesystem_service::THREAD_SUMMARY_KIND
+                        };
+                        if row.entry.kind.as_ref().map(RecordKind::as_str) != Some(expected_kind) {
+                            continue;
+                        }
                         let entry = if messages {
                             let record = deserialize::<ThreadMessageRecord>(&row.entry.body)?;
                             for (lookup_path, lookup_entry, expectation) in

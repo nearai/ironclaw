@@ -1,12 +1,14 @@
 use chrono::Utc;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-use ironclaw_processes::GetProcessSnapshotRequest;
+use ironclaw_host_api::{AgentId, ProjectId, ResourceScope, TenantId, ThreadId, UserId};
+use ironclaw_processes::{GetProcessSnapshotRequest, ProcessJournalPage};
 use std::sync::Arc;
 
 use super::*;
+use crate::TurnEventProjectionFromProcessJournal;
 use crate::{
     AcceptedMessageRef, CapabilityActivityId, EventCursor, GateRef, ReplyTargetBindingRef,
-    RunProfileVersion, SourceBindingRef, TurnActor, TurnId, TurnRunProfile, TurnScope,
+    RunProfileId, RunProfileVersion, SourceBindingRef, TurnActor, TurnId, TurnRunProfile,
+    TurnScope, events::TurnEventProjectionSource,
 };
 
 fn scope() -> TurnScope {
