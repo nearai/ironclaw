@@ -2224,7 +2224,7 @@ pub(crate) async fn start_postgres_testcontainer() -> HarnessResult<(
     ))
 }
 
-const POSTGRES_TEST_POOL_MAX_SIZE: usize = 64;
+const POSTGRES_TEST_POOL_MAX_SIZE: usize = 16;
 
 pub(crate) fn postgres_pool(database_url: &str) -> HarnessResult<deadpool_postgres::Pool> {
     let config: tokio_postgres::Config = database_url

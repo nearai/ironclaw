@@ -243,6 +243,51 @@ where
             };
             let mut state = std::mem::take(&mut loaded.state);
             let prefix = processes_prefix()?;
+            let reservation_count = command.cursor_reservation_count(state.processes.len());
+            let sequence_path = self
+                .filesystem
+                .resolve(&ResourceScope::system(), &process_journal_sequence_path()?)?;
+            let mut cursor_txn = match self
+                .filesystem
+                .begin(&ResourceScope::system(), &prefix)
+                .await
+            {
+                Ok(txn) => txn,
+                Err(error) if rows::retryable_transaction_error(&error) => {
+                    rows::retry_transaction(attempt).await;
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let mut first_cursor = None;
+            for _ in 0..reservation_count {
+                let reserved = match cursor_txn.reserve_sequence(&sequence_path).await {
+                    Ok(reserved) => reserved,
+                    Err(error) if rows::retryable_transaction_error(&error) => {
+                        cursor_txn.rollback().await;
+                        rows::retry_transaction(attempt).await;
+                        continue 'transaction;
+                    }
+                    Err(error) => {
+                        cursor_txn.rollback().await;
+                        return Err(error.into());
+                    }
+                };
+                first_cursor.get_or_insert(reserved.get());
+            }
+            match cursor_txn.commit().await {
+                Ok(()) => {}
+                Err(error) if rows::retryable_transaction_error(&error) => {
+                    rows::retry_transaction(attempt).await;
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            }
+            state.next_cursor = first_cursor.unwrap_or(1);
+            // Cursor reservation commits in its own short transaction. It may
+            // leave a contiguous range unused after a later CAS retry, but it
+            // does not hold the global sequence-row lock while materialized
+            // writes run and other writers queue behind it.
             let mut txn = match self
                 .filesystem
                 .begin(&ResourceScope::system(), &prefix)
@@ -255,27 +300,6 @@ where
                 }
                 Err(error) => return Err(error.into()),
             };
-            let sequence_path = self
-                .filesystem
-                .resolve(&ResourceScope::system(), &process_journal_sequence_path()?)?;
-            let reservation_count = command.cursor_reservation_count(state.processes.len());
-            let mut first_cursor = None;
-            for _ in 0..reservation_count {
-                let reserved = match txn.reserve_sequence(&sequence_path).await {
-                    Ok(reserved) => reserved,
-                    Err(error) if rows::retryable_transaction_error(&error) => {
-                        txn.rollback().await;
-                        rows::retry_transaction(attempt).await;
-                        continue 'transaction;
-                    }
-                    Err(error) => {
-                        txn.rollback().await;
-                        return Err(error.into());
-                    }
-                };
-                first_cursor.get_or_insert(reserved.get());
-            }
-            state.next_cursor = first_cursor.unwrap_or(1);
             let outcome = match state.apply_command(command.clone()) {
                 Ok(outcome) => outcome,
                 Err(error) => {
