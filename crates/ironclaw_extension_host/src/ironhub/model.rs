@@ -16,6 +16,7 @@ pub(crate) const MAX_METADATA_BYTES: u64 = 1024 * 1024;
 pub(crate) const MAX_WASM_BYTES: u64 = 16 * 1024 * 1024;
 pub(crate) const MANIFEST_CACHE_TTL: Duration = Duration::from_secs(60);
 pub(crate) const MANIFEST_CACHE_MAX_ENTRIES: usize = 64;
+pub(crate) const MAX_SEARCH_RESPONSE_BYTES: usize = 20 * 1024;
 pub(crate) const GENERIC_TOOL_INPUT_SCHEMA: &[u8] =
     br#"{"type":"object","additionalProperties":true}"#;
 pub(crate) const GENERIC_TOOL_OUTPUT_SCHEMA: &[u8] =
@@ -154,7 +155,8 @@ pub struct IronHubEntrySummary {
     pub version: String,
     pub description: String,
     pub provenance: IronHubProvenance,
-    pub artifact_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,22 +169,91 @@ pub enum IronHubPhase {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IronHubResponse {
     pub phase: IronHubPhase,
+    pub total_entries: usize,
+    pub returned_entries: usize,
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
     pub entries: Vec<IronHubEntrySummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<LifecycleProductResponse>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
 }
 
 impl IronHubResponse {
     pub(crate) fn discovered(entries: Vec<IronHubEntrySummary>) -> Self {
+        let total_entries = entries.len();
         Self {
             phase: IronHubPhase::Discovered,
+            total_entries,
+            returned_entries: total_entries,
+            truncated: false,
+            message: None,
             entries,
             lifecycle: None,
-            message: None,
         }
     }
+
+    pub(crate) fn discovered_catalog(
+        entries: Vec<IronHubEntrySummary>,
+    ) -> Result<Self, IronHubCommandError> {
+        let total_entries = entries.len();
+        let complete = Self::discovered(entries);
+        if serialized_len(&complete)? <= MAX_SEARCH_RESPONSE_BYTES {
+            return Ok(complete);
+        }
+
+        let mut returned_entries = Vec::new();
+        let mut serialized_entry_bytes = 0;
+        for entry in complete.entries {
+            let entry_bytes = serialized_len(&entry)?;
+            let candidate_count = returned_entries.len() + 1;
+            let base_bytes = serialized_len(&Self::incomplete(
+                total_entries,
+                candidate_count,
+                Vec::new(),
+            ))?;
+            let separator_bytes = candidate_count.saturating_sub(1);
+            if base_bytes + serialized_entry_bytes + separator_bytes + entry_bytes
+                > MAX_SEARCH_RESPONSE_BYTES
+            {
+                break;
+            }
+            serialized_entry_bytes += entry_bytes;
+            returned_entries.push(entry);
+        }
+
+        Ok(Self::incomplete(
+            total_entries,
+            returned_entries.len(),
+            returned_entries,
+        ))
+    }
+
+    fn incomplete(
+        total_entries: usize,
+        returned_entries: usize,
+        entries: Vec<IronHubEntrySummary>,
+    ) -> Self {
+        Self {
+            phase: IronHubPhase::Discovered,
+            total_entries,
+            returned_entries,
+            truncated: true,
+            message: Some(format!(
+                "INCOMPLETE IRONHUB RESULTS: returned {returned_entries} of {total_entries} matching catalog entries. Do not claim an unreturned package is absent; narrow the search query or call ironhub_info with its exact name."
+            )),
+            entries,
+            lifecycle: None,
+        }
+    }
+}
+
+fn serialized_len<T: Serialize>(value: &T) -> Result<usize, IronHubCommandError> {
+    serde_json::to_vec(value)
+        .map(|bytes| bytes.len())
+        .map_err(|error| IronHubCommandError::Catalog {
+            reason: format!("failed to size IronHub catalog response: {error}"),
+        })
 }
 
 #[derive(Debug, Error)]

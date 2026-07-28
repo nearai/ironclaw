@@ -15,8 +15,22 @@ pub fn render_reborn_ironhub_response(label: &str, response: &IronHubResponse) -
     );
     push_line(
         &mut output,
-        format_args!("count: {}", response.entries.len()),
+        format_args!("total_entries: {}", response.total_entries),
     );
+    push_line(
+        &mut output,
+        format_args!("returned_entries: {}", response.returned_entries),
+    );
+    push_line(
+        &mut output,
+        format_args!("truncated: {}", response.truncated),
+    );
+    if let Some(message) = &response.message {
+        push_line(
+            &mut output,
+            format_args!("message: {}", terminal_safe(message)),
+        );
+    }
     for entry in &response.entries {
         push_line(
             &mut output,
@@ -29,19 +43,12 @@ pub fn render_reborn_ironhub_response(label: &str, response: &IronHubResponse) -
                 terminal_safe(&entry.description)
             ),
         );
-        push_line(
-            &mut output,
-            format_args!(
-                "  artifact_digest: {}",
-                terminal_safe(&entry.artifact_digest)
-            ),
-        );
-    }
-    if let Some(message) = &response.message {
-        push_line(
-            &mut output,
-            format_args!("message: {}", terminal_safe(message)),
-        );
+        if let Some(artifact_digest) = &entry.artifact_digest {
+            push_line(
+                &mut output,
+                format_args!("  artifact_digest: {}", terminal_safe(artifact_digest)),
+            );
+        }
     }
     output
 }

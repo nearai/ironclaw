@@ -10,6 +10,9 @@ use super::model::{
     SignedManifestEnvelope,
 };
 
+const MAX_SEARCH_DESCRIPTION_BYTES: usize = 120;
+const SEARCH_DESCRIPTION_ELLIPSIS: char = '…';
+
 pub(crate) fn verify_signed_manifest(envelope_bytes: &[u8]) -> Result<Vec<u8>, String> {
     verify_signed_manifest_with_keys(envelope_bytes, super::model::MANIFEST_VERIFY_KEYS)
 }
@@ -139,7 +142,7 @@ pub(crate) fn tool_summary(entry: &IronHubToolEntry) -> IronHubEntrySummary {
         version: entry.version.clone(),
         description: entry.description.clone(),
         provenance: entry.provenance,
-        artifact_digest: tool_artifact_digest(entry),
+        artifact_digest: Some(tool_artifact_digest(entry)),
     }
 }
 
@@ -150,7 +153,29 @@ pub(crate) fn skill_summary(entry: &IronHubSkillEntry) -> IronHubEntrySummary {
         version: entry.version.clone(),
         description: entry.description.clone(),
         provenance: entry.provenance,
-        artifact_digest: skill_artifact_digest(entry),
+        artifact_digest: Some(skill_artifact_digest(entry)),
+    }
+}
+
+pub(crate) fn compact_tool_summary(entry: &IronHubToolEntry) -> IronHubEntrySummary {
+    IronHubEntrySummary {
+        kind: IronHubEntryKind::Tool,
+        name: entry.name.clone(),
+        version: entry.version.clone(),
+        description: compact_description(&entry.description),
+        provenance: entry.provenance,
+        artifact_digest: None,
+    }
+}
+
+pub(crate) fn compact_skill_summary(entry: &IronHubSkillEntry) -> IronHubEntrySummary {
+    IronHubEntrySummary {
+        kind: IronHubEntryKind::Skill,
+        name: entry.name.clone(),
+        version: entry.version.clone(),
+        description: compact_description(&entry.description),
+        provenance: entry.provenance,
+        artifact_digest: None,
     }
 }
 
@@ -160,6 +185,24 @@ pub(crate) fn tool_artifact_digest(entry: &IronHubToolEntry) -> String {
 
 fn skill_artifact_digest(entry: &IronHubSkillEntry) -> String {
     sha256_hex(entry.skill_md.sha256.as_bytes())
+}
+
+fn compact_description(description: &str) -> String {
+    if description.len() <= MAX_SEARCH_DESCRIPTION_BYTES {
+        return description.to_string();
+    }
+
+    let mut summary = String::new();
+    for character in description.chars() {
+        if summary.len() + character.len_utf8() + SEARCH_DESCRIPTION_ELLIPSIS.len_utf8()
+            > MAX_SEARCH_DESCRIPTION_BYTES
+        {
+            break;
+        }
+        summary.push(character);
+    }
+    summary.push(SEARCH_DESCRIPTION_ELLIPSIS);
+    summary
 }
 
 pub(crate) fn validate_manifest(manifest: &IronHubManifest) -> Result<(), IronHubCommandError> {

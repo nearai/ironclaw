@@ -423,11 +423,41 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "type": "object",
             "properties": {
                 "phase": { "type": "string", "enum": ["discovered", "installed"] },
-                "entries": { "type": "array", "items": { "type": "object" } },
+                "total_entries": { "type": "integer", "minimum": 0 },
+                "returned_entries": { "type": "integer", "minimum": 0 },
+                "truncated": {
+                    "type": "boolean",
+                    "description": "True when entries is an incomplete prefix of the matching signed catalog. Never infer absence from an incomplete result."
+                },
+                "entries": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "kind": { "type": "string", "enum": ["tool", "skill"] },
+                            "name": { "type": "string" },
+                            "version": { "type": "string" },
+                            "description": { "type": "string" },
+                            "provenance": {
+                                "type": "string",
+                                "enum": ["official", "trusted", "verified", "new"]
+                            },
+                            "artifact_digest": { "type": "string" }
+                        },
+                        "required": ["kind", "name", "version", "description", "provenance"],
+                        "additionalProperties": false
+                    }
+                },
                 "lifecycle": { "type": "object" },
                 "message": { "type": "string" }
             },
-            "required": ["phase", "entries"],
+            "required": [
+                "phase",
+                "total_entries",
+                "returned_entries",
+                "truncated",
+                "entries"
+            ],
             "additionalProperties": false
         }),
         "schemas/builtin/admin_configuration_replace.input.v1.json" => json!({
@@ -926,20 +956,43 @@ mod tests {
     }
 
     #[test]
-    fn ironhub_install_schema_keeps_unverified_acknowledgement_operator_only() {
+    fn ironhub_schemas_require_explicit_catalog_completeness_metadata() {
         let input =
             resolve_builtin_input_schema_ref("schemas/builtin/ironhub_install.input.v1.json")
                 .expect("IronHub install input schema is registered");
-        let output =
+        let install_output =
             resolve_builtin_input_schema_ref("schemas/builtin/ironhub_install.output.v1.json")
                 .expect("IronHub install output schema is registered");
+        let search_output =
+            resolve_builtin_input_schema_ref("schemas/builtin/ironhub_search.output.v1.json")
+                .expect("IronHub search output schema is registered");
 
         assert!(input["properties"].get("acknowledge_unverified").is_none());
         assert_eq!(input["additionalProperties"], false);
         assert_eq!(
-            output["properties"]["phase"]["enum"],
+            install_output["properties"]["phase"]["enum"],
             serde_json::json!(["discovered", "installed"])
         );
+        assert_eq!(
+            search_output["required"],
+            serde_json::json!([
+                "phase",
+                "total_entries",
+                "returned_entries",
+                "truncated",
+                "entries"
+            ])
+        );
+        assert_eq!(
+            search_output["properties"]["total_entries"]["type"],
+            "integer"
+        );
+        assert_eq!(
+            search_output["properties"]["returned_entries"]["type"],
+            "integer"
+        );
+        assert_eq!(search_output["properties"]["truncated"]["type"], "boolean");
+        assert_eq!(search_output["additionalProperties"], false);
     }
 
     #[test]

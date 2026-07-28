@@ -22,6 +22,8 @@ use super::service::{
     test_manifest_fetch_lock_exists,
 };
 
+const TOOL_RESULT_PREVIEW_BUDGET_BYTES: usize = 24 * 1024;
+
 #[test]
 fn signed_catalog_verification_accepts_only_the_selected_key() {
     let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
@@ -87,6 +89,152 @@ fn unverified_entry_requires_non_model_operator_acknowledgement() {
         },
     )
     .expect("operator acknowledgement permits install");
+}
+
+#[tokio::test]
+async fn execute_search_and_list_return_the_complete_catalog_in_a_compact_payload() {
+    let description = "long signed catalog description ".repeat(20);
+    let (service, expected_names) = catalog_test_service(
+        "compact-complete",
+        "ironhub-compact-complete-owner",
+        18,
+        42,
+        &description,
+    )
+    .await;
+    let legacy_payload = serde_json::json!({
+        "phase": "discovered",
+        "entries": expected_names
+            .iter()
+            .map(|name| serde_json::json!({
+                "kind": "tool",
+                "name": name,
+                "version": "0.1.0",
+                "description": description,
+                "provenance": "official",
+                "artifact_digest": "a".repeat(64),
+            }))
+            .collect::<Vec<_>>(),
+    });
+    assert!(
+        serde_json::to_vec(&legacy_payload)
+            .expect("legacy payload serializes")
+            .len()
+            > TOOL_RESULT_PREVIEW_BUDGET_BYTES,
+        "fixture must reproduce the pre-fix result-reference truncation"
+    );
+
+    for command in [
+        IronHubCommand::Search {
+            query: String::new(),
+        },
+        IronHubCommand::List { kind: None },
+    ] {
+        let response = service
+            .execute(command)
+            .await
+            .expect("signed catalog query succeeds");
+        let payload = serde_json::to_value(&response).expect("response serializes");
+        let serialized = serde_json::to_vec(&payload).expect("response bytes serialize");
+        let returned_names = response
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(response.total_entries, expected_names.len());
+        assert_eq!(response.returned_entries, expected_names.len());
+        assert!(!response.truncated);
+        assert_eq!(
+            returned_names,
+            expected_names
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            returned_names.contains(&"zz-final-skill"),
+            "the alphabetically last catalog entry must be present"
+        );
+        assert!(
+            response.entries.iter().all(|entry| {
+                entry.description.len() <= 120 && entry.description.ends_with('…')
+            }),
+            "search/list descriptions must be explicitly shortened to at most 120 bytes"
+        );
+        assert!(
+            response
+                .entries
+                .iter()
+                .all(|entry| entry.provenance == IronHubProvenance::Official),
+            "compact catalog entries must retain provenance for trust gating"
+        );
+        assert!(
+            payload["entries"]
+                .as_array()
+                .expect("entries are an array")
+                .iter()
+                .all(|entry| entry.get("artifact_digest").is_none()),
+            "full artifact digests belong to ironhub_info, not catalog listings"
+        );
+        assert!(
+            serialized.len() <= TOOL_RESULT_PREVIEW_BUDGET_BYTES,
+            "complete catalog payload is {} bytes",
+            serialized.len()
+        );
+    }
+
+    let info = service
+        .execute(IronHubCommand::Info {
+            name: "zz-final-skill".to_string(),
+            kind: Some(IronHubEntryKind::Skill),
+        })
+        .await
+        .expect("full entry detail remains available");
+    assert_eq!(info.entries[0].description, description);
+    assert!(
+        info.entries[0].artifact_digest.is_some(),
+        "ironhub_info retains the signed artifact digest"
+    );
+}
+
+#[tokio::test]
+async fn execute_search_marks_an_oversized_catalog_as_incomplete_with_the_true_total() {
+    let description = "oversized signed catalog description ".repeat(20);
+    let (service, expected_names) = catalog_test_service(
+        "compact-truncated",
+        "ironhub-compact-truncated-owner",
+        120,
+        120,
+        &description,
+    )
+    .await;
+
+    let response = service
+        .execute(IronHubCommand::Search {
+            query: String::new(),
+        })
+        .await
+        .expect("signed catalog search succeeds");
+    let serialized = serde_json::to_vec(&response).expect("response serializes");
+    let message = response
+        .message
+        .as_deref()
+        .expect("incomplete response carries a model-visible warning");
+
+    assert_eq!(response.total_entries, expected_names.len());
+    assert_eq!(response.returned_entries, response.entries.len());
+    assert!(response.returned_entries < response.total_entries);
+    assert!(response.truncated);
+    assert!(
+        message.contains("INCOMPLETE") && message.contains(&expected_names.len().to_string()),
+        "warning must state that the result is incomplete and report the true total: {message}"
+    );
+    assert!(
+        serialized.len() <= TOOL_RESULT_PREVIEW_BUDGET_BYTES,
+        "bounded incomplete response is {} bytes",
+        serialized.len()
+    );
 }
 
 #[tokio::test]
@@ -667,6 +815,106 @@ fn signed_manifest(manifest_json: String, signing_key: &SigningKey) -> Vec<u8> {
     })
     .to_string()
     .into_bytes()
+}
+
+async fn catalog_test_service(
+    fixture: &str,
+    owner: &str,
+    tool_count: usize,
+    skill_count: usize,
+    description: &str,
+) -> (IronHubService, Vec<String>) {
+    let services =
+        crate::lifecycle_test_support::build_lifecycle_test_services(owner, None, false).await;
+    let scope = crate::lifecycle_test_support::webui_gate_resource_scope_for_owner(owner);
+    let manifest_url = format!("https://hub.ironclaw.com/tests/{fixture}/manifest.json");
+    let (manifest_json, expected_names) =
+        catalog_manifest_json(fixture, tool_count, skill_count, description);
+    let manifest = signed_manifest(manifest_json, &test_signing_key());
+    let service = configure_test_catalog(
+        IronHubService::new_with_runtime_egress(
+            services.skill_management,
+            services.extension_management,
+            Arc::new(RecordingEgress::new([(manifest_url.as_str(), manifest)])),
+            scope,
+            CapabilityId::new(super::IRONHUB_SEARCH_CAPABILITY_ID).expect("capability id"),
+        ),
+        manifest_url,
+        test_manifest_verify_keys(),
+    );
+    (service, expected_names)
+}
+
+fn catalog_manifest_json(
+    fixture: &str,
+    tool_count: usize,
+    skill_count: usize,
+    description: &str,
+) -> (String, Vec<String>) {
+    let tools = (0..tool_count)
+        .map(|index| {
+            let name = format!("tool-{index:03}");
+            serde_json::json!({
+                "name": name,
+                "crate_name": name,
+                "version": "0.1.0",
+                "description": description,
+                "provenance": "official",
+                "wasm": {
+                    "url": format!("https://hub.ironclaw.com/tests/{fixture}/{name}.wasm"),
+                    "size_bytes": 1,
+                    "sha256": "a".repeat(64),
+                },
+                "capabilities": {
+                    "url": format!("https://hub.ironclaw.com/tests/{fixture}/{name}.json"),
+                    "size_bytes": 1,
+                    "sha256": "b".repeat(64),
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+    let skills = (0..skill_count)
+        .map(|index| {
+            let name = if index + 1 == skill_count {
+                "zz-final-skill".to_string()
+            } else {
+                format!("skill-{index:03}")
+            };
+            serde_json::json!({
+                "name": name,
+                "version": "0.1.0",
+                "description": description,
+                "provenance": "official",
+                "skill_md": {
+                    "url": format!("https://hub.ironclaw.com/tests/{fixture}/{name}.md"),
+                    "size_bytes": 1,
+                    "sha256": "c".repeat(64),
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+    let expected_names = tools
+        .iter()
+        .chain(&skills)
+        .map(|entry| {
+            entry["name"]
+                .as_str()
+                .expect("fixture entry name is a string")
+                .to_string()
+        })
+        .collect();
+    (
+        serde_json::json!({
+            "version": "1",
+            "generated_at": "2026-07-28T00:00:00Z",
+            "release_tag": "test",
+            "repo": "nearai/ironhub",
+            "tools": tools,
+            "skills": skills,
+        })
+        .to_string(),
+        expected_names,
+    )
 }
 
 struct MixedManifestFixture<'a> {

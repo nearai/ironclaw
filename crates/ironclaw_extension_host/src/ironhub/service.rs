@@ -24,9 +24,10 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::ExtensionLifecycleManager;
 
 use super::catalog::{
-    catalog, classify, classify_gate_and_digest, entry_matches, invalid, network_policy_for_url,
-    sha256_hex, skill_summary, tool_summary, validate_artifact, validate_artifact_url,
-    validate_hub_name, validate_manifest, verify_signed_manifest,
+    catalog, classify, classify_gate_and_digest, compact_skill_summary, compact_tool_summary,
+    entry_matches, invalid, network_policy_for_url, sha256_hex, skill_summary, tool_summary,
+    validate_artifact, validate_artifact_url, validate_hub_name, validate_manifest,
+    verify_signed_manifest,
 };
 use super::model::{
     DEFAULT_IRONHUB_MANIFEST_URL, IronHubArtifact, IronHubCommand, IronHubCommandError,
@@ -231,16 +232,16 @@ impl IronHubService {
             .tools
             .iter()
             .filter(|entry| entry_matches(&entry.name, &entry.description, &query))
-            .map(tool_summary)
+            .map(compact_tool_summary)
             .collect::<Vec<_>>();
         entries.extend(
             manifest
                 .skills
                 .iter()
                 .filter(|entry| entry_matches(&entry.name, &entry.description, &query))
-                .map(skill_summary),
+                .map(compact_skill_summary),
         );
-        Ok(IronHubResponse::discovered(entries))
+        IronHubResponse::discovered_catalog(entries)
     }
 
     async fn list(
@@ -250,12 +251,12 @@ impl IronHubService {
         let manifest = self.fetch_manifest_cached().await?;
         let mut entries = Vec::new();
         if kind != Some(IronHubEntryKind::Skill) {
-            entries.extend(manifest.tools.iter().map(tool_summary));
+            entries.extend(manifest.tools.iter().map(compact_tool_summary));
         }
         if kind != Some(IronHubEntryKind::Tool) {
-            entries.extend(manifest.skills.iter().map(skill_summary));
+            entries.extend(manifest.skills.iter().map(compact_skill_summary));
         }
-        Ok(IronHubResponse::discovered(entries))
+        IronHubResponse::discovered_catalog(entries)
     }
 
     async fn info(
@@ -369,8 +370,9 @@ impl IronHubService {
             };
             Ok(IronHubResponse {
                 phase: IronHubPhase::Installed,
-                entries: vec![entry],
-                lifecycle: Some(lifecycle),
+                total_entries: 1,
+                returned_entries: 1,
+                truncated: false,
                 message: Some(install_message(
                     kind,
                     name,
@@ -378,6 +380,8 @@ impl IronHubService {
                     provenance,
                     &artifact_digest,
                 )),
+                entries: vec![entry],
+                lifecycle: Some(lifecycle),
             })
         }
         .await;
