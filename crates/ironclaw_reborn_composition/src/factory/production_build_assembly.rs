@@ -34,7 +34,7 @@ pub(super) async fn build_production_shaped(
     let first_party_bundles = deployment.first_party_bundles.clone();
     let traffic_policy = deployment.traffic();
     // Scope an implicit mem0 app id to the standalone storage root.
-    let memory_service_resolver = {
+    let resolved_memory_provider = {
         let mut memory_provider_connection = memory_provider_connection;
         if memory_provider_connection.app_id.is_none()
             && let crate::input::RebornStorageInput::LocalFilesystem { root, .. } = &storage
@@ -44,10 +44,10 @@ pub(super) async fn build_production_shaped(
             root.hash(&mut hasher);
             memory_provider_connection.app_id = Some(format!("ws-{:016x}", hasher.finish()));
         }
-        crate::build_memory_service_resolver(
+        crate::resolve_memory_provider(
             memory_binding_policy,
             &crate::MemoryProviderDeps::for_third_party(memory_provider_connection),
-        )
+        )?
     };
     let profile = deployment.profile();
     let wiring_config = production_config(
@@ -73,7 +73,7 @@ pub(super) async fn build_production_shaped(
         owner_id,
         local_runtime_identity,
         turn_state_store_limits,
-        memory_resolver: memory_service_resolver,
+        resolved_memory: resolved_memory_provider,
         scheduler_wake_wiring,
         account_setup_descriptors,
         nearai_mcp_bootstrap_config,
@@ -336,7 +336,7 @@ pub(super) struct RebornProductionBuildContext {
     pub(super) owner_id: String,
     pub(super) local_runtime_identity: Option<RebornLocalRuntimeIdentity>,
     pub(super) turn_state_store_limits: ironclaw_turns::TurnStateStoreLimits,
-    pub(super) memory_resolver: MemoryServiceResolver,
+    pub(super) resolved_memory: crate::ResolvedMemoryProvider,
     pub(super) scheduler_wake_wiring: ironclaw_runner::runtime::SchedulerWakeWiring,
     pub(super) account_setup_descriptors: Vec<ironclaw_product::ExtensionAccountSetupDescriptor>,
     pub(super) nearai_mcp_bootstrap_config:

@@ -266,6 +266,7 @@ pub(crate) async fn build_backend_channel_pairing(
             project_id: scope.project_id.clone(),
             extension_id: descriptor.extension_id.clone(),
             connection_notices: descriptor.connection_notices.clone(),
+            connection_requirement: descriptor.connection_requirement.clone(),
             deep_link_template: descriptor.pairing_deep_link_template.clone(),
             inbound_code_prefixes: descriptor.inbound_code_prefixes.clone(),
             store: pairing_store,

@@ -2488,15 +2488,14 @@ mem0_base_url = "https://mem0.example.com"
     }
 
     #[test]
-    fn memory_rejects_unknown_binding_key() {
+    fn memory_rejects_unknown_section_key() {
         let toml = r#"
-[[memory.profile_bindings]]
-profile_id = "memory.document_store.v1"
-extension_id = "ironclaw.memory"
+[memory]
+provider = "ironclaw.memory"
 typo = true
 "#;
         let err = RebornConfigFile::parse_text(toml, &attributed())
-            .expect_err("deny_unknown_fields must catch typos in [[memory.profile_bindings]]");
+            .expect_err("deny_unknown_fields must catch typos in [memory]");
         assert!(matches!(err, RebornConfigFileError::Toml { .. }));
     }
 

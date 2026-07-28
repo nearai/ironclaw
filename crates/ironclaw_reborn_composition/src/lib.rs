@@ -143,8 +143,8 @@ pub use ironclaw_turns::TurnStatus;
 pub use llm_admin::openai_compat_serve::build_openai_compat_route_mount;
 pub use memory_binding::{memory_binding_diagnostics, resolve_memory_binding_policy};
 pub use memory_provider_factory::{
-    Mem0ConnectionConfig, MemoryProviderDeps, build_memory_service_resolver,
-    create_document_store_provider,
+    Mem0ConnectionConfig, MemoryLifecycleConsumers, MemoryProviderDeps, ResolvedMemoryProvider,
+    create_provider, memory_lifecycle_consumers, resolve_memory_provider,
 };
 // Re-exported for the host-owned `ironclaw_webui::webui_v2_app`
 // (hoisted up from this crate): its bearer-auth middleware mints tenant-scoped

@@ -105,7 +105,7 @@ use serde::{Deserialize, Serialize};
 
 use ironclaw_host_api::turn::IdempotencyKey;
 use ironclaw_host_api::{
-    ActivityId, Blocked, FailureKind, InstallationState, ProductSurface, ProductSurfaceCaller,
+    ActivityId, Blocked, FailureKind, LifecyclePublicState, ProductSurface, ProductSurfaceCaller,
     ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
     ProductSurfaceValidationCode, Resolution, SecretHandle, ThreadId, UserId,
 };
@@ -2316,16 +2316,7 @@ async fn extension_install_succeeded(
                     services,
                     caller.clone(),
                     package_ref,
-                    |extension| {
-                        matches!(
-                            extension.installation_state,
-                            InstallationState::Active
-                                | InstallationState::Installed
-                                | InstallationState::Configured
-                                | InstallationState::Disabled
-                                | InstallationState::Failed
-                        )
-                    },
+                    membership_is_visible,
                 )
                 .await;
             } else if matches!(
@@ -2336,15 +2327,7 @@ async fn extension_install_succeeded(
                     services,
                     caller.clone(),
                     package_ref,
-                    |extension| {
-                        extension.needs_setup
-                            || matches!(
-                                extension.installation_state,
-                                InstallationState::Installed
-                                    | InstallationState::Configured
-                                    | InstallationState::Failed
-                            )
-                    },
+                    membership_landed_pending_setup,
                 )
                 .await;
                 match readback {
@@ -2356,19 +2339,34 @@ async fn extension_install_succeeded(
             }
         }
         Resolution::Blocked(Blocked::Auth(_)) => {
-            ensure_extension_inventory_readback(services, caller, package_ref, |extension| {
-                extension.needs_setup
-                    || matches!(
-                        extension.installation_state,
-                        InstallationState::Installed
-                            | InstallationState::Configured
-                            | InstallationState::Failed
-                    )
-            })
+            ensure_extension_inventory_readback(
+                services,
+                caller,
+                package_ref,
+                membership_landed_pending_setup,
+            )
             .await
         }
         other => extension_lifecycle_mutation_succeeded(other),
     }
+}
+
+/// The install landed: the caller can see their membership, in any resting
+/// public state. `Uninstalled` is never a listed entry, so this rejects only a
+/// projection that somehow reports the caller as a non-member.
+fn membership_is_visible(extension: &ironclaw_product::RebornExtensionInfo) -> bool {
+    matches!(
+        extension.installation_state,
+        LifecyclePublicState::Active | LifecyclePublicState::SetupNeeded
+    )
+}
+
+/// The install landed but the caller still owes setup (credentials, personal
+/// auth, or channel pairing). This is the expected readback when the mutation
+/// reported a blocked-auth or transient outcome: membership exists, readiness
+/// does not.
+fn membership_landed_pending_setup(extension: &ironclaw_product::RebornExtensionInfo) -> bool {
+    extension.installation_state == LifecyclePublicState::SetupNeeded
 }
 
 async fn ensure_extension_inventory_readback(

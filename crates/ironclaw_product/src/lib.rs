@@ -103,7 +103,7 @@ pub use auth_interaction::{
 };
 pub use auth_prompt::{
     AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller, BlockedAuthPromptRequest,
-    auth_prompt_view_for_blocked_auth,
+    PairingAuthChallengeView, auth_prompt_view_for_blocked_auth,
 };
 pub use automation_product_service::RebornAutomationProductService;
 pub use automation_thread_metadata::{

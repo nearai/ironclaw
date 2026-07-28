@@ -89,16 +89,16 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         count: 5,
     },
     FrozenPathCount {
-        category: "test-support",
-        item_kind: "field",
-        path: "crates/ironclaw_extension_host/src/channel_host.rs",
-        count: 2,
+        category: "dead-code",
+        item_kind: "method",
+        path: "crates/ironclaw_host_runtime/src/sandbox_process/attribution.rs",
+        count: 4,
     },
     FrozenPathCount {
         category: "test-support",
         item_kind: "field",
-        path: "crates/ironclaw_host_runtime/src/first_party_tools/memory.rs",
-        count: 1,
+        path: "crates/ironclaw_extension_host/src/channel_host.rs",
+        count: 2,
     },
     FrozenPathCount {
         category: "test-support",
@@ -271,12 +271,6 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
         category: "test-support",
         item_kind: "method",
-        path: "crates/ironclaw_host_runtime/src/first_party_tools/memory.rs",
-        count: 1,
-    },
-    FrozenPathCount {
-        category: "test-support",
-        item_kind: "method",
         path: "crates/ironclaw_host_runtime/src/sandbox_process/ca.rs",
         count: 2,
     },
@@ -290,6 +284,12 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         category: "test-support",
         item_kind: "method",
         path: "crates/ironclaw_host_runtime/src/obligations.rs",
+        count: 1,
+    },
+    FrozenPathCount {
+        category: "test-support",
+        item_kind: "method",
+        path: "crates/ironclaw_host_runtime/src/sandbox_process/attribution.rs",
         count: 1,
     },
     FrozenPathCount {

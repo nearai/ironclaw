@@ -142,13 +142,12 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::memory_provider::MemoryServiceResolver;
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostProcessPort, HostRuntimeServices,
-    NATIVE_MEMORY_FIRST_PARTY_PROVIDER, PostEditCheckConfig, ProductAuthProviderRuntimePorts,
-    RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
-    RuntimeCredentialAccountResolver, TriggerCreateHook, builtin_first_party_package,
-    native_memory_first_party_package,
+    PostEditCheckConfig, ProductAuthProviderRuntimePorts, RuntimeCredentialAccessSecret,
+    RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver, TriggerCreateHook,
+    builtin_first_party_package,
 };
 use ironclaw_host_runtime::{
-    builtin_first_party_handlers_with_trigger_create_hook_for_process_backend_and_memory_resolver,
+    builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
     builtin_first_party_package_for_process_backend,
 };
 use ironclaw_loop_host::CheckpointStateStore;
@@ -317,6 +316,9 @@ pub(crate) struct RebornRuntimeStores {
     /// profile reads and tools agree on the bound provider (native, or
     /// degrade-to-empty for disabled/third-party).
     pub(crate) memory_service_resolver: MemoryServiceResolver,
+    /// Lifecycle hooks declared by the bound memory provider. Host-initiated
+    /// retrieval, recording, and profile reads are wired only when declared.
+    pub(crate) memory_lifecycle: ironclaw_host_api::MemoryDescriptor,
     pub(crate) workspace_mounts: MountView,
     pub(crate) standalone_storage_root: Option<PathBuf>,
     pub(crate) default_system_prompt_path: Option<PathBuf>,
@@ -1153,28 +1155,29 @@ pub(crate) fn builtin_extension_registry() -> Result<ExtensionRegistry, RebornBu
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("built-in first-party registry is invalid: {error}"),
         })?;
-    insert_native_memory_package(&mut registry)?;
     Ok(registry)
 }
 
-/// Insert the always-on `ironclaw.memory` package into a registry that
-/// already holds the builtin package. Native memory rides the same always-on
-/// lane as builtin (not the catalog/lifecycle lane), so it is registered here
-/// directly rather than discovered from the extension catalog.
-fn insert_native_memory_package(registry: &mut ExtensionRegistry) -> Result<(), RebornBuildError> {
+/// Insert the bound memory provider's package into a registry that already
+/// holds the builtin package. A disabled or unconstructible binding registers
+/// no memory tools.
+fn insert_bound_memory_package(
+    registry: &mut ExtensionRegistry,
+    memory_package: Option<&ironclaw_extensions::ExtensionPackage>,
+) -> Result<(), RebornBuildError> {
+    let Some(package) = memory_package else {
+        return Ok(());
+    };
     registry
-        .insert(native_memory_first_party_package().map_err(|error| {
-            RebornBuildError::InvalidConfig {
-                reason: format!("native memory first-party package is invalid: {error}"),
-            }
-        })?)
+        .insert(package.clone())
         .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("native memory first-party registry is invalid: {error}"),
+            reason: format!("bound memory provider registry is invalid: {error}"),
         })
 }
 
 fn production_builtin_extension_registry(
     process_backend: ProcessBackendKind,
+    memory_package: Option<&ironclaw_extensions::ExtensionPackage>,
 ) -> Result<ExtensionRegistry, RebornBuildError> {
     let mut registry = ExtensionRegistry::new();
     let package =
@@ -1213,7 +1216,7 @@ fn production_builtin_extension_registry(
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("built-in first-party registry is invalid: {error}"),
         })?;
-    insert_native_memory_package(&mut registry)?;
+    insert_bound_memory_package(&mut registry, memory_package)?;
     Ok(registry)
 }
 
@@ -1222,14 +1225,12 @@ fn production_first_party_registry_with_trigger_create_hook(
     trigger_create_hook: Arc<dyn TriggerCreateHook>,
     active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
     process_backend: ProcessBackendKind,
-    memory_resolver: MemoryServiceResolver,
 ) -> Result<FirstPartyCapabilityRegistry, RebornBuildError> {
-    builtin_first_party_handlers_with_trigger_create_hook_for_process_backend_and_memory_resolver(
+    builtin_first_party_handlers_with_trigger_create_hook_for_process_backend(
         trigger_repository,
         trigger_create_hook,
         active_run_lookup,
         process_backend,
-        memory_resolver,
     )
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("built-in first-party handlers are invalid: {error}"),
@@ -1296,32 +1297,20 @@ pub fn production_first_party_trust_policy(
     let policy = builtin_capability_policy().map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("standalone capability policy is invalid: {error}"),
     })?;
-    let mut entries = vec![
-        AdminEntry::for_local_manifest(
-            policy.provider.id,
-            policy.provider.manifest_path,
-            None,
-            HostTrustAssignment::first_party(),
-            // Sourced from builtin_capability_policy.toml `[provider]
-            // authority_effects`, which includes `external_write` — required by
-            // builtin.trace_commons.onboard (operator-invite enrollment posts to
-            // an external onboarding server).
-            policy.provider.authority_effects,
-            None,
-        ),
-        // Native memory rides the always-on first-party lane alongside builtin
-        // (it is registered into the builtin extension registry, not discovered
-        // from the catalog), so it carries its own first-party trust entry. The
-        // path is a stable identifier only — `for_local_manifest` does not read
-        // it — because native memory is constructed in code, not from a bundled
-        // manifest file. Its effects are the document-store provider's needs.
-        AdminEntry::for_local_manifest(
-            PackageId::new(NATIVE_MEMORY_FIRST_PARTY_PROVIDER).map_err(|error| {
-                RebornBuildError::InvalidConfig {
-                    reason: format!("native memory first-party package id is invalid: {error}"),
-                }
+    let mut entries = vec![AdminEntry::for_local_manifest(
+        policy.provider.id,
+        policy.provider.manifest_path,
+        None,
+        HostTrustAssignment::first_party(),
+        policy.provider.authority_effects,
+        None,
+    )];
+    for provider in ironclaw_host_runtime::memory_native_extension::MEMORY_PROVIDER_PACKAGE_IDS {
+        entries.push(AdminEntry::for_local_manifest(
+            PackageId::new(*provider).map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("memory provider package id '{provider}' is invalid: {error}"),
             })?,
-            "/system/extensions/ironclaw.memory/manifest.toml".to_string(),
+            format!("/system/extensions/{provider}/manifest.toml"),
             None,
             HostTrustAssignment::first_party(),
             vec![
@@ -1330,8 +1319,8 @@ pub fn production_first_party_trust_policy(
                 ironclaw_host_api::EffectKind::WriteFilesystem,
             ],
             None,
-        ),
-    ];
+        ));
+    }
     // Packages supply their own trust grant as data (`trust_effects`);
     // composition still owns the decision (`first_party`) and the policy
     // construction. Packages with `None` (WASM tools, channel-only) draw trust

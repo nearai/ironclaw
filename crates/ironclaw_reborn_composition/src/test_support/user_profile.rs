@@ -15,9 +15,11 @@ pub fn build_user_profile_source_for_test(
     filesystem: Option<std::sync::Arc<dyn ironclaw_filesystem::RootFilesystem>>,
 ) -> std::sync::Arc<dyn ironclaw_loop_host::HostUserProfileSource> {
     match filesystem {
-        Some(fs) => std::sync::Arc::new(crate::runtime::MemoryBackedUserProfileSourceAdapter(
-            ironclaw_host_runtime::MemoryBackedUserProfileSource::from_filesystem(fs),
-        )),
+        Some(fs) => std::sync::Arc::new(
+            crate::memory_provider_factory::MemoryBackedUserProfileSourceAdapter(
+                ironclaw_host_runtime::MemoryBackedUserProfileSource::from_filesystem(fs),
+            ),
+        ),
         None => std::sync::Arc::new(ironclaw_loop_host::EmptyUserProfileSource),
     }
 }

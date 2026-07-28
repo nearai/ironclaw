@@ -41,17 +41,34 @@ pub fn backfill_legacy_skill_tree(
     legacy_root: &Path,
     scoped_root: &Path,
 ) -> Result<(), RebornBuildError> {
-    if !legacy_root.is_dir() {
+    let legacy_metadata = match fs::symlink_metadata(legacy_root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(legacy_backfill_io_error(
+                "inspect legacy skill root",
+                legacy_root,
+                error,
+            ));
+        }
+    };
+    if legacy_metadata.file_type().is_symlink() {
+        tracing::warn!(
+            path = %legacy_root.display(),
+            "Skipping symlinked legacy skill root during backfill"
+        );
         return Ok(());
     }
-    let marker = scoped_root.join(LEGACY_SKILLS_BACKFILL_MARKER);
-    if marker.exists() {
+    if !legacy_metadata.is_dir() {
         return Ok(());
     }
 
-    fs::create_dir_all(scoped_root).map_err(|error| {
-        legacy_backfill_io_error("create scoped skill root", scoped_root, error)
-    })?;
+    ensure_scoped_skill_root(scoped_root)?;
+    let marker = scoped_root.join(LEGACY_SKILLS_BACKFILL_MARKER);
+    if destination_entry_exists(&marker)? {
+        return Ok(());
+    }
+
     for entry in fs::read_dir(legacy_root)
         .map_err(|error| legacy_backfill_io_error("read legacy skill root", legacy_root, error))?
     {
@@ -59,7 +76,7 @@ pub fn backfill_legacy_skill_tree(
             legacy_backfill_io_error("read legacy skill directory entry", legacy_root, error)
         })?;
         let destination = scoped_root.join(entry.file_name());
-        if !destination.exists() {
+        if !destination_entry_exists(&destination)? {
             copy_legacy_skill_entry(&entry.path(), &destination)?;
         }
     }
@@ -75,6 +92,12 @@ fn copy_legacy_skill_entry(source: &Path, destination: &Path) -> Result<(), Rebo
                 "legacy skill entry '{}' exceeds max copy depth {}",
                 source.display(),
                 LEGACY_SKILLS_BACKFILL_MAX_DEPTH
+            )));
+        }
+        if destination_entry_exists(&destination)? {
+            return Err(invalid_config(format!(
+                "legacy skill backfill destination appeared during copy: '{}'",
+                destination.display()
             )));
         }
 
@@ -122,6 +145,57 @@ fn copy_legacy_skill_entry(source: &Path, destination: &Path) -> Result<(), Rebo
         }
     }
     Ok(())
+}
+
+fn ensure_scoped_skill_root(scoped_root: &Path) -> Result<(), RebornBuildError> {
+    match fs::symlink_metadata(scoped_root) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(invalid_config(format!(
+                "legacy skill backfill refuses symlinked scoped skill root '{}'",
+                scoped_root.display()
+            )));
+        }
+        Ok(metadata) if metadata.is_dir() => return Ok(()),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(legacy_backfill_io_error(
+                "inspect scoped skill root",
+                scoped_root,
+                error,
+            ));
+        }
+    }
+
+    fs::create_dir_all(scoped_root).map_err(|error| {
+        legacy_backfill_io_error("create scoped skill root", scoped_root, error)
+    })?;
+    let metadata = fs::symlink_metadata(scoped_root).map_err(|error| {
+        legacy_backfill_io_error("verify scoped skill root", scoped_root, error)
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(invalid_config(format!(
+            "legacy skill backfill scoped skill root is not a directory: '{}'",
+            scoped_root.display()
+        )));
+    }
+    Ok(())
+}
+
+fn destination_entry_exists(path: &Path) -> Result<bool, RebornBuildError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(invalid_config(format!(
+            "legacy skill backfill refuses symlinked destination '{}'",
+            path.display()
+        ))),
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(legacy_backfill_io_error(
+            "inspect legacy skill backfill destination",
+            path,
+            error,
+        )),
+    }
 }
 
 fn legacy_backfill_io_error(
@@ -569,6 +643,51 @@ mod tests {
             message.contains(&scoped_root.display().to_string()),
             "{message}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_skill_backfill_rejects_symlinked_scoped_root() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let legacy_root = dir.path().join("legacy-skills");
+        let outside_root = dir.path().join("outside");
+        let scoped_root = dir.path().join("scoped-skills");
+        fs::create_dir_all(&legacy_root).expect("legacy root");
+        fs::create_dir_all(&outside_root).expect("outside root");
+        fs::write(legacy_root.join("skill.md"), "legacy").expect("legacy skill");
+        symlink(&outside_root, &scoped_root).expect("scoped root symlink");
+
+        let error = backfill_legacy_skill_tree(&legacy_root, &scoped_root)
+            .expect_err("a symlinked scoped root must fail closed");
+
+        assert!(error.to_string().contains("symlinked scoped skill root"));
+        assert!(!outside_root.join("skill.md").exists());
+        assert!(!outside_root.join(LEGACY_SKILLS_BACKFILL_MARKER).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_skill_backfill_rejects_dangling_destination_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let legacy_root = dir.path().join("legacy-skills");
+        let scoped_root = dir.path().join("scoped-skills");
+        let outside_target = dir.path().join("outside-skill.md");
+        fs::create_dir_all(&legacy_root).expect("legacy root");
+        fs::create_dir_all(&scoped_root).expect("scoped root");
+        fs::write(legacy_root.join("skill.md"), "legacy").expect("legacy skill");
+        symlink(&outside_target, scoped_root.join("skill.md"))
+            .expect("dangling destination symlink");
+
+        let error = backfill_legacy_skill_tree(&legacy_root, &scoped_root)
+            .expect_err("a dangling destination symlink must fail closed");
+
+        assert!(error.to_string().contains("symlinked destination"));
+        assert!(!outside_target.exists());
+        assert!(!scoped_root.join(LEGACY_SKILLS_BACKFILL_MARKER).exists());
     }
 
     /// Zero-legacy gate for embedded skill guidance: the Reborn binary embeds

@@ -42,6 +42,18 @@ export type ChatMessage = {
   [key: string]: unknown;
 };
 
+export function messageBelongsToActiveRun(
+  message: ChatMessage | null | undefined,
+  activeRunId: string | null | undefined,
+): boolean {
+  return (
+    typeof activeRunId === "string" &&
+    activeRunId.length > 0 &&
+    typeof message?.turnRunId === "string" &&
+    message.turnRunId === activeRunId
+  );
+}
+
 export type ErrorChatMessage = {
   id: string;
   role: typeof CHAT_MESSAGE_ROLES.ERROR;

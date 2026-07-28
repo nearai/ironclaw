@@ -26,6 +26,15 @@ const DEFAULT_SYSTEM_PROMPT_EMBEDDED: &str = include_str!("../../assets/prompts/
 /// disclosure is off (no bridges exist on that surface).
 const TOOL_DISCLOSURE_PROTOCOL_EMBEDDED: &str =
     include_str!("../../assets/prompts/tool-disclosure-protocol.md");
+/// Docs-grounding self-knowledge protocol, appended to the system prompt
+/// unconditionally. This is ground knowledge about the running system, not a
+/// user preference: without it the model answers questions about IronClaw's own
+/// capabilities from training data instead of the published docs. Seeding it
+/// into the user-editable file would only reach fresh installs, so it is
+/// appended in memory on every resolve — the same mechanism the tool-disclosure
+/// protocol uses.
+const SELF_KNOWLEDGE_PROTOCOL_EMBEDDED: &str =
+    include_str!("../../assets/prompts/self-knowledge.md");
 const MAX_DEFAULT_SYSTEM_PROMPT_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug, thiserror::Error)]
@@ -51,7 +60,8 @@ pub(crate) struct DefaultSystemPromptIdentitySource {
     /// When true, the progressive tool-disclosure protocol is appended to the
     /// system prompt so the model is told to discover deferred tools via
     /// `tool_search`. Set from the resolved tool-disclosure mode at build time;
-    /// off ⇒ the prompt content is byte-identical to the seeded file.
+    /// off ⇒ the prompt carries the file plus the unconditional self-knowledge
+    /// section, and nothing that references the bridge tools.
     disclosure_protocol_active: bool,
     loaded_identity_content: Arc<RwLock<HashMap<LoopMessageRef, HostIdentityMessageContent>>>,
 }
@@ -72,19 +82,14 @@ impl DefaultSystemPromptIdentitySource {
     }
 
     fn prompt_content(&self) -> Result<String, DefaultSystemPromptError> {
-        let base = read_default_system_prompt(&self.storage_root, &self.prompt_path)?;
-        if !self.disclosure_protocol_active {
-            return Ok(base);
+        // Append in memory (not to the seeded, user-editable file) so these
+        // sections are system invariants independent of user edits to SYSTEM.md
+        // — and so existing installs get them, not just freshly seeded ones.
+        let mut content = read_default_system_prompt(&self.storage_root, &self.prompt_path)?;
+        append_section(&mut content, SELF_KNOWLEDGE_PROTOCOL_EMBEDDED);
+        if self.disclosure_protocol_active {
+            append_section(&mut content, TOOL_DISCLOSURE_PROTOCOL_EMBEDDED);
         }
-        // Append in memory (not to the seeded, user-editable file) so the
-        // disclosure protocol is a system invariant whenever disclosure is on,
-        // independent of user edits to SYSTEM.md.
-        let mut content = base;
-        if !content.ends_with('\n') {
-            content.push('\n');
-        }
-        content.push('\n');
-        content.push_str(TOOL_DISCLOSURE_PROTOCOL_EMBEDDED);
         Ok(content)
     }
 
@@ -145,6 +150,17 @@ pub(crate) fn seed_default_system_prompt(
     }
     validate_default_system_prompt(storage_root, path)?;
     Ok(())
+}
+
+/// Append an embedded prompt section after `content`, separated by a blank line
+/// so the markdown heading always starts its own block regardless of how the
+/// user's file ends.
+fn append_section(content: &mut String, section: &str) {
+    if !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push('\n');
+    content.push_str(section);
 }
 
 fn read_default_system_prompt(
@@ -368,6 +384,28 @@ mod tests {
                 .content
                 .contains("When a tool result is partial, truncated, failed")
         );
+        // Self-knowledge must be grounded in the published docs site rather than
+        // recalled from training data (#6734): the prompt has to name the
+        // llms.txt index and the `.md` raw-markdown suffix, or the model has no
+        // way to look its own capabilities up. The guidance is ground knowledge
+        // about the runtime, so it is appended in memory rather than seeded into
+        // the user-editable file — otherwise only fresh installs would get it.
+        assert!(
+            !std::fs::read_to_string(&prompt_path)
+                .expect("seeded prompt reads")
+                .contains("docs.ironclaw.com"),
+            "docs grounding must not be seeded into the user-editable prompt file"
+        );
+        assert!(
+            content
+                .content
+                .contains("https://docs.ironclaw.com/llms.txt"),
+            "prompt must point capability questions at the docs index"
+        );
+        assert!(
+            content.content.contains(".md"),
+            "prompt must teach the raw-markdown `.md` suffix for docs pages"
+        );
         assert!(
             !content.content.contains("tool_search"),
             "disclosure-off prompt must not mention the bridge tools"
@@ -467,7 +505,30 @@ mod tests {
             .expect("resolve edited content")
             .expect("edited content exists");
 
-        assert_eq!(content.content, "edited standalone prompt");
+        // The user's edited base is preserved verbatim and stays first, but the
+        // docs-grounding self-knowledge section is ground knowledge about the
+        // runtime (#6734): it is appended unconditionally, so an install whose
+        // SYSTEM.md predates the guidance (or was edited to drop it) still tells
+        // the model to look its own capabilities up instead of guessing.
+        assert!(content.content.starts_with("edited standalone prompt"));
+        assert!(
+            content.content.contains("## Self-Knowledge"),
+            "self-knowledge guidance must be appended even when SYSTEM.md omits it"
+        );
+        assert!(
+            content
+                .content
+                .contains("https://docs.ironclaw.com/llms.txt"),
+            "appended guidance must point capability questions at the docs index"
+        );
+        assert!(
+            content.content.contains(".md"),
+            "appended guidance must teach the raw-markdown `.md` suffix for docs pages"
+        );
+        assert!(
+            !content.content.contains("tool_search"),
+            "disclosure-off prompt must not mention the bridge tools"
+        );
     }
 
     #[cfg(unix)]

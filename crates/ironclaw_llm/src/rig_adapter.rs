@@ -32,8 +32,8 @@ use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, FinishReason,
     LlmProvider, ReasoningDetail as IronReasoningDetail, ReasoningDetails as IronReasoningDetails,
     ToolCall as IronToolCall, ToolCompletionRequest, ToolCompletionResponse,
-    ToolDefinition as IronToolDefinition, normalized_model_override,
-    strip_unsupported_completion_params, strip_unsupported_tool_params,
+    ToolDefinition as IronToolDefinition, map_provider_finish_token, normalized_model_override,
+    resolve_finish_reason, strip_unsupported_completion_params, strip_unsupported_tool_params,
 };
 use crate::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
 #[cfg(test)]
@@ -345,18 +345,46 @@ impl<M: CompletionModel> RigAdapter<M> {
             }
         }
 
-        let usage = stream
-            .response
-            .as_ref()
-            .and_then(GetTokenUsage::token_usage)
-            .unwrap_or_default();
-        let cache_creation_input_tokens = stream
-            .response
-            .as_ref()
-            .map(extract_cache_creation)
-            .unwrap_or(0);
+        // rig-core sets `stream.response` only when the provider yields its
+        // terminal frame. Its absence means the stream simply stopped
+        // producing items — a dropped connection or an aborted generation —
+        // which is the crate's established incomplete-stream condition, not a
+        // completed call. Raising it here, before a response object exists,
+        // is what lets retry and failover see a failure instead of a success.
+        //
+        // What this actually detects, in rig-core 0.33: **Ollama only**. Its
+        // stream yields `FinalResponse` solely inside `if response.done`
+        // (`providers/ollama.rs:706`), so a stream that stops early genuinely
+        // leaves `stream.response` unset. OpenAI
+        // (`providers/openai/completion/streaming.rs:330`), Anthropic
+        // (`providers/anthropic/streaming.rs:333`), Gemini
+        // (`providers/gemini/streaming.rs:233`), OpenRouter
+        // (`providers/openrouter/streaming.rs:323`) and DeepSeek
+        // (`providers/deepseek.rs:862`) all yield a usage-only `FinalResponse`
+        // unconditionally after the SSE loop — including after the plain
+        // `Err(StreamEnded) => break` arm — so on those five a server that
+        // closes mid-answer still sets `stream.response` and this check does
+        // not fire. Catching that needs a terminal-observed signal rig-core
+        // does not carry; it is a known limitation of this adapter, not a
+        // claim it makes.
+        let Some(terminal_frame) = stream.response.as_ref() else {
+            return Err(LlmError::InvalidResponse {
+                provider: self.model_name.clone(),
+                reason: "stream ended before the provider's terminal frame".to_string(),
+            });
+        };
+        let usage = terminal_frame.token_usage().unwrap_or_default();
+        let raw_terminal_frame = serialize_raw_response(terminal_frame);
+        let cache_creation_input_tokens = extract_cache_creation(raw_terminal_frame.as_ref());
+        let provider_finish = extract_finish_reason(raw_terminal_frame.as_ref());
+        // Note: in rig-core 0.33 only Ollama's terminal frame still carries a
+        // finish reason (`done_reason`). The other five define
+        // `StreamingResponse` as usage-only, so their per-chunk
+        // `finish_reason`/`stop_reason` is dropped before it reaches this
+        // adapter and `provider_finish` is `None` — shape inference is the
+        // documented fallback there.
         let (text, tool_calls, finish, reasoning, reasoning_details) =
-            extract_response(&stream.choice, &usage);
+            extract_response(&stream.choice, &usage, provider_finish);
         let (streamed_reasoning, streamed_reasoning_details) = streamed_reasoning.finish();
 
         Ok(DrainedStreamingResponse {
@@ -730,6 +758,7 @@ fn rig_reasoning_to_iron(reasoning: &rig::message::Reasoning) -> Option<IronReas
 fn extract_response(
     choice: &OneOrMany<AssistantContent>,
     _usage: &RigUsage,
+    provider_finish: Option<FinishReason>,
 ) -> (
     Option<String>,
     Vec<IronToolCall>,
@@ -799,11 +828,7 @@ fn extract_response(
         })
     };
 
-    let finish = if !tool_calls.is_empty() {
-        FinishReason::ToolUse
-    } else {
-        FinishReason::Stop
-    };
+    let finish = resolve_finish_reason(provider_finish, !tool_calls.is_empty());
 
     (text, tool_calls, finish, reasoning, typed_reasoning)
 }
@@ -886,17 +911,112 @@ fn supports_prompt_cache(name: &str) -> bool {
         || model.starts_with("claude-haiku")
 }
 
-/// Extract `cache_creation_input_tokens` from the raw provider response.
+/// Serialize the raw provider response to JSON **once** per completion.
+///
+/// rig-core's unified types drop fields we need (`cache_creation_input_tokens`,
+/// the provider's own finish reason), so both are read back out of the raw
+/// body. Serializing the whole response — generated text, tool payloads and
+/// all — is response-sized work, so every call site does it once and lends the
+/// resulting `Value` to each extractor rather than each extractor serializing
+/// for itself.
+///
+/// silent-ok: serializing a body rig already deserialized from the provider
+/// cannot fail in practice. If it ever does, the extractors fall back to their
+/// documented defaults rather than failing an otherwise-good response — but the
+/// branch is logged, because it silently re-enables the guess this machinery
+/// removes: a truncated response would then report `Stop`.
+fn serialize_raw_response<T: Serialize>(raw: &T) -> Option<serde_json::Value> {
+    match serde_json::to_value(raw) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            tracing::debug!(
+                %error,
+                "raw provider response would not serialize; falling back to \
+                 response-shape inference and zero cache-creation tokens"
+            );
+            None
+        }
+    }
+}
+
+/// Extract `cache_creation_input_tokens` from the serialized provider response.
 ///
 /// Rig-core's unified `Usage` does not surface this field, but Anthropic's raw
-/// response includes it at `usage.cache_creation_input_tokens`. We serialize the
-/// raw response to JSON and attempt to read the value.
-fn extract_cache_creation<T: Serialize>(raw: &T) -> u32 {
-    serde_json::to_value(raw)
-        .ok()
-        .and_then(|v| v.get("usage")?.get("cache_creation_input_tokens")?.as_u64())
+/// response includes it at `usage.cache_creation_input_tokens`.
+fn extract_cache_creation(raw: Option<&serde_json::Value>) -> u32 {
+    raw.and_then(|v| v.get("usage")?.get("cache_creation_input_tokens")?.as_u64())
         .map(|n| n.min(u32::MAX as u64) as u32)
         .unwrap_or(0)
+}
+
+/// Extract the provider's own finish/stop reason from the serialized response.
+///
+/// rig-core's unified `AssistantContent` says nothing about *why* generation
+/// stopped, so a `max_tokens` truncation and a content-filter refusal used to
+/// be indistinguishable from a clean answer. Every provider states it in its
+/// raw body, so read the field the provider actually emits.
+///
+/// Returns `None` when the response carries no finish-reason field at all
+/// (unknown or older provider shape); callers then fall back to inferring it
+/// from the response shape. See [`resolve_finish_reason`].
+fn extract_finish_reason(raw: Option<&serde_json::Value>) -> Option<FinishReason> {
+    let token = provider_finish_token(raw?)?;
+    map_provider_finish_token(token)
+}
+
+/// Locate the provider's finish-reason field across the response shapes rig fronts.
+///
+/// Paths verified against rig-core 0.33:
+/// - OpenAI-shaped (`openai`, `openai_compatible`, `tinfoil`, `azure`,
+///   `deepseek`, `openrouter`): `choices[0].finish_reason`
+/// - Anthropic-by-key: `stop_reason`
+/// - Ollama: `done_reason`
+/// - Gemini by API key: `candidates[0].finishReason`, falling back to
+///   `promptFeedback.blockReason`
+///
+/// Gemini blocks in two different places. A candidate's `finishReason` means
+/// the *output* was cut off mid-generation. `promptFeedback.blockReason` means
+/// the *input* prompt was rejected before generation, and rig's own
+/// `GenerateContentResponse` documents the consequence: it returns no
+/// candidates at all only when something was wrong with the prompt. Reading
+/// just the candidate path therefore found nothing for a blocked prompt and
+/// left the caller to infer a clean `Stop` from the response shape. The
+/// candidate's own reason still wins when both are present.
+fn provider_finish_token(value: &serde_json::Value) -> Option<&str> {
+    let openai = value
+        .get("choices")
+        .and_then(|choices| choices.as_array())
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("finish_reason"))
+        .and_then(|reason| reason.as_str());
+    if openai.is_some() {
+        return openai;
+    }
+    if let Some(anthropic) = value.get("stop_reason").and_then(|r| r.as_str()) {
+        return Some(anthropic);
+    }
+    if let Some(ollama) = value.get("done_reason").and_then(|r| r.as_str()) {
+        return Some(ollama);
+    }
+    let gemini_candidate = value
+        .get("candidates")
+        .and_then(|candidates| candidates.as_array())
+        .and_then(|candidates| candidates.first())
+        .and_then(|candidate| candidate.get("finishReason"))
+        .and_then(|reason| reason.as_str());
+    if gemini_candidate.is_some() {
+        return gemini_candidate;
+    }
+    // `blockReason` speaks the same `SCREAMING_SNAKE_CASE` vocabulary as
+    // `finishReason`, so the shared table classifies it without a second
+    // mapping: `SAFETY` / `BLOCKLIST` / `PROHIBITED_CONTENT` / `IMAGE_SAFETY` /
+    // `MODEL_ARMOR` are content blocks, `OTHER` and `BLOCK_REASON_UNSPECIFIED`
+    // are unknown. An absent `blockReason` still means the provider said
+    // nothing, which is the documented shape-inference fallback.
+    value
+        .get("promptFeedback")
+        .and_then(|feedback| feedback.get("blockReason"))
+        .and_then(|reason| reason.as_str())
 }
 
 /// Merge default additional parameters into the rig-core request.
@@ -1055,8 +1175,10 @@ where
             .await
             .map_err(|e| map_rig_error(&self.model_name, e))?;
 
+        let raw_response = serialize_raw_response(&response.raw_response);
+        let provider_finish = extract_finish_reason(raw_response.as_ref());
         let (text, _tool_calls, finish, _reasoning, _reasoning_details) =
-            extract_response(&response.choice, &response.usage);
+            extract_response(&response.choice, &response.usage, provider_finish);
 
         let resp = CompletionResponse {
             content: text.unwrap_or_default(),
@@ -1065,7 +1187,7 @@ where
             finish_reason: finish,
             reasoning: None,
             cache_read_input_tokens: saturate_u32(response.usage.cached_input_tokens),
-            cache_creation_input_tokens: extract_cache_creation(&response.raw_response),
+            cache_creation_input_tokens: extract_cache_creation(raw_response.as_ref()),
         };
 
         if resp.cache_read_input_tokens > 0 {
@@ -1173,8 +1295,10 @@ where
             .await
             .map_err(|e| map_rig_error(&self.model_name, e))?;
 
+        let raw_response = serialize_raw_response(&response.raw_response);
+        let provider_finish = extract_finish_reason(raw_response.as_ref());
         let (text, mut tool_calls, finish, reasoning, reasoning_details) =
-            extract_response(&response.choice, &response.usage);
+            extract_response(&response.choice, &response.usage, provider_finish);
 
         // Normalize tool call names: some proxies prepend "proxy_" prefixes.
         for tc in &mut tool_calls {
@@ -1206,7 +1330,7 @@ where
             output_tokens: saturate_u32(response.usage.output_tokens),
             finish_reason: finish,
             cache_read_input_tokens: saturate_u32(response.usage.cached_input_tokens),
-            cache_creation_input_tokens: extract_cache_creation(&response.raw_response),
+            cache_creation_input_tokens: extract_cache_creation(raw_response.as_ref()),
             reasoning,
             reasoning_details,
         };
@@ -1817,6 +1941,119 @@ mod tests {
         }
     }
 
+    /// A rig model that replays a caller-supplied raw provider body alongside
+    /// a fixed assistant choice, so the adapter's public entry points can be
+    /// driven against a real provider payload.
+    #[derive(Clone)]
+    struct ReplayingCompletionModel {
+        choice: OneOrMany<AssistantContent>,
+        raw_response: serde_json::Value,
+    }
+
+    impl CompletionModel for ReplayingCompletionModel {
+        type Response = serde_json::Value;
+        type StreamingResponse = StubStreamingResponse;
+        type Client = ();
+
+        fn make(_client: &Self::Client, _model: impl Into<String>) -> Self {
+            unimplemented!("constructed directly in tests")
+        }
+
+        async fn completion(
+            &self,
+            _request: RigRequest,
+        ) -> Result<rig::completion::CompletionResponse<Self::Response>, CompletionError> {
+            Ok(rig::completion::CompletionResponse {
+                choice: self.choice.clone(),
+                usage: RigUsage::new(),
+                raw_response: self.raw_response.clone(),
+                message_id: None,
+            })
+        }
+
+        async fn stream(
+            &self,
+            _request: RigRequest,
+        ) -> Result<StreamingCompletionResponse<Self::StreamingResponse>, CompletionError> {
+            Err(CompletionError::ProviderError(
+                "streaming path must not be used".to_string(),
+            ))
+        }
+    }
+
+    /// Test through the caller, not just the helper: a `max_tokens` truncation
+    /// that still emitted a (possibly cut-off) tool call must reach
+    /// `complete_with_tools`' return value as `Length`. Before #6284 item 8 the
+    /// adapter reported `ToolUse` and the loop executed the truncated call.
+    #[tokio::test]
+    async fn complete_with_tools_reports_provider_truncation_not_tool_use() {
+        let adapter = RigAdapter::new(
+            ReplayingCompletionModel {
+                choice: OneOrMany::one(AssistantContent::tool_call(
+                    "call_1",
+                    "search",
+                    serde_json::json!({"q": "tru"}),
+                )),
+                raw_response: serde_json::json!({
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": null},
+                        "finish_reason": "length",
+                    }],
+                }),
+            },
+            "gpt-4o",
+        );
+        let request = ToolCompletionRequest::new(
+            vec![ChatMessage::user("search for something")],
+            vec![IronToolDefinition {
+                name: "search".to_string(),
+                description: "Search".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            }],
+        );
+
+        let response = adapter
+            .complete_with_tools(request)
+            .await
+            .expect("adapter returns the provider response");
+
+        assert_eq!(
+            response.finish_reason,
+            FinishReason::Length,
+            "a max_tokens truncation must not be laundered into ToolUse",
+        );
+    }
+
+    /// The same seam for a content-policy block on the plain `complete` path.
+    #[tokio::test]
+    async fn complete_reports_provider_content_filter() {
+        let adapter = RigAdapter::new(
+            ReplayingCompletionModel {
+                choice: OneOrMany::one(AssistantContent::text("I can't help with that.")),
+                raw_response: serde_json::json!({
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "I can't help with that."},
+                        "finish_reason": "content_filter",
+                    }],
+                }),
+            },
+            "gpt-4o",
+        );
+
+        let response = adapter
+            .complete(CompletionRequest::new(vec![ChatMessage::user("hi")]))
+            .await
+            .expect("adapter returns the provider response");
+
+        assert_eq!(
+            response.finish_reason,
+            FinishReason::ContentFilter,
+            "a provider refusal must not be reported as a clean stop",
+        );
+    }
+
     #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
     struct StubStreamingResponse {
         input_tokens: u64,
@@ -1943,6 +2180,11 @@ mod tests {
         assert_eq!(response.input_tokens, 3);
         assert_eq!(response.output_tokens, 4);
     }
+
+    // The finish-reason conformance suite — provider fixtures, payload
+    // builders, and the matrix itself — lives in its own file so this one
+    // stays readable: `src/rig_adapter/tests/finish_reason_tests.rs`.
+    mod finish_reason_tests;
 
     #[test]
     fn test_round_f32_to_f64_no_precision_artifacts() {
@@ -2868,7 +3110,7 @@ mod tests {
         let content = OneOrMany::one(AssistantContent::text("Hello world"));
         let usage = RigUsage::new();
         let (text, calls, finish, _reasoning, _reasoning_details) =
-            extract_response(&content, &usage);
+            extract_response(&content, &usage, None);
         assert_eq!(text, Some("Hello world".to_string()));
         assert!(calls.is_empty());
         assert_eq!(finish, FinishReason::Stop);
@@ -2880,7 +3122,7 @@ mod tests {
         let content = OneOrMany::one(tc);
         let usage = RigUsage::new();
         let (text, calls, finish, _reasoning, _reasoning_details) =
-            extract_response(&content, &usage);
+            extract_response(&content, &usage, None);
         assert!(text.is_none());
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "search");
@@ -3734,7 +3976,7 @@ mod tests {
         .unwrap();
         let usage = RigUsage::new();
         let (text, tool_calls, finish, reasoning, reasoning_details) =
-            extract_response(&rig_response, &usage);
+            extract_response(&rig_response, &usage, None);
 
         assert_eq!(finish, FinishReason::ToolUse);
         assert_eq!(text, None);
@@ -3842,7 +4084,7 @@ mod tests {
 
         let usage = RigUsage::new();
         let (text, tool_calls, _finish, reasoning, reasoning_details) =
-            extract_response(&rig_response, &usage);
+            extract_response(&rig_response, &usage, None);
 
         assert_eq!(text, None);
         assert_eq!(reasoning.as_deref(), Some("safe summary"));

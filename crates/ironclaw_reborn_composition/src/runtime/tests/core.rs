@@ -512,7 +512,6 @@ fn production_scheduler_wake_guard_passes_standalone_with_absent_wiring() {
         .expect("standalone is exempt from the scheduler wake wiring requirement");
 }
 
-use ironclaw_host_api::InstallationState;
 use ironclaw_host_api::ProjectId;
 use ironclaw_host_api::{
     ActivityId, AgentId, ApprovalRequestId, CapabilityId, InvocationId, Principal,
@@ -523,6 +522,7 @@ use ironclaw_host_api::{
         NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
     },
 };
+use ironclaw_host_api::{InstallationState, LifecyclePublicState};
 use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessage, HostManagedModelMessageRole, HostManagedModelRequest,
@@ -5411,7 +5411,10 @@ async fn standalone_webui_bundle_uses_lifecycle_product_service_for_setup_extens
     let setup = query_webui_extension_setup(bundle.as_ref(), caller.clone(), "github").await;
 
     assert_eq!(setup.package_ref.id.as_str(), "github");
-    assert_eq!(setup.phase, InstallationState::Installed);
+    // The setup route is caller-visible: an installed extension whose required
+    // credential the caller has not supplied is `setup_needed`, not a raw
+    // internal checkpoint (§6.1).
+    assert_eq!(setup.phase, LifecyclePublicState::SetupNeeded);
     assert!(setup.blockers.is_empty());
     assert_eq!(setup.secrets.len(), 1);
     assert_eq!(setup.secrets[0].name, "github_runtime_token");

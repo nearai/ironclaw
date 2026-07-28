@@ -317,7 +317,7 @@ pub(super) async fn build_backend_production(
         owner_id,
         local_runtime_identity,
         turn_state_store_limits,
-        memory_resolver,
+        resolved_memory,
         scheduler_wake_wiring,
         mut account_setup_descriptors,
         nearai_mcp_bootstrap_config,
@@ -455,7 +455,8 @@ pub(super) async fn build_backend_production(
     let outbound_delivery_targets = host_owned_outbound_delivery_target_registry()?;
     let skill_auto_activate_learned = Arc::new(AtomicBool::new(true));
     let process_backend = production_wiring.runtime_policy.process_backend;
-    let extension_registry = production_builtin_extension_registry(process_backend)?;
+    let extension_registry =
+        production_builtin_extension_registry(process_backend, resolved_memory.package.as_ref())?;
     let extension_registry = Arc::new(extension_registry);
     let BudgetSinks {
         budget_event_sink,
@@ -551,8 +552,17 @@ pub(super) async fn build_backend_production(
         trigger_create_hook,
         trigger_active_run_lookup,
         process_backend,
-        memory_resolver.clone(),
     )?;
+    if let (Some(package), Some(handler)) = (
+        resolved_memory.package.as_ref(),
+        resolved_memory.tool_handler.as_ref(),
+    ) {
+        ironclaw_host_runtime::register_memory_tool_handler(
+            &mut first_party_registry,
+            package,
+            Arc::clone(handler),
+        );
+    }
     let product_auth_filesystem = Arc::clone(&stores.scoped_filesystem);
     let services = with_shared_host_runtime_wiring!(
         HostRuntimeServices::new(
@@ -1158,7 +1168,8 @@ pub(super) async fn build_backend_production(
         skill_filesystem,
         workspace_filesystem,
         extension_filesystem: Arc::clone(&stores.filesystem),
-        memory_service_resolver: memory_resolver,
+        memory_service_resolver: resolved_memory.resolver.clone(),
+        memory_lifecycle: resolved_memory.lifecycle.clone(),
         workspace_mounts: runtime_workspace_mounts,
         standalone_storage_root,
         default_system_prompt_path,

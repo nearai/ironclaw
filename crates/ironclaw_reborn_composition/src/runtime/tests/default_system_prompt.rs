@@ -150,6 +150,19 @@ async fn standalone_runtime_uses_existing_edited_default_system_prompt() {
         }),
         "default-on disclosure should append the tool-search protocol to the edited prompt"
     );
+    // Docs grounding is ground knowledge about the runtime (#6734), not a seed
+    // default: an install whose SYSTEM.md never contained it must still be told
+    // to look IronClaw's own capabilities up in the published docs.
+    assert!(
+        recorded_requests[0].messages.iter().any(|message| {
+            message.role == HostManagedModelMessageRole::System
+                && message.content.starts_with("custom edited runtime prompt")
+                && message
+                    .content
+                    .contains("https://docs.ironclaw.com/llms.txt")
+        }),
+        "self-knowledge docs grounding should reach the model even for a custom system prompt"
+    );
 
     runtime.shutdown().await.expect("runtime shutdown");
 }
