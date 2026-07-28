@@ -155,11 +155,14 @@ impl ProductCommandHandler {
                 let _: EmptyProductCommandInput = product_command_input(input)?;
                 command_output(services.trace_account_login_link(caller).await?)
             }
-            Self::TraceHoldAuthorize => command_output(
-                services
-                    .authorize_trace_hold(caller, product_command_input(input)?)
-                    .await?,
-            ),
+            Self::TraceHoldAuthorize => {
+                let request: RebornTraceHoldAuthorizeProductRequest = product_command_input(input)?;
+                command_output(
+                    services
+                        .authorize_trace_hold(caller, request.submission_id)
+                        .await?,
+                )
+            }
             Self::OperatorConfigSetKey => {
                 let request: RebornOperatorConfigSetProductRequest = product_command_input(input)?;
                 command_output(
