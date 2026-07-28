@@ -15,10 +15,9 @@
 //! `Arc` entries under one lock).
 //!
 //! Vendor residue that is not yet host-generic enters only through
-//! [`ChannelExtras`]: an inbound payload classifier (gate-resolution
-//! replies), the preference-target codec for the triggered delivery driver, and
-//! an optional storage-root override for a channel whose durable state
-//! predates the generic root scheme.
+//! [`ChannelExtras`]: the preference-target codec for the triggered delivery
+//! driver and an optional storage-root override for a channel whose durable
+//! state predates the generic root scheme.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -60,8 +59,7 @@ use crate::channel_pairing::ChannelPairingConsumeOutcome;
 use crate::extension_ingress::{
     ChannelInboundSinkConfig, ChannelIngressDrain, ChannelIngressRegistration,
     ChannelPairingOutcomeObserver, ExtensionIngressRegistry, GenericChannelInboundSink,
-    InboundPayloadClassifier, ManagedRegistrationOutcome, PostAdmissionObserver,
-    VerifiedEvidenceMint,
+    ManagedRegistrationOutcome, PostAdmissionObserver, VerifiedEvidenceMint,
 };
 use ironclaw_extension_host::ChannelConfigService;
 
@@ -218,8 +216,6 @@ where
 /// the extension's composition lane; a pure-manifest channel package
 /// registers none.
 pub struct ChannelExtras {
-    /// Protocol-specific payload reclassification (gate-resolution replies).
-    pub classifier: Option<Arc<InboundPayloadClassifier>>,
     /// The vendor half of the triggered-delivery driver; consumed by the
     /// lane that builds the triggered hook.
     pub preference_target_codec: Option<Arc<dyn PreferenceTargetCodec>>,
@@ -235,7 +231,6 @@ pub struct ChannelExtras {
 /// The extras retained after registration.
 #[derive(Clone, Default)]
 struct StoredChannelExtras {
-    classifier: Option<Arc<InboundPayloadClassifier>>,
     preference_target_codec: Option<Arc<dyn PreferenceTargetCodec>>,
     subject_route_resolver: Option<Arc<dyn ProductConversationSubjectRouteResolver>>,
     storage_roots: Option<ChannelWorkflowStorageRoots>,
@@ -399,11 +394,10 @@ impl GenericChannelHostAssembly {
     }
 
     /// Register one extension's vendor extras, then re-reconcile the
-    /// extension against the current snapshot so classifier/storage
-    /// overrides apply to the next build.
+    /// extension against the current snapshot so the remaining extras apply
+    /// to the next build.
     pub async fn register_extras(&self, extension_id: &str, extras: ChannelExtras) {
         let ChannelExtras {
-            classifier,
             preference_target_codec,
             subject_route_resolver,
             storage_roots,
@@ -412,7 +406,6 @@ impl GenericChannelHostAssembly {
             stored.insert(
                 extension_id.to_string(),
                 StoredChannelExtras {
-                    classifier,
                     preference_target_codec,
                     subject_route_resolver,
                     storage_roots,
@@ -700,7 +693,6 @@ impl GenericChannelHostAssembly {
         let mut sink = GenericChannelInboundSink::new(ChannelInboundSinkConfig {
             adapter_id,
             evidence,
-            classifier: extras.classifier.clone(),
             surface,
             observer: observer
                 .clone()

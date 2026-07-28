@@ -424,7 +424,6 @@ impl VendorIngress {
         let sink = Arc::new(GenericChannelInboundSink::new(ChannelInboundSinkConfig {
             adapter_id: ProductAdapterId::new(extension_id).expect("adapter id"),
             evidence,
-            classifier: None,
             surface,
             observer: Some(observer as Arc<dyn PostAdmissionObserver>),
         }));

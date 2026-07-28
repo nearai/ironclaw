@@ -23,9 +23,9 @@ use ironclaw_extension_host::ingress::{
 };
 use ironclaw_host_api::{ChannelInboundProductSurface, SecretHandle};
 use ironclaw_product::{
-    AdapterInstallationId, ChannelInboundClassification, ExternalConversationRef, ExternalEventId,
-    NormalizedInboundMessage, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
-    ProductSourceChannel, ProtocolAuthEvidence, classify_channel_inbound_text,
+    AdapterInstallationId, ExternalConversationRef, ExternalEventId, NormalizedInboundMessage,
+    ProductAdapterId, ProductInboundAck, ProductInboundEnvelope, ProductSourceChannel,
+    ProtocolAuthEvidence, classify_channel_inbound_text,
 };
 use ironclaw_product::{
     ChannelInboundSurfaceOutcome, ChannelInboundSurfaceRejectedAdmission,
@@ -65,13 +65,6 @@ pub trait PostAdmissionObserver: Send + Sync {
     ) {
     }
 }
-
-/// Optional protocol-specific reclassification of a normalized message into
-/// a richer channel payload classification (today: gate-resolution replies like
-/// `approve` / `deny gate:<ref>` / `auth deny <ref>`). Transitional debt:
-/// deleted when gate replies become a host-generic channel concern.
-pub type InboundPayloadClassifier =
-    dyn Fn(&NormalizedInboundMessage) -> Option<ChannelInboundClassification> + Send + Sync;
 
 /// How the sink mints the trusted auth claim for admitted messages —
 /// mirrors the ingress verification recipe the router executed.
@@ -320,8 +313,6 @@ pub struct ChannelInboundSinkConfig {
     pub adapter_id: ProductAdapterId,
     /// Auth-claim shape matching the executed verification recipe.
     pub evidence: VerifiedEvidenceMint,
-    /// Optional protocol-specific payload reclassification (gate replies).
-    pub classifier: Option<Arc<InboundPayloadClassifier>>,
     /// The typed channel admission door: durable idempotency ledger →
     /// identity/conversation binding → turn submission.
     pub surface: Arc<dyn ChannelInboundProductSurface>,
@@ -485,14 +476,7 @@ impl InboundSink for GenericChannelInboundSink {
             installation_id: installation,
             evidence,
             received_at: Utc::now(),
-            classification: classify_channel_inbound_text(&message.text, message.trigger).or_else(
-                || {
-                    self.config
-                        .classifier
-                        .as_ref()
-                        .and_then(|classify| classify(&message))
-                },
-            ),
+            classification: classify_channel_inbound_text(&message.text, message.trigger),
             message,
         };
         let response = Box::pin(self.config.surface.admit_channel_inbound(request)).await;
@@ -919,7 +903,6 @@ mod tests {
             evidence: VerifiedEvidenceMint::SharedSecretHeader {
                 header: "X-Vendor-Secret".to_string(),
             },
-            classifier: None,
             surface: Arc::clone(&workflow) as Arc<dyn ChannelInboundProductSurface>,
             observer: None,
         })

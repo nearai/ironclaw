@@ -457,7 +457,6 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         .register_extras(
             "slack",
             ChannelExtras {
-                classifier: None,
                 preference_target_codec: Some(Arc::new(SlackPreferenceTargetCodec)),
                 subject_route_resolver: None,
                 storage_roots: None,
