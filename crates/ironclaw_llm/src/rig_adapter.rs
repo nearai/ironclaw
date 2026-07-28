@@ -1477,10 +1477,49 @@ fn map_rig_error(model_name: &str, e: impl std::fmt::Display) -> LlmError {
         };
     }
 
+    // A model that does not exist will not appear between attempts. Without
+    // this, a 404 fell into `RequestFailed` below — which IS retryable — so a
+    // typo'd or decommissioned model id was retried 12x before failing.
+    // `LlmError::ModelNotAvailable` had ZERO producers, leaving its consumers
+    // (`retry::is_retryable`, `circuit_breaker::is_transient`, the gateway's
+    // `=> PolicyDenied` arm) dead. #6284 WS5.
+    if is_model_not_available_message(&lower) {
+        return LlmError::ModelNotAvailable {
+            provider: model_name.to_string(),
+            model: model_name.to_string(),
+        };
+    }
+
     LlmError::RequestFailed {
         provider: model_name.to_string(),
         reason: msg,
     }
+}
+
+/// Detect "this model does not exist" in a lowercased provider error message.
+///
+/// Checked AFTER auth: a 403 naming a model is a permission problem, not a
+/// missing model. Conservative — a bare `404` is only treated as a missing
+/// model when the message also mentions the model, so an unrelated 404 (a
+/// proxy path, a health endpoint) still falls through to `RequestFailed`.
+fn is_model_not_available_message(lower: &str) -> bool {
+    const MODEL_MISSING_PHRASES: &[&str] = &[
+        "model not found",
+        "model_not_found",
+        "does not exist",
+        "unknown model",
+        "invalid model",
+        "no such model",
+        "model is not supported",
+        "unsupported model",
+    ];
+    if MODEL_MISSING_PHRASES
+        .iter()
+        .any(|phrase| lower.contains(phrase))
+    {
+        return true;
+    }
+    contains_status_code(lower, "404") && lower.contains("model")
 }
 
 /// Detect authentication/authorization failures in a lowercased provider
@@ -1490,10 +1529,37 @@ fn map_rig_error(model_name: &str, e: impl std::fmt::Display) -> LlmError {
 /// Deliberately conservative: matches robust indicators (HTTP 401/403,
 /// explicit "invalid api key"/"unauthorized"/"authentication" phrasing) and
 /// avoids unrelated substrings such as a bare `"key"`.
+/// Whether `code` appears in `lower` as a standalone number rather than as a
+/// run of digits inside a larger one.
+///
+/// `"401"`/`"403"` used to be matched with a bare `contains`, so **any** number
+/// containing those digits classified the failure as an auth error: a
+/// `Retry-After` of `4013 ms`, a request id ending `1403`, a token count of
+/// `24019`. The run then terminated telling the user to fix their API key —
+/// for what was usually a rate limit, the single most common transient
+/// provider error. #6284 WS5.
+fn contains_status_code(lower: &str, code: &str) -> bool {
+    let bytes = lower.as_bytes();
+    lower.match_indices(code).any(|(start, matched)| {
+        let before_is_digit = start
+            .checked_sub(1)
+            .is_some_and(|i| bytes[i].is_ascii_digit());
+        let end = start + matched.len();
+        let after_is_digit = bytes.get(end).is_some_and(u8::is_ascii_digit);
+        !before_is_digit && !after_is_digit
+    })
+}
+
 fn is_auth_error_message(lower: &str) -> bool {
+    // Status codes are matched on digit boundaries; see `contains_status_code`.
+    if ["401", "403"]
+        .iter()
+        .any(|code| contains_status_code(lower, code))
+    {
+        return true;
+    }
+
     const AUTH_PATTERNS: &[&str] = &[
-        "401",
-        "403",
         "unauthorized",
         "invalid api key",
         "incorrect api key",
@@ -1783,6 +1849,83 @@ mod tests {
     }
 
     #[test]
+    /// A number that merely *contains* 401 or 403 is not an auth failure.
+    ///
+    /// `is_auth_error_message` matched `"401"`/`"403"` with a bare `contains`,
+    /// so a `Retry-After` of `4013 ms` — a rate limit, the most common
+    /// transient provider error there is — classified as an auth failure. The
+    /// run terminated immediately telling the user to fix their API key, for a
+    /// condition that would have cleared on its own. #6284 WS5.
+    #[test]
+    fn a_number_containing_401_is_not_an_auth_failure() {
+        for message in [
+            "rate limited, retry after 4013 ms",
+            "rate limited, retry after 14030 ms",
+            "request id req_1403f2a failed",
+            "context window exceeded: 24019 tokens",
+            "upstream returned 4010",
+        ] {
+            assert!(
+                !is_auth_error_message(message),
+                "{message:?} is not an auth failure, but was classified as one — \
+                 the run would terminate telling the user to fix their API key"
+            );
+        }
+    }
+
+    /// The real status codes must still be caught.
+    #[test]
+    fn a_standalone_401_or_403_is_still_an_auth_failure() {
+        for message in [
+            "server returned 401",
+            "http 403 while calling the model",
+            "401",
+            "status: 403, body: {}",
+            "(401)",
+        ] {
+            assert!(
+                is_auth_error_message(message),
+                "{message:?} is a genuine auth failure and must be classified as one"
+            );
+        }
+    }
+
+    /// A missing model must not be retried twelve times.
+    ///
+    /// `LlmError::ModelNotAvailable` had **zero producers**, so a 404 /
+    /// model-not-found fell into `RequestFailed`, which `retry::is_retryable`
+    /// treats as retryable. A typo'd or decommissioned model id burned the full
+    /// retry budget before failing. #6284 WS5.
+    #[test]
+    fn a_missing_model_is_not_retried_as_a_transient_failure() {
+        for message in [
+            "The model `gpt-5-turbo` does not exist",
+            "model not found",
+            "404 model_not_found",
+            "unknown model: claude-99",
+        ] {
+            let error = map_rig_error("gpt-5-turbo", message);
+            assert!(
+                matches!(error, LlmError::ModelNotAvailable { .. }),
+                "{message:?} must map to ModelNotAvailable, got {error:?}"
+            );
+            assert!(
+                !crate::retry::is_retryable(&error),
+                "{message:?} must not be retried — the model will not appear between attempts"
+            );
+        }
+    }
+
+    /// An unrelated 404 is not a missing model.
+    #[test]
+    fn an_unrelated_404_still_falls_through() {
+        let error = map_rig_error("gpt-5-turbo", "404 not found: /v1/healthz");
+        assert!(
+            matches!(error, LlmError::RequestFailed { .. }),
+            "an unrelated 404 must not be read as a missing model, got {error:?}"
+        );
+    }
+
     fn map_rig_error_unrelated_still_request_failed() {
         let err = map_rig_error("openai", "connection reset by peer");
         assert!(
