@@ -36,13 +36,13 @@ async def _next_sse_event(response, *, timeout: float = 45) -> dict:
                 raise AssertionError("SSE stream closed before an event arrived")
             line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
             if not line:
-                if not data_lines:
-                    continue
-                return {
-                    "id": event_id,
-                    "event": event_name,
-                    "data": json.loads("\n".join(data_lines)),
-                }
+                if data_lines:
+                    return {
+                        "id": event_id,
+                        "event": event_name,
+                        "data": json.loads("\n".join(data_lines)),
+                    }
+                continue
             if line.startswith(":"):
                 continue
             field, separator, value = line.partition(":")
@@ -58,9 +58,21 @@ async def _next_sse_event(response, *, timeout: float = 45) -> dict:
                 data_lines.append(value)
 
 
+def _contains_field(value, field: str, expected: str) -> bool:
+    if isinstance(value, dict):
+        if value.get(field) == expected:
+            return True
+        return any(_contains_field(item, field, expected) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_field(item, field, expected) for item in value)
+    return False
+
+
 def _event_matches_run_status(event: dict, run_id: str, status: str) -> bool:
-    encoded = json.dumps(event["data"], separators=(",", ":"))
-    return run_id in encoded and f'"status":"{status}"' in encoded
+    data = event["data"]
+    return _contains_field(data, "run_id", run_id) and _contains_field(
+        data, "status", status
+    )
 
 
 def _sse_payload_signature(event: dict) -> str:
@@ -80,17 +92,30 @@ async def _collect_sse_until_run_status(
     timeout: float = 60,
 ) -> list[dict]:
     events = []
-    deadline = asyncio.get_running_loop().time() + timeout
-    while asyncio.get_running_loop().time() < deadline:
-        event = await _next_sse_event(
-            response,
-            timeout=deadline - asyncio.get_running_loop().time(),
-        )
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            break
+        try:
+            event = await _next_sse_event(response, timeout=remaining)
+        except TimeoutError:
+            break
         events.append(event)
         if _event_matches_run_status(event, run_id, status):
             return events
+    recent = [
+        {
+            "event": event["event"],
+            "type": event["data"].get("type"),
+            "has_cursor": event["id"] is not None,
+        }
+        for event in events[-3:]
+    ]
     raise AssertionError(
-        f"Timed out waiting for run {run_id} to reach {status}; events={events}"
+        f"Timed out waiting for run {run_id} to reach {status}; "
+        f"observed={len(events)}, recent={recent}"
     )
 
 
@@ -432,13 +457,14 @@ async def test_reborn_v2_websocket_origin_projection_and_shared_capacity_served(
             )
         assert rejected.value.status == 403
 
-        websocket = await session.ws_connect(
-            ws_url,
-            headers=headers,
-            origin=reborn_v2_server,
-        )
+        websocket = None
         streams = []
         try:
+            websocket = await session.ws_connect(
+                ws_url,
+                headers=headers,
+                origin=reborn_v2_server,
+            )
             for _ in range(2):
                 response = await session.get(
                     events_url,
@@ -478,13 +504,14 @@ async def test_reborn_v2_websocket_origin_projection_and_shared_capacity_served(
                     message = await websocket.receive()
                     assert message.type == aiohttp.WSMsgType.TEXT, message
                     frame = json.loads(message.data)
-                    if submitted["run_id"] in json.dumps(frame):
+                    if _contains_field(frame, "run_id", submitted["run_id"]):
                         assert frame.get("projection_cursor"), frame
                         break
         finally:
             for stream in streams:
                 stream.close()
-            await websocket.close()
+            if websocket is not None:
+                await websocket.close()
 
 
 async def test_reborn_v2_cancel_and_gate_control_routes_served(reborn_v2_server):
@@ -711,6 +738,7 @@ async def test_reborn_v2_protocol_error_and_limit_boundaries_served(
                 timeout=15,
             )
             assert accepted_by_limiter.status_code != 429
+            await asyncio.sleep(0.05)
 
         rate_limited = await client.post(
             retry_url,
