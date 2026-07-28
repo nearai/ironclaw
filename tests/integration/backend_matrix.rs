@@ -119,12 +119,21 @@ mod backend_inventory {
         body.lines()
             .map(str::trim)
             .filter(|line| !line.is_empty() && !line.starts_with("//") && !line.starts_with("#["))
-            // Variants are bare identifiers here; a payload-carrying variant
-            // would need its own handling, and the assertion below would
-            // notice the parse going wrong before it went quiet.
-            .map(|line| line.trim_end_matches(',').trim().to_string())
+            // Take the variant NAME, whatever follows it. A payload-carrying
+            // variant (`Custom(String),`) or a discriminant (`Legacy = 1,`)
+            // must still be required to have a parity case -- dropping those
+            // lines as unparseable would let exactly the backend this gate
+            // exists to catch slip through unnamed.
+            .map(|line| {
+                line.split(['(', '{', ',', '='])
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string()
+            })
             .filter(|name| {
                 !name.is_empty()
+                    && name.starts_with(|c: char| c.is_ascii_uppercase())
                     && name
                         .chars()
                         .all(|character| character.is_alphanumeric() || character == '_')
@@ -154,6 +163,32 @@ mod backend_inventory {
         lines[first..signature].join("\n")
     }
 
+    /// The attribute text alone, with doc prose removed.
+    ///
+    /// The block above deliberately includes doc comments, and a raw substring
+    /// search over that blob would let a passing mention of a backend in prose
+    /// -- a historical note, an explanation of why some case exists -- stand in
+    /// for the real `#[case(...)]`. That is the same false positive this gate
+    /// already rejects across tests, just reachable through prose.
+    ///
+    /// Bracket depth is tracked rather than matching line-by-line so an
+    /// attribute split across lines is still read whole.
+    fn parity_case_attributes() -> String {
+        let mut attributes = String::new();
+        let mut depth = 0usize;
+        for line in parity_attribute_block().lines() {
+            let trimmed = line.trim();
+            if depth == 0 && !trimmed.starts_with("#[") {
+                continue;
+            }
+            attributes.push_str(trimmed);
+            attributes.push('\n');
+            depth += trimmed.matches('[').count();
+            depth = depth.saturating_sub(trimmed.matches(']').count());
+        }
+        attributes
+    }
+
     /// Every declared backend is exercised by the parity matrix.
     #[test]
     fn every_storage_backend_is_exercised_by_the_parity_matrix() {
@@ -176,7 +211,7 @@ mod backend_inventory {
             );
         }
 
-        let attributes = parity_attribute_block();
+        let attributes = parity_case_attributes();
         assert!(
             attributes.contains("#[case"),
             "found no #[case] attributes on the parity matrix; the gate would \
