@@ -48,6 +48,7 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -62,6 +63,9 @@ use ironclaw_extension_host::extension_ingress::{
     ExtensionIngressParts, GenericChannelInboundSink, PostAdmissionObserver,
     StaticIngressConfiguration, StaticIngressSecrets, VerifiedEvidenceMint,
     extension_ingress_route_mount,
+};
+use ironclaw_extension_host::ingress::{
+    InboundAdmission, InboundAdmissionAck, InboundSink, InboundSinkError,
 };
 use ironclaw_host_api::ChannelInboundProductSurface;
 use ironclaw_host_api::ProductSurfaceCaller;
@@ -110,6 +114,21 @@ const TELEGRAM_INSTALLATION: &str = "telegram";
 const TELEGRAM_WEBHOOK_SECRET: &str = "itest-telegram-webhook-secret";
 const TELEGRAM_BOT_TOKEN: &str = "123456:itest-telegram-token";
 const TELEGRAM_REPLY: &str = "Here is the coordinated Telegram reply.";
+
+struct UnexpectedAdmissionSink {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl InboundSink for UnexpectedAdmissionSink {
+    async fn admit(
+        &self,
+        _admission: InboundAdmission,
+    ) -> Result<InboundAdmissionAck, InboundSinkError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(InboundAdmissionAck::Accepted)
+    }
+}
 
 fn now_unix() -> u64 {
     std::time::SystemTime::now()
@@ -1005,6 +1024,92 @@ async fn admin_configured_telegram_unconnected_dm_gets_connect_notice_without_in
         "the unconnected Telegram DM must not admit an agent turn"
     );
     assert_extension_has_no_user_installation(services, "telegram").await;
+}
+
+#[tokio::test]
+async fn telegram_identity_configuration_errors_are_retryable_on_the_real_router_path() {
+    let group = RebornIntegrationGroup::extension_delivery()
+        .await
+        .expect("delivery group builds");
+    let services = reborn_services(&group);
+    let parts = services
+        .extension_ingress_parts()
+        .expect("composition built generic ingress");
+    let ingress = VendorIngress::production(parts.clone());
+    let sink_calls = Arc::new(AtomicUsize::new(0));
+    let body = json!({
+        "update_id": 7101,
+        "message": {
+            "message_id": 7111,
+            "date": 1710000000,
+            "text": "configuration must be ready before this can be admitted",
+            "from": {"id": 710710, "is_bot": false, "first_name": "Pat"},
+            "chat": {"id": 710710, "type": "private"}
+        }
+    })
+    .to_string();
+
+    let configurations = [
+        Vec::new(),
+        vec![(
+            ironclaw_telegram_extension::TELEGRAM_BOT_USERNAME_CONFIG.to_string(),
+            "configured_identity".to_string(),
+        )],
+    ];
+    let mut responses = Vec::new();
+    for config in configurations {
+        parts.registry.register(
+            "telegram",
+            ChannelIngressRegistration {
+                secrets: Arc::new(StaticIngressSecrets::new(vec![
+                    ironclaw_extension_host::ingress::VerificationCandidate {
+                        installation_id: TELEGRAM_INSTALLATION.to_string(),
+                        secret: TELEGRAM_WEBHOOK_SECRET.as_bytes().to_vec(),
+                    },
+                ])),
+                configuration: Arc::new(StaticIngressConfiguration::new(config)),
+                sink: Arc::new(UnexpectedAdmissionSink {
+                    calls: Arc::clone(&sink_calls),
+                }),
+                drain: None,
+            },
+        );
+        responses.push(
+            ingress
+                .post_with_body(
+                    TELEGRAM_ROUTE,
+                    &body,
+                    vec![(
+                        "X-Telegram-Bot-Api-Secret-Token",
+                        TELEGRAM_WEBHOOK_SECRET.to_string(),
+                    )],
+                )
+                .await,
+        );
+    }
+
+    assert_eq!(
+        responses
+            .iter()
+            .map(|(status, _)| *status)
+            .collect::<Vec<_>>(),
+        vec![
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::SERVICE_UNAVAILABLE
+        ],
+        "missing and invalid host identity configuration must be retryable"
+    );
+    assert!(
+        responses
+            .iter()
+            .all(|(_, body)| body.contains("temporarily_unavailable")),
+        "configuration failures must not be reported as malformed vendor payloads: {responses:?}"
+    );
+    assert_eq!(
+        sink_calls.load(Ordering::SeqCst),
+        0,
+        "host configuration failure must stop before durable admission"
+    );
 }
 
 /// The Slack outbound proof (OUT-1/2/5 + ING-11 read half): a signed DM

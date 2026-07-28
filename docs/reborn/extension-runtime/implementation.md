@@ -326,6 +326,9 @@ oauth-connect integration test rather than adding a parallel one).
   `adapter.inbound(VerifiedInbound)` (pure, panic-isolated, bounded input;
   resolved non-secret configuration is available, signing secrets never are)
   → outcome:
+  - adapter `Parse` failure → permanent malformed-payload 400; adapter
+    `Configuration` failure → retryable 503 so corrected host configuration
+    can recover on vendor redelivery.
   - `Messages` → durable dedupe + admission commit in one transaction (dedupe
     key: `(installation, event_id)`), **then** 2xx; persistence failure →
     retryable 5xx. Then existing workflow: identity and conversation binding,

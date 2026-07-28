@@ -1120,6 +1120,8 @@ mod tests {
                     .expect("valid command"),
                 )),
             ),
+            ("approve gate:approval-1 but do not run it", None),
+            ("deny gate:approval-1 because the scope changed", None),
             ("hello", None),
         ];
 

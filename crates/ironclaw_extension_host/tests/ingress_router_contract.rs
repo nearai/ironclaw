@@ -115,6 +115,8 @@ enum AdapterMode {
     OversizedRespond,
     Ignore,
     Panic,
+    ParseError,
+    ConfigurationError,
 }
 
 struct ScriptedChannelAdapter {
@@ -136,6 +138,12 @@ impl ChannelAdapter for ScriptedChannelAdapter {
         ));
         match self.mode {
             AdapterMode::Panic => panic!("scripted adapter panic"),
+            AdapterMode::ParseError => Err(ChannelError::Parse {
+                reason: "scripted malformed vendor payload".to_string(),
+            }),
+            AdapterMode::ConfigurationError => Err(ChannelError::Configuration {
+                reason: "scripted host configuration failure".to_string(),
+            }),
             AdapterMode::Ignore => Ok(InboundOutcome::Ignore),
             AdapterMode::Respond => Ok(InboundOutcome::Respond(ImmediateResponse {
                 status: 200,
@@ -837,6 +845,34 @@ async fn adapter_panic_is_isolated_and_the_router_survives() {
         harness.router.handle(signed_request(body)).await.status,
         503
     );
+}
+
+#[tokio::test]
+async fn adapter_errors_distinguish_payload_from_host_configuration() {
+    let body = br#"{"text":"hi","event":"ev-error","conversation":"C-1"}"#;
+
+    let malformed = harness_with_activation(HarnessOptions {
+        adapter_mode: AdapterMode::ParseError,
+        ..HarnessOptions::default()
+    })
+    .await;
+    let malformed_response = malformed.router.handle(signed_request(body)).await;
+    assert_eq!(malformed_response.status, 400);
+    assert_eq!(malformed_response.body, br#"{"error":"malformed_payload"}"#);
+
+    let misconfigured = harness_with_activation(HarnessOptions {
+        adapter_mode: AdapterMode::ConfigurationError,
+        ..HarnessOptions::default()
+    })
+    .await;
+    let misconfigured_response = misconfigured.router.handle(signed_request(body)).await;
+    assert_eq!(misconfigured_response.status, 503);
+    assert_eq!(
+        misconfigured_response.body,
+        br#"{"error":"temporarily_unavailable"}"#
+    );
+    assert!(malformed.admitted.lock().expect("admitted").is_empty());
+    assert!(misconfigured.admitted.lock().expect("admitted").is_empty());
 }
 
 /// ING-8 (unit leg): 2xx only after the durable admission commit — a failing

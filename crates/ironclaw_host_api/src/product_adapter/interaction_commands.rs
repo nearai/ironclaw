@@ -58,10 +58,18 @@ pub fn parse_interaction_resolution_text(
         return Ok(None);
     };
     match first.to_ascii_lowercase().as_str() {
-        "approve" => {
-            parse_approval_resolution(parts.next(), ApprovalDecision::ApproveOnce, source_trigger)
-        }
-        "deny" => parse_approval_resolution(parts.next(), ApprovalDecision::Deny, source_trigger),
+        "approve" => parse_approval_resolution(
+            parts.next(),
+            parts.next().is_some(),
+            ApprovalDecision::ApproveOnce,
+            source_trigger,
+        ),
+        "deny" => parse_approval_resolution(
+            parts.next(),
+            parts.next().is_some(),
+            ApprovalDecision::Deny,
+            source_trigger,
+        ),
         "auth" => {
             let Some(action) = parts.next() else {
                 return ambiguous_interaction_falls_through();
@@ -90,22 +98,24 @@ pub fn parse_interaction_resolution_text(
 
 fn parse_approval_resolution(
     gate_ref: Option<&str>,
+    has_trailing_input: bool,
     decision: ApprovalDecision,
     source_trigger: ProductTriggerReason,
 ) -> Result<Option<ProductInboundPayload>, ProductAdapterError> {
     match gate_ref {
         Some(gate_ref) => {
-            // A well-formed `gate:<ref>` wins even when the user pasted the whole
-            // instruction line (e.g. "approve gate:X or deny gate:X") — the
-            // leading verb + first gate ref are the intent; trailing tokens are
-            // ignored. Any token that is not a `gate:<ref>` means this is not a
+            // Any token that is not a `gate:<ref>` means this is not a
             // targeted resolution but ambiguous natural language that merely
-            // starts with a verb ("approve this design"), so fall through to a
-            // normal user-message turn — never silently swallow it — regardless
-            // of whether trailing text follows.
+            // starts with a verb ("approve this design").
             let Some(gate_ref) = explicit_gate_ref(gate_ref)? else {
                 return ambiguous_interaction_falls_through();
             };
+            // Authority-bearing targeted forms are exact. Extra words can
+            // qualify or reverse the leading verb, so they must remain an
+            // ordinary user message instead of being silently ignored.
+            if has_trailing_input {
+                return ambiguous_interaction_falls_through();
+            }
             ApprovalResolutionPayload::new(gate_ref, decision)
                 .map(|payload| payload.with_source_trigger(source_trigger))
                 .map(ProductInboundPayload::ApprovalResolution)
@@ -213,6 +223,19 @@ mod tests {
             parse("deny"),
             Some(ProductInboundPayload::ScopedApprovalResolution(_))
         ));
+    }
+
+    #[test]
+    fn targeted_approval_and_denial_require_end_of_input() {
+        for text in [
+            "approve gate:approval-1 but do not run it",
+            "deny gate:approval-1 because the scope changed",
+        ] {
+            assert!(
+                parse(text).is_none(),
+                "{text:?} is natural language, not an exact authority resolution"
+            );
+        }
     }
 
     #[test]

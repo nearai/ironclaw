@@ -1266,6 +1266,8 @@ mod tests {
         for text in [
             "hello",
             "approve this design",
+            "approve gate:approval-1 but do not run it",
+            "deny gate:approval-1 because the scope changed",
             "auth deny",
             "auth deny this",
         ] {

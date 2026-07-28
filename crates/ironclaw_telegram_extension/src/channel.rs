@@ -24,6 +24,12 @@ use ironclaw_telegram_v2_adapter::{
 /// activation hook registers with the vendor.
 pub const TELEGRAM_WEBHOOK_URL_CONFIG: &str = "telegram_webhook_url";
 /// Non-secret config handle carrying the receiving bot's public username.
+///
+/// The adapter enforces Telegram's public username grammar locally (5–32
+/// ASCII alphanumeric/underscore characters ending in `bot`,
+/// case-insensitively). A syntactically valid but wrong username cannot be
+/// detected without vendor I/O; verifying that identity with a mediated
+/// `getMe` call is a separate follow-up, not inbound parsing work.
 pub const TELEGRAM_BOT_USERNAME_CONFIG: &str = "bot_username";
 /// Secret handle for the webhook shared secret (the same handle the
 /// manifest's `shared_secret_header` recipe verifies with).
@@ -59,12 +65,14 @@ impl TelegramChannelAdapter {
             .find(|(handle, _)| handle == TELEGRAM_BOT_USERNAME_CONFIG)
             .map(|(_, value)| value.as_str())
             .unwrap_or(self.group_trigger_policy.bot_username.as_str());
-        if configured_username.is_empty()
-            || configured_username.len() > 64
+        if !(5..=32).contains(&configured_username.len())
             || configured_username.trim() != configured_username
             || !configured_username
                 .chars()
                 .all(|character| character.is_ascii_alphanumeric() || character == '_')
+            || !configured_username
+                .get(configured_username.len().saturating_sub(3)..)
+                .is_some_and(|suffix| suffix.eq_ignore_ascii_case("bot"))
         {
             return Err("missing or invalid Telegram bot username configuration");
         }
@@ -78,7 +86,7 @@ impl TelegramChannelAdapter {
         let mut policy = self.group_trigger_policy.clone();
         policy.bot_username =
             self.receiving_bot_username(config)
-                .map_err(|reason| ChannelError::Parse {
+                .map_err(|reason| ChannelError::Configuration {
                     reason: reason.to_string(),
                 })?;
         Ok(policy)

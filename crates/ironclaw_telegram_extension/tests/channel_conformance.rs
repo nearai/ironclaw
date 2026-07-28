@@ -170,7 +170,7 @@ fn inbound_identity_is_required_with_constructor_compatibility() {
         let Err(error) = result else {
             panic!("missing or invalid bot identity must fail inbound normalization");
         };
-        assert!(matches!(error, ChannelError::Parse { .. }));
+        assert!(matches!(error, ChannelError::Configuration { .. }));
     }
 
     let adapter = TelegramChannelAdapter::new(GroupTriggerPolicy {
@@ -187,4 +187,62 @@ fn inbound_identity_is_required_with_constructor_compatibility() {
         })
         .expect("an explicitly configured constructor policy remains valid");
     assert!(matches!(outcome, InboundOutcome::Messages(_)));
+}
+
+#[test]
+fn username_enforces_vendor_grammar_for_inbound() {
+    let invalid_usernames = [
+        "fixture_name".to_string(),
+        "bot".to_string(),
+        format!("{}bot", "a".repeat(30)),
+        "valid-bot".to_string(),
+    ];
+    for username in invalid_usernames {
+        let config = vec![(TELEGRAM_BOT_USERNAME_CONFIG.to_string(), username.clone())];
+        assert!(
+            TelegramChannelAdapter::default()
+                .inbound(VerifiedInbound {
+                    extension_id: "telegram",
+                    installation_id: "install_alpha",
+                    config: &config,
+                    body: private_message_body(),
+                    headers: &[],
+                })
+                .is_err(),
+            "{username:?} must fail Telegram's public bot-username grammar"
+        );
+    }
+
+    for username in ["a_bot".to_string(), format!("{}BOT", "a".repeat(29))] {
+        assert!((5..=32).contains(&username.len()));
+        let config = vec![(TELEGRAM_BOT_USERNAME_CONFIG.to_string(), username.clone())];
+        assert!(
+            matches!(
+                TelegramChannelAdapter::default().inbound(VerifiedInbound {
+                    extension_id: "telegram",
+                    installation_id: "install_alpha",
+                    config: &config,
+                    body: private_message_body(),
+                    headers: &[],
+                }),
+                Ok(InboundOutcome::Messages(_))
+            ),
+            "{username:?} is a valid boundary example"
+        );
+    }
+
+    let constructor_compatible = TelegramChannelAdapter::new(GroupTriggerPolicy {
+        bot_username: "c_bot".to_string(),
+        ..GroupTriggerPolicy::default()
+    });
+    assert!(matches!(
+        constructor_compatible.inbound(VerifiedInbound {
+            extension_id: "telegram",
+            installation_id: "install_alpha",
+            config: &[],
+            body: private_message_body(),
+            headers: &[],
+        }),
+        Ok(InboundOutcome::Messages(_))
+    ));
 }

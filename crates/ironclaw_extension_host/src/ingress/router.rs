@@ -14,7 +14,9 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use ironclaw_extensions::ResolvedExtensionManifest;
 use ironclaw_host_api::{ChannelIngressDescriptor, ChannelIngressMethod, SecretHandle};
-use ironclaw_product::{ChannelAdapter, InboundOutcome, NormalizedInboundMessage, VerifiedInbound};
+use ironclaw_product::{
+    ChannelAdapter, ChannelError, InboundOutcome, NormalizedInboundMessage, VerifiedInbound,
+};
 
 use crate::active::ActiveExtension;
 use crate::deployment_channels::{DeploymentChannelBinding, DeploymentChannelRegistry};
@@ -390,6 +392,13 @@ impl ExtensionIngressRouter {
             };
             match catch_unwind(AssertUnwindSafe(|| channel.inbound(inbound))) {
                 Ok(Ok(outcome)) => outcome,
+                Ok(Err(ChannelError::Configuration { .. })) => {
+                    tracing::debug!(
+                        extension_id = %binding.extension_id(),
+                        "channel adapter host configuration is unavailable"
+                    );
+                    return IngressResponse::error(503, "temporarily_unavailable");
+                }
                 Ok(Err(error)) => {
                     tracing::debug!(
                         extension_id = %binding.extension_id(),

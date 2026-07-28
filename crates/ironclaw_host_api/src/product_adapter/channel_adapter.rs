@@ -236,6 +236,11 @@ pub struct TargetCandidate {
 pub enum ChannelError {
     #[error("inbound request could not be parsed: {reason}")]
     Parse { reason: String },
+    /// Host-supplied adapter configuration is missing or invalid. Inbound
+    /// routers treat this as retryable because vendor redelivery may succeed
+    /// after an operator repairs configuration.
+    #[error("channel configuration is unavailable: {reason}")]
+    Configuration { reason: String },
     #[error("outbound rendering failed: {reason}")]
     Render { reason: String },
     #[error("vendor wiring failed: {reason}")]
