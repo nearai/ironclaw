@@ -102,8 +102,8 @@ pub enum ProductTriggerReason {
 /// it enters the product surface.
 ///
 /// `None` at the call site means the normalized message is an ordinary user
-/// message. These variants cover only protocol-specific interaction replies
-/// that should not become user turns.
+/// message. These variants cover channel-neutral interaction replies and
+/// slash commands that should not become user turns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChannelInboundClassification {
     Command(InboundCommandPayload),
