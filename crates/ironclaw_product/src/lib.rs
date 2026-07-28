@@ -173,7 +173,8 @@ pub use ironclaw_host_api::product_adapter::{
     ProtocolAuthFailure, ProtocolHttpEgress, ProtocolHttpEgressError, REDACTED_PLACEHOLDER,
     RedactedDebug, RedactedString, ScopedApprovalResolutionPayload, TargetCandidate, TargetQuery,
     TrustedInboundContext, UserMessagePayload, VerifiedAuthClaim, VerifiedInbound,
-    parse_interaction_resolution_text, parse_product_slash_command, strip_wrapping_inline_code,
+    classify_channel_inbound_text, parse_interaction_resolution_text, parse_product_slash_command,
+    strip_wrapping_inline_code,
 };
 #[cfg(feature = "host-auth-mint")]
 pub use ironclaw_host_api::product_adapter::{
