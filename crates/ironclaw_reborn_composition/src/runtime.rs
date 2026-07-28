@@ -4778,6 +4778,14 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         boot,
         llm_reload,
     };
+    // Channel graphs begin reconciling before the canonical product surface
+    // can exist. Fill their first-write-wins command handle only after the
+    // runtime is complete, using the same surface exposed to WebUI and other
+    // product callers.
+    if let Some(assembly) = runtime._channel_host_assembly.as_ref() {
+        let command_surface = runtime.product_surface(None)?;
+        let _ = assembly.set_product_command_surface(command_surface);
+    }
     // Fill the composition's late-bound channel-connection facade slot (§6.4)
     // now the runtime's serving tenant is known: extension removal
     // (`ExtensionManagementPort::remove`) disconnects the caller's

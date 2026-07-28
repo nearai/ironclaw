@@ -255,6 +255,12 @@ pub fn parse_product_slash_command(
         .unwrap_or(without_slash.len());
     let command_slice = &without_slash[..command_end];
     let arguments_slice = without_slash[command_end..].trim_start();
+    // Vendor adapters remove an address only when it names the verified
+    // current bot. A surviving `@target` therefore belongs to another bot and
+    // must remain ordinary conversation text, not become an Ironclaw command.
+    if command_slice.contains('@') {
+        return Ok(None);
+    }
     validate_command_name(command_slice)
         .map_err(|error| ProductSlashCommandParseError::InvalidPayload(error.to_string()))?;
     validate_payload_string(
@@ -1270,6 +1276,8 @@ mod tests {
             "deny gate:approval-1 because the scope changed",
             "auth deny",
             "auth deny this",
+            "/model@other_bot",
+            "/model@other_bot openai/gpt-5",
         ] {
             assert_eq!(
                 classify_channel_inbound_text(text, ProductTriggerReason::DirectChat),

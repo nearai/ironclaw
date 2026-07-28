@@ -22,11 +22,12 @@ use ironclaw_outbound::{
 };
 use ironclaw_product::{
     AdapterInstallationId, AuthPromptView, AuthRequirement, ChannelAdapter, ChannelError,
-    DeliveryReport, ExternalActorRef, ExternalConversationRef, ExternalEventId, InboundOutcome,
-    OutboundEnvelope, OutboundPart, ParsedProductInbound, PartDeliveryOutcome, ProductAdapterError,
-    ProductAdapterId, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
-    ProductRejection, ProductRejectionKind, ProductTriggerReason, ProtocolAuthEvidence,
-    TrustedInboundContext, UserMessagePayload, VerifiedInbound,
+    DeliveryReport, ExternalActorRef, ExternalConversationRef, ExternalEventId,
+    InboundCommandPayload, InboundOutcome, OutboundEnvelope, OutboundPart, ParsedProductInbound,
+    PartDeliveryOutcome, ProductAdapterError, ProductAdapterId, ProductCommandResultPayload,
+    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductRejection,
+    ProductRejectionKind, ProductTriggerReason, ProtocolAuthEvidence, TrustedInboundContext,
+    UserMessagePayload, VerifiedInbound,
 };
 use ironclaw_product::{
     BlockedAuthPromptRequest, BlockedAuthPromptSource, ChannelConnectionNoticePolicy,
@@ -679,6 +680,50 @@ async fn observer_delivers_final_reply_through_the_coordinator() {
         attempts[0].status,
         ironclaw_outbound::OutboundDeliveryStatus::Delivered
     );
+}
+
+#[tokio::test]
+async fn observer_delivers_command_result_through_the_coordinator() {
+    let harness = build_harness(
+        vec![scripted_state(TurnStatus::Completed, None)],
+        false,
+        None,
+        Duration::from_secs(5),
+    );
+    let command =
+        InboundCommandPayload::new("model", "", ProductTriggerReason::BotCommand).expect("command");
+    let command_envelope = envelope(
+        ProductInboundPayload::Command(command),
+        "evt-command-result",
+    );
+
+    harness
+        .observer
+        .observe_ack(
+            command_envelope,
+            ProductInboundAck::CommandResult {
+                command: "model".to_string(),
+                payload: ProductCommandResultPayload::new(serde_json::json!({
+                    "active": {
+                        "model": "gpt-5.5"
+                    },
+                    "configured": true
+                })),
+            },
+        )
+        .await;
+
+    assert_eq!(
+        harness.adapter.texts(),
+        vec![
+            "Command `/model` completed.\n\n    {\n      \"active\": {\n        \"model\": \"gpt-5.5\"\n      },\n      \"configured\": true\n    }"
+                .to_string()
+        ]
+    );
+    let envelopes = harness.adapter.envelopes();
+    assert_eq!(envelopes.len(), 1);
+    assert_eq!(envelopes[0].target.conversation.conversation_id(), "conv-1");
+    assert_eq!(envelopes[0].extension_id, EXTENSION_ID);
 }
 
 /// Regression (the channel-host e2e race, made deterministic): a

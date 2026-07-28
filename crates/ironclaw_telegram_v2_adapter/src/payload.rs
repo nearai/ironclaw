@@ -650,6 +650,9 @@ fn extract_first_matching_bot_command(
             if entity.entity_type != "bot_command" {
                 continue;
             }
+            if !bot_command_is_leading(text, entities, entity, bot_username) {
+                continue;
+            }
             let Some(slice) = slice_text_by_offset(text, entity.offset, entity.length) else {
                 continue;
             };
@@ -678,6 +681,40 @@ fn extract_first_matching_bot_command(
         }
     }
     None
+}
+
+fn bot_command_is_leading(
+    text: &str,
+    entities: &[MessageEntity],
+    command: &MessageEntity,
+    bot_username: &str,
+) -> bool {
+    if command.offset == 0 {
+        return true;
+    }
+    let Some(mention) = entities
+        .iter()
+        .find(|entity| entity.entity_type == "mention" && entity.offset == 0)
+    else {
+        return false;
+    };
+    let Some(mention_text) = slice_text_by_offset(text, mention.offset, mention.length) else {
+        return false;
+    };
+    if !mention_text
+        .strip_prefix('@')
+        .is_some_and(|target| target.eq_ignore_ascii_case(bot_username))
+    {
+        return false;
+    }
+    let Some(mention_end) = mention.offset.checked_add(mention.length) else {
+        return false;
+    };
+    let Some(gap_length) = command.offset.checked_sub(mention_end) else {
+        return false;
+    };
+    slice_text_by_offset(text, mention_end, gap_length)
+        .is_some_and(|gap| gap.chars().all(char::is_whitespace))
 }
 
 fn strip_leading_mention(text: String, policy: &GroupTriggerPolicy) -> String {
@@ -1030,7 +1067,30 @@ mod tests {
     }
 
     #[test]
-    fn addressed_command_uses_utf16_entity_offsets_and_preserves_arguments() {
+    fn private_mid_sentence_bot_command_remains_ordinary_text() {
+        let payload = br#"{
+            "update_id": 506,
+            "message": {
+                "message_id": 76,
+                "date": 1700000000,
+                "from": {"id": 777, "is_bot": false, "first_name": "Alice"},
+                "chat": {"id": 777, "type": "private"},
+                "text": "please run /help for me",
+                "entities": [{"type": "bot_command", "offset": 11, "length": 5}]
+            }
+        }"#;
+
+        let event =
+            normalize_telegram_update(payload, &install_id(), &policy()).expect("normalizes");
+        let TelegramInboundEvent::Message(message) = event else {
+            panic!("private chat text must be forwarded");
+        };
+        assert_eq!(message.text, "please run /help for me");
+        assert_eq!(message.trigger, ProductTriggerReason::DirectChat);
+    }
+
+    #[test]
+    fn command_after_non_mention_prefix_remains_ordinary_text() {
         let payload = r#"{
             "update_id": 505,
             "message": {
@@ -1050,7 +1110,10 @@ mod tests {
         let TelegramInboundEvent::Message(message) = event else {
             panic!("private chat command must be forwarded");
         };
-        assert_eq!(message.text, "/model openai/gpt-5");
+        assert_eq!(
+            message.text, "🦀 /model@ironclaw_bot openai/gpt-5",
+            "only commands at offset zero or after a leading bot mention are canonicalized"
+        );
     }
 
     #[test]

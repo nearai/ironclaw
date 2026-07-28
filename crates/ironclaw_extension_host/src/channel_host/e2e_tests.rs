@@ -143,6 +143,7 @@ const SLACK_EVENTS_PATH: &str = "/webhooks/extensions/slack/events";
 
 struct Harness {
     mount: PublicRouteMount,
+    command_executions: Arc<RecordingCommandExecutionSurface>,
     /// The generic ingress registry: `drain()` settles every route-owned
     /// in-flight task (the assembly registered the sink's drain with it).
     ingress: ExtensionIngressParts,
@@ -451,6 +452,13 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         channel_pairing: None,
     };
     let assembly = GenericChannelHostAssembly::start(deps);
+    let command_executions = Arc::new(RecordingCommandExecutionSurface::default());
+    assert!(
+        assembly.set_product_command_surface(
+            Arc::clone(&command_executions) as Arc<dyn ironclaw_host_api::ProductSurface>
+        ),
+        "test command surface fills exactly once"
+    );
     // Vendor extras exactly as the binary's channel-extension binding feeds
     // them: the preference-target codec — no storage-root override.
     assembly
@@ -469,6 +477,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
 
     Harness {
         mount,
+        command_executions,
         ingress,
         egress,
         coordinator: Arc::new(coordinator),
@@ -3185,6 +3194,67 @@ impl AuthInteractionService for RecordingAuthInteractionService {
 /// Records every policy-approved channel egress call and synthesizes Slack
 /// Web API responses — the transport-seam analog of the old protocol-egress
 /// recorder.
+#[derive(Default)]
+struct RecordingCommandExecutionSurface {
+    invokes: Mutex<Vec<(String, String, serde_json::Value)>>,
+}
+
+impl RecordingCommandExecutionSurface {
+    fn invokes(&self) -> Vec<(String, String, serde_json::Value)> {
+        self.invokes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
+#[async_trait]
+impl ironclaw_host_api::ProductSurface for RecordingCommandExecutionSurface {
+    async fn invoke(
+        &self,
+        caller: ironclaw_host_api::ProductSurfaceCaller,
+        request: ironclaw_host_api::ProductSurfaceInvokeRequest,
+    ) -> Result<
+        ironclaw_host_api::ProductSurfaceInvokeResponse,
+        ironclaw_host_api::ProductSurfaceError,
+    > {
+        self.invokes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push((
+                request.operation_id.as_str().to_string(),
+                caller.user_id.as_str().to_string(),
+                request.input,
+            ));
+        Ok(ironclaw_host_api::ProductSurfaceInvokeResponse {
+            output: serde_json::json!({
+                "title": "Model",
+                "fields": [{"label": "Provider", "value": "stub-provider"}],
+            }),
+        })
+    }
+
+    async fn query(
+        &self,
+        _caller: ironclaw_host_api::ProductSurfaceCaller,
+        _request: ironclaw_host_api::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ironclaw_host_api::ProductSurfaceError>
+    {
+        Err(ironclaw_host_api::ProductSurfaceError::internal())
+    }
+
+    async fn stream_events(
+        &self,
+        _caller: ironclaw_host_api::ProductSurfaceCaller,
+        _request: ironclaw_host_api::ProductSurfaceStreamRequest,
+    ) -> Result<
+        ironclaw_host_api::ProductSurfaceStreamResponse,
+        ironclaw_host_api::ProductSurfaceError,
+    > {
+        Err(ironclaw_host_api::ProductSurfaceError::internal())
+    }
+}
+
 #[derive(Clone, Default)]
 struct RecordingEgress {
     requests: Arc<Mutex<Vec<ApprovedChannelEgress>>>,
@@ -3390,6 +3460,30 @@ const DM_FINAL: &str = r#"{
   "event_id":"Ev-final",
 	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"hello","ts":"1710000000.000001"}
 	}"#;
+
+const DM_COMMAND: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-command",
+	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"/model","ts":"1710000000.000021"}
+	}"#;
+
+const DM_UNKNOWN_COMMAND: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-command-unknown",
+	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"/notacommand","ts":"1710000000.000022"}
+	}"#;
+
+const APP_MENTION_COMMAND: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-command-channel",
+  "event":{"type":"app_mention","user":"U123","channel":"C123","text":"<@UBOT> /model","ts":"1710000000.000023"}
+}"#;
 
 const DM_APPROVAL: &str = r#"{
   "type":"event_callback",
@@ -4485,3 +4579,91 @@ async fn generic_triggered_hook_honors_per_trigger_target_without_global_default
     );
 }
 // arch-exempt: large_file, channel host end-to-end coverage remains centralized, plan #6175
+
+/// A standardized slash command in a DM must cross the production channel
+/// graph, execute through the canonical product command surface, and deliver
+/// its rendered result to the source conversation without submitting a turn.
+#[tokio::test]
+async fn dm_slash_command_executes_and_delivers_rendered_result() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "unused".to_string(),
+    })
+    .await;
+
+    // Commands execute with the already-bound user's authority.
+    let seed = harness.post_event(DM_FINAL).await;
+    assert_eq!(seed.status(), StatusCode::OK);
+    harness.drain().await;
+    let submitted_before_command = harness.coordinator.submitted_turn_count();
+
+    let response = harness.post_event(DM_COMMAND).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let feedback =
+        wait_for_post_messages_matching(&harness.egress, "rendered command result", |payload| {
+            payload["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("Model"))
+        })
+        .await;
+    let invokes = harness.command_executions.invokes();
+    assert_eq!(invokes.len(), 1, "exactly one command operation invoke");
+    assert_eq!(invokes[0].0, "product.model.command");
+    assert_eq!(invokes[0].1, USER, "caller is the bound user");
+    assert_eq!(feedback[0]["channel"], CHANNEL);
+    assert_eq!(
+        harness.coordinator.submitted_turn_count(),
+        submitted_before_command,
+        "product commands are not turns"
+    );
+}
+
+#[tokio::test]
+async fn unknown_dm_slash_command_returns_inventory_help_without_a_turn() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "unused".to_string(),
+    })
+    .await;
+
+    let response = harness.post_event(DM_UNKNOWN_COMMAND).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let feedback =
+        wait_for_post_messages_matching(&harness.egress, "command inventory help", |payload| {
+            payload["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("Available commands:") && text.contains("/model"))
+        })
+        .await;
+    assert_eq!(feedback[0]["channel"], CHANNEL);
+    assert!(harness.command_executions.invokes().is_empty());
+    assert_eq!(harness.coordinator.submitted_turn_count(), 0);
+}
+
+#[tokio::test]
+async fn shared_channel_slash_command_is_denied_with_notice() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "unused".to_string(),
+    })
+    .await;
+
+    let response = harness.post_event(APP_MENTION_COMMAND).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let feedback = wait_for_post_messages_matching(
+        &harness.egress,
+        "direct-conversation command denial",
+        |payload| {
+            payload["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("direct conversation"))
+        },
+    )
+    .await;
+    assert_eq!(feedback[0]["channel"], "C123");
+    assert!(harness.command_executions.invokes().is_empty());
+    assert_eq!(harness.coordinator.submitted_turn_count(), 0);
+}

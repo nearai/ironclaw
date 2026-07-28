@@ -1,5 +1,6 @@
 //! Contract tests for product command dispatch through the product surface.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -11,13 +12,15 @@ use ironclaw_host_api::{
 use ironclaw_product::{
     ActionDispatchKind, DefaultProductSurface, FakeConversationBindingService,
     FakeIdempotencyLedger, FakeInboundTurnService, PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID,
-    PRODUCT_MODEL_COMMAND_OPERATION_ID, ProductCommand, ProductCommandAdmission,
-    ProductCommandAdmissionService, ProductCommandContext, ProductInboundAck,
+    PRODUCT_MODEL_COMMAND_OPERATION_ID, PRODUCT_STATUS_COMMAND_OPERATION_ID, ProductCommand,
+    ProductCommandAdmission, ProductCommandAdmissionService, ProductCommandContext,
+    ProductInboundAck, ProductSurfaceFailure,
 };
 use ironclaw_product::{
-    AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
-    ExternalEventId, InboundCommandPayload, ProductAdapterId, ProductInboundEnvelope,
-    ProductInboundPayload, ProductTriggerReason, ProtocolAuthEvidence, TrustedInboundContext,
+    AdapterInstallationId, AuthRequirement, ConversationBindingService, ExternalActorRef,
+    ExternalConversationRef, ExternalEventId, InboundCommandPayload, ProductAdapterId,
+    ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason, ProtocolAuthEvidence,
+    ResolveBindingRequest, ResolvedBinding, TrustedInboundContext,
 };
 
 fn sample_command_envelope(
@@ -158,6 +161,71 @@ impl ProductSurface for RecordingCommandSurface {
     }
 }
 
+struct FirstCommandBindingService {
+    inner: FakeConversationBindingService,
+    resolve_count: AtomicUsize,
+    lookup_count: AtomicUsize,
+}
+
+impl FirstCommandBindingService {
+    fn new() -> Self {
+        Self {
+            inner: FakeConversationBindingService::new(),
+            resolve_count: AtomicUsize::new(0),
+            lookup_count: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl ConversationBindingService for FirstCommandBindingService {
+    async fn resolve_binding(
+        &self,
+        request: ResolveBindingRequest,
+    ) -> Result<ResolvedBinding, ProductSurfaceFailure> {
+        self.resolve_count.fetch_add(1, Ordering::SeqCst);
+        self.inner.resolve_binding(request).await
+    }
+
+    async fn lookup_binding(
+        &self,
+        _request: ResolveBindingRequest,
+    ) -> Result<ResolvedBinding, ProductSurfaceFailure> {
+        self.lookup_count.fetch_add(1, Ordering::SeqCst);
+        Err(ProductSurfaceFailure::BindingRequired {
+            reason: "no conversation binding exists yet".to_string(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn first_command_after_pairing_resolves_a_conversation_binding() {
+    let inbound = Arc::new(FakeInboundTurnService::new());
+    let ledger = Arc::new(FakeIdempotencyLedger::new());
+    let binding = Arc::new(FirstCommandBindingService::new());
+    let admission_service = Arc::new(RecordingProductCommandAdmissionService::allowing());
+    let command_surface = Arc::new(RecordingCommandSurface::output(serde_json::json!({
+        "title": "Model"
+    })));
+    let workflow = DefaultProductSurface::new(inbound.clone(), ledger, binding.clone())
+        .with_product_command_admission_service(admission_service)
+        .with_product_command_surface(command_surface.clone());
+
+    let ack = workflow
+        .submit_inbound(sample_command_envelope("first-command", "model", ""))
+        .await
+        .expect("first command should establish its conversation binding");
+
+    assert!(matches!(
+        ack,
+        ProductInboundAck::CommandResult { ref command, .. } if command == "model"
+    ));
+    assert_eq!(binding.resolve_count.load(Ordering::SeqCst), 1);
+    assert_eq!(binding.lookup_count.load(Ordering::SeqCst), 0);
+    assert_eq!(command_surface.invokes().len(), 1);
+    assert_eq!(inbound.accepted_count(), 0);
+}
+
 #[tokio::test]
 async fn command_payload_invokes_product_surface_not_inbound_turn_service() {
     let inbound = Arc::new(FakeInboundTurnService::new());
@@ -239,6 +307,44 @@ async fn lifecycle_command_uses_lifecycle_product_surface_operation() {
 }
 
 #[tokio::test]
+async fn status_command_maps_to_its_operation_with_the_bound_thread() {
+    let inbound = Arc::new(FakeInboundTurnService::new());
+    let ledger = Arc::new(FakeIdempotencyLedger::new());
+    let binding = Arc::new(FakeConversationBindingService::new());
+    let admission_service = Arc::new(RecordingProductCommandAdmissionService::allowing());
+    let command_surface = Arc::new(RecordingCommandSurface::output(serde_json::json!({
+        "title": "Status"
+    })));
+    let workflow = DefaultProductSurface::new(inbound, ledger, binding)
+        .with_product_command_admission_service(admission_service)
+        .with_product_command_surface(command_surface.clone());
+
+    let ack = workflow
+        .submit_inbound(sample_command_envelope("command-status", "status", ""))
+        .await
+        .expect("accept");
+
+    assert!(matches!(
+        ack,
+        ProductInboundAck::CommandResult { ref command, .. } if command == "status"
+    ));
+    let invokes = command_surface.invokes();
+    assert_eq!(invokes.len(), 1);
+    assert_eq!(
+        invokes[0].request.operation_id.as_str(),
+        PRODUCT_STATUS_COMMAND_OPERATION_ID
+    );
+    assert!(
+        invokes[0]
+            .request
+            .input
+            .get("thread_id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|thread_id| !thread_id.is_empty())
+    );
+}
+
+#[tokio::test]
 async fn malformed_known_lifecycle_command_rejects_before_admission() {
     let inbound = Arc::new(FakeInboundTurnService::new());
     let ledger = Arc::new(FakeIdempotencyLedger::new());
@@ -283,7 +389,10 @@ async fn command_admission_receives_authority_context_and_action_metadata() {
 
     let ack = workflow.submit_inbound(envelope).await.expect("accept");
 
-    assert!(matches!(ack, ProductInboundAck::Rejected(_)));
+    assert!(matches!(
+        ack,
+        ProductInboundAck::CommandResult { ref command, .. } if command == "status"
+    ));
     let records = admission_service.records();
     assert_eq!(records.len(), 1);
     let (context, command) = &records[0];

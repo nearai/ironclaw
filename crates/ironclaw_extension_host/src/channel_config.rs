@@ -517,19 +517,24 @@ impl ChannelConfigService {
         Ok(None)
     }
 
-    /// Resolve the non-secret configuration passed to channel lifecycle hooks
-    /// and verified inbound normalization. Manifest-declared tenant admin
-    /// values take precedence over the retired per-installation configure
-    /// surface while preserving it as a compatibility fallback for manifests
-    /// that do not declare administrator configuration.
+    /// Resolve the manifest-declared non-secret configuration passed to channel
+    /// lifecycle hooks and verified inbound normalization. When the manifest
+    /// declares administrator configuration, the administrator service is
+    /// required; silently substituting an empty configuration would let an
+    /// adapter run without its host-owned routing and identity settings.
     pub async fn effective_non_secret_config(
         &self,
         extension_id: &ExtensionId,
     ) -> Result<Vec<(String, String)>, ChannelConfigError> {
         let manifest = self.resolved_manifest(extension_id).await?;
+        if manifest.admin_configuration.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut effective = Vec::new();
         let Some(admin) = &self.admin_configuration else {
-            return Ok(effective);
+            return Err(ChannelConfigError::Storage {
+                reason: "administrator configuration service is unavailable".to_string(),
+            });
         };
         let channel_fields = channel_config_fields(&manifest);
         for descriptor in &manifest.admin_configuration {
@@ -1365,5 +1370,26 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
             .await
             .expect_err("uninstalled extension is a typed error");
         assert!(matches!(error, ChannelConfigError::NotInstalled { .. }));
+    }
+
+    #[tokio::test]
+    async fn effective_config_fails_closed_when_admin_configuration_is_unavailable() {
+        let installation_store = installed_store(CHANNEL_FIXTURE_MANIFEST, "acmechat").await;
+        let secrets = Arc::new(SecretStore::ephemeral());
+        let reactivation = Arc::new(RecordingReactivation::new());
+        let service = ChannelConfigService::new(
+            installation_store as Arc<dyn ExtensionInstallationStorePort>,
+            secrets as Arc<dyn SecretStorePort>,
+            test_scope(),
+            reactivation as Arc<dyn ChannelConfigReactivation>,
+        );
+        let extension_id = ExtensionId::new("acmechat").expect("extension id");
+
+        let error = service
+            .effective_non_secret_config(&extension_id)
+            .await
+            .expect_err("declared admin configuration must not degrade to an empty success");
+
+        assert!(matches!(error, ChannelConfigError::Storage { .. }));
     }
 }

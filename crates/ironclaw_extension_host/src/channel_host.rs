@@ -261,6 +261,72 @@ pub struct ChannelHostDeliveryDeps {
     pub settings: RunDeliverySettings,
 }
 
+/// Late-bound command execution surface shared by every channel workflow.
+///
+/// Channel graphs are reconciled while the runtime is still being assembled,
+/// before the canonical product surface can be built. The composition fills
+/// this handle once at the end of runtime construction. Until then, command
+/// execution fails closed with retryable service unavailability.
+#[derive(Clone, Default)]
+struct SharedCommandSurface {
+    cell: Arc<std::sync::OnceLock<Arc<dyn ironclaw_host_api::ProductSurface>>>,
+}
+
+impl SharedCommandSurface {
+    fn set(&self, surface: Arc<dyn ironclaw_host_api::ProductSurface>) -> bool {
+        self.cell.set(surface).is_ok()
+    }
+}
+
+#[async_trait]
+impl ironclaw_host_api::ProductSurface for SharedCommandSurface {
+    async fn invoke(
+        &self,
+        caller: ironclaw_host_api::ProductSurfaceCaller,
+        request: ironclaw_host_api::ProductSurfaceInvokeRequest,
+    ) -> Result<
+        ironclaw_host_api::ProductSurfaceInvokeResponse,
+        ironclaw_host_api::ProductSurfaceError,
+    > {
+        match self.cell.get() {
+            Some(surface) => surface.invoke(caller, request).await,
+            None => Err(ironclaw_host_api::ProductSurfaceError::service_unavailable(
+                true,
+            )),
+        }
+    }
+
+    async fn query(
+        &self,
+        caller: ironclaw_host_api::ProductSurfaceCaller,
+        request: ironclaw_host_api::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ironclaw_host_api::ProductSurfaceError>
+    {
+        match self.cell.get() {
+            Some(surface) => surface.query(caller, request).await,
+            None => Err(ironclaw_host_api::ProductSurfaceError::service_unavailable(
+                true,
+            )),
+        }
+    }
+
+    async fn stream_events(
+        &self,
+        caller: ironclaw_host_api::ProductSurfaceCaller,
+        request: ironclaw_host_api::ProductSurfaceStreamRequest,
+    ) -> Result<
+        ironclaw_host_api::ProductSurfaceStreamResponse,
+        ironclaw_host_api::ProductSurfaceError,
+    > {
+        match self.cell.get() {
+            Some(surface) => surface.stream_events(caller, request).await,
+            None => Err(ironclaw_host_api::ProductSurfaceError::service_unavailable(
+                true,
+            )),
+        }
+    }
+}
+
 /// Everything the assembly composes per-extension graphs from.
 pub struct GenericChannelHostDeps {
     pub watch: SnapshotWatch,
@@ -355,6 +421,7 @@ struct BuiltGenericChannelGraph {
 /// generic extension host. Owns a reconcile loop over the snapshot watch.
 pub struct GenericChannelHostAssembly {
     deps: GenericChannelHostDeps,
+    command_surface: SharedCommandSurface,
     extras: StdMutex<HashMap<String, StoredChannelExtras>>,
     reconciled: tokio::sync::Mutex<HashMap<String, ReconciledChannel>>,
     reconcile_loop: StdMutex<Option<tokio::task::JoinHandle<()>>>,
@@ -368,6 +435,7 @@ impl GenericChannelHostAssembly {
         let mut subscription = deps.watch.subscribe();
         let assembly = Arc::new(Self {
             deps,
+            command_surface: SharedCommandSurface::default(),
             extras: StdMutex::new(HashMap::new()),
             reconciled: tokio::sync::Mutex::new(HashMap::new()),
             reconcile_loop: StdMutex::new(None),
@@ -391,6 +459,16 @@ impl GenericChannelHostAssembly {
             *slot = Some(handle);
         }
         assembly
+    }
+
+    /// Fill the command surface after the canonical runtime product surface
+    /// exists. First write wins so a later construction path cannot swap
+    /// authority under already-running channel graphs.
+    pub fn set_product_command_surface(
+        &self,
+        surface: Arc<dyn ironclaw_host_api::ProductSurface>,
+    ) -> bool {
+        self.command_surface.set(surface)
     }
 
     /// Register one extension's vendor extras, then re-reconcile the
@@ -681,6 +759,11 @@ impl GenericChannelHostAssembly {
         if let Some(delivery) = &self.deps.delivery {
             workflow = workflow.with_delivered_gate_routes(Arc::clone(&delivery.route_store));
         }
+        workflow = workflow
+            .with_product_command_admission_service(Arc::new(
+                ironclaw_product::DirectConversationCommandAdmission,
+            ))
+            .with_product_command_surface(Arc::new(self.command_surface.clone()));
 
         let observer = match &self.deps.delivery {
             Some(delivery) => Some(self.build_observer(source, delivery, Arc::clone(&binding))?),
