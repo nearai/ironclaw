@@ -2,7 +2,9 @@
 
 **Date:** 2026-07-28
 **Status:** Approved
-**Decision:** Classify channel-neutral interactions and commands once in the generic host ingress sink.
+**Decision:** Classify channel-neutral interactions once in the generic host
+ingress sink, and expose product commands only when the resolved channel
+manifest explicitly declares them.
 
 ## Problem
 
@@ -32,13 +34,18 @@ the original run was never resumed or cancelled.
   extraction, conversation references, and bot-addressing rules in adapters.
 - Route classified payloads through the existing `ProductSurface` workflow
   without channel-specific resume or command execution paths.
+- Make command availability a fail-closed channel-manifest declaration instead
+  of exposing the complete product command registry to every direct channel.
+- Ship Slack and Telegram with only the exact `/status` command enabled.
 - Replace tests that manually inject Slack-only production behavior with tests
   that exercise the actual generic host path for Slack and Telegram.
 - Fail closed for malformed reserved interaction or command syntax.
 
 ## Non-goals
 
-- Changing approval, auth, command authorization, or turn-resume semantics.
+- Changing approval, auth, action-level command authorization, or turn-resume
+  semantics. Manifest availability is an exposure boundary, not a substitute
+  for administrator, owner, membership, or capability authorization.
 - Adding new product commands.
 - Moving vendor webhook verification, delivery, rendering, activation, or
   preference-target behavior into the generic host.
@@ -124,6 +131,63 @@ Private-chat slash text is also eligible for generic command classification;
 the product command inventory and admission service remain authoritative about
 whether a command is supported and allowed.
 
+## Manifest-Declared Command Availability
+
+The optional `commands` field on the typed channel descriptor is the sole
+declaration of product commands exposed by that channel:
+
+```toml
+[channel]
+id = "messages"
+display_name = "Slack messages"
+inbound = true
+outbound = true
+conversation_model = "continuous"
+commands = ["status"]
+```
+
+Command entries are exact command tokens without a leading `/`. Missing
+`commands` and `commands = []` both mean that the channel exposes no product
+commands. There is no compatibility fallback to the global registry. Aliases
+are independently declarative: `commands = ["status"]` admits `/status` but
+does not implicitly admit `/progress`.
+
+The neutral `ChannelDescriptor` validates command-token shape, length, count,
+and uniqueness. The generic channel host validates each declared token against
+the centralized product command registry when it assembles the resolved
+manifest. A syntactically valid but unknown declaration fails channel assembly
+instead of becoming an inert typo.
+
+The resolved allowlist configures the channel's production
+`ProductCommandAdmissionService`. Admission checks the exact inbound token
+before any product command handler is invoked. A disabled or unknown command
+settles as a durable, non-retryable rejection and the user-visible response
+names only commands enabled for that channel. When the allowlist is empty, the
+response says that commands are unavailable for the channel.
+
+Direct-conversation admission remains a separate rule. A declared command is
+still denied in a shared conversation, and future action-level authorization
+must still run after availability admission. Manifest authors cannot grant
+administrator or operator authority by listing a command.
+
+Interaction-resolution grammar (`approve`, `deny`, and `auth deny`) is not a
+product-command inventory and remains available wherever its existing gate
+policy permits it. Manifest-declared pairing syntax such as Telegram `/start`
+also remains owned by `[channel.connection].inbound_code_prefixes`; it is
+intercepted before product command dispatch and is unaffected by
+`channel.commands`.
+
+The bundled manifests declare:
+
+```toml
+# Slack and Telegram
+[channel]
+commands = ["status"]
+```
+
+No Slack- or Telegram-specific filter, parser, handler, or command
+implementation is introduced.
+
 ## Wiring Changes
 
 The optional `InboundPayloadClassifier` hook and its copies in
@@ -161,8 +225,19 @@ current wiring.
   - Slack-normalized auth denial reaches `AuthResolution`;
   - approval replies reach their typed resolution path without injected
     classifier extras;
-  - slash commands reach the typed command path;
+  - a manifest-declared `/status` command reaches the typed command path;
+  - `/model`, `/extension_configure`, and skill mutation commands are rejected
+    before their product handlers are invoked;
+  - a missing or empty `channel.commands` declaration exposes no commands;
+  - rejection feedback lists only the commands enabled for that channel;
   - normal messages still submit turns.
+- Manifest contract tests:
+  - `commands = ["status"]` parses and round-trips;
+  - missing and empty command lists are fail-closed;
+  - duplicate, malformed, oversized, and excessive declarations fail
+    validation;
+  - syntactically valid unknown commands fail generic channel assembly;
+  - bundled Slack and Telegram manifests declare exactly `["status"]`.
 - Telegram protocol tests:
   - `/command@botname` canonicalizes correctly;
   - UTF-16 entity offsets and command arguments remain correct;
@@ -183,20 +258,31 @@ Targeted verification follows the owning-crate guidance:
 
 ## Compatibility, Rollback, and Risk
 
-The product payload and workflow semantics are unchanged. The shared
-classification enum gains a variant, so all exhaustive matches are updated in
-the same change. Legacy public parser exports remain available to avoid an
-unnecessary source-compatibility break.
+The shared classification enum gains a variant, so all exhaustive matches are
+updated in the same change. Legacy public parser exports remain available to
+avoid an unnecessary source-compatibility break.
+
+`ChannelDescriptor.commands` is additive at the current schema version and
+defaults to an empty list while reading older manifests and persisted resolved
+manifests. This is intentionally fail-closed: an existing channel package must
+explicitly opt into commands before an upgraded host will execute one. The
+bundled Slack and Telegram manifests opt into only `status`.
 
 The main behavior change is intentional: reserved gate syntax and slash
 commands received through any generic channel no longer become model-visible
-user messages. Unsupported commands are still rejected by the existing product
-command inventory/admission path.
+user messages. Slash commands not declared by the resolved channel manifest are
+durably rejected before command execution.
 
-Rollback is a normal revert of this change. No persistence schema, secret,
-credential, or external vendor configuration changes are involved.
+Rollback of code and bundled assets is a normal revert for installations whose
+manifests predate the new field. A new binary may persist a resolved manifest
+containing `channel.commands`; an older binary whose strict descriptor rejects
+unknown fields may require restoring the pre-deploy installation snapshot
+before rollback. No secret material or external vendor configuration changes.
 
 The highest regression risk is over-classifying natural language. The shared
 interaction parser already distinguishes confident reserved forms from phrases
 such as “approve this design,” and slash-command classification requires a
-leading `/`. Caller-path tests preserve both boundaries.
+leading `/`. The command-availability risks are accidentally treating an empty
+list as allow-all, checking the allowlist after a side effect, or conflating
+pairing/gate grammar with product commands. Caller-path denial and
+non-invocation tests preserve those boundaries.
