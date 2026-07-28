@@ -45,6 +45,7 @@ pub mod subagent;
 pub mod text_loop_driver;
 pub mod thread_scope;
 mod tool_disclosure;
+pub mod tool_disclosure_bridge;
 mod tool_disclosure_port;
 pub mod turn_run_executor;
 pub mod turn_runner;

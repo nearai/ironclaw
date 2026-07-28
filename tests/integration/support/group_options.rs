@@ -113,12 +113,15 @@ impl RebornIntegrationGroupBuilder {
     /// #5647 RED-pin seam: override the Bridged-mode `CapabilityAllowSet`
     /// (default forces `All`) so a test can reproduce a narrowed profile atop
     /// bridged deferral; requires `.with_tool_disclosure_bridged()` too — `into_group` fails fast otherwise.
-    /// Mirrors the production resolve-once wiring: `runtime.rs`'s
-    /// `build_default_planned_runtime_inner` wires `ToolDisclosureCapabilityDecorator`
-    /// when `tool_disclosure.is_bridged()`, and `loop_driver_host.rs`'s
-    /// `create_host` resolves the allow-set once and threads it into both that
-    /// decorator and the `CapabilitySurfaceProfileFilter` wrap in
-    /// `build_text_only_host_with_profiled_capabilities`.
+    /// Mirrors the production resolve-once wiring in
+    /// `crates/ironclaw_runner/src/runtime.rs`:
+    /// `RuntimeProfiledCapabilityPortFactory::create_capability_port` shares the
+    /// resolved allow-set between `ToolDisclosureCapabilityDecorator` and the
+    /// capability-surface filter before `RebornLoopDriverHostFactory::create_host`
+    /// in `crates/ironclaw_runner/src/loop_driver_host.rs` calls
+    /// `build_text_only_host_with_capabilities`. The explicit
+    /// `build_text_only_host_with_profiled_capabilities` form is for test
+    /// construction.
     pub fn with_narrowed_capability_allow_set_for_bridged_test(
         mut self,
         ids: impl IntoIterator<Item = CapabilityId>,

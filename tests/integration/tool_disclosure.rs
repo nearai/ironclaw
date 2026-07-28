@@ -188,6 +188,71 @@ async fn bridged_mode_survives_narrowed_capability_allow_set() {
         .expect("deferral still replaces the flat list under a narrowed profile");
 }
 
+/// Empty allow-set boundary: host-owned bridge synthesis remains reachable,
+/// but the bridge must expose no underlying catalog names or results, and a
+/// direct call to a catalog capability must still fail before dispatch.
+#[tokio::test]
+async fn empty_allow_set_keeps_bridges_without_disclosing_tools() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_bridged()
+        .with_github_issue_tools()
+        .with_narrowed_capability_allow_set_for_bridged_test([])
+        .script([
+            RebornScriptedReply::tool_call(
+                TOOL_SEARCH_NAME,
+                serde_json::json!({"query": "github", "limit": 20}),
+            ),
+            RebornScriptedReply::tool_call(
+                "github.get_repo",
+                serde_json::json!({"owner": "octo", "repo": "demo"}),
+            ),
+        ])
+        .build()
+        .await
+        .expect("empty-allow-set bridged-disclosure harness builds");
+
+    let run_id = harness
+        .submit_turn_async("find a GitHub tool, then call it directly")
+        .await
+        .expect("turn submits");
+    let state = harness
+        .wait_for_status(run_id, TurnStatus::Failed)
+        .await
+        .expect("direct underlying call is denied");
+    let failure = state
+        .failure
+        .as_ref()
+        .expect("a Failed run must carry a failure detail");
+    assert_eq!(failure.category(), "model_unavailable", "got {failure:?}");
+
+    harness
+        .assert_model_tools_contains(TOOL_SEARCH_NAME)
+        .await
+        .expect("the host-owned tool_search bridge remains advertised");
+    harness
+        .assert_model_tools_excludes(FLAT_GITHUB_TOOL_NAME)
+        .await
+        .expect("no underlying tool is advertised directly");
+    harness
+        .assert_model_tool_description_excludes(TOOL_SEARCH_NAME, "github__")
+        .await
+        .expect("tool_search's catalog index exposes no underlying tool names");
+
+    let output = harness
+        .tool_result_output("ironclaw.tool_search")
+        .await
+        .expect("tool_search result recorded");
+    let results = output["results"].as_array().expect("results is an array");
+    assert!(
+        results.is_empty(),
+        "an empty allow-set must expose no tool_search results: {results:?}"
+    );
+    harness
+        .assert_network_egress_count(0)
+        .await
+        .expect("a direct underlying call must be denied before dispatch");
+}
+
 /// #5647 trust boundary: the bridge-id exemption must not widen access to
 /// UNDERLYING tools. A deferred call resolves to the real capability id
 /// (`github.list_issues`), which the narrowed allow-set still denies at the
