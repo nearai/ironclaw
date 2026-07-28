@@ -20,7 +20,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_api::{
     Authorized, CapabilityDispatchRequest, CapabilityDispatchResult, CapabilityDispatcher,
-    CapabilityDisplayOutputPreview, DispatchError, DispatchFailureDetail, RuntimeDispatchErrorKind,
+    CapabilityDisplayOutputPreview, DispatchError, DispatchErrorLane, DispatchFailureDetail,
+    RuntimeDispatchErrorKind,
 };
 use ironclaw_resources::ResourceGovernor;
 use serde_json::Value;
@@ -408,25 +409,31 @@ fn dispatch_resource_error(
 ) -> DispatchError {
     tracing::debug!(%error, ?runtime, "reservation validation failed before dispatch");
     let cause = error.to_string();
-    match runtime {
-        RuntimeKind::Wasm => DispatchError::Wasm {
+    // System has no runtime backend to attribute a resource-reservation
+    // failure to, so it classifies as MissingRuntimeBackend here rather than
+    // joining FirstParty's lane (unlike the other three RuntimeKind ->
+    // DispatchError sites, which route System into FirstParty uniformly).
+    if runtime == RuntimeKind::System {
+        return DispatchError::MissingRuntimeBackend { runtime };
+    }
+    match runtime.dispatch_error_lane() {
+        DispatchErrorLane::Wasm => DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Resource,
             model_visible_cause: Some(cause),
         },
-        RuntimeKind::Script | RuntimeKind::Sandbox => DispatchError::Script {
+        DispatchErrorLane::Script => DispatchError::Script {
             kind: RuntimeDispatchErrorKind::Resource,
             model_visible_cause: Some(cause),
         },
-        RuntimeKind::Mcp => DispatchError::Mcp {
+        DispatchErrorLane::Mcp => DispatchError::Mcp {
             kind: RuntimeDispatchErrorKind::Resource,
             model_visible_cause: Some(cause),
         },
-        RuntimeKind::FirstParty => DispatchError::FirstParty {
+        DispatchErrorLane::FirstParty => DispatchError::FirstParty {
             kind: RuntimeDispatchErrorKind::Resource,
             safe_summary: None,
             detail: Some(DispatchFailureDetail::Diagnostic { text: cause }),
         },
-        RuntimeKind::System => DispatchError::MissingRuntimeBackend { runtime },
     }
 }
 

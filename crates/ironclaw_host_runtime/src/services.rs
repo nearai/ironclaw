@@ -26,9 +26,9 @@ use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{DiskFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    CapabilityDispatcher, CapabilityId, DispatchError, ResourceReservationId, ResourceScope,
-    ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgress, RuntimeKind, RuntimeLane,
-    SecretHandle,
+    CapabilityDispatcher, CapabilityId, DispatchError, DispatchErrorLane, ResourceReservationId,
+    ResourceScope, ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgress, RuntimeKind,
+    RuntimeLane, SecretHandle,
     runtime_policy::{
         DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode,
         ProcessBackendKind, RuntimeProfile, SecretMode,
