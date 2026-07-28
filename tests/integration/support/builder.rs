@@ -810,6 +810,32 @@ impl RebornIntegrationHarness {
         Ok(run_id)
     }
 
+    /// Submit one stable inbound event with bounded retries for a retryable
+    /// product-surface rejection. This models an external sender redelivering
+    /// the identical event, so a partially settled first attempt converges
+    /// through the production idempotency ledger.
+    pub async fn submit_turn_with_transient_retry(&self, text: &str) -> HarnessResult<TurnRunId> {
+        let (_, envelope) = self.build_user_envelope(text)?;
+        let mut last_error = None;
+        for _ in 0..3 {
+            match self.workflow.submit_inbound(envelope.clone()).await {
+                Ok(ack) => {
+                    let run_id = Self::run_id_from_ack(ack)?;
+                    self.wait_for_status(run_id, TurnStatus::Completed).await?;
+                    return Ok(run_id);
+                }
+                Err(error) if error.is_retryable() => {
+                    last_error = Some(error);
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(last_error
+            .expect("the bounded retry loop always makes at least one request")
+            .into())
+    }
+
     /// Enqueue additional scripted replies AFTER the harness is built — for a
     /// second turn whose tool-call arguments depend on a server-minted value
     /// (e.g. a durable `result_ref`) only known once an earlier turn has

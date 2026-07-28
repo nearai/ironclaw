@@ -123,7 +123,7 @@ async fn acme_fixture_lifecycle_dispatches_from_the_active_snapshot(#[case] stor
         .await
         .expect("seed acme account");
     lifecycle
-        .submit_turn("install the acme messenger extension")
+        .submit_turn_with_transient_retry("install the acme messenger extension")
         .await
         .expect("install turn completes");
     lifecycle
@@ -153,7 +153,7 @@ async fn acme_fixture_lifecycle_dispatches_from_the_active_snapshot(#[case] stor
         .await
         .expect("invoke thread builds");
     invoke
-        .submit_turn("send an acme note")
+        .submit_turn_with_transient_retry("send an acme note")
         .await
         .expect("invoke turn completes");
     invoke
@@ -180,7 +180,7 @@ async fn acme_fixture_lifecycle_dispatches_from_the_active_snapshot(#[case] stor
         .await
         .expect("remove thread builds");
     remove
-        .submit_turn("remove the acme messenger extension")
+        .submit_turn_with_transient_retry("remove the acme messenger extension")
         .await
         .expect("remove turn completes");
     remove
