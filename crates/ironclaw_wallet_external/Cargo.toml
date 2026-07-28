@@ -1,0 +1,63 @@
+[package]
+name = "ironclaw_wallet_external"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "External-wallet signing providers (browser injected window.ethereum / window.solana) for the IronClaw attested-signing substrate"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+# Internal workspace crate — not published to crates.io. cargo-deny's
+# allow-wildcard-paths exemption is skipped for publishable crates (crates.io
+# disallows path deps), so this crate's path deps would otherwise be flagged.
+publish = false
+
+[package.metadata.dist]
+dist = false
+
+[package.metadata.ironclaw]
+# External-wallet providers: injected, NEAR redirect, WalletConnect. Holds no
+# key material — the user's wallet does — so it carries signer-recovery
+# primitives but never ironclaw_secrets or the chain SDKs, which the boundary
+# suite pins. Depends only on contracts and substrates.
+layer = "substrates"
+
+[dependencies]
+tracing = "0.1"
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+# Attested-signing substrate (lower PRs in the stack).
+ironclaw_signing_provider = { path = "../ironclaw_signing_provider" }
+ironclaw_attestation = { path = "../ironclaw_attestation" }
+
+# EVM signer recovery (ecrecover over secp256k1). Direct k256, matching the
+# chain-signing crate (PR6); no full alloy wire stack is pulled into PR7.
+k256 = { version = "0.13", features = ["ecdsa"] }
+# Solana ed25519 signature verification — already vendored in-tree, so the heavy
+# solana-sdk is NOT pulled.
+ed25519-dalek = { version = "2.2.0", features = ["std"] }
+sha3 = "0.10"
+sha2 = "0.10"
+# NEAR redirect (PR8): the unsigned tx and gate-bound `state` ride the redirect
+# URL as URL-safe base64. Already vendored in the workspace lockfile; no heavy
+# near-primitives / near-crypto SDK is pulled — ed25519 verification reuses the
+# vendored ed25519-dalek above and the full borsh Transaction roundtrip is a
+# deferred follow-up (matching PR6).
+base64 = "0.22"
+
+# WalletConnect v2 relay transport (PR9). The fork at
+# tracecommons/walletconnect-rs @ c6b528e defaults to rustls (openssl-free); we
+# take DEFAULT features for relay_client and DO NOT enable relay_rpc's `cacao`
+# feature (it pulls alloy 0.3.6 -> reqwest default-tls -> openssl). The
+# architecture boundary test `workspace_graph_is_openssl_free` enforces this.
+relay_client = { git = "https://github.com/tracecommons/walletconnect-rs", rev = "7078fd303cc521cceeed919e3d452f45eeb115e8", package = "relay_client" }
+relay_rpc = { git = "https://github.com/tracecommons/walletconnect-rs", rev = "7078fd303cc521cceeed919e3d452f45eeb115e8", package = "relay_rpc" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+hex = "0.4"
+rand_core = "0.6"
