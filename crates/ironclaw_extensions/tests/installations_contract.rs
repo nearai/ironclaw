@@ -1946,3 +1946,186 @@ async fn failed_install_debris_is_not_granted_to_a_later_installer() {
         "debris from alice's failed install must not grant her membership"
     );
 }
+
+/// Perf contract: listing installations must not issue a query per
+/// installation. The normalized layout split one aggregate row into an
+/// installation row plus child membership/binding rows, and reconstructing
+/// each installation with its own child queries makes `list_installations`
+/// O(N) round trips. On a local SSD that is invisible (fractions of a
+/// millisecond); on network-attached storage it dominates -- it took the
+/// hosted `/api/webchat/v2/extensions` read to ~2s. Pinning "the query count
+/// does not grow with the number of installations" is what catches a
+/// regression here, because wall-clock on a dev machine never will.
+#[tokio::test]
+async fn listing_installations_does_not_issue_a_query_per_installation() {
+    async fn queries_to_list(installation_count: usize) -> usize {
+        let counting = Arc::new(QueryCountingBackend::new(InMemoryBackend::new()));
+        let filesystem: Arc<dyn RootFilesystem> = counting.clone();
+        let store = ExtensionInstallationStore::load_at(
+            Arc::clone(&filesystem),
+            VirtualPath::new("/system/extensions/.installations/query-count").unwrap(),
+            HostPortCatalog::empty(),
+            contracts(),
+        )
+        .await
+        .unwrap();
+
+        for index in 0..installation_count {
+            let ext = format!("acme-tools-{index}");
+            let toml = raw_capability_provider_manifest()
+                .replace("id = \"acme-tools\"", &format!("id = \"{ext}\""))
+                .replace("acme-tools.echo", &format!("{ext}.echo"));
+            let record = ExtensionManifestRecord::from_toml(
+                toml,
+                ManifestSource::HostBundled,
+                &HostPortCatalog::empty(),
+                Some(manifest_hash("sha256:abc")),
+                &contracts(),
+            )
+            .unwrap();
+            let installation = ExtensionInstallation::new(
+                installation_id(&ext),
+                extension_id(&ext),
+                ExtensionManifestRef::new(extension_id(&ext), Some(manifest_hash("sha256:abc"))),
+                vec![ExtensionCredentialBinding::new(
+                    ExtensionCredentialHandle::new("api-token").unwrap(),
+                    SecretHandle::new("secret-api-token").unwrap(),
+                )],
+                Utc::now(),
+                InstallationOwner::user(UserId::new("alice").unwrap()),
+            )
+            .unwrap();
+            store
+                .upsert_manifest_and_installation(record, installation)
+                .await
+                .unwrap();
+        }
+
+        counting.reset();
+        let listed = store.list_installations().await.unwrap();
+        assert_eq!(listed.len(), installation_count, "all installations listed");
+        // every listed aggregate is still fully reconstructed
+        for installation in &listed {
+            assert_eq!(installation.credential_bindings().len(), 1);
+            assert_eq!(installation.owner().members().unwrap().len(), 1);
+        }
+        counting.queries()
+    }
+
+    let few = queries_to_list(2).await;
+    let many = queries_to_list(8).await;
+    assert_eq!(
+        few, many,
+        "list_installations must issue a constant number of queries; \
+         got {few} for 2 installations and {many} for 8 (O(N) round trips)"
+    );
+}
+
+/// Counts `query` calls so a test can assert round-trip complexity rather
+/// than wall-clock, which is meaningless on a local disk.
+struct QueryCountingBackend {
+    inner: InMemoryBackend,
+    queries: std::sync::atomic::AtomicUsize,
+}
+
+impl QueryCountingBackend {
+    fn new(inner: InMemoryBackend) -> Self {
+        Self {
+            inner,
+            queries: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn reset(&self) {
+        self.queries.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn queries(&self) -> usize {
+        self.queries.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl RootFilesystem for QueryCountingBackend {
+    fn capabilities(&self) -> ironclaw_filesystem::BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: ironclaw_filesystem::Entry,
+        cas: CasExpectation,
+    ) -> Result<ironclaw_filesystem::RecordVersion, ironclaw_filesystem::FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<Option<ironclaw_filesystem::VersionedEntry>, ironclaw_filesystem::FilesystemError>
+    {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<Vec<ironclaw_filesystem::DirEntry>, ironclaw_filesystem::FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn query(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<ironclaw_filesystem::VersionedEntry>, ironclaw_filesystem::FilesystemError>
+    {
+        self.queries
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.query(path, filter, page).await
+    }
+
+    async fn list_dir_bounded(
+        &self,
+        path: &VirtualPath,
+        max_entries: usize,
+    ) -> Result<Vec<ironclaw_filesystem::DirEntry>, ironclaw_filesystem::FilesystemError> {
+        self.inner.list_dir_bounded(path, max_entries).await
+    }
+
+    async fn ensure_index(
+        &self,
+        prefix: &VirtualPath,
+        spec: &ironclaw_filesystem::IndexSpec,
+    ) -> Result<(), ironclaw_filesystem::FilesystemError> {
+        self.inner.ensure_index(prefix, spec).await
+    }
+
+    async fn stat(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<ironclaw_filesystem::FileStat, ironclaw_filesystem::FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), ironclaw_filesystem::FilesystemError> {
+        self.inner.delete(path).await
+    }
+
+    async fn begin(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<Box<dyn ironclaw_filesystem::StorageTxn>, ironclaw_filesystem::FilesystemError>
+    {
+        self.inner.begin(path).await
+    }
+
+    async fn reserve_sequence(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<ironclaw_filesystem::SeqNo, ironclaw_filesystem::FilesystemError> {
+        self.inner.reserve_sequence(path).await
+    }
+}
