@@ -359,7 +359,11 @@ fn parse_host_pattern_trims_surrounding_whitespace() {
 
 #[test]
 fn parse_host_pattern_rejects_empty_and_bare_wildcard() {
-    assert!(parse_host_pattern("").unwrap_err().is_invalid_host_pattern());
+    assert!(
+        parse_host_pattern("")
+            .unwrap_err()
+            .is_invalid_host_pattern()
+    );
     assert!(
         parse_host_pattern("   ")
             .unwrap_err()
@@ -383,7 +387,9 @@ fn parse_host_pattern_rejects_malformed_hostnames() {
         "embedded\0nul.com",
     ] {
         assert!(
-            parse_host_pattern(bad).unwrap_err().is_invalid_host_pattern(),
+            parse_host_pattern(bad)
+                .unwrap_err()
+                .is_invalid_host_pattern(),
             "expected {bad:?} to be rejected"
         );
     }

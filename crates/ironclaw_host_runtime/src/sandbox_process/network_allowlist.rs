@@ -111,7 +111,9 @@ pub fn sandbox_extra_allowed_domains() -> Result<Vec<String>, NetworkPolicyError
     raw.split(',')
         .map(str::trim)
         .filter(|domain| !domain.is_empty())
-        .map(|domain| ironclaw_network::parse_host_pattern(domain).map(|pattern| pattern.host_pattern))
+        .map(|domain| {
+            ironclaw_network::parse_host_pattern(domain).map(|pattern| pattern.host_pattern)
+        })
         .collect()
 }
 
@@ -230,7 +232,10 @@ mod tests {
 
         let policy = sandbox_network_policy().unwrap();
 
-        assert_eq!(policy.max_egress_bytes, Some(DEFAULT_SANDBOX_MAX_EGRESS_BYTES));
+        assert_eq!(
+            policy.max_egress_bytes,
+            Some(DEFAULT_SANDBOX_MAX_EGRESS_BYTES)
+        );
     }
 
     #[test]
@@ -263,7 +268,10 @@ mod tests {
         let _guard = lock_env();
         remove_runtime_env(SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV);
 
-        assert_eq!(sandbox_extra_allowed_domains().unwrap(), Vec::<String>::new());
+        assert_eq!(
+            sandbox_extra_allowed_domains().unwrap(),
+            Vec::<String>::new()
+        );
     }
 
     // A bare `*` turns `host_matches_pattern` (ironclaw_network::policy) into

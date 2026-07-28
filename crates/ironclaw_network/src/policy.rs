@@ -71,10 +71,12 @@ impl NetworkPolicyError {
 /// caller's own default) is the way to do that, not `0`.
 pub fn parse_egress_limit(raw: &str) -> Result<u64, NetworkPolicyError> {
     let trimmed = raw.trim();
-    let parsed: u64 = trimmed.parse().map_err(|_| NetworkPolicyError::InvalidEgressLimit {
-        raw: raw.to_string(),
-        reason: "must be a positive integer number of bytes".to_string(),
-    })?;
+    let parsed: u64 = trimmed
+        .parse()
+        .map_err(|_| NetworkPolicyError::InvalidEgressLimit {
+            raw: raw.to_string(),
+            reason: "must be a positive integer number of bytes".to_string(),
+        })?;
     if parsed == 0 {
         return Err(NetworkPolicyError::InvalidEgressLimit {
             raw: raw.to_string(),
