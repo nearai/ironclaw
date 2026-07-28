@@ -521,6 +521,9 @@ impl InboundSink for GenericChannelInboundSink {
             ChannelInboundSurfaceOutcome::Rejected(rejection) => {
                 let ChannelInboundSurfaceRejectedAdmission { envelope, error } = *rejection;
                 let retryable = error.is_retryable();
+                #[cfg(feature = "test-support")]
+                let test_diagnostic =
+                    format!("ProductSurface admission failed retryably: {error:?}");
                 if let Some(observer) = self.config.observer.clone() {
                     self.spawn_observer(async move {
                         observer.observe_error(envelope, error).await;
@@ -532,9 +535,13 @@ impl InboundSink for GenericChannelInboundSink {
                     );
                 }
                 if retryable {
+                    #[cfg(feature = "test-support")]
+                    let reason = test_diagnostic;
+                    #[cfg(not(feature = "test-support"))]
+                    let reason = "ProductSurface admission failed retryably".to_string();
                     Err(InboundSinkError {
                         retryable: true,
-                        reason: "ProductSurface admission failed retryably".to_string(),
+                        reason,
                     })
                 } else {
                     // A non-retryable ProductSurface error is settled in the durable
