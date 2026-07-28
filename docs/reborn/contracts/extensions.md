@@ -55,17 +55,107 @@ V1 installed extensions live under:
 /system/extensions/<extension_id>/
 ```
 
-Generic runtime and caller-membership state lives in filesystem record rows under:
+Generic runtime and caller-membership state uses normalized, typed filesystem
+record rows under:
+
+```text
+/system/extensions/.installations/v2/
+  installations/<hashed_installation_id>.json
+  memberships/<hashed_installation_id>/<hashed_user_id>.json
+  credential-bindings/<hashed_installation_id>/<hashed_credential_handle>.json
+```
+
+Each row has an explicit record kind, `extension_state.v2` schema version,
+typed body, and exact lookup indexes. The installation record is both the
+stable package-instance identity and the deployment's **install pin**: it
+embeds the validated, hash-carrying manifest wire for the installed
+definition. That embedded definition is not an availability or policy
+declaration — what *can* be installed lives in the available-extension
+catalog — and a definition never exists outside an installation record. User
+membership and credential bindings are independently mutable records.
+Extension failure state is not stored here: the host's activation record owns
+it, so this store has no second, divergent answer to "is this extension
+broken". Lifecycle state is derived, not stored: a record with `removed_at`
+set is a tombstone, a record with a `lease` is mid-mutation, and a record
+with neither is live. A tombstone additionally carries
+`removal_cleanup_pending` until `delete_manifest` marks the removal
+converged; while pending, the embedded definition stays authoritative for
+manifest readers so an interrupted removal cleanup retries without the
+catalog and fresh imports stay blocked (`persist_removal_tombstone` seeds
+the same state for orphan cleanups that never had an installation row).
+Removing a user or the final installation sets `removed_at` rather than
+erasing rows. Package bytes and assets remain under
+`/system/extensions/<extension_id>/` and are never embedded in lifecycle
+records.
+
+All authoritative read-modify-write transitions use the shared bounded
+filesystem CAS helper. A fresh installation writes child rows before
+committing the installation record (definition included) in one CAS, so an
+interrupted write cannot expose a partial aggregate and a free-floating
+definition row cannot exist. Updates to a live aggregate first take the
+record's `lease`, which keeps it out of typed installation reads while
+children change (the embedded definition stays readable), and commit the
+record lease-free last. A failed update restores the prior aggregate;
+startup uses the compatibility snapshot to roll back an interrupted lease.
+Aggregate `ExtensionInstallation` values are reconstructed at the typed
+store boundary for existing callers, with `manifest_ref` derived from the
+embedded definition so an installation can never disagree with its pin.
+
+Every aggregate write sweeps child rows omitted from its member and binding
+sets, including creation and reactivation, which hold no lease. Under the
+single-writer-per-root contract an omitted-but-active row can only be debris
+from an earlier failed write — an interrupted install's membership row, a
+crashed update's leftovers — and merging it in would grant membership to a
+user whose install never succeeded. A mutation's outcome is
+decided by the v2 records alone: once they commit, a failed
+compatibility-projection write does not fail the operation; startup repair
+converges the projection.
+
+Membership removal uses the same lease as a cross-process gate, with the
+leaving member recorded as the holder so only that caller's retry re-enters
+it. A non-final leave updates only the caller row and releases the lease; a
+final leave keeps it held until shared runtime teardown and soft removal
+complete. Concurrent joins fail transiently while the lease is held.
+Removal retries are idempotent, and the record gains `removed_at` only after
+its child tombstones are durable; the tombstone retains the embedded
+definition so reinstall revives the same identities. These transitions are
+pinned by
+`cargo test -p ironclaw_extensions --test installations_contract`
+(normalized layout, membership mutation, interruption, and backend
+contracts) and
+`cargo test --test reborn_integration_extension_user_lifecycle_isolation`
+(the production-composition restart journey).
+
+These are `VirtualPath` keys, not a promise of literal host directories.
+`RootFilesystem` may route them to disk, libSQL, PostgreSQL, or another
+compatible backend while retaining the same partitioning and typed store API.
+These records do not own administrator configuration.
+
+During the v2 transition, the previous aggregate paths remain compatibility
+views:
 
 ```text
 /system/extensions/.installations/manifests/<hashed_extension_id>.json
 /system/extensions/.installations/installations/<hashed_installation_id>.json
 ```
 
-The store declares exact indexes for extension id and runtime installation id,
-and uses row CAS for membership, compatibility health metadata, and deletes.
-Health metadata is diagnostic, not lifecycle authority. These records do not
-own administrator configuration.
+Store startup imports each legacy manifest+installation pair only when no v2
+authority record exists; an orphaned legacy manifest with no installation is
+the legacy flow's durable cleanup tombstone and imports as a
+cleanup-pending tombstone record so the interrupted removal stays
+retryable. Startup then repairs both views from v2. The installation compatibility row is also the bounded
+rollback snapshot while a v2 record holds a lease; outside that transition
+it is never lifecycle authority. **One live writer per installation root**
+is the deployment contract: deploys quiesce the old writer before the new
+binary starts (old and new binaries especially must never overlap), and
+startup recovery assumes any lease it finds was orphaned by a dead writer.
+Concurrent same-root writers are out of contract — the composition already
+serializes extension lifecycle behind a single process's operation lock,
+and cross-process coordination (lease fencing, epochs) is deliberately not
+built until a multi-writer topology actually exists. Startup still skips
+rather than fails on a lease that reappears between recovery passes. Once a v2 writer has run, rollback requires a data
+backup or a binary that understands v2; starting an aggregate-only writer
+would create divergent state.
 
 Manifest-declared administrator configuration is stored once per tenant under
 the tenant-rewriting admin-configuration scoped mount, at the logical record

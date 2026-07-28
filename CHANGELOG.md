@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Extension persistence:** normalize filesystem-backed extension lifecycle
+  state into typed installation (with the embedded, hash-pinned manifest
+  definition), user-membership, and credential-binding records with bounded
+  CAS updates, a CAS-protected mutation lease for membership and removal
+  transitions, `removed_at` soft-removal tombstones, legacy aggregate
+  compatibility views, and restart repair. Retires the per-installation
+  diagnostic health snapshot: it was always `healthy`, never read, and never
+  surfaced, while the host's activation record already owns extension failure
+  state. Rows written by the previous release keep deserializing.
+
 ### Fixed
 
 - **Agent-loop termination recovery:** tell the model when no-progress or the

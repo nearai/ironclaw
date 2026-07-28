@@ -3724,15 +3724,18 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "deadpool-postgres",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_trust",
+ "libsql",
  "parking_lot",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-postgres",
  "toml 1.1.2+spec-1.1.0",
  "url",
 ]
