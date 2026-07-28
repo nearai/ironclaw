@@ -19,7 +19,8 @@ mod url_target;
 pub use egress::{NetworkHttpEgress, NetworkHttpTransport, PolicyNetworkHttpEgress};
 pub use error::NetworkHttpError;
 pub use policy::{
-    NetworkPolicyError, StaticNetworkPolicyEnforcer, parse_host_pattern, target_matches_pattern,
+    NetworkPolicyError, StaticNetworkPolicyEnforcer, parse_egress_limit, parse_host_pattern,
+    target_matches_pattern,
 };
 pub use resolver::NetworkResolver;
 pub use test_rewrite::{

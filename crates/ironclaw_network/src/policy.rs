@@ -33,6 +33,8 @@ pub enum NetworkPolicyError {
     },
     #[error("invalid network host pattern {pattern:?}: {reason}")]
     InvalidHostPattern { pattern: String, reason: String },
+    #[error("invalid network egress limit {raw:?}: {reason}")]
+    InvalidEgressLimit { raw: String, reason: String },
 }
 
 impl NetworkPolicyError {
@@ -55,6 +57,31 @@ impl NetworkPolicyError {
     pub fn is_invalid_host_pattern(&self) -> bool {
         matches!(self, Self::InvalidHostPattern { .. })
     }
+
+    pub fn is_invalid_egress_limit(&self) -> bool {
+        matches!(self, Self::InvalidEgressLimit { .. })
+    }
+}
+
+/// Parses one operator-supplied egress byte-limit string (e.g. from an env
+/// var override) into a positive `u64`. Rejects non-numeric input and zero —
+/// `max_egress_bytes: Some(0)` would deny every request with an egress
+/// estimate and is never what an operator setting a volume cap means; if
+/// they want to disable the cap, unsetting the override (falling back to the
+/// caller's own default) is the way to do that, not `0`.
+pub fn parse_egress_limit(raw: &str) -> Result<u64, NetworkPolicyError> {
+    let trimmed = raw.trim();
+    let parsed: u64 = trimmed.parse().map_err(|_| NetworkPolicyError::InvalidEgressLimit {
+        raw: raw.to_string(),
+        reason: "must be a positive integer number of bytes".to_string(),
+    })?;
+    if parsed == 0 {
+        return Err(NetworkPolicyError::InvalidEgressLimit {
+            raw: raw.to_string(),
+            reason: "must not be zero".to_string(),
+        });
+    }
+    Ok(parsed)
 }
 
 /// Parses one operator- or config-supplied hostname string into a validated

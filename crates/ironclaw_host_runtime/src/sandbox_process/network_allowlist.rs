@@ -34,6 +34,41 @@ use ironclaw_network::NetworkPolicyError;
 /// Comma-separated hostnames (e.g. `example.com,*.internal.example.com`).
 pub const SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV: &str = "IRONCLAW_SANDBOX_EXTRA_ALLOWED_DOMAINS";
 
+/// Environment variable operators can set to override
+/// [`DEFAULT_SANDBOX_MAX_EGRESS_BYTES`] — the per-request egress volume cap
+/// carried on the sandboxed shell's [`NetworkPolicy`]. Same
+/// `env_or_override` precedence as [`SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV`] and
+/// `connect::DOCKER_HOST_ENV`.
+pub const SANDBOX_MAX_EGRESS_BYTES_ENV: &str = "IRONCLAW_SANDBOX_MAX_EGRESS_BYTES";
+
+/// Default per-request egress volume cap for the sandboxed shell profile, in
+/// bytes: **2 GiB** (`2 * 1024 * 1024 * 1024`).
+///
+/// This is a product tradeoff between two failure modes: too low, and a
+/// legitimate `cargo fetch`/`npm install`/`docker pull`-style dependency
+/// resolve (which can pull single artifacts in the hundreds-of-MB range —
+/// large ML/CUDA wheels, `node_modules` tarballs, monorepo shallow clones)
+/// gets blocked and reported as if it were malicious; too high, and the cap
+/// stops meaning anything. 2 GiB is generous enough to pass those ordinary
+/// package-manager workloads (which sit one to two orders of magnitude
+/// below it) while still bounding a single request far short of what a
+/// deliberate bulk-exfiltration attempt would need to move — this is a
+/// **per-request** ceiling (`NetworkPolicy::max_egress_bytes` is checked
+/// against one request's `estimated_bytes` by `ironclaw_network`'s policy
+/// enforcer), not a cumulative session budget, so it does not by itself
+/// bound how much data a long-running sandboxed session moves in total
+/// across many requests; that is future work for the CONNECT proxy this
+/// list feeds. [`SANDBOX_MAX_EGRESS_BYTES_ENV`] lets an operator tighten (or
+/// loosen) this for their own risk tolerance and workload shape.
+///
+/// Mirrors `MCP_NETWORK_EGRESS_LIMIT`'s shape
+/// (`crates/ironclaw_extension_host/src/mcp.rs`, `activation_transaction.rs`)
+/// — a named constant feeding `NetworkPolicy::max_egress_bytes` — but not
+/// its value: that one is sized for MCP tool-call JSON responses (2 MiB) and
+/// is not a template here; the sandboxed shell's legitimate payloads are
+/// orders of magnitude larger.
+pub const DEFAULT_SANDBOX_MAX_EGRESS_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
 /// Default egress allowlist for the sandboxed shell profile — the package
 /// registries and source hosts ordinary `pip`/`npm`/`git`/`curl` workflows
 /// need, mirroring legacy IronClaw's sandbox allowlist.
@@ -92,6 +127,19 @@ pub fn sandbox_allowed_domains() -> Result<Vec<String>, NetworkPolicyError> {
         .collect())
 }
 
+/// Reads [`SANDBOX_MAX_EGRESS_BYTES_ENV`] and returns the operator's
+/// configured per-request egress cap, or [`DEFAULT_SANDBOX_MAX_EGRESS_BYTES`]
+/// when unset. `Err` when the override is set but not a positive `u64` —
+/// same fail-loud posture as [`sandbox_extra_allowed_domains`]: a malformed
+/// override must refuse to start, not silently fall back to the default
+/// while the operator believes their tighter value took effect.
+pub fn sandbox_max_egress_bytes() -> Result<u64, NetworkPolicyError> {
+    let Some(raw) = env_or_override(SANDBOX_MAX_EGRESS_BYTES_ENV) else {
+        return Ok(DEFAULT_SANDBOX_MAX_EGRESS_BYTES);
+    };
+    ironclaw_network::parse_egress_limit(&raw)
+}
+
 /// [`sandbox_allowed_domains`], expressed as [`NetworkPolicy`] `allowed_targets`
 /// — ready to carry on the sandboxed profile's `builtin.shell` grant so
 /// `validate_network_policy_metadata` (which rejects an empty allowlist)
@@ -115,7 +163,7 @@ pub fn sandbox_network_policy() -> Result<NetworkPolicy, NetworkPolicyError> {
             })
             .collect(),
         deny_private_ip_ranges: true,
-        max_egress_bytes: None,
+        max_egress_bytes: Some(sandbox_max_egress_bytes()?),
     })
 }
 
@@ -145,6 +193,16 @@ mod tests {
 
     #[test]
     fn sandbox_network_policy_is_non_empty_and_denies_private_ips() {
+        // Guarded and reset like the env-mutating tests below: `sandbox_
+        // network_policy` now reads the shared runtime-env overlay through
+        // `sandbox_extra_allowed_domains`/`sandbox_max_egress_bytes`, so this
+        // test must not race a sibling test's mid-flight override of either
+        // env var (e.g. the deliberately-invalid `*` set by
+        // `sandbox_network_policy_propagates_the_wildcard_rejection`).
+        let _guard = lock_env();
+        remove_runtime_env(SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV);
+        remove_runtime_env(SANDBOX_MAX_EGRESS_BYTES_ENV);
+
         let policy = sandbox_network_policy().unwrap();
         assert!(
             !policy.allowed_targets.is_empty(),
@@ -157,6 +215,47 @@ mod tests {
                 .iter()
                 .any(|target| target.host_pattern == "github.com")
         );
+    }
+
+    // The sandboxed shell is the one profile whose entire purpose is running
+    // untrusted code; an absent egress cap there means a single request can
+    // exfiltrate an unbounded amount of data through the (otherwise
+    // allowlisted) proxy. `max_egress_bytes: None` is the repo-wide default
+    // everywhere else, but not here.
+    #[test]
+    fn sandbox_network_policy_sets_a_concrete_egress_ceiling() {
+        let _guard = lock_env();
+        remove_runtime_env(SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV);
+        remove_runtime_env(SANDBOX_MAX_EGRESS_BYTES_ENV);
+
+        let policy = sandbox_network_policy().unwrap();
+
+        assert_eq!(policy.max_egress_bytes, Some(DEFAULT_SANDBOX_MAX_EGRESS_BYTES));
+    }
+
+    #[test]
+    fn sandbox_max_egress_bytes_env_override_is_honored() {
+        let _guard = lock_env();
+        set_runtime_env(SANDBOX_MAX_EGRESS_BYTES_ENV, "1048576");
+
+        let result = sandbox_max_egress_bytes();
+
+        remove_runtime_env(SANDBOX_MAX_EGRESS_BYTES_ENV);
+
+        assert_eq!(result.unwrap(), 1_048_576);
+    }
+
+    #[test]
+    fn sandbox_max_egress_bytes_env_rejects_zero_and_non_numeric() {
+        let _guard = lock_env();
+
+        set_runtime_env(SANDBOX_MAX_EGRESS_BYTES_ENV, "0");
+        assert!(sandbox_max_egress_bytes().is_err());
+
+        set_runtime_env(SANDBOX_MAX_EGRESS_BYTES_ENV, "not-a-number");
+        assert!(sandbox_max_egress_bytes().is_err());
+
+        remove_runtime_env(SANDBOX_MAX_EGRESS_BYTES_ENV);
     }
 
     #[test]

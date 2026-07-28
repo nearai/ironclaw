@@ -134,12 +134,13 @@ pub use process_port::{
 };
 pub use production::DefaultHostRuntime;
 pub use sandbox_process::{
-    DEFAULT_SANDBOX_ALLOWED_DOMAINS, RebornSandboxConfig, RebornSandboxContainerIdentity,
-    RebornSandboxNetworkBroker, RebornSandboxScopeKey, RebornSandboxSecretBroker,
-    RebornSandboxUserKey, RebornSandboxWorkspaceMode, RebornScopedSandboxCommandTransport,
-    SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV, SandboxActivityRegistry, SandboxDockerReadiness,
+    DEFAULT_SANDBOX_ALLOWED_DOMAINS, DEFAULT_SANDBOX_MAX_EGRESS_BYTES, RebornSandboxConfig,
+    RebornSandboxContainerIdentity, RebornSandboxNetworkBroker, RebornSandboxScopeKey,
+    RebornSandboxSecretBroker, RebornSandboxUserKey, RebornSandboxWorkspaceMode,
+    RebornScopedSandboxCommandTransport, SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV,
+    SANDBOX_MAX_EGRESS_BYTES_ENV, SandboxActivityRegistry, SandboxDockerReadiness,
     connect_docker_with_retry, sandbox_allowed_domains, sandbox_docker_readiness,
-    sandbox_extra_allowed_domains, sandbox_network_policy,
+    sandbox_extra_allowed_domains, sandbox_max_egress_bytes, sandbox_network_policy,
 };
 /// Scoped cleanup guard consumed by the generic extension activation
 /// transaction's composition adapter. Raw obligation handoff stores remain
