@@ -20,6 +20,14 @@ use ironclaw_host_api::{
 };
 use ironclaw_turns::{TurnRunId, TurnScope};
 
+/// Map a manifest display string onto the projection's optional field: a blank
+/// value means the affordance does not exist, which is `None` on the wire. The
+/// projection validator rejects `Some("")`.
+fn non_empty(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
 /// A host-issued pairing challenge: the minted proof code plus the manifest
 /// connection recipe it belongs to. Carrying both is what lets a product
 /// surface render the pairing panel instead of a generic "unsupported
@@ -63,13 +71,21 @@ impl AuthChallengeView {
         view.expires_at = self.expires_at;
         if let Some(pairing) = self.pairing {
             let connection = pairing.connection;
+            // These are `Option` because the field may be genuinely ABSENT, and
+            // the projection validator rejects a present-but-empty display
+            // string. A manifest legitimately ships empty values for a recipe
+            // that has no such affordance -- Telegram's `web_generated_code`
+            // pairing has no text input, so `input_placeholder = ""` -- so an
+            // empty string must map to `None`, not `Some("")`. Emitting
+            // `Some("")` fails `ConnectionPromptContext::validate` and takes the
+            // whole chat stream down with "The chat stream failed: Validation".
             view.connection = Some(ConnectionPromptContext {
                 channel: connection.channel.clone(),
                 strategy: Some(connection.strategy.as_str().to_string()),
-                instructions: Some(connection.instructions.clone()),
-                input_placeholder: Some(connection.input_placeholder),
-                submit_label: Some(connection.submit_label),
-                error_message: Some(connection.error_message),
+                instructions: non_empty(&connection.instructions),
+                input_placeholder: non_empty(&connection.input_placeholder),
+                submit_label: non_empty(&connection.submit_label),
+                error_message: non_empty(&connection.error_message),
             });
             view.pairing = Some(PairingPromptView {
                 channel: connection.channel,

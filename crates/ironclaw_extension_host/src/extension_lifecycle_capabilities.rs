@@ -429,6 +429,16 @@ fn without_model_visible_connection_chrome(
         }) => *connection_required = None,
         Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) => {
             for extension in extensions {
+                // Connection guidance is SETUP instructions, not live state.
+                // An installation that is already `Active` for this caller is
+                // connected, so handing the model "here is how to pair" makes
+                // it contradict itself ("installed/active" followed by "to
+                // pair your account: ..."). Drop the chrome once the caller is
+                // done; keep it for everyone who still has work to do.
+                if extension.installation_phase == Some(InstallationState::Active) {
+                    extension.summary.channel_connection = None;
+                    continue;
+                }
                 match extension.summary.channel_connection.as_mut() {
                     Some(connection)
                         if connection.strategy
@@ -1015,9 +1025,81 @@ mod tests {
         );
     }
 
+    /// Connection guidance is setup instructions, not live state. Once the
+    /// caller's own installation is `Active` they are already connected, so
+    /// telling the model "here is how to pair" makes it contradict itself —
+    /// the observed symptom was a reply reading "Telegram is installed/active."
+    /// immediately followed by "To pair your account: ...". Strip the chrome
+    /// for entries the caller has already completed; keep it for the rest.
+    #[test]
+    fn model_visible_extension_search_drops_connection_guidance_once_active() {
+        let response = LifecycleProductResponse {
+            package_ref: None,
+            phase: InstallationState::Active,
+            blockers: Vec::new(),
+            message: None,
+            payload: Some(LifecycleProductPayload::ExtensionSearch {
+                extensions: vec![
+                    search_summary_with_phase(
+                        "paired",
+                        RebornChannelConnectStrategy::WebGeneratedCode,
+                        Some(InstallationState::Active),
+                    ),
+                    search_summary_with_phase(
+                        "unpaired",
+                        RebornChannelConnectStrategy::WebGeneratedCode,
+                        Some(InstallationState::Installed),
+                    ),
+                    search_summary_with_phase(
+                        "uninstalled",
+                        RebornChannelConnectStrategy::WebGeneratedCode,
+                        None,
+                    ),
+                ],
+                count: 3,
+            }),
+        };
+
+        let filtered = without_model_visible_connection_chrome(response);
+        let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) = filtered.payload
+        else {
+            panic!("expected extension_search payload");
+        };
+        let find = |id: &str| {
+            extensions
+                .iter()
+                .find(|extension| extension.summary.package_ref.id.as_str() == id)
+                .unwrap_or_else(|| panic!("{id} summary"))
+                .summary
+                .channel_connection
+                .clone()
+        };
+
+        assert!(
+            find("paired").is_none(),
+            "an already-active install must not be told how to connect"
+        );
+        assert!(
+            find("unpaired").is_some(),
+            "an installed-but-unconnected extension still needs its guidance"
+        );
+        assert!(
+            find("uninstalled").is_some(),
+            "a catalog entry the caller has not installed still needs its guidance"
+        );
+    }
+
     fn search_summary(
         id: &str,
         strategy: RebornChannelConnectStrategy,
+    ) -> LifecycleSearchExtensionSummary {
+        search_summary_with_phase(id, strategy, None)
+    }
+
+    fn search_summary_with_phase(
+        id: &str,
+        strategy: RebornChannelConnectStrategy,
+        installation_phase: Option<InstallationState>,
     ) -> LifecycleSearchExtensionSummary {
         LifecycleSearchExtensionSummary {
             summary: LifecycleExtensionSummary {
@@ -1045,7 +1127,7 @@ mod tests {
                 credential_requirements: Vec::new(),
                 onboarding: None,
             },
-            installation_phase: None,
+            installation_phase,
         }
     }
 
