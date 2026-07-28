@@ -32,6 +32,8 @@ pub enum HostApiError {
     InvalidRuntimeCredentialTarget { value: String, reason: String },
     #[error("invalid safe summary: {reason}")]
     InvalidSafeSummary { reason: String },
+    #[error("invalid model diagnostic: {reason}")]
+    InvalidModelDiagnostic { reason: String },
     #[error("invalid host remediation: {reason}")]
     InvalidHostRemediation { reason: String },
     #[error("host API invariant violation: {reason}")]
@@ -96,6 +98,15 @@ impl HostApiError {
     /// payload/credential material the redaction rule caught.
     pub(crate) fn invalid_safe_summary(reason: impl Into<String>) -> Self {
         Self::InvalidSafeSummary {
+            reason: reason.into(),
+        }
+    }
+
+    /// Validation failure for a [`crate::ModelDiagnostic`]. Deliberately carries
+    /// only the reason: the rejected value may be the backend text this
+    /// model-only contract is preventing from crossing unsafely.
+    pub(crate) fn invalid_model_diagnostic(reason: impl Into<String>) -> Self {
+        Self::InvalidModelDiagnostic {
             reason: reason.into(),
         }
     }
