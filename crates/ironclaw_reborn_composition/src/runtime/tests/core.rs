@@ -3680,11 +3680,12 @@ async fn cancel_run_propagates_to_subagent_children() {
         run_id: parent_run_id,
         ..
     } = parent;
-    let child_scope = TurnScope::new(
+    let child_scope = TurnScope::new_with_owner(
         parent_scope.tenant_id.clone(),
         parent_scope.agent_id.clone(),
         parent_scope.project_id.clone(),
         ThreadId::new("runtime-cancel-child-thread").unwrap(),
+        parent_scope.explicit_owner_user_id().cloned(),
     );
     let child = runtime
         .turn_tree_store

@@ -1,3 +1,4 @@
+// arch-exempt: large_file, bounded transaction retry handling stays with the row-native journal transaction owner, plan #6696
 use std::{
     collections::VecDeque,
     sync::{
@@ -229,21 +230,49 @@ where
     ) -> Result<StoredCommandOutcome, ProcessJournalStoreError> {
         self.ensure_materialized().await?;
         let references = command.load_references()?;
-        for attempt in 0..MAX_TRANSACTION_RETRIES {
-            let mut loaded = rows::load(self.filesystem.as_ref(), &references).await?;
+        'transaction: for attempt in 0..MAX_TRANSACTION_RETRIES {
+            let mut loaded = match rows::load(self.filesystem.as_ref(), &references).await {
+                Ok(loaded) => loaded,
+                Err(ProcessJournalStoreError::Filesystem(error))
+                    if rows::retryable_transaction_error(&error) =>
+                {
+                    rows::retry_transaction(attempt).await;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             let mut state = std::mem::take(&mut loaded.state);
             let prefix = processes_prefix()?;
-            let mut txn = self
+            let mut txn = match self
                 .filesystem
                 .begin(&ResourceScope::system(), &prefix)
-                .await?;
+                .await
+            {
+                Ok(txn) => txn,
+                Err(error) if rows::retryable_transaction_error(&error) => {
+                    rows::retry_transaction(attempt).await;
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
             let sequence_path = self
                 .filesystem
                 .resolve(&ResourceScope::system(), &process_journal_sequence_path()?)?;
             let reservation_count = command.cursor_reservation_count(state.processes.len());
             let mut first_cursor = None;
             for _ in 0..reservation_count {
-                let reserved = txn.reserve_sequence(&sequence_path).await?;
+                let reserved = match txn.reserve_sequence(&sequence_path).await {
+                    Ok(reserved) => reserved,
+                    Err(error) if rows::retryable_transaction_error(&error) => {
+                        txn.rollback().await;
+                        rows::retry_transaction(attempt).await;
+                        continue 'transaction;
+                    }
+                    Err(error) => {
+                        txn.rollback().await;
+                        return Err(error.into());
+                    }
+                };
                 first_cursor.get_or_insert(reserved.get());
             }
             state.next_cursor = first_cursor.unwrap_or(1);
@@ -564,9 +593,22 @@ where
         &self,
         import_legacy: bool,
     ) -> Result<usize, ProcessJournalStoreError> {
-        for attempt in 0..MAX_TRANSACTION_RETRIES {
-            let mut loaded =
-                rows::load(self.filesystem.as_ref(), &rows::LoadReferences::default()).await?;
+        'transaction: for attempt in 0..MAX_TRANSACTION_RETRIES {
+            let mut loaded = match rows::load(
+                self.filesystem.as_ref(),
+                &rows::LoadReferences::default(),
+            )
+            .await
+            {
+                Ok(loaded) => loaded,
+                Err(ProcessJournalStoreError::Filesystem(error))
+                    if rows::retryable_transaction_error(&error) =>
+                {
+                    rows::retry_transaction(attempt).await;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if loaded.initialized {
                 return Ok(0);
             }
@@ -614,17 +656,31 @@ where
             let entries = std::mem::take(&mut state.journal);
             let imported = entries.len();
             let prefix = processes_prefix()?;
-            let mut txn = self
+            let mut txn = match self
                 .filesystem
                 .begin(&ResourceScope::system(), &prefix)
-                .await?;
+                .await
+            {
+                Ok(txn) => txn,
+                Err(error) if rows::retryable_transaction_error(&error) => {
+                    rows::retry_transaction(attempt).await;
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
             let result = async {
                 if import_legacy {
                     let sequence_path = self
                         .filesystem
                         .resolve(&ResourceScope::system(), &process_journal_sequence_path()?)?;
                     for _ in 1..state.next_cursor {
-                        txn.reserve_sequence(&sequence_path).await?;
+                        match txn.reserve_sequence(&sequence_path).await {
+                            Ok(_) => {}
+                            Err(error) if rows::retryable_transaction_error(&error) => {
+                                return Err(ProcessJournalStoreError::Filesystem(error));
+                            }
+                            Err(error) => return Err(error.into()),
+                        }
                     }
                 }
                 rows::persist(self.filesystem.as_ref(), txn.as_mut(), &loaded, &state).await?;
@@ -646,6 +702,7 @@ where
                 {
                     txn.rollback().await;
                     rows::retry_transaction(attempt).await;
+                    continue 'transaction;
                 }
                 Err(error) => {
                     txn.rollback().await;

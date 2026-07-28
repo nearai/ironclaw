@@ -1578,30 +1578,35 @@ async fn process_journal_contains_scope<F>(filesystem: &F, tenant_id: &str, user
 where
     F: RootFilesystem,
 {
-    let path =
-        VirtualPath::new("/tenants/__system__/users/__system__/processes/journal/state.json")
-            .expect("process journal path");
-    let body = filesystem
-        .read_file(&path)
+    let prefix =
+        VirtualPath::new("/tenants/__system__/users/__system__/processes/materialized/process")
+            .expect("row-native process journal path");
+    for entry in filesystem
+        .list_dir(&prefix)
         .await
-        .expect("read process journal state");
-    let state: serde_json::Value =
-        serde_json::from_slice(&body).expect("deserialize process journal state");
-    state
-        .get("processes")
-        .and_then(serde_json::Value::as_object)
-        .is_some_and(|processes| {
-            processes.values().any(|process| {
-                process
-                    .pointer("/scope/tenant_id")
-                    .and_then(serde_json::Value::as_str)
-                    == Some(tenant_id)
-                    && process
-                        .pointer("/scope/user_id")
-                        .and_then(serde_json::Value::as_str)
-                        == Some(user_id)
-            })
-        })
+        .expect("list row-native process journal")
+    {
+        let path = VirtualPath::new(format!("{}/{}", prefix.as_str(), entry.name))
+            .expect("row-native process path");
+        let body = filesystem
+            .read_file(&path)
+            .await
+            .expect("read row-native process");
+        let process: serde_json::Value =
+            serde_json::from_slice(&body).expect("deserialize row-native process");
+        if process
+            .pointer("/scope/tenant_id")
+            .and_then(serde_json::Value::as_str)
+            == Some(tenant_id)
+            && process
+                .pointer("/scope/user_id")
+                .and_then(serde_json::Value::as_str)
+                == Some(user_id)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 #[tokio::test]

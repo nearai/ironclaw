@@ -32,14 +32,19 @@ async fn reborn_user_submit_completes_while_another_turn_state_write_is_blocked(
         "agent-e2e",
         Some("project-e2e"),
     );
+    // Both schedulers can claim either durable run from the shared storage.
+    // Share the replay queue too, so whichever scheduler wins sees the same
+    // two model responses instead of exhausting a harness-local queue.
+    let model_gateway = RebornTraceReplayModelGateway::with_responses([
+        HostManagedModelResponse::assistant_reply("first submit completed"),
+        HostManagedModelResponse::assistant_reply("second submit completed"),
+    ]);
 
     let mut blocked_harness =
         RebornBinaryE2EHarness::with_model_gateway_scope_initial_actor_installation_shared_storage(
             BLOCKED_ROOM,
             "alice",
-            RebornTraceReplayModelGateway::with_responses([
-                HostManagedModelResponse::assistant_reply("blocked submit eventually completed"),
-            ]),
+            model_gateway.clone(),
             RecordingTestCapabilityPort::echo(),
             scope.clone(),
             "reborn-test",
@@ -52,9 +57,7 @@ async fn reborn_user_submit_completes_while_another_turn_state_write_is_blocked(
         RebornBinaryE2EHarness::with_model_gateway_scope_initial_actor_installation_shared_storage(
             LIVE_ROOM,
             "alice",
-            RebornTraceReplayModelGateway::with_responses([
-                HostManagedModelResponse::assistant_reply("live submit completed"),
-            ]),
+            model_gateway,
             RecordingTestCapabilityPort::echo(),
             scope,
             "reborn-test",

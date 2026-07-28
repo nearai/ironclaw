@@ -2,7 +2,7 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_filesystem::{
-    CasExpectation, DiskFilesystem, Entry, Fault, FaultInjecting, FilesystemError,
+    CasExpectation, DiskFilesystem, Entry, Fault, FaultInjecting, FaultKind, FilesystemError,
     FilesystemOperation, Filter, InMemoryBackend, IndexKey, LibSqlRootFilesystem, Page,
     ScopedFilesystem,
 };
@@ -206,6 +206,36 @@ async fn process_journal_rows_serialize_concurrent_store_handles() {
         second.submit_process(exclusive_request(ProcessId::new())),
     );
     assert_ne!(first_result.is_ok(), second_result.is_ok());
+}
+
+#[tokio::test]
+async fn process_journal_retries_transient_transaction_setup_contention() {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&backend),
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/processes").expect("process alias"),
+            VirtualPath::new("/engine/processes").expect("process target"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("process mount"),
+    ));
+    let store = ProcessJournalStore::new(filesystem);
+    let resource_scope = scope();
+    submit_internal_process(&store, &resource_scope, ProcessId::new()).await;
+
+    for operation in [
+        FilesystemOperation::ReadFile,
+        FilesystemOperation::BeginTxn,
+        FilesystemOperation::ReserveSeq,
+    ] {
+        backend.add_fault(
+            Fault::on(operation)
+                .nth(1)
+                .returning(FaultKind::BackendBusy),
+        );
+        submit_internal_process(&store, &resource_scope, ProcessId::new()).await;
+    }
 }
 
 #[tokio::test]
