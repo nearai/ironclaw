@@ -91,14 +91,23 @@ pub fn parse_egress_limit(raw: &str) -> Result<u64, NetworkPolicyError> {
 ///
 /// This is the chokepoint for turning untrusted "extra allowed domain"
 /// strings into policy the enforcer will actually honor. It is stricter than
-/// [`NetworkTargetPattern::validate_declaration`]: that method accepts a bare
-/// `*` because some manifest-declared grants (e.g. `CapabilityNetworkProfile::
-/// DevWildcard`, MCP full-network credential audiences) legitimately mean
-/// "every host" and are reviewed as such at declaration time. A hostname
-/// typed into an env var was never reviewed — `host_matches_pattern` (this
-/// module) treats `*` as "match every host", so a typo here silently turns a
-/// package-registry allowlist into allow-all egress for the one profile whose
-/// entire purpose is holding untrusted code. Reject it instead of trusting it.
+/// [`NetworkTargetPattern::validate_declaration`] (`crates/ironclaw_host_api/
+/// src/action.rs`): that method accepts a bare `*` because some
+/// host-authored grants — e.g. `CapabilityNetworkProfile::DevWildcard`'s
+/// local-dev shell profile — legitimately mean "every host" and are reviewed
+/// as such at declaration time. A hostname typed into an env var was never
+/// reviewed — `host_matches_pattern` (this module) treats `*` as "match
+/// every host", so a typo here silently turns a package-registry allowlist
+/// into allow-all egress for the one profile whose entire purpose is holding
+/// untrusted code. Reject it instead of trusting it.
+///
+/// The two validators diverge INTENTIONALLY and this direction must not be
+/// collapsed either: `validate_declaration` must not be tightened to match
+/// this function's wildcard rejection, since that would break
+/// `DevWildcard`'s declared full-access grant. (Extension manifest
+/// credential audiences are already stricter than either of these — they
+/// reject a wildcard host outright via `ManifestV3Error::WildcardAudienceHost`
+/// — so they are not an example of a legitimate bare-`*` consumer either.)
 ///
 /// Accepts: a bare hostname (`example.com`) or a single `*.`-prefixed
 /// wildcard label (`*.example.com`). Rejects: empty/whitespace-only input,

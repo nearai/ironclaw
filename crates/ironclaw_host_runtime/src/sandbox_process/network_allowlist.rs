@@ -57,9 +57,25 @@ pub const SANDBOX_MAX_EGRESS_BYTES_ENV: &str = "IRONCLAW_SANDBOX_MAX_EGRESS_BYTE
 /// against one request's `estimated_bytes` by `ironclaw_network`'s policy
 /// enforcer), not a cumulative session budget, so it does not by itself
 /// bound how much data a long-running sandboxed session moves in total
-/// across many requests; that is future work for the CONNECT proxy this
-/// list feeds. [`SANDBOX_MAX_EGRESS_BYTES_ENV`] lets an operator tighten (or
-/// loosen) this for their own risk tolerance and workload shape.
+/// across many requests.
+///
+/// That per-request model holds today only because the sole consumer of
+/// this constant is `PolicyNetworkHttpEgress`, a host-mediated HTTP client
+/// that sees plaintext method/URL/headers/body and computes
+/// `estimated_bytes` for a request before sending it
+/// (`estimate_http_request_bytes`,
+/// `crates/ironclaw_network/src/egress.rs`). It is **not established** that
+/// the same model transfers to the CONNECT/forward proxy this list feeds
+/// (see the module doc above): a CONNECT proxy tunnels opaque TLS bytes
+/// after the handshake and never sees plaintext, so it cannot compute "one
+/// request's size" the way `estimate_http_request_bytes` does — streamed
+/// per-connection byte metering is the natural fit for that transport, not
+/// discrete pre-flight request sizing. Whether `max_egress_bytes` should
+/// mean "per request" or "cumulative per connection" once the proxy exists
+/// is an open design question for that proxy-wiring PR to resolve, not
+/// something this constant already answers. [`SANDBOX_MAX_EGRESS_BYTES_ENV`]
+/// lets an operator tighten (or loosen) this for their own risk tolerance
+/// and workload shape in the meantime.
 ///
 /// Mirrors `MCP_NETWORK_EGRESS_LIMIT`'s shape
 /// (`crates/ironclaw_extension_host/src/mcp.rs`, `activation_transaction.rs`)
@@ -67,6 +83,14 @@ pub const SANDBOX_MAX_EGRESS_BYTES_ENV: &str = "IRONCLAW_SANDBOX_MAX_EGRESS_BYTE
 /// its value: that one is sized for MCP tool-call JSON responses (2 MiB) and
 /// is not a template here; the sandboxed shell's legitimate payloads are
 /// orders of magnitude larger.
+// TODO(security): this value is sized and validated against
+// `PolicyNetworkHttpEgress`'s per-request `estimated_bytes` check
+// (`crates/ironclaw_network/src/egress.rs`). The CONNECT-proxy wiring PR
+// (see module doc above) must explicitly decide streaming vs. cumulative
+// byte metering for that transport before assuming `max_egress_bytes`
+// carries the same "per request" meaning there — a proxy that reuses this
+// constant without that decision is not enforcing what this doc comment
+// describes.
 pub const DEFAULT_SANDBOX_MAX_EGRESS_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Default egress allowlist for the sandboxed shell profile — the package
