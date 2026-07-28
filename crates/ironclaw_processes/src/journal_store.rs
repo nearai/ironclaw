@@ -447,16 +447,15 @@ where
         if state_present {
             return Ok(true);
         }
-        Ok(!self
+        Ok(self
             .filesystem
-            .tail_bounded(
+            .head_seq(
                 &ResourceScope::system(),
                 &legacy_command_log_path()?,
                 SeqNo::ZERO,
-                1,
             )
             .await?
-            .is_empty())
+            .is_some())
     }
 
     async fn deployed_legacy_authority_present(&self) -> Result<bool, ProcessJournalStoreError> {
