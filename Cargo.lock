@@ -3701,6 +3701,7 @@ dependencies = [
  "ironclaw_trust",
  "ironclaw_turns",
  "lru",
+ "proptest",
  "rand 0.10.1",
  "rust_decimal",
  "secrecy",
