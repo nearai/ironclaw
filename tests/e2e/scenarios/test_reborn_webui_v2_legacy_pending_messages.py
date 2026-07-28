@@ -871,6 +871,9 @@ async def test_reborn_legacy_failed_send_retry_resubmits_message(
             "The request failed: service_unavailable."
         )
         await expect(failed.get_by_label("Retry message")).to_have_count(0)
+        await expect(page.locator(SEL_V2["typing_indicator"])).to_be_visible(
+            timeout=5000
+        )
         assert [request["content"] for request in harness["send_requests"]] == [
             "retry failed send test",
             "retry failed send test",

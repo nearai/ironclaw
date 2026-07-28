@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import signal
 import socket
 import uuid
@@ -28,6 +29,7 @@ YOLO_PROFILE = "local-dev-yolo"
 DEFAULT_MODEL = "mock-model"
 VISION_MODEL = "gpt-4o"
 ACCEPTED_SEND_OUTCOMES = {"submitted", "already_submitted"}
+DEFAULT_ARTIFACT_MAX_BYTES = 256 * 1024 * 1024
 
 # Shared tenant secret for the test-tools/market-data fixture (test-tools/README.md).
 # `IRONCLAW_REBORN_DEV_SECRET__<handle>` is read once at `serve` boot, so it must
@@ -36,12 +38,91 @@ ACCEPTED_SEND_OUTCOMES = {"submitted", "already_submitted"}
 MARKET_DATA_DEV_SECRET = "e2e-market-data-shared-key"
 
 
+def _directory_size(path: Path) -> int:
+    return sum(
+        entry.stat().st_size
+        for entry in path.rglob("*")
+        if entry.is_file()
+    )
+
+
+def _enforce_artifact_budget(
+    browser_artifact_root: Path,
+    max_bytes: int,
+    current_artifact_dir: Path,
+) -> None:
+    """Keep browser artifacts within a deterministic per-shard disk budget."""
+    bundles = [
+        path
+        for path in browser_artifact_root.iterdir()
+        if path.is_dir()
+    ]
+    bundle_sizes = {path: _directory_size(path) for path in bundles}
+    total_bytes = sum(bundle_sizes.values())
+    if total_bytes <= max_bytes:
+        return
+
+    oldest_first = sorted(
+        (path for path in bundles if path != current_artifact_dir),
+        key=lambda path: path.stat().st_mtime_ns,
+    )
+    for path in oldest_first:
+        if total_bytes <= max_bytes:
+            break
+        total_bytes -= bundle_sizes[path]
+        shutil.rmtree(path)
+
+    if total_bytes <= max_bytes or not current_artifact_dir.exists():
+        return
+
+    largest_first = sorted(
+        (
+            path
+            for path in current_artifact_dir.rglob("*")
+            if path.is_file()
+        ),
+        key=lambda path: path.stat().st_size,
+        reverse=True,
+    )
+    for path in largest_first:
+        if total_bytes <= max_bytes:
+            break
+        file_size = path.stat().st_size
+        path.unlink()
+        total_bytes -= file_size
+
+
+def _artifact_max_bytes() -> int:
+    raw_value = os.environ.get("IRONCLAW_E2E_ARTIFACT_MAX_BYTES", "").strip()
+    if not raw_value:
+        return DEFAULT_ARTIFACT_MAX_BYTES
+    try:
+        max_bytes = int(raw_value)
+    except ValueError as error:
+        raise ValueError(
+            "IRONCLAW_E2E_ARTIFACT_MAX_BYTES must be a positive integer"
+        ) from error
+    if max_bytes <= 0:
+        raise ValueError(
+            "IRONCLAW_E2E_ARTIFACT_MAX_BYTES must be a positive integer"
+        )
+    return max_bytes
+
+
 class _ArtifactContext:
     """Browser context that persists diagnostics when CI requests them."""
 
-    def __init__(self, context, artifact_dir: Path):
+    def __init__(
+        self,
+        context,
+        artifact_dir: Path,
+        browser_artifact_root: Path,
+        artifact_max_bytes: int,
+    ):
         self._context = context
         self._artifact_dir = artifact_dir
+        self._browser_artifact_root = browser_artifact_root
+        self._artifact_max_bytes = artifact_max_bytes
         self._closed = False
 
     def __getattr__(self, name):
@@ -70,14 +151,25 @@ class _ArtifactContext:
         except PlaywrightError:
             pass
         await self._context.close()
+        _enforce_artifact_budget(
+            self._browser_artifact_root,
+            self._artifact_max_bytes,
+            self._artifact_dir,
+        )
 
 
 class _ArtifactBrowser:
     """Browser proxy that records each context under a unique artifact path."""
 
-    def __init__(self, browser, artifact_root: Path):
+    def __init__(
+        self,
+        browser,
+        artifact_root: Path,
+        artifact_max_bytes: int,
+    ):
         self._browser = browser
-        self._artifact_root = artifact_root
+        self._browser_artifact_root = artifact_root / "browser"
+        self._artifact_max_bytes = artifact_max_bytes
 
     def __getattr__(self, name):
         return getattr(self._browser, name)
@@ -88,12 +180,22 @@ class _ArtifactBrowser:
         )[0]
         readable_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", node_id).strip("-")[-160:]
         context_name = f"{readable_name}-{uuid.uuid4().hex[:8]}"
-        artifact_dir = self._artifact_root / "browser" / context_name
+        artifact_dir = self._browser_artifact_root / context_name
         artifact_dir.mkdir(parents=True, exist_ok=True)
         kwargs.setdefault("record_video_dir", str(artifact_dir / "videos"))
+        kwargs.setdefault("record_video_size", {"width": 960, "height": 540})
         context = await self._browser.new_context(*args, **kwargs)
-        await context.tracing.start(screenshots=True, snapshots=True, sources=True)
-        return _ArtifactContext(context, artifact_dir)
+        await context.tracing.start(
+            screenshots=True,
+            snapshots=False,
+            sources=False,
+        )
+        return _ArtifactContext(
+            context,
+            artifact_dir,
+            self._browser_artifact_root,
+            self._artifact_max_bytes,
+        )
 
 
 def find_free_port() -> int:
@@ -438,6 +540,10 @@ async def reborn_v2_browser():
     from playwright.async_api import async_playwright
 
     headless = os.environ.get("HEADED", "").strip() not in ("1", "true")
+    artifact_root = os.environ.get("IRONCLAW_E2E_ARTIFACT_DIR", "").strip()
+    artifact_max_bytes = (
+        _artifact_max_bytes() if artifact_root else DEFAULT_ARTIFACT_MAX_BYTES
+    )
     async with async_playwright() as p:
         browser = None
         for attempt in range(3):
@@ -448,9 +554,12 @@ async def reborn_v2_browser():
                 if attempt == 2:
                     raise
                 await asyncio.sleep(1)
-        artifact_root = os.environ.get("IRONCLAW_E2E_ARTIFACT_DIR", "").strip()
         if artifact_root:
-            yield _ArtifactBrowser(browser, Path(artifact_root).resolve())
+            yield _ArtifactBrowser(
+                browser,
+                Path(artifact_root).resolve(),
+                artifact_max_bytes,
+            )
         else:
             yield browser
         await browser.close()

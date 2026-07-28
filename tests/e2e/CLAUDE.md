@@ -64,6 +64,33 @@ pytest scenarios/ --timeout=60
 HEADED=1 pytest scenarios/
 ```
 
+## Reborn Playwright diagnostics
+
+Set `IRONCLAW_E2E_ARTIFACT_DIR` to preserve diagnostics from the shared Reborn
+browser and server fixtures. Leave it unset for ordinary local runs, where the
+harness keeps logs under pytest's temporary directory and does not enable
+Playwright trace, screenshot, or video capture.
+
+```bash
+IRONCLAW_E2E_ARTIFACT_DIR=tests/e2e/artifacts/local-debug \
+  pytest scenarios/test_reborn_webui_v2_smoke.py
+```
+
+The harness writes server stdout/stderr beneath `server-logs/`. Each browser
+context gets a directory beneath `browser/` whose name is derived from the
+sanitized pytest node ID plus a short unique suffix. A context bundle contains
+final page screenshots, a screenshot-only Playwright trace (DOM snapshots and
+source capture are disabled), and 960×540 video. The nightly workflow uploads
+these diagnostics only when its shard fails.
+
+Browser artifacts have a 256 MiB per-shard default budget. Override it with a
+positive byte count in `IRONCLAW_E2E_ARTIFACT_MAX_BYTES`. Once the budget is
+reached, the harness removes the oldest context bundles first; if the newest
+bundle alone exceeds the budget, its largest files are removed until it fits.
+Server logs remain outside this browser budget so startup and process failures
+retain textual evidence even when a browser bundle is pruned; nightly servers
+run at warn-level logging to limit that volume.
+
 ## Test Scenarios
 
 The suite has grown to ~65+ scenario files. The table below is a **representative
