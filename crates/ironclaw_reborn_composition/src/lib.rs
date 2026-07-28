@@ -22,6 +22,8 @@ mod admin_token;
 mod admin_user_directory;
 #[cfg(test)]
 mod approval_test_support;
+mod attested;
+mod attested_continuation;
 mod automation;
 mod blocked_auth_resume;
 mod builtin_capability_policy;
@@ -58,6 +60,8 @@ mod trigger_fire_access;
 mod turn_run_snapshot;
 
 pub use admin_token::AdminApiTokenMinter;
+pub use attested::{NoopBroadcaster, RebornAttestedComposition, RegisterAttestedGateError};
+pub use attested_continuation::RebornAttestedContinuation;
 pub use automation::service::RebornAutomationProductService;
 pub use automation::trigger_poller::PostSubmitDeliveryHook;
 pub use error::RebornBuildError;

@@ -4485,6 +4485,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_attested_runtime"
+version = "0.1.0"
+dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
+ "alloy-primitives",
+ "async-trait",
+ "chrono",
+ "ed25519-dalek",
+ "hex",
+ "ironclaw_attestation",
+ "ironclaw_chain_signing",
+ "ironclaw_host_api",
+ "ironclaw_secrets",
+ "ironclaw_signing_provider",
+ "ironclaw_turns",
+ "ironclaw_wallet_external",
+ "k256",
+ "secrecy",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ironclaw_auth"
 version = "0.1.0"
 dependencies = [
@@ -5343,11 +5367,14 @@ dependencies = [
 name = "ironclaw_reborn_composition"
 version = "0.1.0"
 dependencies = [
+ "alloy-consensus",
+ "alloy-primitives",
  "async-trait",
  "axum 0.8.9",
  "base64 0.22.1",
  "chrono",
  "deadpool-postgres",
+ "ed25519-dalek",
  "fs4",
  "futures",
  "hex",
@@ -5356,9 +5383,12 @@ dependencies = [
  "http-body-util",
  "ironclaw_approvals",
  "ironclaw_attachments",
+ "ironclaw_attestation",
+ "ironclaw_attested_runtime",
  "ironclaw_auth",
  "ironclaw_authorization",
  "ironclaw_capabilities",
+ "ironclaw_chain_signing",
  "ironclaw_common",
  "ironclaw_conversations",
  "ironclaw_event_projections",
@@ -5398,13 +5428,16 @@ dependencies = [
  "ironclaw_runtime_policy",
  "ironclaw_safety",
  "ironclaw_secrets",
+ "ironclaw_signing_provider",
  "ironclaw_skills",
  "ironclaw_slack_extension",
  "ironclaw_threads",
  "ironclaw_triggers",
  "ironclaw_trust",
  "ironclaw_turns",
+ "ironclaw_wallet_external",
  "ironclaw_webui",
+ "k256",
  "libc",
  "libsql",
  "lru",

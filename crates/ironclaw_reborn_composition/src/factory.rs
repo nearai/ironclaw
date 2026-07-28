@@ -164,6 +164,7 @@ use ironclaw_triggers::{
     TriggerRepository,
 };
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
+use ironclaw_turns::AttestedResumePort;
 use ironclaw_turns::TurnStateRowStore;
 use ironclaw_turns::{
     CheckpointStateStorePort, ExternalToolCatalog, InMemoryExternalToolCatalog, LoopCheckpointStore,
@@ -1003,6 +1004,11 @@ where
 }
 
 pub(crate) struct RebornRuntimeStores {
+    /// Attested-signing signer-continuation composition: the shared gate
+    /// binding store plus the assembled driver, dispatched by the gate/resolve
+    /// ingress once a turn reaches `AttestedResolved`. `None` on production
+    /// profiles until the durable attested backends are wired.
+    pub(crate) attested_signing: Option<Arc<crate::attested::RebornAttestedComposition>>,
     pub(crate) host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime>,
     #[cfg(test)]
     pub(crate) turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
@@ -1575,11 +1581,19 @@ where
 fn production_turn_state_store<F>(
     filesystem: Arc<ScopedFilesystem<F>>,
     limits: ironclaw_turns::TurnStateStoreLimits,
+    // `None` on the production paths until the durable attested backends are
+    // wired: without a port the store simply never admits an attested resume,
+    // which is the correct fail-closed default rather than a silent no-op.
+    attested_resume_port: Option<Arc<dyn AttestedResumePort>>,
 ) -> TurnStateRowStore<F>
 where
     F: RootFilesystem + 'static,
 {
-    TurnStateRowStore::new(filesystem).with_limits(limits)
+    let store = TurnStateRowStore::new(filesystem).with_limits(limits);
+    match attested_resume_port {
+        Some(port) => store.with_attested_resume_port(port),
+        None => store,
+    }
 }
 
 async fn local_dev_trigger_repository(
@@ -4166,6 +4180,7 @@ where
     let turn_state = Arc::new(production_turn_state_store(
         Arc::clone(&turn_state_filesystem),
         ironclaw_turns::TurnStateStoreLimits::default(),
+        None,
     ));
     let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
     let secret_credentials = build_filesystem_secret_credential_stores(
@@ -4620,6 +4635,7 @@ async fn build_backend_production(
     let turn_state = Arc::new(production_turn_state_store(
         Arc::clone(&turn_state_filesystem),
         turn_state_store_limits,
+        None,
     ));
     // Rebindable source-turn-state slot for the trigger delivery-target
     // service — same repoint seam as the sibling snapshot slot below.
@@ -5542,6 +5558,10 @@ async fn build_backend_production(
     };
 
     Ok(RebornRuntimeStores {
+        // Production composes no attested backend yet: the durable stores are a
+        // later group, and `None` means the gate ingress has nothing to
+        // dispatch to and refuses, rather than half-resolving a signature.
+        attested_signing: None,
         host_runtime,
         #[cfg(test)]
         turn_coordinator,

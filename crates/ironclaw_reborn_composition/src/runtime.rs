@@ -691,6 +691,11 @@ impl From<DefaultPlannedRuntimeBuildError> for RebornRuntimeError {
 /// [`build_reborn_runtime`]. Downstream code never reaches into the substrate
 /// or worker machinery: it talks to the runtime through task-level methods.
 pub struct RebornRuntime {
+    /// Attested-signing signer-continuation composition, when one was composed.
+    /// `None` on production profiles until the durable attested backends are
+    /// wired — the gate ingress then has nothing to dispatch to and fails
+    /// closed, rather than half-resolving a signature.
+    pub(crate) attested_signing: Option<Arc<crate::attested::RebornAttestedComposition>>,
     pub(crate) host_runtime: Arc<dyn HostRuntime>,
     pub(crate) product_auth: Arc<RebornProductAuthServices>,
     pub(crate) readiness: RebornReadiness,
@@ -1432,6 +1437,17 @@ fn approval_turn_locator_unavailable() -> ironclaw_product::ProductSurfaceFailur
 impl RebornRuntime {
     pub fn readiness(&self) -> &RebornReadiness {
         &self.readiness
+    }
+
+    /// The attested-signing signer-continuation composition, when this runtime
+    /// composed one.
+    ///
+    /// The gate/resolve ingress reaches the assembled driver and the
+    /// authoritative binding store through this one handle, rather than
+    /// assembling them from runtime internals — so there is exactly one place a
+    /// signing continuation can be obtained.
+    pub fn attested_signing(&self) -> Option<&Arc<crate::attested::RebornAttestedComposition>> {
+        self.attested_signing.as_ref()
     }
 
     /// Build the canonical product surface over this runtime graph.
@@ -4708,6 +4724,7 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
     }
 
     let runtime = RebornRuntime {
+        attested_signing: services.attested_signing.clone(),
         host_runtime: services.host_runtime.clone(),
         product_auth: services.product_auth.clone(),
         readiness: services.readiness.clone(),

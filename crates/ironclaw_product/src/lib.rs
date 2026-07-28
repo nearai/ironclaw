@@ -28,6 +28,7 @@ mod action;
 pub mod adapter_registry;
 mod approval_interaction;
 mod approval_prompt;
+mod attested_continuation;
 mod auth_continuation;
 mod auth_interaction;
 mod auth_prompt;
@@ -76,6 +77,10 @@ pub use approval_interaction::{
 pub use approval_prompt::{
     ApprovalPromptLookup, ApprovalPromptLookupError, approval_prompt_context_view,
     approval_prompt_lookup,
+};
+pub use attested_continuation::{
+    AttestedContinuationOutcome, AttestedContinuationRejection, AttestedGateContinuationPort,
+    AttestedProofClaim, AttestedProofKind, VerifiedAttestedContinuation,
 };
 /// Concrete turn-gate resume dispatcher used by the Reborn composition crate to
 /// bridge product-auth continuations into the workflow-owned turn boundary.
