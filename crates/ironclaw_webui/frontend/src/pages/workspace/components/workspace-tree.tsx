@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { Skeleton, cn } from "@ironclaw/design-system";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import { listWorkspace } from "../lib/workspace-api";
@@ -128,21 +129,21 @@ const TreeNode = React.memo(function WorkspaceTreeNode({
         className="outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-accent)]/70 focus-visible:ring-inset"
       >
         <div
-          className={[
+          className={cn(
             "flex min-h-8 w-full cursor-pointer items-center gap-2 rounded-md px-2 text-left text-sm hover:bg-[var(--v2-surface-soft)] hover:text-[var(--v2-text-strong)]",
             selectedPath === entry.path
               ? "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)] shadow-[inset_2px_0_0_currentColor]"
-              : "text-[var(--v2-text)]",
-          ].join(" ")}
+              : "text-[var(--v2-text)]"
+          )}
           style={{ paddingLeft: `${8 + depth * 16}px` }}
         >
-          <span aria-hidden="true" className={["w-3 text-[10px]", isExpanded ? "rotate-90" : ""].join(" ")}>{">"}</span>
+          <span aria-hidden="true" className={cn("w-3 text-[10px]", isExpanded && "rotate-90")}>{">"}</span>
           <span className="min-w-0 truncate font-medium">{displayName}</span>
         </div>
         {isExpanded && (
           <div role="group" className="space-y-1">
             {childQuery.isLoading
-              ? (<div role="status" className="px-4 py-2 text-xs text-[var(--v2-text-faint)]">{t("workspace.loading")}</div>)
+              ? (<div role="status" className="space-y-1 px-4 py-2"><Skeleton className="h-3 w-24" /><span className="sr-only">{t("workspace.loading")}</span></div>)
               : childQuery.isError
               ? (<div role="alert" className="px-4 py-2 text-xs text-[var(--v2-danger-text)]">{t("workspace.unableOpenDirectory")}</div>)
               : children.map((child, index) => (
@@ -189,12 +190,12 @@ const TreeNode = React.memo(function WorkspaceTreeNode({
         onSelectFile(entry.path);
       }}
       onKeyDown={(event) => onTreeItemKeyDown(event, entry, false)}
-      className={[
+      className={cn(
         "flex min-h-8 w-full cursor-pointer items-center gap-2 rounded-md px-2 text-left text-sm outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-accent)]/70 focus-visible:ring-inset",
         selectedPath === entry.path
           ? "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)] shadow-[inset_2px_0_0_currentColor]"
-          : "text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-soft)] hover:text-[var(--v2-text-strong)]",
-      ].join(" ")}
+          : "text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-soft)] hover:text-[var(--v2-text-strong)]"
+      )}
       style={{ paddingLeft: `${24 + depth * 16}px` }}
     >
       <span className="min-w-0 truncate">{displayName}</span>
@@ -453,7 +454,7 @@ export function WorkspaceTree({
   ]);
 
   if (isLoading) {
-    return (<div className="space-y-2 p-3">{[1, 2, 3, 4].map((i) => (<div key={i} className="v2-skeleton h-8 rounded-md" />))}</div>);
+    return (<div className="space-y-2 p-3">{[1, 2, 3, 4].map((i) => (<Skeleton key={i} className="h-8" />))}</div>);
   }
 
   if (!rootEntries.length) {

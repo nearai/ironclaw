@@ -67,6 +67,21 @@ function renderModal({
     Button() {},
     Icon() {},
     TelegramPairingPanel() {},
+    Input() {},
+    Skeleton() {},
+    ModalBody({ children }) {
+      return children;
+    },
+    Modal({ open, onClose, title, children, closeLabel }) {
+      return {
+        open,
+        onClose,
+        title,
+        closeLabel,
+        children,
+        type: "Modal",
+      };
+    },
     console: { error() {} },
     React: {
       useState: (initial) => [

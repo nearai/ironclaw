@@ -58,6 +58,10 @@ function renderExtensionsPage(tab, extensionState = {}) {
   };
   const context = {
     ActionToast() {},
+    Button() {},
+    Card({ children, ...rest }) {
+      return { type: "Card", props: rest, children };
+    },
     ChannelsTab() {},
     ConfirmDialog,
     ConfigureModal() {},
