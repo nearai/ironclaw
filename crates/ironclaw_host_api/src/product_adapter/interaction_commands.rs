@@ -21,6 +21,7 @@ use crate::product_adapter::inbound::{
     ApprovalDecision, ApprovalResolutionPayload, AuthResolutionPayload, AuthResolutionResult,
     ProductInboundPayload, ProductTriggerReason, ScopedApprovalResolutionPayload,
 };
+use crate::product_adapter::redaction::RedactedString;
 
 /// Strip symmetric wrapping backticks (repeatedly, with trimming) so a
 /// pasted `` `approve gate:x` `` parses like the bare command.
@@ -35,7 +36,7 @@ pub fn strip_wrapping_inline_code(text: &str) -> &str {
 /// Parse an already-normalized message text as an in-chat gate command.
 ///
 /// Only a *confident* gate command — the reserved shape the system advertises:
-/// a bare `approve`/`deny`, or any verb carrying a `gate:<ref>` (`approve
+/// a bare `approve`/`deny`, or any verb carrying a nonempty `gate:<ref>` (`approve
 /// gate:<ref>`, `auth deny gate:<ref>`) — is pulled out of normal turn handling
 /// and returned as `Some(payload)`.
 ///
@@ -72,6 +73,9 @@ pub fn parse_interaction_resolution_text(
                 if parts.next().is_some() {
                     return ambiguous_interaction_falls_through();
                 }
+                let Some(auth_request_ref) = explicit_gate_ref(auth_request_ref)? else {
+                    return ambiguous_interaction_falls_through();
+                };
                 AuthResolutionPayload::new(auth_request_ref, AuthResolutionResult::Denied)
                     .map(|payload| payload.with_source_trigger(source_trigger))
                     .map(ProductInboundPayload::AuthResolution)
@@ -99,9 +103,9 @@ fn parse_approval_resolution(
             // starts with a verb ("approve this design"), so fall through to a
             // normal user-message turn — never silently swallow it — regardless
             // of whether trailing text follows.
-            if !gate_ref.starts_with("gate:") {
+            let Some(gate_ref) = explicit_gate_ref(gate_ref)? else {
                 return ambiguous_interaction_falls_through();
-            }
+            };
             ApprovalResolutionPayload::new(gate_ref, decision)
                 .map(|payload| payload.with_source_trigger(source_trigger))
                 .map(ProductInboundPayload::ApprovalResolution)
@@ -112,6 +116,18 @@ fn parse_approval_resolution(
             .map(ProductInboundPayload::ScopedApprovalResolution)
             .map(Some),
     }
+}
+
+fn explicit_gate_ref(token: &str) -> Result<Option<&str>, ProductAdapterError> {
+    let Some(reference) = token.strip_prefix("gate:") else {
+        return Ok(None);
+    };
+    if reference.is_empty() {
+        return Err(ProductAdapterError::MalformedInboundPayload {
+            reason: RedactedString::new("gate reference must not be empty"),
+        });
+    }
+    Ok(Some(token))
 }
 
 /// Ambiguous input — a phrase that merely *starts* with a command verb but is
@@ -148,6 +164,24 @@ mod tests {
     }
 
     #[test]
+    fn auth_deny_with_non_gate_text_falls_through_to_a_user_message() {
+        assert!(
+            parse("auth deny this").is_none(),
+            "non-gate auth text is natural language, not a confident resolution"
+        );
+    }
+
+    #[test]
+    fn reserved_gate_tokens_require_a_nonempty_reference() {
+        for text in ["auth deny gate:", "approve gate:"] {
+            assert!(
+                parse_interaction_resolution_text(text, ProductTriggerReason::DirectChat).is_err(),
+                "{text:?} is malformed reserved syntax and must fail validation"
+            );
+        }
+    }
+
+    #[test]
     fn backtick_wrapped_paste_parses_like_bare_command() {
         // Every channel's busy hint renders the command in backticks; users
         // paste them back.
@@ -166,6 +200,14 @@ mod tests {
         assert!(matches!(
             parse("approve gate:approval-1"),
             Some(ProductInboundPayload::ApprovalResolution(_))
+        ));
+        assert!(matches!(
+            parse("deny gate:approval-1"),
+            Some(ProductInboundPayload::ApprovalResolution(_))
+        ));
+        assert!(matches!(
+            parse("approve"),
+            Some(ProductInboundPayload::ScopedApprovalResolution(_))
         ));
         assert!(matches!(
             parse("deny"),

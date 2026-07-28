@@ -1263,14 +1263,24 @@ mod tests {
 
     #[test]
     fn channel_inbound_classifier_preserves_natural_language_and_fails_closed() {
-        for text in ["hello", "approve this design", "auth deny"] {
+        for text in [
+            "hello",
+            "approve this design",
+            "auth deny",
+            "auth deny this",
+        ] {
             assert_eq!(
                 classify_channel_inbound_text(text, ProductTriggerReason::DirectChat),
                 None,
                 "{text:?} must remain an ordinary user message"
             );
         }
-        for text in ["auth deny gate:bad\0ref", "/bad\\command"] {
+        for text in [
+            "auth deny gate:",
+            "approve gate:",
+            "auth deny gate:bad\0ref",
+            "/bad\\command",
+        ] {
             assert_eq!(
                 classify_channel_inbound_text(text, ProductTriggerReason::DirectChat),
                 Some(ChannelInboundClassification::NoOp),
