@@ -488,9 +488,9 @@ fn event_kind_for_state(state: &TurnRunState) -> TurnEventKind {
         TurnStatus::RecoveryRequired => TurnEventKind::RecoveryRequired,
         // Resolved attested gate: the signer continuation runs in the reborn
         // layer; from the turns view this is a non-terminal handoff.
-        TurnStatus::AttestedResolved
-        | TurnStatus::Queued
-        | TurnStatus::CancelRequested => TurnEventKind::RunnerHeartbeat,
+        TurnStatus::AttestedResolved | TurnStatus::Queued | TurnStatus::CancelRequested => {
+            TurnEventKind::RunnerHeartbeat
+        }
     }
 }
 

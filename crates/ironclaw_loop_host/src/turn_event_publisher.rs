@@ -87,9 +87,9 @@ impl EventPublishingTurnRunTransitionPort {
             TurnStatus::RecoveryRequired => TurnEventKind::RecoveryRequired,
             // Resolved attested gate: signer continuation runs in the reborn
             // layer; a non-terminal handoff from the turn-event view.
-            TurnStatus::AttestedResolved
-            | TurnStatus::Queued
-            | TurnStatus::CancelRequested => TurnEventKind::RunnerHeartbeat,
+            TurnStatus::AttestedResolved | TurnStatus::Queued | TurnStatus::CancelRequested => {
+                TurnEventKind::RunnerHeartbeat
+            }
         }
     }
 

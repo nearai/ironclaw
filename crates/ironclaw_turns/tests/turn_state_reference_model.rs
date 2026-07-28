@@ -356,6 +356,8 @@ fn resume_request(
         idempotency_key: IdempotencyKey::new(idem).unwrap(),
         precondition: ResumeTurnPrecondition::default(),
         resume_disposition: None,
+        // The reference model drives non-attested resumes only.
+        attestation: None,
     }
 }
 
@@ -652,6 +654,8 @@ async fn build_run_in_status(status: TurnStatus) -> BuiltRun {
         | TurnStatus::RecoveryRequired
         | TurnStatus::Cancelled
         | TurnStatus::Queued
+        | TurnStatus::BlockedAttested
+        | TurnStatus::AttestedResolved
         | TurnStatus::Running => {
             panic!("state-op fixture does not build {status:?}");
         }

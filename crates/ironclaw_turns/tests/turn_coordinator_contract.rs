@@ -12,27 +12,27 @@ use std::{
 use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-use ironclaw_turns::{ResumeTurnResponse, 
+use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, AllowAllTurnAdmissionPolicy,
     BlockedReason, CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator,
     DefaultTurnLifecycleEventBus, GateRef, GetRunStateRequest, IdempotencyKey,
     InMemoryRunProfileResolver, InMemoryTurnEventSink, LifecyclePublicationErrorPort,
     LifecyclePublishingTurnStateStore, LoopBlockedKind, LoopCheckpointStateRef, LoopExitMapping,
     LoopGateRef, ProductTurnContext, ReplyTargetBindingRef, ResolvedRunProfile, ResumeTurnRequest,
-    RetryTurnRequest, RetryTurnResponse, RunOriginAdapter, RunProfileId, RunProfileRequest,
-    RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
-    SanitizedCancelReason, SanitizedFailure, SourceBindingRef, StaticTurnAdmissionLimitProvider,
-    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
-    TurnAdmissionAxisKind, TurnAdmissionBucketKind, TurnAdmissionBucketScope,
-    TurnAdmissionCapacityDenial, TurnAdmissionClass, TurnAdmissionPolicy, TurnCapacityResource,
-    TurnCheckpointId, TurnCommittedEventObserver, TurnCoordinator, TurnError, TurnErrorCategory,
-    TurnEventKind, TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
-    TurnEventProjectionService, TurnEventSink, TurnIdempotencyErrorReplay,
-    TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind, TurnIdempotencyRecord,
-    TurnIdempotencyReplay, TurnLeaseToken, TurnLifecycleEvent, TurnLifecycleEventBus,
-    TurnLockVersion, TurnOriginKind, TurnOwner, TurnRunId, TurnRunProfile, TurnRunState,
-    TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnRunnerId, TurnScope,
-    TurnSpawnTreePort, TurnSpawnTreeStateStore, TurnStateRowStore, TurnStateStore,
+    ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse, RunOriginAdapter, RunProfileId,
+    RunProfileRequest, RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver,
+    RunProfileVersion, SanitizedCancelReason, SanitizedFailure, SourceBindingRef,
+    StaticTurnAdmissionLimitProvider, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse,
+    ThreadBusy, TurnActor, TurnAdmissionAxisKind, TurnAdmissionBucketKind,
+    TurnAdmissionBucketScope, TurnAdmissionCapacityDenial, TurnAdmissionClass, TurnAdmissionPolicy,
+    TurnCapacityResource, TurnCheckpointId, TurnCommittedEventObserver, TurnCoordinator, TurnError,
+    TurnErrorCategory, TurnEventKind, TurnEventProjectionCursor, TurnEventProjectionError,
+    TurnEventProjectionRequest, TurnEventProjectionService, TurnEventSink,
+    TurnIdempotencyErrorReplay, TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind,
+    TurnIdempotencyRecord, TurnIdempotencyReplay, TurnLeaseToken, TurnLifecycleEvent,
+    TurnLifecycleEventBus, TurnLockVersion, TurnOriginKind, TurnOwner, TurnRunId, TurnRunProfile,
+    TurnRunState, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnRunnerId,
+    TurnScope, TurnSpawnTreePort, TurnSpawnTreeStateStore, TurnStateRowStore, TurnStateStore,
     TurnStateStoreLimits, TurnStatus, TurnSurfaceType,
     events::EventCursor,
     run_profile::{LoopGateKind, LoopModelRouteSnapshot, LoopModelUsage},
@@ -1579,7 +1579,7 @@ async fn default_turn_coordinator_dedupes_idempotency_replay_events_by_cursor() 
     .await
     .unwrap();
     let resume = ResumeTurnRequest {
-            attestation: None,
+        attestation: None,
         scope: scope("thread-event-replay-resume"),
         actor: actor(),
         run_id: resume_run_id,
@@ -4846,7 +4846,7 @@ async fn resume_updates_persisted_run_binding_refs_and_replay_envelope() {
         .await
         .unwrap();
     let resume_request = ResumeTurnRequest {
-            attestation: None,
+        attestation: None,
         scope: scope("thread-a"),
         actor: actor(),
         run_id,
@@ -6105,7 +6105,7 @@ async fn blocked_run_persists_checkpoint_and_keeps_same_thread_lock_until_resume
     assert!(matches!(busy, TurnError::ThreadBusy(_)));
 
     let resume_request = ResumeTurnRequest {
-            attestation: None,
+        attestation: None,
         scope: scope("thread-a"),
         actor: actor(),
         run_id,
@@ -6127,7 +6127,10 @@ async fn blocked_run_persists_checkpoint_and_keeps_same_thread_lock_until_resume
     // a successful resume (the attested signer continuation) gates on
     // `replayed == false` so it cannot fire twice.
     assert!(!resumed.replayed, "first resume is a fresh transition");
-    assert!(duplicate.replayed, "duplicate resume must be marked replayed");
+    assert!(
+        duplicate.replayed,
+        "duplicate resume must be marked replayed"
+    );
     assert_eq!(
         ResumeTurnResponse {
             replayed: false,
@@ -7475,9 +7478,9 @@ fn event_from_state_for_recording(state: &TurnRunState) -> TurnLifecycleEvent {
         TurnStatus::Cancelled => TurnEventKind::Cancelled,
         TurnStatus::Failed => TurnEventKind::Failed,
         TurnStatus::RecoveryRequired => TurnEventKind::RecoveryRequired,
-        TurnStatus::AttestedResolved
-        | TurnStatus::Queued
-        | TurnStatus::CancelRequested => TurnEventKind::RunnerHeartbeat,
+        TurnStatus::AttestedResolved | TurnStatus::Queued | TurnStatus::CancelRequested => {
+            TurnEventKind::RunnerHeartbeat
+        }
     };
     let sanitized_reason = state
         .failure

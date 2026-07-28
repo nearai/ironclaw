@@ -25,8 +25,8 @@
 use std::sync::Arc;
 
 use ironclaw_attestation::{
-    LedgerKey, DecodedTransaction, GrantKey, RenderingSchemaVersion, SealedGrantStore, SigningLedger,
-    SigningLedgerState, approved_tx_hash_for, canonical_signing_bytes,
+    DecodedTransaction, GrantKey, LedgerKey, RenderingSchemaVersion, SealedGrantStore,
+    SigningLedger, SigningLedgerState, approved_tx_hash_for, canonical_signing_bytes,
 };
 use ironclaw_host_api::ResourceScope;
 use ironclaw_signing_provider::{ApprovedTxHash, SigningContext};
@@ -274,7 +274,10 @@ where
         // follows, so a stale ledger row fails before private-key access.
         self.claim_grant(req).await?;
         self.ledger
-            .advance(&LedgerKey::new(req.context.tenant.clone(), req.context.gate_ref.clone()), SigningLedgerState::Signing)
+            .advance(
+                &LedgerKey::new(req.context.tenant.clone(), req.context.gate_ref.clone()),
+                SigningLedgerState::Signing,
+            )
             .await?;
 
         let signed = match authorized.path {
@@ -300,7 +303,10 @@ where
         };
 
         self.ledger
-            .advance(&LedgerKey::new(req.context.tenant.clone(), req.context.gate_ref.clone()), SigningLedgerState::Signed)
+            .advance(
+                &LedgerKey::new(req.context.tenant.clone(), req.context.gate_ref.clone()),
+                SigningLedgerState::Signed,
+            )
             .await?;
 
         Ok(CustodialSignOutcome {
@@ -344,7 +350,10 @@ where
         // pre-flight has succeeded (see `sign_evm` for the atomicity rationale).
         self.claim_grant(req).await?;
         self.ledger
-            .advance(&LedgerKey::new(req.context.tenant.clone(), req.context.gate_ref.clone()), SigningLedgerState::Signing)
+            .advance(
+                &LedgerKey::new(req.context.tenant.clone(), req.context.gate_ref.clone()),
+                SigningLedgerState::Signing,
+            )
             .await?;
 
         let signed = match authorized.path {
@@ -370,7 +379,10 @@ where
         };
 
         self.ledger
-            .advance(&LedgerKey::new(req.context.tenant.clone(), req.context.gate_ref.clone()), SigningLedgerState::Signed)
+            .advance(
+                &LedgerKey::new(req.context.tenant.clone(), req.context.gate_ref.clone()),
+                SigningLedgerState::Signed,
+            )
             .await?;
 
         Ok(CustodialSignOutcome {
@@ -405,7 +417,10 @@ where
         // pre-flight has succeeded (see `sign_evm` for the atomicity rationale).
         self.claim_grant(req).await?;
         self.ledger
-            .advance(&LedgerKey::new(req.context.tenant.clone(), req.context.gate_ref.clone()), SigningLedgerState::Signing)
+            .advance(
+                &LedgerKey::new(req.context.tenant.clone(), req.context.gate_ref.clone()),
+                SigningLedgerState::Signing,
+            )
             .await?;
 
         let signed = match authorized.path {
@@ -430,7 +445,10 @@ where
         };
 
         self.ledger
-            .advance(&LedgerKey::new(req.context.tenant.clone(), req.context.gate_ref.clone()), SigningLedgerState::Signed)
+            .advance(
+                &LedgerKey::new(req.context.tenant.clone(), req.context.gate_ref.clone()),
+                SigningLedgerState::Signed,
+            )
             .await?;
 
         Ok(CustodialSignOutcome {
@@ -486,7 +504,10 @@ where
         ctx: &SigningContext,
     ) -> Result<(), ChainSigningError> {
         self.ledger
-            .advance(&LedgerKey::new(ctx.tenant.clone(), ctx.gate_ref.clone()), SigningLedgerState::BroadcastSubmitted)
+            .advance(
+                &LedgerKey::new(ctx.tenant.clone(), ctx.gate_ref.clone()),
+                SigningLedgerState::BroadcastSubmitted,
+            )
             .await
             .map_err(Into::into)
     }
@@ -506,7 +527,10 @@ where
             ));
         }
         self.ledger
-            .advance(&LedgerKey::new(ctx.tenant.clone(), ctx.gate_ref.clone()), terminal)
+            .advance(
+                &LedgerKey::new(ctx.tenant.clone(), ctx.gate_ref.clone()),
+                terminal,
+            )
             .await
             .map_err(Into::into)
     }

@@ -27,7 +27,7 @@
 //! cross the boundary. The [`kms::ShipGate`] refuses mainnet signing unless such
 //! a secure-custody backend is wired, and returns the REQUIRED
 //! [`kms::SigningPath`] so a hot key can never service a mainnet request
-//! (compromised-host hot-key threat #18). [`kms::LocalKmsSigner`] is an in-tree
+//! (compromised-host hot-key threat #18). [`kms::SoftwareKmsSigner`] is an in-tree
 //! software-HSM reference backend (secp256k1 + ed25519) that exercises and tests
 //! the full key-ref path without a cloud account; a concrete cloud backend (AWS
 //! KMS / GCP KMS / YubiHSM — note AWS KMS supports secp256k1 but NOT ed25519) is
@@ -93,7 +93,7 @@ pub use custodial::{
 pub use error::{ChainSigningError, Result};
 pub use keystore::{ChainKeyBinding, ConsumedChainKey, KeyStore, KeyStoreError, SecretsKeyStore};
 pub use kms::{
-    HsmKmsBackend, KmsSigner, LocalKmsSigner, ShipGate, SignatureAlg, SigningPath, ValueClass,
+    HsmKmsBackend, KmsSigner, ShipGate, SignatureAlg, SigningPath, SoftwareKmsSigner, ValueClass,
 };
 pub use policy::{
     AllowBootstrapPolicy, BootstrapPolicy, CustodyDecision, DenyFirstBootstrapPolicy,

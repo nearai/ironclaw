@@ -237,10 +237,7 @@ where
 
     /// Inject the verifier used to validate `BlockedAttested` resumes. Without
     /// it, attested resumes fail closed with [`TurnError::Unavailable`].
-    pub fn with_attested_resume_port(
-        mut self,
-        port: Arc<dyn crate::AttestedResumePort>,
-    ) -> Self {
+    pub fn with_attested_resume_port(mut self, port: Arc<dyn crate::AttestedResumePort>) -> Self {
         self.attested_resume_port = Some(port);
         self
     }

@@ -140,7 +140,10 @@ where
                 // releases on drop, so no early return or panic can strand it.
                 let Some(in_flight) = super::AttestedInFlightGuard::try_acquire(
                     &self.attested_in_flight,
-                    format!("{:?}|{}|{:?}", request.scope, run_id, request.idempotency_key),
+                    format!(
+                        "{:?}|{}|{:?}",
+                        request.scope, run_id, request.idempotency_key
+                    ),
                 ) else {
                     return Err(TurnError::Unavailable {
                         reason: "attested resume already in flight for this idempotency key"

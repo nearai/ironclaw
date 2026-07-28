@@ -16,6 +16,14 @@ repository = "https://github.com/nearai/ironclaw"
 [package.metadata.dist]
 dist = false
 
+[package.metadata.ironclaw]
+# Custodial multi-chain signing. Depends only on contracts (signing_provider,
+# host_api) and substrates (attestation, secrets) — it is the layer that may
+# hold key material, which is precisely why ironclaw_attestation above it
+# must not. The attested runtime at kernel drives this crate, never the
+# reverse.
+layer = "substrates"
+
 [dependencies]
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }

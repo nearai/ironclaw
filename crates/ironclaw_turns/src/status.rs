@@ -295,7 +295,9 @@ impl BlockedReason {
     /// `None` for every standard gate kind.
     pub fn expected_tx_hash(&self) -> Option<&crate::ApprovedTxHashRef> {
         match self {
-            Self::Attested { expected_tx_hash, .. } => expected_tx_hash.as_ref(),
+            Self::Attested {
+                expected_tx_hash, ..
+            } => expected_tx_hash.as_ref(),
             _ => None,
         }
     }

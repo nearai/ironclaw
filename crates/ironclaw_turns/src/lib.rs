@@ -36,6 +36,7 @@ pub use admission::{
     TurnAdmissionCapacityDenial, TurnAdmissionClass, TurnAdmissionLimit,
     TurnAdmissionLimitProvider, TurnAdmissionLimitUnavailable, TurnAdmissionReservationRecord,
 };
+pub use attested_resume::{AttestedResumePort, AttestedResumeRejection, AttestedResumeRequest};
 pub use block_persistence::TurnStateBlockPersistence;
 pub use checkpoint_state::{
     CheckpointStateMatchMetadata, CheckpointStateRecord, CheckpointStateStorePort,
@@ -60,12 +61,11 @@ pub use external_tool_catalog::{
     ExternalToolCatalog, ExternalToolCatalogError, ExternalToolSpec, ExternalToolSpecError,
     InMemoryExternalToolCatalog, PendingExternalCall,
 };
-pub use attested_resume::{AttestedResumePort, AttestedResumeRejection, AttestedResumeRequest};
-pub use ids::{ AttestationClaimRef, ApprovedTxHashRef,
-    AcceptedMessageRef, CapabilityActivityId, GateRef, IdempotencyKey, LoopDiagnosticRef,
-    LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef, ReplyTargetBindingRef, RunProfileId,
-    RunProfileRequest, RunProfileVersion, SourceBindingRef, TurnCheckpointId, TurnId,
-    TurnLeaseToken, TurnRunId, TurnRunnerId,
+pub use ids::{
+    AcceptedMessageRef, ApprovedTxHashRef, AttestationClaimRef, CapabilityActivityId, GateRef,
+    IdempotencyKey, LoopDiagnosticRef, LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef,
+    ReplyTargetBindingRef, RunProfileId, RunProfileRequest, RunProfileVersion, SourceBindingRef,
+    TurnCheckpointId, TurnId, TurnLeaseToken, TurnRunId, TurnRunnerId,
 };
 pub use ironclaw_host_api::{
     ModelInvalidOutputDetailReason, SanitizedCancelReason, SanitizedFailure, TurnOwner,

@@ -21,9 +21,15 @@
 //! account (so a faulty or hostile backend still cannot forge a usable
 //! signature for the wrong account).
 //!
-//! ## In-tree reference backend ([`LocalKmsSigner`])
+//! ## In-tree reference backend ([`SoftwareKmsSigner`])
 //!
-//! [`LocalKmsSigner`] is a software-HSM that proves and tests the full key-ref
+//! Named `Software*` rather than `Local*`: `Local`-prefixed type names are
+//! banned by the deployment-mode ratchet, because a deployment mode is a
+//! `DeploymentConfig` value and never a type. "Software" is also the more
+//! accurate word — the distinction is software-HSM versus a real HSM/cloud
+//! KMS, not one deployment shape versus another.
+//!
+//! [`SoftwareKmsSigner`] is a software-HSM that proves and tests the full key-ref
 //! path end-to-end without a cloud account. It holds each key behind a sealed
 //! [`secrecy::SecretBox`] boundary keyed by an opaque `key_ref`, exposes ONLY
 //! `sign_digest` (never the key bytes), and implements both secp256k1 (EVM) and
@@ -32,7 +38,7 @@
 //! `is_secure_custody() == false` **by default**, so it can NEVER satisfy the
 //! mainnet ship-gate in a normal build. Tests that need to exercise the
 //! mainnet/KMS path construct it via the explicit, clearly-labelled
-//! [`LocalKmsSigner::new_modeling_secure_custody`] test-only opt-in. A real
+//! [`SoftwareKmsSigner::new_modeling_secure_custody`] test-only opt-in. A real
 //! cloud backend is a flagged follow-up (see crate docs / PR body):
 //!
 //! ```text
@@ -75,7 +81,7 @@ pub enum SignatureAlg {
 ///
 /// `sign_digest` is `async` because a production cloud KMS / HSM backend signs
 /// over an HTTP/RPC round-trip; making it `async` ensures that round-trip never
-/// blocks a tokio worker thread. The in-tree [`LocalKmsSigner`] reference
+/// blocks a tokio worker thread. The in-tree [`SoftwareKmsSigner`] reference
 /// backend computes its signature synchronously and simply returns a ready
 /// future — no executor stall either way.
 #[async_trait]
@@ -111,7 +117,7 @@ pub use self::KmsSigner as HsmKmsBackend;
 /// raw bytes are never returned and never leak through `Debug`. This exercises
 /// and tests the full key-reference path that a cloud KMS would use, proving the
 /// architecture without a cloud account.
-pub struct LocalKmsSigner {
+pub struct SoftwareKmsSigner {
     id: String,
     // key_ref -> sealed key material. The seal means even a stray `Debug`/log of
     // the map prints `[REDACTED]`, and the bytes are zeroized on drop.
@@ -129,16 +135,16 @@ struct SealedKey {
     secret: SecretBox<[u8]>,
 }
 
-impl std::fmt::Debug for LocalKmsSigner {
+impl std::fmt::Debug for SoftwareKmsSigner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LocalKmsSigner")
+        f.debug_struct("SoftwareKmsSigner")
             .field("id", &self.id)
             .field("keys", &"[REDACTED]")
             .finish()
     }
 }
 
-impl LocalKmsSigner {
+impl SoftwareKmsSigner {
     /// Build an empty software-HSM with the given backend id.
     ///
     /// The resulting backend reports `is_secure_custody() == false`: its keys
@@ -221,7 +227,7 @@ impl LocalKmsSigner {
 }
 
 #[async_trait]
-impl KmsSigner for LocalKmsSigner {
+impl KmsSigner for SoftwareKmsSigner {
     fn backend_id(&self) -> &str {
         &self.id
     }
@@ -416,8 +422,8 @@ impl ShipGate {
 mod tests {
     use super::*;
 
-    fn secure() -> LocalKmsSigner {
-        LocalKmsSigner::new_modeling_secure_custody("test-secure-kms")
+    fn secure() -> SoftwareKmsSigner {
+        SoftwareKmsSigner::new_modeling_secure_custody("test-secure-kms")
     }
 
     struct HotBackend;
@@ -493,12 +499,12 @@ mod tests {
     fn default_local_kms_is_not_secure_custody_and_cannot_gate_mainnet() {
         // The plain `new()` backend holds keys in process memory, so it must NOT
         // satisfy the mainnet ship-gate even with the opt-in flag set (threat #18).
-        let insecure = LocalKmsSigner::new("heap-backend");
+        let insecure = SoftwareKmsSigner::new("heap-backend");
         assert!(!insecure.is_secure_custody());
         let gate = ShipGate::new(true, Some(&insecure));
         assert!(gate.authorize_chain("eip155:1").is_err());
         // Only the explicit test opt-in models secure custody.
-        let modeled = LocalKmsSigner::new_modeling_secure_custody("modeled");
+        let modeled = SoftwareKmsSigner::new_modeling_secure_custody("modeled");
         assert!(modeled.is_secure_custody());
     }
 

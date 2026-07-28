@@ -9,14 +9,14 @@ use alloy_consensus::TxEip1559;
 use alloy_primitives::{Bytes, TxKind, U256};
 
 use ironclaw_attestation::{
-    LedgerKey, AttestedSigningGrant, DecodedTransaction, GrantKey, InMemorySealedGrantStore,
-    InMemorySigningLedger, RenderingSchemaVersion, SealedGrantStore, SigningLedger,
+    AttestedSigningGrant, DecodedTransaction, GrantKey, InMemorySealedGrantStore,
+    InMemorySigningLedger, LedgerKey, RenderingSchemaVersion, SealedGrantStore, SigningLedger,
     SigningLedgerState,
 };
 use ironclaw_chain_signing::{
     ChainKeyBinding, ChainKeyId, ChainSigningError, CustodialSignRequest, CustodialSigner,
-    DenyFirstCustodyPolicy, KeyStore, LocalKmsSigner, SecretsKeyStore, ShipGate, SignatureAlg, evm,
-    recompute_approved_hash,
+    DenyFirstCustodyPolicy, KeyStore, SecretsKeyStore, ShipGate, SignatureAlg, SoftwareKmsSigner,
+    evm, recompute_approved_hash,
 };
 use ironclaw_host_api::{
     InvocationId, ProjectId, ResourceScope, TenantId as HostTenantId, UserId as HostUserId,
@@ -138,7 +138,13 @@ async fn fixture(seal_grant: bool, mutate_after_approval: bool) -> Fixture {
     let ledger = Arc::new(InMemorySigningLedger::new());
     let context = ctx(chain);
 
-    ledger.create(&LedgerKey::new(context.tenant.clone(), context.gate_ref.clone())).await.unwrap();
+    ledger
+        .create(&LedgerKey::new(
+            context.tenant.clone(),
+            context.gate_ref.clone(),
+        ))
+        .await
+        .unwrap();
 
     if seal_grant {
         let gk = GrantKey::from_context(&context, approved);
@@ -180,7 +186,13 @@ async fn happy_path_signs_and_advances_ledger() {
     assert!(out.signer.starts_with("0x"));
     assert!(!out.signature.is_empty());
     assert_eq!(
-        f.ledger.state(&LedgerKey::new(f.req.context.tenant.clone(), f.req.context.gate_ref.clone())).await.unwrap(),
+        f.ledger
+            .state(&LedgerKey::new(
+                f.req.context.tenant.clone(),
+                f.req.context.gate_ref.clone()
+            ))
+            .await
+            .unwrap(),
         SigningLedgerState::Signed
     );
 }
@@ -191,7 +203,13 @@ async fn refuses_without_a_claimed_grant() {
     let err = f.signer.sign_evm(&f.req).await.unwrap_err();
     assert!(matches!(err, ChainSigningError::Grant(_)), "got {err:?}");
     assert_eq!(
-        f.ledger.state(&LedgerKey::new(f.req.context.tenant.clone(), f.req.context.gate_ref.clone())).await.unwrap(),
+        f.ledger
+            .state(&LedgerKey::new(
+                f.req.context.tenant.clone(),
+                f.req.context.gate_ref.clone()
+            ))
+            .await
+            .unwrap(),
         SigningLedgerState::Approved
     );
 }
@@ -221,7 +239,13 @@ async fn sign_time_hash_recheck_fails_closed_without_consuming_key() {
         "expected ApprovedHashMismatch, got {err:?}"
     );
     assert_eq!(
-        f.ledger.state(&LedgerKey::new(f.req.context.tenant.clone(), f.req.context.gate_ref.clone())).await.unwrap(),
+        f.ledger
+            .state(&LedgerKey::new(
+                f.req.context.tenant.clone(),
+                f.req.context.gate_ref.clone()
+            ))
+            .await
+            .unwrap(),
         SigningLedgerState::Approved
     );
 }
@@ -280,13 +304,18 @@ async fn evm_signer_binding_rejects_wrong_bound_account() {
     let grants = Arc::new(InMemorySealedGrantStore::new());
     let ledger = Arc::new(InMemorySigningLedger::new());
     let context = ctx(chain);
-    ledger.create(&LedgerKey::new(context.tenant.clone(), context.gate_ref.clone())).await.unwrap();
+    ledger
+        .create(&LedgerKey::new(
+            context.tenant.clone(),
+            context.gate_ref.clone(),
+        ))
+        .await
+        .unwrap();
     grants
-        .seal(AttestedSigningGrant::new(
-            GrantKey::from_context(&context, approved),
-            0,
-            None,
-        ).expect("valid grant"))
+        .seal(
+            AttestedSigningGrant::new(GrantKey::from_context(&context, approved), 0, None)
+                .expect("valid grant"),
+        )
         .await
         .unwrap();
 
@@ -324,7 +353,10 @@ async fn broadcast_idempotency_blocks_resigning_after_submitted() {
 
     let err = f
         .ledger
-        .advance(&LedgerKey::new(f.req.context.tenant.clone(), f.req.context.gate_ref.clone()), SigningLedgerState::Signing)
+        .advance(
+            &LedgerKey::new(f.req.context.tenant.clone(), f.req.context.gate_ref.clone()),
+            SigningLedgerState::Signing,
+        )
         .await
         .unwrap_err();
     assert_eq!(
@@ -371,7 +403,13 @@ async fn preflight_failure_after_authorize_does_not_consume_grant() {
     let grants = Arc::new(InMemorySealedGrantStore::new());
     let ledger = Arc::new(InMemorySigningLedger::new());
     let context = ctx(chain);
-    ledger.create(&LedgerKey::new(context.tenant.clone(), context.gate_ref.clone())).await.unwrap();
+    ledger
+        .create(&LedgerKey::new(
+            context.tenant.clone(),
+            context.gate_ref.clone(),
+        ))
+        .await
+        .unwrap();
     let gk = GrantKey::from_context(&context, approved);
     grants
         .seal(AttestedSigningGrant::new(gk.clone(), 0, None).expect("valid grant"))
@@ -402,7 +440,13 @@ async fn preflight_failure_after_authorize_does_not_consume_grant() {
 
     // The ledger must still be at Approved (never advanced to Signing).
     assert_eq!(
-        ledger.state(&LedgerKey::new(context.tenant.clone(), context.gate_ref.clone())).await.unwrap(),
+        ledger
+            .state(&LedgerKey::new(
+                context.tenant.clone(),
+                context.gate_ref.clone()
+            ))
+            .await
+            .unwrap(),
         SigningLedgerState::Approved
     );
 
@@ -435,13 +479,18 @@ async fn wrong_chain_family_key_cannot_sign_other_chain_tx() {
     let ledger = Arc::new(InMemorySigningLedger::new());
     let mut context = ctx(solana_chain);
     context.gate_ref = GateRef::new("gate:confused");
-    ledger.create(&LedgerKey::new(context.tenant.clone(), context.gate_ref.clone())).await.unwrap();
+    ledger
+        .create(&LedgerKey::new(
+            context.tenant.clone(),
+            context.gate_ref.clone(),
+        ))
+        .await
+        .unwrap();
     grants
-        .seal(AttestedSigningGrant::new(
-            GrantKey::from_context(&context, approved),
-            0,
-            None,
-        ).expect("valid grant"))
+        .seal(
+            AttestedSigningGrant::new(GrantKey::from_context(&context, approved), 0, None)
+                .expect("valid grant"),
+        )
         .await
         .unwrap();
 
@@ -494,13 +543,18 @@ async fn same_family_cross_chain_id_is_rejected() {
     let grants = Arc::new(InMemorySealedGrantStore::new());
     let ledger = Arc::new(InMemorySigningLedger::new());
     let context = ctx(key_chain); // context says sepolia, tx says mainnet
-    ledger.create(&LedgerKey::new(context.tenant.clone(), context.gate_ref.clone())).await.unwrap();
+    ledger
+        .create(&LedgerKey::new(
+            context.tenant.clone(),
+            context.gate_ref.clone(),
+        ))
+        .await
+        .unwrap();
     grants
-        .seal(AttestedSigningGrant::new(
-            GrantKey::from_context(&context, approved),
-            0,
-            None,
-        ).expect("valid grant"))
+        .seal(
+            AttestedSigningGrant::new(GrantKey::from_context(&context, approved), 0, None)
+                .expect("valid grant"),
+        )
         .await
         .unwrap();
 
@@ -547,13 +601,18 @@ async fn ship_gate_refuses_mainnet_hot_key() {
     let grants = Arc::new(InMemorySealedGrantStore::new());
     let ledger = Arc::new(InMemorySigningLedger::new());
     let context = ctx(chain);
-    ledger.create(&LedgerKey::new(context.tenant.clone(), context.gate_ref.clone())).await.unwrap();
+    ledger
+        .create(&LedgerKey::new(
+            context.tenant.clone(),
+            context.gate_ref.clone(),
+        ))
+        .await
+        .unwrap();
     grants
-        .seal(AttestedSigningGrant::new(
-            GrantKey::from_context(&context, approved),
-            0,
-            None,
-        ).expect("valid grant"))
+        .seal(
+            AttestedSigningGrant::new(GrantKey::from_context(&context, approved), 0, None)
+                .expect("valid grant"),
+        )
         .await
         .unwrap();
 
@@ -605,18 +664,23 @@ async fn secure_kms_configured_but_mainnet_hot_key_is_refused() {
     let grants = Arc::new(InMemorySealedGrantStore::new());
     let ledger = Arc::new(InMemorySigningLedger::new());
     let context = ctx(chain);
-    ledger.create(&LedgerKey::new(context.tenant.clone(), context.gate_ref.clone())).await.unwrap();
+    ledger
+        .create(&LedgerKey::new(
+            context.tenant.clone(),
+            context.gate_ref.clone(),
+        ))
+        .await
+        .unwrap();
     grants
-        .seal(AttestedSigningGrant::new(
-            GrantKey::from_context(&context, approved),
-            0,
-            None,
-        ).expect("valid grant"))
+        .seal(
+            AttestedSigningGrant::new(GrantKey::from_context(&context, approved), 0, None)
+                .expect("valid grant"),
+        )
         .await
         .unwrap();
 
     let kms: Arc<dyn ironclaw_chain_signing::KmsSigner> =
-        Arc::new(LocalKmsSigner::new_modeling_secure_custody("secure-kms"));
+        Arc::new(SoftwareKmsSigner::new_modeling_secure_custody("secure-kms"));
     let signer = CustodialSigner::with_kms(
         keystore,
         grants,
@@ -642,7 +706,7 @@ async fn secure_kms_configured_but_mainnet_hot_key_is_refused() {
 
 /// Review finding #3 (positive): mainnet signing SUCCEEDS through the KMS
 /// key-ref path with NO private-key bytes in the IronClaw process — the key
-/// lives in the `LocalKmsSigner` reference backend; only a key_ref + digest
+/// lives in the `SoftwareKmsSigner` reference backend; only a key_ref + digest
 /// cross the boundary.
 #[tokio::test]
 async fn mainnet_signs_via_kms_key_ref_path() {
@@ -652,7 +716,7 @@ async fn mainnet_signs_via_kms_key_ref_path() {
     let bound = evm::address_of(&key);
 
     // The KMS holds the key behind its sealed boundary, referenced by "kms-evm".
-    let kms_backend = LocalKmsSigner::new_modeling_secure_custody("secure-kms");
+    let kms_backend = SoftwareKmsSigner::new_modeling_secure_custody("secure-kms");
     kms_backend
         .import_key("kms-evm", SignatureAlg::Secp256k1, key.to_bytes().to_vec())
         .unwrap();
@@ -680,13 +744,18 @@ async fn mainnet_signs_via_kms_key_ref_path() {
     let grants = Arc::new(InMemorySealedGrantStore::new());
     let ledger = Arc::new(InMemorySigningLedger::new());
     let context = ctx(chain);
-    ledger.create(&LedgerKey::new(context.tenant.clone(), context.gate_ref.clone())).await.unwrap();
+    ledger
+        .create(&LedgerKey::new(
+            context.tenant.clone(),
+            context.gate_ref.clone(),
+        ))
+        .await
+        .unwrap();
     grants
-        .seal(AttestedSigningGrant::new(
-            GrantKey::from_context(&context, approved),
-            0,
-            None,
-        ).expect("valid grant"))
+        .seal(
+            AttestedSigningGrant::new(GrantKey::from_context(&context, approved), 0, None)
+                .expect("valid grant"),
+        )
         .await
         .unwrap();
 
@@ -711,7 +780,13 @@ async fn mainnet_signs_via_kms_key_ref_path() {
     // ecrecover-bound exactly like the hot path.
     assert_eq!(out.signer, format!("0x{}", hex::encode(bound.as_slice())));
     assert_eq!(
-        ledger.state(&LedgerKey::new(req.context.tenant.clone(), req.context.gate_ref.clone())).await.unwrap(),
+        ledger
+            .state(&LedgerKey::new(
+                req.context.tenant.clone(),
+                req.context.gate_ref.clone()
+            ))
+            .await
+            .unwrap(),
         SigningLedgerState::Signed
     );
 }
@@ -764,13 +839,18 @@ async fn solana_signs_over_canonical_bytes() {
     let grants = Arc::new(InMemorySealedGrantStore::new());
     let ledger = Arc::new(InMemorySigningLedger::new());
     let context = ctx(chain);
-    ledger.create(&LedgerKey::new(context.tenant.clone(), context.gate_ref.clone())).await.unwrap();
+    ledger
+        .create(&LedgerKey::new(
+            context.tenant.clone(),
+            context.gate_ref.clone(),
+        ))
+        .await
+        .unwrap();
     grants
-        .seal(AttestedSigningGrant::new(
-            GrantKey::from_context(&context, approved),
-            0,
-            None,
-        ).expect("valid grant"))
+        .seal(
+            AttestedSigningGrant::new(GrantKey::from_context(&context, approved), 0, None)
+                .expect("valid grant"),
+        )
         .await
         .unwrap();
     let signer = CustodialSigner::new(
@@ -847,13 +927,18 @@ async fn near_signs_over_canonical_bytes() {
     let grants = Arc::new(InMemorySealedGrantStore::new());
     let ledger = Arc::new(InMemorySigningLedger::new());
     let context = ctx(chain);
-    ledger.create(&LedgerKey::new(context.tenant.clone(), context.gate_ref.clone())).await.unwrap();
+    ledger
+        .create(&LedgerKey::new(
+            context.tenant.clone(),
+            context.gate_ref.clone(),
+        ))
+        .await
+        .unwrap();
     grants
-        .seal(AttestedSigningGrant::new(
-            GrantKey::from_context(&context, approved),
-            0,
-            None,
-        ).expect("valid grant"))
+        .seal(
+            AttestedSigningGrant::new(GrantKey::from_context(&context, approved), 0, None)
+                .expect("valid grant"),
+        )
         .await
         .unwrap();
     let signer = CustodialSigner::new(
