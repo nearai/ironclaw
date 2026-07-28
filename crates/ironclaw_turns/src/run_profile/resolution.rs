@@ -35,8 +35,8 @@
 //!   the same verdict (the model-visible correction hint): `InvalidInput` schema
 //!   issues carry their [`DispatchInputIssueCode`](ironclaw_host_api::DispatchInputIssueCode)
 //!   plus redacted [`SafeSummary`] fields, and a free-text `Diagnostic` is
-//!   redacted to a [`SafeSummary`] (path-shaped text degrades to the placeholder
-//!   — the raw path never crosses the charter).
+//!   carried as a bounded [`ModelDiagnostic`] after producer-side secret
+//!   scrubbing (paths and payload delimiters remain available for recovery).
 //! - `progress`/`terminate_hint`/`output_digest` →
 //!   [`Outcome::progress`]/[`Outcome::terminate_hint`]/[`OutcomeRefs::output_digest`].
 //! - the `resume_token` inside `approval_resume`/`auth_resume` → the
@@ -64,9 +64,9 @@
 
 use ironclaw_host_api::{
     Blocked, Denial, DenyReason, DenyRecord, DenyRef, DependentRunResult, FailureKind, GateRecord,
-    GateRef, GateWaypoint, LoopRef, ModelFailureDiagnostic, ModelInputIssue, ModelInputIssues,
-    ModelResultPreview, Outcome, OutcomeRefs, OutputDigest, ProcessRef, ProcessWaypoint,
-    Resolution, ResultPreviewMeta, ResultProgress, ResultRef, ResumeToken, RunId,
+    GateRef, GateWaypoint, LoopRef, ModelDiagnostic, ModelFailureDiagnostic, ModelInputIssue,
+    ModelInputIssues, ModelResultPreview, Outcome, OutcomeRefs, OutputDigest, ProcessRef,
+    ProcessWaypoint, Resolution, ResultPreviewMeta, ResultProgress, ResultRef, ResumeToken, RunId,
     RuntimeCredentialAuthRequirement, SafeSummary, Suspension, TerminateHint, ToolVerdict,
 };
 
@@ -368,9 +368,8 @@ pub fn denied(reason_kind: CapabilityDeniedReasonKind, safe_summary: String) -> 
 /// [`DispatchInputIssueCode`](ironclaw_host_api::DispatchInputIssueCode) and
 /// every free-text field re-validated through the [`SafeSummary`] redaction
 /// contract (a field that fails is dropped; an issue whose required `path` fails
-/// is dropped whole). The loop's lenient free-text `Diagnostic` (which permits
-/// paths) is redacted to a [`SafeSummary`]: a path-shaped diagnostic degrades to
-/// the placeholder rather than carry a raw host path across the charter.
+/// is dropped whole). The loop's producer-scrubbed free-text `Diagnostic` keeps
+/// paths and payload delimiters in a bounded [`ModelDiagnostic`].
 fn model_failure_diagnostic(
     detail: Option<CapabilityFailureDetail>,
 ) -> Option<ModelFailureDiagnostic> {
@@ -380,11 +379,26 @@ fn model_failure_diagnostic(
                 ModelInputIssues::truncating(issues.into_iter().filter_map(model_input_issue));
             Some(ModelFailureDiagnostic::InvalidInput { issues })
         }
-        CapabilityFailureDetail::Diagnostic { text } => Some(ModelFailureDiagnostic::Diagnostic {
-            // The loop channel allows paths; the host_api boundary does not — a
-            // path-shaped diagnostic redacts to the placeholder (never raw).
-            text: SafeSummary::new(text).unwrap_or_else(|_| SafeSummary::placeholder()),
-        }),
+        CapabilityFailureDetail::Diagnostic { text } => {
+            let text = match ModelDiagnostic::truncating(text) {
+                Ok(text) => text,
+                // silent-ok: the model-visible diagnostic boundary fails closed
+                // to a fixed sentence rather than failing the turn — the
+                // producer is responsible for scrubbing before text reaches
+                // here. Reaching this arm means it did not, which an operator
+                // wants to see; `debug!` because `info!`/`warn!` corrupt the
+                // REPL/TUI (repo CLAUDE.md).
+                Err(error) => {
+                    tracing::debug!(
+                        %error,
+                        "model-visible diagnostic rejected at the sanitized \
+                         resolution boundary; substituting the fixed fallback"
+                    );
+                    ModelDiagnostic::unavailable()
+                }
+            };
+            Some(ModelFailureDiagnostic::Diagnostic { text })
+        }
         // The TRUSTED channel: the payload is already a validated
         // `HostRemediation`, so it crosses the charter as-is. Deliberately NOT
         // squeezed through `SafeSummary` — doing so is the #6299 regression
@@ -976,10 +990,10 @@ mod tests {
         }
     }
 
-    /// A `failed` result's free-text `Diagnostic` rides the verdict as a redacted
-    /// `SafeSummary`, and a path/secret-shaped diagnostic is redacted (never raw).
+    /// A `failed` result's producer-scrubbed free-text `Diagnostic` rides the
+    /// verdict without losing path-shaped recovery context.
     #[test]
-    fn failed_free_text_diagnostic_round_trips_and_redacts() {
+    fn failed_free_text_diagnostic_round_trips_and_preserves_paths() {
         match failed(
             FailureKind::Backend,
             "tool failed".to_string(),
@@ -996,8 +1010,8 @@ mod tests {
             other => panic!("expected Done, got {other:?}"),
         }
 
-        // A free-text diagnostic carrying a host path is redacted to the
-        // placeholder — the raw path never crosses the boundary.
+        // Path-shaped recovery context survives the sanitized resolution
+        // boundary instead of becoming an opaque placeholder.
         match failed(
             FailureKind::Backend,
             "tool failed".to_string(),
@@ -1007,8 +1021,25 @@ mod tests {
         ) {
             Resolution::Done(done) => match done.verdict.diagnostic() {
                 Some(ModelFailureDiagnostic::Diagnostic { text }) => {
-                    assert_eq!(text, &SafeSummary::placeholder());
-                    assert!(!text.as_str().contains("/etc/passwd"));
+                    assert_eq!(text.as_str(), "failed reading /etc/passwd");
+                }
+                other => panic!("expected Diagnostic, got {other:?}"),
+            },
+            other => panic!("expected Done, got {other:?}"),
+        }
+
+        // A known credential-shaped value that reaches this defense-in-depth
+        // boundary is replaced with the fixed diagnostic fallback.
+        match failed(
+            FailureKind::Backend,
+            "tool failed".to_string(),
+            Some(CapabilityFailureDetail::Diagnostic {
+                text: "provider returned ghp_0123456789abcdef".to_string(),
+            }),
+        ) {
+            Resolution::Done(done) => match done.verdict.diagnostic() {
+                Some(ModelFailureDiagnostic::Diagnostic { text }) => {
+                    assert_eq!(text, &ModelDiagnostic::unavailable());
                 }
                 other => panic!("expected Diagnostic, got {other:?}"),
             },
