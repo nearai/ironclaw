@@ -48,6 +48,20 @@ use crate::RuntimeProcessError;
 /// not implement and must not be assumed to provide.
 const DOCKER_HOST_ENV: &str = "IRONCLAW_REBORN_DOCKER_HOST";
 
+/// Second, separately-named opt-in required before [`DOCKER_HOST_ENV`] may
+/// point at a non-loopback, plaintext HTTP(S)/TCP Docker daemon.
+///
+/// Mirrors the `SANDBOX_ALLOW_FULL_ACCESS` pattern (`.env.example`): a
+/// dangerous default (here, plaintext host-root-equivalent Docker API
+/// access reachable from off-box) needs its own explicit flag rather than
+/// being implied by setting the first, more innocuous-looking var. Bare
+/// "reject all non-loopback" was rejected by design review: it breaks the
+/// one legitimate case (a DinD/CI sidecar reachable at a container-network
+/// IP, not `127.0.0.1`) and operators who hit it would just disable the
+/// whole check. RFC1918-only was also rejected: a corporate `10.0.0.0/8`
+/// hosts plenty of attacker footholds and is not a trust boundary.
+const DOCKER_HOST_ALLOW_REMOTE_ENV: &str = "IRONCLAW_REBORN_DOCKER_HOST_ALLOW_REMOTE";
+
 /// Maximum connect attempts before giving up.
 const MAX_ATTEMPTS: u32 = 4;
 /// Base backoff between attempts; doubles each retry attempt.
@@ -133,6 +147,16 @@ async fn connect_override(host: &str) -> Result<Docker, RuntimeProcessError> {
         return Ok(docker);
     }
 
+    if !is_loopback_docker_host(host) && !docker_host_allow_remote() {
+        return Err(RuntimeProcessError::ExecutionFailed(format!(
+            "{DOCKER_HOST_ENV}={host} is not a unix socket or loopback address; \
+             plaintext access to a remote Docker Engine API is host-root-equivalent \
+             (it can create containers and mount host paths). Set \
+             {DOCKER_HOST_ALLOW_REMOTE_ENV}=1 to explicitly allow a non-loopback \
+             Docker daemon (e.g. a DinD/CI sidecar reachable at a container-network IP)."
+        )));
+    }
+
     let docker = Docker::connect_with_http(
         host,
         CONNECT_ATTEMPT_TIMEOUT.as_secs(),
@@ -149,6 +173,46 @@ async fn connect_override(host: &str) -> Result<Docker, RuntimeProcessError> {
         ))
     })?;
     Ok(docker)
+}
+
+/// Extracts the bare host (no scheme, no port, no path) from an
+/// `IRONCLAW_REBORN_DOCKER_HOST` HTTP(S)/TCP address such as
+/// `http://127.0.0.1:2375`, `tcp://docker-sidecar:2375`, or
+/// `[::1]:2375`.
+fn docker_host_component(addr: &str) -> &str {
+    let without_scheme = addr.split_once("://").map_or(addr, |(_, rest)| rest);
+    let without_path = without_scheme
+        .split_once('/')
+        .map_or(without_scheme, |(host, _)| host);
+    if let Some(after_bracket) = without_path.strip_prefix('[') {
+        // IPv6 literal: "[::1]:2375" -> "::1"
+        return after_bracket.split(']').next().unwrap_or(after_bracket);
+    }
+    without_path
+        .rsplit_once(':')
+        .map_or(without_path, |(host, _)| host)
+}
+
+/// Whether an `IRONCLAW_REBORN_DOCKER_HOST` HTTP(S)/TCP address resolves (by
+/// literal, not DNS) to loopback — the documented safe default for this
+/// override. `localhost` and IPv4/IPv6 loopback literals count; a hostname
+/// that merely *might* resolve to loopback at connect time does not, since
+/// that would make the guard dependent on DNS state.
+fn is_loopback_docker_host(addr: &str) -> bool {
+    let host = docker_host_component(addr);
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Whether the operator has set the separate [`DOCKER_HOST_ALLOW_REMOTE_ENV`]
+/// opt-in permitting a non-loopback [`DOCKER_HOST_ENV`] target.
+fn docker_host_allow_remote() -> bool {
+    env_or_override(DOCKER_HOST_ALLOW_REMOTE_ENV).is_some_and(|value| {
+        let value = value.trim().to_ascii_lowercase();
+        value == "1" || value == "true"
+    })
 }
 
 #[cfg(unix)]
@@ -370,6 +434,87 @@ mod tests {
         assert!(
             message.contains(DOCKER_HOST_ENV),
             "expected http override branch error to name {DOCKER_HOST_ENV}, got: {message}"
+        );
+    }
+
+    // Plaintext, unauthenticated access to a remote Docker Engine API is
+    // host-root-equivalent (see the module doc comment on DOCKER_HOST_ENV).
+    // A non-loopback host must be refused by default, before any socket is
+    // even opened, unless the operator has separately opted in via
+    // DOCKER_HOST_ALLOW_REMOTE_ENV. This reaches the guard directly (not
+    // through connect_once/connect_docker_with_retry) so it doesn't need a
+    // reachable daemon: the trust-boundary check must fire before any I/O.
+    #[test]
+    fn connect_override_rejects_non_loopback_host_without_opt_in() {
+        let _guard = lock_env();
+        remove_runtime_env(DOCKER_HOST_ALLOW_REMOTE_ENV);
+
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build current-thread runtime for test")
+            .block_on(connect_override("http://203.0.113.5:2375"));
+
+        let err = result.expect_err("non-loopback host must be rejected without the opt-in");
+        let message = err.to_string();
+        assert!(
+            message.contains(DOCKER_HOST_ALLOW_REMOTE_ENV),
+            "error must name the opt-in env var so an operator doesn't have \
+             to read Rust source to proceed, got: {message}"
+        );
+        assert!(
+            message.contains("203.0.113.5"),
+            "error must name the disallowed host, got: {message}"
+        );
+    }
+
+    // With the opt-in set, the trust-boundary check must get out of the way
+    // — the call should reach real Docker connect/ping logic (which then
+    // fails because nothing is listening at that address, not because of
+    // the trust boundary). This machine has no Docker daemon, so this only
+    // proves the guard was passed, not that a real remote daemon connects;
+    // see the module doc comment for why a Docker-client mock was rejected.
+    #[test]
+    fn connect_override_proceeds_past_trust_boundary_with_opt_in() {
+        let _guard = lock_env();
+        set_runtime_env(DOCKER_HOST_ALLOW_REMOTE_ENV, "1");
+
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build current-thread runtime for test")
+            .block_on(connect_override("http://203.0.113.5:2375"));
+
+        remove_runtime_env(DOCKER_HOST_ALLOW_REMOTE_ENV);
+
+        let err = result.expect_err("203.0.113.5:2375 has nothing listening");
+        let message = err.to_string();
+        assert!(
+            !message.contains(DOCKER_HOST_ALLOW_REMOTE_ENV),
+            "with the opt-in set, the failure must come from the real \
+             connect/ping attempt, not the trust-boundary guard, got: {message}"
+        );
+    }
+
+    // Loopback addresses must be unaffected by the new guard — this is the
+    // documented safe default and must keep working with no opt-in set.
+    #[test]
+    fn connect_override_loopback_host_is_unaffected_by_the_remote_guard() {
+        let _guard = lock_env();
+        remove_runtime_env(DOCKER_HOST_ALLOW_REMOTE_ENV);
+
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build current-thread runtime for test")
+            .block_on(connect_override("http://127.0.0.1:1"));
+
+        let err = result.expect_err("nothing is listening on 127.0.0.1:1");
+        let message = err.to_string();
+        assert!(
+            !message.contains(DOCKER_HOST_ALLOW_REMOTE_ENV),
+            "loopback host must not be routed through the remote-host guard, \
+             got: {message}"
         );
     }
 
