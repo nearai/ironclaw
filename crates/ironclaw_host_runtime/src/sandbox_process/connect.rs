@@ -203,9 +203,19 @@ pub async fn connect_docker_with_retry() -> Result<Docker, RuntimeProcessError> 
 pub async fn sandbox_docker_readiness() -> SandboxDockerReadiness {
     match connect_once().await {
         Ok(_) => SandboxDockerReadiness::Ready,
-        Err(err) => SandboxDockerReadiness::Unreachable {
-            reason: err.to_string(),
-        },
+        Err(err) => {
+            // The underlying error embeds the configured socket path /
+            // remote address and Bollard's raw backend error (see
+            // `connect_override`). This probe is documented as a boot
+            // diagnostic surfaced on "a startup log line or health
+            // endpoint" — a surface that is not necessarily
+            // trusted-internal-only — so the public `reason` stays a fixed
+            // string and the detail goes to a debug log instead.
+            tracing::debug!(error = %err, "sandbox docker readiness probe failed");
+            SandboxDockerReadiness::Unreachable {
+                reason: "docker daemon unreachable".to_string(),
+            }
+        }
     }
 }
 
@@ -325,15 +335,19 @@ mod tests {
         );
     }
 
-    // Natural on this machine: no Docker daemon is running, so connect_once
-    // (and therefore the readiness probe) fails through local discovery.
-    // See the comment on `docker_host_env_override_is_consulted_first` for
-    // why this is a plain `#[test]` driving the async probe via `block_on`
-    // rather than `#[tokio::test]` holding the guard across an `.await`.
+    // Uses the env override (like the two tests above) so the daemon is
+    // deterministically unreachable and the underlying `RuntimeProcessError`
+    // is guaranteed to embed the configured endpoint (see
+    // `connect_override`'s format! strings) — that's the exact string the
+    // public `reason` must NOT leak. See the comment on
+    // `docker_host_env_override_is_consulted_first` for why this is a plain
+    // `#[test]` driving the async probe via `block_on` rather than
+    // `#[tokio::test]` holding the guard across an `.await`.
     #[test]
     fn readiness_surfaces_reason_on_unreachable_daemon() {
         let _guard = lock_env();
-        remove_runtime_env(DOCKER_HOST_ENV);
+        let unreachable_host = "/nonexistent/ironclaw-test-docker-readiness.sock";
+        set_runtime_env(DOCKER_HOST_ENV, unreachable_host);
 
         let readiness = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -341,14 +355,23 @@ mod tests {
             .expect("build current-thread runtime for test")
             .block_on(sandbox_docker_readiness());
 
+        remove_runtime_env(DOCKER_HOST_ENV);
+
         match readiness {
             SandboxDockerReadiness::Unreachable { reason } => {
                 assert!(!reason.is_empty(), "reason should be a non-empty string");
+                assert!(
+                    !reason.contains(unreachable_host),
+                    "readiness reason leaked the configured Docker endpoint \
+                     into a diagnostic surface that isn't necessarily \
+                     trusted-internal-only, got: {reason}"
+                );
             }
             SandboxDockerReadiness::Ready => {
-                // A real Docker daemon happens to be reachable on this
-                // machine/CI runner; readiness reporting Ready is also a
-                // valid, non-flaky outcome for this probe.
+                panic!(
+                    "expected Unreachable: {unreachable_host} is a nonexistent \
+                     socket path and can never be Ready"
+                );
             }
         }
     }
