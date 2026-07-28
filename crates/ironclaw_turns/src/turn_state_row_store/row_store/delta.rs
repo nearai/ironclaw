@@ -4,14 +4,16 @@ use std::{
 };
 
 use ironclaw_filesystem::SeqNo;
+use ironclaw_host_api::{TenantId, UserId, VendorId};
 use serde::Serialize;
 
 use crate::{
-    EventCursor, IdempotencyKey, LoopCheckpointRecord, SpawnTreeReservation, SubmitTurnResponse,
-    TurnActiveLockRecord, TurnAdmissionReservationRecord, TurnCheckpointRecord, TurnError,
-    TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind, TurnIdempotencyRecord,
-    TurnIdempotencyReplay, TurnLifecycleEvent, TurnPersistenceSnapshot, TurnRecord, TurnRunId,
-    TurnRunRecord, TurnRunState, TurnScope, TurnStateStoreLimits, runner::ClaimedTurnRun,
+    BlockedAuthRunCandidate, BlockedAuthRunQuery, EventCursor, IdempotencyKey,
+    LoopCheckpointRecord, SpawnTreeReservation, SubmitTurnResponse, TurnActiveLockRecord,
+    TurnAdmissionReservationRecord, TurnCheckpointRecord, TurnError, TurnIdempotencyOperationKind,
+    TurnIdempotencyOutcomeKind, TurnIdempotencyRecord, TurnIdempotencyReplay, TurnLifecycleEvent,
+    TurnPersistenceSnapshot, TurnRecord, TurnRunId, TurnRunRecord, TurnRunState, TurnScope,
+    TurnStateStoreLimits, TurnStatus, runner::ClaimedTurnRun,
 };
 
 use crate::turn_state_row_store::turn_state_engine::TurnStateEngine;
@@ -78,6 +80,45 @@ impl RowSnapshotState {
         self.snapshot.runs.get(index).cloned()
     }
 
+    pub(super) fn blocked_auth_runs(
+        &self,
+        query: &BlockedAuthRunQuery,
+    ) -> Vec<BlockedAuthRunCandidate> {
+        let key = BlockedAuthIndexKey {
+            tenant_id: query.tenant_id.clone(),
+            owner_user_id: query.owner_user_id.clone(),
+            provider: query.provider.clone(),
+        };
+        let mut candidates = self
+            .indexes
+            .blocked_auth_runs
+            .get(&key)
+            .into_iter()
+            .flatten()
+            .filter_map(|run_id| {
+                let run_index = self.indexes.runs.get(&run_id.to_string()).copied()?;
+                let run = self.snapshot.runs.get(run_index)?;
+                let actor = self
+                    .indexes
+                    .turns
+                    .get(&run.turn_id.to_string())
+                    .and_then(|turn_index| self.snapshot.turns.get(*turn_index))
+                    .filter(|turn| turn.scope == run.scope)
+                    .map(|turn| turn.actor.clone());
+                Some(BlockedAuthRunCandidate {
+                    run_id: run.run_id,
+                    scope: run.scope.clone(),
+                    actor,
+                    gate_ref: run.gate_ref.clone(),
+                    source_binding_ref: run.source_binding_ref.clone(),
+                    reply_target_binding_ref: run.reply_target_binding_ref.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|candidate| candidate.run_id.as_uuid());
+        candidates
+    }
+
     pub(super) fn turn_record_for_run(
         &self,
         scope: &TurnScope,
@@ -126,6 +167,14 @@ struct RowSnapshotIndexes {
     events: HashMap<String, usize>,
     admission_reservations: HashMap<String, usize>,
     spawn_tree_reservations: HashMap<String, usize>,
+    blocked_auth_runs: HashMap<BlockedAuthIndexKey, HashSet<TurnRunId>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct BlockedAuthIndexKey {
+    tenant_id: TenantId,
+    owner_user_id: UserId,
+    provider: VendorId,
 }
 
 impl RowSnapshotIndexes {
@@ -152,7 +201,59 @@ impl RowSnapshotIndexes {
                 &snapshot.spawn_tree_reservations,
                 &spawn_tree_reservation_record_key,
             )?,
+            blocked_auth_runs: blocked_auth_run_index(&snapshot.runs),
         })
+    }
+}
+
+fn blocked_auth_run_index(
+    runs: &[TurnRunRecord],
+) -> HashMap<BlockedAuthIndexKey, HashSet<TurnRunId>> {
+    let mut index = HashMap::new();
+    for run in runs {
+        insert_blocked_auth_run(&mut index, run);
+    }
+    index
+}
+
+fn blocked_auth_index_keys(run: &TurnRunRecord) -> HashSet<BlockedAuthIndexKey> {
+    if run.status != TurnStatus::BlockedAuth {
+        return HashSet::new();
+    }
+    let Some(owner_user_id) = run.scope.explicit_owner_user_id().cloned() else {
+        return HashSet::new();
+    };
+    run.credential_requirements
+        .iter()
+        .map(|requirement| BlockedAuthIndexKey {
+            tenant_id: run.scope.tenant_id.clone(),
+            owner_user_id: owner_user_id.clone(),
+            provider: requirement.provider.clone(),
+        })
+        .collect()
+}
+
+fn insert_blocked_auth_run(
+    index: &mut HashMap<BlockedAuthIndexKey, HashSet<TurnRunId>>,
+    run: &TurnRunRecord,
+) {
+    for key in blocked_auth_index_keys(run) {
+        index.entry(key).or_default().insert(run.run_id);
+    }
+}
+
+fn remove_blocked_auth_run(
+    index: &mut HashMap<BlockedAuthIndexKey, HashSet<TurnRunId>>,
+    run: &TurnRunRecord,
+) {
+    for key in blocked_auth_index_keys(run) {
+        let remove_key = index.get_mut(&key).is_some_and(|run_ids| {
+            run_ids.remove(&run.run_id);
+            run_ids.is_empty()
+        });
+        if remove_key {
+            index.remove(&key);
+        }
     }
 }
 
@@ -353,6 +454,19 @@ fn apply_delta_indexed(
         )?;
     }
     if !delta.runs_upsert.is_empty() || !delta.runs_delete.is_empty() {
+        let mut changed_run_keys = delta.runs_delete.clone();
+        changed_run_keys.extend(delta.runs_upsert.iter().map(|run| run.run_id.to_string()));
+        let old_runs = changed_run_keys
+            .iter()
+            .filter_map(|key| {
+                indexes
+                    .runs
+                    .get(key)
+                    .and_then(|record_index| snapshot.runs.get(*record_index))
+                    .cloned()
+            })
+            .collect::<Vec<_>>();
+        let new_runs = delta.runs_upsert.clone();
         apply_delta_collection_indexed(
             &mut snapshot.runs,
             &mut indexes.runs,
@@ -360,6 +474,12 @@ fn apply_delta_indexed(
             delta.runs_delete,
             run_record_key,
         )?;
+        for run in &old_runs {
+            remove_blocked_auth_run(&mut indexes.blocked_auth_runs, run);
+        }
+        for run in &new_runs {
+            insert_blocked_auth_run(&mut indexes.blocked_auth_runs, run);
+        }
     }
     if !delta.active_locks_upsert.is_empty() || !delta.active_locks_delete.is_empty() {
         apply_delta_collection_indexed(

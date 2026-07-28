@@ -536,19 +536,19 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
 
 pub(crate) fn auth_continuation_dispatcher(
     turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
-    blocked_auth_snapshot_source: Option<Arc<dyn ironclaw_turns::TurnRunSnapshotSource>>,
+    blocked_auth_run_source: Option<Arc<dyn ironclaw_turns::BlockedAuthRunSource>>,
 ) -> Arc<dyn RebornAuthContinuationDispatcher> {
     let single_run: Arc<dyn RebornAuthContinuationDispatcher> = Arc::new(
         ProductAuthTurnGateResumeDispatcher::new(Arc::clone(&turn_coordinator)),
     );
-    match blocked_auth_snapshot_source {
+    match blocked_auth_run_source {
         // Local paths fan a completed flow out to the caller's other
         // provider-blocked runs (pair/authorize once, all waiting chats
         // continue). Production-shaped builders pass None until their
         // turn-state snapshot source is wired.
-        Some(snapshot_source) => Arc::new(ironclaw_product::BlockedAuthResumeFanout::new(
+        Some(run_source) => Arc::new(ironclaw_product::BlockedAuthResumeFanout::new(
             single_run,
-            snapshot_source,
+            run_source,
             turn_coordinator,
         )),
         None => single_run,
@@ -558,7 +558,7 @@ pub(crate) fn auth_continuation_dispatcher(
 pub(super) struct ProductAuthServicesCompositionInput {
     pub(super) ports: RebornProductAuthServicePorts,
     pub(super) turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
-    pub(super) blocked_auth_snapshot_source: Option<Arc<dyn ironclaw_turns::TurnRunSnapshotSource>>,
+    pub(super) blocked_auth_run_source: Option<Arc<dyn ironclaw_turns::BlockedAuthRunSource>>,
     pub(super) provider_composition: OAuthProviderComposition,
     pub(super) security_audit_sink: Option<Arc<dyn ironclaw_events::SecurityAuditSink>>,
     pub(super) secret_store: Arc<dyn SecretStorePort>,
@@ -581,7 +581,7 @@ pub(super) fn compose_product_auth_services(
     let ProductAuthServicesCompositionInput {
         ports,
         turn_coordinator,
-        blocked_auth_snapshot_source,
+        blocked_auth_run_source,
         provider_composition,
         security_audit_sink,
         secret_store,
@@ -595,8 +595,7 @@ pub(super) fn compose_product_auth_services(
         None if builder_owned_durable_auth => ports.with_current_provider_client(),
         None => ports,
     };
-    let base_continuation =
-        auth_continuation_dispatcher(turn_coordinator, blocked_auth_snapshot_source);
+    let base_continuation = auth_continuation_dispatcher(turn_coordinator, blocked_auth_run_source);
     let mut services = ports.into_services(Arc::clone(&base_continuation), secret_store);
     if let Some(sink) = security_audit_sink {
         services = services.with_security_audit_sink(sink);

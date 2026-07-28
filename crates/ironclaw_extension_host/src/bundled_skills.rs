@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use ironclaw_filesystem::{
     CasExpectation, DiskFilesystem, Entry, FileType, FilesystemError, RootFilesystem,
 };
-use ironclaw_host_api::{HostPath, UserId, VirtualPath};
+use ironclaw_host_api::{HostPath, VirtualPath};
 use ironclaw_loop_host::SkillFilePath;
 use ironclaw_skills::{ManagedSkillSource, SkillSummary};
 use serde::{Deserialize, Serialize};
@@ -33,53 +33,38 @@ const SYSTEM_SKILLS_ROOT: &str = "/projects/system/skills";
 pub const LEGACY_SKILLS_BACKFILL_MARKER: &str = ".legacy-skills-backfilled";
 const LEGACY_SKILLS_BACKFILL_MAX_DEPTH: usize = 64;
 
-/// Copies the legacy standalone skill tree into each supported user-scoped
-/// location once. Existing scoped entries win and symlinks are never followed.
-pub fn backfill_legacy_user_skills(
-    storage_root: &Path,
-    owner_user_id: &UserId,
+/// Copies one legacy skill tree into one caller-selected scoped skill root.
+///
+/// Deployment/profile code owns which scopes need compatibility backfill.
+/// Existing scoped entries win and symlinks are never followed.
+pub fn backfill_legacy_skill_tree(
+    legacy_root: &Path,
+    scoped_root: &Path,
 ) -> Result<(), RebornBuildError> {
-    let legacy_root = storage_root.join("skills");
     if !legacy_root.is_dir() {
         return Ok(());
     }
-    for tenant_id in ["default", "reborn-cli"] {
-        backfill_legacy_user_skills_for_tenant(
-            &legacy_root,
-            storage_root,
-            tenant_id,
-            owner_user_id,
-        )?;
-    }
-    Ok(())
-}
-
-fn backfill_legacy_user_skills_for_tenant(
-    legacy_root: &Path,
-    storage_root: &Path,
-    tenant_id: &str,
-    owner_user_id: &UserId,
-) -> Result<(), RebornBuildError> {
-    let scoped_root = storage_root
-        .join("tenants")
-        .join(tenant_id)
-        .join("users")
-        .join(owner_user_id.as_str())
-        .join("skills");
     let marker = scoped_root.join(LEGACY_SKILLS_BACKFILL_MARKER);
     if marker.exists() {
         return Ok(());
     }
 
-    fs::create_dir_all(&scoped_root).map_err(invalid_config)?;
-    for entry in fs::read_dir(legacy_root).map_err(invalid_config)? {
-        let entry = entry.map_err(invalid_config)?;
+    fs::create_dir_all(scoped_root).map_err(|error| {
+        legacy_backfill_io_error("create scoped skill root", scoped_root, error)
+    })?;
+    for entry in fs::read_dir(legacy_root)
+        .map_err(|error| legacy_backfill_io_error("read legacy skill root", legacy_root, error))?
+    {
+        let entry = entry.map_err(|error| {
+            legacy_backfill_io_error("read legacy skill directory entry", legacy_root, error)
+        })?;
         let destination = scoped_root.join(entry.file_name());
         if !destination.exists() {
             copy_legacy_skill_entry(&entry.path(), &destination)?;
         }
     }
-    fs::write(marker, b"").map_err(invalid_config)
+    fs::write(&marker, b"")
+        .map_err(|error| legacy_backfill_io_error("write backfill marker", &marker, error))
 }
 
 fn copy_legacy_skill_entry(source: &Path, destination: &Path) -> Result<(), RebornBuildError> {
@@ -93,16 +78,24 @@ fn copy_legacy_skill_entry(source: &Path, destination: &Path) -> Result<(), Rebo
             )));
         }
 
-        let metadata = fs::symlink_metadata(&source).map_err(invalid_config)?;
+        let metadata = fs::symlink_metadata(&source).map_err(|error| {
+            legacy_backfill_io_error("inspect legacy skill entry", &source, error)
+        })?;
         if metadata.file_type().is_symlink() {
             tracing::warn!(
                 path = %source.display(),
                 "Skipping symlinked legacy skill entry during backfill"
             );
         } else if metadata.is_dir() {
-            fs::create_dir_all(&destination).map_err(invalid_config)?;
-            for entry in fs::read_dir(&source).map_err(invalid_config)? {
-                let entry = entry.map_err(invalid_config)?;
+            fs::create_dir_all(&destination).map_err(|error| {
+                legacy_backfill_io_error("create migrated skill directory", &destination, error)
+            })?;
+            for entry in fs::read_dir(&source).map_err(|error| {
+                legacy_backfill_io_error("read legacy skill directory", &source, error)
+            })? {
+                let entry = entry.map_err(|error| {
+                    legacy_backfill_io_error("read legacy skill directory entry", &source, error)
+                })?;
                 pending.push_back((
                     entry.path(),
                     destination.join(entry.file_name()),
@@ -111,12 +104,32 @@ fn copy_legacy_skill_entry(source: &Path, destination: &Path) -> Result<(), Rebo
             }
         } else {
             if let Some(parent) = destination.parent() {
-                fs::create_dir_all(parent).map_err(invalid_config)?;
+                fs::create_dir_all(parent).map_err(|error| {
+                    legacy_backfill_io_error(
+                        "create migrated skill parent directory",
+                        parent,
+                        error,
+                    )
+                })?;
             }
-            fs::copy(source, destination).map_err(invalid_config)?;
+            fs::copy(&source, &destination).map_err(|error| {
+                invalid_config(format!(
+                    "failed to copy legacy skill entry from '{}' to '{}': {error}",
+                    source.display(),
+                    destination.display()
+                ))
+            })?;
         }
     }
     Ok(())
+}
+
+fn legacy_backfill_io_error(
+    operation: &str,
+    path: &Path,
+    error: std::io::Error,
+) -> RebornBuildError {
+    invalid_config(format!("{operation} '{}': {error}", path.display()))
 }
 
 #[derive(Debug, Deserialize)]
@@ -538,6 +551,25 @@ fn invalid_config(reason: impl std::fmt::Display) -> RebornBuildError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_skill_backfill_errors_include_operation_and_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let legacy_root = dir.path().join("legacy-skills");
+        let scoped_root = dir.path().join("scoped-skills");
+        fs::create_dir_all(&legacy_root).expect("legacy root");
+        fs::write(&scoped_root, "not a directory").expect("scoped root fixture");
+
+        let error = backfill_legacy_skill_tree(&legacy_root, &scoped_root)
+            .expect_err("a file cannot be used as the scoped skill root");
+        let message = error.to_string();
+
+        assert!(message.contains("create scoped skill root"), "{message}");
+        assert!(
+            message.contains(&scoped_root.display().to_string()),
+            "{message}"
+        );
+    }
 
     /// Zero-legacy gate for embedded skill guidance: the Reborn binary embeds
     /// the repo `skills/` directory, so a skill teaching the retired v1

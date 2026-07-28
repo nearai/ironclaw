@@ -12,9 +12,9 @@ use tokio::sync::{Mutex as AsyncMutex, RwLock};
 use tracing::field;
 
 use crate::{
-    AllowAllTurnAdmissionLimitProvider, CancelRunRequest, EventCursor, TurnAdmissionLimitProvider,
-    TurnError, TurnPersistenceSnapshot, TurnRunId, TurnRunState, TurnScope, TurnStateStoreLimits,
-    TurnStatus, runner::HeartbeatRequest,
+    AllowAllTurnAdmissionLimitProvider, BlockedAuthRunCandidate, BlockedAuthRunQuery,
+    CancelRunRequest, EventCursor, TurnAdmissionLimitProvider, TurnError, TurnPersistenceSnapshot,
+    TurnRunId, TurnRunState, TurnScope, TurnStateStoreLimits, TurnStatus, runner::HeartbeatRequest,
 };
 
 use super::{
@@ -192,6 +192,26 @@ where
             .read_snapshot_with_runner_lease_overlay(RunnerLeaseOverlay::All)
             .await?;
         Ok(snapshot)
+    }
+
+    /// Return only runs parked on auth for one exact caller/provider.
+    ///
+    /// The hot row snapshot maintains a secondary index for this query, so a
+    /// callback clones only matching resume candidates rather than the entire
+    /// durable turn-state history.
+    pub async fn blocked_auth_runs(
+        &self,
+        query: &BlockedAuthRunQuery,
+    ) -> Result<Vec<BlockedAuthRunCandidate>, TurnError> {
+        let mut guard = self.snapshot_state.lock().await;
+        self.drop_cache_if_degraded(&mut guard);
+        if guard.is_none() {
+            *guard = Some(self.load_snapshot_from_rows().await?);
+        }
+        Ok(guard
+            .as_ref()
+            .map(|state| state.blocked_auth_runs(query))
+            .unwrap_or_default())
     }
 
     /// Materialize the embedded engine over the current durable state (runner

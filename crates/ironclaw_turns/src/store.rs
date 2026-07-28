@@ -3,7 +3,9 @@ use std::collections::BTreeSet;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use ironclaw_host_api::{AgentId, ProjectId, RuntimeCredentialAuthRequirement, TenantId};
+use ironclaw_host_api::{
+    AgentId, ProjectId, RuntimeCredentialAuthRequirement, TenantId, UserId, VendorId,
+};
 
 use crate::{
     AcceptedMessageRef, AdmissionRejection, CancelRunRequest, CancelRunResponse,
@@ -530,6 +532,38 @@ pub struct TurnPersistenceSnapshot {
 #[async_trait]
 pub trait TurnRunSnapshotSource: Send + Sync {
     async fn turn_run_snapshot(&self) -> Result<TurnPersistenceSnapshot, crate::TurnError>;
+}
+
+/// Exact caller/provider key for reading runs parked on an auth gate.
+///
+/// This query stays separate from [`TurnRunSnapshotSource`] so auth completion
+/// does not materialize unrelated turns, checkpoints, idempotency records, or
+/// lifecycle events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockedAuthRunQuery {
+    pub tenant_id: TenantId,
+    pub owner_user_id: UserId,
+    pub provider: VendorId,
+}
+
+/// Minimal data needed to resume one run selected by [`BlockedAuthRunQuery`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockedAuthRunCandidate {
+    pub run_id: TurnRunId,
+    pub scope: TurnScope,
+    pub actor: Option<TurnActor>,
+    pub gate_ref: Option<GateRef>,
+    pub source_binding_ref: SourceBindingRef,
+    pub reply_target_binding_ref: ReplyTargetBindingRef,
+}
+
+/// Backend-neutral scoped lookup for provider-auth fan-out.
+#[async_trait]
+pub trait BlockedAuthRunSource: Send + Sync {
+    async fn blocked_auth_runs(
+        &self,
+        query: BlockedAuthRunQuery,
+    ) -> Result<Vec<BlockedAuthRunCandidate>, crate::TurnError>;
 }
 
 impl TurnPersistenceSnapshot {

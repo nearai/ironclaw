@@ -21,21 +21,23 @@ use ironclaw_filesystem::{
     RootFilesystem, ScopedFilesystem, SeqNo, StorageClass, VersionedEntry,
 };
 use ironclaw_host_api::{
-    AgentId, HostPath, MountAlias, MountGrant, MountPermissions, MountView, ProjectId,
-    ResourceScope, ScopedPath, TenantId, ThreadId, UserId, VirtualPath,
+    AgentId, ExtensionId, HostPath, MountAlias, MountGrant, MountPermissions, MountView, ProjectId,
+    ResourceScope, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, ScopedPath,
+    TenantId, ThreadId, UserId, VendorId, VirtualPath,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, AdmissionRejection, AllowAllTurnAdmissionPolicy, BlockedReason,
-    CheckpointSchemaId, EventCursor, FilesystemTurnStateBlockPersistence, GateRef,
-    GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey, InMemoryRunProfileResolver,
-    LoopCheckpointStore, LoopExitMapping, ProductTurnContext, PutLoopCheckpointRequest,
-    ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest, RunOriginAdapter,
-    RunProfileRequest, RunProfileVersion, SanitizedCancelReason, SanitizedFailure,
-    SourceBindingRef, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnAdmissionPolicy, TurnCheckpointId, TurnError, TurnEventKind, TurnEventProjectionSource,
-    TurnId, TurnLeaseToken, TurnLifecycleEvent, TurnOriginKind, TurnOwner, TurnRunId, TurnRunnerId,
-    TurnScope, TurnSpawnTreeStateStore, TurnStateBlockPersistence, TurnStateRowStore,
-    TurnStateStore, TurnStateStoreLimits, TurnStatus,
+    AcceptedMessageRef, AdmissionRejection, AllowAllTurnAdmissionPolicy, BlockedAuthRunQuery,
+    BlockedAuthRunSource, BlockedReason, CheckpointSchemaId, EventCursor,
+    FilesystemTurnStateBlockPersistence, GateRef, GetLoopCheckpointRequest, GetRunStateRequest,
+    IdempotencyKey, InMemoryRunProfileResolver, LoopCheckpointStore, LoopExitMapping,
+    ProductTurnContext, PutLoopCheckpointRequest, ReplyTargetBindingRef, ResumeTurnPrecondition,
+    ResumeTurnRequest, RunOriginAdapter, RunProfileRequest, RunProfileVersion,
+    SanitizedCancelReason, SanitizedFailure, SourceBindingRef, SubmitChildRunRequest,
+    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnAdmissionPolicy, TurnCheckpointId,
+    TurnError, TurnEventKind, TurnEventProjectionSource, TurnId, TurnLeaseToken,
+    TurnLifecycleEvent, TurnOriginKind, TurnOwner, TurnRunId, TurnRunnerId, TurnScope,
+    TurnSpawnTreeStateStore, TurnStateBlockPersistence, TurnStateRowStore, TurnStateStore,
+    TurnStateStoreLimits, TurnStatus,
     run_profile::{LoopCheckpointKind, LoopCheckpointStateRef},
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, ClaimRunRequest, CompleteRunRequest,
@@ -767,6 +769,143 @@ fn accepted_run_id(response: &SubmitTurnResponse) -> TurnRunId {
 fn accepted_turn_id(response: &SubmitTurnResponse) -> TurnId {
     let SubmitTurnResponse::Accepted { turn_id, .. } = response;
     *turn_id
+}
+
+#[tokio::test]
+async fn blocked_auth_query_indexes_exact_owner_and_provider_across_reload_and_resume() {
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let store = TurnStateRowStore::new(Arc::clone(&scoped));
+    let resolver = InMemoryRunProfileResolver::default();
+    let tenant_id = TenantId::new("tenant1").unwrap();
+    let matching_owner = UserId::new("auth-owner").unwrap();
+    let matching_provider = VendorId::new("slack").unwrap();
+    let mut matching = None;
+
+    for index in 0..64 {
+        let scope = TurnScope::new_with_owner(
+            tenant_id.clone(),
+            Some(AgentId::new("agent1").unwrap()),
+            Some(ProjectId::new("project1").unwrap()),
+            ThreadId::new(format!("unrelated-auth-query-{index}")).unwrap(),
+            Some(matching_owner.clone()),
+        );
+        store
+            .submit_turn(
+                submit_request_for(scope, &format!("unrelated-auth-query-{index}")),
+                &AllowAllTurnAdmissionPolicy,
+                &resolver,
+            )
+            .await
+            .unwrap();
+    }
+
+    for (thread, owner, provider) in [
+        (
+            "matching-auth-query",
+            matching_owner.clone(),
+            matching_provider.clone(),
+        ),
+        (
+            "different-owner-auth-query",
+            UserId::new("different-auth-owner").unwrap(),
+            matching_provider.clone(),
+        ),
+        (
+            "different-provider-auth-query",
+            matching_owner.clone(),
+            VendorId::new("google").unwrap(),
+        ),
+    ] {
+        let scope = TurnScope::new_with_owner(
+            tenant_id.clone(),
+            Some(AgentId::new("agent1").unwrap()),
+            Some(ProjectId::new("project1").unwrap()),
+            ThreadId::new(thread).unwrap(),
+            Some(owner.clone()),
+        );
+        let mut request = submit_request_for(scope.clone(), &format!("idem-{thread}"));
+        request.actor = TurnActor::new(owner);
+        let run_id = accepted_run_id(
+            &store
+                .submit_turn(request, &AllowAllTurnAdmissionPolicy, &resolver)
+                .await
+                .unwrap(),
+        );
+        let runner_id = TurnRunnerId::new();
+        let lease_token = TurnLeaseToken::new();
+        store
+            .claim_next_run(ClaimRunRequest {
+                runner_id,
+                lease_token,
+                scope_filter: Some(scope.clone()),
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let gate_ref = GateRef::new(format!("gate-{thread}")).unwrap();
+        store
+            .block_run(BlockRunRequest {
+                run_id,
+                runner_id,
+                lease_token,
+                checkpoint_id: TurnCheckpointId::new(),
+                state_ref: LoopCheckpointStateRef::new(format!("checkpoint:{thread}")).unwrap(),
+                reason: BlockedReason::Auth {
+                    gate_ref: gate_ref.clone(),
+                    credential_requirements: vec![RuntimeCredentialAuthRequirement {
+                        provider,
+                        setup: RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
+                        requester_extension: ExtensionId::new("auth-query-test").unwrap(),
+                        provider_scopes: Vec::new(),
+                    }],
+                },
+            })
+            .await
+            .unwrap();
+        if thread == "matching-auth-query" {
+            matching = Some((scope, run_id, gate_ref));
+        }
+    }
+
+    let query = BlockedAuthRunQuery {
+        tenant_id,
+        owner_user_id: matching_owner,
+        provider: matching_provider,
+    };
+    let candidates = BlockedAuthRunSource::blocked_auth_runs(&store, query.clone())
+        .await
+        .unwrap();
+    assert_eq!(candidates.len(), 1);
+    let (matching_scope, matching_run_id, matching_gate_ref) = matching.unwrap();
+    assert_eq!(candidates[0].run_id, matching_run_id);
+
+    let reopened = TurnStateRowStore::new(scoped);
+    let reloaded = BlockedAuthRunSource::blocked_auth_runs(&reopened, query.clone())
+        .await
+        .unwrap();
+    assert_eq!(reloaded, candidates);
+
+    reopened
+        .resume_turn(ResumeTurnRequest {
+            scope: matching_scope,
+            actor: TurnActor::new(query.owner_user_id.clone()),
+            run_id: matching_run_id,
+            gate_resolution_ref: matching_gate_ref,
+            source_binding_ref: candidates[0].source_binding_ref.clone(),
+            reply_target_binding_ref: candidates[0].reply_target_binding_ref.clone(),
+            idempotency_key: IdempotencyKey::new("resume-matching-auth-query").unwrap(),
+            precondition: ResumeTurnPrecondition::AnyBlockedGate,
+            resume_disposition: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        BlockedAuthRunSource::blocked_auth_runs(&reopened, query)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]

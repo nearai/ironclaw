@@ -21,9 +21,9 @@
 //! it — resumed runs leave `BlockedAuth` and are skipped on replay, and the
 //! primary dispatcher settles idempotently on an already-settled gate.
 //!
-//! Scope safety mirrors the deleted read model: the scan is bounded to the
-//! completed flow's `tenant_id` + explicit owner `user_id`, so this can never
-//! resume another caller's parked run.
+//! Scope safety mirrors the deleted read model: the lookup is keyed by the
+//! completed flow's `tenant_id` + explicit owner `user_id` + provider, so this
+//! can never resume another caller's parked run.
 
 use std::sync::Arc;
 
@@ -31,9 +31,10 @@ use async_trait::async_trait;
 use ironclaw_auth::{
     AuthContinuationEvent, AuthContinuationRef, AuthProductError, RebornAuthContinuationDispatcher,
 };
+use ironclaw_host_api::VendorId;
 use ironclaw_turns::{
-    IdempotencyKey, ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator, TurnRunId,
-    TurnRunSnapshotSource, TurnStatus,
+    BlockedAuthRunQuery, BlockedAuthRunSource, IdempotencyKey, ResumeTurnPrecondition,
+    ResumeTurnRequest, TurnCoordinator, TurnRunId,
 };
 use uuid::Uuid;
 
@@ -41,25 +42,26 @@ use uuid::Uuid;
 /// blocked-run fan-out described in the module docs.
 pub struct BlockedAuthResumeFanout {
     inner: Arc<dyn RebornAuthContinuationDispatcher>,
-    snapshot_source: Arc<dyn TurnRunSnapshotSource>,
+    blocked_auth_run_source: Arc<dyn BlockedAuthRunSource>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
 }
 
 impl BlockedAuthResumeFanout {
     pub fn new(
         inner: Arc<dyn RebornAuthContinuationDispatcher>,
-        snapshot_source: Arc<dyn TurnRunSnapshotSource>,
+        blocked_auth_run_source: Arc<dyn BlockedAuthRunSource>,
         turn_coordinator: Arc<dyn TurnCoordinator>,
     ) -> Self {
         Self {
             inner,
-            snapshot_source,
+            blocked_auth_run_source,
             turn_coordinator,
         }
     }
 
     /// Sweep the caller's other provider-blocked runs. An incomplete sweep —
-    /// unreadable turn snapshot, or any retryable resume failure — returns an
+    /// unreadable parked-run query, malformed candidate, or any retryable
+    /// resume failure — returns an
     /// error so the caller leaves the durable continuation UNDISPATCHED and a
     /// re-drive (the browser's flow reconcile, or lifecycle cleanup) retries
     /// the whole dispatch. Retries are safe end-to-end: already-resumed runs
@@ -67,79 +69,73 @@ impl BlockedAuthResumeFanout {
     /// dispatcher settles idempotently on a no-longer-blocked gate.
     async fn fan_out(&self, event: &AuthContinuationEvent) -> Result<(), AuthProductError> {
         let primary_run_id = primary_run_id(&event.continuation);
-        let snapshot = self
-            .snapshot_source
-            .turn_run_snapshot()
+        let provider = VendorId::new(event.provider.as_str()).map_err(|error| {
+            tracing::warn!(
+                flow_id = %event.flow_id,
+                %error,
+                "blocked-auth fan-out received an invalid provider identifier"
+            );
+            AuthProductError::BackendUnavailable
+        })?;
+        let candidates = self
+            .blocked_auth_run_source
+            .blocked_auth_runs(BlockedAuthRunQuery {
+                tenant_id: event.scope.resource.tenant_id.clone(),
+                owner_user_id: event.scope.resource.user_id.clone(),
+                provider,
+            })
             .await
             .map_err(|error| {
                 tracing::warn!(
                     flow_id = %event.flow_id,
                     %error,
-                    "blocked-auth fan-out could not read the turn snapshot; keeping the continuation retryable"
+                    "blocked-auth fan-out could not query parked runs; keeping the continuation retryable"
                 );
                 AuthProductError::BackendUnavailable
             })?;
-        let tenant_id = &event.scope.resource.tenant_id;
-        let user_id = &event.scope.resource.user_id;
         let mut resumed = 0usize;
         let mut incomplete = false;
-        for run in &snapshot.runs {
-            if run.status != TurnStatus::BlockedAuth {
-                continue;
-            }
-            // Strict caller scoping: same tenant and same explicit owner user.
-            if run.scope.tenant_id != *tenant_id
-                || run.scope.explicit_owner_user_id() != Some(user_id)
-            {
-                continue;
-            }
-            if primary_run_id == Some(run.run_id) {
+        for candidate in candidates {
+            if primary_run_id == Some(candidate.run_id) {
                 // The inner dispatcher already resumed (or reported on) the
                 // run the completed flow was pinned to.
                 continue;
             }
-            let Some(gate_ref) = run.gate_ref.clone() else {
+            let Some(gate_ref) = candidate.gate_ref else {
+                tracing::warn!(
+                    run_id = %candidate.run_id,
+                    "blocked-auth fan-out found a blocked run with no gate reference"
+                );
+                incomplete = true;
                 continue;
             };
-            if !run
-                .credential_requirements
-                .iter()
-                .any(|requirement| requirement.provider.as_str() == event.provider.as_str())
-            {
-                continue;
-            }
-            // The run record does not carry the actor; join it from the
-            // parent turn record. Fan-out is best-effort, so a missing parent
-            // is logged and skipped rather than aborting the sweep.
-            let Some(actor) = snapshot
-                .turns
-                .iter()
-                .find(|turn| turn.turn_id == run.turn_id)
-                .map(|turn| turn.actor.clone())
-            else {
+            let Some(actor) = candidate.actor else {
                 tracing::warn!(
-                    run_id = %run.run_id,
+                    run_id = %candidate.run_id,
                     "blocked-auth fan-out found a blocked run with no parent turn record"
                 );
+                incomplete = true;
                 continue;
             };
             let Ok(idempotency_key) = IdempotencyKey::new(format!(
                 "blocked-auth-fanout-{}-{}",
-                event.flow_id, run.run_id
+                event.flow_id, candidate.run_id
             )) else {
                 tracing::warn!(
-                    run_id = %run.run_id,
+                    run_id = %candidate.run_id,
                     "blocked-auth fan-out could not build a resume idempotency key"
                 );
+                incomplete = true;
                 continue;
             };
+            let run_id = candidate.run_id;
             let request = ResumeTurnRequest {
-                scope: run.scope.clone(),
+                scope: candidate.scope,
                 actor,
-                run_id: run.run_id,
+                run_id,
                 gate_resolution_ref: gate_ref,
-                source_binding_ref: run.source_binding_ref.clone(),
-                reply_target_binding_ref: run.reply_target_binding_ref.clone(),
+                source_binding_ref: candidate.source_binding_ref,
+                reply_target_binding_ref: candidate.reply_target_binding_ref,
                 idempotency_key,
                 // No credential_ref: the resumed run re-runs its capability
                 // (extension_activate), which re-checks requirement
@@ -155,7 +151,7 @@ impl BlockedAuthResumeFanout {
                     // rest, but report the sweep incomplete: the continuation
                     // must stay undispatched so a re-drive retries this run.
                     tracing::warn!(
-                        run_id = %run.run_id,
+                        %run_id,
                         flow_id = %event.flow_id,
                         %error,
                         "blocked-auth fan-out failed to resume a parked run; keeping the continuation retryable"
@@ -232,14 +228,15 @@ mod tests {
         RuntimeCredentialAuthRequirement, TenantId, ThreadId, UserId, VendorId,
     };
     use ironclaw_turns::{
-        AcceptedMessageRef, AgentLoopDriverDescriptor, CancelRunRequest, CancelRunResponse,
+        AcceptedMessageRef, AgentLoopDriverDescriptor, BlockedAuthRunCandidate,
+        BlockedAuthRunQuery, BlockedAuthRunSource, CancelRunRequest, CancelRunResponse,
         CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy, CheckpointSchemaId,
         ConcurrencyClass, ContextProfileId, EventCursor, GateRef, GetRunStateRequest, LoopDriverId,
         ModelProfileId, RedactedRunProfileProvenance, ReplyTargetBindingRef, ResolvedRunProfile,
         ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint, RunProfileId,
         RunProfileVersion, RuntimeProfileConstraints, SchedulingClass, SourceBindingRef,
         SteeringPolicy, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnError, TurnId,
-        TurnPersistenceSnapshot, TurnRecord, TurnRunProfile, TurnRunState, TurnScope,
+        TurnPersistenceSnapshot, TurnRecord, TurnRunProfile, TurnRunState, TurnScope, TurnStatus,
     };
 
     struct RecordingInnerDispatcher {
@@ -269,11 +266,38 @@ mod tests {
     }
 
     #[async_trait]
-    impl TurnRunSnapshotSource for StaticSnapshotSource {
-        async fn turn_run_snapshot(
+    impl BlockedAuthRunSource for StaticSnapshotSource {
+        async fn blocked_auth_runs(
             &self,
-        ) -> Result<TurnPersistenceSnapshot, ironclaw_turns::TurnError> {
-            Ok(self.snapshot.clone())
+            query: BlockedAuthRunQuery,
+        ) -> Result<Vec<BlockedAuthRunCandidate>, ironclaw_turns::TurnError> {
+            Ok(self
+                .snapshot
+                .runs
+                .iter()
+                .filter(|run| {
+                    run.status == TurnStatus::BlockedAuth
+                        && run.scope.tenant_id == query.tenant_id
+                        && run.scope.explicit_owner_user_id() == Some(&query.owner_user_id)
+                        && run
+                            .credential_requirements
+                            .iter()
+                            .any(|requirement| requirement.provider == query.provider)
+                })
+                .map(|run| BlockedAuthRunCandidate {
+                    run_id: run.run_id,
+                    scope: run.scope.clone(),
+                    actor: self
+                        .snapshot
+                        .turns
+                        .iter()
+                        .find(|turn| turn.turn_id == run.turn_id && turn.scope == run.scope)
+                        .map(|turn| turn.actor.clone()),
+                    gate_ref: run.gate_ref.clone(),
+                    source_binding_ref: run.source_binding_ref.clone(),
+                    reply_target_binding_ref: run.reply_target_binding_ref.clone(),
+                })
+                .collect())
         }
     }
 
@@ -604,6 +628,28 @@ mod tests {
         assert_eq!(
             run_ids, expected,
             "a Settings-page connect resumes every blocked chat"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_parent_turn_keeps_the_continuation_retryable() {
+        let waiting = blocked_run(OWNER, TurnRunId::new(), TurnId::new(), slack_requirement());
+        let snapshot = TurnPersistenceSnapshot {
+            turns: Vec::new(),
+            runs: vec![waiting],
+            ..Default::default()
+        };
+        let (fanout, coordinator, _inner) = fanout_with(snapshot, 0);
+
+        let error = fanout
+            .dispatch_auth_continuation(event("slack", AuthContinuationRef::SetupOnly))
+            .await
+            .expect_err("a malformed candidate must keep the continuation retryable");
+
+        assert!(matches!(error, AuthProductError::BackendUnavailable));
+        assert!(
+            coordinator.resumed.lock().expect("resumed").is_empty(),
+            "a candidate without its parent actor must not be resumed"
         );
     }
 

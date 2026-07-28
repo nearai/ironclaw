@@ -28,7 +28,10 @@ use async_trait::async_trait;
 use ironclaw_filesystem::{CasExpectation, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::ResourceScope;
 
-use crate::{TurnError, TurnPersistenceSnapshot, TurnRunSnapshotSource};
+use crate::{
+    BlockedAuthRunCandidate, BlockedAuthRunQuery, BlockedAuthRunSource, TurnError,
+    TurnPersistenceSnapshot, TurnRunSnapshotSource,
+};
 
 mod io;
 mod profile_resolver;
@@ -48,6 +51,19 @@ where
 {
     async fn turn_run_snapshot(&self) -> Result<TurnPersistenceSnapshot, TurnError> {
         self.persistence_snapshot().await
+    }
+}
+
+#[async_trait::async_trait]
+impl<F> BlockedAuthRunSource for TurnStateRowStore<F>
+where
+    F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
+{
+    async fn blocked_auth_runs(
+        &self,
+        query: BlockedAuthRunQuery,
+    ) -> Result<Vec<BlockedAuthRunCandidate>, TurnError> {
+        TurnStateRowStore::blocked_auth_runs(self, &query).await
     }
 }
 pub use turn_state_engine::TurnStateStoreLimits;

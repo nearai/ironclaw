@@ -1153,7 +1153,7 @@ impl RebornRuntime {
             let (turn_coordinator, turn_state, tenant_id) = turn_world;
             let continuation = crate::factory::auth_continuation_dispatcher(
                 turn_coordinator,
-                Some(turn_state as Arc<dyn ironclaw_turns::TurnRunSnapshotSource>),
+                Some(turn_state as Arc<dyn ironclaw_turns::BlockedAuthRunSource>),
             );
             service
                 .dispatch_pairing_completion_with_for_test(user_id, tenant_id, continuation)

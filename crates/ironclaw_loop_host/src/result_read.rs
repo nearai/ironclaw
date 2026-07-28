@@ -53,7 +53,7 @@ pub fn wrap_result_read_capability_for_test(
         // `result_read` never raises an approval gate, so its resume path never
         // loads a replay payload; an in-memory store keeps the seam wired.
         Arc::new(ironclaw_capabilities::ReplayPayloadStore::new(
-            replay_payload_filesystem(),
+            replay_payload_filesystem()?,
         )),
     )
 }
@@ -88,20 +88,30 @@ fn thread_scope_for_run(
 }
 
 #[cfg(feature = "test-support")]
-fn replay_payload_filesystem()
--> Arc<ironclaw_filesystem::ScopedFilesystem<ironclaw_filesystem::InMemoryBackend>> {
+fn replay_payload_filesystem() -> Result<
+    Arc<ironclaw_filesystem::ScopedFilesystem<ironclaw_filesystem::InMemoryBackend>>,
+    AgentLoopHostError,
+> {
     use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
 
+    let invalid_mount = || {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Internal,
+            "test replay payload filesystem configuration is invalid",
+        )
+    };
     let mounts = MountView::new(vec![MountGrant::new(
-        MountAlias::new("/replay-payloads").expect("static valid mount alias"),
+        MountAlias::new("/replay-payloads").map_err(|_| invalid_mount())?,
         VirtualPath::new("/tenants/test/users/test/replay-payloads")
-            .expect("static valid virtual path"),
+            .map_err(|_| invalid_mount())?,
         MountPermissions::read_write_list_delete(),
     )])
-    .expect("static valid replay-payload mount view");
-    Arc::new(ironclaw_filesystem::ScopedFilesystem::with_fixed_view(
-        Arc::new(ironclaw_filesystem::InMemoryBackend::new()),
-        mounts,
+    .map_err(|_| invalid_mount())?;
+    Ok(Arc::new(
+        ironclaw_filesystem::ScopedFilesystem::with_fixed_view(
+            Arc::new(ironclaw_filesystem::InMemoryBackend::new()),
+            mounts,
+        ),
     ))
 }
 
