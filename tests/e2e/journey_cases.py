@@ -40,13 +40,76 @@ _TOOL_WORLD_PREFIXES = {
 _HTTP_WORLD_HOSTS = {
     "api.github.com": ProviderWorld.GITHUB,
 }
-_MUTATING_PROVIDER_TOOLS = {
-    "gmail__send_message": ProviderWorld.GOOGLE,
-    "google-docs__create_document": ProviderWorld.GOOGLE,
-    "google-sheets__create_spreadsheet": ProviderWorld.GOOGLE,
-    "google-sheets__append_values": ProviderWorld.GOOGLE,
-    "slack__send_message": ProviderWorld.SLACK,
-}
+# The five tools this set used to name by hand. Kept only as a regression
+# floor: if the derivation below ever stops finding them, it has broken.
+_HISTORICAL_MUTATING_PROVIDER_TOOLS = frozenset(
+    {
+        "gmail__send_message",
+        "google-docs__create_document",
+        "google-sheets__create_spreadsheet",
+        "google-sheets__append_values",
+        "slack__send_message",
+    }
+)
+
+
+def _production_mutating_tools() -> dict[str, ProviderWorld]:
+    """Provider-world writes, taken from the shipped manifests.
+
+    A journey that mutates a provider world must declare that world so the
+    harness resets it afterwards; otherwise whatever the journey created
+    survives into the next test. Which tools mutate is not a judgement call --
+    production already states it, as the `external_write` effect on each tool
+    (`crates/ironclaw_first_party_extensions/assets/*/manifest.toml`).
+
+    This used to be a hand-kept list of five names while production declared
+    seventy such tools. Every one of the other sixty-five -- `github__create_issue`,
+    `google-drive__upload_file`, and so on -- would have run without marking its
+    world mutable, so no reset fired and the leak guards this workstream added
+    never got the chance to.
+    """
+    mutating: dict[str, ProviderWorld] = {}
+    for manifest_path in sorted(ASSET_ROOT.glob("*/manifest.toml")):
+        with manifest_path.open("rb") as manifest_file:
+            manifest = tomllib.load(manifest_file)
+        for tool in manifest.get("tools", []) or []:
+            if "external_write" not in (tool.get("effects") or []):
+                continue
+            # Manifest ids are `github.create_issue`; traces record
+            # `github__create_issue`.
+            tool_name = str(tool["id"]).replace(".", "__", 1)
+            world = next(
+                (
+                    world
+                    for prefix, world in _TOOL_WORLD_PREFIXES.items()
+                    if tool_name.startswith(prefix)
+                ),
+                None,
+            )
+            # Tools outside a world the harness can reset (web-access, nearai)
+            # are not skipped silently -- `unreset_mutating_tools()` below is
+            # what reports them.
+            if world is not None:
+                mutating[tool_name] = world
+    return mutating
+
+
+_MUTATING_PROVIDER_TOOLS = _production_mutating_tools()
+
+
+def unreset_mutating_tools() -> frozenset[str]:
+    """Production writes whose provider world no fixture can reset."""
+    unreset = set()
+    for manifest_path in sorted(ASSET_ROOT.glob("*/manifest.toml")):
+        with manifest_path.open("rb") as manifest_file:
+            manifest = tomllib.load(manifest_file)
+        for tool in manifest.get("tools", []) or []:
+            if "external_write" not in (tool.get("effects") or []):
+                continue
+            tool_name = str(tool["id"]).replace(".", "__", 1)
+            if tool_name not in _MUTATING_PROVIDER_TOOLS:
+                unreset.add(tool_name)
+    return frozenset(unreset)
 _REPEAT_AFTER_RESET = {
     "qa_5d_slack_strategy_doc_answer",
     "qa_10f_slack_mention_encoding",

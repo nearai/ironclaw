@@ -12,6 +12,8 @@ from pathlib import Path
 import pytest
 
 from journey_cases import (
+    _HISTORICAL_MUTATING_PROVIDER_TOOLS,
+    _MUTATING_PROVIDER_TOOLS,
     ALL_JOURNEY_CASES,
     JOURNEY_ORDER_ENV,
     PROVIDER_JOURNEY_CASES,
@@ -21,6 +23,7 @@ from journey_cases import (
     required_ingresses,
     shared_world_provider_journey_runs,
     uncovered_surfaces,
+    unreset_mutating_tools,
 )
 from journey_types import (
     CargoEvidence,
@@ -781,3 +784,59 @@ def test_cargo_evidence_counts_an_empty_lib_table_as_a_manual_target(
             source_path,
             root=tmp_path,
         )
+
+
+# ---------------------------------------------------------------------------
+# Provider-world baseline gate (#6524 workstream 3)
+#
+# A journey that writes to a provider world must declare that world, because
+# the declaration is what triggers the reset afterwards. Without it, whatever
+# the journey created survives into the next test and the leak guards this
+# workstream added never run.
+#
+# Which tools write is not a judgement call: production says so, as the
+# `external_write` effect on each manifest tool. The harness used to restate
+# that as a hand-kept list of five names while production declared seventy.
+# Nothing detected the drift, because a journey using an undeclared write
+# simply resets nothing and passes.
+# ---------------------------------------------------------------------------
+
+
+def test_every_production_provider_write_maps_to_a_resettable_world():
+    """No production write can run without a world that gets reset."""
+    unreset = unreset_mutating_tools()
+    assert not unreset, (
+        "these production tools declare `external_write` but belong to no "
+        f"provider world the harness can reset: {sorted(unreset)}. A journey "
+        "using one would mutate a world that nothing restores, and the next "
+        "test would inherit the result. Add the world to _TOOL_WORLD_PREFIXES "
+        "with a reset path, or give the tool a world that has one."
+    )
+
+
+def test_provider_write_derivation_still_finds_the_tools_it_replaced():
+    """The derivation cannot quietly collapse to nothing.
+
+    This is the gate on the gate. Deriving the set from manifests removes the
+    drift risk but adds a worse one: a manifest key rename would empty the
+    mapping, every journey would declare no mutable world, every reset would
+    be skipped, and the whole suite would still pass. The five names below are
+    the ones the hand-kept list carried, so they are a floor the derivation
+    must always clear.
+    """
+    missing = sorted(_HISTORICAL_MUTATING_PROVIDER_TOOLS - set(_MUTATING_PROVIDER_TOOLS))
+    assert not missing, (
+        f"the derivation stopped recognising known provider writes: {missing}. "
+        "It reads the `external_write` effect from "
+        "crates/ironclaw_first_party_extensions/assets/*/manifest.toml -- check "
+        "whether that key or the tool ids were renamed. Until this is fixed no "
+        "journey resets its provider world."
+    )
+    # A floor of five would still pass if the manifests shrank to just those.
+    # Production declares dozens; a collapse to single digits is the symptom
+    # worth failing on.
+    assert len(_MUTATING_PROVIDER_TOOLS) >= 20, (
+        f"only {len(_MUTATING_PROVIDER_TOOLS)} provider writes were derived from "
+        "the shipped manifests; production declares far more. The derivation "
+        "is probably reading the wrong manifests or the wrong key."
+    )
