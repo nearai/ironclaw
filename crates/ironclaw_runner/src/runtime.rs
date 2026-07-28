@@ -5,15 +5,15 @@ use std::{error::Error, fmt, sync::Arc};
 use ironclaw_events::SecurityAuditSink;
 use ironclaw_host_api::CapabilityId;
 use ironclaw_loop_host::{
-    AwaitEdgeSettler, AwaitEdgeWriter, CapabilitySurfaceProfileResolver,
-    CompositeTurnRunWakeNotifier, DecoratingLoopCapabilityPortFactory, HostIdentityContextSource,
-    HostInputQueue, HostManagedModelGateway, HostSkillContextSource, HostUserProfileSource,
-    LoopAttachmentReadPort, LoopCapabilityPortDecorator, LoopCapabilityPortFactory,
-    LoopCapabilityResultWriter, PerSurfaceCapabilityDenyDecorator,
-    ProductLiveCancellationReadiness, RunCancellationFactory, SpawnSubagentFlavorDescriptor,
-    SpawnSubagentInputCodec, SubagentDefinitionResolver, SubagentPromptComposer,
-    SubagentPromptMaterialSource, SubagentSpawnCapabilityPort, SubagentSpawnDeps,
-    SubagentSpawnLimits, verify_product_live_cancellation_probe,
+    AgentTurnRunCancellationFactory, AwaitEdgeSettler, AwaitEdgeWriter,
+    CapabilitySurfaceProfileResolver, CompositeTurnRunWakeNotifier,
+    DecoratingLoopCapabilityPortFactory, HostIdentityContextSource, HostInputQueue,
+    HostManagedModelGateway, HostSkillContextSource, HostUserProfileSource, LoopAttachmentReadPort,
+    LoopCapabilityPortDecorator, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    PerSurfaceCapabilityDenyDecorator, ProductLiveCancellationReadiness, RunCancellationFactory,
+    SpawnSubagentFlavorDescriptor, SpawnSubagentInputCodec, SubagentDefinitionResolver,
+    SubagentPromptComposer, SubagentPromptMaterialSource, SubagentSpawnCapabilityPort,
+    SubagentSpawnDeps, SubagentSpawnLimits, verify_product_live_cancellation_probe,
 };
 use ironclaw_memory::MemoryService;
 use ironclaw_processes::ProcessTransitionPort;
@@ -601,6 +601,15 @@ where
     );
     let run_profile_resolver: Arc<dyn RunProfileResolver> = resolver;
 
+    let process_system = parts.process_system.clone();
+    let agent_turn_runtime = Arc::new(process_system.agent_turn_runtime());
+    let cancellation_factory: Arc<dyn RunCancellationFactory> =
+        parts.cancellation_factory.clone().unwrap_or_else(|| {
+            Arc::new(AgentTurnRunCancellationFactory::new(
+                agent_turn_runtime.clone() as Arc<dyn AgentTurnRuntimePort>,
+            ))
+        });
+
     // Resolve the scheduler wake wiring BEFORE building the coordinator, breaking
     // the coordinator↔scheduler build-order cycle.  The coordinator receives the
     // real notifier immediately; the channel is held in the carrier and passed to
@@ -614,21 +623,15 @@ where
         .scheduler_wake_wiring
         .unwrap_or_else(SchedulerWakeWiring::channel);
     let scheduler_notifier_base: Arc<dyn TurnRunWakeNotifier> = wake_wiring.notifier();
-    // When a cancellation factory is supplied, fan-out each coordinator wake to
-    // BOTH the scheduler AND the factory's `notify_run_wake` observer. Without
-    // this composite, the scheduler still wakes but retained product run handles
-    // never flip on `cancel_run` — breaking end-to-end product-live
-    // cancellation observation.
-    let wake_notifier: Arc<dyn TurnRunWakeNotifier> = match parts.cancellation_factory.clone() {
-        Some(factory) => Arc::new(CompositeTurnRunWakeNotifier::new(
-            scheduler_notifier_base,
-            factory,
-        )),
-        None => scheduler_notifier_base,
-    };
+    // Fan out each coordinator wake to BOTH the scheduler and the exact
+    // cancellation factory installed on the loop host. Without this shared
+    // instance, the scheduler still wakes but retained run handles never flip
+    // on `cancel_run`.
+    let wake_notifier: Arc<dyn TurnRunWakeNotifier> = Arc::new(CompositeTurnRunWakeNotifier::new(
+        scheduler_notifier_base,
+        Arc::clone(&cancellation_factory),
+    ));
     let subagent_await_edge_settler = Arc::clone(&parts.subagent_await_edge_settler);
-    let process_system = parts.process_system.clone();
-    let agent_turn_runtime = Arc::new(process_system.agent_turn_runtime());
     subagent_await_edge_settler
         .bind_turn_tree_store(agent_turn_runtime.clone() as Arc<dyn AgentTurnSpawnTreeRuntimePort>)
         .map_err(|error| DefaultPlannedRuntimeBuildError::SubagentCompletion(error.to_string()))?;
@@ -762,9 +765,7 @@ where
     if let Some(resolver) = parts.model_route_resolver {
         host_factory = host_factory.with_model_route_resolver(resolver);
     }
-    if let Some(factory) = parts.cancellation_factory {
-        host_factory = host_factory.with_cancellation_factory(factory);
-    }
+    host_factory = host_factory.with_cancellation_factory(cancellation_factory);
     if let Some(port) = parts.attachment_read_port {
         host_factory = host_factory.with_attachment_read_port(port);
     }

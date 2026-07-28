@@ -1963,8 +1963,26 @@ async fn ensure_postgres_ordered_projection(
         "{}_sync",
         sql_index_name("/ordered_projection", spec.name.as_str())
     );
-    let function_name = format!("{trigger_base}_sync_fn");
-    let trigger_name = format!("{trigger_base}_sync");
+    // Hash each final identifier independently. Appending suffixes to an
+    // already-capped 62-byte base lets PostgreSQL truncate every trigger name
+    // to the same identifier on long tenant paths.
+    let function_name = sql_index_name(
+        path.as_str(),
+        &format!("{}_ordered_sync_fn", spec.name.as_str()),
+    );
+    let insert_trigger_name = sql_index_name(
+        path.as_str(),
+        &format!("{}_ordered_insert", spec.name.as_str()),
+    );
+    let update_trigger_name = sql_index_name(
+        path.as_str(),
+        &format!("{}_ordered_update", spec.name.as_str()),
+    );
+    let delete_trigger_name = sql_index_name(
+        path.as_str(),
+        &format!("{}_ordered_delete", spec.name.as_str()),
+    );
+    let legacy_scoped_trigger_name = format!("{trigger_base}_sync");
     let index_name = spec.name.as_str().replace('\'', "''");
     let escaped_prefix = path.as_str().replace('\'', "''");
     let (prefix_lower, prefix_upper) = descendant_path_range(path);
@@ -2027,24 +2045,22 @@ async fn ensure_postgres_ordered_projection(
          END; \
          $projection$; \
          DROP TRIGGER IF EXISTS {legacy_trigger_name} ON root_filesystem_entries; \
-         DROP TRIGGER IF EXISTS {trigger_name} ON root_filesystem_entries; \
-         DO $trigger$ \
-         BEGIN \
-           CREATE TRIGGER {trigger_name}_insert \
-             AFTER INSERT ON root_filesystem_entries \
-             FOR EACH ROW WHEN ({new_path_matches}) \
-             EXECUTE FUNCTION {function_name}(); \
-           CREATE TRIGGER {trigger_name}_update \
-             AFTER UPDATE ON root_filesystem_entries \
-             FOR EACH ROW WHEN ({old_path_matches} OR {new_path_matches}) \
-             EXECUTE FUNCTION {function_name}(); \
-           CREATE TRIGGER {trigger_name}_delete \
-             AFTER DELETE ON root_filesystem_entries \
-             FOR EACH ROW WHEN ({old_path_matches}) \
-             EXECUTE FUNCTION {function_name}(); \
-         EXCEPTION WHEN duplicate_object THEN NULL; \
-         END; \
-         $trigger$;"
+         DROP TRIGGER IF EXISTS {legacy_scoped_trigger_name} ON root_filesystem_entries; \
+         DROP TRIGGER IF EXISTS {insert_trigger_name} ON root_filesystem_entries; \
+         DROP TRIGGER IF EXISTS {update_trigger_name} ON root_filesystem_entries; \
+         DROP TRIGGER IF EXISTS {delete_trigger_name} ON root_filesystem_entries; \
+         CREATE TRIGGER {insert_trigger_name} \
+           AFTER INSERT ON root_filesystem_entries \
+           FOR EACH ROW WHEN ({new_path_matches}) \
+           EXECUTE FUNCTION {function_name}(); \
+         CREATE TRIGGER {update_trigger_name} \
+           AFTER UPDATE ON root_filesystem_entries \
+           FOR EACH ROW WHEN ({old_path_matches} OR {new_path_matches}) \
+           EXECUTE FUNCTION {function_name}(); \
+         CREATE TRIGGER {delete_trigger_name} \
+           AFTER DELETE ON root_filesystem_entries \
+           FOR EACH ROW WHEN ({old_path_matches}) \
+           EXECUTE FUNCTION {function_name}();"
     );
     let transaction = client
         .transaction()

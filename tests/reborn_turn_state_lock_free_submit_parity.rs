@@ -17,7 +17,8 @@ use reborn_support::harness::{RecordingTestCapabilityPort, test_product_scope};
 
 #[tokio::test]
 async fn reborn_user_submit_completes_while_another_turn_state_write_is_blocked() {
-    const ROOM: &str = "room-turn-state-lock-free-submit";
+    const BLOCKED_ROOM: &str = "room-turn-state-lock-free-submit-blocked";
+    const LIVE_ROOM: &str = "room-turn-state-lock-free-submit-live";
     // The live submit is still awaited before releasing the blocked writer, so
     // a real lock regression times out here; the wider window only absorbs CI
     // scheduler/build-host jitter around the binary-E2E harness.
@@ -34,7 +35,7 @@ async fn reborn_user_submit_completes_while_another_turn_state_write_is_blocked(
 
     let mut blocked_harness =
         RebornBinaryE2EHarness::with_model_gateway_scope_initial_actor_installation_shared_storage(
-            ROOM,
+            BLOCKED_ROOM,
             "alice",
             RebornTraceReplayModelGateway::with_responses([
                 HostManagedModelResponse::assistant_reply("blocked submit eventually completed"),
@@ -49,7 +50,7 @@ async fn reborn_user_submit_completes_while_another_turn_state_write_is_blocked(
         .expect("blocked harness");
     let mut live_harness =
         RebornBinaryE2EHarness::with_model_gateway_scope_initial_actor_installation_shared_storage(
-            ROOM,
+            LIVE_ROOM,
             "alice",
             RebornTraceReplayModelGateway::with_responses([
                 HostManagedModelResponse::assistant_reply("live submit completed"),
@@ -69,7 +70,12 @@ async fn reborn_user_submit_completes_while_another_turn_state_write_is_blocked(
     shared_storage.block_next_turn_state_put();
     let blocked_submit = tokio::spawn(async move {
         let result = blocked_harness
-            .submit_text_for(ROOM, "alice", "event-turn-state-blocked", "blocked writer")
+            .submit_text_for(
+                BLOCKED_ROOM,
+                "alice",
+                "event-turn-state-blocked",
+                "blocked writer",
+            )
             .await;
         blocked_harness.shutdown().await;
         result
@@ -84,7 +90,7 @@ async fn reborn_user_submit_completes_while_another_turn_state_write_is_blocked(
 
     let live = tokio::time::timeout(
         LOCK_FREE_SUBMIT_TIMEOUT,
-        live_harness.submit_text_for(ROOM, "alice", "event-turn-state-live", "live writer"),
+        live_harness.submit_text_for(LIVE_ROOM, "alice", "event-turn-state-live", "live writer"),
     )
     .await
     .expect("same-user inbound submit must not wait behind the blocked writer")

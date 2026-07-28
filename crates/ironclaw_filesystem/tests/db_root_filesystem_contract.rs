@@ -2555,6 +2555,60 @@ mod postgres_tests {
     }
 
     #[tokio::test]
+    async fn postgres_ordered_index_projects_rows_under_long_prefixes() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let unique = prefix.rsplit('_').next().unwrap();
+        let index_name = IndexName::new(format!("long_prefix_projection_{unique}")).unwrap();
+        let status = IndexKey::new("status").unwrap();
+        let process_id = IndexKey::new("process_id").unwrap();
+        let tenant_prefix = VirtualPath::new(format!(
+            "{prefix}/tenants/tenant/agents/agent/projects/project/users/user/turns/materialized/process"
+        ))
+        .unwrap();
+        fs.ensure_index(
+            &tenant_prefix,
+            &IndexSpec::new(
+                index_name.clone(),
+                vec![status.clone(), process_id.clone()],
+                IndexKind::Exact,
+            ),
+        )
+        .await
+        .unwrap();
+
+        let row_path = VirtualPath::new(format!("{}/run-1", tenant_prefix.as_str())).unwrap();
+        let row = Entry::record(RecordKind::new("process").unwrap(), &serde_json::json!({}))
+            .unwrap()
+            .with_indexed(status.clone(), IndexValue::Text("queued".into()))
+            .with_indexed(process_id.clone(), IndexValue::Text("run-1".into()));
+        fs.put(&row_path, row, CasExpectation::Absent)
+            .await
+            .unwrap();
+
+        let rows = fs
+            .query_ordered(
+                &tenant_prefix,
+                &Filter::Eq {
+                    key: status.clone(),
+                    value: IndexValue::Text("queued".into()),
+                },
+                &ironclaw_filesystem::OrderedPage::new(
+                    index_name,
+                    status,
+                    process_id,
+                    SortDirection::Ascending,
+                    10,
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].path, row_path);
+    }
+
+    #[tokio::test]
     async fn postgres_scopes_ordered_index_names_by_prefix() {
         let Some((fs, prefix)) = postgres_root().await else {
             return;
