@@ -211,6 +211,45 @@ def _emulate_unavailable(reason: str) -> None:
     pytest.skip(reason)
 
 
+def emulate_build_label() -> str:
+    """Which Emulate this process talks to, for reporting."""
+    if globals()["EMULATE_CLI_PATH"]:
+        return f"pinned fork CLI at {EMULATE_CLI_PATH}"
+    return f"npm fallback {EMULATE_NPM_PACKAGE} (NOT what CI runs)"
+
+
+def skip_if_emulate_capability_absent(reason: str) -> None:
+    """Skip on the npm fallback; FAIL on the pinned build CI uses.
+
+    These guards exist because the npm package lacks endpoints the pinned
+    fork implements, so on the fallback a skip is the honest outcome. On the
+    pinned build the capability is expected to be there — a skip would mean
+    the fork regressed, and reporting that as "skipped" is how a coverage
+    loss hides in a green run.
+
+    Measured on `test_emulate_reborn_provider_contracts.py` against
+    unmodified main: the npm fallback gave 1 failed / 10 passed / 3 skipped,
+    the pinned fork gave 14 passed. A local run was quietly exercising less
+    than CI with nothing saying so.
+    """
+    if globals()["EMULATE_CLI_PATH"]:
+        pytest.fail(
+            f"{reason} — but this run uses the pinned Emulate fork, which is "
+            "expected to expose it. Treat as a capability regression in the "
+            "pinned build, not an environment quirk."
+        )
+    pytest.skip(f"{reason} (npm fallback; the pinned fork CI uses has it)")
+
+
+def pytest_report_header() -> str:
+    """Name the Emulate build in the pytest header.
+
+    Without this the fallback and the pinned fork produce identical-looking
+    runs, and "it passed locally" silently means something weaker than CI.
+    """
+    return f"emulate: {emulate_build_label()}"
+
+
 def _wasip2_target_missing() -> bool:
     try:
         installed = subprocess.run(

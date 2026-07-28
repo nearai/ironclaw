@@ -106,11 +106,11 @@ If you run a reverse proxy (recommended for public web access), also allow:
 
 If you intentionally expose the gateway directly (generally not recommended), you must:
 
-1. Set `GATEWAY_HOST=0.0.0.0` (and optionally `GATEWAY_PORT=<port>` if not `3000`)
-2. Set `GATEWAY_AUTH_TOKEN=<strong-random-token>`
+1. Bind a public interface with `ironclaw serve --host 0.0.0.0` (add `--port <port>` if not `3000`), or set `[webui].listen_host` / `[webui].listen_port` in `config.toml` so the installed service picks it up
+2. Set `IRONCLAW_REBORN_WEBUI_TOKEN=<strong-random-token>`
 3. Add a firewall rule for that gateway port, ideally restricted to trusted source IPs
 
-With SSH tunnel or VPN access, keep `GATEWAY_HOST` at the default (`127.0.0.1`) and do not open the gateway port in GCE firewall.
+With SSH tunnel or VPN access, leave the listener at its default (`127.0.0.1`) and do not open the port in the GCE firewall.
 
 <Note>
 Restricting SSH to your IP prevents brute-force attacks from the internet. You can update the source range later if your IP changes. Port `8080` is required for webhooks (e.g. Telegram) to deliver events to IronClaw. On Linux, the orchestrator internal API listens on port `50051` and binds to `0.0.0.0`; unless you add a firewall rule for it, GCE's default deny-all ingress policy will still block external access. Other IronClaw listeners bind to `127.0.0.1` by default.
@@ -175,10 +175,26 @@ With the server hardened, install IronClaw and start it up:
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-installer.sh | sh
 ```
 
-Then start IronClaw and follow the prompts to complete the setup:
+Run the one-time setup, then start the agent:
 
 ```bash
-ironclaw
+ironclaw onboard
+ironclaw serve
+```
+
+`onboard` prints a login link for the web interface. On a remote host, forward the port
+from your own machine rather than exposing it:
+
+```bash
+ssh -N -L 3000:127.0.0.1:3000 <user>@<IP_ADDRESS>
+```
+
+Once you've confirmed it works, stop the foreground server (Ctrl-C) and run it as a
+service instead so it survives disconnects — the service runs `serve` itself, so the two
+cannot share the port:
+
+```bash
+ironclaw service install && ironclaw service start
 ```
 
 <Tip>

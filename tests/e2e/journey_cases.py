@@ -1,12 +1,13 @@
 """Typed inventory for harvested provider and representative product journeys."""
 
 import json
+import os
+import tomllib
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TypeVar
 from urllib.parse import urlparse
 
-import tomllib
 from journey_types import (
     CargoEvidence,
     JourneyCase,
@@ -126,10 +127,29 @@ def _provider_journey_cases() -> tuple[ProviderJourneyCase, ...]:
 PROVIDER_JOURNEY_CASES = _provider_journey_cases()
 
 
-def _provider_journey_runs() -> tuple[
-    tuple[ProviderJourneyCase, ...],
-    tuple[str, ...],
-]:
+JOURNEY_ORDER_ENV = "IRONCLAW_JOURNEY_ORDER"
+
+
+def journey_order_is_reversed() -> bool:
+    """Whether CI explicitly selected the shared-world reverse proof.
+
+    The dedicated scenario owns ordering and provider lifecycle. This selector
+    makes that expensive lane fail closed if workflow wiring drops its intent.
+    """
+    return os.environ.get(JOURNEY_ORDER_ENV, "").strip().lower() == "reverse"
+
+
+def provider_journey_runs(
+    *,
+    reverse: bool = False,
+) -> tuple[tuple[ProviderJourneyCase, ...], tuple[str, ...]]:
+    """Journey runs and their ids, forward or reversed.
+
+    Takes `reverse` explicitly rather than reading the environment so the
+    ordering itself is testable without mutating process state — a reversed
+    lane that silently ran forward would look exactly like a passing lane, and
+    would quietly retire the proof it was added to provide.
+    """
     runs = []
     ids = []
     for case in PROVIDER_JOURNEY_CASES:
@@ -138,10 +158,31 @@ def _provider_journey_runs() -> tuple[
         if case.repeat_after_reset:
             runs.append(case)
             ids.append(f"{case.case_id}-isolated-repeat")
+    if reverse:
+        runs.reverse()
+        ids.reverse()
     return tuple(runs), tuple(ids)
 
 
-PROVIDER_JOURNEY_RUNS, PROVIDER_JOURNEY_RUN_IDS = _provider_journey_runs()
+def shared_world_provider_journey_runs(
+    *,
+    reverse: bool = False,
+) -> tuple[tuple[ProviderJourneyCase, ...], tuple[str, ...]]:
+    """Mutating journeys to replay without provider resets between cases.
+
+    Isolation repeats belong to the ordinary runner: repeating them here would
+    deliberately collide with their own mutation rather than expose leakage
+    from a different journey.
+    """
+    runs = [case for case in PROVIDER_JOURNEY_CASES if case.mutable_provider_worlds]
+    if reverse:
+        runs.reverse()
+    return tuple(runs), tuple(case.case_id for case in runs)
+
+
+# The ordinary replay owns per-case isolation. Reversed ordering is reserved
+# for the dedicated shared-world scenario, where ordering can affect outcomes.
+PROVIDER_JOURNEY_RUNS, PROVIDER_JOURNEY_RUN_IDS = provider_journey_runs()
 
 PRODUCT_JOURNEY_CASES = (
     ProductJourneyCase(

@@ -12,6 +12,10 @@ const appCssSource = readFileSync(
   new URL("../../../styles/app.css", import.meta.url),
   "utf8",
 );
+const highlighterSource = readFileSync(
+  new URL("../../../lib/syntax-highlighting.ts", import.meta.url),
+  "utf8",
+);
 
 function rendererEnhancerSourceForTest() {
   const lines = [];
@@ -158,15 +162,69 @@ function translator(prefix) {
     })[key] || key;
 }
 
-test("markdown code blocks are passed through highlight.js when available", () => {
-  assert.ok(
-    rendererSource.includes('import hljs from "highlight.js/lib/common"'),
-    "highlight.js should be bundled through npm rather than loaded from a window global",
+test("markdown and syntax highlighting stay out of the synchronous chat chunk", () => {
+  assert.doesNotMatch(
+    rendererSource,
+    /^import .*["'](?:highlight\.js|\.\.\/\.\.\/\.\.\/lib\/markdown)["'];?$/m,
+    "expensive markdown dependencies should not be statically imported by the chat renderer",
   );
   assert.match(
     rendererSource,
-    /hljs\.highlightElement\(codeEl\)/,
-    "markdown code blocks should be enhanced by highlight.js after rendering",
+    /import\("\.\.\/\.\.\/\.\.\/lib\/markdown"\)/,
+    "the sanitized markdown pipeline should load only for stable non-empty content",
+  );
+  assert.match(
+    rendererSource,
+    /root\?\.querySelector\("pre code"\)[\s\S]*import\("\.\.\/\.\.\/\.\.\/lib\/syntax-highlighting"\)/,
+    "syntax highlighting should load only after rendered code is present",
+  );
+  assert.doesNotMatch(
+    highlighterSource,
+    /highlight\.js\/lib\/common/,
+    "the broad highlight.js common bundle must not return",
+  );
+  assert.match(
+    highlighterSource,
+    /highlight\.js\/lib\/core/,
+    "the lazy highlighter should start from highlight.js core",
+  );
+});
+
+test("streaming markdown renders sanitized snapshots at a bounded cadence", () => {
+  assert.match(
+    rendererSource,
+    /const STREAMING_RENDER_INTERVAL_MS = 150/,
+    "streaming rendering should have an explicit cadence budget",
+  );
+  assert.match(
+    rendererSource,
+    /const delay = Math\.max\(0, STREAMING_RENDER_INTERVAL_MS[\s\S]*setTimeout/,
+    "streaming updates should batch rendering instead of parsing every projection",
+  );
+  assert.match(
+    rendererSource,
+    /html: renderMarkdown\(currentContent\)/,
+    "every streamed snapshot must still pass through the markdown sanitizer",
+  );
+  assert.match(
+    rendererSource,
+    /if \(streaming \|\| renderedHtml === null\) return undefined/,
+    "syntax highlighting and code controls should wait for the completed reply",
+  );
+  assert.match(
+    rendererSource,
+    /if \(renderedHtml === null\) \{[\s\S]*\{normalizedContent\}[\s\S]*dangerouslySetInnerHTML=\{\{ __html: renderedHtml \}\}/,
+    "only the completed sanitized result may be passed to innerHTML",
+  );
+  assert.match(
+    rendererSource,
+    /React\.useEffect\(\(\) => \{\s*latestContentRef\.current = normalizedContent;\s*latestStreamingRef\.current = streaming;/,
+    "async rendering should only observe committed stream snapshots",
+  );
+  assert.match(
+    rendererSource,
+    /markdownLoadFailedRef\.current = true[\s\S]*markdownLoadFailedRef\.current/,
+    "a failed Markdown chunk should stop repeated stream retries",
   );
 });
 

@@ -28,10 +28,9 @@ use ironclaw_capabilities::{
 use ironclaw_extensions::{ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityDispatcher, CapabilityId, DenyReason, DispatchFailureKind,
-    InvocationId, Principal, ResourceScope, RuntimeCredentialAuthRequirement,
-    RuntimeDispatchErrorKind, RuntimeKind, SecretHandle, runtime_policy::EffectiveRuntimePolicy,
-    sha256_digest_token,
+    ApprovalRequestId, CapabilityDispatcher, CapabilityId, DenyReason, FailureKind, InvocationId,
+    Principal, ResourceScope, RuntimeCredentialAuthRequirement, RuntimeKind, SecretHandle,
+    runtime_policy::EffectiveRuntimePolicy, sha256_digest_token,
 };
 use ironclaw_observability::live_latency_started_at;
 use ironclaw_process_sandbox::{
@@ -100,10 +99,10 @@ use crate::{
     CancelRuntimeWorkRequest, CapabilitySurfaceVersion, HostRuntime, HostRuntimeError,
     HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalGate, RuntimeApprovalResume,
     RuntimeAuthGate, RuntimeAuthResume, RuntimeBackendHealth, RuntimeBlockedReason,
-    RuntimeCapabilityCompleted, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
-    RuntimeFailureKind, RuntimeGateId, RuntimeInvocation, RuntimeStatusRequest, RuntimeWorkId,
-    RuntimeWorkSummary, VisibleCapabilityRequest, VisibleCapabilitySurface,
-    obligations::secret_owner_scope, surface::CapabilityCatalog,
+    RuntimeCapabilityCompleted, RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeGateId,
+    RuntimeInvocation, RuntimeStatusRequest, RuntimeWorkId, RuntimeWorkSummary,
+    VisibleCapabilityRequest, VisibleCapabilitySurface, obligations::secret_owner_scope,
+    surface::CapabilityCatalog,
 };
 
 /// Default production wiring for [`HostRuntime`].
@@ -708,7 +707,7 @@ impl HostRuntime for DefaultHostRuntime {
             Ok(()) => Ok(RuntimeCapabilityOutcome::Failed(
                 RuntimeCapabilityFailure::new(
                     capability_id,
-                    RuntimeFailureKind::GateDeclined,
+                    FailureKind::GateDeclined,
                     Some("auth gate denied by user".to_string()),
                 ),
             )),
@@ -1067,7 +1066,7 @@ impl DefaultHostRuntime {
                     Ok(None) => Ok(RuntimeCapabilityOutcome::Failed(
                         RuntimeCapabilityFailure::new(
                             capability,
-                            RuntimeFailureKind::Authorization,
+                            FailureKind::Authorization,
                             Some(
                                 "approval required but no approval request was persisted"
                                     .to_string(),
@@ -1581,7 +1580,7 @@ fn persistent_approval_lookup_scopes(scope: &ResourceScope) -> Vec<PersistentApp
 /// A malformed or invalid process-sandbox plan is a *model-fixable* condition:
 /// the model chose bad arguments and can correct them on a retry. It must
 /// surface as a recoverable, model-visible tool error
-/// ([`RuntimeFailureKind::InvalidInput`] → `ModelVisibleToolError`), never as a
+/// ([`FailureKind::InputEncode`] → `ModelVisibleToolError`), never as a
 /// terminal [`HostRuntimeError`] that ends the whole run. Genuine host-side
 /// faults (serializing the validated host struct back to JSON) remain errors.
 enum SpawnInputPreparation {
@@ -1604,7 +1603,7 @@ fn host_runtime_spawn_input_for_capability(
             return Ok(SpawnInputPreparation::ModelInputRejected(
                 RuntimeCapabilityFailure::new(
                     capability_id.clone(),
-                    RuntimeFailureKind::InvalidInput,
+                    FailureKind::InputEncode,
                     Some(
                         "process sandbox capability input must be a SandboxProcessPlan".to_string(),
                     ),
@@ -1622,7 +1621,7 @@ fn host_runtime_spawn_input_for_capability(
             return Ok(SpawnInputPreparation::ModelInputRejected(
                 RuntimeCapabilityFailure::new(
                     capability_id.clone(),
-                    RuntimeFailureKind::InvalidInput,
+                    FailureKind::InputEncode,
                     Some(
                         "process sandbox capability input failed SandboxProcessPlan validation"
                             .to_string(),
@@ -1658,31 +1657,53 @@ fn failure_from(
 ) -> RuntimeCapabilityFailure {
     let kind = failure_kind_from(&error);
     let raw_cause = raw_failure_cause(&error);
+    let raw_cause_needs_detail = raw_cause
+        .as_ref()
+        .is_some_and(|cause| LoopSafeSummary::new(cause.clone()).is_err());
     let message = sanitized_failure_message(&error);
     let detail = match error {
         CapabilityInvocationError::Dispatch {
             detail: Some(detail),
             ..
         } => Some(detail),
-        CapabilityInvocationError::Dispatch {
-            detail: None,
-            safe_summary: Some(summary),
-            ..
-        } => rejected_summary_diagnostic(summary),
         _ => None,
     };
     let mut failure = RuntimeCapabilityFailure::new(capability_id, kind, message);
     if let Some(detail) = detail {
         failure = failure.with_detail(detail);
     }
-    if let Some(raw_cause) = raw_cause {
-        // Registry-scrubbed here (belt); the loop-support Diagnostic seam
-        // re-scrubs and injection-fences fail-closed (suspenders). Never
-        // rendered in Debug, run-state rows, or runtime events.
-        let (scrubbed, _) = model_visible_cause_scrubber().redact_all_secrets(&raw_cause);
-        failure = failure.with_model_visible_cause(scrubbed);
+    match raw_cause {
+        Some(raw_cause) => {
+            // Registry-scrubbed here (belt); the loop-support Diagnostic seam
+            // re-scrubs and injection-fences fail-closed (suspenders). Never
+            // rendered in Debug, run-state rows, or runtime events.
+            let (scrubbed, _) = model_visible_cause_scrubber().redact_all_secrets(&raw_cause);
+            if failure.detail.is_none() && raw_cause_needs_detail {
+                failure =
+                    failure.with_detail(ironclaw_host_api::DispatchFailureDetail::Diagnostic {
+                        text: bounded_diagnostic_text(&scrubbed),
+                    });
+            }
+            failure = failure.with_model_visible_cause(scrubbed);
+        }
+        None if failure.detail.is_none() => {
+            failure = failure.with_detail(ironclaw_host_api::DispatchFailureDetail::Diagnostic {
+                text: ironclaw_host_api::ModelDiagnostic::unavailable().into_inner(),
+            });
+        }
+        None => {}
     }
     failure
+}
+
+fn bounded_diagnostic_text(value: &str) -> String {
+    let mut end = value
+        .len()
+        .min(ironclaw_host_api::MODEL_DIAGNOSTIC_MAX_BYTES);
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string() // safety: `end` is moved to a UTF-8 boundary above.
 }
 
 /// The raw descriptive cause for the model-visible Diagnostic channel, before
@@ -1693,35 +1714,6 @@ fn raw_failure_cause(error: &CapabilityInvocationError) -> Option<String> {
         Dispatch { safe_summary, .. } => safe_summary.clone(),
         _ => None,
     }
-}
-
-/// Preserve a host-authored failure reason that the strict loop safe-summary
-/// validator rejects (paths, payload delimiters, newlines).
-///
-/// [`dispatch_failure_message`] degrades such reasons to the fixed category
-/// sentence, which is correct for the summary — but the reason itself is what
-/// the model needs to repair its call (e.g. which path was out of scope), so
-/// it must ride the model-visible diagnostic detail channel instead of being
-/// dropped. Secret VALUES are scrubbed and disallowed control characters
-/// normalized at the loop boundary before the model observes the text.
-fn rejected_summary_diagnostic(
-    summary: String,
-) -> Option<ironclaw_host_api::DispatchFailureDetail> {
-    if LoopSafeSummary::new(summary.clone()).is_ok() {
-        // The reason survives into `message`; the loop layer derives the
-        // model-visible diagnostic from it directly, so attaching it here
-        // would only duplicate it.
-        return None;
-    }
-    const MAX_DIAGNOSTIC_CHARS: usize = 512;
-    let text = if summary.chars().count() <= MAX_DIAGNOSTIC_CHARS {
-        summary
-    } else {
-        let mut text: String = summary.chars().take(MAX_DIAGNOSTIC_CHARS - 3).collect();
-        text.push_str("...");
-        text
-    };
-    Some(ironclaw_host_api::DispatchFailureDetail::Diagnostic { text })
 }
 
 /// Returns a stable, redacted summary message for a capability invocation
@@ -1787,12 +1779,10 @@ fn dispatch_failure_message(
         .unwrap_or_else(|| kind.human_summary().to_string())
 }
 
-pub(crate) fn failure_kind_from(error: &CapabilityInvocationError) -> RuntimeFailureKind {
+pub(crate) fn failure_kind_from(error: &CapabilityInvocationError) -> FailureKind {
     match error {
-        CapabilityInvocationError::UnknownCapability { .. } => RuntimeFailureKind::MissingRuntime,
-        CapabilityInvocationError::AuthorizationRequiresAuth { .. } => {
-            RuntimeFailureKind::Authorization
-        }
+        CapabilityInvocationError::UnknownCapability { .. } => FailureKind::MissingRuntime,
+        CapabilityInvocationError::AuthorizationRequiresAuth { .. } => FailureKind::Authorization,
         CapabilityInvocationError::AuthorizationDenied { .. }
         | CapabilityInvocationError::UnsupportedObligations { .. }
         | CapabilityInvocationError::AuthorizationRequiresApproval { .. }
@@ -1801,117 +1791,44 @@ pub(crate) fn failure_kind_from(error: &CapabilityInvocationError) -> RuntimeFai
         | CapabilityInvocationError::ApprovalNotApproved { .. }
         | CapabilityInvocationError::ApprovalLeaseMissing { .. }
         | CapabilityInvocationError::ResumeNotBlocked { .. }
-        | CapabilityInvocationError::ResumeContextMismatch { .. } => {
-            RuntimeFailureKind::Authorization
-        }
+        | CapabilityInvocationError::ResumeContextMismatch { .. } => FailureKind::Authorization,
         CapabilityInvocationError::ObligationFailed { kind, .. } => match kind {
-            ironclaw_capabilities::CapabilityObligationFailureKind::Audit => {
-                RuntimeFailureKind::Backend
-            }
+            ironclaw_capabilities::CapabilityObligationFailureKind::Audit => FailureKind::Backend,
             ironclaw_capabilities::CapabilityObligationFailureKind::Mount => {
-                RuntimeFailureKind::Authorization
+                FailureKind::Authorization
             }
+            // Every Network obligation failure is deterministic policy/config
+            // (duplicate ApplyNetworkPolicy, empty allowed_targets, missing
+            // policy store) — never a transport fault, so it must not ride
+            // the retryable transport `Network` kind and burn retry budget.
             ironclaw_capabilities::CapabilityObligationFailureKind::Network => {
-                RuntimeFailureKind::Network
+                FailureKind::NetworkDenied
             }
             ironclaw_capabilities::CapabilityObligationFailureKind::Output => {
-                RuntimeFailureKind::OutputTooLarge
+                FailureKind::OutputTooLarge
             }
             ironclaw_capabilities::CapabilityObligationFailureKind::Resource => {
-                RuntimeFailureKind::Resource
+                FailureKind::Resource
             }
             ironclaw_capabilities::CapabilityObligationFailureKind::Secret => {
-                RuntimeFailureKind::Authorization
+                FailureKind::Authorization
             }
         },
-        CapabilityInvocationError::InvocationFingerprint { .. } => RuntimeFailureKind::InvalidInput,
+        // The invocation fingerprint could not be computed from the supplied
+        // input — model-fixable request-shape fault, same family as an input
+        // that fails to encode.
+        CapabilityInvocationError::InvocationFingerprint { .. } => FailureKind::InputEncode,
         CapabilityInvocationError::ApprovalStoreMissing { .. }
         | CapabilityInvocationError::ResumeStoreMissing { .. }
-        | CapabilityInvocationError::ProcessManagerMissing { .. } => RuntimeFailureKind::Backend,
+        | CapabilityInvocationError::ProcessManagerMissing { .. } => FailureKind::Backend,
         CapabilityInvocationError::Lease(_)
         | CapabilityInvocationError::RunState(_)
-        | CapabilityInvocationError::Process(_) => RuntimeFailureKind::Backend,
-        CapabilityInvocationError::Dispatch { kind, .. } => RuntimeFailureKind::from(*kind),
-    }
-}
-
-impl From<DispatchFailureKind> for RuntimeFailureKind {
-    fn from(kind: DispatchFailureKind) -> Self {
-        match kind {
-            DispatchFailureKind::UnknownCapability | DispatchFailureKind::UnknownProvider => {
-                RuntimeFailureKind::InvalidOutput
-            }
-            DispatchFailureKind::MissingRuntimeBackend
-            | DispatchFailureKind::UnsupportedRuntime => RuntimeFailureKind::MissingRuntime,
-            DispatchFailureKind::AuthRequired => RuntimeFailureKind::Authorization,
-            DispatchFailureKind::RuntimeMismatch => RuntimeFailureKind::Backend,
-            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::ExtensionRuntimeMismatch) => {
-                RuntimeFailureKind::MissingRuntime
-            }
-            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Memory)
-            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource) => {
-                RuntimeFailureKind::Resource
-            }
-            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied) => {
-                RuntimeFailureKind::Network
-            }
-            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::PolicyDenied) => {
-                RuntimeFailureKind::PolicyDenied
-            }
-            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OutputTooLarge) => {
-                RuntimeFailureKind::OutputTooLarge
-            }
-            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::FilesystemDenied) => {
-                RuntimeFailureKind::Authorization
-            }
-            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::SecretDenied) => {
-                RuntimeFailureKind::Authorization
-            }
-            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::ExitFailure) => {
-                RuntimeFailureKind::Process
-            }
-            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InputEncode) => {
-                RuntimeFailureKind::InvalidInput
-            }
-            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OutputDecode)
-            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InvalidResult) => {
-                RuntimeFailureKind::InvalidOutput
-            }
-            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed) => {
-                RuntimeFailureKind::OperationFailed
-            }
-            // A method or capability the model named that does not exist is a
-            // model-fixable request error, not an infra fault: classify it as
-            // InvalidInput so it surfaces as an immediate model-visible tool
-            // error instead of burning the retry budget on a call that can
-            // never resolve by retrying.
-            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::MethodMissing)
-            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UndeclaredCapability) => {
-                RuntimeFailureKind::InvalidInput
-            }
-            // A guest trap is an extension-local execution failure. It can be
-            // an extension defect or a call-specific failure, but retrying the
-            // same guest invocation as host infrastructure cannot repair it.
-            // Surface it as an operation failure so the model can change
-            // approach or report the broken extension.
-            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest) => {
-                RuntimeFailureKind::OperationFailed
-            }
-            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend)
-            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Client)
-            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Executor)
-            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Manifest)
-            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UnsupportedRunner) => {
-                RuntimeFailureKind::Backend
-            }
-            // The fail-safe "uncategorized" redaction bucket collapses to a
-            // concrete internal failure rather than propagating a dedicated
-            // `Unknown` category downstream. `Internal` is retryable and
-            // surfaces to the model/user, so an unclassified dispatch error is
-            // no longer an opaque run-ending dead-end. See
-            // `docs/plans/2026-06-28-reborn-error-recoverability-audit.md`.
-            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Unknown) => Self::Internal,
-        }
+        | CapabilityInvocationError::Process(_) => FailureKind::Backend,
+        // The dispatch lane carries the unified vocabulary losslessly: every
+        // precise mechanism name (MethodMissing, NetworkDenied, Guest, …)
+        // survives 1:1 via host_api's `From` injections instead of the retired
+        // 22→12 coarsening fold.
+        CapabilityInvocationError::Dispatch { kind, .. } => FailureKind::from(*kind),
     }
 }
 
@@ -2087,104 +2004,83 @@ mod tests {
 
     #[test]
     fn dispatch_kind_to_failure_pins_every_runtime_dispatch_error_kind() {
-        // Every RuntimeDispatchErrorKind variant must map to a non-Unknown
-        // failure kind so upstream additions are surfaced explicitly.
-        let cases: &[(RuntimeDispatchErrorKind, RuntimeFailureKind)] = &[
-            (
-                RuntimeDispatchErrorKind::Backend,
-                RuntimeFailureKind::Backend,
-            ),
-            (
-                RuntimeDispatchErrorKind::Client,
-                RuntimeFailureKind::Backend,
-            ),
-            (
-                RuntimeDispatchErrorKind::Executor,
-                RuntimeFailureKind::Backend,
-            ),
+        // The dispatch lane's precise mechanism names survive 1:1 into the
+        // unified vocabulary (host_api's lossless `From` injection) — this
+        // replaces the retired 22->12 coarsening fold. The single non-identity
+        // edge is the redaction bucket `Unknown` -> `Internal`.
+        let cases: &[(RuntimeDispatchErrorKind, FailureKind)] = &[
+            (RuntimeDispatchErrorKind::Backend, FailureKind::Backend),
+            (RuntimeDispatchErrorKind::Client, FailureKind::Client),
+            (RuntimeDispatchErrorKind::Executor, FailureKind::Executor),
             (
                 RuntimeDispatchErrorKind::ExitFailure,
-                RuntimeFailureKind::Process,
+                FailureKind::ExitFailure,
             ),
             (
                 RuntimeDispatchErrorKind::ExtensionRuntimeMismatch,
-                RuntimeFailureKind::MissingRuntime,
+                FailureKind::ExtensionRuntimeMismatch,
             ),
             (
                 RuntimeDispatchErrorKind::FilesystemDenied,
-                RuntimeFailureKind::Authorization,
+                FailureKind::FilesystemDenied,
             ),
-            (
-                RuntimeDispatchErrorKind::Guest,
-                RuntimeFailureKind::OperationFailed,
-            ),
+            (RuntimeDispatchErrorKind::Guest, FailureKind::Guest),
             (
                 RuntimeDispatchErrorKind::InputEncode,
-                RuntimeFailureKind::InvalidInput,
+                FailureKind::InputEncode,
             ),
             (
                 RuntimeDispatchErrorKind::InvalidResult,
-                RuntimeFailureKind::InvalidOutput,
+                FailureKind::InvalidResult,
             ),
-            (
-                RuntimeDispatchErrorKind::Manifest,
-                RuntimeFailureKind::Backend,
-            ),
-            (
-                RuntimeDispatchErrorKind::Memory,
-                RuntimeFailureKind::Resource,
-            ),
+            (RuntimeDispatchErrorKind::Manifest, FailureKind::Manifest),
+            (RuntimeDispatchErrorKind::Memory, FailureKind::Memory),
             (
                 RuntimeDispatchErrorKind::MethodMissing,
-                RuntimeFailureKind::InvalidInput,
+                FailureKind::MethodMissing,
             ),
             (
                 RuntimeDispatchErrorKind::NetworkDenied,
-                RuntimeFailureKind::Network,
+                FailureKind::NetworkDenied,
             ),
             (
                 RuntimeDispatchErrorKind::OperationFailed,
-                RuntimeFailureKind::OperationFailed,
+                FailureKind::OperationFailed,
             ),
             (
                 RuntimeDispatchErrorKind::OutputDecode,
-                RuntimeFailureKind::InvalidOutput,
+                FailureKind::OutputDecode,
             ),
             (
                 RuntimeDispatchErrorKind::OutputTooLarge,
-                RuntimeFailureKind::OutputTooLarge,
+                FailureKind::OutputTooLarge,
             ),
             (
                 RuntimeDispatchErrorKind::PolicyDenied,
-                RuntimeFailureKind::PolicyDenied,
+                FailureKind::PolicyDenied,
             ),
-            (
-                RuntimeDispatchErrorKind::Resource,
-                RuntimeFailureKind::Resource,
-            ),
+            (RuntimeDispatchErrorKind::Resource, FailureKind::Resource),
             (
                 RuntimeDispatchErrorKind::SecretDenied,
-                RuntimeFailureKind::Authorization,
+                FailureKind::SecretDenied,
             ),
             (
                 RuntimeDispatchErrorKind::UndeclaredCapability,
-                RuntimeFailureKind::InvalidInput,
+                FailureKind::UndeclaredCapability,
             ),
             (
                 RuntimeDispatchErrorKind::UnsupportedRunner,
-                RuntimeFailureKind::Backend,
+                FailureKind::UnsupportedRunner,
             ),
-            // The fail-safe "uncategorized" redaction bucket collapses to a
-            // concrete, surfacing `Internal` rather than a dedicated `Unknown`
-            // category (which no longer exists on `RuntimeFailureKind`).
-            (
-                RuntimeDispatchErrorKind::Unknown,
-                RuntimeFailureKind::Internal,
-            ),
+            // The fail-safe "uncategorized" redaction bucket routes to the
+            // explicit non-retryable `Unclassified` sink: an unclassifiable
+            // failure may be permanent, so it surfaces model-visibly instead
+            // of consuming retry budget in the retryable `Internal` bucket.
+            (RuntimeDispatchErrorKind::Unknown, FailureKind::Unclassified),
         ];
         for (variant, expected) in cases {
             let kind = DispatchFailureKind::Runtime(*variant);
-            let actual = RuntimeFailureKind::from(kind);
+            let actual = FailureKind::from(kind);
             assert_eq!(
                 actual, *expected,
                 "dispatch kind {kind:?} should map to {expected:?}, got {actual:?}"
@@ -2194,50 +2090,62 @@ mod tests {
 
     #[test]
     fn dispatch_kind_to_failure_pins_dispatch_error_top_level_kinds() {
-        let cases: &[(DispatchFailureKind, RuntimeFailureKind)] = &[
+        // Control-plane siblings also survive 1:1 (previously coarsened into
+        // InvalidOutput/MissingRuntime/Authorization/Backend).
+        let cases: &[(DispatchFailureKind, FailureKind)] = &[
             (
                 DispatchFailureKind::UnknownCapability,
-                RuntimeFailureKind::InvalidOutput,
+                FailureKind::UnknownCapability,
             ),
             (
                 DispatchFailureKind::UnknownProvider,
-                RuntimeFailureKind::InvalidOutput,
+                FailureKind::UnknownProvider,
             ),
             (
                 DispatchFailureKind::MissingRuntimeBackend,
-                RuntimeFailureKind::MissingRuntime,
+                FailureKind::MissingRuntimeBackend,
             ),
             (
                 DispatchFailureKind::UnsupportedRuntime,
-                RuntimeFailureKind::MissingRuntime,
+                FailureKind::UnsupportedRunner,
             ),
             (
                 DispatchFailureKind::RuntimeMismatch,
-                RuntimeFailureKind::Backend,
+                FailureKind::RuntimeMismatch,
             ),
-            (
-                DispatchFailureKind::AuthRequired,
-                RuntimeFailureKind::Authorization,
-            ),
+            (DispatchFailureKind::AuthRequired, FailureKind::AuthRequired),
         ];
         for (kind, expected) in cases {
-            assert_eq!(RuntimeFailureKind::from(*kind), *expected, "kind {kind:?}");
+            assert_eq!(FailureKind::from(*kind), *expected, "kind {kind:?}");
         }
     }
 
     #[test]
-    fn failure_kind_from_dispatch_unknown_capability_maps_to_invalid_output() {
+    fn failure_kind_from_dispatch_unknown_capability_maps_to_unknown_capability() {
         let error = dispatch(DispatchFailureKind::UnknownCapability);
-        assert_eq!(failure_kind_from(&error), RuntimeFailureKind::InvalidOutput);
+        assert_eq!(failure_kind_from(&error), FailureKind::UnknownCapability);
     }
 
     #[test]
     fn failure_kind_from_unknown_capability_variant_maps_to_missing_runtime() {
         let error = CapabilityInvocationError::UnknownCapability { capability: cap() };
-        assert_eq!(
-            failure_kind_from(&error),
-            RuntimeFailureKind::MissingRuntime
-        );
+        assert_eq!(failure_kind_from(&error), FailureKind::MissingRuntime);
+    }
+
+    /// Regression (#6684 review): a Network obligation failure is deterministic
+    /// policy/config (duplicate policy obligation, empty allowed_targets,
+    /// missing policy store) — it must map to the never-retryable
+    /// `NetworkDenied`, not the retryable transport `Network` kind, or retries
+    /// burn budget on a call that cannot succeed.
+    #[test]
+    fn failure_kind_from_network_obligation_failure_is_not_retryable() {
+        let error = CapabilityInvocationError::ObligationFailed {
+            capability: cap(),
+            kind: ironclaw_capabilities::CapabilityObligationFailureKind::Network,
+        };
+        let kind = failure_kind_from(&error);
+        assert_eq!(kind, FailureKind::NetworkDenied);
+        assert!(!kind.is_retryable());
     }
 
     #[test]
@@ -2276,7 +2184,7 @@ mod tests {
 
         match output {
             SpawnInputPreparation::ModelInputRejected(failure) => {
-                assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+                assert_eq!(failure.kind, FailureKind::InputEncode);
                 assert_eq!(
                     failure.disposition(),
                     crate::CapabilityFailureDisposition::ModelVisibleToolError
@@ -2309,7 +2217,7 @@ mod tests {
 
         match output {
             SpawnInputPreparation::ModelInputRejected(failure) => {
-                assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+                assert_eq!(failure.kind, FailureKind::InputEncode);
                 assert_eq!(
                     failure.disposition(),
                     crate::CapabilityFailureDisposition::ModelVisibleToolError
@@ -2431,13 +2339,16 @@ mod tests {
     }
 
     #[test]
-    fn failure_from_carries_rejected_safe_summary_on_the_diagnostic_detail() {
+    fn failure_from_inlines_bounded_rejected_summary_and_keeps_complete_private_cause() {
         // A path-bearing (or newline-bearing) failure reason fails the strict
         // loop safe-summary validator, so the message degrades to the fixed
-        // category sentence. The raw reason must NOT be dropped: it rides the
-        // model-visible diagnostic detail channel, which is exactly how the
-        // model learns what to repair (e.g. which path was denied).
-        let raw = "shell execution failed: cannot read /etc/passwd\nsecond line".to_string();
+        // category sentence. The complete reason must ride the private cause
+        // channel until the loop applies the 4096-byte diagnostic bound.
+        let raw = format!(
+            "shell execution failed: cannot read /workspace/{}\nsecond line",
+            "segment/".repeat(600)
+        );
+        assert!(raw.len() > ironclaw_host_api::MODEL_DIAGNOSTIC_MAX_BYTES);
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Executor),
             safe_summary: Some(raw.clone()),
@@ -2451,16 +2362,26 @@ mod tests {
             Some("the tool executor failed"),
             "message must stay the fixed category sentence"
         );
+        let Some(ironclaw_host_api::DispatchFailureDetail::Diagnostic { text }) =
+            failure.detail.as_ref()
+        else {
+            panic!("rejected public summary must ride the diagnostic detail");
+        };
         assert_eq!(
-            failure.detail,
-            Some(ironclaw_host_api::DispatchFailureDetail::Diagnostic { text: raw }),
-            "the raw reason must ride the diagnostic detail"
+            text,
+            &raw[..ironclaw_host_api::MODEL_DIAGNOSTIC_MAX_BYTES],
+            "the inline diagnostic uses the shared model-observation byte cap"
+        );
+        assert_eq!(
+            failure.model_visible_cause(),
+            Some(raw.as_str()),
+            "the cause must not be pre-truncated before the 4096-byte model boundary"
         );
     }
 
     #[test]
-    fn failure_from_bounds_rejected_summary_diagnostic_on_char_boundaries() {
-        let raw = format!("/{}", "é".repeat(600));
+    fn failure_from_bounds_rejected_summary_diagnostic_on_utf8_boundary() {
+        let raw = format!("/workspace/{}tail", "é".repeat(3_000));
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Executor),
             safe_summary: Some(raw),
@@ -2470,10 +2391,24 @@ mod tests {
         let failure = failure_from(error, cap());
         let Some(ironclaw_host_api::DispatchFailureDetail::Diagnostic { text }) = failure.detail
         else {
-            panic!("expected bounded diagnostic detail");
+            panic!("expected a bounded diagnostic");
         };
-        assert_eq!(text.chars().count(), 512);
-        assert!(text.ends_with("..."));
+        assert!(text.len() <= ironclaw_host_api::MODEL_DIAGNOSTIC_MAX_BYTES);
+        assert!(text.ends_with('é'));
+    }
+
+    #[test]
+    fn failure_from_inlines_unavailable_detail_when_no_cause_exists() {
+        let failure = failure_from(
+            CapabilityInvocationError::UnknownCapability { capability: cap() },
+            cap(),
+        );
+        assert_eq!(
+            failure.detail,
+            Some(ironclaw_host_api::DispatchFailureDetail::Diagnostic {
+                text: ironclaw_host_api::ModelDiagnostic::unavailable().into_inner(),
+            })
+        );
     }
 
     #[test]
@@ -2519,7 +2454,7 @@ mod tests {
             CapabilityId::new("builtin.trigger_create").expect("valid capability id"),
         );
 
-        assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+        assert_eq!(failure.kind, FailureKind::InputEncode);
         assert_eq!(
             failure.detail,
             Some(ironclaw_host_api::DispatchFailureDetail::InvalidInput {
@@ -2529,60 +2464,52 @@ mod tests {
     }
 
     #[test]
-    fn runtime_failure_kind_as_str_is_stable_snake_case() {
-        // Pin the public metric/tracing tokens; renaming any of these is a
-        // breaking observability contract change.
-        assert_eq!(RuntimeFailureKind::Authorization.as_str(), "authorization");
-        assert_eq!(RuntimeFailureKind::Backend.as_str(), "backend");
-        assert_eq!(RuntimeFailureKind::Cancelled.as_str(), "cancelled");
-        assert_eq!(RuntimeFailureKind::Dispatcher.as_str(), "dispatcher");
-        assert_eq!(RuntimeFailureKind::Internal.as_str(), "internal");
-        assert_eq!(RuntimeFailureKind::InvalidInput.as_str(), "invalid_input");
-        assert_eq!(RuntimeFailureKind::InvalidOutput.as_str(), "invalid_output");
-        assert_eq!(
-            RuntimeFailureKind::MissingRuntime.as_str(),
-            "missing_runtime"
-        );
-        assert_eq!(RuntimeFailureKind::Network.as_str(), "network");
-        assert_eq!(
-            RuntimeFailureKind::OperationFailed.as_str(),
-            "operation_failed"
-        );
-        assert_eq!(
-            RuntimeFailureKind::OutputTooLarge.as_str(),
-            "output_too_large"
-        );
-        assert_eq!(RuntimeFailureKind::PolicyDenied.as_str(), "policy_denied");
-        assert_eq!(RuntimeFailureKind::Process.as_str(), "process");
-        assert_eq!(RuntimeFailureKind::Resource.as_str(), "resource");
-        assert_eq!(RuntimeFailureKind::Transient.as_str(), "transient");
-        assert_eq!(RuntimeFailureKind::Unavailable.as_str(), "unavailable");
+    fn failure_kind_as_str_is_stable_snake_case() {
+        // Pin the public metric/tracing tokens this crate emits; renaming any
+        // of these is a breaking observability contract change. (host_api pins
+        // the full tag round-trip over `FailureKind::ALL`; this pins the exact
+        // spellings host-runtime events/metrics rely on, including the precise
+        // names that replaced the retired coarse tokens invalid_input/
+        // invalid_output/process/dispatcher.)
+        assert_eq!(FailureKind::Authorization.as_str(), "authorization");
+        assert_eq!(FailureKind::Backend.as_str(), "backend");
+        assert_eq!(FailureKind::Cancelled.as_str(), "cancelled");
+        assert_eq!(FailureKind::Internal.as_str(), "internal");
+        assert_eq!(FailureKind::InputEncode.as_str(), "input_encode");
+        assert_eq!(FailureKind::OutputDecode.as_str(), "output_decode");
+        assert_eq!(FailureKind::InvalidResult.as_str(), "invalid_result");
+        assert_eq!(FailureKind::MethodMissing.as_str(), "method_missing");
+        assert_eq!(FailureKind::MissingRuntime.as_str(), "missing_runtime");
+        assert_eq!(FailureKind::Network.as_str(), "network");
+        assert_eq!(FailureKind::NetworkDenied.as_str(), "network_denied");
+        assert_eq!(FailureKind::OperationFailed.as_str(), "operation_failed");
+        assert_eq!(FailureKind::OutputTooLarge.as_str(), "output_too_large");
+        assert_eq!(FailureKind::PolicyDenied.as_str(), "policy_denied");
+        assert_eq!(FailureKind::ExitFailure.as_str(), "exit_failure");
+        assert_eq!(FailureKind::GateDeclined.as_str(), "gate_declined");
+        assert_eq!(FailureKind::Resource.as_str(), "resource");
+        assert_eq!(FailureKind::Transient.as_str(), "transient");
+        assert_eq!(FailureKind::Unavailable.as_str(), "unavailable");
     }
 
     #[test]
     fn capability_failure_disposition_maps_failure_kinds_once() {
         use crate::CapabilityFailureDisposition::*;
 
-        let cases = [
-            (RuntimeFailureKind::Authorization, ModelVisibleToolError),
-            (RuntimeFailureKind::Backend, RetrySameCall),
-            (RuntimeFailureKind::Cancelled, ModelVisibleToolError),
-            (RuntimeFailureKind::Dispatcher, ModelVisibleToolError),
-            (RuntimeFailureKind::Internal, RetrySameCall),
-            (RuntimeFailureKind::InvalidInput, ModelVisibleToolError),
-            (RuntimeFailureKind::InvalidOutput, ModelVisibleToolError),
-            (RuntimeFailureKind::MissingRuntime, ModelVisibleToolError),
-            (RuntimeFailureKind::Network, RetrySameCall),
-            (RuntimeFailureKind::OperationFailed, ModelVisibleToolError),
-            (RuntimeFailureKind::OutputTooLarge, ModelVisibleToolError),
-            (RuntimeFailureKind::PolicyDenied, ModelVisibleToolError),
-            (RuntimeFailureKind::Process, ModelVisibleToolError),
-            (RuntimeFailureKind::Resource, ModelVisibleToolError),
-            (RuntimeFailureKind::Transient, RetrySameCall),
-            (RuntimeFailureKind::Unavailable, RetrySameCall),
-        ];
-
-        for (kind, expected) in cases {
+        // Exactly the Retry-fated kinds are retried before the model sees
+        // anything; everything else — model-visible mechanism names, policy
+        // denials, config faults, park/terminal fates — surfaces as a
+        // model-visible tool error. Exhaustive over the closed vocabulary so
+        // a new variant fails this pin until deliberately classified.
+        for &kind in FailureKind::ALL {
+            let expected = match kind {
+                FailureKind::Network
+                | FailureKind::Transient
+                | FailureKind::Unavailable
+                | FailureKind::Backend
+                | FailureKind::Internal => RetrySameCall,
+                _ => ModelVisibleToolError,
+            };
             assert_eq!(
                 crate::capability_failure_disposition(kind),
                 expected,
@@ -2595,11 +2522,11 @@ mod tests {
     fn capability_failure_disposition_retries_retryable_kinds_before_exhaustion() {
         use crate::CapabilityFailureDisposition::*;
         for kind in [
-            RuntimeFailureKind::Backend,
-            RuntimeFailureKind::Internal,
-            RuntimeFailureKind::Network,
-            RuntimeFailureKind::Transient,
-            RuntimeFailureKind::Unavailable,
+            FailureKind::Backend,
+            FailureKind::Internal,
+            FailureKind::Network,
+            FailureKind::Transient,
+            FailureKind::Unavailable,
         ] {
             assert_eq!(
                 crate::capability_failure_disposition(kind),
@@ -2607,6 +2534,34 @@ mod tests {
                 "{kind:?}"
             );
         }
+    }
+
+    /// Regression: a `NetworkDenied` dispatch failure is a POLICY denial —
+    /// the policy does not change between attempts, so retrying can never
+    /// succeed and only burns the loop's retry budget. It must NOT be
+    /// retried; it surfaces to the model as a tool error so the loop can
+    /// route around the denied egress. The retired coarsening fold mapped
+    /// `NetworkDenied` onto the retryable `Network` bucket, so this test
+    /// would have failed against it (disposition was `RetrySameCall`).
+    #[test]
+    fn network_denied_dispatch_failure_is_model_visible_not_retried() {
+        let failure = failure_from(
+            dispatch(DispatchFailureKind::Runtime(
+                RuntimeDispatchErrorKind::NetworkDenied,
+            )),
+            cap(),
+        );
+
+        assert_eq!(failure.kind, FailureKind::NetworkDenied);
+        assert_eq!(
+            failure.disposition(),
+            crate::CapabilityFailureDisposition::ModelVisibleToolError,
+            "a policy egress denial must surface model-visibly, never retry"
+        );
+        assert!(
+            !FailureKind::NetworkDenied.is_retryable(),
+            "NetworkDenied must not be in the quiet-retry set"
+        );
     }
 
     // ─── capability_credential_requirements unit tests ──────────────────────────
@@ -2835,42 +2790,30 @@ required = true
 
     #[test]
     fn runtime_failure_summary_is_bounded_and_blank_messages_are_not_safe() {
-        let blank = RuntimeCapabilityFailure::new(
-            cap(),
-            RuntimeFailureKind::InvalidInput,
-            Some("   ".to_string()),
-        );
+        let blank =
+            RuntimeCapabilityFailure::new(cap(), FailureKind::InputEncode, Some("   ".to_string()));
         assert!(blank.safe_summary().is_none());
         assert_eq!(
             blank.disposition(),
             crate::CapabilityFailureDisposition::ModelVisibleToolError
         );
 
-        let long = RuntimeCapabilityFailure::new(
-            cap(),
-            RuntimeFailureKind::InvalidInput,
-            Some("x".repeat(3000)),
-        );
+        let long =
+            RuntimeCapabilityFailure::new(cap(), FailureKind::InputEncode, Some("x".repeat(3000)));
         let summary = long.safe_summary().expect("long message is still safe");
         assert_eq!(summary.chars().count(), 512);
         assert!(summary.ends_with("..."));
 
-        let multibyte = RuntimeCapabilityFailure::new(
-            cap(),
-            RuntimeFailureKind::InvalidInput,
-            Some("é".repeat(3000)),
-        );
+        let multibyte =
+            RuntimeCapabilityFailure::new(cap(), FailureKind::InputEncode, Some("é".repeat(3000)));
         let summary = multibyte
             .safe_summary()
             .expect("long multibyte message is still safe");
         assert_eq!(summary.chars().count(), 512);
         assert!(summary.ends_with("..."));
 
-        let exact = RuntimeCapabilityFailure::new(
-            cap(),
-            RuntimeFailureKind::InvalidInput,
-            Some("x".repeat(512)),
-        );
+        let exact =
+            RuntimeCapabilityFailure::new(cap(), FailureKind::InputEncode, Some("x".repeat(512)));
         assert_eq!(exact.safe_summary(), Some("x".repeat(512)));
     }
 

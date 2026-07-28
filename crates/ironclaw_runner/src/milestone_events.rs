@@ -380,15 +380,13 @@ mod tests {
     use super::*;
     use ironclaw_events::{EventStreamKey, InMemoryDurableEventLog, ReadScope, RuntimeEventKind};
     use ironclaw_host_api::{
-        AgentId, ExtensionId, InvocationId, ProjectId, RuntimeKind, TenantId, ThreadId, UserId,
+        AgentId, ExtensionId, FailureKind, InvocationId, ProjectId, RuntimeKind, TenantId,
+        ThreadId, UserId,
     };
     use ironclaw_threads::ThreadScope;
     use ironclaw_turns::{
         CapabilityActivityId, TurnId, TurnScope,
-        run_profile::{
-            CapabilityFailureKind, HookDecisionSummary, LoopDriverId, LoopHostMilestone,
-            LoopSafeSummary,
-        },
+        run_profile::{HookDecisionSummary, LoopDriverId, LoopHostMilestone, LoopSafeSummary},
     };
 
     const HOOK_HEX_ID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -538,7 +536,7 @@ mod tests {
                 capability_id: capability_id.clone(),
                 provider: Some(provider.clone()),
                 runtime: Some(RuntimeKind::Script),
-                reason_kind: CapabilityFailureKind::OperationFailed,
+                reason_kind: FailureKind::OperationFailed,
                 safe_summary: Some(
                     LoopSafeSummary::new(
                         "read_file failed for path workspace ironclaw_issues.json: file not found",
@@ -595,7 +593,7 @@ mod tests {
                 capability_id: capability_id.clone(),
                 provider: Some(provider.clone()),
                 runtime: Some(RuntimeKind::Script),
-                reason_kind: CapabilityFailureKind::OperationFailed,
+                reason_kind: FailureKind::OperationFailed,
                 safe_summary: None,
             },
         ] {

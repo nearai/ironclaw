@@ -32,6 +32,7 @@ from urllib.parse import parse_qs, urlparse
 
 import aiohttp
 import httpx
+import pytest
 from playwright.async_api import expect
 from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2
 from reborn_webui_harness import (
@@ -102,6 +103,78 @@ async def _assert_readable(locator, label: str) -> dict[str, list[float]]:
     ratio = _contrast_ratio(colors["foreground"], colors["background"])
     assert ratio >= 4.5, f"{label} contrast was {ratio:.2f}:1 with colors {colors}"
     return colors
+
+
+async def _typography_metrics(page, selectors: dict[str, str]) -> dict:
+    return await page.evaluate(
+        """selectors => {
+          const semanticSize = getComputedStyle(document.documentElement)
+            .getPropertyValue("--text-ui").trim();
+          if (!semanticSize) {
+            throw new Error("Semantic typography token --text-ui is not defined");
+          }
+          const probe = document.createElement("span");
+          probe.style.cssText =
+            "position:absolute;visibility:hidden;font-size:var(--text-ui)";
+          document.body.append(probe);
+          const expectedFontSize = getComputedStyle(probe).fontSize;
+          probe.remove();
+
+          const controls = Object.fromEntries(
+            Object.entries(selectors).map(([name, selector]) => {
+              const element = document.querySelector(selector);
+              if (!element) {
+                throw new Error(`Typography target not found: ${name} (${selector})`);
+              }
+              const style = getComputedStyle(element);
+              const rect = element.getBoundingClientRect();
+              return [name, {
+                className: element.className,
+                clientHeight: element.clientHeight,
+                clientWidth: element.clientWidth,
+                expectedFontSize,
+                fontFamily: style.fontFamily,
+                fontSize: style.fontSize,
+                height: rect.height,
+                semanticSize,
+                scrollHeight: element.scrollHeight,
+                scrollWidth: element.scrollWidth,
+              }];
+            })
+          );
+          return {
+            controls,
+            rootFontSize: getComputedStyle(document.documentElement).fontSize,
+            viewport: {
+              documentWidth: document.documentElement.scrollWidth,
+              viewportWidth: window.innerWidth,
+            },
+          };
+        }""",
+        selectors,
+    )
+
+
+def _assert_control_typography(
+    metrics: dict,
+    label: str,
+    *,
+    expected_height: float | None = None,
+) -> None:
+    assert metrics["fontSize"] == metrics["expectedFontSize"], (
+        f"{label} font size was {metrics['fontSize']}, "
+        f"expected semantic --text-ui size {metrics['expectedFontSize']}: {metrics}"
+    )
+    assert metrics["scrollWidth"] <= metrics["clientWidth"] + 1, (
+        f"{label} clipped horizontally: {metrics}"
+    )
+    assert metrics["scrollHeight"] <= metrics["clientHeight"] + 1, (
+        f"{label} clipped vertically: {metrics}"
+    )
+    if expected_height is not None:
+        assert abs(metrics["height"] - expected_height) <= 1, (
+            f"{label} height was {metrics['height']}px, expected {expected_height}px"
+        )
 
 
 async def _wait_for_automation_named(
@@ -208,6 +281,156 @@ async def test_reborn_v2_serves_shell_and_gates_auth(reborn_v2_server, reborn_v2
         assert urlparse(anon_page.url).path == "/login"
     finally:
         await anon_ctx.close()
+
+
+@pytest.mark.parametrize(
+    ("locale", "expected_lang", "connect_label"),
+    [
+        pytest.param("en-US", "en", "Connect", id="english"),
+        pytest.param("zh-CN", "zh-CN", "连接", id="simplified-chinese"),
+    ],
+)
+@pytest.mark.parametrize("width", [375, 768, 1024, 1440])
+async def test_reborn_v2_shared_control_typography_is_stable(
+    reborn_v2_server,
+    reborn_v2_browser,
+    locale,
+    expected_lang,
+    connect_label,
+    width,
+):
+    """Shared controls keep one size without viewport or locale clipping."""
+    context = await reborn_v2_browser.new_context(
+        locale=locale,
+        viewport={"width": width, "height": 900},
+    )
+    page = await context.new_page()
+
+    async def handle_tools(route) -> None:
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "entries": [
+                        {
+                            "key": "agent.auto_approve_tools",
+                            "value": False,
+                            "mutable": True,
+                            "source": "default",
+                        },
+                        {
+                            "key": "tool.typography_check",
+                            "value": {
+                                "name": "typography_check",
+                                "description": "Shared control typography.",
+                                "state": "ask_each_time",
+                                "default_state": "ask_each_time",
+                                "locked": False,
+                                "effective_source": "default",
+                            },
+                            "mutable": True,
+                            "source": "default",
+                        },
+                    ]
+                }
+            ),
+        )
+
+    try:
+        await page.goto(f"{reborn_v2_server}/")
+        token_input = page.locator(SEL_V2["login_token"])
+        connect_button = page.locator("form button[type='submit']")
+        token_label = page.locator("label[for='v2-token']")
+        await expect(token_input).to_be_visible(timeout=15000)
+        await expect(connect_button).to_have_text(connect_label, timeout=15000)
+        await expect(page.locator("html")).to_have_attribute(
+            "lang", expected_lang
+        )
+
+        expected_height = 44 if width < 768 else 50
+        login_page_metrics = await _typography_metrics(
+            page,
+            {
+                "tokenInput": SEL_V2["login_token"],
+                "connectButton": "form button[type='submit']",
+                "tokenLabel": "label[for='v2-token']",
+            },
+        )
+        login_metrics = login_page_metrics["controls"]
+        _assert_control_typography(
+            login_metrics["tokenInput"],
+            f"{locale} token input at {width}px",
+            expected_height=expected_height,
+        )
+        _assert_control_typography(
+            login_metrics["connectButton"],
+            f"{locale} connect button at {width}px",
+            expected_height=expected_height,
+        )
+        _assert_control_typography(
+            login_metrics["tokenLabel"],
+            f"{locale} token label at {width}px",
+        )
+        assert login_page_metrics["rootFontSize"] == "16px"
+
+        tools_route = "**/api/webchat/v2/settings/tools"
+        await page.route(tools_route, handle_tools)
+        try:
+            await page.goto(
+                f"{reborn_v2_server}/settings/tools"
+                f"?token={REBORN_V2_AUTH_TOKEN}"
+            )
+            tool_row_selector = SEL_V2["settings_tool_row_for"].format(
+                name="typography_check"
+            )
+            permission = page.locator(tool_row_selector).locator(
+                SEL_V2["settings_tool_permission"]
+            )
+            await expect(permission).to_be_visible(timeout=15000)
+            permission_metrics = (
+                await _typography_metrics(
+                    page,
+                    {
+                        "permission": (
+                            f"{tool_row_selector} "
+                            f"{SEL_V2['settings_tool_permission']}"
+                        )
+                    },
+                )
+            )["controls"]["permission"]
+        finally:
+            await page.unroute(tools_route, handle_tools)
+
+        _assert_control_typography(
+            permission_metrics,
+            f"{locale} SelectMenu at {width}px",
+        )
+        assert "Mono" not in permission_metrics["fontFamily"], (
+            f"SelectMenu defaulted to monospace: {permission_metrics['fontFamily']}"
+        )
+
+        await page.goto(
+            f"{reborn_v2_server}/settings/skills"
+            f"?token={REBORN_V2_AUTH_TOKEN}"
+        )
+        skill_content = page.locator("textarea").first
+        await expect(skill_content).to_be_visible(timeout=15000)
+        skills_metrics = await _typography_metrics(
+            page,
+            {"skillContent": "textarea"},
+        )
+        _assert_control_typography(
+            skills_metrics["controls"]["skillContent"],
+            f"{locale} textarea at {width}px",
+        )
+
+        viewport_metrics = skills_metrics["viewport"]
+        assert viewport_metrics["documentWidth"] <= viewport_metrics["viewportWidth"], (
+            f"{locale} layout overflowed at {width}px: {viewport_metrics}"
+        )
+    finally:
+        await context.close()
 
 
 async def test_reborn_v2_lazy_routes_preserve_direct_navigation(
@@ -532,7 +755,7 @@ async def test_reborn_v2_light_theme_semantic_colors_have_readable_contrast(
 
 
 async def test_reborn_v2_appearance_theme_selection_persists(reborn_v2_page):
-    """Appearance controls update the live theme and preserve it across reloads."""
+    """Appearance controls preserve the live theme across SPA navigation and reloads."""
     origin = await reborn_v2_page.evaluate("location.origin")
     await reborn_v2_page.goto(
         f"{origin}/v2/settings/appearance?token={REBORN_V2_AUTH_TOKEN}"
@@ -545,6 +768,34 @@ async def test_reborn_v2_appearance_theme_selection_persists(reborn_v2_page):
 
     await dark_option.click()
     await expect(dark_option).to_be_checked()
+    await expect(reborn_v2_page.locator("html")).to_have_attribute(
+        "data-theme", "dark"
+    )
+    await reborn_v2_page.wait_for_function(
+        'localStorage.getItem("ironclaw:v2-theme") === "dark"'
+    )
+
+    await reborn_v2_page.locator(SEL_V2["nav_chat"]).first.click()
+    await expect(
+        reborn_v2_page.locator(SEL_V2["chat_composer"])
+    ).to_be_visible(timeout=15000)
+    await expect(reborn_v2_page.locator("html")).to_have_attribute(
+        "data-theme", "dark"
+    )
+    await reborn_v2_page.wait_for_function(
+        'localStorage.getItem("ironclaw:v2-theme") === "dark"'
+    )
+
+    await reborn_v2_page.locator(SEL_V2["nav_settings_inference"]).first.click()
+    await expect(
+        reborn_v2_page.locator(SEL_V2["settings_search_input"])
+    ).to_be_visible(timeout=15000)
+    await reborn_v2_page.wait_for_function(
+        'localStorage.getItem("ironclaw:v2-theme") === "dark"'
+    )
+    await reborn_v2_page.locator(SEL_V2["nav_settings_appearance"]).first.click()
+    dark_option = reborn_v2_page.locator(SEL_V2["appearance_theme_dark"])
+    await expect(dark_option).to_be_checked(timeout=15000)
     await expect(reborn_v2_page.locator("html")).to_have_attribute(
         "data-theme", "dark"
     )

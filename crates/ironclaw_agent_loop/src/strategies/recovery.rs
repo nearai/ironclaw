@@ -11,6 +11,7 @@
 // arch-exempt: large_file, keep recovery policy beside its exhaustive mapping tests until the item-7 conformance-matrix extraction, plan #6284
 
 use async_trait::async_trait;
+use ironclaw_host_api::{FailureFate, FailureKind};
 use ironclaw_turns::{
     LoopDiagnosticRef, LoopFailureKind, ModelInvalidOutputDetailReason,
     run_profile::LoopSafeSummary,
@@ -99,38 +100,19 @@ impl<'de> serde::Deserialize<'de> for SanitizedStrategySummary {
     }
 }
 
-/// Sanitized capability error — class + safe summary string + opaque
-/// diagnostic ref. Strategies never see raw provider errors, host paths,
-/// or secrets; sanitization happens at the host port boundary before recovery
-/// strategy code runs.
+/// Sanitized capability error — the unified [`FailureKind`] plus a safe
+/// summary string and an opaque diagnostic ref. Strategies never see raw
+/// provider errors, host paths, or secrets; sanitization happens at the host
+/// port boundary before recovery strategy code runs.
+///
+/// The retired loop-private `CapabilityErrorClass` re-declared the
+/// recoverability domain beside the host's; the summary now carries the
+/// unified kind and decision sites ask [`FailureKind::fate`] instead.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CapabilityErrorSummary {
-    pub(crate) class: CapabilityErrorClass,
+    pub(crate) kind: FailureKind,
     pub(crate) safe_summary: SanitizedStrategySummary,
     pub(crate) diagnostic_ref: Option<LoopDiagnosticRef>,
-}
-
-/// Wire-stable capability error classification. Snake_case names appear in
-/// checkpoints and observability events.
-#[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum CapabilityErrorClass {
-    /// Retryable capability-side failure such as timeout or temporary outage.
-    Transient,
-    /// Non-retryable capability-side failure.
-    Permanent,
-    /// Host rejected malformed capability input.
-    InputInvalid,
-    /// Capability implementation ran but could not complete the requested
-    /// operation in a model-visible way.
-    OperationFailed,
-    /// Host policy denied the capability call.
-    PolicyDenied,
-    /// Capability provider or backing service is unavailable.
-    Unavailable,
-    /// Capability host failed internally without safe caller detail.
-    Internal,
 }
 
 /// Sanitized model error — class + safe summary + opaque diagnostic ref.
@@ -277,21 +259,28 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
         state: &LoopExecutionState,
         err: &CapabilityErrorSummary,
     ) -> RecoveryOutcome {
-        let kind = capability_error_to_failure_kind(err.class);
-        match err.class {
-            class if capability_error_is_model_visible_tool_failure(class) => {
-                RecoveryOutcome::ToolErrorResult {
-                    recovery: state.recovery_state.cleared_attempts(),
-                }
-            }
-            CapabilityErrorClass::Permanent => RecoveryOutcome::Abort {
+        // Wildcard-free by construction: the four `FailureFate` arms are
+        // exhaustive, and `FailureKind::fate` is itself wildcard-free over the
+        // full kind vocabulary — a new kind refuses to compile until its fate
+        // is chosen at the enum, not silently dispositioned here.
+        match err.kind.fate() {
+            // The model sees the failure as a tool error and routes around it.
+            // `Park` (auth-required) reaches this path only as a failure
+            // summary — the actual gate parks via `Resolution::Blocked` — so
+            // it surfaces model-visibly rather than ending the run.
+            FailureFate::ModelVisible | FailureFate::Park => RecoveryOutcome::ToolErrorResult {
                 recovery: state.recovery_state.cleared_attempts(),
-                failure_kind: kind,
             },
-            CapabilityErrorClass::Transient
-            | CapabilityErrorClass::Unavailable
-            | CapabilityErrorClass::Internal => {
-                let Some(attempt_class) = capability_retry_attempt_class(err.class) else {
+            // Cancellation is the only terminal kind; abort as before.
+            FailureFate::Terminal => RecoveryOutcome::Abort {
+                recovery: state.recovery_state.cleared_attempts(),
+                failure_kind: capability_error_to_failure_kind(err.kind),
+            },
+            FailureFate::Retry => {
+                let Some(attempt_class) = capability_retry_attempt_class(err.kind) else {
+                    // Unreachable: every Retry-fated kind has an attempt class
+                    // (pinned by test). Kept as a loud driver bug, not a
+                    // silent disposition.
                     return RecoveryOutcome::Abort {
                         recovery: state.recovery_state.cleared_attempts(),
                         failure_kind: LoopFailureKind::DriverBug,
@@ -309,10 +298,6 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
                     },
                 )
             }
-            _ => RecoveryOutcome::Abort {
-                recovery: state.recovery_state.cleared_attempts(),
-                failure_kind: LoopFailureKind::DriverBug,
-            },
         }
     }
 
@@ -413,15 +398,6 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
         3u32.saturating_add(self.max_attempts_per_class)
             .saturating_add(self.max_model_availability_attempts.saturating_mul(3))
     }
-}
-
-fn capability_error_is_model_visible_tool_failure(class: CapabilityErrorClass) -> bool {
-    matches!(
-        class,
-        CapabilityErrorClass::PolicyDenied
-            | CapabilityErrorClass::InputInvalid
-            | CapabilityErrorClass::OperationFailed
-    )
 }
 
 fn retry_or_abort(
@@ -553,15 +529,49 @@ fn retry_or_capability_tool_error(
     }
 }
 
-fn capability_retry_attempt_class(class: CapabilityErrorClass) -> Option<RecoveryAttemptClass> {
-    match class {
-        CapabilityErrorClass::Transient => Some(RecoveryAttemptClass::CapabilityTransient),
-        CapabilityErrorClass::Unavailable => Some(RecoveryAttemptClass::CapabilityUnavailable),
-        CapabilityErrorClass::Internal => Some(RecoveryAttemptClass::CapabilityInternal),
-        CapabilityErrorClass::Permanent
-        | CapabilityErrorClass::InputInvalid
-        | CapabilityErrorClass::OperationFailed
-        | CapabilityErrorClass::PolicyDenied => None,
+/// Checkpoint-serialized retry-budget bucket for a Retry-fated kind.
+/// Wildcard-free: a new kind must deliberately choose a bucket (or `None`)
+/// here. `None` for every non-Retry fate — those never consume retry budget.
+fn capability_retry_attempt_class(kind: FailureKind) -> Option<RecoveryAttemptClass> {
+    match kind {
+        FailureKind::Network | FailureKind::Transient => {
+            Some(RecoveryAttemptClass::CapabilityTransient)
+        }
+        FailureKind::Backend | FailureKind::Unavailable => {
+            Some(RecoveryAttemptClass::CapabilityUnavailable)
+        }
+        FailureKind::Internal => Some(RecoveryAttemptClass::CapabilityInternal),
+        FailureKind::MethodMissing
+        | FailureKind::UndeclaredCapability
+        | FailureKind::UnknownCapability
+        | FailureKind::UnknownProvider
+        | FailureKind::InputEncode
+        | FailureKind::OperationFailed
+        | FailureKind::OutputTooLarge
+        | FailureKind::Resource
+        | FailureKind::PolicyDenied
+        | FailureKind::NetworkDenied
+        | FailureKind::FilesystemDenied
+        | FailureKind::SecretDenied
+        | FailureKind::Authorization
+        | FailureKind::StaleSurface
+        | FailureKind::GateDeclined
+        | FailureKind::Guest
+        | FailureKind::ExitFailure
+        | FailureKind::OutputDecode
+        | FailureKind::InvalidResult
+        | FailureKind::Memory
+        | FailureKind::Manifest
+        | FailureKind::ExtensionRuntimeMismatch
+        | FailureKind::RuntimeMismatch
+        | FailureKind::MissingRuntimeBackend
+        | FailureKind::UnsupportedRunner
+        | FailureKind::MissingRuntime
+        | FailureKind::Client
+        | FailureKind::Executor
+        | FailureKind::Unclassified
+        | FailureKind::AuthRequired
+        | FailureKind::Cancelled => None,
     }
 }
 
@@ -580,17 +590,59 @@ fn model_retry_attempt_class(class: ModelErrorClass) -> Option<RecoveryAttemptCl
     }
 }
 
-/// Maps a sanitized capability error class to the loop-level failure kind that
-/// the executor surfaces in `LoopExit::Failed { reason_kind }`.
-fn capability_error_to_failure_kind(class: CapabilityErrorClass) -> LoopFailureKind {
-    match class {
-        CapabilityErrorClass::PolicyDenied => LoopFailureKind::PolicyDenied,
-        CapabilityErrorClass::InputInvalid => LoopFailureKind::ModelError,
-        CapabilityErrorClass::Transient
-        | CapabilityErrorClass::Permanent
-        | CapabilityErrorClass::OperationFailed
-        | CapabilityErrorClass::Unavailable
-        | CapabilityErrorClass::Internal => LoopFailureKind::CapabilityProtocolError,
+/// Maps a unified capability [`FailureKind`] to the loop-level failure kind
+/// the executor surfaces in `LoopExit::Failed { reason_kind }` for terminal
+/// reporting. The single surviving copy of what used to be three byte-identical
+/// mappings (executor mapping, recovery abort, exhausted-retry exit).
+///
+/// Wildcard-free: a new kind must be classified here deliberately. Preserves
+/// the retired class semantics — policy-shaped kinds report `PolicyDenied`,
+/// model-input-shaped kinds report `ModelError`, everything else reports the
+/// capability protocol failure.
+pub(crate) fn capability_error_to_failure_kind(kind: FailureKind) -> LoopFailureKind {
+    match kind {
+        // The model shaped the input wrongly — a model error, not a protocol one.
+        FailureKind::InputEncode => LoopFailureKind::ModelError,
+        // Policy-shaped denials (including the specific `*Denied` causes and
+        // the auth-shaped kinds, which the retired vocabulary coarsened to
+        // `Authorization`/`PolicyDenied`).
+        FailureKind::PolicyDenied
+        | FailureKind::NetworkDenied
+        | FailureKind::FilesystemDenied
+        | FailureKind::SecretDenied
+        | FailureKind::Authorization
+        | FailureKind::GateDeclined
+        | FailureKind::AuthRequired => LoopFailureKind::PolicyDenied,
+        // Every remaining kind maps to the protocol-error failure, enumerated
+        // explicitly so a new kind cannot silently inherit this terminal fate.
+        FailureKind::MethodMissing
+        | FailureKind::UndeclaredCapability
+        | FailureKind::UnknownCapability
+        | FailureKind::UnknownProvider
+        | FailureKind::OperationFailed
+        | FailureKind::OutputTooLarge
+        | FailureKind::Resource
+        | FailureKind::StaleSurface
+        | FailureKind::Network
+        | FailureKind::Transient
+        | FailureKind::Unavailable
+        | FailureKind::Backend
+        | FailureKind::Internal
+        | FailureKind::Guest
+        | FailureKind::ExitFailure
+        | FailureKind::OutputDecode
+        | FailureKind::InvalidResult
+        | FailureKind::Memory
+        | FailureKind::Manifest
+        | FailureKind::ExtensionRuntimeMismatch
+        | FailureKind::RuntimeMismatch
+        | FailureKind::MissingRuntimeBackend
+        | FailureKind::UnsupportedRunner
+        | FailureKind::MissingRuntime
+        | FailureKind::Client
+        | FailureKind::Executor
+        | FailureKind::Unclassified
+        | FailureKind::Cancelled => LoopFailureKind::CapabilityProtocolError,
     }
 }
 
@@ -740,25 +792,6 @@ mod tests {
     }
 
     #[test]
-    fn capability_error_class_round_trips_snake_case() {
-        for (variant, wire) in [
-            (CapabilityErrorClass::Transient, "transient"),
-            (CapabilityErrorClass::Permanent, "permanent"),
-            (CapabilityErrorClass::InputInvalid, "input_invalid"),
-            (CapabilityErrorClass::OperationFailed, "operation_failed"),
-            (CapabilityErrorClass::PolicyDenied, "policy_denied"),
-            (CapabilityErrorClass::Unavailable, "unavailable"),
-            (CapabilityErrorClass::Internal, "internal"),
-        ] {
-            let value = serde_json::to_value(variant).expect("serialize");
-            assert_eq!(value, serde_json::json!(wire));
-            let restored: CapabilityErrorClass =
-                serde_json::from_value(value).expect("deserialize");
-            assert_eq!(restored, variant);
-        }
-    }
-
-    #[test]
     fn model_error_class_round_trips_snake_case() {
         for (variant, wire) in [
             (ModelErrorClass::Transient, "transient"),
@@ -784,7 +817,7 @@ mod tests {
     #[test]
     fn capability_error_summary_round_trips() {
         let summary = CapabilityErrorSummary {
-            class: CapabilityErrorClass::Transient,
+            kind: FailureKind::Transient,
             safe_summary: SanitizedStrategySummary::new("upstream timed out").expect("valid"),
             diagnostic_ref: Some(LoopDiagnosticRef::new("diag:cap-1").expect("valid")),
         };
@@ -967,15 +1000,16 @@ mod tests {
         };
 
         use super::super::{
-            BackoffDelayMs, CapabilityErrorClass, CapabilityErrorSummary, DefaultRecoveryStrategy,
-            ModelErrorClass, ModelErrorSummary, RecoveryOutcome, RecoveryStrategy, RetryAlteration,
-            RetryScope, SanitizedStrategySummary, availability_backoff_for, backoff_for,
-            capability_error_to_failure_kind,
+            BackoffDelayMs, CapabilityErrorSummary, DefaultRecoveryStrategy, ModelErrorClass,
+            ModelErrorSummary, RecoveryOutcome, RecoveryStrategy, RetryAlteration, RetryScope,
+            SanitizedStrategySummary, availability_backoff_for, backoff_for,
+            capability_error_to_failure_kind, capability_retry_attempt_class,
         };
         use crate::state::{
             LoopExecutionState, ModelErrorRecoveryObservation, RecoveryAttemptClass,
             RecoveryStrategyState,
         };
+        use ironclaw_host_api::{FailureFate, FailureKind};
         use ironclaw_turns::LoopFailureKind;
 
         fn test_run_context() -> LoopRunContext {
@@ -1072,9 +1106,9 @@ mod tests {
             state
         }
 
-        fn cap_err(class: CapabilityErrorClass) -> CapabilityErrorSummary {
+        fn cap_err(kind: FailureKind) -> CapabilityErrorSummary {
             CapabilityErrorSummary {
-                class,
+                kind,
                 safe_summary: SanitizedStrategySummary::from_trusted_static("test"),
                 diagnostic_ref: None,
             }
@@ -1096,12 +1130,15 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn capability_permanent_aborts_immediately() {
+        async fn capability_cancelled_aborts_immediately() {
+            // Cancellation is the only terminal capability failure kind; it is
+            // normally intercepted upstream as a cancelled exit, but a summary
+            // that reaches the strategy must still abort rather than retry.
             let strategy = DefaultRecoveryStrategy::default();
             let state = state_with_no_attempts();
 
             let outcome = strategy
-                .on_capability_error(&state, &cap_err(CapabilityErrorClass::Permanent))
+                .on_capability_error(&state, &cap_err(FailureKind::Cancelled))
                 .await;
 
             assert!(matches!(
@@ -1114,12 +1151,12 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn capability_input_invalid_becomes_tool_error_result() {
+        async fn capability_input_encode_becomes_tool_error_result() {
             let strategy = DefaultRecoveryStrategy::default();
             let state = state_with_no_attempts();
 
             let outcome = strategy
-                .on_capability_error(&state, &cap_err(CapabilityErrorClass::InputInvalid))
+                .on_capability_error(&state, &cap_err(FailureKind::InputEncode))
                 .await;
 
             match outcome {
@@ -1129,7 +1166,7 @@ mod tests {
                 other => panic!("expected ToolErrorResult, got {other:?}"),
             }
             assert_eq!(
-                capability_error_to_failure_kind(CapabilityErrorClass::InputInvalid),
+                capability_error_to_failure_kind(FailureKind::InputEncode),
                 LoopFailureKind::ModelError
             );
         }
@@ -1140,7 +1177,7 @@ mod tests {
             let state = state_with_no_attempts();
 
             let outcome = strategy
-                .on_capability_error(&state, &cap_err(CapabilityErrorClass::OperationFailed))
+                .on_capability_error(&state, &cap_err(FailureKind::OperationFailed))
                 .await;
 
             match outcome {
@@ -1157,7 +1194,7 @@ mod tests {
             let state = state_with_no_attempts();
 
             let outcome = strategy
-                .on_capability_error(&state, &cap_err(CapabilityErrorClass::PolicyDenied))
+                .on_capability_error(&state, &cap_err(FailureKind::PolicyDenied))
                 .await;
 
             match outcome {
@@ -1169,6 +1206,21 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn capability_auth_required_becomes_tool_error_result() {
+            // Park-fated kinds reach this path only as failure summaries —
+            // the actual gate parks via Resolution::Blocked — so they surface
+            // model-visibly instead of retrying or ending the run.
+            let strategy = DefaultRecoveryStrategy::default();
+            let state = state_with_no_attempts();
+
+            let outcome = strategy
+                .on_capability_error(&state, &cap_err(FailureKind::AuthRequired))
+                .await;
+
+            assert!(matches!(outcome, RecoveryOutcome::ToolErrorResult { .. }));
+        }
+
+        #[tokio::test]
         async fn capability_transient_retries_then_becomes_tool_error_at_budget() {
             let strategy = DefaultRecoveryStrategy::default();
 
@@ -1176,7 +1228,7 @@ mod tests {
                 let state =
                     state_with_attempts_for(attempts, RecoveryAttemptClass::CapabilityTransient);
                 let outcome = strategy
-                    .on_capability_error(&state, &cap_err(CapabilityErrorClass::Transient))
+                    .on_capability_error(&state, &cap_err(FailureKind::Transient))
                     .await;
                 assert!(
                     matches!(
@@ -1192,7 +1244,7 @@ mod tests {
 
             let state = state_with_attempts_for(2, RecoveryAttemptClass::CapabilityTransient);
             let outcome = strategy
-                .on_capability_error(&state, &cap_err(CapabilityErrorClass::Transient))
+                .on_capability_error(&state, &cap_err(FailureKind::Transient))
                 .await;
             assert!(matches!(outcome, RecoveryOutcome::ToolErrorResult { .. }));
         }
@@ -1201,22 +1253,73 @@ mod tests {
         async fn capability_unavailable_and_internal_become_tool_errors_at_budget() {
             let strategy = DefaultRecoveryStrategy::default();
 
-            for (class, attempt_class) in [
+            for (kind, attempt_class) in [
                 (
-                    CapabilityErrorClass::Unavailable,
+                    FailureKind::Unavailable,
                     RecoveryAttemptClass::CapabilityUnavailable,
                 ),
                 (
-                    CapabilityErrorClass::Internal,
+                    FailureKind::Internal,
                     RecoveryAttemptClass::CapabilityInternal,
                 ),
             ] {
                 let state = state_with_attempts_for(2, attempt_class);
-                let outcome = strategy.on_capability_error(&state, &cap_err(class)).await;
+                let outcome = strategy.on_capability_error(&state, &cap_err(kind)).await;
                 assert!(
                     matches!(outcome, RecoveryOutcome::ToolErrorResult { .. }),
-                    "{class:?} at retry budget should become a tool error, got {outcome:?}"
+                    "{kind:?} at retry budget should become a tool error, got {outcome:?}"
                 );
+            }
+        }
+
+        /// Classification lock over the FULL unified kind vocabulary: every
+        /// `FailureKind` has a deliberate capability-recovery outcome derived
+        /// from its fate, the terminal set is exactly `{Cancelled}`, and every
+        /// Retry-fated kind owns a checkpoint attempt class. This complements
+        /// the compile-time guarantee (`fate()` is wildcard-free) by catching
+        /// a silent re-bucketing of an existing kind.
+        #[tokio::test]
+        async fn every_failure_kind_has_a_deliberate_capability_recovery_outcome() {
+            let strategy = DefaultRecoveryStrategy::default();
+            for &kind in FailureKind::ALL {
+                let state = state_with_no_attempts();
+                let outcome = strategy.on_capability_error(&state, &cap_err(kind)).await;
+                match kind.fate() {
+                    FailureFate::Retry => {
+                        assert!(
+                            matches!(outcome, RecoveryOutcome::Retry { .. }),
+                            "{kind:?} is Retry-fated but produced {outcome:?}"
+                        );
+                        assert!(
+                            capability_retry_attempt_class(kind).is_some(),
+                            "{kind:?} is Retry-fated but has no attempt class"
+                        );
+                    }
+                    FailureFate::ModelVisible | FailureFate::Park => {
+                        assert!(
+                            matches!(outcome, RecoveryOutcome::ToolErrorResult { .. }),
+                            "{kind:?} must surface model-visibly, got {outcome:?}"
+                        );
+                    }
+                    FailureFate::Terminal => {
+                        assert_eq!(
+                            kind,
+                            FailureKind::Cancelled,
+                            "the terminal set must be exactly {{Cancelled}}"
+                        );
+                        assert!(
+                            matches!(outcome, RecoveryOutcome::Abort { .. }),
+                            "{kind:?} is Terminal-fated but produced {outcome:?}"
+                        );
+                    }
+                }
+                if capability_retry_attempt_class(kind).is_some() {
+                    assert_eq!(
+                        kind.fate(),
+                        FailureFate::Retry,
+                        "{kind:?} has an attempt class but is not Retry-fated"
+                    );
+                }
             }
         }
 
@@ -1504,7 +1607,7 @@ mod tests {
                 .with_incremented_attempts_for(RecoveryAttemptClass::CapabilityUnavailable);
 
             let outcome = strategy
-                .on_capability_error(&state, &cap_err(CapabilityErrorClass::Transient))
+                .on_capability_error(&state, &cap_err(FailureKind::Transient))
                 .await;
 
             assert!(matches!(outcome, RecoveryOutcome::ToolErrorResult { .. }));
@@ -1516,7 +1619,7 @@ mod tests {
             let state = state_with_attempts_for(2, RecoveryAttemptClass::CapabilityTransient);
 
             let outcome = strategy
-                .on_capability_error(&state, &cap_err(CapabilityErrorClass::Unavailable))
+                .on_capability_error(&state, &cap_err(FailureKind::Unavailable))
                 .await;
 
             match outcome {
@@ -1540,7 +1643,7 @@ mod tests {
             let state = state_with_attempts_for(2, RecoveryAttemptClass::CapabilityTransient);
 
             let outcome = strategy
-                .on_capability_error(&state, &cap_err(CapabilityErrorClass::PolicyDenied))
+                .on_capability_error(&state, &cap_err(FailureKind::PolicyDenied))
                 .await;
             let RecoveryOutcome::ToolErrorResult { recovery } = outcome else {
                 panic!("expected policy denied tool error result");
