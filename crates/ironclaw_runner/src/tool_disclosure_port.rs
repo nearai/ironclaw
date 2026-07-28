@@ -93,7 +93,7 @@ struct ToolDisclosureCapabilityPort {
     promoted_by_scope: Arc<Mutex<HashMap<PromotionScopeKey, PromotedSet>>>,
     caps: DisclosureCaps,
     /// #5712/#5659-w6: the caller's effective allow-set, resolved once in
-    /// `ToolDisclosureCapabilityDecorator::decorate` — narrows disclosed
+    /// `ToolDisclosureCapabilityDecorator::decorate_with_allow_set` — narrows disclosed
     /// tool_search/tool_describe metadata *and* the tool_search bridge's own
     /// advertised description (the always-on catalog index).
     allow_set: Arc<CapabilityAllowSet>,
