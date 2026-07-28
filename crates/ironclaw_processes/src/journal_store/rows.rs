@@ -227,7 +227,7 @@ where
             &["gate_status", "scope_key", "created_at", "process_id"],
         )?,
         ordered_index(
-            "process_gate_owner_scope_v4",
+            "process_gate_owner_scope_v5",
             &["gate_status", "owner_scope_key", "created_at", "process_id"],
         )?,
     ] {
@@ -666,7 +666,7 @@ where
 {
     let (index, scope_key, scope_value) = if owner_scope {
         (
-            index_name("process_gate_owner_scope_v4")?,
+            index_name("process_gate_owner_scope_v5")?,
             "owner_scope_key",
             owner_scope_key(scope)?,
         )

@@ -69,13 +69,8 @@ pub(super) fn scope_owner_key(scope: &ResourceScope) -> Result<String, ProcessJo
 }
 
 pub(super) fn owner_scope_key(scope: &ResourceScope) -> Result<String, ProcessJournalStoreError> {
-    serde_json::to_string(&(
-        &scope.tenant_id,
-        &scope.user_id,
-        &scope.agent_id,
-        &scope.project_id,
-    ))
-    .map_err(|error| ProcessJournalStoreError::Serialization(error.to_string()))
+    serde_json::to_string(&(&scope.tenant_id, &scope.user_id))
+        .map_err(|error| ProcessJournalStoreError::Serialization(error.to_string()))
 }
 
 pub(super) fn lineage_scope_key(scope: &ResourceScope) -> Result<String, ProcessJournalStoreError> {

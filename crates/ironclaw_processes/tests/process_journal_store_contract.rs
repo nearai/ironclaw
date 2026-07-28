@@ -19,11 +19,12 @@ use ironclaw_processes::{
     ProcessCheckpointPort, ProcessCheckpointRef, ProcessConcurrencyClass, ProcessConcurrencyLimits,
     ProcessControlPort, ProcessDependencyPort, ProcessDependencyQuery, ProcessDependencyState,
     ProcessDependencySubmission, ProcessGateOwnerMatch, ProcessGateQuery, ProcessGateQuerySource,
-    ProcessInputPayload, ProcessInputPort, ProcessInputRef, ProcessInputSubmission,
-    ProcessJournalCommit, ProcessJournalCommitObserver, ProcessJournalCursor, ProcessJournalEntry,
-    ProcessJournalError, ProcessJournalKind, ProcessJournalObserverRegistry, ProcessJournalSource,
-    ProcessJournalStore, ProcessJournalStoreError, ProcessKind, ProcessLeaseRequest,
-    ProcessLeaseToken, ProcessLifecycleLookupBatchRequest, ProcessLifecycleLookupRequest,
+    ProcessGateScopeMatch, ProcessInputPayload, ProcessInputPort, ProcessInputRef,
+    ProcessInputSubmission, ProcessJournalCommit, ProcessJournalCommitObserver,
+    ProcessJournalCursor, ProcessJournalEntry, ProcessJournalError, ProcessJournalKind,
+    ProcessJournalObserverRegistry, ProcessJournalSource, ProcessJournalStore,
+    ProcessJournalStoreError, ProcessKind, ProcessLeaseRequest, ProcessLeaseToken,
+    ProcessLifecycleLookupBatchRequest, ProcessLifecycleLookupRequest,
     ProcessLifecycleLookupResult, ProcessLifecycleLookupSource, ProcessLifecycleStatus,
     ProcessOperationId, ProcessStateTransitionRequest, ProcessSubmissionPort, ProcessSuspension,
     ProcessSuspensionKind, ProcessTerminalEvidence, ProcessTransitionPort, ProcessTreePort,
@@ -1787,6 +1788,24 @@ async fn process_journal_store_owns_lifecycle_and_gate_projection() {
         gates[0].reply_target_ref.as_deref(),
         Some("reply:journal-contract")
     );
+
+    let mut owner_scope = scope.clone();
+    owner_scope.project_id = None;
+    owner_scope.thread_id = None;
+    let owner_gates = store
+        .query_process_gates(ProcessGateQuery {
+            scope: owner_scope,
+            gate_kind: ProcessSuspensionKind::Authorization,
+            scope_match: Some(ProcessGateScopeMatch::Owner),
+            owner_user_id: gates[0].owner_user_id.clone(),
+            gate_ref: None,
+            owner_match: Some(ProcessGateOwnerMatch::Explicit),
+            include_historical: false,
+        })
+        .await
+        .expect("query gates across the explicit owner's projects");
+    assert_eq!(owner_gates.len(), 1);
+    assert_eq!(owner_gates[0].process_id, process_id);
 
     let snapshot = store
         .get_process_snapshot(GetProcessSnapshotRequest {

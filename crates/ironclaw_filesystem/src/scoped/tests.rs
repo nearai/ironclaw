@@ -18,6 +18,8 @@ use crate::{
     FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind, IndexName, IndexPolicy,
     IndexSpec, MountDescriptor, Page, RecordKind, SeqNo, StorageClass, TxnCapability,
 };
+#[cfg(feature = "test-support")]
+use crate::{Fault, FaultInjecting, FaultKind};
 
 fn test_scope() -> ResourceScope {
     ResourceScope {
@@ -405,6 +407,43 @@ async fn ensure_index_succeeds_with_write() {
         )
         .await
         .unwrap();
+}
+
+#[tokio::test]
+#[cfg(feature = "test-support")]
+async fn ensure_index_retries_retryable_backend_contention() {
+    let backend = Arc::new(
+        FaultInjecting::new(InMemoryBackend::new()).with_fault(
+            Fault::on(FilesystemOperation::EnsureIndex)
+                .nth(1)
+                .returning(FaultKind::BackendBusy),
+        ),
+    );
+    let scoped = ScopedFilesystem::with_fixed_view(
+        Arc::clone(&backend),
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").unwrap(),
+            VirtualPath::new("/engine/scoped_test").unwrap(),
+            no_op(false, true, false, false),
+        )])
+        .unwrap(),
+    );
+    let spec = IndexSpec::new(
+        IndexName::new("by_scope").unwrap(),
+        vec![IndexKey::new("scope").unwrap()],
+        IndexKind::Exact,
+    );
+
+    scoped
+        .ensure_index(
+            &test_scope(),
+            &ScopedPath::new("/workspace").unwrap(),
+            &spec,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(backend.count(FilesystemOperation::EnsureIndex), 2);
 }
 
 #[tokio::test]

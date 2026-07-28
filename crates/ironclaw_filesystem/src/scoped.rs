@@ -1,4 +1,7 @@
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use ironclaw_host_api::{
     HostApiError, MountPermissions, MountView, ResourceScope, ScopedPath, VirtualPath,
@@ -340,9 +343,26 @@ where
         let started_at = live_latency_started_at();
         let virtual_path =
             self.resolve_with_permission(scope, prefix, FilesystemOperation::EnsureIndex)?;
-        let result = self.root.ensure_index(&virtual_path, spec).await;
-        trace_fs_latency("ensure_index", prefix, started_at, &result, None);
-        result
+        const MAX_ATTEMPTS: u32 = 4;
+        const INITIAL_BACKOFF: Duration = Duration::from_millis(10);
+
+        let mut attempt = 0;
+        loop {
+            let result = self.root.ensure_index(&virtual_path, spec).await;
+            if matches!(result, Err(FilesystemError::BackendBusy { .. }))
+                && attempt + 1 < MAX_ATTEMPTS
+            {
+                // Index declarations are idempotent by contract. A short,
+                // bounded retry absorbs SQLite schema-lock races and
+                // PostgreSQL serialization/deadlock retries without widening
+                // retry behavior for ordinary reads or writes.
+                tokio::time::sleep(INITIAL_BACKOFF * 2u32.pow(attempt)).await;
+                attempt += 1;
+                continue;
+            }
+            trace_fs_latency("ensure_index", prefix, started_at, &result, None);
+            return result;
+        }
     }
 
     /// Begin a multi-key transaction (capability-gated).

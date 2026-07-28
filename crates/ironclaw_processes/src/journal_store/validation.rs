@@ -70,8 +70,6 @@ pub(super) fn process_gate_snapshot_matches(
         crate::ProcessGateScopeMatch::Owner => {
             snapshot.scope.tenant_id == request.scope.tenant_id
                 && snapshot.scope.user_id == request.scope.user_id
-                && snapshot.scope.agent_id == request.scope.agent_id
-                && snapshot.scope.project_id == request.scope.project_id
         }
     };
     snapshot.status == ProcessLifecycleStatus::Suspended
