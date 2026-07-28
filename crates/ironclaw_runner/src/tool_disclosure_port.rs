@@ -61,10 +61,30 @@ pub(crate) struct ToolDisclosureCapabilityDecorator {
     /// `CapabilitySurfaceProfileFilter` observe the identical resolved value
     /// instead of two independent resolves that could diverge under a
     /// transient resolver failure. Keyed by `(turn_id, run_id)` and consumed
-    /// exactly once in `decorate`, or discarded if capability-port creation
-    /// fails, so concurrent turns sharing this long-lived decorator never
-    /// observe another turn's primed value.
+    /// exactly once in `decorate`, or released by the build reservation if
+    /// capability-port creation fails or is cancelled, so concurrent turns
+    /// sharing this long-lived decorator never observe another turn's value.
     primed_allow_sets: Mutex<HashMap<(TurnId, TurnRunId), Arc<CapabilityAllowSet>>>,
+}
+
+/// Owns one primed allow-set until the capability decorator consumes it.
+/// Dropping a host-build future before capability-port construction completes
+/// releases the reservation so a retry of the same run is not rejected as a
+/// duplicate prime.
+pub(crate) struct PrimedAllowSetReservation {
+    decorator: Arc<ToolDisclosureCapabilityDecorator>,
+    key: (TurnId, TurnRunId),
+}
+
+impl Drop for PrimedAllowSetReservation {
+    fn drop(&mut self) {
+        if let Err(error) = self.decorator.discard_primed_allow_set(&self.key) {
+            tracing::error!(
+                error = %error.safe_summary,
+                "failed to release tool disclosure allow-set reservation"
+            );
+        }
+    }
 }
 
 impl ToolDisclosureCapabilityDecorator {
@@ -86,10 +106,10 @@ impl ToolDisclosureCapabilityDecorator {
     /// resolve, before it asks the capability factory to build (and
     /// decorate) the port for `run_context`.
     pub(crate) fn prime_allow_set(
-        &self,
+        self: &Arc<Self>,
         run_context: &LoopRunContext,
         allow_set: Arc<CapabilityAllowSet>,
-    ) -> Result<(), AgentLoopHostError> {
+    ) -> Result<PrimedAllowSetReservation, AgentLoopHostError> {
         let key = Self::primed_allow_set_key(run_context);
         let mut primed = self.primed_allow_sets.lock().map_err(|e| {
             invalid_invocation(format!(
@@ -102,14 +122,17 @@ impl ToolDisclosureCapabilityDecorator {
             ));
         }
         primed.insert(key, allow_set);
-        Ok(())
+        Ok(PrimedAllowSetReservation {
+            decorator: Arc::clone(self),
+            key,
+        })
     }
 
-    /// Discard a prime that the decorator chain could not consume because the
-    /// capability factory failed before running its decorators.
-    pub(crate) fn discard_primed_allow_set(
+    /// Release a prime that the decorator chain did not consume before its
+    /// host-build reservation was dropped.
+    fn discard_primed_allow_set(
         &self,
-        run_context: &LoopRunContext,
+        key: &(TurnId, TurnRunId),
     ) -> Result<(), AgentLoopHostError> {
         self.primed_allow_sets
             .lock()
@@ -118,7 +141,7 @@ impl ToolDisclosureCapabilityDecorator {
                     "tool disclosure primed allow-set lock is poisoned: {e}"
                 ))
             })?
-            .remove(&Self::primed_allow_set_key(run_context));
+            .remove(key);
         Ok(())
     }
 }
@@ -1188,8 +1211,12 @@ impl ToolDisclosureCapabilityPort {
         let Some(state) = guard.as_ref() else {
             return Ok(None);
         };
-        // Forgiving resolution: resolve any tool the catalog knows by name,
-        // regardless of whether it has been advertised or discovered this turn.
+        // Forgiving resolution: resolve any allowlisted tool the catalog knows
+        // by name, regardless of whether it has been advertised or discovered
+        // this turn. A catalog-known but non-allowlisted target must follow the
+        // same recoverable bridge path as a nonexistent target; otherwise this
+        // host-exempt bridge becomes an existence oracle before the outer
+        // capability-surface filter can deny the resolved capability id.
         // A *direct* call to an undisclosed tool already resolves via
         // `direct_deferred_target`, so the `tool_call` bridge must not be
         // stricter than the direct path. Requiring prior disclosure here was a
@@ -1203,6 +1230,9 @@ impl ToolDisclosureCapabilityPort {
         let Some(definition) = self.catalog_target(state, name) else {
             return Ok(None);
         };
+        if !self.allow_set.permits(&definition.capability_id) {
+            return Ok(None);
+        }
         let target_call = self.target_call(tool_call, &definition, arguments);
         Ok(Some(ResolvedToolTarget {
             definition,
@@ -1616,26 +1646,25 @@ mod tests {
 
     #[tokio::test]
     async fn priming_rejects_duplicates_and_discard_removes_only_failed_build_entry() {
-        let decorator = ToolDisclosureCapabilityDecorator::new(Arc::new(TestWriter));
+        let decorator = Arc::new(ToolDisclosureCapabilityDecorator::new(Arc::new(TestWriter)));
         let failed_context = run_context(TurnId::new()).await;
         let concurrent_context = run_context(TurnId::new()).await;
 
-        decorator
+        let failed_reservation = decorator
             .prime_allow_set(&failed_context, Arc::new(CapabilityAllowSet::All))
             .expect("prime failed build");
         let duplicate_error = decorator
             .prime_allow_set(&failed_context, Arc::new(CapabilityAllowSet::All))
-            .expect_err("duplicate prime must not overwrite unconsumed state");
+            .err()
+            .expect("duplicate prime must not overwrite unconsumed state");
         assert_eq!(
             duplicate_error.kind,
             AgentLoopHostErrorKind::InvalidInvocation
         );
-        decorator
+        let _concurrent_reservation = decorator
             .prime_allow_set(&concurrent_context, Arc::new(CapabilityAllowSet::All))
             .expect("prime concurrent build");
-        decorator
-            .discard_primed_allow_set(&failed_context)
-            .expect("discard failed build prime");
+        drop(failed_reservation);
 
         let primed = decorator
             .primed_allow_sets

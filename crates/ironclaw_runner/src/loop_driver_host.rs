@@ -2423,37 +2423,23 @@ where
                         crate::turn_runner::HostFactoryError::new(error.to_string())
                     })?,
             );
-            if let Some(decorator) = self.tool_disclosure_decorator.as_ref() {
-                decorator
-                    .prime_allow_set(&request.loop_run_context, Arc::clone(&allow_set))
-                    .map_err(|error| {
-                        crate::turn_runner::HostFactoryError::new(error.safe_summary)
-                    })?;
-            }
-            let capabilities = match profiled
+            let _disclosure_prime_reservation =
+                if let Some(decorator) = self.tool_disclosure_decorator.as_ref() {
+                    Some(
+                        decorator
+                            .prime_allow_set(&request.loop_run_context, Arc::clone(&allow_set))
+                            .map_err(|error| {
+                                crate::turn_runner::HostFactoryError::new(error.safe_summary)
+                            })?,
+                    )
+                } else {
+                    None
+                };
+            let capabilities = profiled
                 .capability_factory
                 .create_capability_port(&request.loop_run_context)
                 .await
-            {
-                Ok(capabilities) => capabilities,
-                Err(error) => {
-                    let factory_error =
-                        crate::turn_runner::HostFactoryError::new(error.safe_summary);
-                    // The disclosure decorator consumes the prime inside the
-                    // decorating factory's success path. If the inner factory
-                    // fails first, discard the otherwise long-lived map entry.
-                    if let Some(decorator) = self.tool_disclosure_decorator.as_ref()
-                        && let Err(error) =
-                            decorator.discard_primed_allow_set(&request.loop_run_context)
-                    {
-                        tracing::error!(
-                            error = %error.safe_summary,
-                            "failed to discard tool disclosure allow-set after capability factory failure"
-                        );
-                    }
-                    return Err(factory_error);
-                }
-            };
+                .map_err(|error| crate::turn_runner::HostFactoryError::new(error.safe_summary))?;
             self.build_text_only_host_with_profiled_capabilities(request, capabilities, allow_set)
                 .await
         } else {

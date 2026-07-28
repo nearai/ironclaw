@@ -692,8 +692,11 @@ pub(crate) fn tool_search_rank(
         .entries
         .iter()
         .filter_map(|entry| {
+            if !permits(&entry.definition.capability_id) {
+                return None;
+            }
             let score = score_tool_entry(entry, &query_terms);
-            if score > 0 && permits(&entry.definition.capability_id) {
+            if score > 0 {
                 Some((entry.definition.name.to_string(), score))
             } else {
                 None
@@ -1731,6 +1734,20 @@ mod tests {
         assert_eq!(
             tool_search_rank(&catalog, "read", 2, |_| false),
             Vec::<String>::new()
+        );
+
+        let permit_checks = std::cell::Cell::new(0);
+        assert_eq!(
+            tool_search_rank(&catalog, "read", 2, |_| {
+                permit_checks.set(permit_checks.get() + 1);
+                false
+            }),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            permit_checks.get(),
+            definitions.len(),
+            "allow-set filtering must run before query scoring, including for non-matching entries"
         );
     }
 

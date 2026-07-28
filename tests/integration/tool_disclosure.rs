@@ -388,6 +388,67 @@ async fn narrowed_allow_set_denies_tool_describe_of_non_allowlisted_id() {
     );
 }
 
+/// A host-exempt `tool_call` bridge must not expose whether a requested target
+/// exists outside the caller's effective allow-set. Both a catalog-known denied
+/// target and a genuinely nonexistent target stay on the same recoverable bridge
+/// path and persist byte-equivalent result envelopes modulo their run-scoped ids.
+#[tokio::test]
+async fn narrowed_allow_set_denies_tool_call_of_non_allowlisted_id_without_existence_oracle() {
+    const NONEXISTENT_TARGET: &str = "totally_nonexistent_tool";
+    let harness = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_bridged()
+        .with_github_issue_tools()
+        .with_narrowed_capability_allow_set_for_bridged_test(["github.get_repo"])
+        .script([
+            RebornScriptedReply::tool_call(
+                TOOL_CALL_NAME,
+                serde_json::json!({"name": "github.list_issues", "arguments": {}}),
+            ),
+            RebornScriptedReply::tool_call(
+                TOOL_CALL_NAME,
+                serde_json::json!({"name": NONEXISTENT_TARGET, "arguments": {}}),
+            ),
+            RebornScriptedReply::text("done"),
+        ])
+        .build()
+        .await
+        .expect("narrowed bridged-disclosure harness builds");
+
+    harness
+        .submit_turn("call list_issues, then a made-up tool")
+        .await
+        .expect("turn completes");
+
+    harness
+        .assert_tool_error_summary_contains("tool_call target is not a known tool")
+        .await
+        .expect("a non-allowlisted tool_call target must read as unknown");
+
+    let envelopes = harness
+        .persisted_tool_result_envelopes()
+        .await
+        .expect("both tool_call attempts persist a ToolResultReference");
+    assert_eq!(
+        envelopes.len(),
+        2,
+        "expected exactly one ToolResultReference per scripted tool_call, got {envelopes:?}"
+    );
+    let (non_allowlisted, nonexistent) = (&envelopes[0], &envelopes[1]);
+    assert_ne!(
+        non_allowlisted.result_ref, nonexistent.result_ref,
+        "sanity: distinct scripted calls must carry distinct run-scoped result refs"
+    );
+    assert_eq!(non_allowlisted.version, nonexistent.version);
+    assert_eq!(
+        non_allowlisted.safe_summary, nonexistent.safe_summary,
+        "non-allowlisted and nonexistent tool_call targets must have identical summaries"
+    );
+    assert_eq!(
+        non_allowlisted.model_observation, nonexistent.model_observation,
+        "non-allowlisted and nonexistent tool_call targets must have identical model observations"
+    );
+}
+
 /// #5712 control: an unnarrowed (All) caller keeps the full search catalog —
 /// proves the result filter discriminates on the allow-set, not the query.
 #[tokio::test]
