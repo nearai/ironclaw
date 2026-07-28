@@ -8,7 +8,7 @@ publish = false
 layer = "kernel"
 
 [features]
-test-support = []
+test-support = ["ironclaw_processes/test-support"]
 
 [dependencies]
 async-trait = "0.1"
@@ -53,6 +53,11 @@ ironclaw_wasm = { path = "../ironclaw_wasm" }
 libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
 jsonschema = { version = "0.46", default-features = false }
 libc = "0.2"
+# Internal per-tenant CA for the sandbox egress proxy (W5, design doc
+# 2026-07-26-sandbox-credential-firewall-design.md §4). Generates the root
+# key/cert in-memory and issues short-lived leaf certs; ships unwired until
+# W6 (proxy TLS termination) exists to call it.
+rcgen = "0.14"
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
@@ -60,6 +65,9 @@ serde_json = "1"
 sha2 = "0.11"
 static_assertions = "1"
 thiserror = "2"
+# rcgen's `CertificateParams::not_before`/`not_after` are `time::OffsetDateTime`
+# — needed directly to compute the CA's leaf-cert validity window.
+time = { version = "0.3", default-features = false }
 tokio = { version = "1", features = ["io-util", "macros", "process", "rt", "sync", "time"] }
 tokio-util = { version = "0.7" }
 tracing = "0.1"
@@ -92,6 +100,9 @@ zeroize = "1"
 wat = "1.245.1"
 wit-component = "0.245.1"
 wit-parser = "0.245.1"
+# Test-only: parses/verifies the sandbox CA's issued certs in sandbox_process::ca
+# tests (chain-of-trust, SAN, validity window) without hand-rolling ASN.1.
+x509-parser = { version = "0.18", features = ["verify"] }
 
 [lints]
 workspace = true

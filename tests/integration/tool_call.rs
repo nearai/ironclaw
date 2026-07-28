@@ -868,3 +868,49 @@ where
         std::panic::resume_unwind(panic);
     }
 }
+
+/// #6284 item 1, at the seam that matters: a **caller-shaped capability port
+/// error ends the tool call, not the run**.
+///
+/// Before the capability-stage fix, `capability_host_error` mapped every
+/// non-`Cancelled` `AgentLoopHostError` from the port to a terminal
+/// `HostUnavailable{Capability}` — so an expired credential, a scope
+/// mismatch, or a malformed invocation killed a run the model could have
+/// recovered from. The executor now splits the port-error kinds exhaustively:
+/// caller-shaped ones (`InvalidInvocation` here) surface as a model-visible tool
+/// error and the loop continues; genuine host faults stay terminal.
+///
+/// Asserted at the durable seam — the persisted `ToolResultReference` envelope
+/// and the finalized reply — not on a completed status, so it proves the model
+/// actually saw the failure *and* kept working. Crate-tier coverage of the same
+/// split lives in `ironclaw_agent_loop`'s executor tests; this pins it through
+/// the production composition.
+#[tokio::test]
+async fn caller_shaped_capability_port_error_is_a_tool_error_not_a_dead_run() {
+    let h = RebornIntegrationHarness::test_default()
+        .with_recoverable_port_error_for_test()
+        .script([
+            RebornScriptedReply::tool_call("test_echo", json!({"message": "hi"})),
+            RebornScriptedReply::text("the tool was refused, so here is what I can say instead"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    h.submit_turn("use the echo tool")
+        .await
+        .expect("turn completes");
+
+    // The model was told, in the durable envelope the next turn reads from.
+    h.assert_tool_error(
+        reborn_support::assertions::ToolErrorClass::Failed,
+        "input_encode",
+    )
+    .await
+    .expect("a caller-shaped port error reaches the model as a recoverable tool error");
+
+    // …and the run kept going rather than dying on the port error.
+    h.assert_reply_contains("here is what I can say instead")
+        .await
+        .expect("the run continues past a recoverable port error");
+}

@@ -15,11 +15,10 @@ use ironclaw_approvals::{
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+use ironclaw_host_api::FailureKind;
 use ironclaw_host_api::dispatch_test_support::TestDispatcher;
 use ironclaw_host_api::*;
-use ironclaw_host_runtime::{
-    CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime, RuntimeFailureKind,
-};
+use ironclaw_host_runtime::{CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime};
 use ironclaw_processes::{
     ProcessError, ProcessManager, ProcessRecord, ProcessStart, ProcessStatus,
 };
@@ -388,7 +387,7 @@ async fn default_runtime_does_not_replay_tenant_grantee_persistent_policy() {
     match outcome {
         ironclaw_host_runtime::RuntimeCapabilityOutcome::Failed(failure) => {
             assert_eq!(failure.capability_id, capability_id());
-            assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
+            assert_eq!(failure.kind, FailureKind::Authorization);
         }
         other => panic!("expected authorization failure, got {:?}", other),
     }
@@ -514,7 +513,7 @@ async fn default_runtime_falls_back_when_persistent_policy_lookup_fails() {
     match outcome {
         ironclaw_host_runtime::RuntimeCapabilityOutcome::Failed(failure) => {
             assert_eq!(failure.capability_id, capability_id());
-            assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
+            assert_eq!(failure.kind, FailureKind::Authorization);
         }
         other => panic!("expected authorization failure, got {:?}", other),
     }
@@ -640,7 +639,7 @@ async fn default_runtime_skips_expired_persistent_policy() {
     match outcome {
         ironclaw_host_runtime::RuntimeCapabilityOutcome::Failed(failure) => {
             assert_eq!(failure.capability_id, capability_id());
-            assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
+            assert_eq!(failure.kind, FailureKind::Authorization);
         }
         other => panic!("expected authorization failure, got {:?}", other),
     }

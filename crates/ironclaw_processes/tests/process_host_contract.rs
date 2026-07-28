@@ -71,7 +71,7 @@ async fn process_host_kill_transitions_running_process() {
 
 #[tokio::test]
 async fn process_host_await_process_returns_terminal_exit_after_background_completion() {
-    let process_services = ProcessServices::in_memory();
+    let process_services = in_memory_process_services();
     let manager =
         BackgroundProcessManager::new(process_services.clone(), Arc::new(DelayedSuccessExecutor));
     let host = process_services
@@ -237,7 +237,7 @@ async fn process_host_subscribe_emits_initial_and_terminal_records() {
 
 #[tokio::test]
 async fn process_host_subscribe_tracks_background_completion() {
-    let process_services = ProcessServices::in_memory();
+    let process_services = in_memory_process_services();
     let manager =
         BackgroundProcessManager::new(process_services.clone(), Arc::new(DelayedSuccessExecutor));
     let host = process_services
@@ -321,7 +321,7 @@ async fn process_host_subscribe_fails_closed_for_unknown_or_other_scope_process(
 }
 
 fn process_services_and_runtime() -> (ProcessServices, Arc<dyn ProcessRuntimePort>) {
-    let process_services = ProcessServices::in_memory();
+    let process_services = in_memory_process_services();
     let runtime = process_services.process_runtime();
     (process_services, runtime)
 }
@@ -412,6 +412,10 @@ fn processes_fs_over<F: RootFilesystem>(backend: Arc<F>) -> Arc<ScopedFilesystem
 
 fn processes_test_fs() -> Arc<ScopedFilesystem<InMemoryBackend>> {
     processes_fs_over(Arc::new(InMemoryBackend::new()))
+}
+
+fn in_memory_process_services() -> ProcessServices {
+    ProcessServices::filesystem(processes_test_fs())
 }
 
 fn in_mem_process_store() -> ProcessJournalStore<InMemoryBackend> {

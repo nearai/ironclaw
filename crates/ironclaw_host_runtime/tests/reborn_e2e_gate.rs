@@ -21,11 +21,11 @@ use ironclaw_events::{
 };
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem};
+use ironclaw_host_api::FailureKind;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationServices, CapabilitySurfacePolicy, CapabilitySurfaceVersion, HostRuntime,
-    HostRuntimeServices, RuntimeCapabilityOutcome, RuntimeFailureKind, RuntimeStatusRequest,
-    SurfaceKind,
+    HostRuntimeServices, RuntimeCapabilityOutcome, RuntimeStatusRequest, SurfaceKind,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -250,7 +250,7 @@ async fn reborn_e2e_gate_blocks_for_approval_resumes_once_and_rejects_replay() {
         ))
         .await
         .unwrap();
-    assert_failed_outcome(replay, RuntimeFailureKind::Authorization);
+    assert_failed_outcome(replay, FailureKind::Authorization);
     assert_eq!(
         fixture.events.events().len(),
         3,
@@ -293,7 +293,7 @@ async fn reborn_e2e_gate_fails_unsupported_obligations_before_runtime_events_or_
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::Backend);
+    assert_failed_outcome(outcome, FailureKind::Backend);
     assert!(events.events().is_empty());
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(run.status, ProcessInvocationStatus::Failed);
@@ -411,7 +411,7 @@ async fn reborn_e2e_gate_sanitizes_runtime_backend_failure_before_public_surface
 
     match outcome {
         RuntimeCapabilityOutcome::Failed(failure) => {
-            assert_eq!(failure.kind, RuntimeFailureKind::Backend);
+            assert_eq!(failure.kind, FailureKind::Backend);
             let rendered = format!("{failure:?}");
             for forbidden in [
                 input_sentinel,
@@ -510,7 +510,7 @@ async fn reborn_e2e_gate_blocks_oversized_runtime_output_before_publication() {
 
     match outcome {
         RuntimeCapabilityOutcome::Failed(failure) => {
-            assert_eq!(failure.kind, RuntimeFailureKind::OutputTooLarge);
+            assert_eq!(failure.kind, FailureKind::OutputTooLarge);
             let rendered = format!("{failure:?}");
             assert!(!rendered.contains(forbidden));
         }
@@ -1004,7 +1004,7 @@ fn assert_event_kinds(events: &InMemoryEventSink, expected: &[RuntimeEventKind])
     assert_eq!(actual, expected);
 }
 
-fn assert_failed_outcome(outcome: RuntimeCapabilityOutcome, expected: RuntimeFailureKind) {
+fn assert_failed_outcome(outcome: RuntimeCapabilityOutcome, expected: FailureKind) {
     match outcome {
         RuntimeCapabilityOutcome::Failed(failure) => assert_eq!(failure.kind, expected),
         other => panic!("expected failed outcome {expected:?}, got {other:?}"),

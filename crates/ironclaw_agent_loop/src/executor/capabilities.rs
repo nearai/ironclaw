@@ -12,19 +12,18 @@ use ironclaw_turns::{
     run_profile::{
         AuthResumeApprovalIdentity, CapabilityActivityId, CapabilityApprovalResume,
         CapabilityAuthResume, CapabilityCallCandidate, CapabilityFailure, CapabilityFailureDetail,
-        CapabilityFailureKind, CapabilityInputIssue, CapabilityProgress, CapabilityResultMessage,
-        CapabilityResumeToken, ContentDigest, LoopDriverNoteKind, LoopProcessRef,
-        LoopProgressEvent, LoopRequestBatch, MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
-        ModelVisibleToolObservation, ObservationTrust, ToolObservationDetail,
-        ToolObservationStatus, VisibleCapabilitySurface,
+        CapabilityInputIssue, CapabilityProgress, CapabilityResultMessage, CapabilityResumeToken,
+        ContentDigest, LoopDriverNoteKind, LoopProcessRef, LoopProgressEvent, LoopRequestBatch,
+        MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleToolObservation,
+        ObservationTrust, ToolObservationDetail, ToolObservationStatus, VisibleCapabilitySurface,
     },
 };
 
 use crate::{
     state::{CapabilityOutputObservation, CheckpointKind, LoopExecutionState},
     strategies::{
-        BatchPolicy, CapabilityBatchTurnSummary, CapabilityErrorClass, CapabilityErrorSummary,
-        GateKind, RecoveryOutcome, RetryAlteration, SanitizedStrategySummary, TurnSummary,
+        BatchPolicy, CapabilityBatchTurnSummary, CapabilityErrorSummary, GateKind, RecoveryOutcome,
+        RetryAlteration, SanitizedStrategySummary, TurnSummary, capability_error_to_failure_kind,
     },
 };
 
@@ -34,13 +33,12 @@ use super::{
     GateInput, GateStage, MAX_CAPABILITY_RETRIES, StageContext, TurnCompletedStep,
     append_capability_error_ref, append_capability_result_ref, append_capability_safe_summary_ref,
     attach_failure_explanation, batch_policy_kind, cancelled_exit, capability_batch_counts,
-    capability_call_signature, capability_error_class, capability_error_failure_category,
-    capability_failure_kind, capability_host_error,
+    capability_call_signature, capability_error_failure_category, capability_host_error,
     capability_invocation_from_auth_resume_candidate, capability_invocation_from_candidate,
-    capability_is_visible, capability_summary, clear_matching_pending_auth_resume,
-    clear_matching_pending_external_tool_resume, failed_exit, honor_retry_alteration,
-    model_visible_capability_failure_observation, push_call_signature_once, push_completed_result,
-    sanitized_strategy_summary_or_fallback,
+    capability_is_visible, capability_port_error_is_terminal, capability_summary,
+    clear_matching_pending_auth_resume, clear_matching_pending_external_tool_resume, failed_exit,
+    honor_retry_alteration, model_visible_capability_failure_observation, push_call_signature_once,
+    push_completed_result, sanitized_strategy_summary_or_fallback,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -121,15 +119,21 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                 .recent_failure_kinds
                 .push(LoopFailureKind::PolicyDenied);
             let summary = CapabilityErrorSummary {
-                class: CapabilityErrorClass::PolicyDenied,
+                kind: FailureKind::PolicyDenied,
                 safe_summary: SanitizedStrategySummary::from_trusted_static(
                     "capability is not visible in the filtered surface",
                 ),
                 diagnostic_ref: None,
             };
-            match self
-                .handle_capability_error(ctx, state, call, summary, None, &mut capability_batch)
-                .await?
+            match Box::pin(self.handle_capability_error(
+                ctx,
+                state,
+                call,
+                summary,
+                None,
+                &mut capability_batch,
+            ))
+            .await?
             {
                 BatchStep::Continue(next) => state = *next,
                 BatchStep::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
@@ -290,21 +294,60 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                     state
                         .recent_failure_kinds
                         .push(LoopFailureKind::PolicyDenied);
+                    // The honest kind for a surface raced by a refresh; its
+                    // fate stays ModelVisible (re-issue against the fresh
+                    // surface) and its wire failure category stays
+                    // `capability_policy_denied`, matching the retired mint.
                     let summary = CapabilityErrorSummary {
-                        class: CapabilityErrorClass::PolicyDenied,
+                        kind: FailureKind::StaleSurface,
                         safe_summary: stale_summary.clone(),
                         diagnostic_ref: None,
                     };
-                    match self
-                        .handle_capability_error(
-                            ctx,
-                            state,
-                            call,
-                            summary,
-                            None,
-                            &mut capability_batch,
-                        )
-                        .await?
+                    match Box::pin(self.handle_capability_error(
+                        ctx,
+                        state,
+                        call,
+                        summary,
+                        None,
+                        &mut capability_batch,
+                    ))
+                    .await?
+                    {
+                        BatchStep::Continue(next) => state = *next,
+                        BatchStep::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
+                    }
+                }
+                return self
+                    .completed_turn(ctx, state, result_refs_start, capability_batch)
+                    .await;
+            }
+            // A caller-shaped port error (unauthorized, scope mismatch,
+            // invalid invocation, policy denied, ...) must not end the run:
+            // surface it to the model as a tool error for every call in the
+            // batch — mirroring the StaleSurface arm above — and let the
+            // recovery strategy route it by `FailureKind::fate`. Only genuine
+            // host faults keep the terminal `capability_host_error` path
+            // below.
+            Err(error) if !capability_port_error_is_terminal(error.kind) => {
+                let summary = capability_port_error_summary(&error);
+                let observation = capability_port_error_observation(&error);
+                for call in visible_calls {
+                    push_call_signature_once(&mut state, &mut signatures, &call)?;
+                    state
+                        .recent_failure_kinds
+                        .push(capability_error_to_failure_kind(summary.kind));
+                    // Boxed: this second inlined `handle_capability_error`
+                    // call site would otherwise grow the (already enormous)
+                    // executor future past the test-thread stack.
+                    match Box::pin(self.handle_capability_error(
+                        ctx,
+                        state,
+                        call,
+                        summary.clone(),
+                        Some(observation.clone()),
+                        &mut capability_batch,
+                    ))
+                    .await?
                     {
                         BatchStep::Continue(next) => state = *next,
                         BatchStep::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
@@ -478,8 +521,42 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
     }
 }
 
+/// Strategy-visible summary for a capability-stage port `Err` whose kind is
+/// NOT a terminal host fault (`capability_port_error_is_terminal` == false).
+/// The kind projection is owned by `AgentLoopHostErrorKind::failure_kind`;
+/// the summary text fail-softs through `capability_failed_summary` (a summary
+/// that trips the strict validator degrades to a canned fallback instead of
+/// borking the run).
+fn capability_port_error_summary(
+    error: &ironclaw_turns::run_profile::AgentLoopHostError,
+) -> CapabilityErrorSummary {
+    let kind = error.kind.failure_kind();
+    CapabilityErrorSummary {
+        kind,
+        safe_summary: capability_failed_summary(kind, error.safe_summary.clone()),
+        diagnostic_ref: error.diagnostic_ref.clone(),
+    }
+}
+
+/// Model-visible observation for a recoverable capability-stage port `Err`.
+/// Carries the port error's secret-scrubbed `detail` (when present) so the
+/// model can retry or explain instead of guessing from the kind alone.
+fn capability_port_error_observation(
+    error: &ironclaw_turns::run_profile::AgentLoopHostError,
+) -> ModelVisibleToolObservation {
+    let failure = CapabilityFailure {
+        error_kind: error.kind.failure_kind(),
+        safe_summary: error.safe_summary.clone(),
+        detail: error
+            .detail
+            .clone()
+            .map(|text| CapabilityFailureDetail::Diagnostic { text }),
+    };
+    model_visible_capability_failure_observation(&failure)
+}
+
 fn capability_failed_summary(
-    error_kind: &CapabilityFailureKind,
+    error_kind: FailureKind,
     safe_summary: String,
 ) -> SanitizedStrategySummary {
     prefixed_capability_summary(
@@ -630,30 +707,30 @@ impl CapabilityStage {
                         diagnostic.as_ref(),
                         &outcome,
                     );
-                    if failure.error_kind == CapabilityFailureKind::Cancelled {
+                    if failure.error_kind == FailureKind::Cancelled {
                         return self.cancelled_after_checkpoint(ctx, state).await;
                     }
                     state
                         .recent_failure_kinds
-                        .push(capability_failure_kind(&failure.error_kind));
+                        .push(capability_error_to_failure_kind(failure.error_kind));
                     let model_observation =
                         Some(model_visible_capability_failure_observation(&failure));
                     let summary = CapabilityErrorSummary {
-                        class: capability_error_class(&failure.error_kind),
+                        kind: failure.error_kind,
                         safe_summary: capability_failed_summary(
-                            &failure.error_kind,
+                            failure.error_kind,
                             failure.safe_summary,
                         ),
                         diagnostic_ref: None,
                     };
-                    self.handle_capability_error(
+                    Box::pin(self.handle_capability_error(
                         ctx,
                         state,
                         call,
                         summary,
                         model_observation,
                         capability_batch,
-                    )
+                    ))
                     .await
                 }
             },
@@ -670,12 +747,19 @@ impl CapabilityStage {
                     .map(|summary| summary.as_str().to_string())
                     .unwrap_or_default();
                 let summary = CapabilityErrorSummary {
-                    class: CapabilityErrorClass::PolicyDenied,
+                    kind: FailureKind::PolicyDenied,
                     safe_summary: capability_denied_summary(reason, safe_summary),
                     diagnostic_ref: None,
                 };
-                self.handle_capability_error(ctx, state, call, summary, None, capability_batch)
-                    .await
+                Box::pin(self.handle_capability_error(
+                    ctx,
+                    state,
+                    call,
+                    summary,
+                    None,
+                    capability_batch,
+                ))
+                .await
             }
             Resolution::Blocked(Blocked::Approval(waypoint)) => {
                 let gate_ref = loop_gate_ref_from_origin(waypoint.origin.as_ref())?;
@@ -899,7 +983,7 @@ impl CapabilityStage {
                     let checked = CheckpointStage
                         .write(ctx, state, CheckpointKind::Final)
                         .await?;
-                    let mut safe_failure = capability_error_failure_category(summary.class)?;
+                    let mut safe_failure = capability_error_failure_category(summary.kind)?;
                     if let Some(detail) = terminal_detail {
                         safe_failure = safe_failure.with_detail(detail);
                     }
@@ -983,13 +1067,22 @@ impl CapabilityStage {
                                 == ironclaw_turns::run_profile::AgentLoopHostErrorKind::StaleSurface =>
                         {
                             summary = CapabilityErrorSummary {
-                                class: CapabilityErrorClass::PolicyDenied,
+                                kind: FailureKind::StaleSurface,
                                 safe_summary: SanitizedStrategySummary::from_trusted_static(
                                     "capability surface changed before execution; re-issue the call",
                                 ),
                                 diagnostic_ref: None,
                             };
                             model_observation = None;
+                            continue;
+                        }
+                        // Caller-shaped port error on the retry dispatch:
+                        // re-enter the recovery loop with the new summary so
+                        // the strategy routes it by fate (mirrors the
+                        // StaleSurface arm above) instead of ending the run.
+                        Err(error) if !capability_port_error_is_terminal(error.kind) => {
+                            summary = capability_port_error_summary(&error);
+                            model_observation = Some(capability_port_error_observation(&error));
                             continue;
                         }
                         Err(error) => return Err(capability_host_error(error)),
@@ -1012,15 +1105,15 @@ impl CapabilityStage {
                                 ),
                                 _ => unreachable!("guarded to RecoverableFailure"),
                             };
-                            if failure.error_kind == CapabilityFailureKind::Cancelled {
+                            if failure.error_kind == FailureKind::Cancelled {
                                 return self.cancelled_after_checkpoint(ctx, state).await;
                             }
                             model_observation =
                                 Some(model_visible_capability_failure_observation(&failure));
                             summary = CapabilityErrorSummary {
-                                class: capability_error_class(&failure.error_kind),
+                                kind: failure.error_kind,
                                 safe_summary: capability_failed_summary(
-                                    &failure.error_kind,
+                                    failure.error_kind,
                                     failure.safe_summary,
                                 ),
                                 diagnostic_ref: None,
@@ -1055,13 +1148,13 @@ impl CapabilityStage {
         // recent-failure-kind record and (when the kind is explainable) the
         // explanation message ref are produced consistently with the other
         // failed-exit sites instead of being pushed inline here.
-        let failure_kind = exhausted_capability_failure_kind(summary.class);
+        let failure_kind = capability_error_to_failure_kind(summary.kind);
         let explanation_message_ref =
             attach_failure_explanation(ctx, &mut state, failure_kind).await?;
         let checked = CheckpointStage
             .write(ctx, state, CheckpointKind::Final)
             .await?;
-        let mut safe_failure = capability_error_failure_category(summary.class)?;
+        let mut safe_failure = capability_error_failure_category(summary.kind)?;
         if let Some(detail) = terminal_detail {
             safe_failure = safe_failure.with_detail(detail);
         }
@@ -1116,7 +1209,7 @@ impl CapabilityStage {
         ctx: StageContext<'_>,
         state: LoopExecutionState,
     ) -> Result<BatchStep, AgentLoopExecutorError> {
-        // Called when a capability invocation surfaced `CapabilityFailureKind::Cancelled`
+        // Called when a capability invocation surfaced `FailureKind::Cancelled`
         // and no `LoopCancellationSignal` is in scope, so the cooperative-boundary
         // reason cannot be derived from a signal. `cancelled_exit` hardcodes
         // `LoopCancelledReasonKind::HostCancellation` which currently coarsens
@@ -1184,7 +1277,7 @@ impl CapabilityStage {
                     LoopProgressEvent::CapabilityActivityFailed {
                         activity_id: denied_activity_id,
                         capability_id: call.capability_id.clone(),
-                        reason_kind: CapabilityFailureKind::GateDeclined,
+                        reason_kind: FailureKind::GateDeclined,
                         // Gate denial carries no host-authored message; the
                         // model-visible text is produced separately below.
                         safe_summary: None,
@@ -1192,7 +1285,7 @@ impl CapabilityStage {
                 )
                 .await;
             let failure = ironclaw_turns::run_profile::CapabilityFailure {
-                error_kind: CapabilityFailureKind::GateDeclined,
+                error_kind: FailureKind::GateDeclined,
                 // Intentionally empty: model-visible text comes from
                 // `model_visible_capability_failure_observation` and the
                 // planner summary from `from_trusted_static` below.
@@ -1201,23 +1294,22 @@ impl CapabilityStage {
             };
             state
                 .recent_failure_kinds
-                .push(capability_failure_kind(&failure.error_kind));
+                .push(capability_error_to_failure_kind(failure.error_kind));
             let model_observation = Some(model_visible_capability_failure_observation(&failure));
             let summary = CapabilityErrorSummary {
-                class: capability_error_class(&failure.error_kind),
+                kind: failure.error_kind,
                 safe_summary: SanitizedStrategySummary::from_trusted_static(planner_summary),
                 diagnostic_ref: None,
             };
-            match self
-                .handle_capability_error(
-                    ctx,
-                    state,
-                    call,
-                    summary,
-                    model_observation,
-                    capability_batch,
-                )
-                .await?
+            match Box::pin(self.handle_capability_error(
+                ctx,
+                state,
+                call,
+                summary,
+                model_observation,
+                capability_batch,
+            ))
+            .await?
             {
                 BatchStep::Continue(next) => state = *next,
                 BatchStep::Exit(exit) => {
@@ -1243,18 +1335,6 @@ fn clear_matching_pending_approval_resume(
         .is_some_and(|resume| resume.capability_id == call.capability_id)
     {
         state.pending_approval_resume = None;
-    }
-}
-
-fn exhausted_capability_failure_kind(class: CapabilityErrorClass) -> LoopFailureKind {
-    match class {
-        CapabilityErrorClass::PolicyDenied => LoopFailureKind::PolicyDenied,
-        CapabilityErrorClass::InputInvalid => LoopFailureKind::ModelError,
-        CapabilityErrorClass::Transient
-        | CapabilityErrorClass::Permanent
-        | CapabilityErrorClass::OperationFailed
-        | CapabilityErrorClass::Unavailable
-        | CapabilityErrorClass::Internal => LoopFailureKind::CapabilityProtocolError,
     }
 }
 
@@ -1475,20 +1555,11 @@ fn capability_failure_from_recoverable(
     outcome: &Outcome,
 ) -> CapabilityFailure {
     CapabilityFailure {
-        error_kind: capability_failure_kind_from(error_kind),
+        // The verdict already carries the unified kind; no tag round-trip.
+        error_kind: *error_kind,
         safe_summary: outcome.summary.as_str().to_string(),
         detail: diagnostic.map(capability_failure_detail_from),
     }
-}
-
-fn capability_failure_kind_from(kind: &FailureKind) -> CapabilityFailureKind {
-    use serde::Deserialize;
-    use serde::de::{IntoDeserializer, value::StrDeserializer};
-    // `FailureKind` and `CapabilityFailureKind` share the same stable tag set
-    // plus an open `Unknown`; deserialize routes any tag (incl. unknowns) losslessly.
-    let deserializer: StrDeserializer<'_, serde::de::value::Error> =
-        kind.as_str().into_deserializer();
-    CapabilityFailureKind::deserialize(deserializer).unwrap_or(CapabilityFailureKind::Internal)
 }
 
 fn capability_failure_detail_from(diagnostic: &ModelFailureDiagnostic) -> CapabilityFailureDetail {
@@ -1847,7 +1918,7 @@ mod tests {
         // banned marker — this used to return a terminal PlannerContract error
         // before the model ever saw the tool failure.
         let summary = capability_failed_summary(
-            &CapabilityFailureKind::Authorization,
+            FailureKind::Authorization,
             "the provider token has expired".to_string(),
         );
 

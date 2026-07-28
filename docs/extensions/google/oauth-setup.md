@@ -25,13 +25,26 @@ Go to [**Google Auth Platform → Clients**](https://console.cloud.google.com/au
 1. Click **Create client**
 2. Set **Application type** to **Web application**
 3. Give it a name (e.g. `ironclaw`)
-4. Under **Authorized redirect URIs**, click **+ Add URI** and enter:
+4. Under **Authorized redirect URIs**, click **+ Add URI** and enter your instance's
+   callback, replacing `your-host`:
 
    ```
-   http://127.0.0.1:9876/callback
+   https://your-host/api/reborn/product-auth/oauth/google/callback
    ```
 
 5. Click **Create** and copy the **Client ID** and **Client Secret** shown
+
+<Warning>
+Google matches redirect URIs **exactly** — scheme, host, port, and path. A mismatch fails
+with `redirect_uri_mismatch` before the consent screen appears.
+</Warning>
+
+<Note>
+IronClaw's product-auth flow receives the callback on a gateway HTTP route, so this must be
+your instance's URL and the instance must be reachable there when you complete the flow.
+Google itself also supports loopback redirect URIs, but IronClaw has no listener for one —
+use the hosted callback above.
+</Note>
 
 </Step>
 
@@ -47,37 +60,79 @@ Only test users can complete the OAuth flow while the app is in Testing mode. If
 
 </Step>
 
-<Step title="Open the SSH Tunnel">
-To complete the OAuth flow, we need to allow Google to reach the IronClaw server. Since port 9876 is only accessible from within the server, you need to open an SSH tunnel that forwards your local port 9876 to the server.
+<Step title="Give IronClaw the Credentials">
 
-Open a new SSH session using port forwarding:
+Store the client id, redirect URI, and client secret with `ironclaw config`. Run these on
+the machine IronClaw runs on — over SSH if it's a remote or hosted instance.
 
 ```bash
-# ssh -p <SSH-PORT> -L 9876:127.0.0.1:9876 <user>@<ironclaw-server-ip>
-ssh -p 15222 -L 9876:127.0.0.1:9876 liquid-zebra@agent4.near.ai
+ironclaw config set google.client_id <your-client-id>
+ironclaw config set google.redirect_uri https://<your-instance-host>/api/reborn/product-auth/oauth/google/callback
+ironclaw config set google.client_secret
 ```
 
-Keep this terminal session open while completing the OAuth flow.
+<Note>
+`google.client_secret` takes no value on the command line. It always prompts, with input
+hidden, so the secret never lands in your shell history or the process list. The client id
+and redirect URI are not secrets and are passed normally.
+</Note>
 
-<Info>
-The port forwarding will remain active as long as the SSH session remains open, and automatically closes when you exit the session.
-</Info>
+Confirm what was stored:
 
-<Tip>
-Remember to whitelist the port 9876 in your server's firewall settings to allow the tunnel to work properly
-</Tip>
+```bash
+ironclaw config get google.client_id
+ironclaw config get google.redirect_uri
+```
 
+The same values can be supplied as environment variables when a service unit or container
+injects them from a secret manager:
+
+```
+IRONCLAW_REBORN_GOOGLE_CLIENT_ID
+IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET
+IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI
+```
+
+<Warning>
+Do not `export` the client secret by hand in an interactive shell. It persists in shell
+history and is visible to every child process. Use `ironclaw config set
+google.client_secret`, which prompts with input hidden, or inject the variable from your
+platform's secret manager.
+</Warning>
 
 </Step>
 
-<Step title="Set Environment Variables">
+<Step title="Restart So the Change Takes Effect">
 
-Once connected via SSH, export your OAuth credentials as environment variables:
+`ironclaw config set` never restarts anything — it writes the value and prints:
 
-```bash
-export GOOGLE_OAUTH_CLIENT_ID=<your-client-id>
-export GOOGLE_OAUTH_CLIENT_SECRET=<your-client-secret>
 ```
+  to apply: ironclaw service restart
+```
+
+A running instance keeps serving the old configuration until you restart it. Google OAuth
+will keep failing until you do.
+
+<Tabs>
+  <Tab title="NEAR AI hosted instance">
+    `ironclaw service` commands do **not** work on a NEAR AI hosted instance — there is no
+    user service manager for them to talk to, so `service restart` fails rather than
+    restarting anything.
+
+    SSH in only to run the `ironclaw config` commands, then restart the agent from the
+    [Agent Dashboard](https://agent.near.ai/). That is the only way to restart a hosted
+    instance.
+  </Tab>
+
+  <Tab title="Self-hosted">
+    ```bash
+    ironclaw service restart
+    ```
+
+    If you're running `ironclaw serve` in the foreground instead, stop it and start it
+    again.
+  </Tab>
+</Tabs>
 
 </Step>
 

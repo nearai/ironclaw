@@ -13,12 +13,13 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_filesystem::InMemoryBackend;
+use ironclaw_host_api::FailureKind;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityError, FirstPartyCapabilityHandler,
     FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
     HostRuntime, HostRuntimeServices, ProductionWiringComponent, ProductionWiringConfig,
-    ProductionWiringIssueKind, RuntimeCapabilityOutcome, RuntimeFailureKind,
+    ProductionWiringIssueKind, RuntimeCapabilityOutcome,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -177,7 +178,7 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
             RuntimeHttpEgressError::Credential {
                 reason: "missing staged credential".to_string(),
             },
-            RuntimeFailureKind::Backend,
+            FailureKind::Client,
         ),
         (
             RuntimeHttpEgressError::Request {
@@ -185,7 +186,7 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
                 request_bytes: 11,
                 response_bytes: 0,
             },
-            RuntimeFailureKind::InvalidInput,
+            FailureKind::InputEncode,
         ),
         (
             RuntimeHttpEgressError::Network {
@@ -193,7 +194,7 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
                 request_bytes: 11,
                 response_bytes: 0,
             },
-            RuntimeFailureKind::Network,
+            FailureKind::NetworkDenied,
         ),
         (
             RuntimeHttpEgressError::Network {
@@ -201,7 +202,7 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
                 request_bytes: 11,
                 response_bytes: 0,
             },
-            RuntimeFailureKind::PolicyDenied,
+            FailureKind::PolicyDenied,
         ),
         (
             RuntimeHttpEgressError::Response {
@@ -209,7 +210,7 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
                 request_bytes: 11,
                 response_bytes: 22,
             },
-            RuntimeFailureKind::OperationFailed,
+            FailureKind::OperationFailed,
         ),
         (
             RuntimeHttpEgressError::Response {
@@ -217,7 +218,7 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
                 request_bytes: 11,
                 response_bytes: 4097,
             },
-            RuntimeFailureKind::OutputTooLarge,
+            FailureKind::OutputTooLarge,
         ),
     ];
 
@@ -266,7 +267,7 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
     let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
         panic!("expected missing egress to fail, got {outcome:?}");
     };
-    assert_eq!(failure.kind, RuntimeFailureKind::Network);
+    assert_eq!(failure.kind, FailureKind::NetworkDenied);
 
     let handle = SecretHandle::new("api-token").unwrap();
     let secret_store = Arc::new(SecretStore::ephemeral());
@@ -283,7 +284,7 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
     let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
         panic!("expected missing URL to fail, got {outcome:?}");
     };
-    assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+    assert_eq!(failure.kind, FailureKind::InputEncode);
 }
 
 #[tokio::test]
@@ -306,7 +307,7 @@ async fn first_party_handler_rejects_non_string_url_input() {
         let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
             panic!("expected non-string URL to fail, got {outcome:?}");
         };
-        assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+        assert_eq!(failure.kind, FailureKind::InputEncode);
     }
 }
 
@@ -431,7 +432,7 @@ async fn first_party_handler_error_reconciles_reported_usage_after_side_effect()
     let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
         panic!("expected failed first-party invocation, got {outcome:?}");
     };
-    assert_eq!(failure.kind, RuntimeFailureKind::Backend);
+    assert_eq!(failure.kind, FailureKind::Backend);
     assert_eq!(governor.usage_for(&account).network_egress_bytes, 77);
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
 }
@@ -478,7 +479,7 @@ async fn first_party_handler_panic_fails_closed_and_releases_reservation() {
     let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
         panic!("expected handler panic to fail closed, got {outcome:?}");
     };
-    assert_eq!(failure.kind, RuntimeFailureKind::Backend);
+    assert_eq!(failure.kind, FailureKind::Backend);
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(run.status, ProcessInvocationStatus::Failed);
@@ -527,11 +528,11 @@ async fn first_party_missing_handler_fails_closed_without_side_effect_handler() 
     };
     assert_eq!(failure.capability_id, capability_id());
     // A capability the model named that has no registered handler is a
-    // model-fixable request error (UndeclaredCapability -> InvalidInput ->
-    // model-visible tool error), not an infra Backend fault — it can never
-    // resolve by retrying, so it must surface to the model immediately. See the
-    // From<DispatchFailureKind> mapping in production.rs.
-    assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+    // model-fixable request error (UndeclaredCapability, model-visible), not
+    // an infra Backend fault — it can never resolve by retrying, so it must
+    // surface to the model immediately. The precise mechanism name survives
+    // 1:1 via host_api's From<DispatchFailureKind> injection.
+    assert_eq!(failure.kind, FailureKind::UndeclaredCapability);
     assert_eq!(
         failure.message.as_deref(),
         Some("the tool used an undeclared capability")

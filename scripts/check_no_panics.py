@@ -237,7 +237,12 @@ def is_test_only_path(path: str) -> bool:
     """
     posix_path = pathlib.PurePosixPath(path)
     parts = posix_path.parts
-    if "tests" in parts or posix_path.name == "tests.rs":
+    if (
+        "tests" in parts
+        or posix_path.name == "tests.rs"
+        or posix_path.name.endswith("_test.rs")
+        or posix_path.name.endswith("_tests.rs")
+    ):
         return True
     # Exempt only the canonical feature-gated module root: `.../src/test_support.rs`
     # or `.../src/test_support/**`. The component immediately after `src` must be
@@ -414,6 +419,8 @@ class CheckNoPanicsTests(unittest.TestCase):
         self.assertTrue(is_test_only_path("crates/foo/src/tests/helpers.rs"))
         self.assertTrue(is_test_only_path("crates/foo/src/tests.rs"))
         self.assertTrue(is_test_only_path("crates/foo/src/nested/tests.rs"))
+        self.assertTrue(is_test_only_path("crates/foo/src/auth_test.rs"))
+        self.assertTrue(is_test_only_path("crates/foo/src/auth_tests.rs"))
         self.assertFalse(is_test_only_path("src/channels/web/mod.rs"))
         self.assertFalse(is_test_only_path("src/channels/web/test_helpers.rs"))
         self.assertFalse(is_test_only_path("crates/foo/src/lib.rs"))

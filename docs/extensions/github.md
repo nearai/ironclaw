@@ -17,7 +17,7 @@ The GitHub extension allows your agent to interact with GitHub repositories, iss
 To install the GitHub extension, run:
 
 ```bash
-ironclaw registry install github
+ironclaw extension install github
 ```
 
 </Step>
@@ -27,30 +27,26 @@ ironclaw registry install github
 Create a GitHub OAuth app at [github.com/settings/apps](https://github.com/settings/apps)
 and set its callback URL to the IronClaw OAuth callback URL your gateway uses.
 
-Then expose the app credentials to IronClaw:
-
-```bash
-export GITHUB_OAUTH_CLIENT_ID=...
-export GITHUB_OAUTH_CLIENT_SECRET=...
-```
+Then supply the app credentials through the GitHub extension's setup flow under
+**Extensions** in the [web interface](/using/webui). They are stored in the encrypted
+secret store.
 
 Now authenticate:
 
 ```bash
-ironclaw tool auth github
+ironclaw extension activate github
 ```
 
-IronClaw will open the browser OAuth flow and store the resulting `github_token`.
+Complete the GitHub OAuth flow from **Extensions** in the [web interface](/using/webui). The resulting token is stored encrypted.
 
 </Step>
 
 <Step title="Configure a PAT (Fallback)">
 
-If you do not want to run a GitHub OAuth app, you can still use a Personal Access Token:
-
-```bash
-ironclaw secret set github_token YOUR_TOKEN
-```
+If you do not want to run a GitHub OAuth app, you can still use a Personal Access Token.
+Supply it in the GitHub extension's setup flow under **Extensions** in the
+[web interface](/using/webui) instead of the OAuth sign-in. It is stored in the encrypted
+secret store.
 
 <Warning>
 Be sure to create a fine-grained personal access token with only the necessary permissions for your use case. When in doubt, choose the least permissive options, you can always create new tokens with different permissions later on
@@ -124,11 +120,11 @@ On the agent's GitHub account, go to [Settings -> Developer settings -> Personal
 Now that you have either OAuth app credentials or a PAT, authenticate the GitHub extension:
 
 ```bash
-ironclaw tool auth github
+ironclaw extension activate github
 ```
 
-If `GITHUB_OAUTH_CLIENT_ID` and `GITHUB_OAUTH_CLIENT_SECRET` are set, IronClaw
-will use browser OAuth. Otherwise it falls back to prompting for a PAT.
+If you configured OAuth app credentials in the extension's setup flow, IronClaw uses
+browser OAuth. Otherwise it falls back to a Personal Access Token.
 
 </Step>
 

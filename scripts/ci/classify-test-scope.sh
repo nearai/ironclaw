@@ -45,7 +45,7 @@ is_shared_test_path() {
     crates/ironclaw_capabilities/*|crates/ironclaw_secrets/*|crates/ironclaw_network/*|crates/ironclaw_runtime_policy/*)
       return 0
       ;;
-    crates/ironclaw_authorization/*|crates/ironclaw_run_state/*|crates/ironclaw_approvals/*|crates/ironclaw_resources/*)
+    crates/ironclaw_authorization/*|crates/ironclaw_approvals/*|crates/ironclaw_resources/*)
       return 0
       ;;
     crates/ironclaw_auth/*|crates/ironclaw_trust/*|crates/ironclaw_turns/*|crates/ironclaw_agent_loop/*|crates/ironclaw_threads/*)

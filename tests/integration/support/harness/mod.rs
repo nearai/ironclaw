@@ -427,6 +427,34 @@ impl HostRuntimeCapabilityHarness {
         label: &str,
         provider_scopes: &[&str],
     ) -> HarnessResult<()> {
+        self.seed_credential_account_with_token(
+            scope,
+            provider,
+            label,
+            provider_scopes,
+            &format!("itest-{provider}-token"),
+        )
+        .await
+    }
+
+    /// [`Self::seed_credential_account_with_material`] with the token material
+    /// chosen by the caller.
+    ///
+    /// Needed to tell one credential from another **on the wire**. A test that
+    /// seeds a credential, has the provider reject it, and then re-authenticates
+    /// cannot prove the resumed dispatch used the NEW credential if both seeds
+    /// mint the same string — the assertion would pass just as happily on a
+    /// stale-credential reuse bug, which is the whole failure it exists to
+    /// catch. Distinct material makes `assert_network_egress_header_contains`
+    /// discriminate.
+    pub(crate) async fn seed_credential_account_with_token(
+        &self,
+        scope: &ResourceScope,
+        provider: &str,
+        label: &str,
+        provider_scopes: &[&str],
+        token: &str,
+    ) -> HarnessResult<()> {
         let product_auth = self
             .product_auth
             .as_ref()
@@ -447,7 +475,7 @@ impl HostRuntimeCapabilityHarness {
             .submit_manual_token(ironclaw_auth::RebornManualTokenSubmitRequest::new(
                 scope.clone(),
                 challenge.interaction_id,
-                secrecy::SecretString::from(format!("itest-{provider}-token")),
+                secrecy::SecretString::from(token.to_string()),
             ))
             .await
             .map_err(|error| format!("manual token submit failed: {error:?}"))?;

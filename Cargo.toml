@@ -277,6 +277,10 @@ name = "reborn_integration_model_recovery"
 path = "tests/integration/model_recovery.rs"
 
 [[test]]
+name = "reborn_integration_terminal_warning"
+path = "tests/integration/terminal_warning.rs"
+
+[[test]]
 name = "reborn_integration_channel_connection_projection"
 path = "tests/integration/channel_connection_projection.rs"
 

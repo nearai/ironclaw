@@ -143,6 +143,16 @@ pub(crate) fn model_error_observation_control_message(
     })
 }
 
+pub(crate) fn terminal_warning_control_message(
+    observation: &crate::state::TerminalWarningObservation,
+) -> Result<LoopInlineMessage, String> {
+    observation.validate()?;
+    Ok(LoopInlineMessage {
+        role: LoopInlineMessageRole::System,
+        safe_body: LoopInlineMessageBody::new(observation.model_instruction())?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use ironclaw_host_api::{TenantId, ThreadId};

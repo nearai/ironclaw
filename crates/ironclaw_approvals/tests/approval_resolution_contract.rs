@@ -9,6 +9,26 @@ use ironclaw_filesystem::{
 };
 use ironclaw_host_api::*;
 
+fn in_memory_backed_approval_request_store() -> ApprovalRequestStore<InMemoryBackend> {
+    let mounts = MountView::new(vec![
+        MountGrant::new(
+            MountAlias::new("/approvals").unwrap(),
+            VirtualPath::new("/engine/approvals").unwrap(),
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/gate-records").unwrap(),
+            VirtualPath::new("/engine/gate-records").unwrap(),
+            MountPermissions::read_write_list_delete(),
+        ),
+    ])
+    .unwrap();
+    ApprovalRequestStore::new(Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::new(InMemoryBackend::new()),
+        mounts,
+    )))
+}
+
 /// The production `ApprovalRequestStore` over a [`FaultInjecting`]
 /// backend armed to fail the approval-status write. On the `/approvals` mount,
 /// `save_pending` is the 1st `WriteFile` and `approve` is the 2nd, so failing the
@@ -62,7 +82,7 @@ fn lease_store_failing_issue_write() -> CapabilityLeaseStore<FaultInjecting<InMe
 
 #[tokio::test]
 async fn approving_pending_dispatch_request_issues_scoped_capability_lease() {
-    let approvals = ironclaw_approvals::in_memory_backed_approval_request_store();
+    let approvals = in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
     let resolver = ApprovalResolver::new(&approvals, &leases);
     let invocation_id = InvocationId::new();
@@ -122,7 +142,7 @@ async fn approving_pending_dispatch_request_issues_scoped_capability_lease() {
 
 #[tokio::test]
 async fn approving_pending_dispatch_request_preserves_reviewed_grant_constraints() {
-    let approvals = ironclaw_approvals::in_memory_backed_approval_request_store();
+    let approvals = in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
     let resolver = ApprovalResolver::new(&approvals, &leases);
     let invocation_id = InvocationId::new();
@@ -200,7 +220,7 @@ async fn approving_pending_request_marks_request_approved_even_when_lease_issue_
     // request must stay `Approved` (not roll back to `Pending`) so that
     // the system can surface the error to the caller and re-attempt
     // lease issuance later.
-    let approvals = ironclaw_approvals::in_memory_backed_approval_request_store();
+    let approvals = in_memory_backed_approval_request_store();
     let leases = lease_store_failing_issue_write();
     let resolver = ApprovalResolver::new(&approvals, &leases);
     let invocation_id = InvocationId::new();
@@ -356,7 +376,7 @@ async fn approving_pending_request_issues_no_lease_when_status_was_resolved_conc
 
 #[tokio::test]
 async fn lease_from_approved_request_is_resume_only_and_not_plain_authority() {
-    let approvals = ironclaw_approvals::in_memory_backed_approval_request_store();
+    let approvals = in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
     let resolver = ApprovalResolver::new(&approvals, &leases);
     let context = execution_context(CapabilitySet::default());
@@ -402,7 +422,7 @@ async fn lease_from_approved_request_is_resume_only_and_not_plain_authority() {
 
 #[tokio::test]
 async fn approving_dispatch_without_fingerprint_fails_without_lease_or_status_change() {
-    let approvals = ironclaw_approvals::in_memory_backed_approval_request_store();
+    let approvals = in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
     let resolver = ApprovalResolver::new(&approvals, &leases);
     let invocation_id = InvocationId::new();
@@ -453,7 +473,7 @@ async fn approving_dispatch_without_fingerprint_fails_without_lease_or_status_ch
 
 #[tokio::test]
 async fn approving_pending_dispatch_request_emits_redacted_approval_audit_event() {
-    let approvals = ironclaw_approvals::in_memory_backed_approval_request_store();
+    let approvals = in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
     let audit = InMemoryAuditSink::new();
     let resolver = ApprovalResolver::new(&approvals, &leases).with_audit_sink(&audit);
@@ -510,7 +530,7 @@ async fn approving_pending_dispatch_request_emits_redacted_approval_audit_event(
 
 #[tokio::test]
 async fn denying_pending_dispatch_request_emits_redacted_approval_audit_event() {
-    let approvals = ironclaw_approvals::in_memory_backed_approval_request_store();
+    let approvals = in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
     let audit = InMemoryAuditSink::new();
     let resolver = ApprovalResolver::new(&approvals, &leases).with_audit_sink(&audit);
@@ -557,7 +577,7 @@ async fn denying_pending_dispatch_request_emits_redacted_approval_audit_event() 
 
 #[tokio::test]
 async fn approval_audit_event_sink_failure_does_not_change_resolution_outcome() {
-    let approvals = ironclaw_approvals::in_memory_backed_approval_request_store();
+    let approvals = in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
     let audit = FailingAuditSink;
     let resolver = ApprovalResolver::new(&approvals, &leases).with_audit_sink(&audit);
@@ -604,7 +624,7 @@ async fn approval_audit_event_sink_failure_does_not_change_resolution_outcome() 
 
 #[tokio::test]
 async fn denying_pending_request_does_not_issue_lease() {
-    let approvals = ironclaw_approvals::in_memory_backed_approval_request_store();
+    let approvals = in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
     let resolver = ApprovalResolver::new(&approvals, &leases);
     let invocation_id = InvocationId::new();
@@ -633,7 +653,7 @@ async fn denying_pending_request_does_not_issue_lease() {
 
 #[tokio::test]
 async fn denying_non_pending_request_fails_without_changing_status() {
-    let approvals = ironclaw_approvals::in_memory_backed_approval_request_store();
+    let approvals = in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
     let resolver = ApprovalResolver::new(&approvals, &leases);
     let invocation_id = InvocationId::new();
@@ -676,7 +696,7 @@ async fn denying_non_pending_request_fails_without_changing_status() {
 
 #[tokio::test]
 async fn approving_request_from_other_tenant_fails_closed() {
-    let approvals = ironclaw_approvals::in_memory_backed_approval_request_store();
+    let approvals = in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
     let resolver = ApprovalResolver::new(&approvals, &leases);
     let invocation_id = InvocationId::new();
@@ -722,8 +742,7 @@ async fn concurrent_approve_dispatch_on_same_request_is_first_write_wins() {
     // and the lease store ends up with exactly one lease — never two —
     // because under F2 ordering the approval write happens before lease
     // issuance, so a loser approval never reaches the lease store.
-    let approvals =
-        std::sync::Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
+    let approvals = std::sync::Arc::new(in_memory_backed_approval_request_store());
     let leases = std::sync::Arc::new(in_memory_backed_capability_lease_store());
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");

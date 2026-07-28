@@ -18,11 +18,11 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, ExecutionContext, ExtensionId,
-    GrantConstraints, MountView, NetworkPolicy, Principal, ResourceEstimate, RunId, TrustClass,
-    UserId,
+    FailureKind, GrantConstraints, MountView, NetworkPolicy, Principal, ResourceEstimate, RunId,
+    TrustClass, UserId,
 };
 use ironclaw_host_runtime::{
-    CapabilitySurfacePolicy, RuntimeCapabilityOutcome, RuntimeFailureKind, SHELL_CAPABILITY_ID,
+    CapabilitySurfacePolicy, RuntimeCapabilityOutcome, SHELL_CAPABILITY_ID,
     SPAWN_SUBAGENT_CAPABILITY_ID, SurfaceKind, VisibleCapabilityRequest,
 };
 use ironclaw_processes::ProcessTransitionPort;
@@ -314,7 +314,7 @@ fn production_builtin_trust_decision() -> TrustDecision {
 fn assert_failed_capability(
     outcome: RuntimeCapabilityOutcome,
     capability_id: &str,
-    expected_kind: RuntimeFailureKind,
+    expected_kind: FailureKind,
     expected_message: &str,
 ) {
     let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
@@ -341,7 +341,7 @@ fn assert_failed_capability(
 
 async fn assert_process_capabilities_unavailable_for_processless_runtime(
     services: &RebornRuntime,
-    expected_shell_failure_kind: RuntimeFailureKind,
+    expected_shell_failure_kind: FailureKind,
     expected_shell_failure_message: &str,
 ) {
     let runtime = services
@@ -393,7 +393,7 @@ async fn assert_process_capabilities_unavailable_for_processless_runtime(
     assert_failed_capability(
         spawn_outcome,
         SPAWN_SUBAGENT_CAPABILITY_ID,
-        RuntimeFailureKind::Authorization,
+        FailureKind::Authorization,
         "process execution is disabled",
     );
 }
@@ -651,7 +651,7 @@ async fn hosted_single_tenant_volume_hides_process_capabilities() {
     );
     assert_process_capabilities_unavailable_for_processless_runtime(
         &services,
-        RuntimeFailureKind::MissingRuntime,
+        FailureKind::MissingRuntime,
         "unknown capability",
     )
     .await;
@@ -1538,7 +1538,7 @@ async fn production_postgres_secure_default_builds_without_process_port() {
     assert_production_services_ready_with_first_party_runtime(&services).await;
     assert_process_capabilities_unavailable_for_processless_runtime(
         &services,
-        RuntimeFailureKind::MissingRuntime,
+        FailureKind::MissingRuntime,
         "unknown capability",
     )
     .await;
@@ -1571,7 +1571,7 @@ async fn production_libsql_secure_default_builds_without_process_port() {
     assert_production_services_ready_with_first_party_runtime(&services).await;
     assert_process_capabilities_unavailable_for_processless_runtime(
         &services,
-        RuntimeFailureKind::MissingRuntime,
+        FailureKind::MissingRuntime,
         "unknown capability",
     )
     .await;

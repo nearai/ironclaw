@@ -91,8 +91,6 @@ run_substrates() {
   run_test ironclaw_secrets boundary_contract
   run_test ironclaw_secrets secret_store_contract
   run_test ironclaw_resources resource_governor_contract
-  run_test ironclaw_run_state approval_resolution_contract
-  run_test ironclaw_run_state run_state_contract
   run_test ironclaw_approvals approval_resolution_contract
   run_test ironclaw_approvals boundary_contract
   run_test ironclaw_authorization boundary_contract
