@@ -6,13 +6,15 @@ export type InterfaceTheme = "light" | "dark";
 
 function getInitialTheme(): InterfaceTheme {
   try {
-    if (window.__IRONCLAW_INITIAL_THEME__ === "light" || window.__IRONCLAW_INITIAL_THEME__ === "dark") {
-      return window.__IRONCLAW_INITIAL_THEME__;
-    }
+    // The bootstrap snapshot prevents first-paint flicker, but it becomes stale
+    // after an in-app theme change. Prefer the live/persisted selection on remount.
     const current = document.documentElement.dataset.theme;
     if (current === "light" || current === "dark") return current;
     const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
     if (stored === "light" || stored === "dark") return stored;
+    if (window.__IRONCLAW_INITIAL_THEME__ === "light" || window.__IRONCLAW_INITIAL_THEME__ === "dark") {
+      return window.__IRONCLAW_INITIAL_THEME__;
+    }
     return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
   } catch (_) {
     return "light";

@@ -11,7 +11,7 @@ use ironclaw_host_api::{
     ResourceScope, RuntimeKind, TrustClass, UserId,
 };
 use ironclaw_host_runtime::{
-    CapabilitySurfacePolicy, HostRuntime, NATIVE_MEMORY_FIRST_PARTY_PROVIDER, SurfaceKind,
+    CapabilitySurfacePolicy, HostRuntime, SurfaceKind,
     VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
 use ironclaw_loop_host::{
@@ -1170,26 +1170,30 @@ fn visible_capability_request(
             evaluated_at: Utc::now(),
         },
     );
-    // Native memory rides the same always-on first-party lane as builtin (not the
-    // catalog extension surface), so it is trusted here directly. Its authority
-    // ceiling is the document-store provider's needs only: dispatch + read/write
-    // filesystem (matching the builtin provider's first-party effects).
-    provider_trust.insert(
-        ExtensionId::new(NATIVE_MEMORY_FIRST_PARTY_PROVIDER).map_err(host_api_agent_loop_error)?,
-        TrustDecision {
-            effective_trust: EffectiveTrustClass::user_trusted(),
-            authority_ceiling: AuthorityCeiling {
-                allowed_effects: vec![
-                    EffectKind::DispatchCapability,
-                    EffectKind::ReadFilesystem,
-                    EffectKind::WriteFilesystem,
-                ],
-                max_resource_ceiling: None,
+    // The bound memory provider rides the same always-on first-party lane as
+    // builtin (not the catalog extension surface), so every bundled memory
+    // provider id is trusted here directly — only the bound one ever has a
+    // registered package, so the others stay inert. The authority ceiling is
+    // the memory provider's needs only: dispatch + read/write filesystem
+    // (matching the builtin provider's first-party effects).
+    for provider in ironclaw_host_runtime::memory_native_extension::MEMORY_PROVIDER_PACKAGE_IDS {
+        provider_trust.insert(
+            ExtensionId::new(*provider).map_err(host_api_agent_loop_error)?,
+            TrustDecision {
+                effective_trust: EffectiveTrustClass::user_trusted(),
+                authority_ceiling: AuthorityCeiling {
+                    allowed_effects: vec![
+                        EffectKind::DispatchCapability,
+                        EffectKind::ReadFilesystem,
+                        EffectKind::WriteFilesystem,
+                    ],
+                    max_resource_ceiling: None,
+                },
+                provenance: TrustProvenance::AdminConfig,
+                evaluated_at: Utc::now(),
             },
-            provenance: TrustProvenance::AdminConfig,
-            evaluated_at: Utc::now(),
-        },
-    );
+        );
+    }
     provider_trust.extend(inputs.extension_surface.provider_trust(&context.user_id));
 
     Ok(HostVisibleCapabilityRequest::new(

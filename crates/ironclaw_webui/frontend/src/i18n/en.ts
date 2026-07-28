@@ -545,7 +545,7 @@ registerPack("en", {
   "tools.description.builtin.trace_commons.credits": "Report the current user's Trace Commons credit state, balances, submission counts, and recent explanations.",
   "tools.description.builtin.trace_commons.profile_token": "Mint a short-lived Trace Commons profile-management value for browser or manual profile setup.",
   "tools.description.builtin.trace_commons.profile_set": "Create or update the current user's public Trace Commons community profile after explicit consent.",
-  "tools.description.builtin.profile_set": "Record a private local fact about the user's agent context: timezone, locale, or location.",
+  "tools.description.ironclaw.memory.profile_set": "Record a private local fact about the user's agent context: timezone, locale, or location.",
   "tools.description.builtin.memory_search": "Search Reborn persistent memory documents in the current scope",
   "tools.description.builtin.memory_write": "Write, append, or patch Reborn persistent memory documents in the current scope",
   "tools.description.builtin.memory_read": "Read a Reborn persistent memory document in the current scope",

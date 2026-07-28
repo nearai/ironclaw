@@ -87,6 +87,7 @@ impl AuthChallengeProvider for FakeAuthChallengeProvider {
                     .expect("static OAuth URL should be valid"), // safety: static test URL is valid.
             ),
             expires_at: None,
+            pairing: None,
         }))
     }
 }

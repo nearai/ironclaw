@@ -2,7 +2,8 @@ use std::collections::BTreeSet;
 
 use ironclaw_auth::AuthProductScope;
 use ironclaw_host_api::{
-    ExtensionId, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceValidationCode,
+    ExtensionId, InstallationState, LifecyclePublicState, ProductSurfaceCaller,
+    ProductSurfaceError, ProductSurfaceValidationCode,
 };
 
 use crate::{
@@ -15,8 +16,11 @@ use crate::{
 };
 
 use super::{
-    ExtensionCredentialSetupService, extension_credentials::credential_scope, extension_onboarding,
-    extension_setup_credentials, extension_setup_credentials::SetupSubmitPayload, views,
+    ExtensionCredentialSetupService,
+    extension_credentials::{ExtensionCredentialReadiness, credential_scope},
+    extension_onboarding, extension_setup_credentials,
+    extension_setup_credentials::SetupSubmitPayload,
+    views,
 };
 
 pub const EXTENSION_SETUP_VIEW: RebornViewDescriptor = RebornViewDescriptor {
@@ -233,7 +237,7 @@ async fn setup_extension_response(
         .package_ref
         .clone()
         .ok_or_else(ProductSurfaceError::internal_invariant)?;
-    let mut secrets = extension_setup_credentials::project(
+    let (mut secrets, credential_readiness) = extension_setup_credentials::project(
         extension_credentials,
         scope,
         extension_id,
@@ -272,13 +276,30 @@ async fn setup_extension_response(
     let onboarding = extension_onboarding::from_lifecycle(&lifecycle).onboarding;
     Ok(RebornSetupExtensionResponse {
         package_ref,
-        phase: lifecycle.phase,
+        phase: setup_public_phase(lifecycle.phase, credential_readiness),
         blockers: lifecycle.blockers,
         onboarding,
         payload: lifecycle.payload,
         secrets,
         fields,
     })
+}
+
+/// The setup route's caller-visible phase (§6.1). The host checkpoint alone
+/// cannot say `active` for a caller whose required credentials are missing:
+/// an extension the runtime is serving is still `setup_needed` for them.
+fn setup_public_phase(
+    lifecycle_phase: InstallationState,
+    readiness: ExtensionCredentialReadiness,
+) -> LifecyclePublicState {
+    match (
+        LifecyclePublicState::from_host_checkpoint(lifecycle_phase),
+        readiness,
+    ) {
+        (LifecyclePublicState::Uninstalled, _) => LifecyclePublicState::Uninstalled,
+        (_, ExtensionCredentialReadiness::MissingRequired) => LifecyclePublicState::SetupNeeded,
+        (phase, _) => phase,
+    }
 }
 
 fn setup_action(
@@ -377,7 +398,7 @@ mod tests {
         .expect("setup submit should store credentials and activate");
 
         assert!(activated.load(Ordering::SeqCst));
-        assert_eq!(response.phase, InstallationState::Active);
+        assert_eq!(response.phase, LifecyclePublicState::Active);
         assert!(
             response
                 .secrets
