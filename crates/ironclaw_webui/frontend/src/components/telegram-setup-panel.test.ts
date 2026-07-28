@@ -95,6 +95,7 @@ function setupContext(state, { saveResponses = [], mutationOverrides = {}, confi
   state.mutationSuccess = state.mutationSuccess || {};
   const context = {
     Button: "button",
+    ConfirmDialog: "ConfirmDialog",
     React: createReactStub(state),
     globalThis: {},
     getTelegramSetup: () => ({}),
@@ -267,8 +268,8 @@ test("TelegramSetupPanel renders the API error body when a save fails", () => {
 });
 
 test("TelegramSetupPanel removes the bot only after the confirm prompt", () => {
-  const declinedState = { hookIndex: 0, mutationIndex: 0, values: {}, refs: {}, effectDeps: {} };
-  const declined = setupContext(declinedState, { confirmResult: false });
+  const state = { hookIndex: 0, mutationIndex: 0, values: {}, refs: {}, effectDeps: {} };
+  const harness = setupContext(state);
   const status = {
     configured: true,
     bot_username: "ironclaw_bot",
@@ -276,20 +277,29 @@ test("TelegramSetupPanel removes the bot only after the confirm prompt", () => {
     webhook_url: null,
   };
 
-  renderPanel(declined.context, declinedState, { data: status });
-  let rendered = renderPanel(declined.context, declinedState, { data: status });
+  renderPanel(harness.context, state, { data: status });
+  let rendered = renderPanel(harness.context, state, { data: status });
+  // Dialog starts closed; clicking remove only opens it (no DELETE yet).
   // onClick order: [save, remove] once configured.
+  assert.equal(valuesAfter(rendered, "open=")[0], false);
   valuesAfter(rendered, "onClick=")[1]();
-  assert.deepEqual(declined.confirmCalls, ["telegramSetup.removeConfirm"]);
-  assert.deepEqual(declined.clearCalls, []);
+  assert.deepEqual(harness.clearCalls, []);
 
-  const acceptedState = { hookIndex: 0, mutationIndex: 0, values: {}, refs: {}, effectDeps: {} };
-  const accepted = setupContext(acceptedState, { confirmResult: true });
-  renderPanel(accepted.context, acceptedState, { data: status });
-  rendered = renderPanel(accepted.context, acceptedState, { data: status });
+  rendered = renderPanel(harness.context, state, { data: status });
+  assert.equal(valuesAfter(rendered, "open=")[0], true);
+
+  // Declining keeps the bot.
+  valuesAfter(rendered, "onCancel=")[0]();
+  rendered = renderPanel(harness.context, state, { data: status });
+  assert.equal(valuesAfter(rendered, "open=")[0], false);
+  assert.deepEqual(harness.clearCalls, []);
+
+  // Accepting through the dialog runs the removal.
   valuesAfter(rendered, "onClick=")[1]();
-  assert.deepEqual(accepted.clearCalls, ["delete"]);
-  assert.deepEqual(JSON.parse(JSON.stringify(accepted.invalidations)), [
+  rendered = renderPanel(harness.context, state, { data: status });
+  valuesAfter(rendered, "onConfirm=")[0]();
+  assert.deepEqual(harness.clearCalls, ["delete"]);
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.invalidations)), [
     ["telegram-setup"],
     ["connectable-channels"],
     ["extensions"],
@@ -412,9 +422,14 @@ test("TelegramSetupPanel serializes save and removal mutations", () => {
     mutationOverrides: { 0: { isPending: true } },
   });
   renderPanel(savePending.context, saveState, { data: status });
-  const renderedSavePending = renderPanel(savePending.context, saveState, { data: status });
+  let renderedSavePending = renderPanel(savePending.context, saveState, { data: status });
   valuesAfter(renderedSavePending, "onClick=")[1]();
-  assert.deepEqual(savePending.confirmCalls, [], "no confirm prompt while a save is in flight");
+  renderedSavePending = renderPanel(savePending.context, saveState, { data: status });
+  assert.equal(
+    valuesAfter(renderedSavePending, "open=")[0],
+    false,
+    "no confirm dialog while a save is in flight",
+  );
   assert.deepEqual(savePending.clearCalls, [], "no DELETE while the PUT is in flight");
 });
 

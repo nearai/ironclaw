@@ -33,6 +33,8 @@ type ModalProps = {
   open: boolean;
   onClose?: () => void;
   title?: ReactNode;
+  /** Accessible name for chrome-less dialogs (no visible header). */
+  ariaLabel?: string;
   size?: ModalSize;
   className?: string;
   closeLabel?: string;
@@ -45,6 +47,7 @@ export function Modal({
   open,
   onClose,
   title,
+  ariaLabel,
   size = "md",
   className = "",
   closeLabel,
@@ -84,7 +87,7 @@ export function Modal({
             <Dialog.Content
               asChild
               aria-modal="true"
-              aria-label={typeof title === "string" ? title : undefined}
+              aria-label={typeof title === "string" ? title : ariaLabel}
               onEscapeKeyDown={(event) => {
                 if (!onClose) event.preventDefault();
               }}
@@ -125,6 +128,8 @@ export function Modal({
                   <ModalHeader onClose={onClose} closeLabel={closeLabel}>
                     {title}
                   </ModalHeader>
+                ) : ariaLabel ? (
+                  <Dialog.Title className="sr-only">{ariaLabel}</Dialog.Title>
                 ) : null}
                 {children}
               </motion.div>

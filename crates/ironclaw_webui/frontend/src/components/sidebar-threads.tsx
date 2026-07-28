@@ -75,6 +75,7 @@ function ThreadItem({ thread, isActive, isPinned, presentation, onSelect, onDele
   const t = useT();
   const [deleteDialogOpen, setDeleteDialogOpen] = React.useState(false);
   const [isDeleting, setIsDeleting] = React.useState(false);
+  const [deleteError, setDeleteError] = React.useState("");
   const activityIso = threadActivityIso(thread);
   const timeLabel = formatThreadActivityLabel(activityIso);
   const timeTitle = formatThreadActivityTooltip(activityIso);
@@ -85,6 +86,7 @@ function ThreadItem({ thread, isActive, isPinned, presentation, onSelect, onDele
     (event) => {
       event.preventDefault();
       event.stopPropagation();
+      setDeleteError("");
       setDeleteDialogOpen(true);
     },
     []
@@ -93,12 +95,13 @@ function ThreadItem({ thread, isActive, isPinned, presentation, onSelect, onDele
   const handleConfirmDelete = React.useCallback(
     () => {
       setIsDeleting(true);
+      setDeleteError("");
       void Promise.resolve()
         .then(() => onDelete?.(thread.id))
         .then(() => setDeleteDialogOpen(false))
         .catch((error) => {
           console.error("Failed to delete thread:", error);
-          window.alert(deleteThreadErrorMessage(error, t));
+          setDeleteError(deleteThreadErrorMessage(error, t));
         })
         .finally(() => setIsDeleting(false));
     },
@@ -188,7 +191,16 @@ function ThreadItem({ thread, isActive, isPinned, presentation, onSelect, onDele
       <ConfirmDialog
         open={deleteDialogOpen}
         title={t("common.deleteChat")}
-        description={t("thread.deleteConfirm")}
+        description={
+          deleteError ? (
+            <>
+              {t("thread.deleteConfirm")}
+              <span className="mt-2 block text-[var(--v2-danger-text)]">{deleteError}</span>
+            </>
+          ) : (
+            t("thread.deleteConfirm")
+          )
+        }
         confirmLabel={t("common.delete")}
         isConfirming={isDeleting}
         onConfirm={handleConfirmDelete}

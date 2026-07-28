@@ -1,7 +1,7 @@
 // @ts-nocheck
 import { useOutletContext } from "react-router";
 import React from "react";
-import { Badge, Button, Checkbox, Input, SelectMenu } from "@ironclaw/design-system";
+import { Badge, Button, Checkbox, ConfirmDialog, Input, SelectMenu } from "@ironclaw/design-system";
 import { useT } from "../../lib/i18n";
 import { useLogs } from "./hooks/useLogs";
 
@@ -157,6 +157,7 @@ export function LogsPage() {
     isAdmin,
     defaultThreadId: isAdmin ? null : threadsState?.activeThreadId || null,
   });
+  const [clearConfirmOpen, setClearConfirmOpen] = React.useState(false);
 
   const outputRef = React.useRef(null);
   const followLatestRef = React.useRef(true);
@@ -227,12 +228,21 @@ export function LogsPage() {
           <Button
             size="sm"
             variant="ghost"
-            onClick={() => {
-              if (confirm(t("logs.confirmClear"))) clearEntries();
-            }}
+            onClick={() => setClearConfirmOpen(true)}
           >
             {t("logs.clear")}
           </Button>
+          <ConfirmDialog
+            open={clearConfirmOpen}
+            title={t("logs.clear")}
+            description={t("logs.confirmClear")}
+            confirmLabel={t("logs.clear")}
+            onConfirm={() => {
+              setClearConfirmOpen(false);
+              clearEntries();
+            }}
+            onCancel={() => setClearConfirmOpen(false)}
+          />
         </div>
 
         {activeScope.length > 0 &&

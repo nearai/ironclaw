@@ -102,7 +102,7 @@ function findNodeByType(root, type) {
   return found;
 }
 
-function renderInteractiveSidebarThreads(props = {}, windowOverrides = {}) {
+function renderInteractiveSidebarThreads(props = {}, windowOverrides = {}, contextOverrides = {}) {
   function ConfirmDialog(dialogProps) {
     return { type: "confirm-dialog", props: dialogProps };
   }
@@ -135,6 +135,7 @@ function renderInteractiveSidebarThreads(props = {}, windowOverrides = {}) {
       ...windowOverrides,
     },
   };
+  Object.assign(context, contextOverrides);
   const { SidebarThreads } = runVmModuleForTest(
     "./sidebar-threads.tsx",
     ["SidebarThreads"],
@@ -211,8 +212,9 @@ test("SidebarThreads exposes a visible delete action for listed threads", async 
   );
 });
 
-test("SidebarThreads surfaces delete handler failures from the delete button", async () => {
+test("SidebarThreads surfaces delete handler failures inside the confirm dialog", async () => {
   const alerts = [];
+  const errorMessages = [];
   const deletions = [];
   const { context, rendered } = renderInteractiveSidebarThreads(
     {
@@ -223,6 +225,15 @@ test("SidebarThreads surfaces delete handler failures from the delete button", a
     },
     {
       alert: (message) => alerts.push(message),
+    },
+    {
+      // The failure copy renders inline in the ConfirmDialog description
+      // (never a native alert); spy on the resolver to assert the routing.
+      deleteThreadErrorMessage: (error, t) => {
+        const message = deleteThreadErrorMessage(error, t);
+        errorMessages.push(message);
+        return message;
+      },
     },
   );
 
@@ -236,7 +247,8 @@ test("SidebarThreads surfaces delete handler failures from the delete button", a
   await flushPromises();
 
   assert.deepEqual(deletions, ["thread-old"]);
-  assert.deepEqual(alerts, ["chat.deleteBusy"]);
+  assert.deepEqual(errorMessages, ["chat.deleteBusy"]);
+  assert.deepEqual(alerts, [], "delete failures never fall back to window.alert");
   assert.equal(event.defaultPrevented, true);
   assert.equal(event.propagationStopped, true);
   assert.equal(context.errors.length, 1);

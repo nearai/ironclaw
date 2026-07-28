@@ -1,5 +1,5 @@
 import { useT } from "../../../lib/i18n";
-import { Button } from "@ironclaw/design-system";
+import { Button, Input, SelectMenu } from "@ironclaw/design-system";
 import { EmptyPanel, Panel, StatusPill } from "@ironclaw/design-system";
 import {
   canShowCancel,
@@ -63,19 +63,21 @@ export function JobsList({
         </div>
 
         <div className="mt-5 grid gap-3 md:grid-cols-[minmax(0,1fr)_220px]">
-          <input
+          <Input
             value={search}
             onInput={(event) => onSearchChange(event.currentTarget.value)}
             placeholder={t("jobs.list.searchPlaceholder")}
-            className="h-11 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-3 text-sm text-[var(--v2-text-strong)] outline-none focus:border-[var(--v2-accent)]"
+            aria-label={t("jobs.list.searchPlaceholder")}
           />
-          <select
+          <SelectMenu
             value={stateFilter}
-            onChange={(event) => onStateFilterChange(event.currentTarget.value)}
-            className="v2-select h-11 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-3 text-sm text-[var(--v2-text-strong)] outline-none focus:border-[var(--v2-accent)]"
-          >
-            {FILTERS.map((filter) => (<option key={filter.value} value={filter.value}>{filter.label}</option>))}
-          </select>
+            onChange={onStateFilterChange}
+            ariaLabel={t("jobs.list.filter.all")}
+            align="left"
+            className="w-full"
+            buttonClassName="h-[var(--v2-control-h-md)]"
+            options={FILTERS.map((filter) => ({ value: filter.value, label: filter.label }))}
+          />
         </div>
       </Panel>
 

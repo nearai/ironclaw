@@ -1,6 +1,6 @@
 // @ts-nocheck
 import React from "react";
-import { Card } from "@ironclaw/design-system";
+import { Card, ConfirmDialog } from "@ironclaw/design-system";
 import { Button } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
 import { useSkills } from "../hooks/useSkills";
@@ -29,9 +29,16 @@ export function SkillsTab({ searchQuery = "" }) {
   } = useSkills();
   const [actionError, setActionError] = React.useState("");
   const [actionResult, setActionResult] = React.useState("");
+  const [pendingRemoval, setPendingRemoval] = React.useState(null);
 
-  const handleRemove = React.useCallback(async (name) => {
-    if (!window.confirm(t("skills.confirmDelete", { name }))) return;
+  const handleRemove = React.useCallback((name) => {
+    setPendingRemoval(name);
+  }, []);
+
+  const handleConfirmRemove = React.useCallback(async () => {
+    const name = pendingRemoval;
+    if (!name) return;
+    setPendingRemoval(null);
     setActionError("");
     setActionResult("");
     try {
@@ -44,7 +51,7 @@ export function SkillsTab({ searchQuery = "" }) {
     } catch (err) {
       setActionError(err.message || t("skills.removeFailed"));
     }
-  }, [removeSkill, t]);
+  }, [pendingRemoval, removeSkill, t]);
 
   const handleUpdate = React.useCallback(async (name, content) => {
     if (!content.trim()) {
@@ -181,6 +188,15 @@ export function SkillsTab({ searchQuery = "" }) {
       <SkillInstallPanel onInstall={installSkill} isInstalling={isInstalling} />
       <SkillActionResult error={actionError} result={actionResult} />
       {body}
+      <ConfirmDialog
+        open={pendingRemoval != null}
+        title={t("common.delete")}
+        description={pendingRemoval ? t("skills.confirmDelete", { name: pendingRemoval }) : ""}
+        confirmLabel={t("common.delete")}
+        isConfirming={isRemoving}
+        onConfirm={handleConfirmRemove}
+        onCancel={() => setPendingRemoval(null)}
+      />
     </div>
   );
 }

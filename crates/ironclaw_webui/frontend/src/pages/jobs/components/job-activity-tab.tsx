@@ -1,6 +1,6 @@
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Button } from "@ironclaw/design-system";
+import { Button, Checkbox, Input, SelectMenu } from "@ironclaw/design-system";
 import { EmptyPanel, Panel } from "@ironclaw/design-system";
 import { formatJobDate } from "../lib/jobs-presenters";
 
@@ -94,15 +94,15 @@ export function JobActivityTab({ job, events, onSendPrompt, isSendingPrompt }) {
           <p className="mt-2 text-sm leading-6 text-[var(--v2-text-muted)]">Persisted events are refreshed automatically so operators can follow tool calls, prompts, and worker output.</p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
-          <select
+          <SelectMenu
             value={filter}
-            onChange={(event) => setFilter(event.currentTarget.value)}
-            className="v2-select h-10 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-3 text-sm text-[var(--v2-text-strong)] outline-none focus:border-[var(--v2-accent)]"
-          >
-            {FILTERS.map((option) => (<option key={option.value} value={option.value}>{option.label}</option>))}
-          </select>
+            onChange={setFilter}
+            ariaLabel={FILTERS[0].label}
+            align="left"
+            options={FILTERS.map((option) => ({ value: option.value, label: option.label }))}
+          />
           <label className="flex items-center gap-2 text-sm text-[var(--v2-text-muted)]">
-            <input type="checkbox" checked={autoScroll} onChange={(event) => setAutoScroll(event.target.checked)} />
+            <Checkbox checked={autoScroll} onCheckedChange={(checked) => setAutoScroll(checked === true)} />
             Auto-scroll
           </label>
         </div>
@@ -126,7 +126,7 @@ export function JobActivityTab({ job, events, onSendPrompt, isSendingPrompt }) {
 
       {job.can_prompt && (
         <div className="mt-5 grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto_auto]">
-          <input
+          <Input
             value={content}
             onInput={(event) => setContent(event.currentTarget.value)}
             onKeyDown={(event) => {
@@ -136,7 +136,7 @@ export function JobActivityTab({ job, events, onSendPrompt, isSendingPrompt }) {
               }
             }}
             placeholder={t("job.followupPlaceholder")}
-            className="h-11 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-3 text-sm text-[var(--v2-text-strong)] outline-none focus:border-[var(--v2-accent)]"
+            aria-label={t("job.followupPlaceholder")}
           />
           <Button variant="secondary" disabled={isSendingPrompt} onClick={() => handleSend(true)}>{t("common.done")}</Button>
           <Button variant="primary" disabled={isSendingPrompt} onClick={() => handleSend(false)}>{t("common.send")}</Button>

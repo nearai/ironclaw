@@ -1,6 +1,5 @@
 import { useNavigate } from "react-router";
-import { createPortal } from "react-dom";
-import { Button } from "@ironclaw/design-system";
+import { Button, Popover, PopoverContent, PopoverTrigger } from "@ironclaw/design-system";
 import { Icon } from "@ironclaw/design-system";
 import React from "react";
 import { useT } from "../lib/i18n";
@@ -57,152 +56,99 @@ export function NotificationCenter({ state }) {
   const t = useT();
   const navigate = useNavigate();
   const [open, setOpen] = React.useState(false);
-  const panelRef = React.useRef(null);
-  const triggerRef = React.useRef(null);
   const messages = state?.messages || [];
   const unreadIds = state?.unreadIds || new Set();
   const hasUnread = state?.hasUnread || false;
   const unreadCount = state?.unreadCount || 0;
   const dismissMessage = state?.dismissMessage;
 
-  const close = React.useCallback(() => {
-    setOpen(false);
-    triggerRef.current?.focus?.();
-  }, []);
-
-  const toggleOpen = React.useCallback(() => {
-    const nextOpen = !open;
-    setOpen(nextOpen);
-    if (!nextOpen) {
-      triggerRef.current?.focus?.();
-    }
-  }, [open]);
-
-  React.useEffect(() => {
-    if (!open) return;
-    panelRef.current?.focus?.();
-  }, [open]);
-
-  React.useEffect(() => {
-    if (!open || typeof document === "undefined") return;
-    const onKeyDown = (event) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      close();
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, [close, open]);
-
   const openMessage = React.useCallback(
     (message) => {
       if (message?.id) dismissMessage?.(message.id);
-      close();
+      setOpen(false);
       if (message?.href) navigate(message.href);
     },
-    [close, dismissMessage, navigate],
+    [dismissMessage, navigate],
   );
 
-  const overlay = open
-    ? (
-        <React.Fragment>
-          <button
-            type="button"
-            aria-label={t("notifications.close")}
-            onClick={close}
-            tabIndex={-1}
-            className="fixed inset-0 z-[9998] bg-black/35 lg:bg-transparent"
-          />
-          <section
-            role="dialog"
-            aria-label={t("notifications.title")}
-            data-testid="notification-panel"
-            ref={panelRef}
-            tabIndex={-1}
-            className={cn(
-              "fixed inset-x-0 bottom-0 z-[9999] max-h-[78dvh] overflow-hidden",
-              "rounded-t-[16px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] shadow-[var(--v2-shadow-menu)]",
-              "lg:inset-auto lg:right-12 lg:top-16 lg:w-[24rem] lg:max-h-[min(70vh,32rem)] lg:rounded-[12px]"
-            )}
-          >
-            <div className="flex items-center justify-between gap-3 border-b border-[var(--v2-panel-border)] px-4 py-3">
-              <div className="min-w-0">
-                <h2 className="text-sm font-medium text-[var(--v2-text-strong)]">
-                  {t("notifications.title")}
-                </h2>
-                <p className="mt-0.5 text-xs text-[var(--v2-text-muted)]">
-                  {unreadCount > 0
-                    ? t("notifications.unreadCount", { count: unreadCount })
-                    : t("notifications.allCaughtUp")}
-                </p>
-              </div>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                onClick={close}
-                aria-label={t("notifications.close")}
-                title={t("notifications.close")}
-              >
-                <Icon name="close" className="h-4 w-4" />
-              </Button>
-            </div>
-
-            <div className="max-h-[calc(78dvh-4.5rem)] overflow-y-auto lg:max-h-[calc(min(70vh,32rem)-4.5rem)]">
-              {messages.length === 0
-                ? (
-                    <div className="px-4 py-8 text-center">
-                      <div className="text-sm font-medium text-[var(--v2-text-strong)]">
-                        {t("notifications.emptyTitle")}
-                      </div>
-                      <div className="mt-1 text-sm text-[var(--v2-text-muted)]">
-                        {t("notifications.emptyDescription")}
-                      </div>
-                    </div>
-                  )
-                : messages.map((message) => (
-                    <NotificationRow
-                      key={message.id}
-                      message={message}
-                      unread={unreadIds.has(message.id)}
-                      onOpen={openMessage}
-                    />
-                  ))}
-            </div>
-          </section>
-        </React.Fragment>
-      )
-    : null;
-
   return (
-    <div className="relative">
-      <button
-        type="button"
-        onClick={toggleOpen}
-        data-testid="notification-bell"
-        ref={triggerRef}
-        aria-label={t("notifications.open")}
-        aria-expanded={open ? "true" : "false"}
-        className={cn(
-          "relative grid h-8 w-8 place-items-center rounded-[8px]",
-          "text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]",
-          open && "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
-        )}
-        title={t("notifications.open")}
-      >
-        <Icon name="bell" className="h-4 w-4" />
-        {hasUnread &&
-        (
-          <span
-            data-testid="notification-unread-dot"
-            className="absolute right-1.5 top-1.5 h-2.5 w-2.5 rounded-full border-2 border-[var(--v2-canvas-strong)] bg-[var(--v2-danger-text)]"
-          />
-        )}
-      </button>
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          data-testid="notification-bell"
+          aria-label={t("notifications.open")}
+          title={t("notifications.open")}
+          className={cn(
+            "relative grid h-8 w-8 place-items-center rounded-[8px]",
+            "text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]",
+            open && "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
+          )}
+        >
+          <Icon name="bell" className="h-4 w-4" />
+          {hasUnread &&
+          (
+            <span
+              data-testid="notification-unread-dot"
+              className="absolute right-1.5 top-1.5 h-2.5 w-2.5 rounded-full border-2 border-[var(--v2-canvas-strong)] bg-[var(--v2-danger-text)]"
+            />
+          )}
+        </button>
+      </PopoverTrigger>
 
-      {overlay && typeof document !== "undefined"
-        ? createPortal(overlay, document.body)
-        : null}
-    </div>
+      <PopoverContent
+        align="end"
+        sideOffset={8}
+        collisionPadding={12}
+        aria-label={t("notifications.title")}
+        data-testid="notification-panel"
+        className="z-[9999] w-[24rem] max-w-[calc(100vw-1.5rem)] p-0 bg-[var(--v2-surface)]"
+      >
+        <div className="flex items-center justify-between gap-3 border-b border-[var(--v2-panel-border)] px-4 py-3">
+          <div className="min-w-0">
+            <h2 className="text-sm font-medium text-[var(--v2-text-strong)]">
+              {t("notifications.title")}
+            </h2>
+            <p className="mt-0.5 text-xs text-[var(--v2-text-muted)]">
+              {unreadCount > 0
+                ? t("notifications.unreadCount", { count: unreadCount })
+                : t("notifications.allCaughtUp")}
+            </p>
+          </div>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            onClick={() => setOpen(false)}
+            aria-label={t("notifications.close")}
+            title={t("notifications.close")}
+          >
+            <Icon name="close" className="h-4 w-4" />
+          </Button>
+        </div>
+
+        <div className="max-h-[min(70vh,32rem)] overflow-y-auto">
+          {messages.length === 0
+            ? (
+                <div className="px-4 py-8 text-center">
+                  <div className="text-sm font-medium text-[var(--v2-text-strong)]">
+                    {t("notifications.emptyTitle")}
+                  </div>
+                  <div className="mt-1 text-sm text-[var(--v2-text-muted)]">
+                    {t("notifications.emptyDescription")}
+                  </div>
+                </div>
+              )
+            : messages.map((message) => (
+                <NotificationRow
+                  key={message.id}
+                  message={message}
+                  unread={unreadIds.has(message.id)}
+                  onOpen={openMessage}
+                />
+              ))}
+        </div>
+      </PopoverContent>
+    </Popover>
   );
 }

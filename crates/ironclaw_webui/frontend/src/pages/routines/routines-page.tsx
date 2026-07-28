@@ -1,5 +1,5 @@
 import { useNavigate, useParams } from "react-router";
-import { Button } from "@ironclaw/design-system";
+import { Button, ConfirmDialog } from "@ironclaw/design-system";
 import React from "react";
 import { FeedbackBanner } from "../projects/components/feedback-banner";
 import { RoutineDetailPanel } from "./components/routine-detail-panel";
@@ -24,18 +24,23 @@ export function RoutinesPage() {
     }
   }, []);
 
-  const handleDelete = React.useCallback(
-    async (targetId, name) => {
-      if (!window.confirm(`Delete routine "${name}"?`)) return;
-      try {
-        await routinesState.deleteRoutine({ routineId: targetId });
-        navigate("/routines");
-      } catch {
-        // Mutation hooks own the visible result state.
-      }
-    },
-    [navigate, routinesState]
-  );
+  const [pendingDelete, setPendingDelete] = React.useState(null);
+
+  const handleDelete = React.useCallback((targetId, name) => {
+    setPendingDelete({ id: targetId, name });
+  }, []);
+
+  const handleConfirmDelete = React.useCallback(async () => {
+    const target = pendingDelete;
+    if (!target) return;
+    setPendingDelete(null);
+    try {
+      await routinesState.deleteRoutine({ routineId: target.id });
+      navigate("/routines");
+    } catch {
+      // Mutation hooks own the visible result state.
+    }
+  }, [navigate, pendingDelete, routinesState]);
 
   const detailContent = routineId
     ? (
@@ -129,6 +134,14 @@ export function RoutinesPage() {
             : detailContent}
         </div>
       </div>
+      <ConfirmDialog
+        open={pendingDelete != null}
+        title="Delete routine"
+        description={pendingDelete ? `Delete routine "${pendingDelete.name}"?` : ""}
+        confirmLabel="Delete"
+        onConfirm={handleConfirmDelete}
+        onCancel={() => setPendingDelete(null)}
+      />
     </div>
   );
 }

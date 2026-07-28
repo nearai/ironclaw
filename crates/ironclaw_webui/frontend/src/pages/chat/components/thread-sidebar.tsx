@@ -1,4 +1,4 @@
-import { Icon } from "@ironclaw/design-system";
+import { Button, Icon, SelectMenu } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
 import { displaySidebarTitle } from "../../../lib/thread-title";
 
@@ -30,33 +30,28 @@ export function ThreadSidebar({
   if (compact) {
     return (
       <div className="flex items-center gap-2">
-        <button
+        <Button
           onClick={onCreate}
           disabled={createDisabled}
-          className="v2-button h-9 shrink-0 rounded-md border border-[var(--v2-accent)]/25 bg-[var(--v2-accent-soft)] px-3 text-xs font-medium text-[var(--v2-accent-text)] disabled:opacity-50"
+          variant="secondary"
+          size="sm"
+          className="shrink-0 border-[var(--v2-accent)]/25 bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
         >
           {isCreating ? t("chat.creating") : t("chat.newThread")}
-        </button>
-        <select
+        </Button>
+        <SelectMenu
           value={activeThreadId || ""}
-          onChange={(event) => onSelect(event.currentTarget.value || null)}
-          className="v2-select h-9 min-w-0 flex-1 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] px-3 text-sm text-[var(--v2-text-strong)] outline-none focus:border-[var(--v2-accent)]/60"
-        >
-          <option value="">{t("chat.selectConversation")}</option>
-          {threads.map(
-            (thread) => {
-              const title = displaySidebarTitle(
-                thread,
-                t("notifications.approval.untitled"),
-              );
-              return (
-                <option key={thread.id} value={thread.id}>
-                  {title}
-                </option>
-              );
-            }
-          )}
-        </select>
+          onChange={(threadId) => onSelect(threadId || null)}
+          ariaLabel={t("chat.selectConversation")}
+          placeholder={t("chat.selectConversation")}
+          align="left"
+          className="min-w-0 flex-1"
+          buttonClassName="font-sans text-sm"
+          options={threads.map((thread) => ({
+            value: thread.id,
+            label: displaySidebarTitle(thread, t("notifications.approval.untitled")),
+          }))}
+        />
       </div>
     );
   }
@@ -78,17 +73,20 @@ export function ThreadSidebar({
             {t("chat.threads", { count: threads.length })}
           </p>
         </div>
-        <button
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
           onClick={onCreate}
           disabled={createDisabled}
-          className="v2-button inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--v2-accent)]/25 bg-[var(--v2-accent-soft)] px-2 text-xs font-medium text-[var(--v2-accent-text)] hover:bg-[var(--v2-accent)]/15 disabled:opacity-50"
+          className="gap-1.5 border-[var(--v2-accent)]/25 bg-[var(--v2-accent-soft)] text-xs text-[var(--v2-accent-text)]"
         >
           {isCreating
             ? t("chat.creating")
             : (<><Icon name="plus" className="h-3.5 w-3.5" /> {t(
                   "chat.newThread"
                 )}</>)}
-        </button>
+        </Button>
       </div>
 
       <div className="flex-1 overflow-y-auto p-2">

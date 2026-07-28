@@ -302,16 +302,11 @@ function createNearAiSetupMenuHarness() {
   const context = {
     Button: "Button",
     Icon: "Icon",
+    DropdownMenu: "DropdownMenu",
+    DropdownMenuTrigger: "DropdownMenuTrigger",
+    DropdownMenuContent: "DropdownMenuContent",
+    DropdownMenuItem: "DropdownMenuItem",
     React: createReactMenuStateStub(state),
-    document: {
-      addEventListener: (type, handler) => {
-        state.listeners ??= {};
-        state.listeners[type] = handler;
-      },
-      removeEventListener: (type, handler) => {
-        if (state.listeners?.[type] === handler) delete state.listeners[type];
-      },
-    },
     html,
   };
 
@@ -548,35 +543,23 @@ test("ProviderCard renders generic use action for NEAR when an API key is config
 test("NearAiSetupMenu keeps NEAR onboarding SSO choices behind setup dropdown", () => {
   const harness = createNearAiSetupMenuHarness();
 
-  let rendered = harness.render();
-  assert.equal(valueAfter(rendered, "aria-expanded="), "false");
+  const rendered = harness.render();
+  // Trigger is the design-system Button inside a DropdownMenuTrigger; the
+  // choices render as DropdownMenuItem entries in the (Radix-gated) content.
+  assert.equal(findComponentNodes(rendered, "DropdownMenuTrigger").length, 1);
   assert.equal(firstButtonProps(rendered).disabled, false);
-  let labels = collectScalars(rendered);
+  const labels = collectScalars(rendered);
   assert.ok(labels.includes("onboarding.setUp"));
-  assert.ok(!labels.includes("llm.addApiKey"));
-  assert.ok(!labels.includes("onboarding.nearWallet"));
-  assert.ok(!labels.includes("GitHub"));
-
-  firstButtonProps(rendered).onClick();
-  assert.equal(harness.state.open, true);
-
-  rendered = harness.render();
-  assert.equal(valueAfter(rendered, "aria-expanded="), "true");
-  assert.equal(typeof harness.state.listeners.keydown, "function");
-  labels = collectScalars(rendered);
   assert.ok(labels.includes("llm.addApiKey"));
   assert.ok(labels.includes("onboarding.nearWallet"));
   assert.ok(labels.includes("GitHub"));
   assert.ok(labels.includes("Google"));
 
-  deepValuesAfter(rendered, "onClick=")[1]();
-  assert.deepEqual(harness.calls, [["configure", "nearai"]]);
-  assert.equal(harness.state.open, false);
-
-  firstButtonProps(harness.render()).onClick();
-  rendered = harness.render();
-  deepValuesAfter(rendered, "onClick=")[3]();
-  assert.deepEqual(harness.calls.at(-1), ["sso", "github"]);
+  const items = findComponentNodes(rendered, "DropdownMenuItem");
+  assert.equal(items.length, 4);
+  for (const item of items) {
+    assert.equal(componentProps(item, "DropdownMenuItem").disabled, false);
+  }
 });
 
 test("NearAiSetupMenu disables setup trigger while setup or login is busy", () => {
@@ -597,17 +580,21 @@ test("NearAiSetupMenu disables setup trigger while setup or login is busy", () =
   );
 });
 
-test("NearAiSetupMenu closes the setup dropdown on Escape", () => {
+test("NearAiSetupMenu dispatches the matching setup flow from each menu item", () => {
   const harness = createNearAiSetupMenuHarness();
 
-  firstButtonProps(harness.render()).onClick();
-  harness.render();
-
-  harness.state.listeners.keydown({ key: "Enter" });
-  assert.equal(harness.state.open, true);
-
-  harness.state.listeners.keydown({ key: "Escape" });
-  assert.equal(harness.state.open, false);
+  const rendered = harness.render();
+  const selects = findComponentNodes(rendered, "DropdownMenuItem").map(
+    (item) => componentProps(item, "DropdownMenuItem").onSelect
+  );
+  assert.equal(selects.length, 4);
+  for (const onSelect of selects) onSelect();
+  assert.deepEqual(harness.calls, [
+    ["configure", "nearai"],
+    ["wallet"],
+    ["sso", "github"],
+    ["sso", "google"],
+  ]);
 });
 
 test("isLocalDevOrigin detects loopback origins so NEAR AI SSO fails fast there", () => {

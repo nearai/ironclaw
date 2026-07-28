@@ -6,7 +6,13 @@ import { useT } from "../../lib/i18n";
 import { Badge } from "@ironclaw/design-system";
 import { Button } from "@ironclaw/design-system";
 import { Card } from "@ironclaw/design-system";
-import { Icon } from "@ironclaw/design-system";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+  Icon,
+} from "@ironclaw/design-system";
 import { ProviderDialog } from "../settings/components/provider-dialog";
 import { ProviderLoginStatus } from "../settings/components/provider-login-status";
 import { useProviderManagementActions } from "../settings/hooks/useProviderManagementActions";
@@ -29,25 +35,7 @@ const FEATURED = [
 ];
 
 function NearAiSetupMenu({ provider, isBusy, login, t, onSetUp }) {
-  const [open, setOpen] = React.useState(false);
-  const ref = React.useRef(null);
   const setupBusy = isBusy || login.nearaiBusy;
-
-  React.useEffect(() => {
-    if (!open) return undefined;
-    const onDoc = (event) => {
-      if (ref.current && !ref.current.contains(event.target)) setOpen(false);
-    };
-    const onKeyDown = (event) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onDoc);
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("mousedown", onDoc);
-      document.removeEventListener("keydown", onKeyDown);
-    };
-  }, [open]);
 
   const menuItems = [
     {
@@ -77,45 +65,34 @@ function NearAiSetupMenu({ provider, isBusy, login, t, onSetUp }) {
   ];
 
   return (
-    <div ref={ref} className="relative shrink-0">
-      <Button
-        type="button"
-        variant="primary"
-        size="sm"
-        className="gap-1.5"
-        aria-haspopup="true"
-        aria-expanded={open ? "true" : "false"}
-        disabled={setupBusy}
-        onClick={() => setOpen((v) => !v)}
-      >
-        {t("onboarding.setUp")}
-        <Icon name="chevron" className="h-3.5 w-3.5" />
-      </Button>
-      {open &&
-      (
-        <div
-          role="menu"
-          className="absolute right-0 top-10 z-20 min-w-[176px] rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] p-1 shadow-[var(--v2-shadow-menu)]"
-        >
+    <div className="shrink-0">
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            type="button"
+            variant="primary"
+            size="sm"
+            className="gap-1.5"
+            disabled={setupBusy}
+          >
+            {t("onboarding.setUp")}
+            <Icon name="chevron" className="h-3.5 w-3.5" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="min-w-[176px]">
           {menuItems.map(
             (item) => (
-              <button
+              <DropdownMenuItem
                 key={item.id}
-                type="button"
-                role="menuitem"
                 disabled={item.disabled}
-                onClick={() => {
-                  setOpen(false);
-                  item.run();
-                }}
-                className="flex w-full items-center rounded-[7px] px-2.5 py-1.5 text-left text-[13px] text-[var(--v2-text)] hover:bg-[var(--v2-surface-soft)] disabled:cursor-not-allowed disabled:opacity-50"
+                onSelect={() => item.run()}
               >
                 {item.label}
-              </button>
+              </DropdownMenuItem>
             )
           )}
-        </div>
-      )}
+        </DropdownMenuContent>
+      </DropdownMenu>
     </div>
   );
 }

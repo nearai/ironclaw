@@ -1,3 +1,4 @@
+import { Button } from "@ironclaw/design-system";
 
 export function SuggestionChips({ suggestions, onSelect, disabled = false }) {
   if (!suggestions || suggestions.length === 0) return null;
@@ -7,16 +8,17 @@ export function SuggestionChips({ suggestions, onSelect, disabled = false }) {
       <div className="mx-auto flex max-w-5xl flex-wrap gap-2">
         {suggestions.map(
           (text) => (
-            <button
+            <Button
               key={text}
-              onClick={() => {
-                if (!disabled) onSelect(text);
-              }}
+              type="button"
+              variant="secondary"
+              size="sm"
               disabled={disabled}
-              className="v2-button rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-1.5 text-xs text-[var(--v2-text-strong)] hover:border-[var(--v2-accent)]/40 hover:text-[var(--v2-accent-text)] disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={() => onSelect(text)}
+              className="rounded-full text-xs"
             >
               {text}
-            </button>
+            </Button>
           )
         )}
       </div>

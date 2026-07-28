@@ -40,14 +40,15 @@ export function JobDetailShell({
 
           <div className="flex flex-wrap gap-2">
             {job.browse_url && (
-              <a
+              <Button
+                as="a"
+                variant="secondary"
                 href={job.browse_url}
                 target="_blank"
                 rel="noreferrer noopener"
-                className="v2-button inline-flex h-10 items-center rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 text-sm font-medium text-[var(--v2-text-strong)] hover:border-[color-mix(in_srgb,var(--v2-accent)_45%,var(--v2-panel-border))] hover:bg-[var(--v2-accent-soft)]"
               >
                 Browse files
-              </a>
+              </Button>
             )}
             {canShowCancel(job) && (
               <Button variant="secondary" disabled={isBusy} onClick={() => onCancel(job.id)}>Cancel</Button>
@@ -61,18 +62,20 @@ export function JobDetailShell({
 
       <div className="flex flex-wrap gap-2">
         {JOB_DETAIL_TABS.map((tab) => (
-          <button
+          <Button
             key={tab.id}
+            type="button"
+            variant="secondary"
             onClick={() => onTabChange(tab.id)}
             className={[
-              "v2-button rounded-full border px-4 py-2 text-sm",
+              "rounded-full",
               activeTab === tab.id
                 ? "border-[color-mix(in_srgb,var(--v2-accent)_35%,transparent)] bg-[var(--v2-accent-soft)] text-[var(--v2-text-strong)]"
-                : "border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] text-[var(--v2-text-muted)] hover:border-[color-mix(in_srgb,var(--v2-accent)_25%,var(--v2-panel-border))] hover:text-[var(--v2-text-strong)]",
+                : "text-[var(--v2-text-muted)]",
             ].join(" ")}
           >
             {tab.label}
-          </button>
+          </Button>
         ))}
       </div>
 

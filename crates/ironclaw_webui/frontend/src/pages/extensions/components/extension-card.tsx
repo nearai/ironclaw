@@ -2,7 +2,13 @@ import React from "react";
 import { useT } from "../../../lib/i18n";
 import { Badge } from "@ironclaw/design-system";
 import { Button } from "@ironclaw/design-system";
-import { Icon } from "@ironclaw/design-system";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+  Icon,
+} from "@ironclaw/design-system";
 import {
   KIND_LABELS,
   STATE_TONES,
@@ -36,65 +42,43 @@ function translatedKnownLabel(t, prefix, value, knownLabels) {
   return knownLabels[value] ? t(`${prefix}.${value}`) : value;
 }
 
-/* Lightweight overflow menu. Real <button>s; closes on outside click. */
+/* Overflow action menu on the design-system DropdownMenu. */
 function OverflowMenu({ actions, isBusy }) {
   const t = useT();
-  const [open, setOpen] = React.useState(false);
-  const ref = React.useRef(null);
-
-  React.useEffect(() => {
-    if (!open) return undefined;
-    const onDoc = (event) => {
-      if (ref.current && !ref.current.contains(event.target)) setOpen(false);
-    };
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, [open]);
 
   return (
-    <div ref={ref} className="relative shrink-0">
-      <button
-        type="button"
-        aria-label={t("extensions.moreActions")}
-        aria-haspopup="true"
-        aria-expanded={open ? "true" : "false"}
-        disabled={isBusy}
-        onClick={() => setOpen((v) => !v)}
-        className="grid h-7 w-7 place-items-center rounded-md border border-transparent text-[var(--v2-text-faint)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)] disabled:cursor-not-allowed disabled:opacity-50"
-      >
-        <Icon name="more" className="h-4 w-4" strokeWidth={2.4} />
-      </button>
-      {open &&
-      (
-        <div
-          role="menu"
-          className="absolute right-0 top-8 z-10 min-w-[156px] rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] p-1 shadow-[var(--v2-shadow-menu)]"
-        >
+    <div className="shrink-0">
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            aria-label={t("extensions.moreActions")}
+            disabled={isBusy}
+            className="grid h-7 w-7 place-items-center rounded-md border border-transparent text-[var(--v2-text-faint)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Icon name="more" className="h-4 w-4" strokeWidth={2.4} />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
           {actions.map(
             (action) => (
-              <button
+              <DropdownMenuItem
                 key={action.id}
-                type="button"
-                role="menuitem"
                 disabled={isBusy}
-                onClick={() => {
-                  setOpen(false);
-                  action.run();
-                }}
-                className={[
-                  "flex w-full items-center gap-2.5 rounded-[7px] px-2.5 py-1.5 text-left text-[13px] disabled:cursor-not-allowed disabled:opacity-50",
+                onSelect={() => action.run()}
+                className={
                   action.danger
-                    ? "text-[var(--v2-danger-text)] hover:bg-[var(--v2-danger-soft)]"
-                    : "text-[var(--v2-text)] hover:bg-[var(--v2-surface-soft)]",
-                ].join(" ")}
+                    ? "text-[var(--v2-danger-text)] data-[highlighted]:bg-[var(--v2-danger-soft)] data-[highlighted]:text-[var(--v2-danger-text)]"
+                    : undefined
+                }
               >
                 <Icon name={action.icon || "settings"} className="h-3.5 w-3.5" />
                 {action.label}
-              </button>
+              </DropdownMenuItem>
             )
           )}
-        </div>
-      )}
+        </DropdownMenuContent>
+      </DropdownMenu>
     </div>
   );
 }

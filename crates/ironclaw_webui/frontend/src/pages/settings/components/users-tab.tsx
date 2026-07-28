@@ -2,7 +2,7 @@ import { Button } from "@ironclaw/design-system";
 import { Badge } from "@ironclaw/design-system";
 import { Card } from "@ironclaw/design-system";
 import { Icon } from "@ironclaw/design-system";
-import { Input, FormField, Label } from "@ironclaw/design-system";
+import { Input, FormField, Label, SelectMenu } from "@ironclaw/design-system";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import { useUsers } from "../hooks/useUsers";
@@ -67,15 +67,18 @@ function CreateUserForm({ onCreate, isCreating, error }) {
           </FormField>
         </div>
         <FormField label={t("users.role")} htmlFor="user-role">
-          <select
+          <SelectMenu
             id="user-role"
+            ariaLabel={t("users.role")}
             value={role}
-            onChange={(e) => setRole(e.currentTarget.value)}
-            className="v2-select h-9 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 text-sm text-[var(--v2-text-strong)] outline-none focus:border-[color-mix(in_srgb,var(--v2-accent)_45%,var(--v2-panel-border))]"
-          >
-            <option value="member">{t("users.member")}</option>
-            <option value="admin">{t("users.admin")}</option>
-          </select>
+            onChange={setRole}
+            align="left"
+            className="w-full"
+            options={[
+              { value: "member", label: t("users.member") },
+              { value: "admin", label: t("users.admin") },
+            ]}
+          />
         </FormField>
         {error &&
         ( <p className="text-sm text-[var(--v2-danger-text)]">{error.message}</p> )}

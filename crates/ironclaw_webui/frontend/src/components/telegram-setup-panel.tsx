@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Button } from "@ironclaw/design-system";
+import { Button, ConfirmDialog } from "@ironclaw/design-system";
 import React from "react";
 import { useT } from "../lib/i18n";
 import {
@@ -92,9 +92,13 @@ export function TelegramSetupPanel({ action, setupQuery }) {
     if (mutationPending) return;
     saveMutation.mutate(form);
   };
+  const [removeConfirmOpen, setRemoveConfirmOpen] = React.useState(false);
   const remove = () => {
     if (mutationPending) return;
-    if (!window.confirm(t("telegramSetup.removeConfirm"))) return;
+    setRemoveConfirmOpen(true);
+  };
+  const confirmRemove = () => {
+    setRemoveConfirmOpen(false);
     removeMutation.mutate();
   };
   // A blank token is only submittable when a saved one already exists
@@ -186,6 +190,14 @@ export function TelegramSetupPanel({ action, setupQuery }) {
         {saveMutation.isSuccess &&
         (<p className="text-xs text-[var(--v2-positive-text)]">{copy.successMessage}</p>)}
       </div>
+      <ConfirmDialog
+        open={removeConfirmOpen}
+        title={t("telegramSetup.remove")}
+        description={t("telegramSetup.removeConfirm")}
+        confirmLabel={t("common.remove")}
+        onConfirm={confirmRemove}
+        onCancel={() => setRemoveConfirmOpen(false)}
+      />
     </div>
   );
 }

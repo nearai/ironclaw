@@ -109,6 +109,8 @@ type ButtonProps = ButtonOwnProps & ButtonNativeProps & LinkLikeProps;
 
 /* ── Component ─────────────────────────────────────────────────────── */
 
+/* React 19 passes `ref` as a regular prop, so it flows through `...rest`
+   onto the rendered element — Radix `asChild` triggers compose cleanly. */
 export function Button({
   children,
   className = "",

@@ -1,7 +1,7 @@
 import React from "react";
 import { MarkdownRenderer } from "./markdown-renderer";
 import { ToolActivity } from "./tool-activity";
-import { Icon } from "@ironclaw/design-system";
+import { Button, Icon } from "@ironclaw/design-system";
 import { toast } from "../../../lib/toast";
 import { ProjectFileChips } from "./project-file-chips";
 import { AttachmentChip } from "./attachment-chip";
@@ -281,39 +281,45 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
           {(showActions || showRetryAction) && (
             <div className="flex shrink-0 items-center gap-1">
             {showActions && (
-              <button
+              <Button
                 type="button"
+                variant="ghost"
+                size="icon-sm"
                 onClick={copy}
                 title={copied ? t("common.copied") : t("chat.copyMessage")}
                 aria-label={copied ? t("common.copied") : t("chat.copyMessage")}
-                className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 hover:text-[var(--v2-text-strong)]"
+                className="h-7 w-7"
               >
                 <Icon name={copied ? "check" : "copy"} className="h-3.5 w-3.5" />
-              </button>
+              </Button>
             )}
             {showArtifactAction && (
-              <button
+              <Button
                 type="button"
+                variant="ghost"
+                size="icon-sm"
                 onClick={downloadArtifact}
                 disabled={artifactDownloading}
                 title={artifactDownloading ? t("common.loading") : t("common.download")}
                 aria-label={artifactDownloading ? t("common.loading") : t("common.download")}
                 data-testid="download-run-artifact"
-                className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 hover:text-[var(--v2-text-strong)] disabled:opacity-50"
+                className="h-7 w-7"
               >
                 <Icon name="download" className="h-3.5 w-3.5" />
-              </button>
+              </Button>
             )}
             {showRetryAction && (
-              <button
+              <Button
                 type="button"
+                variant="ghost"
+                size="icon-sm"
                 onClick={() => onRetry?.(message)}
                 title={t("chat.retryMessage")}
                 aria-label={t("chat.retryMessage")}
-                className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 text-[var(--v2-danger-text)] hover:bg-[var(--v2-danger-soft)]"
+                className="h-7 w-7 text-[var(--v2-danger-text)] hover:bg-[var(--v2-danger-soft)] hover:text-[var(--v2-danger-text)]"
               >
                 <Icon name="retry" className="h-3.5 w-3.5" />
-              </button>
+              </Button>
             )}
             </div>
           )}

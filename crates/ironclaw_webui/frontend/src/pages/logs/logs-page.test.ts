@@ -49,6 +49,7 @@ function renderLogsPage(overrides = {}) {
     Badge() {},
     Button() {},
     Checkbox() {},
+    ConfirmDialog() {},
     Input() {},
     SelectMenu() {},
     useT: () => (key) => key,
