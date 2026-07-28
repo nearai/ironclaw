@@ -16,6 +16,15 @@ on:
         required: false
         default: false
         type: boolean
+      alone_journey_replay:
+        description: >-
+          Also replay each mutating provider journey in its own pytest
+          process, proving it passes with no other journey before it. Off for
+          pull requests (one server start per journey); the nightly deep run
+          turns it on.
+        required: false
+        default: false
+        type: boolean
   workflow_dispatch:
   # pull_request deliberately has no `paths:` filter: the "Reborn E2E"
   # roll-up must report on every PR so it can be a required status check (a
@@ -248,6 +257,27 @@ jobs:
           tests/e2e/scenarios/test_reborn_qa_trace_full_path.py::test_mutating_qa_journeys_replay_in_reverse_against_shared_provider_world
           -v
           --timeout=120
+
+      - name: Replay each mutating journey alone
+        if: inputs.alone_journey_replay
+        env:
+          IRONCLAW_EMULATE_CLI: ${{ github.workspace }}/.emulate/packages/emulate/dist/index.js
+        run: |
+          set -euo pipefail
+          # One pytest process per journey: a journey that only passes because
+          # an earlier one left Reborn or a provider in some state fails here,
+          # and nowhere in the ordinary lane. The list is pinned by
+          # test_alone_lane_lists_every_mutating_journey, so an empty loop
+          # cannot quietly pass.
+          mapfile -t journeys < <(python scripts/ci/list_mutating_journeys.py)
+          echo "replaying ${#journeys[@]} journeys alone"
+          for journey in "${journeys[@]}"; do
+            echo "::group::alone: $journey"
+            pytest tests/e2e/scenarios/test_reborn_qa_trace_full_path.py \
+              -k "$journey and not isolated" \
+              -v --timeout=120
+            echo "::endgroup::"
+          done
 
       - name: Run Reborn Responses API E2E
         run: |

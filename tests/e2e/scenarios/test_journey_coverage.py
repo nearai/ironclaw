@@ -1,6 +1,7 @@
 """Completeness gate for typed whole-path journey evidence."""
 
 import ast
+import importlib.util
 import json
 import re
 import tomllib
@@ -405,6 +406,28 @@ def test_journey_order_env_selects_the_reversed_lane(monkeypatch, value, expecte
     else:
         monkeypatch.setenv(JOURNEY_ORDER_ENV, value)
     assert journey_order_is_reversed() is expected
+
+
+def test_alone_lane_lists_every_mutating_journey():
+    """The alone-lane loop is only as good as the list it iterates.
+
+    An empty or drifted list would make the nightly step iterate fewer times,
+    exit 0, and retire the proof with nothing failing — so pin the list
+    against the case inventory rather than trusting the script's own output.
+    """
+    script = ROOT / "scripts/ci/list_mutating_journeys.py"
+    assert script.is_file(), script
+    spec = importlib.util.spec_from_file_location("list_mutating_journeys", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    expected = [
+        case.case_id
+        for case in PROVIDER_JOURNEY_CASES
+        if case.mutable_provider_worlds
+    ]
+    assert expected, "no mutating journeys: the alone lane would test nothing"
+    assert module.mutating_journey_ids() == expected
 
 
 def test_every_journey_has_complete_typed_executable_evidence():
