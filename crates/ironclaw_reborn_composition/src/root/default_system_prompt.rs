@@ -368,6 +368,20 @@ mod tests {
                 .content
                 .contains("When a tool result is partial, truncated, failed")
         );
+        // Self-knowledge must be grounded in the published docs site rather than
+        // recalled from training data (#6734): the prompt has to name the
+        // llms.txt index and the `.md` raw-markdown suffix, or the model has no
+        // way to look its own capabilities up.
+        assert!(
+            content
+                .content
+                .contains("https://docs.ironclaw.com/llms.txt"),
+            "prompt must point capability questions at the docs index"
+        );
+        assert!(
+            content.content.contains(".md"),
+            "prompt must teach the raw-markdown `.md` suffix for docs pages"
+        );
         assert!(
             !content.content.contains("tool_search"),
             "disclosure-off prompt must not mention the bridge tools"
