@@ -1191,7 +1191,10 @@ mod retry_after_properties {
             let header = reqwest::header::HeaderValue::from_str(&past.to_rfc2822())
                 .expect("rfc2822 dates are legal header values");
             let delay = parse_retry_after_value(&header);
-            prop_assert!(delay <= Duration::from_secs(MAX_RETRY_AFTER_SECS), "{delay:?}");
+            // A deadline that has already passed means wait no time at all.
+            // Asserting only the cap would still pass if a past date fell back
+            // to a fixed delay, which is the regression this property is for.
+            prop_assert_eq!(delay, Duration::ZERO, "a past deadline must not delay");
         }
     }
 }
