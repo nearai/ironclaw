@@ -562,7 +562,7 @@ fn dispatch_error_for_runtime(
     kind: RuntimeDispatchErrorKind,
 ) -> DispatchError {
     match runtime {
-        RuntimeKind::Script => DispatchError::Script {
+        RuntimeKind::Script | RuntimeKind::Sandbox => DispatchError::Script {
             kind,
             model_visible_cause: None,
         },

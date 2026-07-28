@@ -161,6 +161,7 @@ where
                 RuntimeKind::Script
                 | RuntimeKind::Mcp
                 | RuntimeKind::Wasm
+                | RuntimeKind::Sandbox
                 | RuntimeKind::FirstParty => {}
                 RuntimeKind::System => self.push_issue(
                     &mut issues,

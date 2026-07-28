@@ -1075,7 +1075,7 @@ fn dispatch_error_for_runtime(
             kind,
             model_visible_cause: cause,
         },
-        RuntimeKind::Script => DispatchError::Script {
+        RuntimeKind::Script | RuntimeKind::Sandbox => DispatchError::Script {
             kind,
             model_visible_cause: cause,
         },

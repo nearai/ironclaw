@@ -413,7 +413,7 @@ fn dispatch_resource_error(
             kind: RuntimeDispatchErrorKind::Resource,
             model_visible_cause: Some(cause),
         },
-        RuntimeKind::Script => DispatchError::Script {
+        RuntimeKind::Script | RuntimeKind::Sandbox => DispatchError::Script {
             kind: RuntimeDispatchErrorKind::Resource,
             model_visible_cause: Some(cause),
         },

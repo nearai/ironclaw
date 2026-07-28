@@ -23,7 +23,7 @@
 //! (§5.10): `RuntimeLane` is the **execution/trust boundary** — the untrusted
 //! surface `dispatch()` hands mediated handles to (§5.4) — a closed set of four.
 //! [`crate::RuntimeKind`] is a **loading detail / taxonomy** (`Wasm`/`Mcp`/
-//! `Script`/`FirstParty`/`System`); e.g. a `Script` runtime executes *on* the
+//! `Script`/`Sandbox`/`FirstParty`/`System`); e.g. a `Script` runtime executes *on* the
 //! `Process` lane, and `System` is host-internal, not an untrusted lane. WASM
 //! extensions are *data behind* the `Wasm` lane, not new lanes — so the closed
 //! set costs no real extensibility (§4.2). Introduced additively ahead of the
@@ -100,6 +100,10 @@ impl RuntimeLane {
             RuntimeKind::Wasm => Some(RuntimeLane::Wasm),
             RuntimeKind::Mcp => Some(RuntimeLane::Mcp),
             RuntimeKind::Script => Some(RuntimeLane::Process),
+            // The sandboxed-shell lane is an OS process under the tenant
+            // sandbox — the same `Process` lane `Script` runs on (see the
+            // module doc above and `.claude/rules/safety-and-sandbox.md`).
+            RuntimeKind::Sandbox => Some(RuntimeLane::Process),
             RuntimeKind::FirstParty => Some(RuntimeLane::FirstParty),
             RuntimeKind::System => None,
         }

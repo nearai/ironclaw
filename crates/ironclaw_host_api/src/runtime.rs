@@ -24,6 +24,12 @@ pub enum RuntimeKind {
     Wasm,
     Mcp,
     Script,
+    /// Sandboxed-shell execution lane: a persistent, per-tenant OS-process
+    /// sandbox (see `.claude/rules/safety-and-sandbox.md`). One invocation
+    /// makes many outbound calls, so it shares the multi-call
+    /// credential-reuse set with `Mcp`/`Wasm` (see
+    /// `runtime_reuses_staged_credentials`).
+    Sandbox,
     #[serde(skip_deserializing)]
     FirstParty,
     #[serde(skip_deserializing)]
@@ -36,6 +42,7 @@ impl RuntimeKind {
             Self::Wasm => "wasm",
             Self::Mcp => "mcp",
             Self::Script => "script",
+            Self::Sandbox => "sandbox",
             Self::FirstParty => "first_party",
             Self::System => "system",
         }
@@ -144,6 +151,7 @@ mod tests {
             RuntimeKind::Wasm,
             RuntimeKind::Mcp,
             RuntimeKind::Script,
+            RuntimeKind::Sandbox,
             RuntimeKind::FirstParty,
             RuntimeKind::System,
         ] {

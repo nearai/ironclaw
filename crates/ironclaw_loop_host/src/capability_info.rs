@@ -262,6 +262,7 @@ fn runtime_kind_label(runtime: RuntimeKind) -> &'static str {
         RuntimeKind::Wasm => "wasm",
         RuntimeKind::Mcp => "mcp",
         RuntimeKind::Script => "script",
+        RuntimeKind::Sandbox => "sandbox",
         RuntimeKind::FirstParty => "first_party",
         RuntimeKind::System => "system",
     }
@@ -304,4 +305,17 @@ fn target_not_visible() -> AgentLoopHostError {
         AgentLoopHostErrorKind::InvalidInvocation,
         "capability_info target is not on the visible surface",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the wire label for the sandboxed-shell lane. `runtime_kind_label`
+    /// is a second copy of `ironclaw_host_runtime::surface::runtime_kind_token`
+    /// (see the mirrored test there) — the two can drift.
+    #[test]
+    fn runtime_kind_label_maps_sandbox_to_stable_wire_string() {
+        assert_eq!(runtime_kind_label(RuntimeKind::Sandbox), "sandbox");
+    }
 }

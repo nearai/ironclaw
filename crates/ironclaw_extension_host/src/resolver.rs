@@ -169,7 +169,7 @@ fn dispatch_error_for_kind(
             kind,
             model_visible_cause: model_visible_cause.or(safe_summary),
         },
-        RuntimeKind::Script => DispatchError::Script {
+        RuntimeKind::Script | RuntimeKind::Sandbox => DispatchError::Script {
             kind,
             model_visible_cause: model_visible_cause.or(safe_summary),
         },
