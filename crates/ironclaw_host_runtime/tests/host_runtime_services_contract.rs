@@ -5572,7 +5572,7 @@ async fn host_runtime_services_cancel_writes_killed_result_when_reservation_is_s
 }
 
 #[tokio::test]
-async fn host_runtime_services_cancel_records_kill_side_effects_when_cleanup_fails() {
+async fn host_runtime_services_cancel_does_not_reclassify_committed_kill_when_cleanup_fails() {
     let process_services = ironclaw_processes::in_memory_backed_process_services();
     let process_runtime = process_services.process_runtime();
     let result_store = process_services.result_store();
@@ -5597,14 +5597,15 @@ async fn host_runtime_services_cancel_records_kill_side_effects_when_cleanup_fai
         .await
         .unwrap();
 
-    let _error = runtime
+    let outcome = runtime
         .cancel_work(CancelRuntimeWorkRequest::new(
             scope.clone(),
             CorrelationId::new(),
             CancelReason::UserRequested,
         ))
         .await
-        .expect_err("cleanup failure should remain visible to callers");
+        .expect("post-commit cleanup failure must not reclassify the durable kill");
+    assert_eq!(outcome.cancelled, vec![RuntimeWorkId::Process(process_id)]);
 
     assert!(
         token.is_cancelled(),

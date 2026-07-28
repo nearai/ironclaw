@@ -8,7 +8,7 @@ publish = false
 layer = "kernel"
 
 [features]
-test-support = ["ironclaw_processes/test-support"]
+test-support = []
 
 [dependencies]
 async-trait = "0.1"

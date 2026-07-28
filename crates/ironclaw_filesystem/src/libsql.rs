@@ -27,7 +27,7 @@ use crate::{
 pub struct LibSqlRootFilesystem {
     pool: LibSqlPool,
     index_ddl_lock: tokio::sync::Mutex<()>,
-    projection_specs: StdMutex<HashMap<IndexName, IndexSpec>>,
+    projection_specs: StdMutex<HashMap<(String, IndexName), IndexSpec>>,
 }
 const LIBSQL_CHILD_ENTRIES_SQL: &str = "SELECT path, length(contents), is_dir \
     FROM root_filesystem_entries \
@@ -214,6 +214,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
             });
         }
         let shared_projection = matches!(spec.kind, IndexKind::Exact | IndexKind::Prefix);
+        let projection_key = (path.as_str().to_string(), spec.name.clone());
         if shared_projection {
             let cache = self
                 .projection_specs
@@ -223,7 +224,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
                     operation: FilesystemOperation::EnsureIndex,
                     reason: "projection index cache mutex poisoned".to_string(),
                 })?;
-            if let Some(existing) = cache.get(&spec.name) {
+            if let Some(existing) = cache.get(&projection_key) {
                 return if existing == spec {
                     Ok(())
                 } else {
@@ -245,7 +246,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
                     operation: FilesystemOperation::EnsureIndex,
                     reason: "projection index cache mutex poisoned".to_string(),
                 })?;
-            if let Some(existing) = cache.get(&spec.name) {
+            if let Some(existing) = cache.get(&projection_key) {
                 return if existing == spec {
                     Ok(())
                 } else {
@@ -257,11 +258,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
                 };
             }
         }
-        let catalog_prefix = if shared_projection {
-            "/shared"
-        } else {
-            path.as_str()
-        };
+        let catalog_prefix = path.as_str();
         let keys_json = serde_json::to_string(
             &spec
                 .keys
@@ -480,7 +477,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
                     operation: FilesystemOperation::EnsureIndex,
                     reason: "projection index cache mutex poisoned".to_string(),
                 })?
-                .insert(spec.name.clone(), spec.clone());
+                .insert(projection_key, spec.clone());
         }
         Ok(())
     }
@@ -505,7 +502,11 @@ impl RootFilesystem for LibSqlRootFilesystem {
         }
         let fts_tables = self.discover_fts_tables_for_filter(path, filter).await?;
         let mut params: Vec<libsql::Value> = vec![libsql::Value::Text(path.as_str().to_string())];
-        let prefix_pattern = format!("{}/%", path.as_str());
+        let prefix_pattern = if path.as_str() == "/" {
+            "/%".to_string()
+        } else {
+            format!("{}/%", path.as_str().trim_end_matches('/'))
+        };
         params.push(libsql::Value::Text(escape_like_with_trailing_wildcard(
             &prefix_pattern,
         )));
@@ -653,7 +654,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
             libsql::Value::Text(page.index.as_str().to_string()),
             libsql::Value::Text(path.as_str().to_string()),
         ];
-        let prefix_pattern = format!("{}/%", path.as_str());
+        let prefix_pattern = format!("{}/%", path.as_str().trim_end_matches('/'));
         params.push(libsql::Value::Text(escape_like_with_trailing_wildcard(
             &prefix_pattern,
         )));
@@ -678,7 +679,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
             };
             sql.push_str(&format!(
                 " AND ({expression} {comparison} ?{value_index} \
-                 OR ({expression} = ?{value_index} AND {tie_expression} > ?{tie_index}))"
+                 OR ({expression} = ?{value_index} AND {tie_expression} {comparison} ?{tie_index}))"
             ));
         }
         let direction = match page.direction {
@@ -690,7 +691,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
         )));
         let limit_index = params.len();
         sql.push_str(&format!(
-            " ORDER BY {expression} {direction}, {tie_expression} ASC LIMIT ?{limit_index}"
+            " ORDER BY {expression} {direction}, {tie_expression} {direction} LIMIT ?{limit_index}"
         ));
 
         let mut rows = conn
@@ -2135,8 +2136,20 @@ async fn ensure_libsql_ordered_projection(
             operation: FilesystemOperation::EnsureIndex,
         });
     }
-    let trigger_base = sql_index_name("/ordered_projection", spec.name.as_str());
+    let trigger_base = sql_index_name(path.as_str(), spec.name.as_str());
+    let legacy_trigger_base = sql_index_name("/ordered_projection", spec.name.as_str());
     let index_name = spec.name.as_str();
+    let escaped_prefix = path.as_str().replace('\'', "''");
+    let descendant_pattern = if path.as_str() == "/" {
+        "/%".to_string()
+    } else {
+        format!("{}/%", path.as_str().trim_end_matches('/'))
+    }
+    .replace('\'', "''");
+    let new_path_matches =
+        format!("(new.path = '{escaped_prefix}' OR new.path LIKE '{descendant_pattern}')");
+    let old_path_matches =
+        format!("(old.path = '{escaped_prefix}' OR old.path LIKE '{descendant_pattern}')");
     let projected_values = spec
         .keys
         .iter()
@@ -2156,17 +2169,19 @@ async fn ensure_libsql_ordered_projection(
     let insert = format!(
         "CREATE TRIGGER IF NOT EXISTS {trigger_base}_ai \
          AFTER INSERT ON root_filesystem_entries \
+         WHEN {new_path_matches} \
          BEGIN \
            INSERT OR REPLACE INTO root_filesystem_ordered_index_rows(\
              index_name, path, k0, k1, k2, k3, k4, k5, k6, k7\
            ) \
            SELECT '{index_name}', new.path, {projected_values} \
-           WHERE new.is_dir = 0 AND {predicate}; \
+           WHERE {new_path_matches} AND new.is_dir = 0 AND {predicate}; \
          END;"
     );
     let update = format!(
         "CREATE TRIGGER IF NOT EXISTS {trigger_base}_au \
          AFTER UPDATE ON root_filesystem_entries \
+         WHEN {old_path_matches} OR {new_path_matches} \
          BEGIN \
            DELETE FROM root_filesystem_ordered_index_rows \
              WHERE index_name = '{index_name}' AND path = old.path; \
@@ -2174,18 +2189,24 @@ async fn ensure_libsql_ordered_projection(
              index_name, path, k0, k1, k2, k3, k4, k5, k6, k7\
            ) \
            SELECT '{index_name}', new.path, {projected_values} \
-           WHERE new.is_dir = 0 AND {predicate}; \
+           WHERE {new_path_matches} AND new.is_dir = 0 AND {predicate}; \
          END;"
     );
     let delete = format!(
         "CREATE TRIGGER IF NOT EXISTS {trigger_base}_ad \
          AFTER DELETE ON root_filesystem_entries \
+         WHEN {old_path_matches} \
          BEGIN \
            DELETE FROM root_filesystem_ordered_index_rows \
              WHERE index_name = '{index_name}' AND path = old.path; \
          END;"
     );
-    conn.execute_batch(&format!("{insert}{update}{delete}"))
+    let remove_legacy = format!(
+        "DROP TRIGGER IF EXISTS {legacy_trigger_base}_ai;\
+         DROP TRIGGER IF EXISTS {legacy_trigger_base}_au;\
+         DROP TRIGGER IF EXISTS {legacy_trigger_base}_ad;"
+    );
+    conn.execute_batch(&format!("{remove_legacy}{insert}{update}{delete}"))
         .await
         .map(|_| ())
         .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error))

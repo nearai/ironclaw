@@ -1253,22 +1253,19 @@ pub(crate) fn result_store_failing_writes() -> (
 }
 
 /// Real `ProcessJournalStore` over a [`FaultInjecting`] backend armed to
-/// fail the terminal status transition's journal append, replacing the whole-trait
-/// `FailingTerminalProcessStore` fake. Submission appends `Submitted` with its
-/// private input, then the supervisor appends `Claimed`. Projection refresh
-/// reads share the recorder, and the terminal transition (`complete` or `fail`,
-/// whichever the executor outcome selects) is the 7th
-/// process-journal append and is faulted, surfacing as `ProcessError::Filesystem`. `get` /
-/// `records_for_scope` still read the live `Running` record.
+/// fail the terminal status transition's materialized process-row write,
+/// replacing the whole-trait `FailingTerminalProcessStore` fake. Submission
+/// writes the process row once, claiming writes it a second time, and the
+/// terminal transition (`complete` or `fail`) performs the third write.
 pub(crate) fn terminal_failing_process_store() -> (
     Arc<ProcessJournalStore<FaultInjecting<InMemoryBackend>>>,
     Arc<FaultInjecting<InMemoryBackend>>,
 ) {
     let backend = Arc::new(
         FaultInjecting::new(InMemoryBackend::new()).with_fault(
-            Fault::on(FilesystemOperation::Append)
-                .path("processes/journal/records")
-                .nth(7)
+            Fault::on(FilesystemOperation::WriteFile)
+                .path("processes/materialized/process/")
+                .nth(3)
                 .backend("injected terminal transition write failure"),
         ),
     );
@@ -1471,15 +1468,14 @@ pub(crate) async fn wait_for_result_store_write(backend: &FaultInjecting<InMemor
 }
 
 pub(crate) async fn wait_for_terminal_transition_write(backend: &FaultInjecting<InMemoryBackend>) {
-    // Fixture invocation lifecycle, submission/input, and claim precede the
-    // faulted terminal append.
+    // Submission and claim precede the faulted terminal process-row write.
     for _ in 0..100 {
-        let journal_appends = backend
-            .recorded_paths(FilesystemOperation::Append)
+        let process_writes = backend
+            .recorded_paths(FilesystemOperation::WriteFile)
             .into_iter()
-            .filter(|path| path.as_str().contains("processes/journal/records"))
+            .filter(|path| path.as_str().contains("processes/materialized/process/"))
             .count();
-        if journal_appends >= 7 {
+        if process_writes >= 3 {
             return;
         }
         tokio::time::sleep(Duration::from_millis(5)).await;

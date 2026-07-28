@@ -884,7 +884,7 @@ async fn libsql_ordered_query_uses_composite_index_and_keyset_cursor() {
             &Filter::All,
             &ironclaw_filesystem::OrderedPage::new(
                 IndexName::new("thread_activity").unwrap(),
-                activity,
+                activity.clone(),
                 thread_id.clone(),
                 SortDirection::Ascending,
                 2,
@@ -901,6 +901,115 @@ async fn libsql_ordered_query_uses_composite_index_and_keyset_cursor() {
         second[0].entry.indexed[&thread_id],
         IndexValue::Text("c".into())
     );
+
+    let descending = filesystem
+        .query_ordered(
+            &prefix,
+            &Filter::All,
+            &ironclaw_filesystem::OrderedPage::new(
+                IndexName::new("thread_activity").unwrap(),
+                activity,
+                thread_id.clone(),
+                SortDirection::Descending,
+                2,
+            )
+            .after(ironclaw_filesystem::OrderedQueryCursor {
+                value: IndexValue::Text("001".into()),
+                tie_breaker: IndexValue::Text("b".into()),
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(descending.len(), 1);
+    assert_eq!(
+        descending[0].entry.indexed[&thread_id],
+        IndexValue::Text("a".into())
+    );
+}
+
+#[tokio::test]
+async fn libsql_root_ordered_query_includes_normal_descendants() {
+    let filesystem = libsql_root().await;
+    // `VirtualPath` intentionally does not expose the bare virtual root, so use
+    // a declared top-level root to exercise the same descendant-pattern edge.
+    let root = VirtualPath::new("/engine").unwrap();
+    let rank = IndexKey::new("rank").unwrap();
+    let item_id = IndexKey::new("item_id").unwrap();
+    filesystem
+        .ensure_index(
+            &root,
+            &IndexSpec::new(
+                IndexName::new("root_items").unwrap(),
+                vec![rank.clone(), item_id.clone()],
+                IndexKind::Exact,
+            ),
+        )
+        .await
+        .unwrap();
+    filesystem
+        .put(
+            &VirtualPath::new("/engine/root-query/item-a").unwrap(),
+            Entry::record(
+                RecordKind::new("root_item").unwrap(),
+                &serde_json::json!({}),
+            )
+            .unwrap()
+            .with_indexed(rank.clone(), IndexValue::Text("001".into()))
+            .with_indexed(item_id.clone(), IndexValue::Text("item-a".into())),
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+
+    let rows = filesystem
+        .query_ordered(
+            &root,
+            &Filter::All,
+            &ironclaw_filesystem::OrderedPage::new(
+                IndexName::new("root_items").unwrap(),
+                rank,
+                item_id,
+                SortDirection::Ascending,
+                10,
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].path.as_str(), "/engine/root-query/item-a");
+}
+
+#[tokio::test]
+async fn libsql_scopes_ordered_index_names_by_prefix() {
+    let filesystem = libsql_root().await;
+    filesystem
+        .ensure_index(
+            &VirtualPath::new("/engine/prefix-a").unwrap(),
+            &IndexSpec::new(
+                IndexName::new("shared_name").unwrap(),
+                vec![
+                    IndexKey::new("rank_a").unwrap(),
+                    IndexKey::new("id_a").unwrap(),
+                ],
+                IndexKind::Exact,
+            ),
+        )
+        .await
+        .unwrap();
+    filesystem
+        .ensure_index(
+            &VirtualPath::new("/engine/prefix-b").unwrap(),
+            &IndexSpec::new(
+                IndexName::new("shared_name").unwrap(),
+                vec![
+                    IndexKey::new("rank_b").unwrap(),
+                    IndexKey::new("id_b").unwrap(),
+                ],
+                IndexKind::Exact,
+            ),
+        )
+        .await
+        .expect("same index name with a different prefix is independent");
 }
 
 #[tokio::test]
@@ -2419,6 +2528,52 @@ mod postgres_tests {
             rows[0].entry.indexed[&thread_id],
             IndexValue::Text("c".into())
         );
+
+        let descending = fs
+            .query_ordered(
+                &prefix_path,
+                &Filter::All,
+                &ironclaw_filesystem::OrderedPage::new(
+                    IndexName::new("thread_activity").unwrap(),
+                    IndexKey::new("activity").unwrap(),
+                    thread_id.clone(),
+                    SortDirection::Descending,
+                    2,
+                )
+                .after(ironclaw_filesystem::OrderedQueryCursor {
+                    value: IndexValue::Text("001".into()),
+                    tie_breaker: IndexValue::Text("b".into()),
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(descending.len(), 1);
+        assert_eq!(
+            descending[0].entry.indexed[&thread_id],
+            IndexValue::Text("a".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_scopes_ordered_index_names_by_prefix() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        for (suffix, rank, id) in [
+            ("prefix-a", "rank_a", "id_a"),
+            ("prefix-b", "rank_b", "id_b"),
+        ] {
+            fs.ensure_index(
+                &VirtualPath::new(format!("{prefix}/{suffix}")).unwrap(),
+                &IndexSpec::new(
+                    IndexName::new("shared_name").unwrap(),
+                    vec![IndexKey::new(rank).unwrap(), IndexKey::new(id).unwrap()],
+                    IndexKind::Exact,
+                ),
+            )
+            .await
+            .expect("same index name with a different prefix is independent");
+        }
     }
 
     #[tokio::test]

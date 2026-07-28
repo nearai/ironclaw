@@ -972,6 +972,10 @@ impl ProcessObligationLifecycleStore {
 
 #[async_trait]
 impl ProcessJournalCommitObserver for ProcessObligationLifecycleStore {
+    fn process_observer_id(&self) -> &'static str {
+        "process-obligation-lifecycle-v1"
+    }
+
     async fn observe_process_commit(&self, commit: ProcessJournalCommit) -> Result<(), String> {
         if commit.state.process_kind != ProcessKind::CapabilityInvocation {
             return Ok(());

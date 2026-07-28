@@ -10,11 +10,12 @@ use ironclaw_processes::{
     ProcessGateRecord, ProcessInputPort, ProcessInputRecord, ProcessJournalCursor,
     ProcessJournalPage, ProcessJournalSource, ProcessJournalStoreError, ProcessLeaseRequest,
     ProcessLifecycleLookupBatchRequest, ProcessLifecycleLookupResult, ProcessLifecycleLookupSource,
-    ProcessRuntimePort, ProcessStateTransitionRequest, ProcessSubmissionPort,
-    ProcessTransitionPort, ProcessTreePort, ProcessTreeReservation, PruneReleasedProcessRequest,
-    RecordProcessCheckpointRequest, RecoverExpiredProcessLeasesRequest,
-    RecoverExpiredProcessLeasesResponse, ReleaseProcessTreeRequest, ReserveProcessTreeRequest,
-    ResumeProcessRequest, StopProcessRequest, SubmitProcessRequest, SuspendProcessRequest,
+    ProcessRuntimePort, ProcessSnapshotSource, ProcessStateTransitionRequest,
+    ProcessSubmissionPort, ProcessTransitionPort, ProcessTreePort, ProcessTreeReservation,
+    PruneReleasedProcessRequest, RecordProcessCheckpointRequest,
+    RecoverExpiredProcessLeasesRequest, RecoverExpiredProcessLeasesResponse,
+    ReleaseProcessTreeRequest, ReserveProcessTreeRequest, ResumeProcessRequest, StopProcessRequest,
+    SubmitProcessRequest, SubmitProcessWithCheckpointRequest, SuspendProcessRequest,
 };
 
 use crate::TurnError;
@@ -26,6 +27,21 @@ pub struct ProcessJournalStoreTurnAdapter {
 impl ProcessJournalStoreTurnAdapter {
     pub fn new(runtime: Arc<dyn ProcessRuntimePort>) -> Self {
         Self { runtime }
+    }
+}
+
+#[async_trait]
+impl ProcessSnapshotSource for ProcessJournalStoreTurnAdapter {
+    type Error = TurnError;
+
+    async fn process_snapshots(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<JournaledProcessSnapshot>, Self::Error> {
+        self.runtime
+            .process_snapshots(scope)
+            .await
+            .map_err(turn_error_from_process_journal_store_error)
     }
 }
 
@@ -125,6 +141,16 @@ impl ProcessSubmissionPort for ProcessJournalStoreTurnAdapter {
     ) -> Result<JournaledProcessSnapshot, Self::Error> {
         self.runtime
             .submit_process(request)
+            .await
+            .map_err(turn_error_from_process_journal_store_error)
+    }
+
+    async fn submit_process_with_checkpoint(
+        &self,
+        request: SubmitProcessWithCheckpointRequest,
+    ) -> Result<JournaledProcessSnapshot, Self::Error> {
+        self.runtime
+            .submit_process_with_checkpoint(request)
             .await
             .map_err(turn_error_from_process_journal_store_error)
     }
@@ -369,7 +395,8 @@ pub fn turn_error_from_process_journal_store_error(error: ProcessJournalStoreErr
         | ProcessJournalStoreError::Filesystem(_)
         | ProcessJournalStoreError::Serialization(_)
         | ProcessJournalStoreError::Deserialization(_)
-        | ProcessJournalStoreError::Observer(_) => TurnError::Unavailable {
+        | ProcessJournalStoreError::Observer(_)
+        | ProcessJournalStoreError::MigrationRequired => TurnError::Unavailable {
             reason: error.to_string(),
         },
     }

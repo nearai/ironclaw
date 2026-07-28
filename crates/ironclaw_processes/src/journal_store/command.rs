@@ -16,6 +16,10 @@ use crate::{
 pub(super) enum StoredProcessCommand {
     ImportLegacyState(Box<ProcessJournalMaterializedState>),
     Submit(Box<SubmitProcessRequest>),
+    SubmitWithCheckpoint {
+        request: Box<SubmitProcessRequest>,
+        checkpoint: Box<RecordProcessCheckpointRequest>,
+    },
     Claim {
         request: ClaimProcessesRequest,
         now: ironclaw_host_api::Timestamp,
@@ -45,13 +49,21 @@ pub(super) enum StoredProcessCommand {
 }
 
 impl StoredProcessCommand {
+    pub(super) fn cursor_reservation_count(&self, loaded_process_count: usize) -> usize {
+        match self {
+            Self::Claim { request, .. } => request.max_processes.max(1),
+            Self::RecoverExpired(_) => loaded_process_count.max(1),
+            _ => 1,
+        }
+    }
+
     pub(super) fn load_references(
         &self,
     ) -> Result<rows::LoadReferences, super::ProcessJournalStoreError> {
         let mut references = rows::LoadReferences::default();
         match self {
             Self::ImportLegacyState(_) => {}
-            Self::Submit(request) => {
+            Self::Submit(request) | Self::SubmitWithCheckpoint { request, .. } => {
                 references.process_ids.push(request.process_id);
                 references.process_ids.extend(request.parent_process_id);
                 references.process_ids.extend(request.root_process_id);
@@ -67,6 +79,11 @@ impl StoredProcessCommand {
                     references
                         .dependencies
                         .push((dependency.dependent_process_id, request.process_id));
+                }
+                if let Self::SubmitWithCheckpoint { checkpoint, .. } = self {
+                    references
+                        .checkpoints
+                        .push(checkpoint.checkpoint_id.clone());
                 }
             }
             Self::Claim {
@@ -148,15 +165,23 @@ pub(super) fn submission_replay_key(
         .operation_id
         .as_ref()
         .map(|operation_id| {
-            serde_json::to_string(&request.scope)
-                .map(|scope| {
-                    format!(
-                        "submit:{scope}:{:?}:{}",
-                        request.process_kind,
-                        operation_id.as_str()
-                    )
-                })
-                .map_err(|error| super::ProcessJournalStoreError::Serialization(error.to_string()))
+            let scope = &request.scope;
+            serde_json::to_string(&(
+                &scope.tenant_id,
+                &scope.user_id,
+                &scope.agent_id,
+                &scope.project_id,
+                &scope.mission_id,
+                &scope.thread_id,
+            ))
+            .map(|scope| {
+                format!(
+                    "submit:{scope}:{:?}:{}",
+                    request.process_kind,
+                    operation_id.as_str()
+                )
+            })
+            .map_err(|error| super::ProcessJournalStoreError::Serialization(error.to_string()))
         })
         .transpose()
 }

@@ -27,7 +27,7 @@ use crate::{
 pub struct PostgresRootFilesystem {
     pool: deadpool_postgres::Pool,
     index_ddl_lock: tokio::sync::Mutex<()>,
-    projection_specs: StdMutex<HashMap<IndexName, IndexSpec>>,
+    projection_specs: StdMutex<HashMap<(String, IndexName), IndexSpec>>,
 }
 const POSTGRES_MIGRATION_CONNECT_MAX_WAIT_ENV: &str =
     "IRONCLAW_FILESYSTEM_POSTGRES_MIGRATION_CONNECT_MAX_WAIT_SECS";
@@ -302,12 +302,13 @@ impl RootFilesystem for PostgresRootFilesystem {
             });
         }
         let shared_projection = matches!(spec.kind, IndexKind::Exact | IndexKind::Prefix);
+        let projection_key = (path.as_str().to_string(), spec.name.clone());
         if shared_projection {
             let cache = self
                 .projection_specs
                 .lock()
                 .map_err(|_| projection_cache_error(path))?;
-            if let Some(existing) = cache.get(&spec.name) {
+            if let Some(existing) = cache.get(&projection_key) {
                 return cached_projection_result(path, spec, existing);
             }
         }
@@ -317,15 +318,11 @@ impl RootFilesystem for PostgresRootFilesystem {
                 .projection_specs
                 .lock()
                 .map_err(|_| projection_cache_error(path))?;
-            if let Some(existing) = cache.get(&spec.name) {
+            if let Some(existing) = cache.get(&projection_key) {
                 return cached_projection_result(path, spec, existing);
             }
         }
-        let catalog_prefix = if shared_projection {
-            "/shared"
-        } else {
-            path.as_str()
-        };
+        let catalog_prefix = path.as_str();
         let keys_json = serde_json::to_value(
             spec.keys
                 .iter()
@@ -440,7 +437,7 @@ impl RootFilesystem for PostgresRootFilesystem {
             self.projection_specs
                 .lock()
                 .map_err(|_| projection_cache_error(path))?
-                .insert(spec.name.clone(), spec.clone());
+                .insert(projection_key, spec.clone());
         }
         Ok(())
     }
@@ -619,7 +616,7 @@ impl RootFilesystem for PostgresRootFilesystem {
             };
             sql.push_str(&format!(
                 " AND ({expression} {comparison} ${value_index} \
-                 OR ({expression} = ${value_index} AND {tie_expression} > ${tie_index}))"
+                 OR ({expression} = ${value_index} AND {tie_expression} {comparison} ${tie_index}))"
             ));
         }
         let direction = match page.direction {
@@ -629,7 +626,7 @@ impl RootFilesystem for PostgresRootFilesystem {
         params.push(Box::new(i64::from(page.limit.min(crate::Page::MAX_LIMIT))));
         let limit_index = params.len();
         sql.push_str(&format!(
-            " ORDER BY {expression} {direction}, {tie_expression} ASC LIMIT ${limit_index}"
+            " ORDER BY {expression} {direction}, {tie_expression} {direction} LIMIT ${limit_index}"
         ));
         let params_ref = params
             .iter()
@@ -1961,10 +1958,24 @@ async fn ensure_postgres_ordered_projection(
             operation: FilesystemOperation::EnsureIndex,
         });
     }
-    let trigger_base = sql_index_name("/ordered_projection", spec.name.as_str());
+    let trigger_base = sql_index_name(path.as_str(), spec.name.as_str());
+    let legacy_trigger_name = format!(
+        "{}_sync",
+        sql_index_name("/ordered_projection", spec.name.as_str())
+    );
     let function_name = format!("{trigger_base}_sync_fn");
     let trigger_name = format!("{trigger_base}_sync");
     let index_name = spec.name.as_str().replace('\'', "''");
+    let escaped_prefix = path.as_str().replace('\'', "''");
+    let (prefix_lower, prefix_upper) = descendant_path_range(path);
+    let prefix_lower = prefix_lower.replace('\'', "''");
+    let prefix_upper = prefix_upper.replace('\'', "''");
+    let new_path_matches = format!(
+        "(NEW.path = '{escaped_prefix}' OR (NEW.path >= '{prefix_lower}' AND NEW.path < '{prefix_upper}'))"
+    );
+    let old_path_matches = format!(
+        "(OLD.path = '{escaped_prefix}' OR (OLD.path >= '{prefix_lower}' AND OLD.path < '{prefix_upper}'))"
+    );
     let projected_values = spec
         .keys
         .iter()
@@ -1996,15 +2007,17 @@ async fn ensure_postgres_ordered_projection(
          LANGUAGE plpgsql AS $projection$ \
          BEGIN \
            IF TG_OP = 'DELETE' THEN \
-             DELETE FROM root_filesystem_ordered_index_rows \
-              WHERE index_name = '{index_name}' AND path = OLD.path; \
+             IF {old_path_matches} THEN \
+               DELETE FROM root_filesystem_ordered_index_rows \
+                WHERE index_name = '{index_name}' AND path = OLD.path; \
+             END IF; \
              RETURN OLD; \
            END IF; \
-           IF TG_OP = 'UPDATE' THEN \
+           IF TG_OP = 'UPDATE' AND {old_path_matches} THEN \
              DELETE FROM root_filesystem_ordered_index_rows \
               WHERE index_name = '{index_name}' AND path = OLD.path; \
            END IF; \
-           IF NEW.is_dir = FALSE AND {predicate} THEN \
+           IF {new_path_matches} AND NEW.is_dir = FALSE AND {predicate} THEN \
              INSERT INTO root_filesystem_ordered_index_rows(\
                index_name, path, k0, k1, k2, k3, k4, k5, k6, k7\
              ) VALUES ('{index_name}', NEW.path, {projected_values}) \
@@ -2013,11 +2026,22 @@ async fn ensure_postgres_ordered_projection(
            RETURN NEW; \
          END; \
          $projection$; \
+         DROP TRIGGER IF EXISTS {legacy_trigger_name} ON root_filesystem_entries; \
+         DROP TRIGGER IF EXISTS {trigger_name} ON root_filesystem_entries; \
          DO $trigger$ \
          BEGIN \
-           CREATE TRIGGER {trigger_name} \
-             AFTER INSERT OR UPDATE OR DELETE ON root_filesystem_entries \
-             FOR EACH ROW EXECUTE FUNCTION {function_name}(); \
+           CREATE TRIGGER {trigger_name}_insert \
+             AFTER INSERT ON root_filesystem_entries \
+             FOR EACH ROW WHEN ({new_path_matches}) \
+             EXECUTE FUNCTION {function_name}(); \
+           CREATE TRIGGER {trigger_name}_update \
+             AFTER UPDATE ON root_filesystem_entries \
+             FOR EACH ROW WHEN ({old_path_matches} OR {new_path_matches}) \
+             EXECUTE FUNCTION {function_name}(); \
+           CREATE TRIGGER {trigger_name}_delete \
+             AFTER DELETE ON root_filesystem_entries \
+             FOR EACH ROW WHEN ({old_path_matches}) \
+             EXECUTE FUNCTION {function_name}(); \
          EXCEPTION WHEN duplicate_object THEN NULL; \
          END; \
          $trigger$;"

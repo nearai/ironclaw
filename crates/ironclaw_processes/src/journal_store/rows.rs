@@ -4,9 +4,8 @@ use std::{
 };
 
 use ironclaw_filesystem::{
-    CasExpectation, Entry, Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page,
-    RecordKind, RecordVersion, RootFilesystem, ScopedFilesystem, SortDirection, StorageTxn,
-    VersionedEntry,
+    CasExpectation, Entry, Filter, IndexKind, IndexName, IndexSpec, IndexValue, Page, RecordKind,
+    RecordVersion, RootFilesystem, ScopedFilesystem, SortDirection, StorageTxn, VersionedEntry,
 };
 use ironclaw_host_api::{ProcessId, ResourceScope, ScopedPath, UserId, VirtualPath};
 use serde::{Deserialize, Serialize};
@@ -17,6 +16,12 @@ use crate::{
     ProcessConcurrencyLimits, ProcessControlResult, ProcessDependencyRecord, ProcessInputRecord,
     ProcessJournalEntry, ProcessKind, ProcessLifecycleStatus, ProcessTreeReservation,
     RecoverExpiredProcessLeasesRequest,
+};
+
+mod keys;
+use keys::{
+    index_key, index_name, lineage_scope_key, ordered_index, owner_scope_key, process_kind_key,
+    process_status_key, scope_owner_key, scoped_path,
 };
 
 const MATERIALIZED_PREFIX: &str = "/processes/materialized";
@@ -316,8 +321,25 @@ where
             .map(decode_process)
             .filter_map(Result::transpose)
             .collect::<Result<Vec<_>, _>>()?;
+        let mut queried_owners = HashSet::new();
+        let mut queried_classes = HashSet::new();
         for snapshot in snapshots {
-            records.extend(query_running_quota_rows(filesystem, &snapshot, limits).await?);
+            let query_owner = snapshot.owner_user_id.as_ref().is_some_and(|owner| {
+                queried_owners.insert((
+                    snapshot.scope.tenant_id.as_str().to_string(),
+                    owner.as_str().to_string(),
+                ))
+            });
+            let query_class = snapshot.concurrency_class.as_ref().is_some_and(|class| {
+                queried_classes.insert((
+                    snapshot.scope.tenant_id.as_str().to_string(),
+                    class.as_str().to_string(),
+                ))
+            });
+            records.extend(
+                query_running_quota_rows(filesystem, &snapshot, limits, query_owner, query_class)
+                    .await?,
+            );
         }
     }
     if let Some(request) = &references.recover_expired {
@@ -499,6 +521,13 @@ pub(super) async fn persist(
         .cloned()
         .collect::<HashSet<_>>();
     for path in paths {
+        if loaded.initialized && path.as_str().ends_with("/processes/materialized/metadata") {
+            // Initialization state is immutable. Runtime cursors come from the
+            // backend's transactional sequence allocator, and idempotency
+            // records are independently keyed, so unrelated mutations must not
+            // contend on one global metadata CAS.
+            continue;
+        }
         let previous = loaded.rows.get(&path);
         let next = desired.get(&path);
         if previous == next || matches!((previous, next), (Some(MaterializedRow::Tombstone), None))
@@ -810,7 +839,6 @@ where
         .collect()
 }
 
-const CLAIM_CANDIDATE_MULTIPLIER: usize = 16;
 const RECOVERY_BATCH_LIMIT: u32 = Page::MAX_LIMIT;
 
 async fn query_claim_candidates<F>(
@@ -846,11 +874,7 @@ where
         }
         (None, None) => index_name("process_queue_v4")?,
     };
-    let limit = request
-        .max_processes
-        .saturating_mul(CLAIM_CANDIDATE_MULTIPLIER)
-        .min(Page::MAX_LIMIT as usize) as u32;
-    ordered_process_query(filesystem, index, filters, "created_at", limit).await
+    ordered_process_query_all(filesystem, index, filters, "created_at").await
 }
 
 async fn query_active_conflict<F>(
@@ -880,12 +904,16 @@ async fn query_running_quota_rows<F>(
     filesystem: &ScopedFilesystem<F>,
     candidate: &JournaledProcessSnapshot,
     limits: &ProcessConcurrencyLimits,
+    query_owner: bool,
+    query_class: bool,
 ) -> Result<Vec<VersionedEntry>, ProcessJournalStoreError>
 where
     F: RootFilesystem,
 {
     let mut rows = Vec::new();
-    if let (Some(cap), Some(owner)) = (limits.max_running_per_owner, &candidate.owner_user_id) {
+    if query_owner
+        && let (Some(cap), Some(owner)) = (limits.max_running_per_owner, &candidate.owner_user_id)
+    {
         rows.extend(
             ordered_process_query(
                 filesystem,
@@ -901,7 +929,8 @@ where
             .await?,
         );
     }
-    if let Some(class) = &candidate.concurrency_class
+    if query_class
+        && let Some(class) = &candidate.concurrency_class
         && let Some(cap) = limits.max_running_by_class.get(class)
     {
         rows.extend(
@@ -1014,6 +1043,63 @@ where
         .query_ordered(&ResourceScope::system(), &prefix, &filter, &page)
         .await
         .map_err(Into::into)
+}
+
+async fn ordered_process_query_all<F>(
+    filesystem: &ScopedFilesystem<F>,
+    index: IndexName,
+    filters: Vec<Filter>,
+    sort_key: &str,
+) -> Result<Vec<VersionedEntry>, ProcessJournalStoreError>
+where
+    F: RootFilesystem,
+{
+    let prefix = scoped_path(&format!("{MATERIALIZED_PREFIX}/process"))?;
+    let filter = if filters.len() == 1 {
+        filters.into_iter().next().ok_or_else(|| {
+            ProcessJournalStoreError::InvalidRequest(
+                "ordered process query lost its required filter".to_string(),
+            )
+        })?
+    } else {
+        Filter::And(filters)
+    };
+    let sort_key = index_key(sort_key)?;
+    let tie_breaker = index_key("process_id")?;
+    let mut cursor = None;
+    let mut records = Vec::new();
+    loop {
+        let mut page = ironclaw_filesystem::OrderedPage::new(
+            index.clone(),
+            sort_key.clone(),
+            tie_breaker.clone(),
+            SortDirection::Ascending,
+            Page::MAX_LIMIT,
+        );
+        if let Some(after) = cursor.take() {
+            page = page.after(after);
+        }
+        let batch = filesystem
+            .query_ordered(&ResourceScope::system(), &prefix, &filter, &page)
+            .await?;
+        let count = batch.len();
+        cursor = batch.last().and_then(|row| {
+            Some(ironclaw_filesystem::OrderedQueryCursor {
+                value: row.entry.indexed.get(&sort_key)?.clone(),
+                tie_breaker: row.entry.indexed.get(&tie_breaker)?.clone(),
+            })
+        });
+        records.extend(batch);
+        if count < Page::MAX_LIMIT as usize {
+            break;
+        }
+        if cursor.is_none() {
+            return Err(ProcessJournalStoreError::Deserialization(
+                "ordered process row omitted pagination keys".to_string(),
+            ));
+        }
+    }
+    Ok(records)
 }
 
 fn eq_text(key: &str, value: &str) -> Result<Filter, ProcessJournalStoreError> {
@@ -1405,101 +1491,9 @@ pub(super) fn encode(
     Ok(entry)
 }
 
-fn index_name(name: &str) -> Result<IndexName, ProcessJournalStoreError> {
-    IndexName::new(name).map_err(|error| {
-        ProcessJournalStoreError::InvalidPath(super::invalid_path(error).to_string())
-    })
-}
-
-fn ordered_index(name: &str, keys: &[&str]) -> Result<IndexSpec, ProcessJournalStoreError> {
-    Ok(IndexSpec::new(
-        index_name(name)?,
-        keys.iter()
-            .map(|key| index_key(key))
-            .collect::<Result<Vec<_>, _>>()?,
-        IndexKind::Exact,
-    ))
-}
-
-fn process_kind_key(kind: &ProcessKind) -> Result<String, ProcessJournalStoreError> {
-    serde_json::to_value(kind)
-        .map_err(|error| ProcessJournalStoreError::Serialization(error.to_string()))
-        .and_then(|value| match value {
-            serde_json::Value::String(value) => Ok(value),
-            serde_json::Value::Object(value) if value.len() == 1 => {
-                let (kind, detail) = value.into_iter().next().ok_or_else(|| {
-                    ProcessJournalStoreError::Serialization(
-                        "extension-defined process kind had no value".to_string(),
-                    )
-                })?;
-                Ok(format!("{kind}:{}", detail.as_str().unwrap_or_default()))
-            }
-            _ => Err(ProcessJournalStoreError::Serialization(
-                "process kind did not serialize to an indexable value".to_string(),
-            )),
-        })
-}
-
-fn process_status_key(status: ProcessLifecycleStatus) -> Result<String, ProcessJournalStoreError> {
-    serde_json::to_value(status)
-        .map_err(|error| ProcessJournalStoreError::Serialization(error.to_string()))?
-        .as_str()
-        .map(str::to_string)
-        .ok_or_else(|| {
-            ProcessJournalStoreError::Serialization(
-                "process status did not serialize to an indexable value".to_string(),
-            )
-        })
-}
-
-fn scope_owner_key(scope: &ResourceScope) -> Result<String, ProcessJournalStoreError> {
-    serde_json::to_string(&(
-        &scope.tenant_id,
-        &scope.user_id,
-        &scope.agent_id,
-        &scope.project_id,
-        &scope.mission_id,
-        &scope.thread_id,
-    ))
-    .map_err(|error| ProcessJournalStoreError::Serialization(error.to_string()))
-}
-
-fn owner_scope_key(scope: &ResourceScope) -> Result<String, ProcessJournalStoreError> {
-    serde_json::to_string(&(
-        &scope.tenant_id,
-        &scope.user_id,
-        &scope.agent_id,
-        &scope.project_id,
-    ))
-    .map_err(|error| ProcessJournalStoreError::Serialization(error.to_string()))
-}
-
-fn lineage_scope_key(scope: &ResourceScope) -> Result<String, ProcessJournalStoreError> {
-    serde_json::to_string(&(
-        &scope.tenant_id,
-        &scope.user_id,
-        &scope.agent_id,
-        &scope.project_id,
-        &scope.mission_id,
-    ))
-    .map_err(|error| ProcessJournalStoreError::Serialization(error.to_string()))
-}
-
 pub(super) fn decode(
     versioned: &VersionedEntry,
 ) -> Result<MaterializedRow, ProcessJournalStoreError> {
     serde_json::from_slice(&versioned.entry.body)
         .map_err(|error| ProcessJournalStoreError::Deserialization(error.to_string()))
-}
-
-fn index_key(value: &str) -> Result<IndexKey, ProcessJournalStoreError> {
-    IndexKey::new(value).map_err(|error| {
-        ProcessJournalStoreError::InvalidPath(super::invalid_path(error).to_string())
-    })
-}
-
-fn scoped_path(value: &str) -> Result<ScopedPath, ProcessJournalStoreError> {
-    ScopedPath::new(value).map_err(|error| {
-        ProcessJournalStoreError::InvalidPath(super::invalid_path(error).to_string())
-    })
 }

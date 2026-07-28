@@ -63,6 +63,139 @@ fn record_with_status(status: TurnStatus) -> TurnRunRecord {
     }
 }
 
+#[tokio::test]
+async fn retry_rebinds_checkpoint_through_the_real_process_store() {
+    use ironclaw_host_api::SanitizedFailure;
+    use ironclaw_processes::{
+        ClaimProcessesRequest, FailProcessRequest, GetProcessCheckpointRequest,
+        ProcessCheckpointId, ProcessCheckpointPayload, ProcessCheckpointPort, ProcessCheckpointRef,
+        ProcessJournalSource, ProcessKind, ProcessRuntimePort, ProcessSubmissionPort,
+        ProcessTransitionPort, ProcessWorkerId, RecordProcessCheckpointRequest,
+        SubmitProcessRequest, in_memory_backed_processes_filesystem,
+    };
+
+    let store = Arc::new(ironclaw_processes::ProcessJournalStore::new(
+        in_memory_backed_processes_filesystem(),
+    ));
+    let runtime =
+        AgentTurnProcessRuntime::from_process_runtime(store.clone() as Arc<dyn ProcessRuntimePort>);
+    let turn_scope = scope();
+    let resource_scope = turn_scope.to_resource_scope();
+    let actor = TurnActor::new(UserId::new("retry-actor").expect("retry actor"));
+    let failed_run_id = TurnRunId::new();
+    let failed_process_id = process_id_from_turn_run_id(failed_run_id);
+    let checkpoint_id =
+        ProcessCheckpointId::from_trusted(TurnCheckpointId::new().as_uuid().to_string());
+    let state_ref = ProcessCheckpointRef::from_trusted("source-state");
+    let run_profile = profile();
+    let metadata = AgentTurnProcessStateMetadata {
+        turn_id: TurnId::new(),
+        actor: Some(actor.clone()),
+        accepted_message_ref: AcceptedMessageRef::new("accepted-retry").expect("accepted"),
+        source_binding_ref: SourceBindingRef::new("source-retry").expect("source"),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-retry").expect("reply"),
+        resolved_run_profile_id: run_profile.id,
+        resolved_run_profile_version: run_profile.version,
+        resolved_run_profile: None,
+        resolved_model_route: None,
+        model_usage: None,
+        subagent_depth: 0,
+        spawn_tree_descendant_cap: None,
+        product_context: None,
+        resume_disposition: None,
+    };
+    store
+        .submit_process(SubmitProcessRequest {
+            process_id: failed_process_id,
+            process_kind: ProcessKind::AgentTurn,
+            scope: resource_scope.clone(),
+            exclusive_within_scope: true,
+            operation_id: None,
+            owner_user_id: Some(actor.user_id.clone()),
+            concurrency_class: None,
+            parent_process_id: None,
+            root_process_id: None,
+            spawn_tree_descendant_cap: None,
+            dependency: None,
+            checkpoint_ref: Some(ProcessCheckpointRef::from_trusted(checkpoint_id.as_str())),
+            input: None,
+            created_at: Utc::now(),
+            metadata: serde_json::json!({ "agent_turn": metadata }),
+        })
+        .await
+        .expect("submit failed-run precursor");
+    store
+        .record_process_checkpoint(RecordProcessCheckpointRequest {
+            checkpoint_id: checkpoint_id.clone(),
+            process_id: failed_process_id,
+            scope: resource_scope.clone(),
+            state_ref: state_ref.clone(),
+            payload: ProcessCheckpointPayload::new(b"checkpoint payload".to_vec())
+                .expect("checkpoint payload"),
+            created_at: Utc::now(),
+            metadata: serde_json::json!({"source": "retry-test"}),
+        })
+        .await
+        .expect("record source checkpoint");
+    let claim = store
+        .claim_next_processes(ClaimProcessesRequest {
+            worker_id: ProcessWorkerId::from_trusted("retry-worker"),
+            scope_filter: Some(resource_scope.clone()),
+            process_id_filter: Some(failed_process_id),
+            process_kind_filter: Some(ProcessKind::AgentTurn),
+            max_processes: 1,
+        })
+        .await
+        .expect("claim source run")
+        .pop()
+        .expect("claimed source run");
+    store
+        .fail_process(FailProcessRequest {
+            process_id: failed_process_id,
+            worker_id: claim.worker_id,
+            lease_token: claim.lease_token,
+            failure: SanitizedFailure::new("retryable_failure").expect("failure"),
+            metadata: None,
+        })
+        .await
+        .expect("fail source run");
+
+    let retried = runtime
+        .retry_turn(crate::RetryTurnRequest {
+            scope: turn_scope,
+            actor,
+            run_id: failed_run_id,
+            source_binding_ref: SourceBindingRef::new("retry-source").expect("retry source"),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("retry-reply")
+                .expect("retry reply"),
+            idempotency_key: crate::IdempotencyKey::new("retry-operation")
+                .expect("idempotency key"),
+        })
+        .await
+        .expect("retry failed run");
+    let retried_snapshot = store
+        .get_process_snapshot(GetProcessSnapshotRequest {
+            scope: resource_scope.clone(),
+            process_id: process_id_from_turn_run_id(retried.run_id),
+        })
+        .await
+        .expect("retried snapshot");
+    let rebound_ref = retried_snapshot
+        .checkpoint_ref
+        .expect("retry checkpoint reference");
+    let rebound = store
+        .get_process_checkpoint(GetProcessCheckpointRequest {
+            checkpoint_id: ProcessCheckpointId::from_trusted(rebound_ref.as_str()),
+            process_id: retried_snapshot.process_id,
+            scope: resource_scope,
+        })
+        .await
+        .expect("read rebound checkpoint")
+        .expect("rebound checkpoint");
+    assert_eq!(rebound.state_ref, state_ref);
+    assert_eq!(rebound.payload.as_bytes(), b"checkpoint payload");
+}
+
 #[test]
 fn every_turn_status_maps_to_process_lifecycle_status() {
     let cases = [
@@ -327,6 +460,7 @@ async fn turn_event_projection_can_be_a_view_over_process_journal() {
                     retryable: None,
                     detail: None,
                     metadata: Value::Null,
+                    committed_state: None,
                 }],
                 next_cursor: ProcessJournalCursor(1),
                 truncated: false,

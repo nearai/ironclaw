@@ -33,7 +33,11 @@ use ironclaw_processes::{
 use serde_json::json;
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
 };
 
 #[derive(Default)]
@@ -43,12 +47,48 @@ struct RecordingProcessObserver {
 
 #[async_trait]
 impl ProcessJournalCommitObserver for RecordingProcessObserver {
+    fn process_observer_id(&self) -> &'static str {
+        "recording-process-observer"
+    }
+
     async fn observe_process_commit(&self, commit: ProcessJournalCommit) -> Result<(), String> {
         self.commits
             .lock()
             .map_err(|_| "observer mutex poisoned".to_string())?
             .push(commit);
         Ok(())
+    }
+}
+
+struct FailingProcessObserver;
+
+#[async_trait]
+impl ProcessJournalCommitObserver for FailingProcessObserver {
+    fn process_observer_id(&self) -> &'static str {
+        "failing-process-observer"
+    }
+
+    async fn observe_process_commit(&self, _commit: ProcessJournalCommit) -> Result<(), String> {
+        Err("deterministic observer failure".to_string())
+    }
+}
+
+struct FailOnceProcessObserver {
+    attempts: AtomicUsize,
+}
+
+#[async_trait]
+impl ProcessJournalCommitObserver for FailOnceProcessObserver {
+    fn process_observer_id(&self) -> &'static str {
+        "fail-once-process-observer"
+    }
+
+    async fn observe_process_commit(&self, _commit: ProcessJournalCommit) -> Result<(), String> {
+        if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            Err("transient observer failure".to_string())
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -295,6 +335,7 @@ async fn explicit_legacy_materialized_state_imports_before_row_native_commands()
         failure: None,
         journal_cursor: cursor,
         lease: None,
+        crash_reclaim_count: 0,
         created_at: Utc::now(),
         owner_user_id: Some(scope.user_id.clone()),
         concurrency_class: None,
@@ -316,6 +357,7 @@ async fn explicit_legacy_materialized_state_imports_before_row_native_commands()
         retryable: None,
         detail: None,
         metadata: serde_json::Value::Null,
+        committed_state: Some(Box::new(snapshot.clone())),
     };
     let legacy = json!({
         "next_cursor": 2,
@@ -359,7 +401,7 @@ async fn explicit_legacy_materialized_state_imports_before_row_native_commands()
 }
 
 #[tokio::test]
-async fn normal_process_request_never_reads_or_replays_legacy_state() {
+async fn normal_process_request_requires_migration_when_legacy_state_exists() {
     let filesystem = in_memory_backed_processes_filesystem();
     filesystem
         .put(
@@ -373,14 +415,146 @@ async fn normal_process_request_never_reads_or_replays_legacy_state() {
 
     let store = ProcessJournalStore::new(filesystem);
     let scope = scope();
-    let submitted = submit_internal_process(&store, &scope, ProcessId::new()).await;
-    assert_eq!(submitted.journal_cursor, ProcessJournalCursor(1));
+    let error = store
+        .submit_process(SubmitProcessRequest {
+            process_id: ProcessId::new(),
+            process_kind: ProcessKind::Internal,
+            scope: scope.clone(),
+            exclusive_within_scope: false,
+            operation_id: None,
+            owner_user_id: Some(scope.user_id.clone()),
+            concurrency_class: None,
+            parent_process_id: None,
+            root_process_id: None,
+            spawn_tree_descendant_cap: None,
+            dependency: None,
+            checkpoint_ref: None,
+            input: None,
+            created_at: Utc::now(),
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect_err("normal traffic must not close the legacy import path");
+    assert!(matches!(error, ProcessJournalStoreError::MigrationRequired));
+}
+
+#[tokio::test]
+async fn malformed_legacy_journal_fails_without_initializing_row_native_state() {
+    for legacy_path in [
+        "/processes/journal/state.json",
+        "/processes/journal/records",
+    ] {
+        let filesystem = in_memory_backed_processes_filesystem();
+        let path = ScopedPath::new(legacy_path).expect("legacy path");
+        if legacy_path.ends_with("state.json") {
+            filesystem
+                .put(
+                    &ResourceScope::system(),
+                    &path,
+                    Entry::bytes(b"not valid legacy json".to_vec()),
+                    CasExpectation::Absent,
+                )
+                .await
+                .expect("seed malformed legacy state");
+        } else {
+            filesystem
+                .append(
+                    &ResourceScope::system(),
+                    &path,
+                    b"not valid legacy command".to_vec(),
+                )
+                .await
+                .expect("seed malformed legacy command");
+        }
+        let store = ProcessJournalStore::new(Arc::clone(&filesystem));
+
+        let error = store
+            .migrate_legacy_journal()
+            .await
+            .expect_err("malformed legacy input must fail");
+        assert!(matches!(
+            error,
+            ProcessJournalStoreError::Deserialization(_)
+        ));
+        assert!(
+            filesystem
+                .get(
+                    &ResourceScope::system(),
+                    &ScopedPath::new("/processes/materialized/metadata").expect("metadata path"),
+                )
+                .await
+                .expect("read metadata")
+                .is_none()
+        );
+    }
+}
+
+#[tokio::test]
+async fn normal_process_request_cannot_hide_deployed_turn_authority() {
+    let mounts = MountView::new(vec![
+        MountGrant::new(
+            MountAlias::new("/processes").expect("processes alias"),
+            VirtualPath::new("/engine/processes").expect("processes target"),
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/turns").expect("turns alias"),
+            VirtualPath::new("/engine/turns").expect("turns target"),
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/run-state").expect("run-state alias"),
+            VirtualPath::new("/engine/run-state").expect("run-state target"),
+            MountPermissions::read_write_list_delete(),
+        ),
+    ])
+    .expect("legacy migration mount view");
+    let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::new(InMemoryBackend::new()),
+        mounts,
+    ));
+    filesystem
+        .put(
+            &ResourceScope::system(),
+            &ScopedPath::new("/turns/state.json").expect("legacy turn state path"),
+            Entry::bytes(b"{\"runs\":[]}".to_vec()),
+            CasExpectation::Absent,
+        )
+        .await
+        .expect("seed deployed legacy authority");
+    let store = ProcessJournalStore::new(Arc::clone(&filesystem));
 
     let error = store
-        .migrate_legacy_journal()
+        .submit_process(SubmitProcessRequest {
+            process_id: ProcessId::new(),
+            process_kind: ProcessKind::AgentTurn,
+            scope: scope(),
+            exclusive_within_scope: false,
+            operation_id: None,
+            owner_user_id: None,
+            concurrency_class: None,
+            parent_process_id: None,
+            root_process_id: None,
+            spawn_tree_descendant_cap: None,
+            dependency: None,
+            checkpoint_ref: None,
+            input: None,
+            created_at: Utc::now(),
+            metadata: serde_json::Value::Null,
+        })
         .await
-        .expect_err("migration after initialization must fail closed");
-    assert!(matches!(error, ProcessJournalStoreError::InvalidRequest(_)));
+        .expect_err("normal traffic must not initialize over deployed turn state");
+    assert!(matches!(error, ProcessJournalStoreError::MigrationRequired));
+    assert!(
+        filesystem
+            .get(
+                &ResourceScope::system(),
+                &ScopedPath::new("/processes/materialized/metadata").expect("metadata path"),
+            )
+            .await
+            .expect("metadata lookup")
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -559,6 +733,179 @@ async fn process_observer_receives_commits_once_not_idempotency_replays() {
 }
 
 #[tokio::test]
+async fn committed_process_mutation_is_not_reported_failed_when_wake_hint_fails() {
+    let store = ProcessJournalStore::new(in_memory_backed_processes_filesystem());
+    store
+        .subscribe_process_observer(Arc::new(FailingProcessObserver))
+        .expect("subscribe observer");
+    let scope = scope();
+    let process_id = ProcessId::new();
+
+    let submitted = store
+        .submit_process(SubmitProcessRequest {
+            process_id,
+            process_kind: ProcessKind::Internal,
+            scope: scope.clone(),
+            exclusive_within_scope: false,
+            operation_id: None,
+            owner_user_id: Some(scope.user_id.clone()),
+            concurrency_class: None,
+            parent_process_id: None,
+            root_process_id: None,
+            spawn_tree_descendant_cap: None,
+            dependency: None,
+            checkpoint_ref: None,
+            input: None,
+            created_at: Utc::now(),
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect("durably committed submission must remain successful");
+
+    assert_eq!(submitted.process_id, process_id);
+}
+
+#[tokio::test]
+async fn observer_registration_replays_commits_durably_after_restart() {
+    let filesystem = in_memory_backed_processes_filesystem();
+    let store = ProcessJournalStore::new(Arc::clone(&filesystem));
+    let scope = scope();
+    let process_id = ProcessId::new();
+    store
+        .submit_process(SubmitProcessRequest {
+            process_id,
+            process_kind: ProcessKind::Internal,
+            scope: scope.clone(),
+            exclusive_within_scope: false,
+            operation_id: None,
+            owner_user_id: Some(scope.user_id.clone()),
+            concurrency_class: None,
+            parent_process_id: None,
+            root_process_id: None,
+            spawn_tree_descendant_cap: None,
+            dependency: None,
+            checkpoint_ref: None,
+            input: None,
+            created_at: Utc::now(),
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect("submit before observer registration");
+
+    let reopened = ProcessJournalStore::new(filesystem);
+    let observer = Arc::new(RecordingProcessObserver::default());
+    reopened
+        .subscribe_process_observer(observer.clone())
+        .expect("subscribe observer after restart");
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if observer
+                .commits
+                .lock()
+                .expect("observer commits")
+                .iter()
+                .any(|commit| commit.state.process_id == process_id)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("durable observer replay");
+}
+
+#[tokio::test]
+async fn observer_failure_retries_until_durable_cursor_is_acknowledged() {
+    let filesystem = in_memory_backed_processes_filesystem();
+    let store = ProcessJournalStore::new(Arc::clone(&filesystem));
+    let scope = scope();
+    store
+        .submit_process(SubmitProcessRequest {
+            process_id: ProcessId::new(),
+            process_kind: ProcessKind::Internal,
+            scope: scope.clone(),
+            exclusive_within_scope: false,
+            operation_id: None,
+            owner_user_id: Some(scope.user_id.clone()),
+            concurrency_class: None,
+            parent_process_id: None,
+            root_process_id: None,
+            spawn_tree_descendant_cap: None,
+            dependency: None,
+            checkpoint_ref: None,
+            input: None,
+            created_at: Utc::now(),
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect("submit before observer registration");
+
+    let observer = Arc::new(FailOnceProcessObserver {
+        attempts: AtomicUsize::new(0),
+    });
+    ProcessJournalStore::new(Arc::clone(&filesystem))
+        .subscribe_process_observer(observer.clone())
+        .expect("subscribe transient observer");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while observer.attempts.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("observer retry succeeds");
+
+    let after_restart = Arc::new(FailOnceProcessObserver {
+        attempts: AtomicUsize::new(0),
+    });
+    ProcessJournalStore::new(filesystem)
+        .subscribe_process_observer(after_restart.clone())
+        .expect("subscribe after acknowledged replay");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(after_restart.attempts.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn process_submission_idempotency_ignores_fresh_invocation_identity() {
+    let store = ProcessJournalStore::new(in_memory_backed_processes_filesystem());
+    let first_scope = scope();
+    let mut retry_scope = first_scope.clone();
+    retry_scope.invocation_id = InvocationId::new();
+    let original_process_id = ProcessId::new();
+    let owner_user_id = first_scope.user_id.clone();
+    let request = |process_id, scope| SubmitProcessRequest {
+        process_id,
+        process_kind: ProcessKind::Internal,
+        scope,
+        exclusive_within_scope: false,
+        operation_id: Some(ProcessOperationId::from_trusted("stable-operation")),
+        owner_user_id: Some(owner_user_id.clone()),
+        concurrency_class: None,
+        parent_process_id: None,
+        root_process_id: None,
+        spawn_tree_descendant_cap: None,
+        dependency: None,
+        checkpoint_ref: None,
+        input: None,
+        created_at: Utc::now(),
+        metadata: serde_json::Value::Null,
+    };
+
+    let submitted = store
+        .submit_process(request(original_process_id, first_scope))
+        .await
+        .expect("initial submission");
+    let replayed = store
+        .submit_process(request(ProcessId::new(), retry_scope))
+        .await
+        .expect("logical retry with fresh invocation identity");
+
+    assert_eq!(replayed.process_id, submitted.process_id);
+    assert_eq!(replayed.journal_cursor, submitted.journal_cursor);
+}
+
+#[tokio::test]
 async fn process_claim_enforces_owner_and_class_concurrency_limits_atomically() {
     let owner_store = ProcessJournalStore::new(in_memory_backed_processes_filesystem())
         .with_concurrency_limits(ProcessConcurrencyLimits {
@@ -624,6 +971,76 @@ async fn process_claim_enforces_owner_and_class_concurrency_limits_atomically() 
         .await
         .expect("claim class-limited processes");
     assert_eq!(class_claims.len(), 1);
+}
+
+#[tokio::test]
+async fn process_claim_pages_past_a_quota_blocked_prefix() {
+    let store = ProcessJournalStore::new(in_memory_backed_processes_filesystem())
+        .with_concurrency_limits(ProcessConcurrencyLimits {
+            max_running_per_owner: Some(1),
+            max_running_by_class: BTreeMap::new(),
+        });
+    let scope = scope();
+    let blocked_owner = UserId::new("blocked-owner").expect("blocked owner");
+    let eligible_owner = UserId::new("eligible-owner").expect("eligible owner");
+    let submit = |process_id, owner_user_id| SubmitProcessRequest {
+        process_id,
+        process_kind: ProcessKind::Internal,
+        scope: scope.clone(),
+        exclusive_within_scope: false,
+        operation_id: None,
+        owner_user_id: Some(owner_user_id),
+        concurrency_class: None,
+        parent_process_id: None,
+        root_process_id: None,
+        spawn_tree_descendant_cap: None,
+        dependency: None,
+        checkpoint_ref: None,
+        input: None,
+        created_at: Utc::now(),
+        metadata: serde_json::Value::Null,
+    };
+
+    let running_id = ProcessId::new();
+    store
+        .submit_process(submit(running_id, blocked_owner.clone()))
+        .await
+        .expect("submit running quota holder");
+    store
+        .claim_next_processes(ClaimProcessesRequest {
+            worker_id: ProcessWorkerId::from_trusted("quota-holder"),
+            scope_filter: None,
+            process_id_filter: Some(running_id),
+            process_kind_filter: None,
+            max_processes: 1,
+        })
+        .await
+        .expect("claim quota holder");
+
+    for _ in 0..20 {
+        store
+            .submit_process(submit(ProcessId::new(), blocked_owner.clone()))
+            .await
+            .expect("submit quota-blocked prefix");
+    }
+    let eligible_id = ProcessId::new();
+    store
+        .submit_process(submit(eligible_id, eligible_owner))
+        .await
+        .expect("submit eligible process after blocked prefix");
+
+    let claimed = store
+        .claim_next_processes(ClaimProcessesRequest {
+            worker_id: ProcessWorkerId::from_trusted("paging-worker"),
+            scope_filter: None,
+            process_id_filter: None,
+            process_kind_filter: None,
+            max_processes: 1,
+        })
+        .await
+        .expect("page beyond blocked candidates");
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].state.process_id, eligible_id);
 }
 
 #[tokio::test]
@@ -1105,6 +1522,166 @@ async fn process_journal_store_relinquishes_claim_with_fresh_reclaim_lease() {
     let second_claim = second_claim.pop().expect("reclaimed process");
     assert_eq!(second_claim.worker_id, second_worker);
     assert_ne!(second_claim.lease_token, first_claim.lease_token);
+}
+
+#[tokio::test]
+async fn expired_leases_cancel_requested_work_and_requeue_safe_crashes() {
+    let store = ProcessJournalStore::new(in_memory_backed_processes_filesystem())
+        .with_lease_duration(Duration::from_millis(1));
+    let scope = scope();
+    let requeue_id = ProcessId::new();
+    let cancel_id = ProcessId::new();
+    submit_internal_process(&store, &scope, requeue_id).await;
+    submit_internal_process(&store, &scope, cancel_id).await;
+    let claimed = store
+        .claim_next_processes(ClaimProcessesRequest {
+            worker_id: ProcessWorkerId::from_trusted("recovery-worker"),
+            scope_filter: Some(scope.clone()),
+            process_id_filter: None,
+            process_kind_filter: Some(ProcessKind::Internal),
+            max_processes: 2,
+        })
+        .await
+        .expect("claim processes");
+    assert_eq!(claimed.len(), 2);
+    store
+        .request_cancel_process(CancelProcessRequest {
+            scope: scope.clone(),
+            process_id: cancel_id,
+            operation_id: None,
+            reason: Some("user_cancelled".to_string()),
+        })
+        .await
+        .expect("request cancellation");
+    tokio::time::sleep(Duration::from_millis(2)).await;
+
+    let recovered = store
+        .recover_expired_process_leases(ironclaw_processes::RecoverExpiredProcessLeasesRequest {
+            now: Utc::now(),
+            scope_filter: Some(scope.clone()),
+            process_kind_filter: Some(ProcessKind::Internal),
+        })
+        .await
+        .expect("recover expired leases");
+    assert_eq!(recovered.recovered.len(), 2);
+    let requeued = store
+        .get_process_snapshot(GetProcessSnapshotRequest {
+            scope: scope.clone(),
+            process_id: requeue_id,
+        })
+        .await
+        .expect("requeued snapshot");
+    let cancelled = store
+        .get_process_snapshot(GetProcessSnapshotRequest {
+            scope,
+            process_id: cancel_id,
+        })
+        .await
+        .expect("cancelled snapshot");
+    assert_eq!(requeued.status, ProcessLifecycleStatus::Queued);
+    assert_eq!(cancelled.status, ProcessLifecycleStatus::Cancelled);
+    assert!(requeued.lease.is_none());
+    assert!(cancelled.lease.is_none());
+}
+
+#[tokio::test]
+async fn expired_checkpointed_and_reclaim_exhausted_work_fails_boundedly() {
+    let store = ProcessJournalStore::new(in_memory_backed_processes_filesystem())
+        .with_lease_duration(Duration::from_millis(1));
+    let scope = scope();
+    let checkpointed_id = ProcessId::new();
+    store
+        .submit_process(SubmitProcessRequest {
+            process_id: checkpointed_id,
+            process_kind: ProcessKind::Internal,
+            scope: scope.clone(),
+            exclusive_within_scope: false,
+            operation_id: None,
+            owner_user_id: Some(scope.user_id.clone()),
+            concurrency_class: None,
+            parent_process_id: None,
+            root_process_id: None,
+            spawn_tree_descendant_cap: None,
+            dependency: None,
+            checkpoint_ref: Some(ProcessCheckpointRef::from_trusted("checkpointed")),
+            input: None,
+            created_at: Utc::now(),
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect("submit checkpointed process");
+    store
+        .claim_next_processes(ClaimProcessesRequest {
+            worker_id: ProcessWorkerId::from_trusted("checkpointed-worker"),
+            scope_filter: Some(scope.clone()),
+            process_id_filter: Some(checkpointed_id),
+            process_kind_filter: None,
+            max_processes: 1,
+        })
+        .await
+        .expect("claim checkpointed process");
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    store
+        .recover_expired_process_leases(ironclaw_processes::RecoverExpiredProcessLeasesRequest {
+            now: Utc::now(),
+            scope_filter: Some(scope.clone()),
+            process_kind_filter: None,
+        })
+        .await
+        .expect("recover checkpointed process");
+    let checkpointed = store
+        .get_process_snapshot(GetProcessSnapshotRequest {
+            scope: scope.clone(),
+            process_id: checkpointed_id,
+        })
+        .await
+        .expect("checkpointed snapshot");
+    assert_eq!(checkpointed.status, ProcessLifecycleStatus::Failed);
+    assert_eq!(
+        checkpointed
+            .failure
+            .as_ref()
+            .map(|failure| failure.category()),
+        Some("lease_expired")
+    );
+
+    let exhausted_id = ProcessId::new();
+    submit_internal_process(&store, &scope, exhausted_id).await;
+    for attempt in 1..=3 {
+        store
+            .claim_next_processes(ClaimProcessesRequest {
+                worker_id: ProcessWorkerId::from_trusted(format!("crash-worker-{attempt}")),
+                scope_filter: Some(scope.clone()),
+                process_id_filter: Some(exhausted_id),
+                process_kind_filter: None,
+                max_processes: 1,
+            })
+            .await
+            .expect("claim crash-recovery process");
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        store
+            .recover_expired_process_leases(
+                ironclaw_processes::RecoverExpiredProcessLeasesRequest {
+                    now: Utc::now(),
+                    scope_filter: Some(scope.clone()),
+                    process_kind_filter: None,
+                },
+            )
+            .await
+            .expect("recover crash-recovery process");
+    }
+    let exhausted = store
+        .get_process_snapshot(GetProcessSnapshotRequest {
+            scope,
+            process_id: exhausted_id,
+        })
+        .await
+        .expect("exhausted snapshot");
+    assert_eq!(exhausted.status, ProcessLifecycleStatus::Failed);
+    assert_eq!(
+        exhausted.failure.as_ref().map(|failure| failure.category()),
+        Some("crash_retry_exhausted")
+    );
 }
 
 #[tokio::test]

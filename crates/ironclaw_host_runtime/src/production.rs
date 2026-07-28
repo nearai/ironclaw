@@ -231,7 +231,7 @@ impl DefaultHostRuntime {
         self
     }
 
-    /// Attaches the run-state store used to record invocation lifecycle.
+    /// Attaches the process invocation-state port used to record lifecycle.
     // arch-exempt: optional_arc, store ports are absent in minimal/test runtime graphs, plan #4539
     pub fn with_invocation_state(
         mut self,
@@ -671,9 +671,9 @@ impl HostRuntime for DefaultHostRuntime {
             Err(CapabilityInvocationError::ApprovalStore(error)) => {
                 Err(unavailable_from_approval_store(*error))
             }
-            Err(CapabilityInvocationError::ResumeStoreMissing { .. }) => {
-                Err(HostRuntimeError::unavailable("run-state store unavailable"))
-            }
+            Err(CapabilityInvocationError::ResumeStoreMissing { .. }) => Err(
+                HostRuntimeError::unavailable("invocation-state store unavailable"),
+            ),
             Err(error) => Ok(RuntimeCapabilityOutcome::Failed(failure_from(
                 error,
                 capability_id,
@@ -1256,9 +1256,9 @@ fn unavailable_from_approval_store(error: ApprovalStoreError) -> HostRuntimeErro
         ApprovalStoreError::ApprovalNotPending { .. } => "approval request not pending",
         ApprovalStoreError::InvalidPath(_) => "approval storage path invalid",
         ApprovalStoreError::Filesystem(_) => "approval filesystem unavailable",
-        ApprovalStoreError::Serialization(_) => "run-state serialization failed",
-        ApprovalStoreError::Deserialization(_) => "run-state deserialization failed",
-        ApprovalStoreError::Backend(_) => "run-state backend unavailable",
+        ApprovalStoreError::Serialization(_) => "approval-store serialization failed",
+        ApprovalStoreError::Deserialization(_) => "approval-store deserialization failed",
+        ApprovalStoreError::Backend(_) => "approval-store backend unavailable",
     };
     HostRuntimeError::unavailable(reason)
 }

@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 
 use chrono::{DateTime, Utc};
-use futures::StreamExt;
 use ironclaw_filesystem::{
     CasApply, CasExpectation, ContentType, Entry, FileType, Filter, IndexKey, IndexKind, IndexName,
     IndexSpec, IndexValue, OrderedPage, OrderedQueryCursor, Page, RecordKind, RootFilesystem,
@@ -114,6 +113,40 @@ where
             ready.insert(scope_key.clone());
             evict_hash_set_entry_over_limit(&mut ready, 128, &scope_key);
         }
+        if required {
+            let marker = thread_index_migration_marker_path(scope)?;
+            if self
+                .filesystem
+                .get(&scope.to_resource_scope(), &marker)
+                .await?
+                .is_none()
+            {
+                if let Err(error) = self.migrate_thread_index_for_scope(scope).await {
+                    if let Ok(mut ready) = self.ready_thread_index_scopes.lock() {
+                        ready.remove(&scope_key);
+                    }
+                    return Err(error);
+                }
+                self.filesystem
+                    .put(
+                        &scope.to_resource_scope(),
+                        &marker,
+                        Entry::bytes(b"thread-index-v1".to_vec()),
+                        CasExpectation::Any,
+                    )
+                    .await?;
+                if self
+                    .filesystem
+                    .get(&scope.to_resource_scope(), &marker)
+                    .await?
+                    .is_none()
+                {
+                    return Err(SessionThreadError::Backend(
+                        "thread index migration marker was not durable after write".to_string(),
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -191,6 +224,13 @@ where
     ) -> Result<ThreadIndexRecord, SessionThreadError> {
         self.ensure_thread_index_query(&source.record.scope, false)
             .await?;
+        self.merge_thread_index_record_declared(source).await
+    }
+
+    async fn merge_thread_index_record_declared(
+        &self,
+        source: ThreadIndexRecord,
+    ) -> Result<ThreadIndexRecord, SessionThreadError> {
         let path = thread_index_record_path(&source.record.scope, &source.record.thread_id)?;
         let resource_scope = source.record.scope.to_resource_scope();
         let source_for_retry = source.clone();
@@ -370,39 +410,10 @@ where
             .take(limit)
             .map(|row| deserialize::<ThreadIndexRecord>(&row.entry.body))
             .collect::<Result<Vec<_>, _>>()?;
-        let validated = futures::stream::iter(records)
-            .map(|record| async move {
-                let source = self
-                    .read_thread_versioned(&record.record.scope, &record.record.thread_id)
-                    .await;
-                (record, source)
-            })
-            .buffered(8)
-            .filter_map(|(record, source)| async move {
-                match source {
-                    Ok(Some((stored, _)))
-                        if stored.record.scope == record.record.scope
-                            && stored.record.created_at == record.record.created_at =>
-                    {
-                        Some(Ok(record))
-                    }
-                    Ok(_) => {
-                        let cleanup = self
-                            .delete_thread_index_record(
-                                &record.record.scope,
-                                &record.record.thread_id,
-                            )
-                            .await;
-                        cleanup.err().map(Err)
-                    }
-                    Err(error) => Some(Err(error)),
-                }
-            })
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok((validated, has_more))
+        // Index rows are the list projection. Source validation belongs to the
+        // explicit migration/repair path; rereading every source row here
+        // turns each user-facing page into an N+1 storage operation.
+        Ok((records, has_more))
     }
 
     async fn decode_thread_index_cursor(
@@ -430,7 +441,7 @@ where
             .map_err(|error| SessionThreadError::Serialization(error.to_string()))
     }
 
-    /// Explicit legacy repair. Normal startup and list requests never call it.
+    /// Idempotent legacy repair used before indexed listing is exposed.
     pub async fn migrate_thread_index_for_scope(
         &self,
         scope: &ThreadScope,
@@ -446,15 +457,33 @@ where
             .map(|entry| ThreadId::new(entry.name).map_err(invalid_path))
             .collect::<Result<Vec<_>, _>>()?;
         for thread_id in &thread_ids {
-            self.refresh_thread_index_from_source(scope, thread_id)
-                .await?;
+            if let Some((stored, _)) = self.read_thread_versioned(scope, thread_id).await? {
+                self.merge_thread_index_record_declared(Self::thread_index_record(&stored))
+                    .await?;
+            }
+        }
+        let source_ids = thread_ids
+            .iter()
+            .map(ThreadId::as_str)
+            .collect::<HashSet<_>>();
+        let index_root = thread_index_root(scope)?;
+        for entry in self
+            .filesystem
+            .list_dir(&scope.to_resource_scope(), &index_root)
+            .await?
+        {
+            let Some(raw_id) = entry.name.strip_suffix(".json") else {
+                continue;
+            };
+            if !source_ids.contains(raw_id) {
+                let stale_id = ThreadId::new(raw_id.to_string()).map_err(invalid_path)?;
+                self.delete_thread_index_record(scope, &stale_id).await?;
+            }
         }
         Ok(thread_ids.len())
     }
 
-    /// Explicit offline rebuild for message and summary ordered projections.
-    ///
-    /// Normal startup and transcript requests never enumerate source rows.
+    /// Idempotent rebuild for message, summary, and exact-lookup projections.
     pub async fn migrate_transcript_indexes_for_scope(
         &self,
         scope: &ThreadScope,
@@ -493,11 +522,31 @@ where
                     let received = rows.len();
                     let mut txn = self
                         .filesystem
-                        .begin(&scope.to_resource_scope(), &prefix)
+                        .begin(
+                            &scope.to_resource_scope(),
+                            &scoped_path(crate::filesystem_service::THREADS_PREFIX)?,
+                        )
                         .await?;
                     for row in rows {
                         let entry = if messages {
                             let record = deserialize::<ThreadMessageRecord>(&row.entry.body)?;
+                            for (lookup_path, lookup_entry, expectation) in
+                                crate::filesystem_service::message_lookup_index::MessageLookupIndexStore::<F>::entries_for_message(
+                                    scope,
+                                    &thread_id,
+                                    &record,
+                                )?
+                            {
+                                let virtual_path = self
+                                    .filesystem
+                                    .resolve(&scope.to_resource_scope(), &lookup_path)?;
+                                if matches!(expectation, CasExpectation::Absent)
+                                    && txn.get(&virtual_path).await?.is_some()
+                                {
+                                    continue;
+                                }
+                                txn.put(&virtual_path, lookup_entry, expectation).await?;
+                            }
                             Self::message_entry(&record)?
                         } else {
                             let record = deserialize::<SummaryArtifact>(&row.entry.body)?;
@@ -516,6 +565,41 @@ where
             }
         }
         Ok(migrated)
+    }
+
+    pub(super) async fn ensure_transcript_indexes_migrated(
+        &self,
+        scope: &ThreadScope,
+    ) -> Result<(), SessionThreadError> {
+        let marker = transcript_index_migration_marker_path(scope)?;
+        if self
+            .filesystem
+            .get(&scope.to_resource_scope(), &marker)
+            .await?
+            .is_some()
+        {
+            return Ok(());
+        }
+        self.migrate_transcript_indexes_for_scope(scope).await?;
+        self.filesystem
+            .put(
+                &scope.to_resource_scope(),
+                &marker,
+                Entry::bytes(b"transcript-index-v1".to_vec()),
+                CasExpectation::Any,
+            )
+            .await?;
+        if self
+            .filesystem
+            .get(&scope.to_resource_scope(), &marker)
+            .await?
+            .is_none()
+        {
+            return Err(SessionThreadError::Backend(
+                "transcript index migration marker was not durable after write".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     pub(super) async fn thread_record_with_index_overlay(
@@ -567,6 +651,24 @@ impl ThreadIndexCursor {
 
 fn thread_index_root(scope: &ThreadScope) -> Result<ScopedPath, SessionThreadError> {
     scoped_path(&format!("{}/thread_index", scope_axes_string(scope)))
+}
+
+fn thread_index_migration_marker_path(
+    scope: &ThreadScope,
+) -> Result<ScopedPath, SessionThreadError> {
+    scoped_path(&format!(
+        "{}/index-migrations/thread-index-v1.complete",
+        scope_axes_string(scope)
+    ))
+}
+
+fn transcript_index_migration_marker_path(
+    scope: &ThreadScope,
+) -> Result<ScopedPath, SessionThreadError> {
+    scoped_path(&format!(
+        "{}/index-migrations/transcript-index-v1.complete",
+        scope_axes_string(scope)
+    ))
 }
 
 pub(super) fn thread_index_record_path(

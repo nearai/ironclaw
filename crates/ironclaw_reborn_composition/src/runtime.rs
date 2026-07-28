@@ -748,6 +748,10 @@ pub struct RebornRuntime {
         Option<Arc<ironclaw_extension_host::channel_host::GenericChannelHostAssembly>>,
     pub(crate) process_lifecycle_lookup_source:
         Arc<dyn ProcessLifecycleLookupSource<Error = TurnError>>,
+    // Used by the full runtime/test-support wiring; minimal consumers such as
+    // the standalone latency harness compile the composition crate without
+    // those call sites.
+    #[allow(dead_code)]
     pub(crate) process_gate_query_source: Arc<dyn ProcessGateQuerySource<Error = TurnError>>,
     turn_tree_store: Arc<dyn AgentTurnSpawnTreeRuntimePort>,
     thread_service: Arc<dyn SessionThreadService>,

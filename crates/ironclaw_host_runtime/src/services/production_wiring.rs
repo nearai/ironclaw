@@ -275,7 +275,7 @@ impl ProductionComponentType {
     pub(super) fn of<T: ?Sized + 'static>() -> Self {
         Self {
             implementation: type_name::<T>(),
-            readiness: classify_component_type::<T>(),
+            readiness: classify_component_type_of::<T>(),
         }
     }
 
@@ -292,7 +292,7 @@ impl ProductionComponentType {
     pub(super) fn erased(implementation: &'static str, type_id: TypeId) -> Self {
         Self {
             implementation,
-            readiness: classify_component_type_id(type_id),
+            readiness: classify_component_type(implementation, type_id),
         }
     }
 }
@@ -308,11 +308,14 @@ pub(super) fn component_name(component: Option<ProductionComponentType>) -> Opti
     component.map(|component| component.implementation)
 }
 
-fn classify_component_type<T: ?Sized + 'static>() -> ProductionImplementationReadiness {
-    classify_component_type_id(TypeId::of::<T>())
+fn classify_component_type_of<T: ?Sized + 'static>() -> ProductionImplementationReadiness {
+    classify_component_type(type_name::<T>(), TypeId::of::<T>())
 }
 
-fn classify_component_type_id(type_id: TypeId) -> ProductionImplementationReadiness {
+fn classify_component_type(
+    implementation: &'static str,
+    type_id: TypeId,
+) -> ProductionImplementationReadiness {
     match () {
         () if type_id == TypeId::of::<DiskFilesystem>()
             || type_id == TypeId::of::<InMemoryResourceGovernor>()
@@ -323,7 +326,7 @@ fn classify_component_type_id(type_id: TypeId) -> ProductionImplementationReadin
             // still local-only; libSQL/Postgres monomorphizations are distinct.
             || type_id == TypeId::of::<ProcessJournalStore<InMemoryBackend>>()
             || type_id == TypeId::of::<ProcessResultStore<InMemoryBackend>>()
-            || is_local_only_test_component(type_id)
+            || is_local_only_test_component(implementation)
             // Approval requests use one filesystem-backed store. The process
             // invocation fake exists only behind test support. Both are
             // local-only when backed by `InMemoryBackend`.
@@ -363,12 +366,7 @@ fn classify_component_type_id(type_id: TypeId) -> ProductionImplementationReadin
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
-fn is_local_only_test_component(type_id: TypeId) -> bool {
-    type_id == TypeId::of::<ironclaw_processes::ProcessInvocationStateStore<InMemoryBackend>>()
-}
-
-#[cfg(not(any(test, feature = "test-support")))]
-fn is_local_only_test_component(_type_id: TypeId) -> bool {
-    false
+fn is_local_only_test_component(implementation: &str) -> bool {
+    implementation.contains("ProcessInvocationStateStore<")
+        && implementation.contains("InMemoryBackend")
 }

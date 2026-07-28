@@ -13,14 +13,16 @@ use uuid::Uuid;
 
 use ironclaw_host_api::{ProcessId, ResourceScope, SYSTEM_RESERVED_ID};
 use ironclaw_processes::{
-    CancelProcessRequest, ClaimedProcess, GetProcessSnapshotRequest, JournaledProcessSnapshot,
-    ProcessCheckpointRef, ProcessConcurrencyClass, ProcessControlPort, ProcessJournalCommit,
+    CancelProcessRequest, ClaimedProcess, GetProcessCheckpointRequest, GetProcessSnapshotRequest,
+    JournaledProcessSnapshot, ProcessCheckpointId, ProcessCheckpointPort, ProcessCheckpointRef,
+    ProcessConcurrencyClass, ProcessControlPort, ProcessJournalCommit,
     ProcessJournalCommitObserver, ProcessJournalCursor, ProcessJournalEntry, ProcessJournalKind,
     ProcessJournalPage, ProcessJournalSource, ProcessKind, ProcessLeaseSnapshot, ProcessLeaseToken,
     ProcessLifecycleStatus, ProcessOperationId, ProcessOutcome, ProcessRuntimePort,
-    ProcessSubmissionPort, ProcessSuspension, ProcessSuspensionKind, ProcessTreePort,
-    ProcessWorkerId, PruneReleasedProcessRequest, ReleaseProcessTreeRequest,
-    ReserveProcessTreeRequest, ResumeProcessRequest, SubmitProcessRequest,
+    ProcessSnapshotSource, ProcessSubmissionPort, ProcessSuspension, ProcessSuspensionKind,
+    ProcessTreePort, ProcessWorkerId, PruneReleasedProcessRequest, RecordProcessCheckpointRequest,
+    ReleaseProcessTreeRequest, ReserveProcessTreeRequest, ResumeProcessRequest,
+    SubmitProcessRequest, SubmitProcessWithCheckpointRequest,
 };
 
 use crate::{
@@ -70,6 +72,10 @@ impl AgentTurnProcessCommitObserver {
 
 #[async_trait]
 impl ProcessJournalCommitObserver for AgentTurnProcessCommitObserver {
+    fn process_observer_id(&self) -> &'static str {
+        "agent-turn-commit-observer-v1"
+    }
+
     async fn observe_process_commit(&self, commit: ProcessJournalCommit) -> Result<(), String> {
         if commit.state.process_kind != ProcessKind::AgentTurn {
             return Ok(());
@@ -88,6 +94,7 @@ impl ProcessJournalCommitObserver for AgentTurnProcessCommitObserver {
             retryable: None,
             detail: None,
             metadata: commit.state.metadata,
+            committed_state: None,
         })
         .map_err(|error| error.to_string())?;
         if self.required.observes_event(&event) {
@@ -111,6 +118,8 @@ pub struct AgentTurnProcessRuntime {
     journal: Arc<dyn ProcessJournalSource<Error = TurnError>>,
     controls: Arc<dyn ProcessControlPort<Error = TurnError>>,
     trees: Arc<dyn ProcessTreePort<Error = TurnError>>,
+    snapshots: Arc<dyn ProcessSnapshotSource<Error = TurnError>>,
+    checkpoints: Arc<dyn ProcessCheckpointPort<Error = TurnError>>,
 }
 
 impl AgentTurnProcessRuntime {
@@ -123,7 +132,9 @@ impl AgentTurnProcessRuntime {
             Arc::clone(&adapter) as Arc<dyn ProcessSubmissionPort<Error = TurnError>>,
             Arc::clone(&adapter) as Arc<dyn ProcessJournalSource<Error = TurnError>>,
             Arc::clone(&adapter) as Arc<dyn ProcessControlPort<Error = TurnError>>,
-            adapter as Arc<dyn ProcessTreePort<Error = TurnError>>,
+            Arc::clone(&adapter) as Arc<dyn ProcessTreePort<Error = TurnError>>,
+            Arc::clone(&adapter) as Arc<dyn ProcessSnapshotSource<Error = TurnError>>,
+            adapter as Arc<dyn ProcessCheckpointPort<Error = TurnError>>,
         )
     }
 
@@ -132,12 +143,16 @@ impl AgentTurnProcessRuntime {
         journal: Arc<dyn ProcessJournalSource<Error = TurnError>>,
         controls: Arc<dyn ProcessControlPort<Error = TurnError>>,
         trees: Arc<dyn ProcessTreePort<Error = TurnError>>,
+        snapshots: Arc<dyn ProcessSnapshotSource<Error = TurnError>>,
+        checkpoints: Arc<dyn ProcessCheckpointPort<Error = TurnError>>,
     ) -> Self {
         Self {
             submission,
             journal,
             controls,
             trees,
+            snapshots,
+            checkpoints,
         }
     }
 
@@ -190,6 +205,7 @@ impl AgentTurnProcessRuntime {
                 .and_then(LoopModelRouteSnapshot::advisory),
             model_usage: None,
             subagent_depth: 0,
+            spawn_tree_descendant_cap: None,
             product_context: request.product_context,
             resume_disposition: None,
         };
@@ -290,6 +306,7 @@ impl AgentTurnProcessRuntime {
             resolved_model_route: None,
             model_usage: None,
             subagent_depth,
+            spawn_tree_descendant_cap: Some(request.spawn_tree_descendant_cap),
             product_context: parent_metadata.product_context,
             resume_disposition: None,
         };
@@ -431,10 +448,11 @@ impl AgentTurnProcessRuntime {
         &self,
         request: RetryTurnRequest,
     ) -> Result<RetryTurnResponse, TurnError> {
+        let resource_scope = request.scope.to_resource_scope();
         let snapshot = self
             .journal
             .get_process_snapshot(GetProcessSnapshotRequest {
-                scope: request.scope.to_resource_scope(),
+                scope: resource_scope.clone(),
                 process_id: process_id_from_turn_run_id(request.run_id),
             })
             .await?;
@@ -451,33 +469,91 @@ impl AgentTurnProcessRuntime {
             });
         }
         let mut metadata = agent_turn_metadata_from_process_snapshot(&snapshot)?;
+        let latest = self
+            .snapshots
+            .process_snapshots(&resource_scope)
+            .await?
+            .into_iter()
+            .filter(|candidate| candidate.process_kind == ProcessKind::AgentTurn)
+            .filter_map(|candidate| {
+                let candidate_metadata =
+                    agent_turn_metadata_from_process_snapshot(&candidate).ok()?;
+                (candidate_metadata.turn_id == metadata.turn_id).then_some(candidate)
+            })
+            .max_by_key(|candidate| candidate.journal_cursor.0);
+        if latest
+            .as_ref()
+            .is_some_and(|latest| latest.process_id != snapshot.process_id)
+        {
+            return Err(TurnError::RunNotRetryable {
+                run_id: request.run_id,
+            });
+        }
         metadata.source_binding_ref = request.source_binding_ref;
         metadata.reply_target_binding_ref = request.reply_target_binding_ref;
         metadata.model_usage = None;
         metadata.resume_disposition = None;
         let concurrency_class = process_concurrency_class(metadata.product_context.as_ref());
         let run_id = TurnRunId::new();
+        let retry_process_id = process_id_from_turn_run_id(run_id);
+        let initial_checkpoint = if let Some(source_ref) = snapshot.checkpoint_ref.as_ref() {
+            let source = self
+                .checkpoints
+                .get_process_checkpoint(GetProcessCheckpointRequest {
+                    checkpoint_id: ProcessCheckpointId::from_trusted(source_ref.as_str()),
+                    process_id: snapshot.process_id,
+                    scope: resource_scope.clone(),
+                })
+                .await?
+                .ok_or(TurnError::RunNotRetryable {
+                    run_id: request.run_id,
+                })?;
+            let checkpoint_id = TurnCheckpointId::new();
+            let checkpoint_ref = process_checkpoint_ref(checkpoint_id);
+            Some((
+                checkpoint_ref.clone(),
+                RecordProcessCheckpointRequest {
+                    checkpoint_id: ProcessCheckpointId::from_trusted(
+                        checkpoint_ref.as_str().to_string(),
+                    ),
+                    process_id: retry_process_id,
+                    scope: resource_scope.clone(),
+                    state_ref: source.state_ref,
+                    payload: source.payload,
+                    created_at: Utc::now(),
+                    metadata: source.metadata,
+                },
+            ))
+        } else {
+            None
+        };
+        let checkpoint_ref = initial_checkpoint
+            .as_ref()
+            .map(|(checkpoint_ref, _)| checkpoint_ref.clone());
         let retried = self
             .submission
-            .submit_process(SubmitProcessRequest {
-                process_id: process_id_from_turn_run_id(run_id),
-                process_kind: ProcessKind::AgentTurn,
-                scope: request.scope.to_resource_scope(),
-                exclusive_within_scope: true,
-                operation_id: Some(ProcessOperationId::from_trusted(format!(
-                    "retry:{}",
-                    request.idempotency_key.as_str()
-                ))),
-                owner_user_id: snapshot.owner_user_id,
-                concurrency_class,
-                parent_process_id: snapshot.parent_process_id,
-                root_process_id: snapshot.root_process_id,
-                spawn_tree_descendant_cap: None,
-                dependency: None,
-                checkpoint_ref: snapshot.checkpoint_ref,
-                input: None,
-                created_at: Utc::now(),
-                metadata: json!({ "agent_turn": metadata }),
+            .submit_process_with_checkpoint(SubmitProcessWithCheckpointRequest {
+                submission: SubmitProcessRequest {
+                    process_id: retry_process_id,
+                    process_kind: ProcessKind::AgentTurn,
+                    scope: resource_scope,
+                    exclusive_within_scope: true,
+                    operation_id: Some(ProcessOperationId::from_trusted(format!(
+                        "retry:{}",
+                        request.idempotency_key.as_str()
+                    ))),
+                    owner_user_id: snapshot.owner_user_id,
+                    concurrency_class,
+                    parent_process_id: snapshot.parent_process_id,
+                    root_process_id: snapshot.root_process_id,
+                    spawn_tree_descendant_cap: metadata.spawn_tree_descendant_cap,
+                    dependency: None,
+                    checkpoint_ref,
+                    input: None,
+                    created_at: Utc::now(),
+                    metadata: json!({ "agent_turn": metadata }),
+                },
+                checkpoint: initial_checkpoint.map(|(_, checkpoint)| checkpoint),
             })
             .await?;
         let state = turn_run_state_from_process_snapshot(retried)?;
@@ -723,6 +799,8 @@ pub struct AgentTurnProcessStateMetadata {
     #[serde(default)]
     pub subagent_depth: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawn_tree_descendant_cap: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub product_context: Option<ProductTurnContext>,
     #[serde(
         rename = "auth_resume_disposition",
@@ -746,6 +824,7 @@ impl AgentTurnProcessStateMetadata {
             resolved_model_route: state.resolved_model_route.clone(),
             model_usage: state.model_usage,
             subagent_depth: 0,
+            spawn_tree_descendant_cap: None,
             product_context: state.product_context.clone(),
             resume_disposition: state.resume_disposition.clone(),
         }
@@ -787,6 +866,7 @@ impl TurnRunProcessExt for TurnRunRecord {
             failure: self.failure.clone(),
             journal_cursor: ProcessJournalCursor(self.event_cursor.0),
             lease: process_lease_from_record(self),
+            crash_reclaim_count: 0,
             created_at: self.received_at,
             owner_user_id: self.scope.explicit_owner_user_id().cloned(),
             concurrency_class: process_concurrency_class(self.product_context.as_ref()),
@@ -814,6 +894,7 @@ impl TurnRunStateProcessExt for TurnRunState {
             failure: self.failure.clone(),
             journal_cursor: ProcessJournalCursor(self.event_cursor.0),
             lease: None,
+            crash_reclaim_count: 0,
             created_at: self.received_at,
             owner_user_id: self
                 .scope
@@ -848,6 +929,7 @@ impl TurnLifecycleProcessExt for TurnLifecycleEvent {
             retryable: self.retryable,
             detail: self.detail.clone(),
             metadata: Value::Null,
+            committed_state: None,
         }
     }
 }

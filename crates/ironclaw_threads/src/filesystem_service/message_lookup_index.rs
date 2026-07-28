@@ -93,6 +93,67 @@ where
         Ok(())
     }
 
+    pub(super) fn entries_for_message(
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message: &ThreadMessageRecord,
+    ) -> Result<Vec<(ScopedPath, Entry, CasExpectation)>, SessionThreadError> {
+        let mut entries = Vec::new();
+        let mut push = |path: ScopedPath, expectation: CasExpectation| {
+            let record = MessageLookupIndexRecord {
+                thread_id: thread_id.clone(),
+                message_id: message.message_id,
+            };
+            let body = serialize_pretty(&record)?;
+            entries.push((
+                path,
+                Entry::bytes(body).with_content_type(ContentType::json()),
+                expectation,
+            ));
+            Ok::<(), SessionThreadError>(())
+        };
+        if message.kind == MessageKind::Assistant
+            && let Some(turn_run_id) = message.turn_run_id.as_deref()
+        {
+            push(
+                assistant_run_index_path(scope, thread_id, turn_run_id)?,
+                CasExpectation::Any,
+            )?;
+        }
+        if message.kind == MessageKind::ToolResultReference
+            && let (Some(turn_run_id), Some(result_ref)) = (
+                message.turn_run_id.as_deref(),
+                message.tool_result_ref.as_deref(),
+            )
+        {
+            push(
+                tool_result_index_path(scope, thread_id, turn_run_id, result_ref)?,
+                CasExpectation::Any,
+            )?;
+        }
+        if message.kind == MessageKind::User {
+            push(
+                first_user_index_path(scope, thread_id)?,
+                CasExpectation::Absent,
+            )?;
+        }
+        if message.kind == MessageKind::CapabilityDisplayPreview
+            && let (Some(turn_run_id), Some(invocation_id)) = (
+                message.turn_run_id.as_deref(),
+                CapabilityDisplayPreviewEnvelope::invocation_id_from_json(
+                    message.content.as_deref(),
+                )
+                .map_err(SessionThreadError::Serialization)?,
+            )
+        {
+            push(
+                capability_preview_index_path(scope, thread_id, turn_run_id, invocation_id)?,
+                CasExpectation::Any,
+            )?;
+        }
+        Ok(entries)
+    }
+
     pub(super) async fn read_first_user(
         &self,
         scope: &ThreadScope,

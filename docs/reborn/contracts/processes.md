@@ -1,367 +1,144 @@
 # IronClaw Reborn process lifecycle contract
 
-**Date:** 2026-04-25
-**Status:** V1 contract slice
-**Crate:** `crates/ironclaw_processes`
-**Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/capabilities.md`, `docs/reborn/contracts/filesystem.md`, `docs/reborn/contracts/events.md`
+**Date:** 2026-07-28
+**Status:** Row-native journal contract
+**Owner:** `crates/ironclaw_processes`
 
----
+## Purpose and authority
 
-## 1. Purpose
+`ironclaw_processes` owns the durable lifecycle of agent turns, capability
+invocations, background work, dependencies, checkpoints, and spawn-tree
+reservations. Authorization remains in `ironclaw_authorization`; approvals
+remain in `ironclaw_approvals`; domain adapters such as `ironclaw_turns`
+translate their vocabulary at the process boundary.
 
-`ironclaw_processes` owns process lifecycle state. The original V1 surface is
-host-tracked background capability execution; the 2026-07-24 journal slice adds
-the richer kernel process vocabulary used to converge turns, subagents,
-capability invocations, automations, and external waits onto one durable process
-journal.
-
-It is intentionally below `CapabilityHost`:
+The sole lifecycle authority is `ProcessJournalStore`:
 
 ```text
-CapabilityHost::spawn_json(...)
-  -> validates scope and authorization
-  -> selects a declared capability descriptor
-  -> asks ProcessManager to create a process record
-
-ironclaw_processes
-  -> stores process identity and lifecycle
-  -> optionally starts background execution through ProcessExecutor
-  -> optionally owns resource reservations through ResourceManagedProcessStore
-  -> optionally emits process lifecycle events through EventingProcessStore
-  -> exposes host-facing lifecycle APIs through ProcessHost
-  -> exposes status transitions such as complete/fail/kill
+typed process command
+  -> validate scope, lease, lineage, quota, and dependency invariants
+  -> atomically update participating materialized rows
+  -> append one immutable lifecycle row
+  -> return the committed snapshot
+  -> emit an in-process wake hint
 ```
 
-It does not decide whether a caller may spawn a capability. Authorization remains in `ironclaw_authorization`, and caller-facing workflow remains in `ironclaw_capabilities`.
+Observers and transport projections do not own state. A committed journal
+mutation is successful even if an in-process wake hint fails; required
+consumers must be replayable from durable journal cursors.
 
----
+## Durable layout
 
-## 2. Capability-backed process records
-
-A process is a tracked runtime instance of a declared capability, not a raw host process escape:
-
-```rust
-pub struct ProcessRecord {
-    pub process_id: ProcessId,
-    pub parent_process_id: Option<ProcessId>,
-    pub invocation_id: InvocationId,
-    pub scope: ResourceScope,
-    pub authenticated_actor_user_id: Option<UserId>,
-    pub extension_id: ExtensionId,
-    pub capability_id: CapabilityId,
-    pub runtime: RuntimeKind,
-    pub status: ProcessStatus,
-    pub grants: CapabilitySet,
-    pub mounts: MountView,
-    pub estimated_resources: ResourceEstimate,
-    pub resource_reservation_id: Option<ResourceReservationId>, // store-assigned only
-    pub error_kind: Option<String>,
-}
-```
-
-The record always carries tenant/user/agent scope, the optional authenticated actor, and capability identity so lifecycle, accounting, audit, and future runtime boundaries can be traced back to the same host authority envelope. The actor is distinct from `scope.user_id`: `ProcessStart`, `ProcessRecord`, and `ProcessExecutionRequest` preserve it unchanged and never infer it from the subject. Older serialized records without this field load it as `None`.
-
----
-
-## 3. Status model
-
-The first slice keeps process status minimal:
-
-```rust
-pub enum ProcessStatus {
-    Running,
-    Completed,
-    Failed,
-    Killed,
-}
-```
-
-The process-journal slice adds a separate canonical lifecycle vocabulary for
-queued/leased/suspended/recovered process kernels without changing the V1
-runtime-execution `ProcessStatus` wire contract:
-
-```rust
-pub enum ProcessLifecycleStatus {
-    Queued,
-    Running,
-    Suspended,
-    StopRequested,
-    CancelRequested,
-    Stopped,
-    Cancelled,
-    Completed,
-    Failed,
-    Killed,
-    RecoveryRequired,
-}
-```
-
-`ProcessLifecycleStatus`, `ProcessSuspension`, `ProcessJournalEntry`,
-`JournaledProcessSnapshot`, lease requests, stop/kill/suspend/resume envelopes,
-and `ProcessOutcome` live in `ironclaw_processes::journal` and are re-exported
-from the crate root. Domain crates such as `ironclaw_turns` should adapt their
-domain records into these process-owned contracts instead of defining parallel
-journal/status vocabularies.
-
-The same module owns the process transition port:
-
-```rust
-#[async_trait]
-pub trait ProcessTransitionPort: Send + Sync {
-    async fn claim_next_process(...) -> Result<Option<ClaimedProcess>, Self::Error>;
-    async fn heartbeat_process(...) -> Result<ProcessJournalCursor, Self::Error>;
-    async fn recover_expired_process_leases(...)
-        -> Result<RecoverExpiredProcessLeasesResponse, Self::Error>;
-    async fn suspend_process(...) -> Result<JournaledProcessSnapshot, Self::Error>;
-    async fn complete_process(...) -> Result<JournaledProcessSnapshot, Self::Error>;
-    async fn cancel_process(...) -> Result<JournaledProcessSnapshot, Self::Error>;
-    async fn fail_process(...) -> Result<JournaledProcessSnapshot, Self::Error>;
-    async fn relinquish_process(...) -> Result<JournaledProcessSnapshot, Self::Error>;
-}
-```
-
-The journal module also owns the process read/projection source:
-
-```rust
-pub trait ProcessJournalSource: Send + Sync {
-    async fn get_process_snapshot(...) -> Result<JournaledProcessSnapshot, Self::Error>;
-    async fn read_process_journal_after(...) -> Result<ProcessJournalPage, Self::Error>;
-    async fn read_process_journal_log_after(...) -> Result<ProcessJournalPage, Self::Error>;
-}
-```
-
-`ProcessJournalSource` is the canonical read-side process contract for current
-state and ordered lifecycle facts. Domain lifecycle streams, including agent
-turn events, are projections over this source and are not separate journal
-authorities.
-
-The journal also owns process dependency truth through
-`ProcessDependencyPort`. A dependency relates a dependent process to another
-process and progresses through `Open`, `Settled`, and `Consumed`, with
-`Abandoned` as rollback termination. Terminal evidence is bounded lifecycle
-metadata; domain-specific result bodies remain externalized.
-
-For a child process, `SubmitProcessRequest.dependency` is part of the same
-journal command as process creation and spawn-tree reservation. Capacity
-rejection therefore persists neither the child nor an orphan dependency.
-Consuming or abandoning a dependency closes it and releases the corresponding
-tree reservation in the same command. Replays are idempotent.
-
-Scoped dependency queries support a dependent process and optional group
-reference. `unresolved_process_dependencies` is the authoritative recovery
-enumeration; domain rosters and secondary recovery indexes are forbidden.
-Runner await edges are a projection over these records. Missing dependencies
-are not reconstructed from agent-turn records or thread metadata.
-
-`ProcessJournalStore` implements the process mutation and read ports directly.
-`ironclaw_turns::AgentTurnProcessRuntime` projects turn coordination and query
-contracts over those ports. Its `ProcessJournalStoreTurnAdapter` translates
-errors at the crate boundary but owns no state and contains no reverse
-turn-transition engine.
-
-The durable lifecycle journal is an append-only set of immutable
-`RootFilesystem` records under `/processes/materialized/journal`; every
-`ProcessJournalEntry` is one physical row keyed by its zero-padded cursor.
-Queryable state is stored as typed records alongside it under
-`/processes/materialized/{process,input,tree,dependency,checkpoint,...}`.
-Commands atomically update the participating materialized rows and insert their
-lifecycle rows through a `StorageTxn`. Row versions provide optimistic
-conflict detection across store handles and processes. Reads address one keyed
-row or one row family and never rebuild state by replaying the journal.
-
-Backends used for process persistence must advertise
-`TxnCapability::MultiKey`; the store fails closed on CAS-only mounts because
-process/tree/dependency invariants span records and journal appends. The former
-`/processes/journal/records` command log and
-`/processes/journal/state.json` snapshot are read-only migration inputs. They
-are never inspected by normal startup or request handling. Operators must call
-`ProcessJournalStore::migrate_legacy_journal` before any new-store request to
-replay them into materialized rows and individual lifecycle rows. Once
-row-native metadata exists, legacy import fails closed. Ordered projections
-introduced after row-native records were written are rebuilt separately with
-the explicit offline `migrate_row_native_indexes` operation.
-
-Every request-time collection read names an ordered projection and binds its
-leading scope/owner/kind/state partition before a bounded keyset traversal.
-Index declaration is O(1) and never backfills existing records. Lifecycle
-indexes are sparse: queue keys exist only for queued processes, quota keys only
-for running processes, expiry keys only for leased recoverable processes, and
-gate keys only for suspended processes. Startup exact-probes metadata and may
-run bounded queue/expiry queries; it never replays or enumerates the journal.
-
-This is a forward storage migration once a new writer commits. An older binary
-cannot observe commands written only as materialized rows. Rollback therefore
-requires stopping writers and restoring the pre-migration database backup (or
-deploying a compatibility reader); binary rollback against an already-written
-database is not supported.
-
-`spawn_json` creates a `Running` process record. `BackgroundProcessManager` then drives `Running -> Completed` or `Running -> Failed` from the attached `ProcessExecutor`. `ProcessHost::kill` drives `Running -> Killed` and, when configured with a shared `ProcessCancellationRegistry`, also signals the running executor's cooperative cancellation token. Terminal states are protected: `Completed`, `Failed`, and `Killed` cannot be overwritten by a late background completion.
-
----
-
-## 4. Store and manager contracts
-
-`ProcessStore` is current-state storage for process lifecycle:
-
-```rust
-async fn start(ProcessStart) -> Result<ProcessRecord>;
-async fn complete(scope, process_id) -> Result<ProcessRecord>;
-async fn fail(scope, process_id, error_kind) -> Result<ProcessRecord>;
-async fn kill(scope, process_id) -> Result<ProcessRecord>;
-async fn get(scope, process_id) -> Result<Option<ProcessRecord>>;
-async fn records_for_scope(scope) -> Result<Vec<ProcessRecord>>;
-```
-
-`ProcessManager::spawn` is the lower-level lifecycle mechanic used by `CapabilityHost`. It receives the spawn input and authenticated actor in `ProcessStart` so runtime-backed managers can start work, but `ProcessRecord` does not persist raw input. The in-memory and filesystem stores implement the manager by recording a new `Running` process, including the actor. `BackgroundProcessManager` then copies the record actor into `ProcessExecutionRequest` for the executor.
-
-`ProcessStart.resource_reservation_id` is an internal store-assigned channel. Callers must not pre-fill it. `ResourceManagedProcessStore::start` rejects caller-supplied reservation IDs before persisting any process record so forged reservation IDs cannot bypass `ResourceGovernor::reserve`. The wrapper also tracks the reservations it created per process and refuses `complete`, `fail`, or `kill` cleanup for reservation IDs it did not create for that process.
-
-`ProcessHost` is the current host-facing lifecycle API layered over `ProcessStore`:
-
-```rust
-async fn status(scope, process_id) -> Result<Option<ProcessRecord>>;
-async fn kill(scope, process_id) -> Result<ProcessRecord>;
-async fn await_process(scope, process_id) -> Result<ProcessExit>;
-async fn subscribe(scope, process_id) -> Result<ProcessSubscription>;
-async fn result(scope, process_id) -> Result<Option<ProcessResultRecord>>;
-async fn output(scope, process_id) -> Result<Option<Value>>;
-async fn await_result(scope, process_id) -> Result<ProcessResultRecord>;
-```
-
-`status` preserves tenant/user isolation by returning `None` for out-of-scope records. `kill` delegates to the scoped store transition and signals cooperative cancellation only after a scoped kill succeeds. `await_process` polls the scoped current-state store until the record reaches `Completed`, `Failed`, or `Killed`, then returns a terminal `ProcessExit`. `subscribe` returns a scoped current-state subscription whose first `next()` yields the current record, whose later `next()` calls yield status changes, and whose terminal record is emitted once before returning `None`. `result` and `await_result` read terminal output/error metadata from a scoped `ProcessResultStore`; `output` resolves inline or referenced JSON output through the same scoped store. Missing or out-of-scope records fail closed with `UnknownProcess`.
-
-The V1 subscription is intentionally scoped and current-state based. It does not expose raw process input/output, host paths, or cross-tenant existence information, and it does not require `CapabilityHost` or `ironclaw_dispatcher` to own process lifecycle mechanics.
-
-`ProcessServices` is a composition helper that wires the process store, result store, and cancellation registry together so `ProcessHost` and `BackgroundProcessManager` share the same lifecycle/result/cancellation state:
-
-```rust
-let services = ProcessServices::filesystem(scoped_filesystem);
-let host = services.host();
-let manager = services.background_manager(executor);
-```
-
-The lifecycle and result stores share the one scoped filesystem handle, so
-externalized output (`output_ref`) written by the result store resolves on
-read-back. There is no bespoke in-memory store pair anymore
-(arch-simplification §4.3): tests wire the same filesystem stores over
-`InMemoryBackend` via the `test-support` helpers
-(`in_memory_backed_process_services()`, or the equivalent `test-support`-gated
-`ProcessServices::in_memory()`). `CapabilityHost::with_process_services(...)` can derive its spawn manager from this same bundle, while callers still use `services.host()` for lifecycle/result/output operations. This helper is convenience wiring only; it does not move process lifecycle into `CapabilityHost`, `ironclaw_dispatcher`, or any runtime lane.
-
-`BackgroundProcessManager` composes a `ProcessStore` and `ProcessExecutor`:
+The store uses `RootFilesystem` multi-key transactions under:
 
 ```text
-start ProcessRecord as Running
-  -> spawn background executor task
-  -> executor success: complete(scope, process_id)
-  -> executor failure: fail(scope, process_id, error_kind)
+/processes/materialized/metadata
+/processes/materialized/process/{process_id}
+/processes/materialized/input/{process_id}
+/processes/materialized/checkpoint/{checkpoint_id}
+/processes/materialized/tree/{root_process_id}
+/processes/materialized/dependency/{dependent_id}/{dependency_id}
+/processes/materialized/journal/{zero_padded_cursor}
+/processes/materialized/{control,submission}/...
 ```
 
-The executor receives a redaction-friendly `ProcessExecutionRequest` containing process identity, scope, target capability, estimate, raw input, and a `ProcessCancellationToken`. When the process record already carries a process-owned reservation ID, `BackgroundProcessManager` sends a zero/default dispatch estimate so a runtime-backed process does not reserve the same process estimate twice. If configured with a `ProcessResultStore`, it records `ProcessExecutionResult.output` after a successful `complete` transition, records sanitized failure kind after a successful `fail` transition, and does not overwrite a `Killed` result after late executor completion.
+Each journal entry is immutable and cursor-keyed. Current-state reads address
+typed rows and ordered sparse indexes; they never rebuild state by replaying
+the journal. Mutations require `TxnCapability::MultiKey` and fail closed on
+CAS-only backends.
 
-`ProcessResultRecord` is separate from `ProcessRecord`:
+`ProcessRuntimePort` is the complete composition surface. Consumers should
+accept its narrower ports: submission, transition, control, snapshots,
+journal, dependencies, trees, checkpoints, inputs, gates, and lifecycle
+lookups.
 
-```rust
-pub struct ProcessResultRecord {
-    pub process_id: ProcessId,
-    pub scope: ResourceScope,
-    pub status: ProcessStatus,
-    pub output: Option<Value>,
-    pub output_ref: Option<VirtualPath>,
-    pub error_kind: Option<String>,
-}
-```
+## Lifecycle and leases
 
-In-memory/dev result stores may keep small JSON output inline. Filesystem-backed process results write successful JSON output to scoped output artifact paths and store only `output_ref` in the result record, keeping lifecycle/result metadata small and easier to redact. This is still not a streaming/binary output system; later slices should generalize these refs for large, streaming, binary, or sensitive outputs.
-
-`ProcessCancellationRegistry` is optional wiring shared by `BackgroundProcessManager` and `ProcessHost`. The manager registers a token under tenant/user/process scope before starting executor work. `ProcessHost::kill` removes and signals the matching token only after the scoped store kill succeeds. Cross-tenant or cross-user kill attempts therefore cannot cancel another tenant/user's running executor even if they know a process UUID. Executor cancellation is cooperative: runtime adapters must observe `ProcessExecutionRequest.cancellation` and stop themselves.
-
-`ProcessStore::from_arc(...)` provides an owned store handle for detached background managers. The filesystem store serializes start/status writes within a store instance; production DB/object-store implementations should use compare-and-swap or transactional updates for cross-process terminal-state protection.
-
-`ResourceManagedProcessStore` wraps any `ProcessStore` and owns process reservation cleanup:
+`ProcessLifecycleStatus` is the canonical status vocabulary:
 
 ```text
-start
-  -> ResourceGovernor::reserve(scope, estimate)
-  -> attach resource_reservation_id to ProcessStart
-  -> inner.start(...)
-  -> on inner start failure: release reservation
-
-complete
-  -> inner.complete(...)
-  -> reconcile reservation with configured completion usage
-
-fail / kill
-  -> inner.fail(...) / inner.kill(...)
-  -> release reservation without recording usage
+Queued -> Running -> Suspended/Completed/Failed/Cancelled/Stopped
+                  -> StopRequested/CancelRequested
 ```
 
-Resource denial fails before process record creation. Caller-supplied reservation IDs are rejected before process record creation. The wrapper verifies that the inner store preserves the reservation ID it created and releases the reservation if start fails. The wrapper is deliberately below `CapabilityHost` and above concrete stores so resource ownership can compose with in-memory, filesystem, eventing, and future durable stores without making `ironclaw_dispatcher` process-aware.
+Claims mint scoped worker leases. Heartbeats extend the active lease only when
+worker and token match. Expiry policy preserves the prior turn guarantees:
 
-`EventingProcessStore` wraps any `ProcessStore` and emits best-effort lifecycle events after successful state transitions:
+- expired `CancelRequested` work becomes terminal `Cancelled`;
+- checkpoint-free work is safely requeued only within the bounded crash
+  reclaim budget;
+- checkpointed or reclaim-exhausted work becomes terminal `Failed` with
+  sanitized `lease_expired` or `crash_retry_exhausted` evidence.
+
+Retries must target the latest authoritative run for a turn. A replacement
+checkpoint is linked to the new process identity, and child retries retain the
+root lineage and descendant-cap policy.
+
+## Trees, dependencies, and capability causality
+
+Subagent children carry `parent_process_id`, the authoritative root, and a
+descendant cap. Child creation, tree reservation, and optional dependency
+creation are one journal command. Consuming or abandoning the dependency
+releases the reservation idempotently.
+
+Capability causality is stored in `CapabilityProcessMetadata.parent_process_id`
+instead of the subagent reservation relation. Capability work therefore
+retains its authoritative parent without consuming or forging a subagent
+descendant slot.
+
+## Idempotency and pagination
+
+Submission idempotency keys use stable owner/scope axes, process kind, and
+operation ID. The per-request `invocation_id` is deliberately excluded because
+logical retries may mint a fresh invocation identity.
+
+Queue claims keyset-page until the queue is exhausted or enough eligible work
+is found. Owner and concurrency-class quota reads are reused per unique key;
+quota-blocked prefixes cannot starve later eligible work.
+
+## Compatibility and migration
+
+Pre-row-native deployments may contain lifecycle data in:
 
 ```text
-start    -> process_started
-complete -> process_completed
-fail     -> process_failed
-kill     -> process_killed
+/turns/rows/v1
+/turns/state.json
+/run-state/.../runs
 ```
 
-These events include tenant/user/agent `ResourceScope`, `CapabilityId`, provider `ExtensionId`, `RuntimeKind`, and `ProcessId`. The wrapper does not make `ironclaw_dispatcher` process-aware; process observability stays in the process lifecycle service.
+Upgrade code must import these deployed layouts idempotently, verify durable
+read-back, and only then mark row-native authority initialized. Normal traffic
+must fail with a typed migration-required result while a known legacy authority
+is present. The transitional `/processes/journal/records` and
+`/processes/journal/state.json` layouts are also read-only import inputs.
 
-`start` rejects duplicate process IDs within the same tenant/user/agent partition. Callers must transition existing records instead of overwriting lifecycle state. `complete`, `fail`, and `kill` only transition from `Running`; late executor completions after `kill` are ignored by the background manager because the store rejects the terminal-state overwrite. Because event emission happens after successful transitions, a killed process does not emit a misleading late `process_completed` event when the background executor finishes after kill.
+Ordered-index and projection migrations are separately restartable. Completion
+markers are written only after read-back verification. Rollback after a new
+writer commits requires restoring the pre-migration backup or deploying a
+compatibility reader; an older binary cannot interpret row-native-only writes.
 
----
+## Capability process compatibility surface
 
-## 5. Tenant/user/agent partitioning
+`ProcessManager`, `ProcessHost`, and `ProcessRecord` remain the host-facing
+capability-process API, but their lifecycle persistence delegates to the
+canonical journal. `ProcessResultStore` owns bounded result/output records; raw
+input is stored through the private process-input port and is not exposed by
+status APIs.
 
-Process records and result records are tenant/user/agent scoped. The filesystem-backed stores write through `RootFilesystem` under:
+The mutex-backed `ProcessInvocationStateStore` under `test_support` is
+explicitly a pure fake. Production-store and durable-parity tests use
+`ProcessJournalStore<InMemoryBackend>`, libSQL, or PostgreSQL.
 
-```text
-/engine/tenants/{tenant_id}/users/{user_id}/agents/{agent_id-or-_none}/processes/{process_id}.json
-/engine/tenants/{tenant_id}/users/{user_id}/agents/{agent_id-or-_none}/process-results/{process_id}.json
-/engine/tenants/{tenant_id}/users/{user_id}/agents/{agent_id-or-_none}/process-outputs/{process_id}/output.json
-```
+## Validation
 
-Cross-tenant, cross-user, and cross-agent reads return `None`, empty lists, or `UnknownProcess`; they must not reveal that another tenant/user/agent has a matching process UUID.
+Changes must cover the smallest relevant contract tier, including:
 
----
+- transaction and idempotency replay behavior;
+- lease cancellation, checkpointed expiry, bounded reclaim, and exhaustion;
+- child lineage, dependency settlement, and retry checkpoint ownership;
+- paginated quota-blocked claims;
+- restartable migration with malformed and interrupted inputs;
+- libSQL/PostgreSQL parity for ordered keysets and durable restart.
 
-## 6. Current non-goals
-
-This slice does not implement:
-
-- direct WASM/Script/MCP process loops inside `ironclaw_processes`; runtime work is delegated through `ProcessExecutor`
-- dynamic executor-reported actual resource usage; completion reconciliation currently uses configured/default usage
-- forced/preemptive cancellation of uncooperative executor tasks
-- generalized artifact references for large, streaming, binary, or sensitive outputs beyond the current JSON output file
-- streaming output APIs
-- durable subscription cursors or process event projection/read APIs beyond the shared event sink/current-state subscription
-- process tree queries beyond parent process ID storage
-- durable resource ledger beyond the configured `ResourceGovernor` implementation
-- approval resume for `Action::SpawnCapability`
-
-Those should be layered on this capability-backed process record and manager boundary.
-
-
----
-
-## Contract freeze addendum — V1 process/output API (2026-04-25)
-
-The V1 process contract includes:
-
-```text
-status
-kill/cancel
-await completion
-subscribe to lifecycle/progress events
-result record
-output refs
-streaming output/progress through durable events
-```
-
-Large or binary outputs are represented by artifact refs, not embedded in process records or event payloads.
-
-Process scope must include tenant/user/project/agent where available. Process events and result records must not leak raw input, raw output beyond allowed output refs, host paths, secret material, or backend detail strings.
-
-Terminal-like raw stdout/stderr streams, forced abort handles, and advanced binary streaming are V2 unless implemented behind the same redacted event/artifact-ref contract.
+Production code does not use `.unwrap()` or `.expect()`, and failures retain
+their underlying cause while exposing only bounded, sanitized public evidence.

@@ -24,25 +24,31 @@ use crate::journal::{
     JournaledProcessSnapshot, KillProcessRequest, OpenProcessDependencyRequest,
     ProcessCheckpointPort, ProcessCheckpointRecord, ProcessConcurrencyLimits, ProcessControlPort,
     ProcessControlResult, ProcessDependencyPort, ProcessDependencyQuery, ProcessDependencyRecord,
-    ProcessGateOwnerMatch, ProcessGateQuery, ProcessGateQuerySource, ProcessGateRecord,
-    ProcessJournalCommit, ProcessJournalCommitObserver, ProcessJournalCursor, ProcessJournalEntry,
-    ProcessJournalKind, ProcessJournalObserverRegistry, ProcessJournalPage, ProcessJournalSource,
-    ProcessLeaseRequest, ProcessLeaseToken, ProcessLifecycleLookupBatchRequest,
-    ProcessLifecycleLookupResult, ProcessLifecycleLookupSource, ProcessLifecycleStatus,
-    ProcessOperationId, ProcessSubmissionPort, ProcessSuspension, ProcessTransitionPort,
-    ProcessTreePort, ProcessTreeReservation, ProcessWorkerId, PruneReleasedProcessRequest,
-    RecordProcessCheckpointRequest, RecoverExpiredProcessLeasesRequest,
-    RecoverExpiredProcessLeasesResponse, ReleaseProcessTreeRequest, ReserveProcessTreeRequest,
-    ResumeProcessRequest, SettleProcessDependencyRequest, StopProcessRequest, SubmitProcessRequest,
-    SuspendProcessRequest,
+    ProcessGateQuery, ProcessGateQuerySource, ProcessGateRecord, ProcessJournalCursor,
+    ProcessJournalEntry, ProcessJournalKind, ProcessJournalPage, ProcessJournalSource,
+    ProcessLeaseRequest, ProcessLifecycleLookupBatchRequest, ProcessLifecycleLookupResult,
+    ProcessLifecycleLookupSource, ProcessLifecycleStatus, ProcessOperationId,
+    ProcessSubmissionPort, ProcessSuspension, ProcessTransitionPort, ProcessTreePort,
+    ProcessTreeReservation, PruneReleasedProcessRequest, RecordProcessCheckpointRequest,
+    RecoverExpiredProcessLeasesRequest, RecoverExpiredProcessLeasesResponse,
+    ReleaseProcessTreeRequest, ReserveProcessTreeRequest, ResumeProcessRequest,
+    SettleProcessDependencyRequest, StopProcessRequest, SubmitProcessRequest,
+    SubmitProcessWithCheckpointRequest, SuspendProcessRequest,
 };
 use crate::types::{invalid_path, same_scope_owner};
 
 mod command;
+mod observer;
 mod rows;
 mod state;
+mod validation;
 use command::StoredProcessCommand;
+use observer::RegisteredProcessObserver;
 use state::ProcessJournalMaterializedState;
+use validation::{
+    ensure_lease, ensure_transition, process_claim_within_limits, process_gate_snapshot_matches,
+    process_scope_visible, same_lineage_scope, validate_tree_root,
+};
 
 const LEGACY_COMMAND_LOG_PATH: &str = "/processes/journal/records";
 const LEGACY_JOURNAL_STATE_PATH: &str = "/processes/journal/state.json";
@@ -96,6 +102,8 @@ pub enum ProcessJournalStoreError {
     Deserialization(String),
     #[error("process journal observer error: {0}")]
     Observer(String),
+    #[error("legacy process lifecycle data requires migration before row-native initialization")]
+    MigrationRequired,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,7 +160,7 @@ where
     filesystem: Arc<ScopedFilesystem<F>>,
     migration: Arc<Mutex<()>>,
     materialized_ready: Arc<AtomicBool>,
-    observers: Arc<StdMutex<Vec<Arc<dyn ProcessJournalCommitObserver>>>>,
+    observers: Arc<StdMutex<Vec<RegisteredProcessObserver>>>,
     lease_duration: Duration,
     concurrency_limits: ProcessConcurrencyLimits,
 }
@@ -211,35 +219,6 @@ where
         }
     }
 
-    async fn notify_process_commit(
-        &self,
-        state: JournaledProcessSnapshot,
-        kind: ProcessJournalKind,
-        sanitized_reason: Option<String>,
-    ) -> Result<(), ProcessJournalStoreError> {
-        let observers = self
-            .observers
-            .lock()
-            .map_err(|_| {
-                ProcessJournalStoreError::Observer(
-                    "process journal observer registry mutex poisoned".to_string(),
-                )
-            })?
-            .clone();
-        let commit = ProcessJournalCommit {
-            state,
-            kind,
-            sanitized_reason,
-        };
-        for observer in observers {
-            observer
-                .observe_process_commit(commit.clone())
-                .await
-                .map_err(ProcessJournalStoreError::Observer)?;
-        }
-        Ok(())
-    }
-
     async fn execute(
         &self,
         command: StoredProcessCommand,
@@ -249,13 +228,29 @@ where
         for attempt in 0..MAX_TRANSACTION_RETRIES {
             let mut loaded = rows::load(self.filesystem.as_ref(), &references).await?;
             let mut state = std::mem::take(&mut loaded.state);
-            let outcome = state.apply_command(command.clone())?;
-            let entries = std::mem::take(&mut state.journal);
             let prefix = processes_prefix()?;
             let mut txn = self
                 .filesystem
                 .begin(&ResourceScope::system(), &prefix)
                 .await?;
+            let sequence_path = self
+                .filesystem
+                .resolve(&ResourceScope::system(), &process_journal_sequence_path()?)?;
+            let reservation_count = command.cursor_reservation_count(state.processes.len());
+            let mut first_cursor = None;
+            for _ in 0..reservation_count {
+                let reserved = txn.reserve_sequence(&sequence_path).await?;
+                first_cursor.get_or_insert(reserved.get());
+            }
+            state.next_cursor = first_cursor.unwrap_or(1);
+            let outcome = match state.apply_command(command.clone()) {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    txn.rollback().await;
+                    return Err(error);
+                }
+            };
+            let entries = std::mem::take(&mut state.journal);
             let result = async {
                 rows::persist(self.filesystem.as_ref(), txn.as_mut(), &loaded, &state).await?;
                 rows::persist_journal(self.filesystem.as_ref(), txn.as_mut(), entries.as_slice())
@@ -360,6 +355,9 @@ where
             self.materialized_ready.store(true, Ordering::Release);
             return Ok(());
         }
+        if self.legacy_process_journal_present().await? {
+            return Err(ProcessJournalStoreError::MigrationRequired);
+        }
         self.initialize_materialized(false).await?;
         self.materialized_ready.store(true, Ordering::Release);
         Ok(())
@@ -377,6 +375,9 @@ where
                 "legacy process journal migration must run before row-native initialization"
                     .to_string(),
             ));
+        }
+        if self.deployed_legacy_authority_present().await? {
+            return Err(ProcessJournalStoreError::MigrationRequired);
         }
         let imported = self.initialize_materialized(true).await?;
         self.materialized_ready.store(true, Ordering::Release);
@@ -428,6 +429,67 @@ where
             }
         }
         Ok(migrated)
+    }
+
+    async fn legacy_process_journal_present(&self) -> Result<bool, ProcessJournalStoreError> {
+        if self.deployed_legacy_authority_present().await? {
+            return Ok(true);
+        }
+        let state_present = self
+            .filesystem
+            .get(&ResourceScope::system(), &legacy_journal_state_path()?)
+            .await?
+            .is_some();
+        if state_present {
+            return Ok(true);
+        }
+        Ok(!self
+            .filesystem
+            .tail_bounded(
+                &ResourceScope::system(),
+                &legacy_command_log_path()?,
+                SeqNo::ZERO,
+                1,
+            )
+            .await?
+            .is_empty())
+    }
+
+    async fn deployed_legacy_authority_present(&self) -> Result<bool, ProcessJournalStoreError> {
+        for raw in [
+            "/turns/state.json",
+            "/turns/rows/v1/meta/state.json",
+            "/turns/rows/v1/runs",
+            "/run-state",
+        ] {
+            let path = ScopedPath::new(raw)
+                .map_err(|error| ProcessJournalStoreError::InvalidPath(error.to_string()))?;
+            // Test and narrow-purpose mount views may intentionally expose only
+            // `/processes`. Probe deployed authorities only when their legacy
+            // alias is present in the supplied production view.
+            if self
+                .filesystem
+                .resolve(&ResourceScope::system(), &path)
+                .is_err()
+            {
+                continue;
+            }
+            match self.filesystem.get(&ResourceScope::system(), &path).await {
+                Ok(Some(_)) => return Ok(true),
+                Ok(None) | Err(FilesystemError::NotFound { .. }) => {}
+                Err(error) => return Err(error.into()),
+            }
+            match self
+                .filesystem
+                .list_dir(&ResourceScope::system(), &path)
+                .await
+            {
+                Ok(entries) if !entries.is_empty() => return Ok(true),
+                Ok(_) | Err(FilesystemError::NotFound { .. }) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(false)
     }
 
     async fn initialize_materialized(
@@ -488,6 +550,14 @@ where
                 .begin(&ResourceScope::system(), &prefix)
                 .await?;
             let result = async {
+                if import_legacy {
+                    let sequence_path = self
+                        .filesystem
+                        .resolve(&ResourceScope::system(), &process_journal_sequence_path()?)?;
+                    for _ in 1..state.next_cursor {
+                        txn.reserve_sequence(&sequence_path).await?;
+                    }
+                }
                 rows::persist(self.filesystem.as_ref(), txn.as_mut(), &loaded, &state).await?;
                 rows::persist_journal(self.filesystem.as_ref(), txn.as_mut(), entries.as_slice())
                     .await?;
@@ -539,7 +609,34 @@ where
         let (snapshot, changed) = self.submit_process_inner(request).await?;
         if changed {
             self.notify_process_commit(snapshot.clone(), ProcessJournalKind::Submitted, None)
-                .await?;
+                .await;
+        }
+        Ok(snapshot)
+    }
+
+    async fn submit_process_with_checkpoint(
+        &self,
+        request: SubmitProcessWithCheckpointRequest,
+    ) -> Result<JournaledProcessSnapshot, Self::Error> {
+        let outcome = if let Some(checkpoint) = request.checkpoint {
+            self.execute(StoredProcessCommand::SubmitWithCheckpoint {
+                request: Box::new(request.submission),
+                checkpoint: Box::new(checkpoint),
+            })
+            .await?
+        } else {
+            self.execute(StoredProcessCommand::Submit(Box::new(request.submission)))
+                .await?
+        };
+        let StoredCommandOutcome::Submitted(snapshot, changed) = outcome else {
+            return Err(unexpected_outcome(
+                "submit_process_with_checkpoint",
+                outcome,
+            ));
+        };
+        if changed {
+            self.notify_process_commit(snapshot.clone(), ProcessJournalKind::Submitted, None)
+                .await;
         }
         Ok(snapshot)
     }
@@ -601,7 +698,7 @@ where
         };
         for process in &claimed {
             self.notify_process_commit(process.state.clone(), ProcessJournalKind::Claimed, None)
-                .await?;
+                .await;
         }
         Ok(claimed)
     }
@@ -628,7 +725,7 @@ where
             outcome => return Err(unexpected_outcome("heartbeat", outcome)),
         };
         self.notify_process_commit(snapshot.clone(), ProcessJournalKind::Heartbeat, None)
-            .await?;
+            .await;
         Ok(snapshot.journal_cursor)
     }
 
@@ -644,12 +741,14 @@ where
             outcome => return Err(unexpected_outcome("recover_expired", outcome)),
         };
         for snapshot in &response.recovered {
-            self.notify_process_commit(
-                snapshot.clone(),
-                ProcessJournalKind::RecoveryRequired,
-                None,
-            )
-            .await?;
+            let kind = match snapshot.status {
+                ProcessLifecycleStatus::Queued => ProcessJournalKind::Resumed,
+                ProcessLifecycleStatus::Cancelled => ProcessJournalKind::Cancelled,
+                ProcessLifecycleStatus::Failed => ProcessJournalKind::Failed,
+                _ => ProcessJournalKind::RecoveryRequired,
+            };
+            self.notify_process_commit(snapshot.clone(), kind, None)
+                .await;
         }
         Ok(response)
     }
@@ -841,7 +940,7 @@ where
         };
         if let Some(kind) = committed_kind {
             self.notify_process_commit(result.state.clone(), kind, reason)
-                .await?;
+                .await;
         }
         Ok(result)
     }
@@ -860,25 +959,8 @@ where
             outcome => return Err(unexpected_outcome("leased_transition", outcome)),
         };
         self.notify_process_commit(snapshot.clone(), kind, None)
-            .await?;
+            .await;
         Ok(snapshot)
-    }
-}
-
-impl<F> ProcessJournalObserverRegistry for ProcessJournalStore<F>
-where
-    F: RootFilesystem + Send + Sync + 'static,
-{
-    fn subscribe_process_observer(
-        &self,
-        observer: Arc<dyn ProcessJournalCommitObserver>,
-    ) -> Result<(), String> {
-        let mut observers = self
-            .observers
-            .lock()
-            .map_err(|_| "process journal observer registry mutex poisoned".to_string())?;
-        observers.push(observer);
-        Ok(())
     }
 }
 
@@ -1310,168 +1392,9 @@ impl ProcessJournalEntry {
             retryable: None,
             detail: None,
             metadata: snapshot.metadata.clone(),
+            committed_state: Some(Box::new(snapshot.clone())),
         }
     }
-}
-
-fn ensure_transition(
-    snapshot: &JournaledProcessSnapshot,
-    to: ProcessLifecycleStatus,
-) -> Result<(), ProcessJournalStoreError> {
-    let valid = match (snapshot.status, to) {
-        (ProcessLifecycleStatus::Queued, ProcessLifecycleStatus::Running)
-        | (ProcessLifecycleStatus::Suspended, ProcessLifecycleStatus::Queued)
-        | (ProcessLifecycleStatus::Running, ProcessLifecycleStatus::Running)
-        | (ProcessLifecycleStatus::Running, ProcessLifecycleStatus::Suspended)
-        | (ProcessLifecycleStatus::Running, ProcessLifecycleStatus::Completed)
-        | (ProcessLifecycleStatus::Running, ProcessLifecycleStatus::Cancelled)
-        | (ProcessLifecycleStatus::Running, ProcessLifecycleStatus::Failed)
-        | (ProcessLifecycleStatus::Running, ProcessLifecycleStatus::Queued)
-        | (ProcessLifecycleStatus::CancelRequested, ProcessLifecycleStatus::Cancelled) => true,
-        (from, _) if from == to => true,
-        _ => false,
-    };
-    if valid {
-        Ok(())
-    } else {
-        Err(ProcessJournalStoreError::InvalidTransition {
-            process_id: snapshot.process_id,
-            from: snapshot.status,
-            to,
-        })
-    }
-}
-
-fn ensure_lease(
-    snapshot: &JournaledProcessSnapshot,
-    worker_id: &ProcessWorkerId,
-    lease_token: &ProcessLeaseToken,
-) -> Result<(), ProcessJournalStoreError> {
-    let Some(lease) = &snapshot.lease else {
-        return Err(ProcessJournalStoreError::InvalidLease {
-            process_id: snapshot.process_id,
-        });
-    };
-    if &lease.worker_id == worker_id && &lease.lease_token == lease_token {
-        Ok(())
-    } else {
-        Err(ProcessJournalStoreError::InvalidLease {
-            process_id: snapshot.process_id,
-        })
-    }
-}
-
-fn process_gate_snapshot_matches(
-    snapshot: &JournaledProcessSnapshot,
-    request: &ProcessGateQuery,
-) -> bool {
-    let Some(suspension) = &snapshot.suspension else {
-        return false;
-    };
-    let scope_matches = match request
-        .scope_match
-        .unwrap_or(crate::ProcessGateScopeMatch::Exact)
-    {
-        crate::ProcessGateScopeMatch::Exact => same_scope_owner(&snapshot.scope, &request.scope),
-        crate::ProcessGateScopeMatch::Owner => {
-            snapshot.scope.tenant_id == request.scope.tenant_id
-                && snapshot.scope.user_id == request.scope.user_id
-                && snapshot.scope.agent_id == request.scope.agent_id
-                && snapshot.scope.project_id == request.scope.project_id
-        }
-    };
-    snapshot.status == ProcessLifecycleStatus::Suspended
-        && suspension.kind == request.gate_kind
-        && scope_matches
-        && request
-            .gate_ref
-            .as_ref()
-            .is_none_or(|gate_ref| suspension.gate_ref.as_ref() == Some(gate_ref))
-        && request.owner_user_id.as_ref().is_none_or(|owner| {
-            match request
-                .owner_match
-                .unwrap_or(ProcessGateOwnerMatch::Explicit)
-            {
-                ProcessGateOwnerMatch::Explicit | ProcessGateOwnerMatch::ExplicitOrActor => {
-                    snapshot.owner_user_id.as_ref() == Some(owner)
-                }
-            }
-        })
-}
-
-fn process_claim_within_limits(
-    state: &ProcessJournalMaterializedState,
-    process_id: ProcessId,
-    limits: &ProcessConcurrencyLimits,
-) -> bool {
-    let Some(candidate) = state.processes.get(&process_id) else {
-        return false;
-    };
-    if let (Some(cap), Some(owner)) = (limits.max_running_per_owner, &candidate.owner_user_id) {
-        let running_for_owner = state
-            .processes
-            .values()
-            .filter(|snapshot| {
-                snapshot.status == ProcessLifecycleStatus::Running
-                    && snapshot.scope.tenant_id == candidate.scope.tenant_id
-                    && snapshot.owner_user_id.as_ref() == Some(owner)
-            })
-            .count();
-        if running_for_owner >= cap as usize {
-            return false;
-        }
-    }
-    let Some(class) = &candidate.concurrency_class else {
-        return true;
-    };
-    let Some(cap) = limits.max_running_by_class.get(class) else {
-        return true;
-    };
-    state
-        .processes
-        .values()
-        .filter(|snapshot| {
-            snapshot.status == ProcessLifecycleStatus::Running
-                && snapshot.scope.tenant_id == candidate.scope.tenant_id
-                && snapshot.concurrency_class.as_ref() == Some(class)
-        })
-        .count()
-        < *cap as usize
-}
-
-fn process_scope_visible(stored: &ResourceScope, requested: &ResourceScope) -> bool {
-    *requested == ResourceScope::system() || same_scope_owner(stored, requested)
-}
-
-fn same_lineage_scope(left: &ResourceScope, right: &ResourceScope) -> bool {
-    left.tenant_id == right.tenant_id
-        && left.user_id == right.user_id
-        && left.agent_id == right.agent_id
-        && left.project_id == right.project_id
-        && left.mission_id == right.mission_id
-}
-
-fn validate_tree_root(
-    state: &ProcessJournalMaterializedState,
-    scope: &ResourceScope,
-    root_process_id: ProcessId,
-) -> Result<(), ProcessJournalStoreError> {
-    let root =
-        state
-            .processes
-            .get(&root_process_id)
-            .ok_or(ProcessJournalStoreError::UnknownProcess {
-                process_id: root_process_id,
-            })?;
-    if !same_lineage_scope(&root.scope, scope) {
-        return Err(ProcessJournalStoreError::UnauthorizedScope);
-    }
-    if root.root_process_id.unwrap_or(root.process_id) != root.process_id {
-        return Err(ProcessJournalStoreError::InvalidRequest(
-            "root_process_id must identify the process tree root".to_string(),
-        ));
-    }
-    Ok(())
 }
 
 fn legacy_command_log_path() -> Result<ScopedPath, ProcessJournalStoreError> {
@@ -1487,6 +1410,11 @@ fn processes_prefix() -> Result<ScopedPath, ProcessJournalStoreError> {
 fn legacy_journal_state_path() -> Result<ScopedPath, ProcessJournalStoreError> {
     ScopedPath::new(LEGACY_JOURNAL_STATE_PATH)
         .map_err(|error| ProcessJournalStoreError::InvalidPath(invalid_path(error).to_string()))
+}
+
+fn process_journal_sequence_path() -> Result<ScopedPath, ProcessJournalStoreError> {
+    ScopedPath::new("/processes/materialized/journal-sequence")
+        .map_err(|error| ProcessJournalStoreError::InvalidPath(error.to_string()))
 }
 
 fn unexpected_outcome(operation: &str, outcome: StoredCommandOutcome) -> ProcessJournalStoreError {

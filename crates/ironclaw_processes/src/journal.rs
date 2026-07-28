@@ -367,6 +367,8 @@ pub struct JournaledProcessSnapshot {
     pub journal_cursor: ProcessJournalCursor,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lease: Option<ProcessLeaseSnapshot>,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub crash_reclaim_count: u64,
     pub created_at: Timestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_user_id: Option<UserId>,
@@ -378,6 +380,10 @@ pub struct JournaledProcessSnapshot {
     pub root_process_id: Option<ProcessId>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -409,6 +415,12 @@ pub struct ProcessJournalEntry {
     pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
+    /// Full post-transition state committed with this journal row.
+    ///
+    /// This turns the immutable journal into the durable delivery source for
+    /// post-commit observers. Older rows omit it and remain readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committed_state: Option<Box<JournaledProcessSnapshot>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -421,6 +433,11 @@ pub struct ProcessJournalCommit {
 
 #[async_trait]
 pub trait ProcessJournalCommitObserver: Send + Sync {
+    /// Stable identity used to persist this consumer's delivery cursor.
+    fn process_observer_id(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
+
     async fn observe_process_commit(&self, commit: ProcessJournalCommit) -> Result<(), String>;
 }
 
@@ -525,6 +542,13 @@ pub struct SubmitProcessRequest {
     pub created_at: Timestamp,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubmitProcessWithCheckpointRequest {
+    pub submission: SubmitProcessRequest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<RecordProcessCheckpointRequest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -816,6 +840,11 @@ pub trait ProcessSubmissionPort: Send + Sync {
     async fn submit_process(
         &self,
         request: SubmitProcessRequest,
+    ) -> Result<JournaledProcessSnapshot, Self::Error>;
+
+    async fn submit_process_with_checkpoint(
+        &self,
+        request: SubmitProcessWithCheckpointRequest,
     ) -> Result<JournaledProcessSnapshot, Self::Error>;
 }
 

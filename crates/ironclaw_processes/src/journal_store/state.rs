@@ -2,7 +2,7 @@ use std::collections::{HashMap, VecDeque};
 
 use std::time::Duration;
 
-use ironclaw_host_api::{ProcessId, ResourceScope};
+use ironclaw_host_api::{ProcessId, ResourceScope, SanitizedFailure};
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -12,13 +12,14 @@ use super::{
 };
 use crate::{
     ClaimedProcess, JournaledProcessSnapshot, ProcessCheckpointId, ProcessCheckpointRecord,
-    ProcessControlResult, ProcessInputRecord, ProcessJournalCursor, ProcessJournalEntry,
-    ProcessJournalKind, ProcessKind, ProcessLeaseSnapshot, ProcessLeaseToken,
+    ProcessCheckpointRef, ProcessControlResult, ProcessInputRecord, ProcessJournalCursor,
+    ProcessJournalEntry, ProcessJournalKind, ProcessKind, ProcessLeaseSnapshot, ProcessLeaseToken,
     ProcessLifecycleStatus, ProcessTreeReservation, RecoverExpiredProcessLeasesResponse,
     types::same_scope_owner,
 };
 
 const MAX_IDEMPOTENCY_RECORDS: usize = 4096;
+const MAX_CRASH_RECOVERY_RECLAIMS: u64 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct ProcessJournalMaterializedState {
@@ -85,6 +86,31 @@ impl ProcessJournalMaterializedState {
                 Ok(StoredCommandOutcome::Imported)
             }
             StoredProcessCommand::Submit(request) => self.apply_submit(*request),
+            StoredProcessCommand::SubmitWithCheckpoint {
+                request,
+                checkpoint,
+            } => {
+                let request = *request;
+                let checkpoint = *checkpoint;
+                if checkpoint.process_id != request.process_id
+                    || checkpoint.scope != request.scope
+                    || request
+                        .checkpoint_ref
+                        .as_ref()
+                        .map(ProcessCheckpointRef::as_str)
+                        != Some(checkpoint.checkpoint_id.as_str())
+                {
+                    return Err(ProcessJournalStoreError::InvalidRequest(
+                        "initial checkpoint must be owned and referenced by the submitted process"
+                            .to_string(),
+                    ));
+                }
+                let outcome = self.apply_submit(request)?;
+                if matches!(outcome, StoredCommandOutcome::Submitted(_, true)) {
+                    self.apply_checkpoint(checkpoint)?;
+                }
+                Ok(outcome)
+            }
             StoredProcessCommand::Claim {
                 request,
                 now,
@@ -222,6 +248,7 @@ impl ProcessJournalMaterializedState {
             failure: None,
             journal_cursor: cursor,
             lease: None,
+            crash_reclaim_count: 0,
             created_at: request.created_at,
             owner_user_id: request.owner_user_id,
             concurrency_class: request.concurrency_class,
@@ -318,12 +345,7 @@ impl ProcessJournalMaterializedState {
                     .ok()
                     .map(|duration| now + duration),
                 last_heartbeat_at: Some(now),
-                claim_count: snapshot
-                    .lease
-                    .as_ref()
-                    .map(|lease| lease.claim_count)
-                    .unwrap_or(0)
-                    .saturating_add(1),
+                claim_count: snapshot.crash_reclaim_count.saturating_add(1),
             });
             snapshot.journal_cursor = cursor;
             let snapshot = snapshot.clone();
@@ -384,15 +406,43 @@ impl ProcessJournalMaterializedState {
         for process_id in expired {
             let cursor = self.next_cursor();
             let snapshot = self.process_mut(process_id)?;
-            snapshot.status = ProcessLifecycleStatus::RecoveryRequired;
+            let claim_count = snapshot.lease.as_ref().map_or(0, |lease| lease.claim_count);
+            let (status, kind, failure) = if snapshot.status
+                == ProcessLifecycleStatus::CancelRequested
+            {
+                (
+                    ProcessLifecycleStatus::Cancelled,
+                    ProcessJournalKind::Cancelled,
+                    None,
+                )
+            } else if snapshot.checkpoint_ref.is_none() && claim_count < MAX_CRASH_RECOVERY_RECLAIMS
+            {
+                (
+                    ProcessLifecycleStatus::Queued,
+                    ProcessJournalKind::Resumed,
+                    None,
+                )
+            } else {
+                let category = if snapshot.checkpoint_ref.is_some() {
+                    "lease_expired"
+                } else {
+                    "crash_retry_exhausted"
+                };
+                (
+                    ProcessLifecycleStatus::Failed,
+                    ProcessJournalKind::Failed,
+                    Some(SanitizedFailure::from_trusted_static(category)),
+                )
+            };
+            snapshot.status = status;
             snapshot.lease = None;
+            if status == ProcessLifecycleStatus::Queued {
+                snapshot.crash_reclaim_count = claim_count;
+            }
+            snapshot.failure = failure;
             snapshot.journal_cursor = cursor;
             let snapshot = snapshot.clone();
-            self.push_entry(ProcessJournalEntry::from_snapshot(
-                &snapshot,
-                cursor,
-                ProcessJournalKind::RecoveryRequired,
-            ));
+            self.push_entry(ProcessJournalEntry::from_snapshot(&snapshot, cursor, kind));
             recovered.push(snapshot);
         }
         Ok(StoredCommandOutcome::Recovered(

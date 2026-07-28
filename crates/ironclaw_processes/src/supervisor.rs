@@ -562,10 +562,9 @@ fn spawn_executor(
                     Some(result) = heartbeats.join(), if heartbeats.is_running() => {
                         match heartbeat_outcome(result) {
                             HeartbeatOutcome::Succeeded => consecutive_failures = 0,
-                            HeartbeatOutcome::Failed => {
+                            HeartbeatOutcome::Failed | HeartbeatOutcome::TimedOut => {
                                 consecutive_failures = consecutive_failures.saturating_add(1);
                             }
-                            HeartbeatOutcome::TimedOut => {}
                         }
                         if consecutive_failures >= config.max_consecutive_heartbeat_failures() {
                             break executor
@@ -753,6 +752,8 @@ fn schedule_retry(command_tx: mpsc::Sender<SupervisorCommand>, delay: Duration) 
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use crate::{
         GetProcessSnapshotRequest, JournaledProcessSnapshot, ProcessJournalSource,
@@ -799,6 +800,18 @@ mod tests {
         }
     }
 
+    struct PanickingExecutor;
+
+    #[async_trait]
+    impl JournalProcessExecutor for PanickingExecutor {
+        async fn execute_claimed_process(
+            &self,
+            _claimed: ClaimedProcess,
+        ) -> Result<(), ProcessExecutorFailure> {
+            panic!("deterministic executor panic");
+        }
+    }
+
     struct BlockingExecutor {
         started: Arc<Notify>,
     }
@@ -811,6 +824,38 @@ mod tests {
         ) -> Result<(), ProcessExecutorFailure> {
             self.started.notify_one();
             std::future::pending().await
+        }
+    }
+
+    struct CountingExecutor {
+        runtime: Arc<dyn ProcessRuntimePort>,
+        active: AtomicUsize,
+        maximum: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl JournalProcessExecutor for CountingExecutor {
+        async fn execute_claimed_process(
+            &self,
+            claimed: ClaimedProcess,
+        ) -> Result<(), ProcessExecutorFailure> {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.maximum.fetch_max(active, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let result = self
+                .runtime
+                .complete_process(ProcessStateTransitionRequest {
+                    lease: ProcessLeaseRequest {
+                        process_id: claimed.state.process_id,
+                        worker_id: claimed.worker_id,
+                        lease_token: claimed.lease_token,
+                    },
+                    metadata: None,
+                })
+                .await
+                .map_err(|_| ProcessExecutorFailure::new("completion_failed"));
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            result.map(|_| ())
         }
     }
 
@@ -858,6 +903,60 @@ mod tests {
             snapshot.failure.as_ref().map(SanitizedFailure::category),
             Some("executor_rejected")
         );
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn executor_panic_is_converted_to_terminal_failure() {
+        let store = Arc::new(crate::ProcessJournalStore::new(
+            in_memory_backed_processes_filesystem(),
+        ));
+        let process_id = submit(&store, ProcessKind::Internal).await;
+        let runtime: Arc<dyn ProcessRuntimePort> = store.clone();
+        let handle = ProcessSupervisor::new(
+            runtime,
+            Arc::new(PanickingExecutor),
+            ProcessKind::Internal,
+            fast_config(),
+        )
+        .start();
+
+        let snapshot = wait_for_status(&store, process_id, ProcessLifecycleStatus::Failed).await;
+        assert_eq!(
+            snapshot.failure.as_ref().map(SanitizedFailure::category),
+            Some("process_executor_panic")
+        );
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn concurrency_cap_is_never_exceeded_and_queued_work_drains() {
+        let store = Arc::new(crate::ProcessJournalStore::new(
+            in_memory_backed_processes_filesystem(),
+        ));
+        let mut process_ids = Vec::new();
+        for _ in 0..6 {
+            process_ids.push(submit(&store, ProcessKind::Internal).await);
+        }
+        let runtime: Arc<dyn ProcessRuntimePort> = store.clone();
+        let executor = Arc::new(CountingExecutor {
+            runtime: Arc::clone(&runtime),
+            active: AtomicUsize::new(0),
+            maximum: AtomicUsize::new(0),
+        });
+        let handle = ProcessSupervisor::new(
+            runtime,
+            Arc::clone(&executor) as Arc<dyn JournalProcessExecutor>,
+            ProcessKind::Internal,
+            fast_config().with_max_concurrent_processes(2),
+        )
+        .start();
+
+        for process_id in process_ids {
+            wait_for_status(&store, process_id, ProcessLifecycleStatus::Completed).await;
+        }
+        assert!(executor.maximum.load(Ordering::SeqCst) <= 2);
+        assert_eq!(executor.active.load(Ordering::SeqCst), 0);
         handle.shutdown().await;
     }
 

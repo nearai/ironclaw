@@ -1,4 +1,4 @@
-//! In-memory-backed process store constructors for tests.
+//! Process test doubles and in-memory-backed production-store constructors.
 //!
 //! The Reborn architecture-simplification note
 //! (`docs/reborn/contracts/processes.md`)
@@ -40,7 +40,13 @@ use crate::{
     ProcessServices,
 };
 
-/// Minimal process-invocation projection for caller-level tests.
+/// Pure, mutex-backed fake for caller-level invocation-state tests.
+///
+/// Despite the historical generic name, this type does not exercise
+/// `RootFilesystem`, CAS, row encoding, or durable-backend behavior. Use
+/// [`ProcessJournalStore<InMemoryBackend>`] for production-store coverage.
+/// The backend marker remains only for source compatibility with existing
+/// test harness type annotations.
 pub struct ProcessInvocationStateStore<F> {
     records: Mutex<Vec<ProcessInvocationRecord>>,
     backend: PhantomData<F>,

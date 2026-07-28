@@ -4,9 +4,9 @@
 //! Drives the production filesystem-backed store over an
 //! [`InMemoryBackend`] composed under a `/threads` mount alias whose
 //! `VirtualPath` target encodes a tenant/user prefix. Mirrors the shape of
-//! the run-state and processes filesystem contract suites — see
-//! `crates/ironclaw_approvals/tests/run_state_contract.rs` and
-//! `crates/ironclaw_processes/tests/process_store_contract.rs`.
+//! the approval and process-journal filesystem contract suites — see
+//! `crates/ironclaw_approvals/tests/approval_resolution_contract.rs` and
+//! `crates/ironclaw_processes/tests/process_journal_store_contract.rs`.
 
 use std::{
     collections::HashMap,
@@ -576,6 +576,10 @@ async fn filesystem_list_threads_skips_stale_thread_index_after_partial_delete()
         .await
         .expect("test setup removes source thread root but leaves derived index row");
     service.clear_thread_index_cache_for_scope(&request_scope);
+    service
+        .migrate_thread_index_for_scope(&request_scope)
+        .await
+        .expect("explicit repair removes stale projection rows");
 
     let listed = service
         .list_threads_for_scope(ListThreadsForScopeRequest {
@@ -590,7 +594,7 @@ async fn filesystem_list_threads_skips_stale_thread_index_after_partial_delete()
             .threads
             .iter()
             .all(|record| record.thread_id != thread.thread_id),
-        "list_threads_for_scope must not expose an index row whose source thread root is gone"
+        "explicit repair must remove an index row whose source thread root is gone"
     );
     assert!(
         scoped
@@ -601,7 +605,7 @@ async fn filesystem_list_threads_skips_stale_thread_index_after_partial_delete()
             .await
             .unwrap()
             .is_none(),
-        "stale index row should be removed during list cleanup"
+        "stale index row should be removed during explicit repair"
     );
 }
 
@@ -1055,7 +1059,7 @@ async fn filesystem_redacts_append_only_finalized_assistant_message() {
 }
 
 #[tokio::test]
-async fn filesystem_lookup_index_write_failure_does_not_trigger_transcript_scan() {
+async fn filesystem_lookup_index_write_failure_rolls_back_source_message() {
     let backend = Arc::new(lookup_index_write_failure_backend());
     let scoped = scoped_threads_fs_at(backend, "tenant-lookup-index-failure", "alice");
     let service = FilesystemSessionThreadService::new(scoped);
@@ -1070,7 +1074,7 @@ async fn filesystem_lookup_index_write_failure_does_not_trigger_transcript_scan(
         })
         .await
         .unwrap();
-    let draft = service
+    service
         .append_assistant_draft(AppendAssistantDraftRequest {
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
@@ -1078,27 +1082,16 @@ async fn filesystem_lookup_index_write_failure_does_not_trigger_transcript_scan(
             content: MessageContent::text("draft"),
         })
         .await
-        .expect("message append must not depend on lookup-index write success");
+        .expect_err("required lookup projection failure must reject the atomic append");
 
-    service
-        .finalize_assistant_message(
-            &scope,
-            &thread.thread_id,
-            draft.message_id,
-            MessageContent::text("final"),
-        )
-        .await
-        .expect("message update must not depend on lookup-index write success");
-
-    let finalized = service
-        .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
             scope,
             thread_id: thread.thread_id,
-            turn_run_id: "run-lookup-index-failure".into(),
         })
         .await
-        .expect("missing lookup projection is not a filesystem failure");
-    assert!(finalized.is_none());
+        .expect("read transcript after rolled-back append");
+    assert!(history.messages.is_empty());
 }
 
 #[tokio::test]

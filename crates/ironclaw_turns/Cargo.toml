@@ -44,6 +44,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 [dev-dependencies]
 # Self-reference so the crate's own integration tests see `test_support`.
 ironclaw_turns = { path = ".", features = ["test-support"] }
+ironclaw_processes = { path = "../ironclaw_processes", features = ["test-support"] }
 # FaultInjecting decorator: drive store fault paths through the real
 # the production process-backed projection instead of hand-rolled trait fakes.
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0", features = [

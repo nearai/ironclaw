@@ -64,7 +64,7 @@ pub use journal::{
     RecoverExpiredProcessLeasesRequest, RecoverExpiredProcessLeasesResponse,
     ReleaseProcessTreeRequest, ReserveProcessTreeRequest, ResumeProcessRequest,
     SettleProcessDependencyRequest, StopProcessRequest, SubmitProcessRequest,
-    SuspendProcessRequest,
+    SubmitProcessWithCheckpointRequest, SuspendProcessRequest,
 };
 pub use journal_store::{ProcessJournalStore, ProcessJournalStoreError};
 pub use result_store::ProcessResultStore;

@@ -467,12 +467,12 @@ async fn default_runtime_status_redacts_process_filesystem_errors() {
     let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     // Real process store over a fault backend armed to fail `records_for_scope`
-    // (its journal-head lookup) with a leaky reason, so the test proves the host-runtime
+    // (its ordered row query) with a leaky reason, so the test proves the host-runtime
     // path maps `ProcessError::Filesystem` to the sanitized, path-free
     // "process filesystem unavailable" through the production store.
     let backend = Arc::new(
         FaultInjecting::new(InMemoryBackend::new()).with_fault(
-            Fault::on(FilesystemOperation::HeadSeq)
+            Fault::on(FilesystemOperation::Query)
                 .backend("simulated read failure: /tmp/processes.db connection refused"),
         ),
     );

@@ -438,10 +438,9 @@ impl RootFilesystem for InMemoryBackend {
 
     async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
         let state = Arc::clone(&self.state).lock_owned().await;
-        let original = state.clone();
         Ok(Box::new(InMemoryStorageTxn {
             state: Some(state),
-            original: Some(original),
+            undo: Vec::new(),
             prefix: path.clone(),
         }))
     }

@@ -49,7 +49,7 @@ run_architecture() {
   run_test ironclaw_capabilities capability_host_contract
   run_test ironclaw_capabilities capability_host_dispatcher_integration
   run_test ironclaw_capabilities capability_host_process_integration
-  run_test ironclaw_capabilities capability_host_run_state_contract
+  run_test ironclaw_capabilities capability_host_invocation_state_contract
   run_test ironclaw_capabilities capability_host_spawn_contract
   run_test ironclaw_capabilities capability_obligation_handler_contract
   # Pins docs/reborn/contracts/events.md: product snapshots and cursor resumes
@@ -72,10 +72,9 @@ run_runtimes() {
   run_test ironclaw_scripts script_runner_contract
   run_test ironclaw_mcp mcp_adapter_contract
   run_test ironclaw_mcp mcp_dispatch_integration
-  run_test ironclaw_processes process_dispatch_integration
   run_test ironclaw_processes process_host_contract
+  run_test ironclaw_processes process_journal_store_contract
   run_test ironclaw_processes process_services_contract
-  run_test ironclaw_processes process_store_contract
 }
 
 run_substrates() {

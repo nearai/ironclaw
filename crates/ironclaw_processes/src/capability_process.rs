@@ -21,6 +21,8 @@ const CAPABILITY_PROJECTION_WORKER_ID: &str = "capability-projection";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CapabilityProcessMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) parent_process_id: Option<ProcessId>,
     pub(crate) invocation_id: InvocationId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) authenticated_actor_user_id: Option<UserId>,
@@ -44,7 +46,7 @@ pub fn process_record_from_snapshot(
         .map_err(|error| ProcessError::Deserialization(error.to_string()))?;
     Ok(ProcessRecord {
         process_id: snapshot.process_id,
-        parent_process_id: snapshot.parent_process_id,
+        parent_process_id: metadata.parent_process_id.or(snapshot.parent_process_id),
         invocation_id: metadata.invocation_id,
         scope: snapshot.scope,
         authenticated_actor_user_id: metadata.authenticated_actor_user_id,
@@ -74,6 +76,7 @@ pub async fn submit_capability_process(
                 .map_err(|error| ProcessError::Serialization(error.to_string()))
         })?;
     let metadata = serde_json::to_value(CapabilityProcessMetadata {
+        parent_process_id: start.parent_process_id,
         invocation_id: start.invocation_id,
         authenticated_actor_user_id: start.authenticated_actor_user_id,
         extension_id: start.extension_id,
@@ -95,7 +98,10 @@ pub async fn submit_capability_process(
             operation_id: None,
             owner_user_id: None,
             concurrency_class: None,
-            parent_process_id: start.parent_process_id,
+            // Capability causality is persisted in typed capability metadata,
+            // not in the spawn-tree reservation relation. Capability work does
+            // not reserve a subagent descendant slot.
+            parent_process_id: None,
             root_process_id: None,
             spawn_tree_descendant_cap: None,
             dependency: None,

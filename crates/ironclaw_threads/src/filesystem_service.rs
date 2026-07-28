@@ -432,31 +432,37 @@ where
         crate::contract::validate_new_message_timestamps(message, description)?;
         let path = message_record_path(scope, thread_id, message.message_id)?;
         let entry = Self::message_entry(message)?;
-        match put_with_cas(
-            self.filesystem.as_ref(),
-            &scope.to_resource_scope(),
-            &path,
-            entry,
-            CasExpectation::Absent,
-        )
-        .await
-        {
-            Ok(()) => {
-                self.write_message_lookup_indexes_best_effort(
-                    scope,
-                    thread_id,
-                    message,
-                    "new message",
-                )
-                .await;
+        let resource_scope = scope.to_resource_scope();
+        let txn_prefix = scoped_path(THREADS_PREFIX)?;
+        match self.filesystem.begin(&resource_scope, &txn_prefix).await {
+            Ok(mut txn) => {
+                let message_virtual_path = self.filesystem.resolve(&resource_scope, &path)?;
+                if let Err(error) = txn
+                    .put(&message_virtual_path, entry.clone(), CasExpectation::Absent)
+                    .await
+                {
+                    txn.rollback().await;
+                    return Err(absent_put_error(error, description, &path));
+                }
+                for (lookup_path, lookup_entry, expectation) in
+                    MessageLookupIndexStore::<F>::entries_for_message(scope, thread_id, message)?
+                {
+                    let virtual_path = self.filesystem.resolve(&resource_scope, &lookup_path)?;
+                    if matches!(expectation, CasExpectation::Absent)
+                        && txn.get(&virtual_path).await?.is_some()
+                    {
+                        continue;
+                    }
+                    if let Err(error) = txn.put(&virtual_path, lookup_entry, expectation).await {
+                        txn.rollback().await;
+                        return Err(absent_put_error(error, "message lookup", &lookup_path));
+                    }
+                }
+                txn.commit().await?;
                 self.invalidate_one_shot_context_window(scope, thread_id);
                 Ok(())
             }
-            Err(PutError::VersionMismatch) => Err(SessionThreadError::Backend(format!(
-                "filesystem CAS Absent rejected new {description} at {}",
-                path.as_str()
-            ))),
-            Err(PutError::Other(error)) => Err(error),
+            Err(error) => Err(error.into()),
         }
     }
 
@@ -474,6 +480,15 @@ where
         let thread_virtual_path = self.filesystem.resolve(&resource_scope, &thread_path)?;
         let message_path = message_record_path(scope, thread_id, message.message_id)?;
         let message_virtual_path = self.filesystem.resolve(&resource_scope, &message_path)?;
+        let lookup_entries =
+            MessageLookupIndexStore::<F>::entries_for_message(scope, thread_id, message)?
+                .into_iter()
+                .map(|(path, entry, expectation)| {
+                    self.filesystem
+                        .resolve(&resource_scope, &path)
+                        .map(|virtual_path| (path, virtual_path, entry, expectation))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
         let idempotency_record = idempotency_record
             .map(|(path, entry)| {
                 self.filesystem
@@ -571,6 +586,17 @@ where
                 txn.rollback().await;
                 return Err(absent_put_error(error, "message", &message_path));
             }
+            for (lookup_path, virtual_path, entry, expectation) in &lookup_entries {
+                if matches!(expectation, CasExpectation::Absent)
+                    && txn.get(virtual_path).await?.is_some()
+                {
+                    continue;
+                }
+                if let Err(error) = txn.put(virtual_path, entry.clone(), *expectation).await {
+                    txn.rollback().await;
+                    return Err(absent_put_error(error, "message lookup", lookup_path));
+                }
+            }
 
             match txn.commit().await {
                 Ok(()) => return Ok(TransactionalMessageWrite::Written),
@@ -611,6 +637,7 @@ where
         turn_run_id: &str,
         required_status: Option<MessageStatus>,
     ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        self.ensure_transcript_indexes_migrated(scope).await?;
         let index_store = MessageLookupIndexStore::new(self.filesystem.as_ref());
         let indexed_message_id = index_store
             .read_assistant_run(scope, thread_id, turn_run_id)
@@ -634,6 +661,7 @@ where
         turn_run_id: &str,
         result_ref: &str,
     ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        self.ensure_transcript_indexes_migrated(scope).await?;
         let index_store = MessageLookupIndexStore::new(self.filesystem.as_ref());
         let indexed_message_id = index_store
             .read_tool_result(scope, thread_id, turn_run_id, result_ref)
@@ -657,6 +685,7 @@ where
         after_sequence: u64,
         through_sequence: u64,
     ) -> Result<Vec<ThreadMessageRecord>, SessionThreadError> {
+        self.ensure_transcript_indexes_migrated(scope).await?;
         if through_sequence <= after_sequence {
             return Ok(Vec::new());
         }
@@ -722,6 +751,7 @@ where
         thread_id: &ThreadId,
         limit: usize,
     ) -> Result<Vec<ThreadMessageRecord>, SessionThreadError> {
+        self.ensure_transcript_indexes_migrated(scope).await?;
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -795,6 +825,7 @@ where
         thread_id: &ThreadId,
         _next_sequence: u64,
     ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        self.ensure_transcript_indexes_migrated(scope).await?;
         let Some(message_id) = MessageLookupIndexStore::new(self.filesystem.as_ref())
             .read_first_user(scope, thread_id)
             .await?
@@ -863,6 +894,7 @@ where
         scope: &ThreadScope,
         thread_id: &ThreadId,
     ) -> Result<Vec<SummaryArtifact>, SessionThreadError> {
+        self.ensure_transcript_indexes_migrated(scope).await?;
         let root = summaries_root(scope, thread_id)?;
         let index = summary_index_spec()?;
         let mut summaries = Vec::new();
@@ -1451,14 +1483,6 @@ where
                 sequence
             }
         };
-        self.write_message_lookup_indexes_best_effort(
-            &scope,
-            &thread_id,
-            &message,
-            "accepted inbound message",
-        )
-        .await;
-
         if sequence == 1 {
             self.seed_one_shot_context_window(&scope, &thread_id, &message);
         } else {
