@@ -182,6 +182,12 @@ mod tests {
             RuntimeLane::from_runtime_kind(RuntimeKind::Script),
             Some(RuntimeLane::Process)
         );
+        // Sandbox is the sandboxed-shell lane — same Process lane as Script
+        // (module doc above).
+        assert_eq!(
+            RuntimeLane::from_runtime_kind(RuntimeKind::Sandbox),
+            Some(RuntimeLane::Process)
+        );
         // System is host-internal — no untrusted execution lane.
         assert_eq!(RuntimeLane::from_runtime_kind(RuntimeKind::System), None);
     }
