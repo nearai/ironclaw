@@ -38,6 +38,14 @@ use crate::RuntimeProcessError;
 /// direct connect against the given endpoint instead of probing local
 /// socket candidates. Accepts a unix socket path (optionally `unix://`
 /// prefixed) or an `http://host:port` / `tcp://host:port` address.
+///
+/// SECURITY: the non-socket form connects in **plaintext, unauthenticated**
+/// — there is no `connect_with_ssl` branch here. The Docker Engine API this
+/// reaches can create containers and mount host paths, so a non-loopback
+/// value hands that authority to anyone on the network path. Set it only to a
+/// unix socket or a loopback address (the CI/DinD case it exists for). A
+/// genuinely remote daemon needs a TLS/mTLS transport, which this module does
+/// not implement and must not be assumed to provide.
 const DOCKER_HOST_ENV: &str = "IRONCLAW_REBORN_DOCKER_HOST";
 
 /// Maximum connect attempts before giving up.
@@ -288,6 +296,32 @@ mod tests {
         assert!(
             message.contains(DOCKER_HOST_ENV),
             "expected override branch error to name {DOCKER_HOST_ENV}, got: {message}"
+        );
+    }
+
+    // The override has two branches; the test above only reaches the unix
+    // socket one. This reaches the http/tcp one, which is the branch CI
+    // runners and DinD actually take, and pins that its failure is still
+    // attributed to the env var rather than falling through to the generic
+    // local-discovery message. Port 1 on loopback has nothing listening.
+    #[test]
+    fn docker_host_env_override_http_branch_reports_the_env_var() {
+        let _guard = lock_env();
+        set_runtime_env(DOCKER_HOST_ENV, "http://127.0.0.1:1");
+
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build current-thread runtime for test")
+            .block_on(connect_once());
+
+        remove_runtime_env(DOCKER_HOST_ENV);
+
+        let err = result.expect_err("nothing is listening on 127.0.0.1:1");
+        let message = err.to_string();
+        assert!(
+            message.contains(DOCKER_HOST_ENV),
+            "expected http override branch error to name {DOCKER_HOST_ENV}, got: {message}"
         );
     }
 

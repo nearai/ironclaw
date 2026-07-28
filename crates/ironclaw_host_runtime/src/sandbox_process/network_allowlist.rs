@@ -25,6 +25,7 @@
 //! reads this list in production today. It arrives first because both of them
 //! take it as an input, and because a list of hostnames is reviewable on its
 //! own in a way it will not be once it is buried in a proxy PR.
+use ironclaw_common::env_helpers::env_or_override;
 use ironclaw_host_api::{NetworkPolicy, NetworkTargetPattern};
 
 /// Environment variable operators can set to add domains to the sandboxed
@@ -59,9 +60,13 @@ pub const DEFAULT_SANDBOX_ALLOWED_DOMAINS: &[&str] = &[
 /// configured extra domains, trimmed and with empty entries dropped. Returns
 /// an empty `Vec` (never an error) when the variable is unset or empty — the
 /// extra-domains hook is optional.
+///
+/// Read through `env_or_override` rather than a bare `std::env::var`, so this
+/// key honors the same runtime-override precedence as the sibling
+/// `connect::DOCKER_HOST_ENV` — one env-reading convention across
+/// `sandbox_process`, not two.
 pub fn sandbox_extra_allowed_domains() -> Vec<String> {
-    std::env::var(SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV)
-        .ok()
+    env_or_override(SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV)
         .map(|raw| {
             raw.split(',')
                 .map(str::trim)
@@ -105,6 +110,8 @@ pub fn sandbox_network_policy() -> NetworkPolicy {
 
 #[cfg(test)]
 mod tests {
+    use ironclaw_common::env_helpers::{lock_env, remove_runtime_env, set_runtime_env};
+
     use super::*;
 
     #[test]
@@ -142,19 +149,38 @@ mod tests {
     }
 
     #[test]
-    fn extra_domains_env_is_parsed_and_merged() {
-        // SAFETY: test-local env var, no concurrent readers of this key in
-        // this crate's test binary.
-        unsafe {
-            std::env::set_var(
-                SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV,
-                " example.internal , , *.corp.example.com",
-            );
-        }
+    fn extra_domains_env_absent_yields_no_extras() {
+        let _guard = lock_env();
+        remove_runtime_env(SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV);
+
+        assert!(sandbox_extra_allowed_domains().is_empty());
+    }
+
+    #[test]
+    fn extra_domains_env_is_parsed_and_merged_into_the_full_allowlist() {
+        // The guard is held across the whole set/read/clear window: this
+        // process's env is global, and the sibling `connect` tests mutate it
+        // too. Raw `std::env::set_var` here would race them.
+        let _guard = lock_env();
+        set_runtime_env(
+            SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV,
+            " example.internal , , *.corp.example.com",
+        );
+
         let extras = sandbox_extra_allowed_domains();
-        unsafe {
-            std::env::remove_var(SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV);
-        }
+        // Asserted while the override is still set: `sandbox_allowed_domains`
+        // must *append* to the defaults, not replace them. Clearing first
+        // would make a replace-instead-of-chain regression invisible.
+        let all = sandbox_allowed_domains();
+
+        remove_runtime_env(SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV);
+
         assert_eq!(extras, vec!["example.internal", "*.corp.example.com"]);
+        assert!(
+            all.contains(&"crates.io".to_string()),
+            "operator extras must not displace the defaults: {all:?}"
+        );
+        assert!(all.contains(&"example.internal".to_string()));
+        assert!(all.contains(&"*.corp.example.com".to_string()));
     }
 }
