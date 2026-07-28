@@ -59,8 +59,9 @@ use http_body_util::BodyExt;
 use ironclaw_extension_host::channel_host::{ChannelHostIdentity, GenericChannelHostAssembly};
 use ironclaw_extension_host::extension_ingress::{
     ChannelInboundSinkConfig, ChannelIngressDrain, ChannelIngressRegistration,
-    ExtensionIngressParts, GenericChannelInboundSink, PostAdmissionObserver, StaticIngressSecrets,
-    VerifiedEvidenceMint, extension_ingress_route_mount,
+    ExtensionIngressParts, GenericChannelInboundSink, PostAdmissionObserver,
+    StaticIngressConfiguration, StaticIngressSecrets, VerifiedEvidenceMint,
+    extension_ingress_route_mount,
 };
 use ironclaw_host_api::ChannelInboundProductSurface;
 use ironclaw_host_api::ProductSurfaceCaller;
@@ -353,6 +354,7 @@ async fn preresolve_vendor_turn_scope(
     adapter: &dyn ChannelAdapter,
     adapter_id: &str,
     installation_id: &str,
+    non_secret_config: &[(String, String)],
     evidence: &ProtocolAuthEvidence,
     body: &str,
 ) -> TurnScope {
@@ -360,6 +362,7 @@ async fn preresolve_vendor_turn_scope(
         .inbound(VerifiedInbound {
             extension_id: adapter_id,
             installation_id,
+            config: non_secret_config,
             body: body.as_bytes(),
             headers: &[],
         })
@@ -436,6 +439,7 @@ impl VendorIngress {
                         secret: secret.to_vec(),
                     },
                 ])),
+                configuration: Arc::new(StaticIngressConfiguration::default()),
                 sink: sink.clone() as Arc<dyn ironclaw_extension_host::ingress::InboundSink>,
                 drain: Some(sink as Arc<dyn ChannelIngressDrain>),
             },
@@ -1085,6 +1089,7 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
         &ironclaw_slack_extension::SlackChannelAdapter,
         "slack",
         SLACK_INSTALLATION,
+        &[],
         &evidence,
         &body,
     )
@@ -1440,6 +1445,10 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
         &ironclaw_telegram_extension::TelegramChannelAdapter::default(),
         "telegram",
         TELEGRAM_INSTALLATION,
+        &[(
+            ironclaw_telegram_extension::TELEGRAM_BOT_USERNAME_CONFIG.to_string(),
+            "itest_delivery_bot".to_string(),
+        )],
         &evidence,
         &body,
     )
@@ -1761,6 +1770,25 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
         })
         .to_string()
     };
+    let targeted_start_body = |update_id: u64, chat_id: u64, code: &str| {
+        let command = "/start@itest_pairing_bot";
+        json!({
+            "update_id": update_id,
+            "message": {
+                "message_id": update_id + 10,
+                "date": 1710000000,
+                "text": format!("{command} {code}"),
+                "entities": [{
+                    "type": "bot_command",
+                    "offset": 0,
+                    "length": command.encode_utf16().count()
+                }],
+                "from": {"id": 424242, "is_bot": false, "first_name": "Pat"},
+                "chat": {"id": chat_id, "type": "private"}
+            }
+        })
+        .to_string()
+    };
     let telegram_notices = services
         .pairing_connection_notices_for_test("telegram")
         .expect("the bundled manifest composes Telegram's pairing notices");
@@ -1840,7 +1868,7 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
     let status = ingress
         .post(
             TELEGRAM_ROUTE,
-            &dm_body(604, 515151, &format!("/start {code}")),
+            &targeted_start_body(604, 515151, &code),
             vec![(
                 "X-Telegram-Bot-Api-Secret-Token",
                 TELEGRAM_WEBHOOK_SECRET.to_string(),
@@ -1892,6 +1920,10 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
         &ironclaw_telegram_extension::TelegramChannelAdapter::default(),
         "telegram",
         TELEGRAM_INSTALLATION,
+        &[(
+            ironclaw_telegram_extension::TELEGRAM_BOT_USERNAME_CONFIG.to_string(),
+            "itest_pairing_bot".to_string(),
+        )],
         &evidence,
         &chat_body,
     )
@@ -1982,7 +2014,7 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
     let status = ingress
         .post(
             TELEGRAM_ROUTE,
-            &dm_body(606, 515151, &format!("/start {repaired_code}")),
+            &targeted_start_body(606, 515151, &repaired_code),
             vec![(
                 "X-Telegram-Bot-Api-Secret-Token",
                 TELEGRAM_WEBHOOK_SECRET.to_string(),
@@ -2009,6 +2041,10 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
         &ironclaw_telegram_extension::TelegramChannelAdapter::default(),
         "telegram",
         TELEGRAM_INSTALLATION,
+        &[(
+            ironclaw_telegram_extension::TELEGRAM_BOT_USERNAME_CONFIG.to_string(),
+            "itest_pairing_bot".to_string(),
+        )],
         &evidence,
         &repaired_chat_body,
     )

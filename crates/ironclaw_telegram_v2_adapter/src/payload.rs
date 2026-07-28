@@ -277,6 +277,9 @@ fn has_bot_mention(message: &TelegramMessage, policy: &GroupTriggerPolicy) -> bo
 }
 
 fn reply_to_bot(message: &TelegramMessage, bot_user_id: i64) -> bool {
+    if bot_user_id <= 0 {
+        return false;
+    }
     let Some(reply) = message.reply_to_message.as_deref() else {
         return false;
     };
@@ -287,35 +290,7 @@ fn reply_to_bot(message: &TelegramMessage, bot_user_id: i64) -> bool {
 }
 
 fn recognized_bot_command(message: &TelegramMessage, policy: &GroupTriggerPolicy) -> bool {
-    for (text, entities) in text_entity_windows(message) {
-        for entity in entities {
-            if entity.entity_type != "bot_command" {
-                continue;
-            }
-            let Some(slice) = slice_text_by_offset(text, entity.offset, entity.length) else {
-                continue;
-            };
-            let raw = slice.strip_prefix('/').unwrap_or(slice);
-            let cmd = match raw.split_once('@') {
-                Some((cmd, target)) => {
-                    if !target.eq_ignore_ascii_case(&policy.bot_username) {
-                        continue;
-                    }
-                    cmd
-                }
-                None => raw,
-            };
-            let cmd_lower = cmd.to_ascii_lowercase();
-            if policy
-                .recognized_commands
-                .iter()
-                .any(|recognized| recognized.to_ascii_lowercase() == cmd_lower)
-            {
-                return true;
-            }
-        }
-    }
-    false
+    extract_first_bot_command(message, policy).is_some()
 }
 
 /// Slice a UTF-16 offset+length window out of a string.
@@ -450,7 +425,9 @@ pub fn normalize_telegram_update(
 }
 
 fn normalize_forwarded_text(message: &TelegramMessage, policy: &GroupTriggerPolicy) -> String {
-    if let Some((command, arguments)) = extract_first_bot_command(message, policy) {
+    if let Some((command, arguments)) =
+        extract_first_addressed_bot_command(message, &policy.bot_username)
+    {
         if arguments.is_empty() {
             return format!("/{command}");
         }
@@ -643,11 +620,31 @@ fn extract_first_bot_command(
     message: &TelegramMessage,
     policy: &GroupTriggerPolicy,
 ) -> Option<(String, String)> {
+    extract_first_matching_bot_command(message, &policy.bot_username, |command| {
+        policy
+            .recognized_commands
+            .iter()
+            .any(|recognized| recognized.eq_ignore_ascii_case(command))
+    })
+}
+
+fn extract_first_addressed_bot_command(
+    message: &TelegramMessage,
+    bot_username: &str,
+) -> Option<(String, String)> {
+    extract_first_matching_bot_command(message, bot_username, |_| true)
+}
+
+fn extract_first_matching_bot_command(
+    message: &TelegramMessage,
+    bot_username: &str,
+    mut accepts_command: impl FnMut(&str) -> bool,
+) -> Option<(String, String)> {
     // Consult both `text+entities` and `caption+caption_entities` so a
-    // recognized `/command` in a media-message caption is extracted
-    // correctly. The first matching command in `text` wins; otherwise
-    // the first matching command in `caption` wins. Offsets in each
-    // entities list are bound to their companion string.
+    // matching `/command` in a media-message caption is extracted correctly.
+    // The first matching command in `text` wins; otherwise the first matching
+    // command in `caption` wins. Offsets in each entities list are bound to
+    // their companion string.
     for (text, entities) in text_entity_windows(message) {
         for entity in entities {
             if entity.entity_type != "bot_command" {
@@ -659,7 +656,7 @@ fn extract_first_bot_command(
             let trimmed = slice.strip_prefix('/').unwrap_or(slice);
             let cmd_only = match trimmed.split_once('@') {
                 Some((cmd, target)) => {
-                    if !target.eq_ignore_ascii_case(&policy.bot_username) {
+                    if !target.eq_ignore_ascii_case(bot_username) {
                         continue;
                     }
                     cmd
@@ -667,14 +664,12 @@ fn extract_first_bot_command(
                 None => trimmed,
             };
             let cmd_lower = cmd_only.to_ascii_lowercase();
-            if !policy
-                .recognized_commands
-                .iter()
-                .any(|c| c.to_ascii_lowercase() == cmd_lower)
-            {
+            if !accepts_command(&cmd_lower) {
                 continue;
             }
-            let after_offset = entity.offset + entity.length;
+            let Some(after_offset) = entity.offset.checked_add(entity.length) else {
+                continue;
+            };
             let arguments = slice_text_to_end(text, after_offset)
                 .unwrap_or("")
                 .trim_start()
@@ -987,6 +982,78 @@ mod tests {
     }
 
     #[test]
+    fn private_qualified_product_command_canonicalizes_without_group_whitelist() {
+        let payload = br#"{
+            "update_id": 503,
+            "message": {
+                "message_id": 73,
+                "date": 1700000000,
+                "from": {"id": 777, "is_bot": false, "first_name": "Alice"},
+                "chat": {"id": 777, "type": "private"},
+                "text": "/model@ironclaw_bot openai/gpt-5",
+                "entities": [{"type": "bot_command", "offset": 0, "length": 19}]
+            }
+        }"#;
+        let mut policy = policy();
+        policy.recognized_commands.clear();
+
+        let event = normalize_telegram_update(payload, &install_id(), &policy).expect("normalizes");
+        let TelegramInboundEvent::Message(message) = event else {
+            panic!("private chat command must be forwarded");
+        };
+        assert_eq!(message.text, "/model openai/gpt-5");
+        assert_eq!(message.trigger, ProductTriggerReason::DirectChat);
+    }
+
+    #[test]
+    fn private_command_for_another_bot_keeps_its_target() {
+        let payload = br#"{
+            "update_id": 504,
+            "message": {
+                "message_id": 74,
+                "date": 1700000000,
+                "from": {"id": 777, "is_bot": false, "first_name": "Alice"},
+                "chat": {"id": 777, "type": "private"},
+                "text": "/model@other_bot openai/gpt-5",
+                "entities": [{"type": "bot_command", "offset": 0, "length": 16}]
+            }
+        }"#;
+        let mut policy = policy();
+        policy.recognized_commands.clear();
+
+        let event = normalize_telegram_update(payload, &install_id(), &policy).expect("normalizes");
+        let TelegramInboundEvent::Message(message) = event else {
+            panic!("private chat command must be forwarded");
+        };
+        assert_eq!(message.text, "/model@other_bot openai/gpt-5");
+        assert_eq!(message.trigger, ProductTriggerReason::DirectChat);
+    }
+
+    #[test]
+    fn addressed_command_uses_utf16_entity_offsets_and_preserves_arguments() {
+        let payload = r#"{
+            "update_id": 505,
+            "message": {
+                "message_id": 75,
+                "date": 1700000000,
+                "from": {"id": 777, "is_bot": false, "first_name": "Alice"},
+                "chat": {"id": 777, "type": "private"},
+                "text": "🦀 /model@ironclaw_bot openai/gpt-5",
+                "entities": [{"type": "bot_command", "offset": 3, "length": 19}]
+            }
+        }"#
+        .as_bytes();
+        let mut policy = policy();
+        policy.recognized_commands.clear();
+
+        let event = normalize_telegram_update(payload, &install_id(), &policy).expect("normalizes");
+        let TelegramInboundEvent::Message(message) = event else {
+            panic!("private chat command must be forwarded");
+        };
+        assert_eq!(message.text, "/model openai/gpt-5");
+    }
+
+    #[test]
     fn command_for_another_bot_remains_ignored_in_groups() {
         let payload = br#"{
             "update_id": 502,
@@ -1001,6 +1068,28 @@ mod tests {
         }"#;
         assert!(matches!(
             normalize_telegram_update(payload, &install_id(), &policy()).expect("normalizes"),
+            TelegramInboundEvent::Ignore
+        ));
+    }
+
+    #[test]
+    fn addressed_product_command_without_group_whitelist_remains_ignored_in_groups() {
+        let payload = br#"{
+            "update_id": 506,
+            "message": {
+                "message_id": 76,
+                "date": 1700000000,
+                "from": {"id": 777, "is_bot": false, "first_name": "Alice"},
+                "chat": {"id": -42, "type": "supergroup"},
+                "text": "/model@ironclaw_bot openai/gpt-5",
+                "entities": [{"type": "bot_command", "offset": 0, "length": 19}]
+            }
+        }"#;
+        let mut policy = policy();
+        policy.recognized_commands.clear();
+
+        assert!(matches!(
+            normalize_telegram_update(payload, &install_id(), &policy).expect("normalizes"),
             TelegramInboundEvent::Ignore
         ));
     }
@@ -1400,6 +1489,33 @@ mod tests {
             }
             other => panic!("expected UserMessage, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn unset_bot_user_id_does_not_match_a_group_reply() {
+        let payload = br#"{
+            "update_id": 206,
+            "message": {
+                "message_id": 17,
+                "date": 1700000000,
+                "from": {"id": 777, "is_bot": false, "first_name": "Alice"},
+                "chat": {"id": -42, "type": "supergroup"},
+                "text": "ambient reply",
+                "reply_to_message": {
+                    "message_id": 7,
+                    "date": 1699999999,
+                    "from": {"id": 0, "is_bot": true, "first_name": "Unknown"},
+                    "chat": {"id": -42, "type": "supergroup"},
+                    "text": "hi there"
+                }
+            }
+        }"#;
+        let mut policy = policy();
+        policy.bot_user_id = 0;
+        assert!(matches!(
+            normalize_telegram_update(payload, &install_id(), &policy).expect("normalizes"),
+            TelegramInboundEvent::Ignore
+        ));
     }
 
     #[test]

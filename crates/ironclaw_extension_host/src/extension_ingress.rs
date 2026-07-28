@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_extension_host::ingress::{
     ExtensionIngressRouter, InboundAdmission, InboundAdmissionAck, InboundSink, InboundSinkError,
-    IngressPortError, IngressSecretsPort, VerificationCandidate,
+    IngressConfigurationPort, IngressPortError, IngressSecretsPort, VerificationCandidate,
 };
 use ironclaw_host_api::{ChannelInboundProductSurface, SecretHandle};
 use ironclaw_product::{
@@ -97,10 +97,12 @@ impl VerifiedEvidenceMint {
     }
 }
 
-/// One extension's inbound wiring: verification secrets + the durable
-/// admission sink (+ optional drain hook for post-admission tasks).
+/// One extension's inbound wiring: verification secrets, non-secret
+/// installation configuration, and the durable admission sink (+ optional
+/// drain hook for post-admission tasks).
 pub struct ChannelIngressRegistration {
     pub secrets: Arc<dyn IngressSecretsPort>,
+    pub configuration: Arc<dyn IngressConfigurationPort>,
     pub sink: Arc<dyn InboundSink>,
     /// Awaited on graceful shutdown after ingress stops accepting requests.
     pub drain: Option<Arc<dyn ChannelIngressDrain>>,
@@ -262,6 +264,25 @@ impl IngressSecretsPort for ExtensionIngressRegistry {
         entry
             .secrets
             .verification_candidates(extension_id, installation_id, handle)
+            .await
+    }
+}
+
+#[async_trait]
+impl IngressConfigurationPort for ExtensionIngressRegistry {
+    async fn non_secret_config(
+        &self,
+        extension_id: &str,
+        installation_id: &str,
+    ) -> Result<Vec<(String, String)>, IngressPortError> {
+        let Some(entry) = self.registration(extension_id) else {
+            return Err(IngressPortError {
+                reason: format!("extension `{extension_id}` has no ingress registration"),
+            });
+        };
+        entry
+            .configuration
+            .non_secret_config(extension_id, installation_id)
             .await
     }
 }
@@ -561,6 +582,29 @@ impl IngressSecretsPort for StaticIngressSecrets {
     }
 }
 
+/// Fixed non-secret configuration for tests and lane-owned registrations.
+#[derive(Default)]
+pub struct StaticIngressConfiguration {
+    values: Vec<(String, String)>,
+}
+
+impl StaticIngressConfiguration {
+    pub fn new(values: Vec<(String, String)>) -> Self {
+        Self { values }
+    }
+}
+
+#[async_trait]
+impl IngressConfigurationPort for StaticIngressConfiguration {
+    async fn non_secret_config(
+        &self,
+        _extension_id: &str,
+        _installation_id: &str,
+    ) -> Result<Vec<(String, String)>, IngressPortError> {
+        Ok(self.values.clone())
+    }
+}
+
 // ── The composed router parts + serve mount ─────────────────────────────────
 
 /// The composed generic ingress: the deployment-first router (with an active
@@ -592,6 +636,7 @@ pub fn build_extension_ingress(
             watch,
             ironclaw_extension_host::ingress::ExtensionIngressRouterDeps {
                 secrets: Arc::clone(&registry) as Arc<dyn IngressSecretsPort>,
+                configuration: Arc::clone(&registry) as Arc<dyn IngressConfigurationPort>,
                 sink: Arc::clone(&registry) as Arc<dyn InboundSink>,
                 reply_context: Arc::clone(&reply_context),
             },
@@ -936,6 +981,7 @@ mod tests {
                 installation_id: "install".to_string(),
                 secret: secret.to_vec(),
             }])),
+            configuration: Arc::new(StaticIngressConfiguration::default()),
             sink: Arc::new(FailingSink),
             drain: None,
         }

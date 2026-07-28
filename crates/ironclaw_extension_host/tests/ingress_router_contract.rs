@@ -17,9 +17,9 @@ use sha2::Sha256;
 
 use ironclaw_extension_host::ingress::{
     ExtensionIngressRouter, ExtensionIngressRouterDeps, InboundAdmission, InboundAdmissionAck,
-    InboundSink, InboundSinkError, IngressPortError, IngressRateLimitConfig, IngressRequest,
-    IngressRouterConfig, IngressSecretsPort, ReplyContextKey, ReplyContextStore,
-    VerificationCandidate, canonical_ingress_path,
+    InboundSink, InboundSinkError, IngressConfigurationPort, IngressPortError,
+    IngressRateLimitConfig, IngressRequest, IngressRouterConfig, IngressSecretsPort,
+    ReplyContextKey, ReplyContextStore, VerificationCandidate, canonical_ingress_path,
 };
 use ironclaw_extension_host::test_support::resolve_manifest_toml;
 use ironclaw_extension_host::{
@@ -35,8 +35,13 @@ use ironclaw_product::{
 };
 
 /// What the scripted adapter observed per call: forwarded headers, body,
-/// and the resolved installation id.
-type SeenInbound = (Vec<(String, String)>, Vec<u8>, String);
+/// resolved installation id, and host-selected non-secret configuration.
+type SeenInbound = (
+    Vec<(String, String)>,
+    Vec<u8>,
+    String,
+    Vec<(String, String)>,
+);
 
 const EXTENSION_ID: &str = "acme-chat";
 const SUFFIX: &str = "events";
@@ -127,6 +132,7 @@ impl ChannelAdapter for ScriptedChannelAdapter {
             request.headers.to_vec(),
             request.body.to_vec(),
             request.installation_id.to_string(),
+            request.config.to_vec(),
         ));
         match self.mode {
             AdapterMode::Panic => panic!("scripted adapter panic"),
@@ -194,6 +200,34 @@ impl IngressSecretsPort for ScriptedSecrets {
             });
         }
         Ok(self.candidates.clone())
+    }
+}
+
+struct ScriptedConfiguration {
+    values: Vec<(String, String)>,
+    calls: Arc<AtomicUsize>,
+    seen_scopes: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    fail: bool,
+}
+
+#[async_trait]
+impl IngressConfigurationPort for ScriptedConfiguration {
+    async fn non_secret_config(
+        &self,
+        extension_id: &str,
+        installation_id: &str,
+    ) -> Result<Vec<(String, String)>, IngressPortError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.seen_scopes
+            .lock()
+            .expect("configuration scopes lock")
+            .push((extension_id.to_string(), installation_id.to_string()));
+        if self.fail {
+            return Err(IngressPortError {
+                reason: "scripted configuration outage".to_string(),
+            });
+        }
+        Ok(self.values.clone())
     }
 }
 
@@ -283,6 +317,8 @@ struct Harness {
     adapter_calls: Arc<AtomicUsize>,
     adapter_seen: Arc<std::sync::Mutex<Vec<SeenInbound>>>,
     secrets_calls: Arc<AtomicUsize>,
+    configuration_calls: Arc<AtomicUsize>,
+    configuration_seen_scopes: Arc<std::sync::Mutex<Vec<(String, String)>>>,
     admitted: Arc<std::sync::Mutex<Vec<(String, String, String)>>>,
     reply_context: Arc<TestReplyContextStore>,
 }
@@ -317,6 +353,8 @@ struct HarnessOptions {
     sink_mode: SinkMode,
     candidates: Vec<VerificationCandidate>,
     secrets_fail: bool,
+    non_secret_config: Vec<(String, String)>,
+    configuration_fail: bool,
     config: IngressRouterConfig,
     reserved_routes: std::collections::BTreeSet<String>,
 }
@@ -331,6 +369,8 @@ impl Default for HarnessOptions {
                 secret: SECRET.to_vec(),
             }],
             secrets_fail: false,
+            non_secret_config: Vec::new(),
+            configuration_fail: false,
             config: IngressRouterConfig {
                 rate_limit: IngressRateLimitConfig {
                     max_requests: 1000,
@@ -367,6 +407,8 @@ async fn harness(options: HarnessOptions) -> Harness {
         .await,
     );
     let secrets_calls = Arc::new(AtomicUsize::new(0));
+    let configuration_calls = Arc::new(AtomicUsize::new(0));
+    let configuration_seen_scopes = Arc::new(std::sync::Mutex::new(Vec::new()));
     let admitted = Arc::new(std::sync::Mutex::new(Vec::new()));
     let reply_context = Arc::new(TestReplyContextStore::default());
     let router = ExtensionIngressRouter::new(
@@ -376,6 +418,12 @@ async fn harness(options: HarnessOptions) -> Harness {
                 candidates: options.candidates,
                 calls: Arc::clone(&secrets_calls),
                 fail: options.secrets_fail,
+            }),
+            configuration: Arc::new(ScriptedConfiguration {
+                values: options.non_secret_config,
+                calls: Arc::clone(&configuration_calls),
+                seen_scopes: Arc::clone(&configuration_seen_scopes),
+                fail: options.configuration_fail,
             }),
             sink: Arc::new(RecordingSink {
                 mode: options.sink_mode,
@@ -391,6 +439,8 @@ async fn harness(options: HarnessOptions) -> Harness {
         adapter_calls,
         adapter_seen,
         secrets_calls,
+        configuration_calls,
+        configuration_seen_scopes,
         admitted,
         reply_context,
     }
@@ -608,6 +658,7 @@ async fn verification_rejects_bad_missing_and_stale_signatures_before_the_adapte
     assert_eq!(harness.router.handle(request).await.status, 401);
 
     assert_eq!(harness.adapter_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(harness.configuration_calls.load(Ordering::SeqCst), 0);
     assert!(harness.admitted.lock().expect("admitted").is_empty());
 
     // The genuine request still verifies.
@@ -616,6 +667,7 @@ async fn verification_rejects_bad_missing_and_stale_signatures_before_the_adapte
         200
     );
     assert_eq!(harness.adapter_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.configuration_calls.load(Ordering::SeqCst), 1);
 }
 
 /// ING-5 + ING-7: the adapter sees bounded input with the verification
@@ -632,9 +684,10 @@ async fn adapter_never_observes_verification_headers_or_secret_material() {
     );
 
     let seen = harness.adapter_seen.lock().expect("seen");
-    let (headers, seen_body, installation_id) = &seen[0];
+    let (headers, seen_body, installation_id, config) = &seen[0];
     assert_eq!(installation_id, &format!("{EXTENSION_ID}-install"));
     assert_eq!(seen_body.as_slice(), body);
+    assert!(config.is_empty());
     assert!(
         headers
             .iter()
@@ -648,6 +701,44 @@ async fn adapter_never_observes_verification_headers_or_secret_material() {
     let secret_text = String::from_utf8_lossy(SECRET).into_owned();
     let rendered = format!("{headers:?}{}", String::from_utf8_lossy(seen_body));
     assert!(!rendered.contains(&secret_text));
+}
+
+#[tokio::test]
+async fn verified_installation_non_secret_config_reaches_the_adapter() {
+    let options = HarnessOptions {
+        non_secret_config: vec![("bot_username".to_string(), "deploy_bot".to_string())],
+        ..HarnessOptions::default()
+    };
+    let harness = harness(options).await;
+    activate(&harness).await;
+    let body = br#"{"text":"hi","event":"ev-config","conversation":"C-1"}"#;
+
+    assert_eq!(
+        harness.router.handle(signed_request(body)).await.status,
+        200
+    );
+    assert_eq!(harness.configuration_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        harness
+            .configuration_seen_scopes
+            .lock()
+            .expect("configuration scopes lock")
+            .as_slice(),
+        &[(EXTENSION_ID.to_string(), format!("{EXTENSION_ID}-install"))]
+    );
+    let seen = harness.adapter_seen.lock().expect("seen");
+    let (_, _, installation_id, config) = &seen[0];
+    assert_eq!(installation_id, &format!("{EXTENSION_ID}-install"));
+    assert_eq!(
+        config,
+        &[("bot_username".to_string(), "deploy_bot".to_string())]
+    );
+    assert!(
+        config
+            .iter()
+            .all(|(_, value)| !value.as_bytes().windows(SECRET.len()).any(|w| w == SECRET)),
+        "verification secret material must never enter adapter configuration"
+    );
 }
 
 /// ING-6 (router leg): with multiple candidate installations the request
@@ -684,6 +775,14 @@ async fn multi_candidate_verification_resolves_exactly_one_installation() {
             "ev-4".to_string()
         )]
     );
+    assert_eq!(
+        harness
+            .configuration_seen_scopes
+            .lock()
+            .expect("configuration scopes lock")
+            .as_slice(),
+        &[(EXTENSION_ID.to_string(), format!("{EXTENSION_ID}-install"))]
+    );
 
     // Ambiguity: both candidates share the verifying secret → 401.
     let options = HarnessOptions {
@@ -705,6 +804,11 @@ async fn multi_candidate_verification_resolves_exactly_one_installation() {
         401
     );
     assert_eq!(ambiguous.adapter_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        ambiguous.configuration_calls.load(Ordering::SeqCst),
+        0,
+        "ambiguous verification must not reveal installation configuration"
+    );
 }
 
 async fn harness_with_activation(options: HarnessOptions) -> Harness {
@@ -784,6 +888,17 @@ async fn two_hundred_only_after_durable_admission_commit() {
     })
     .await;
     assert_eq!(outage.router.handle(signed_request(body)).await.status, 503);
+    assert_eq!(outage.adapter_calls.load(Ordering::SeqCst), 0);
+
+    // A non-secret configuration outage is also retryable and must fail
+    // before adapter normalization.
+    let outage = harness_with_activation(HarnessOptions {
+        configuration_fail: true,
+        ..HarnessOptions::default()
+    })
+    .await;
+    assert_eq!(outage.router.handle(signed_request(body)).await.status, 503);
+    assert_eq!(outage.configuration_calls.load(Ordering::SeqCst), 1);
     assert_eq!(outage.adapter_calls.load(Ordering::SeqCst), 0);
 }
 

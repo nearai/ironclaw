@@ -321,8 +321,11 @@ oauth-connect integration test rather than adding a parallel one).
   verification recipe execution (host verifier: `hmac_sha256` segment
   evaluation, constant-time compare, timestamp/replay window;
   `shared_secret_header` constant-time; candidate installations tried within a
-  small fixed bound) → `adapter.inbound(VerifiedInbound)` (pure, panic-isolated,
-  bounded input; signing secrets never in scope) → outcome:
+  small fixed bound) → drop verification candidates → resolve the verified
+  installation's manifest-declared non-secret configuration →
+  `adapter.inbound(VerifiedInbound)` (pure, panic-isolated, bounded input;
+  resolved non-secret configuration is available, signing secrets never are)
+  → outcome:
   - `Messages` → durable dedupe + admission commit in one transaction (dedupe
     key: `(installation, event_id)`), **then** 2xx; persistence failure →
     retryable 5xx. Then existing workflow: identity and conversation binding,

@@ -517,10 +517,11 @@ impl ChannelConfigService {
         Ok(None)
     }
 
-    /// Resolve the non-secret configuration passed to `ChannelAdapter::activate`.
-    /// Manifest-declared tenant admin values take precedence over the retired
-    /// per-installation configure surface while preserving it as a compatibility
-    /// fallback for manifests that do not declare administrator configuration.
+    /// Resolve the non-secret configuration passed to channel lifecycle hooks
+    /// and verified inbound normalization. Manifest-declared tenant admin
+    /// values take precedence over the retired per-installation configure
+    /// surface while preserving it as a compatibility fallback for manifests
+    /// that do not declare administrator configuration.
     pub async fn effective_non_secret_config(
         &self,
         extension_id: &ExtensionId,

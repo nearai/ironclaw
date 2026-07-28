@@ -455,7 +455,9 @@ pub trait ChannelAdapter: Send + Sync {
     }
 
     /// Parse one host-verified inbound request into a normalized outcome.
-    /// Pure protocol work: no I/O, no secrets, bounded input.
+    /// `VerifiedInbound` includes the verified installation's host-resolved,
+    /// manifest-declared non-secret config. Pure protocol work: no I/O, no
+    /// secrets, bounded input.
     fn inbound(&self, request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError>;
 
     /// Render and send one normalized outbound envelope through restricted

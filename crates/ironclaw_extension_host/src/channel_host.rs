@@ -26,7 +26,7 @@ use async_trait::async_trait;
 use ironclaw_conversations::RebornFilesystemConversationServices;
 use ironclaw_extension_host::active::{ActiveExtension, ActiveSnapshot};
 use ironclaw_extension_host::ingress::{
-    IngressPortError, IngressSecretsPort, VerificationCandidate,
+    IngressConfigurationPort, IngressPortError, IngressSecretsPort, VerificationCandidate,
 };
 use ironclaw_extension_host::{DeploymentChannelBinding, DeploymentChannelRegistry, SnapshotWatch};
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
@@ -653,6 +653,12 @@ impl GenericChannelHostAssembly {
             handle: secret_handle.clone(),
             installation_id: source.installation_id().to_string(),
         });
+        let configuration = Arc::new(ChannelConfigIngressConfiguration {
+            channel_config: Arc::clone(&self.deps.channel_config),
+            extension_id: ExtensionId::new(source.extension_id())
+                .map_err(|error| format!("invalid extension id: {error}"))?,
+            installation_id: source.installation_id().to_string(),
+        });
 
         let (binding, workflow_state) = self.build_binding(source, extras).await?;
 
@@ -709,6 +715,7 @@ impl GenericChannelHostAssembly {
         let sink = Arc::new(sink);
         let registration = ChannelIngressRegistration {
             secrets,
+            configuration,
             sink: Arc::clone(&sink) as Arc<dyn ironclaw_extension_host::ingress::InboundSink>,
             drain: Some(sink as Arc<dyn ChannelIngressDrain>),
         };
@@ -1038,6 +1045,36 @@ impl IngressSecretsPort for ChannelConfigIngressSecrets {
             }],
             None => Vec::new(),
         })
+    }
+}
+
+/// Dynamic non-secret installation configuration. Values are resolved only
+/// after the request has verified against this registration's installation.
+struct ChannelConfigIngressConfiguration {
+    channel_config: Arc<ChannelConfigService>,
+    extension_id: ExtensionId,
+    installation_id: String,
+}
+
+#[async_trait]
+impl IngressConfigurationPort for ChannelConfigIngressConfiguration {
+    async fn non_secret_config(
+        &self,
+        extension_id: &str,
+        installation_id: &str,
+    ) -> Result<Vec<(String, String)>, IngressPortError> {
+        if extension_id != self.extension_id.as_str() || installation_id != self.installation_id {
+            return Err(IngressPortError {
+                reason: "verified installation does not match channel configuration scope"
+                    .to_string(),
+            });
+        }
+        self.channel_config
+            .effective_non_secret_config(&self.extension_id)
+            .await
+            .map_err(|error| IngressPortError {
+                reason: format!("channel non-secret configuration unavailable: {error}"),
+            })
     }
 }
 

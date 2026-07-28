@@ -23,6 +23,8 @@ use ironclaw_telegram_v2_adapter::{
 /// Config field handle (non-secret) carrying the public webhook URL the
 /// activation hook registers with the vendor.
 pub const TELEGRAM_WEBHOOK_URL_CONFIG: &str = "telegram_webhook_url";
+/// Non-secret config handle carrying the receiving bot's public username.
+pub const TELEGRAM_BOT_USERNAME_CONFIG: &str = "bot_username";
 /// Secret handle for the webhook shared secret (the same handle the
 /// manifest's `shared_secret_header` recipe verifies with).
 pub const TELEGRAM_WEBHOOK_SECRET_HANDLE: &str = "telegram_webhook_secret";
@@ -36,8 +38,9 @@ pub const TELEGRAM_TOKEN_PLACEHOLDER: &str = "telegram_bot_token";
 /// Telegram sendMessage hard limit (characters).
 const TELEGRAM_TEXT_LIMIT_CHARS: usize = 4096;
 
-/// The Telegram channel adapter. Group-forwarding triggers are non-secret
-/// installation config, supplied at construction (bind-time).
+/// The Telegram channel adapter. The constructor policy remains available for
+/// compatibility and tests; shipping ingress overlays the receiving bot
+/// identity from verified installation configuration on every request.
 #[derive(Debug, Default)]
 pub struct TelegramChannelAdapter {
     group_trigger_policy: GroupTriggerPolicy,
@@ -48,6 +51,37 @@ impl TelegramChannelAdapter {
         Self {
             group_trigger_policy,
         }
+    }
+
+    fn receiving_bot_username(&self, config: &[(String, String)]) -> Result<String, &'static str> {
+        let configured_username = config
+            .iter()
+            .find(|(handle, _)| handle == TELEGRAM_BOT_USERNAME_CONFIG)
+            .map(|(_, value)| value.as_str())
+            .unwrap_or(self.group_trigger_policy.bot_username.as_str());
+        if configured_username.is_empty()
+            || configured_username.len() > 64
+            || configured_username.trim() != configured_username
+            || !configured_username
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        {
+            return Err("missing or invalid Telegram bot username configuration");
+        }
+        Ok(configured_username.to_string())
+    }
+
+    fn effective_group_trigger_policy(
+        &self,
+        config: &[(String, String)],
+    ) -> Result<GroupTriggerPolicy, ChannelError> {
+        let mut policy = self.group_trigger_policy.clone();
+        policy.bot_username =
+            self.receiving_bot_username(config)
+                .map_err(|reason| ChannelError::Parse {
+                    reason: reason.to_string(),
+                })?;
+        Ok(policy)
     }
 }
 
@@ -62,6 +96,10 @@ impl ChannelAdapter for TelegramChannelAdapter {
         ctx: &ChannelContext<'_>,
         egress: &dyn RestrictedEgress,
     ) -> Result<(), ChannelError> {
+        self.receiving_bot_username(ctx.config)
+            .map_err(|reason| ChannelError::VendorWiring {
+                reason: reason.to_string(),
+            })?;
         let webhook_url = ctx
             .config
             .iter()
@@ -130,7 +168,8 @@ impl ChannelAdapter for TelegramChannelAdapter {
                     reason: format!("invalid installation id: {error}"),
                 }
             })?;
-        match normalize_telegram_update(request.body, &installation_id, &self.group_trigger_policy)
+        let group_trigger_policy = self.effective_group_trigger_policy(request.config)?;
+        match normalize_telegram_update(request.body, &installation_id, &group_trigger_policy)
             .map_err(|error| ChannelError::Parse {
                 reason: error.to_string(),
             })? {
@@ -475,9 +514,14 @@ mod tests {
     }
 
     fn inbound(body: &[u8]) -> Result<InboundOutcome, ChannelError> {
+        let config = vec![(
+            TELEGRAM_BOT_USERNAME_CONFIG.to_string(),
+            "configured_bot".to_string(),
+        )];
         TelegramChannelAdapter::default().inbound(VerifiedInbound {
             extension_id: "telegram",
             installation_id: "install_alpha",
+            config: &config,
             body,
             headers: &[],
         })
@@ -486,10 +530,16 @@ mod tests {
     #[tokio::test]
     async fn activate_names_the_webhook_secret_as_a_declared_body_credential() {
         let egress = RecordingEgress::ok();
-        let config = vec![(
-            TELEGRAM_WEBHOOK_URL_CONFIG.to_string(),
-            "https://host.example/webhooks/extensions/telegram/updates".to_string(),
-        )];
+        let config = vec![
+            (
+                TELEGRAM_WEBHOOK_URL_CONFIG.to_string(),
+                "https://host.example/webhooks/extensions/telegram/updates".to_string(),
+            ),
+            (
+                TELEGRAM_BOT_USERNAME_CONFIG.to_string(),
+                "configured_bot".to_string(),
+            ),
+        ];
         TelegramChannelAdapter::default()
             .activate(&context(&config), &egress)
             .await
@@ -540,10 +590,16 @@ mod tests {
         assert!(matches!(error, ChannelError::VendorWiring { .. }));
 
         let failing = RecordingEgress::failing();
-        let config = vec![(
-            TELEGRAM_WEBHOOK_URL_CONFIG.to_string(),
-            "https://host.example/hooks".to_string(),
-        )];
+        let config = vec![
+            (
+                TELEGRAM_WEBHOOK_URL_CONFIG.to_string(),
+                "https://host.example/hooks".to_string(),
+            ),
+            (
+                TELEGRAM_BOT_USERNAME_CONFIG.to_string(),
+                "configured_bot".to_string(),
+            ),
+        ];
         let error = TelegramChannelAdapter::default()
             .activate(&context(&config), &failing)
             .await
