@@ -91,8 +91,8 @@ use super::{
     FilesystemChannelWorkflowStateFactory, GenericChannelHostAssembly, GenericChannelHostDeps,
 };
 use crate::extension_ingress::{
-    ExtensionIngressParts, InboundPayloadClassifier, PostAdmissionObserver,
-    build_extension_ingress, extension_ingress_route_mount,
+    ExtensionIngressParts, PostAdmissionObserver, build_extension_ingress,
+    extension_ingress_route_mount,
 };
 use crate::run_delivery_ports::ProductAuthBlockedAuthPromptSource;
 use ironclaw_extension_host::{
@@ -452,13 +452,12 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
     };
     let assembly = GenericChannelHostAssembly::start(deps);
     // Vendor extras exactly as the binary's channel-extension binding feeds
-    // them: the gate-reply classifier and the preference-target codec — no
-    // storage-root override.
+    // them: the preference-target codec — no storage-root override.
     assembly
         .register_extras(
             "slack",
             ChannelExtras {
-                classifier: Some(slack_gate_reply_classifier()),
+                classifier: None,
                 preference_target_codec: Some(Arc::new(SlackPreferenceTargetCodec)),
                 subject_route_resolver: None,
                 storage_roots: None,
@@ -483,17 +482,6 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         _host: host,
         assembly,
     }
-}
-
-/// Slack's gate-resolution reclassification for the generic sink — the same
-/// closure the binary-side native registration provides.
-fn slack_gate_reply_classifier() -> Arc<InboundPayloadClassifier> {
-    Arc::new(|message| {
-        ironclaw_slack_extension::classify_channel_interaction_resolution(
-            &message.text,
-            message.trigger,
-        )
-    })
 }
 
 /// `[channel.config]` configured through the production configure service:

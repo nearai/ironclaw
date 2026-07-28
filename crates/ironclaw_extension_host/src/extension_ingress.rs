@@ -25,7 +25,7 @@ use ironclaw_host_api::{ChannelInboundProductSurface, SecretHandle};
 use ironclaw_product::{
     AdapterInstallationId, ChannelInboundClassification, ExternalConversationRef, ExternalEventId,
     NormalizedInboundMessage, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
-    ProductSourceChannel, ProtocolAuthEvidence,
+    ProductSourceChannel, ProtocolAuthEvidence, classify_channel_inbound_text,
 };
 use ironclaw_product::{
     ChannelInboundSurfaceOutcome, ChannelInboundSurfaceRejectedAdmission,
@@ -485,11 +485,14 @@ impl InboundSink for GenericChannelInboundSink {
             installation_id: installation,
             evidence,
             received_at: Utc::now(),
-            classification: self
-                .config
-                .classifier
-                .as_ref()
-                .and_then(|classify| classify(&message)),
+            classification: classify_channel_inbound_text(&message.text, message.trigger).or_else(
+                || {
+                    self.config
+                        .classifier
+                        .as_ref()
+                        .and_then(|classify| classify(&message))
+                },
+            ),
             message,
         };
         let response = Box::pin(self.config.surface.admit_channel_inbound(request)).await;
@@ -784,7 +787,10 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use ironclaw_host_api::UserId;
-    use ironclaw_product::{ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome};
+    use ironclaw_product::{
+        AuthResolutionPayload, AuthResolutionResult, ChannelInboundClassification,
+        ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome, InboundCommandPayload,
+    };
     use ironclaw_product::{
         ExternalActorRef, ExternalConversationRef, ExternalEventId, ParsedProductInbound,
         ProductInboundPayload, ProductTriggerReason, TrustedInboundContext, UserMessagePayload,
@@ -796,17 +802,26 @@ mod tests {
 
     struct CountingSurface {
         submissions: AtomicUsize,
+        classifications: std::sync::Mutex<Vec<Option<ChannelInboundClassification>>>,
     }
 
     impl CountingSurface {
         fn new() -> Self {
             Self {
                 submissions: AtomicUsize::new(0),
+                classifications: std::sync::Mutex::new(Vec::new()),
             }
         }
 
         fn submit_count(&self) -> usize {
             self.submissions.load(Ordering::SeqCst)
+        }
+
+        fn classifications(&self) -> Vec<Option<ChannelInboundClassification>> {
+            self.classifications
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
         }
     }
 
@@ -816,6 +831,10 @@ mod tests {
             &self,
             request: ChannelInboundSurfaceRequest,
         ) -> ChannelInboundSurfaceOutcome {
+            self.classifications
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(request.classification.clone());
             self.submissions.fetch_add(1, Ordering::SeqCst);
             let ack = ProductInboundAck::Accepted {
                 accepted_message_ref: AcceptedMessageRef::new("msg:extension-ingress-test")
@@ -1048,5 +1067,37 @@ mod tests {
         sink.drain().await;
         assert_eq!(workflow.submit_count(), 1);
         assert_eq!(observer.lock().expect("outcomes lock").pop(), None);
+    }
+
+    #[tokio::test]
+    async fn generic_sink_classifies_gate_replies_commands_and_plain_text() {
+        let cases = [
+            (
+                "auth deny gate:auth-1",
+                Some(ChannelInboundClassification::AuthResolution(
+                    AuthResolutionPayload::new("gate:auth-1", AuthResolutionResult::Denied)
+                        .expect("valid auth payload")
+                        .with_source_trigger(ProductTriggerReason::DirectChat),
+                )),
+            ),
+            (
+                "/model openai/gpt-5",
+                Some(ChannelInboundClassification::Command(
+                    InboundCommandPayload::new(
+                        "model",
+                        "openai/gpt-5",
+                        ProductTriggerReason::DirectChat,
+                    )
+                    .expect("valid command"),
+                )),
+            ),
+            ("hello", None),
+        ];
+
+        for (text, expected) in cases {
+            let (sink, surface, _) = pairing_sink(ChannelPairingInterception::NotHandled);
+            sink.admit(admission_for(text)).await.expect("admitted");
+            assert_eq!(surface.classifications(), vec![expected]);
+        }
     }
 }
