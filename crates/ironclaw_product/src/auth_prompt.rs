@@ -87,12 +87,19 @@ impl AuthChallengeView {
                 submit_label: non_empty(&connection.submit_label),
                 error_message: non_empty(&connection.error_message),
             });
+            // `PairingPromptView` validates with the NON-optional
+            // `validate_bounded_text`, so a blank value here is fatal rather
+            // than merely absent -- and `deep_link` is the one field that can
+            // legitimately arrive blank (a manifest may omit
+            // `deep_link_template`, or render it to nothing). Guard it the same
+            // way; the required strings are manifest-validated non-empty at
+            // parse time (`ChannelConnectionDescriptor::validate`).
             view.pairing = Some(PairingPromptView {
                 channel: connection.channel,
                 display_name: connection.display_name,
                 instructions: connection.instructions,
                 code: pairing.code,
-                deep_link: pairing.deep_link,
+                deep_link: pairing.deep_link.as_deref().and_then(non_empty),
                 expires_at: pairing.expires_at,
             });
         } else {
@@ -263,4 +270,142 @@ fn auth_prompt_from_credential_requirement(
     }
     view.provider = Some(provider);
     view
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_host_api::{ChannelConnectStrategy, RuntimeCredentialAccountSetup, VendorId};
+
+    fn requirement(setup: RuntimeCredentialAccountSetup) -> RuntimeCredentialAuthRequirement {
+        RuntimeCredentialAuthRequirement {
+            provider: VendorId::new("telegram").expect("vendor"),
+            setup,
+            requester_extension: ironclaw_host_api::ExtensionId::new("telegram")
+                .expect("extension id"),
+            provider_scopes: Vec::new(),
+        }
+    }
+
+    fn base_view() -> AuthPromptView {
+        AuthPromptView {
+            turn_run_id: ironclaw_turns::TurnRunId::new(),
+            auth_request_ref: "gate:auth:1".to_string(),
+            invocation_id: None,
+            headline: "Authentication required".to_string(),
+            body: "body".to_string(),
+            challenge_kind: None,
+            provider: None,
+            account_label: None,
+            authorization_url: None,
+            expires_at: None,
+            connection: None,
+            pairing: None,
+        }
+    }
+
+    fn connection() -> ChannelConnectionRequirement {
+        ChannelConnectionRequirement {
+            channel: "telegram".to_string(),
+            display_name: "Telegram".to_string(),
+            strategy: ChannelConnectStrategy::WebGeneratedCode,
+            instructions: "Send this code to the bot.".to_string(),
+            // Real `web_generated_code` recipes ship this BLANK — keep it so.
+            input_placeholder: String::new(),
+            submit_label: "Open pairing".to_string(),
+            error_message: "Pairing failed.".to_string(),
+        }
+    }
+
+    /// A pairing credential requirement MUST set `challenge_kind = Pairing`.
+    /// #6616 replaced this arm with a no-op asserting pairing "is not an
+    /// auth-prompt challenge", which dropped every caller onto the generic
+    /// "not available in this view" card. Nothing pinned the restored arm, so
+    /// reverting it left the whole suite green.
+    #[test]
+    fn pairing_credential_requirement_sets_the_pairing_challenge_kind() {
+        let view = auth_prompt_from_credential_requirement(
+            base_view(),
+            &[requirement(RuntimeCredentialAccountSetup::Pairing)],
+        );
+
+        assert_eq!(
+            view.challenge_kind,
+            Some(AuthPromptChallengeKind::Pairing),
+            "a pairing setup is a serviceable challenge, not an unknown one"
+        );
+        assert_eq!(view.provider.as_deref(), Some("telegram"));
+    }
+
+    /// Positive control for `non_empty`. The blank-maps-to-None assertion alone
+    /// is satisfied by `fn non_empty(_) -> None`, which would silently blank the
+    /// entire pairing card. Populated manifest values must reach the wire.
+    #[test]
+    fn populated_connection_fields_reach_the_projection() {
+        let challenge = AuthChallengeView {
+            kind: AuthPromptChallengeKind::Pairing,
+            provider: AuthProviderId::new("telegram".to_string()).expect("provider"),
+            account_label: None,
+            authorization_url: None,
+            expires_at: None,
+            pairing: Some(PairingAuthChallengeView {
+                code: "ABCD2345".to_string(),
+                deep_link: Some("https://t.me/bot?start=ABCD2345".to_string()),
+                expires_at: chrono::Utc::now(),
+                connection: connection(),
+            }),
+        };
+
+        let view = challenge.enrich(base_view());
+        let ctx = view.connection.as_ref().expect("connection context");
+
+        assert_eq!(
+            ctx.instructions.as_deref(),
+            Some("Send this code to the bot."),
+            "populated instructions must survive the non_empty mapping"
+        );
+        assert_eq!(ctx.submit_label.as_deref(), Some("Open pairing"));
+        assert_eq!(ctx.error_message.as_deref(), Some("Pairing failed."));
+        assert_eq!(ctx.strategy.as_deref(), Some("web_generated_code"));
+        // ...and the one field real recipes ship blank stays absent.
+        assert_eq!(
+            ctx.input_placeholder, None,
+            "a blank manifest placeholder must be None, never Some(\"\")"
+        );
+
+        let pairing = view.pairing.as_ref().expect("pairing view");
+        assert_eq!(pairing.code, "ABCD2345");
+        assert_eq!(
+            pairing.deep_link.as_deref(),
+            Some("https://t.me/bot?start=ABCD2345")
+        );
+    }
+
+    /// `PairingPromptView` validates with the NON-optional `validate_bounded_text`,
+    /// so a blank `deep_link` is fatal rather than merely absent — the same class
+    /// that took the chat stream down through `input_placeholder`.
+    #[test]
+    fn blank_pairing_deep_link_projects_as_absent() {
+        let challenge = AuthChallengeView {
+            kind: AuthPromptChallengeKind::Pairing,
+            provider: AuthProviderId::new("telegram".to_string()).expect("provider"),
+            account_label: None,
+            authorization_url: None,
+            expires_at: None,
+            pairing: Some(PairingAuthChallengeView {
+                code: "ABCD2345".to_string(),
+                deep_link: Some("   ".to_string()),
+                expires_at: chrono::Utc::now(),
+                connection: connection(),
+            }),
+        };
+
+        let view = challenge.enrich(base_view());
+
+        assert_eq!(
+            view.pairing.as_ref().expect("pairing view").deep_link,
+            None,
+            "a blank deep link must be None; Some(\"\") fails PairingPromptView::validate"
+        );
+    }
 }

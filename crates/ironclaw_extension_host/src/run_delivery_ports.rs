@@ -80,8 +80,19 @@ impl AuthChallengeProvider for RecipeAuthChallengeProvider {
             };
             return Ok(Some(AuthChallengeView {
                 kind: ironclaw_product::AuthPromptChallengeKind::Pairing,
-                provider: AuthProviderId::new(requirement.provider.as_str().to_string())
-                    .map_err(|_| AuthProductError::MalformedConfig)?,
+                provider: AuthProviderId::new(requirement.provider.as_str().to_string()).map_err(
+                    |error| {
+                        // `MalformedConfig` is a unit variant, so the cause has
+                        // nowhere to ride to the caller -- log it here rather
+                        // than dropping it (`.claude/rules/error-handling.md`).
+                        tracing::warn!(
+                            provider = %requirement.provider,
+                            %error,
+                            "pairing challenge has an unusable provider id"
+                        );
+                        AuthProductError::MalformedConfig
+                    },
+                )?,
                 account_label: None,
                 authorization_url: None,
                 expires_at: Some(issue.expires_at),

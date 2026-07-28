@@ -881,6 +881,37 @@ mod tests {
                  to the user as ready to use",
             );
 
+            // Absence of a connection signal is NOT consent. A pairing/OAuth
+            // channel with no row in the connections map has produced no proof
+            // the caller connected, so it must read unconnected. Without this
+            // arm the predicate can be weakened from `connected != Some(true)`
+            // to `connected == Some(false)` and every test still passes -- which
+            // is exactly the shape #6616 shipped.
+            let mut absent_summary = summary_with_onboarding();
+            absent_summary.runtime_kind = LifecycleExtensionRuntimeKind::FirstParty;
+            absent_summary.surface_kinds = vec![CapabilitySurfaceKind::Channel];
+            absent_summary.credential_requirements = Vec::new();
+            absent_summary.channel_connection = Some(test_channel_connection(strategy));
+            let absent = list_extensions(
+                Arc::new(ListingService {
+                    extension: LifecycleInstalledExtensionSummary {
+                        summary: absent_summary,
+                        phase: InstallationState::Active,
+                        install_scope: None,
+                    },
+                }),
+                None,
+                no_channel_connections(),
+                caller(),
+            )
+            .await
+            .expect("list extensions");
+            assert_eq!(
+                absent.extensions.first().expect("one").installation_state,
+                LifecyclePublicState::SetupNeeded,
+                "no connection signal for a {strategy:?} channel must read unconnected, never silently active",
+            );
+
             // ...and once the caller connects, the same extension goes active.
             let mut connected_summary = summary_with_onboarding();
             connected_summary.runtime_kind = LifecycleExtensionRuntimeKind::FirstParty;

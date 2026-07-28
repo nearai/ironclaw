@@ -112,17 +112,13 @@ fn gate_prompt_reply_instruction(direct_message: bool, gate_ref: &str) -> String
 /// `authorization_url`, when present, is appended as a trailing setup link;
 /// callers strip it BEFORE this point for non-private targets.
 pub(crate) fn auth_prompt_text(view: &AuthPromptView, direct_message: bool) -> String {
-    let mut text = format!(
-        "{}\n\n{}\n\n{}",
-        view.headline,
-        view.body,
-        auth_prompt_reply_instruction(direct_message, &view.auth_request_ref)
-    );
-    if let Some(url) = &view.authorization_url {
-        text.push_str("\n\nSetup link: ");
-        text.push_str(url);
-    }
-    text
+    // Delegate to the canonical channel renderer. It is a strict superset of
+    // the old local formatting -- headline, body, cancel affordance and the
+    // OAuth `Setup link` -- and additionally emits the pairing code, deep link
+    // and expiry. Rendering locally silently dropped the code, so a pairing
+    // challenge told the user to "send the displayed code" without ever
+    // displaying one.
+    ironclaw_host_api::render_channel_auth_prompt(view, direct_message)
 }
 
 /// The body to render for a serviceable challenge. A pairing challenge
@@ -179,14 +175,6 @@ pub(crate) fn unserviceable_auth_prompt_message(view: Option<&AuthPromptView>) -
     match view.and_then(|view| view.challenge_kind) {
         Some(AuthPromptChallengeKind::ManualToken) => MANUAL_TOKEN_AUTH_UNAVAILABLE_MESSAGE,
         _ => AUTH_UNAVAILABLE_MESSAGE,
-    }
-}
-
-fn auth_prompt_reply_instruction(direct_message: bool, auth_request_ref: &str) -> String {
-    if direct_message {
-        format!("Reply `auth deny {auth_request_ref}` here to cancel this run.")
-    } else {
-        format!("Mention me with `auth deny {auth_request_ref}` in this thread to cancel this run.")
     }
 }
 
@@ -299,6 +287,48 @@ mod tests {
             unserviceable_auth_prompt_message(Some(&pairing_view)),
             AUTH_UNAVAILABLE_MESSAGE,
             "a pairing user must not be told to go find an API key"
+        );
+    }
+
+    /// A serviceable pairing challenge is useless unless the CODE reaches the
+    /// user. `auth_prompt_text` only ever rendered headline/body/reply-hint and
+    /// the OAuth `Setup link`, so a Slack/Telegram DM showed "send /start
+    /// followed by the displayed code" and never displayed one. #6520 rendered
+    /// through the canonical `render_channel_auth_prompt`, which emits the
+    /// code, deep link and expiry; the restoration kept the older renderer.
+    #[test]
+    fn channel_auth_prompt_renders_the_pairing_code_not_just_instructions() {
+        let mut view = view(Some(AuthPromptChallengeKind::Pairing));
+        view.pairing = Some(pairing("ABCD2345"));
+        view.body = actionable_auth_prompt_body(&view);
+
+        let text = auth_prompt_text(&view, true);
+
+        assert!(
+            text.contains("ABCD2345"),
+            "the pairing code must reach the channel message; got:\n{text}"
+        );
+        assert!(
+            text.contains("Send this code to the bot."),
+            "instructions must still render; got:\n{text}"
+        );
+        assert!(
+            text.contains("auth deny"),
+            "the cancel affordance must survive; got:\n{text}"
+        );
+    }
+
+    /// Switching renderers must not drop the OAuth setup link.
+    #[test]
+    fn channel_auth_prompt_still_renders_the_oauth_setup_link() {
+        let mut view = view(Some(AuthPromptChallengeKind::OAuthUrl));
+        view.authorization_url = Some("https://provider.example/authorize".to_string());
+
+        let text = auth_prompt_text(&view, true);
+
+        assert!(
+            text.contains("https://provider.example/authorize"),
+            "OAuth setup link must survive; got:\n{text}"
         );
     }
 
