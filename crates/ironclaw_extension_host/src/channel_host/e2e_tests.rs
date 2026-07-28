@@ -673,7 +673,7 @@ async fn slack_test_extension_host_with_manifest_commands(
                 "commands = [\"status\"]",
                 &format!(
                     "commands = {}",
-                    serde_json::to_string(commands).expect("serialize test commands")
+                    serde_json::to_string(commands).expect("serialize test commands") // safety: test-only string slices serialize without failure.
                 ),
             );
         }
