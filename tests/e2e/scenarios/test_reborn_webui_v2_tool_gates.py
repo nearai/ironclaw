@@ -133,7 +133,8 @@ async def test_reborn_v2_tool_turn_records_result_and_final_reply(
     assert any(reference.get("tool_result_ref") for reference in references), references
     assert assistant.get("status") == "finalized", assistant
     assistant_content = assistant.get("content")
-    assert isinstance(assistant_content, str) and assistant_content.strip(), assistant
+    assert isinstance(assistant_content, str), assistant
+    assert assistant_content.strip(), assistant
 
 
 async def test_reborn_v2_cancel_in_flight_turn_ends_cancelled(
@@ -186,6 +187,7 @@ async def test_reborn_v2_cancel_in_flight_turn_ends_cancelled(
                         response.get("run_id") == run_id
                         and response.get("status") == "Cancelled"
                     )
+                # RunStatus is externally tagged, so its run_id is nested here.
                 for item in payload.get("state", {}).get("items", []):
                     status = item.get("run_status") or {}
                     if (
@@ -310,7 +312,8 @@ async def test_reborn_v2_manual_token_auth_gate_resolves_and_resumes(
             assert token_submit.status_code == 200, token_submit.text
             token_body = token_submit.json()
             credential_ref = token_body.get("credential_ref")
-            assert isinstance(credential_ref, str) and credential_ref.strip(), token_body
+            assert isinstance(credential_ref, str), token_body
+            assert credential_ref.strip(), token_body
             assert token_body["continuation"]["type"] == "turn_gate_resume"
             assert raw_token not in token_submit.text
 
