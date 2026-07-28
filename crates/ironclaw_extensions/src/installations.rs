@@ -2314,8 +2314,13 @@ impl ExtensionInstallationStore {
             let record = parse_v2_membership_entry(row.entry, &path)?;
             // Same integrity check the per-installation read makes: the body's
             // installation id must agree with the parent the row is filed under.
-            let expected_root = self.v2_membership_root(&record.installation_id)?;
-            if !path.as_str().starts_with(expected_root.as_str()) {
+            // Match the full directory boundary, not a bare string prefix.
+            // Today's row tokens are fixed-length hashes so a prefix collision
+            // is unreachable, but that is a property of the path scheme rather
+            // than of this check -- pin the boundary so the check stays exact
+            // if the scheme ever changes.
+            let expected_root = format!("{}/", self.v2_membership_root(&record.installation_id)?);
+            if !path.as_str().starts_with(&expected_root) {
                 return Err(invalid_installation_error(
                     "v2 membership row installation id did not match its parent",
                 ));
@@ -2347,8 +2352,11 @@ impl ExtensionInstallationStore {
         for row in rows {
             let path = row.path.clone();
             let record = parse_v2_credential_binding_entry(row.entry, &path)?;
-            let expected_root = self.v2_credential_binding_root(&record.installation_id)?;
-            if !path.as_str().starts_with(expected_root.as_str()) {
+            let expected_root = format!(
+                "{}/",
+                self.v2_credential_binding_root(&record.installation_id)?
+            );
+            if !path.as_str().starts_with(&expected_root) {
                 return Err(invalid_installation_error(
                     "v2 credential binding installation id did not match its parent",
                 ));
