@@ -183,8 +183,9 @@ async def test_reset_restores_rate_limit_headroom_after_a_journey_burns_requests
         assert readings == sorted(readings, reverse=True), readings
         assert readings[-1] < readings[0], readings
 
-        await github_world.reset({"github"})
+    await github_world.reset({"github"})
 
+    async with httpx.AsyncClient(timeout=15) as client:
         after_reset = await _remaining_rate_limit(client, base_url)
 
     # A fresh process starts back near the 5000 ceiling; a leaked counter
@@ -209,18 +210,43 @@ async def test_reset_invalidates_a_pending_oauth_authorization_code(github_world
         "client_id": "provider-world-isolation-test",
     }
     async with httpx.AsyncClient(timeout=15) as client:
-        callback = await client.post(f"{base_url}/login/oauth/callback", data=form)
-        assert callback.status_code == 302, callback.text
-        code = httpx.URL(callback.headers["location"]).params["code"]
+        control_callback = await client.post(
+            f"{base_url}/login/oauth/callback", data=form
+        )
+        assert control_callback.status_code == 302, control_callback.text
+        control_code = httpx.URL(control_callback.headers["location"]).params[
+            "code"
+        ]
+        control_exchange = await client.post(
+            f"{base_url}/login/oauth/access_token",
+            data={
+                "client_id": form["client_id"],
+                "client_secret": "unused-in-emulate",
+                "code": control_code,
+                "redirect_uri": form["redirect_uri"],
+            },
+            headers={"Accept": "application/json"},
+        )
+        assert control_exchange.status_code == 200, control_exchange.text
+        assert control_exchange.json().get("access_token"), control_exchange.json()
 
-        await github_world.reset({"github"})
+        pending_callback = await client.post(
+            f"{base_url}/login/oauth/callback", data=form
+        )
+        assert pending_callback.status_code == 302, pending_callback.text
+        pending_code = httpx.URL(pending_callback.headers["location"]).params[
+            "code"
+        ]
 
+    await github_world.reset({"github"})
+
+    async with httpx.AsyncClient(timeout=15) as client:
         exchange = await client.post(
             f"{base_url}/login/oauth/access_token",
             data={
                 "client_id": form["client_id"],
                 "client_secret": "unused-in-emulate",
-                "code": code,
+                "code": pending_code,
                 "redirect_uri": form["redirect_uri"],
             },
             headers={"Accept": "application/json"},
@@ -287,8 +313,9 @@ async def test_reset_clears_slack_messages_a_journey_posted(slack_world):
             "left-behind-by-a-previous-journey"
         ]
 
-        await slack_world.reset({"slack"})
+    await slack_world.reset({"slack"})
 
+    async with httpx.AsyncClient(timeout=15) as client:
         # The restarted process assigns fresh channel ids from the same seed,
         # so look the channel back up by name rather than reusing channel_id.
         channels_after = await slack_post(client, base_url, "conversations.list")
@@ -321,8 +348,9 @@ async def test_reset_clears_slack_channel_membership_a_journey_joined(slack_worl
         assert joined["channel"]["is_member"] is True
         assert joined["channel"]["num_members"] == seeded_member_count + 1
 
-        await slack_world.reset({"slack"})
+    await slack_world.reset({"slack"})
 
+    async with httpx.AsyncClient(timeout=15) as client:
         channels_after = await slack_post(client, base_url, "conversations.list")
         general_after = next(
             c for c in channels_after["channels"] if c["name"] == "general"
@@ -339,8 +367,17 @@ async def google_world():
     finally:
         await world.close()
 
-async def _mint_google_refresh_token(base_url: str) -> str:
-    """Drive the real consent -> code -> token exchange and keep the refresh token."""
+async def test_reset_invalidates_a_google_refresh_token(google_world):
+    """A refresh token one journey obtained must not still work for the next.
+
+    This is the Google counterpart to the GitHub authorization-code case, and
+    it is the longer-lived half: an authorization code is single-use and
+    short-lived, while a refresh token is exactly the credential a journey
+    would keep using. If it survived a reset, a later journey could silently
+    mint access tokens against a grant it never performed — and would keep
+    passing while doing so.
+    """
+    base_url = google_world.servers["google"]["url"]
     redirect_uri = "http://127.0.0.1:1/callback"
     async with httpx.AsyncClient(timeout=15) as client:
         callback = await client.post(
@@ -366,22 +403,7 @@ async def _mint_google_refresh_token(base_url: str) -> str:
         assert exchanged.status_code == 200, exchanged.text
         refresh_token = exchanged.json().get("refresh_token")
         assert refresh_token, exchanged.json()
-    return refresh_token
 
-async def test_reset_invalidates_a_google_refresh_token(google_world):
-    """A refresh token one journey obtained must not still work for the next.
-
-    This is the Google counterpart to the GitHub authorization-code case, and
-    it is the longer-lived half: an authorization code is single-use and
-    short-lived, while a refresh token is exactly the credential a journey
-    would keep using. If it survived a reset, a later journey could silently
-    mint access tokens against a grant it never performed — and would keep
-    passing while doing so.
-    """
-    base_url = google_world.servers["google"]["url"]
-    refresh_token = await _mint_google_refresh_token(base_url)
-
-    async with httpx.AsyncClient(timeout=15) as client:
         # Redeemable before the reset, so the assertion after it is meaningful
         # rather than passing because the token never worked at all.
         before = await client.post(
