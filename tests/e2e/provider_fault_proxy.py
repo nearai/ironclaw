@@ -246,6 +246,10 @@ class ProviderFaultProxy:
         return {
             "rules": [dict(rule) for rule in self._rules],
             "requests": [dict(request) for request in self._requests],
+            # A delay profile parks a task that aborts its request later. One
+            # left running past a reset keeps firing during whatever case runs
+            # next, so the count is part of "is this proxy actually clean".
+            "pending_faults": len(self._delayed_requests),
         }
 
     def _take_rule(self, method: str, path: str) -> dict | None:

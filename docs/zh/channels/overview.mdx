@@ -3,34 +3,76 @@ title: "Overview"
 description: "设置消息渠道以与您的智能体交互"
 ---
 
-频道定义了用户如何向您的智能体发送消息。开发阶段可以先从本地使用开始，之后再根据集成需求添加消息应用或 Webhook。
-
-<Card title="Tunnel" icon="link" href="/zh/tunnel" horizontal>
-  配置隧道，让基于 Webhook 的频道能够接收传入请求。
-</Card>
+频道让您可以在 Web 界面之外与智能体对话。IronClaw 支持 Slack 和 Telegram。
 
 <CardGroup cols={2}>
-  <Card title="Local" icon="terminal" href="/zh/channels/local">
-    内置终端界面与 Web 网关，适合本地使用和测试。
-  </Card>
-
   <Card title="Telegram" icon="send" href="/zh/channels/telegram">
     在 Telegram 私聊和群聊中与您的智能体对话。
   </Card>
-
-  <Card title="Signal" icon="message" href="/zh/channels/signal">
-    通过 signal-cli HTTP 守护进程将 IronClaw 接入 Signal。
-  </Card>
-
-  <Card title="微信" icon="message" href="/zh/channels/wechat">
-    通过微信 iLink 机器人账号与智能体对话。
-  </Card>
-
-  <Card title="企业微信" icon="message" href="/zh/channels/wecom">
-    通过企业微信智能机器人与智能体对话。
-  </Card>
-
-  <Card title="HTTP Webhook" icon="webhook" href="/zh/channels/webhook">
-    通过 REST 端点接收外部系统发送的消息。
-  </Card>
 </CardGroup>
+
+---
+
+## 频道的工作方式
+
+频道是扩展的一种能力面。安装 Slack 或 Telegram 扩展后，智能体便可在该平台收发消息；扩展清单会在声明其工具的同时声明频道能力面。
+
+启动服务后在 Web 界面中连接频道，设置流程会引导您填写所需凭据，并将其加密存储。
+
+```bash
+ironclaw serve
+```
+
+---
+
+## 频道设置入口在哪里
+
+这是最容易卡住的地方，因此这里写得具体一些：
+
+1. 在侧边栏打开 **Extensions**。页面默认停在 **Registry** 标签页。
+2. 切换到 **Channels** 标签页 —— Registry 不是配置频道的地方。
+3. 在 **Built-in** 面板中**向下滚动到底部**，Slack 与 Telegram 的连接卡片位于 Web 与终端频道各行的下方。
+4. 在该卡片上点击 **Configure**，这才是真正的设置入口。
+
+<Warning>
+不要在 **Registry** 标签页中对 Telegram 点击 **Configure**。该按钮打开的是配对面板，而配对以“机器人已配置完成”为前提，因此只会报错：
+*"An administrator must configure the Telegram bot first."*
+这条信息看起来像权限不足，实际上不是 —— 只是您停留在了错误的标签页。
+</Warning>
+
+<Note>
+在聊天中让智能体“连接 Slack / 设置 Telegram”是行不通的。智能体可以代您安装和使用**工具**类扩展，但频道连接属于运维操作，被有意排除在智能体可驱动的工具之外，需要您在 Web 界面中自行完成。
+</Note>
+
+<Info>
+Telegram 有**两个**容易混淆的步骤：由运维人员为整个实例配置一次机器人令牌；随后每位用户再将自己的 Telegram 账号与 IronClaw 用户配对。出现“administrator must configure”提示，说明第一步尚未完成。
+</Info>
+
+<Note>
+频道凭据保存在加密的密钥存储中，而不是 `config.toml` 里。配置文件只记录存放凭据的环境变量名称，绝不包含凭据本身。
+</Note>
+
+---
+
+## 接收消息
+
+两个频道都通过 Webhook 投递事件，因此消息平台需要能通过 HTTPS 访问到您的 IronClaw 实例。
+
+---
+
+## 不使用频道也可以
+
+您并不一定需要频道。Web 界面和终端连接的是同一个智能体：
+
+```bash
+ironclaw repl
+ironclaw run -m "我今天的日程是什么？"
+```
+
+<Info>
+Discord、Signal、微信和企业微信是 IronClaw v1 的功能，不包含在 1.0 版本中。如果您依赖其中某个频道，请继续使用 v1。
+</Info>
+
+<Note>
+Slack 频道文档目前仅有英文版：[Slack](/channels/slack)。
+</Note>

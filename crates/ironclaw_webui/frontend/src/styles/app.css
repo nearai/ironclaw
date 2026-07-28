@@ -7,6 +7,10 @@
   --font-serif: "Newsreader", "Lyon Text", "Instrument Serif", georgia, serif;
   --font-mono: "Geist Mono", "SF Mono", "JetBrains Mono", ui-monospace,
     monospace;
+  /* Semantic type scale for shared controls. Keep these viewport-independent. */
+  --text-ui-sm: 0.75rem;
+  --text-ui: 0.8125rem;
+  --text-ui-lg: 1rem;
   --color-iron-950: var(--v2-canvas-strong);
   --color-iron-900: var(--v2-surface);
   --color-iron-800: var(--v2-surface-soft);
@@ -135,12 +139,8 @@
 
 html {
   background: var(--v2-canvas);
+  font-size: 16px;
   scroll-behavior: auto;
-}
-
-/* Slightly tighter type scale on large screens */
-@media (min-width: 1024px) {
-  html { font-size: 15px; }
 }
 
 body {
@@ -152,8 +152,10 @@ body {
 }
 
 /* Font inheritance for form elements */
-button, input, select, textarea {
-  font: inherit;
+@layer base {
+  button, input, select, textarea {
+    font: inherit;
+  }
 }
 
 button {

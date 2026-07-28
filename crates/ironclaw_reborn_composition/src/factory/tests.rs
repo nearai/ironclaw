@@ -12,20 +12,19 @@ use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext,
-    ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant, MountPermissions,
-    NetworkPolicy, NetworkScheme, NetworkTargetPattern, Principal, ResourceEstimate, ResourceScope,
-    ResourceUsage, RunId, RuntimeKind, ScopedPath, SecretHandle, TenantId, TrustClass, UserId,
-    VirtualPath,
+    ExtensionId, FailureKind, GrantConstraints, InvocationId, MountAlias, MountGrant,
+    MountPermissions, NetworkPolicy, NetworkScheme, NetworkTargetPattern, Principal,
+    ResourceEstimate, ResourceScope, ResourceUsage, RunId, RuntimeKind, ScopedPath, SecretHandle,
+    TenantId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_api::{
     RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource, VendorId,
 };
 use ironclaw_host_runtime::{
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    RuntimeCapabilityOutcome, RuntimeFailureKind, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
-    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
-    SKILL_UPDATE_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
-    TRIGGER_REMOVE_CAPABILITY_ID,
+    RuntimeCapabilityOutcome, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
+    SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID,
+    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
 };
 use ironclaw_host_runtime::{RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver};
 use ironclaw_product::{LifecyclePackageKind, LifecyclePackageRef};
@@ -1164,8 +1163,8 @@ async fn local_dev_gsuite_installs_activates_and_dispatches_through_host_runtime
     )
     .await
     .expect_err("missing token should fail after approval resume");
-    assert_ne!(failure, RuntimeFailureKind::Authorization);
-    assert_ne!(failure, RuntimeFailureKind::MissingRuntime);
+    assert_ne!(failure, FailureKind::Authorization);
+    assert_ne!(failure, FailureKind::MissingRuntime);
     let gmail_leases = runtime_surfaces
         .capability_leases_for_test()
         .leases_for_scope(&gmail_scope)
@@ -1188,8 +1187,8 @@ async fn local_dev_gsuite_installs_activates_and_dispatches_through_host_runtime
     )
     .await
     .expect_err("missing token should fail after approval resume");
-    assert_ne!(failure, RuntimeFailureKind::Authorization);
-    assert_ne!(failure, RuntimeFailureKind::MissingRuntime);
+    assert_ne!(failure, FailureKind::Authorization);
+    assert_ne!(failure, FailureKind::MissingRuntime);
 }
 
 #[tokio::test]
@@ -1329,10 +1328,11 @@ async fn local_dev_web_access_installs_activates_and_dispatches_through_host_run
     assert_eq!(failure.capability_id.as_str(), "web-access.search");
     // A capability the model named with no registered first-party handler
     // is a model-fixable, model-visible failure (#5389 reclassified the
-    // missing-handler dispatch failure from Backend to InvalidInput so it
-    // does not burn the retry budget on a call that can never resolve). The
-    // capability still fails closed — only the disposition changed.
-    assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+    // missing-handler dispatch failure from Backend so it does not burn the
+    // retry budget on a call that can never resolve; the unified FailureKind
+    // now names the precise cause). The capability still fails closed — the
+    // disposition is unchanged (ModelVisible fate).
+    assert_eq!(failure.kind, FailureKind::UndeclaredCapability);
 }
 
 fn nearai_bootstrap_input_with_base(
@@ -2290,7 +2290,10 @@ async fn local_dev_workspace_mounts_do_not_authorize_skill_writes() {
     .await
     .expect_err("workspace tool cannot write skill root");
 
-    assert_eq!(failure, RuntimeFailureKind::Authorization);
+    // The unified FailureKind names the precise policy cause (filesystem
+    // path refused) where the retired vocabulary coarsened it to
+    // Authorization; same ModelVisible fate and policy-denied bucket.
+    assert_eq!(failure, FailureKind::FilesystemDenied);
     assert!(
         !storage_root
             .join("tenants/default/users/local-dev-test-user/skills/blocked/SKILL.md")
@@ -2503,7 +2506,7 @@ async fn invoke_json(
     capability_id: &str,
     context: ExecutionContext,
     input: serde_json::Value,
-) -> Result<serde_json::Value, RuntimeFailureKind> {
+) -> Result<serde_json::Value, FailureKind> {
     crate::approval_test_support::invoke_json_with_local_dev_approval(
         services,
         capability_id,
@@ -3142,13 +3145,15 @@ async fn completed_lifecycle_activation_continuation_installs_the_extension() {
 #[tokio::test]
 async fn channel_pairing_completions_run_the_lifecycle_wrapped_continuation_dispatcher() {
     let dir = tempfile::tempdir().expect("tempdir");
+    let descriptor = pairing_account_setup_descriptor("pairing-fixture");
+    let expected_connection_requirement = descriptor.connection_requirement.clone();
     let services = build_runtime_substrate(
         crate::deployment::local_dev_build_input(
             "local-dev-pairing-continuation-owner",
             dir.path().join("local-dev"),
         )
         .with_bundled_first_party_for_test()
-        .with_account_setup_descriptors(vec![pairing_account_setup_descriptor("pairing-fixture")]),
+        .with_account_setup_descriptors(vec![descriptor]),
     )
     .await
     .expect("local-dev services build");
@@ -3164,6 +3169,11 @@ async fn channel_pairing_completions_run_the_lifecycle_wrapped_continuation_disp
             continue;
         };
         pairing_services_checked += 1;
+        assert_eq!(
+            pairing.connection_requirement(),
+            &expected_connection_requirement,
+            "{extension_id} pairing prompts must retain the manifest connection recipe",
+        );
         let dispatcher = pairing.continuation_dispatcher_for_test();
         if let Some(shared_dispatcher) = &shared_dispatcher {
             assert!(
@@ -3188,7 +3198,7 @@ fn pairing_account_setup_descriptor(
         extension_id: ExtensionId::new(extension_id).expect("extension id"),
         auth_requirement: ironclaw_host_api::RuntimeCredentialAuthRequirement {
             provider: VendorId::new(extension_id).expect("provider id"),
-            setup: RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
+            setup: RuntimeCredentialAccountSetup::Pairing,
             requester_extension: ExtensionId::new(extension_id).expect("requester extension id"),
             provider_scopes: Vec::new(),
         },

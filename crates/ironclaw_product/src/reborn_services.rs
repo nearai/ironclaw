@@ -1432,7 +1432,7 @@ fn operator_config_mutation_succeeded(resolution: Resolution) -> Result<(), Prod
     match resolution {
         Resolution::Done(outcome) if outcome.verdict.is_success() => Ok(()),
         Resolution::Done(outcome) => match outcome.verdict.error_kind() {
-            Some(FailureKind::InvalidInput) => Err(operator_config_invalid_value("value")),
+            Some(FailureKind::InputEncode) => Err(operator_config_invalid_value("value")),
             Some(FailureKind::Authorization | FailureKind::PolicyDenied) => {
                 Err(operator_config_capability_forbidden())
             }

@@ -563,6 +563,15 @@ mod tests {
              network/external_write — analogous to memory_write on a fixed path)"
         );
         assert!(
+            !policy
+                .approval_gate_exempt_capabilities()
+                .iter()
+                .any(|capability| {
+                    capability.as_str() == "builtin.outbound_delivery_target_route_current"
+                }),
+            "natural-language destination intent is model interpretation, not host-verifiable consent; current-run external routing must stay approval-gated"
+        );
+        assert!(
             policy
                 .approval_defaults
                 .spawn_capability
@@ -615,6 +624,11 @@ mod tests {
         assert_trigger_grant(
             &policy,
             "builtin.trigger_remove",
+            &[EffectKind::DispatchCapability, EffectKind::ExternalWrite],
+        );
+        assert_trigger_grant(
+            &policy,
+            "builtin.outbound_delivery_target_route_current",
             &[EffectKind::DispatchCapability, EffectKind::ExternalWrite],
         );
 

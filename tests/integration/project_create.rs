@@ -135,9 +135,9 @@ async fn project_create_invalid_input_routes_to_recoverable_tool_error_impl() {
         .await
         .expect("project_create dispatched through the synthetic-capability port");
     harness
-        .assert_tool_error(ToolErrorClass::Failed, "invalid_input")
+        .assert_tool_error(ToolErrorClass::Failed, "input_encode")
         .await
-        .expect("oversized name surfaces as a Failed(InvalidInput) capability outcome");
+        .expect("oversized name surfaces as a Failed(InputEncode) capability outcome");
 }
 
 /// C-SYNTH fault-injection arm — `project_create` against a genuine host-side

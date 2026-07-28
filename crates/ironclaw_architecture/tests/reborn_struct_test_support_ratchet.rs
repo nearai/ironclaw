@@ -70,6 +70,30 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         path: "crates/ironclaw_host_api/src/product_adapter/auth.rs",
         count: 5,
     },
+    // Unwired sandbox credential-firewall primitives (W5/W8). Retire these
+    // four entries when the egress proxy consumer (W6) lands on main and the
+    // `#[allow(dead_code)]` attributes come off — the `removed` assertion
+    // below only shrinks this baseline if the attributes are actually
+    // deleted, not merely left in place.
+    FrozenPathCount {
+        category: "dead-code",
+        item_kind: "method",
+        path: "crates/ironclaw_host_runtime/src/sandbox_process/ca.rs",
+        count: 4,
+    },
+    // Same W6 retirement trigger as the `ca.rs` entry above.
+    FrozenPathCount {
+        category: "dead-code",
+        item_kind: "method",
+        path: "crates/ironclaw_host_runtime/src/sandbox_process/credential_firewall.rs",
+        count: 5,
+    },
+    FrozenPathCount {
+        category: "dead-code",
+        item_kind: "method",
+        path: "crates/ironclaw_host_runtime/src/sandbox_process/attribution.rs",
+        count: 4,
+    },
     FrozenPathCount {
         category: "test-support",
         item_kind: "field",
@@ -235,7 +259,25 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
         category: "test-support",
         item_kind: "method",
+        path: "crates/ironclaw_host_runtime/src/sandbox_process/ca.rs",
+        count: 2,
+    },
+    FrozenPathCount {
+        category: "test-support",
+        item_kind: "method",
+        path: "crates/ironclaw_host_runtime/src/sandbox_process/credential_firewall.rs",
+        count: 1,
+    },
+    FrozenPathCount {
+        category: "test-support",
+        item_kind: "method",
         path: "crates/ironclaw_host_runtime/src/obligations.rs",
+        count: 1,
+    },
+    FrozenPathCount {
+        category: "test-support",
+        item_kind: "method",
+        path: "crates/ironclaw_host_runtime/src/sandbox_process/attribution.rs",
         count: 1,
     },
     FrozenPathCount {

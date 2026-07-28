@@ -105,11 +105,11 @@ IronClaw 的 Web 网关默认绑定到 `127.0.0.1:3000`，即默认仅限本地�
 
 如果您有意直接暴露网关（通常不推荐），则必须：
 
-1. 设置 `GATEWAY_HOST=0.0.0.0`（如果端口不是 `3000`，可选设置 `GATEWAY_PORT=<端口>`）
-2. 设置 `GATEWAY_AUTH_TOKEN=<强随机令牌>`
+1. 使用 `ironclaw serve --host 0.0.0.0` 绑定公网接口（端口不是 `3000` 时追加 `--port <端口>`），或在 `config.toml` 中设置 `[webui].listen_host` / `[webui].listen_port`，以便系统服务也能生效
+2. 设置 `IRONCLAW_REBORN_WEBUI_TOKEN=<强随机令牌>`
 3. 为该网关端口添加防火墙规则，最好限制为受信任的来源 IP
 
-如果通过 SSH 隧道或 VPN 访问，保持 `GATEWAY_HOST` 为默认值（`127.0.0.1`），不要在 GCE 防火墙中开放网关端口。
+如果通过 SSH 隧道或 VPN 访问，请保持监听地址为默认值（`127.0.0.1`），不要在 GCE 防火墙中开放该端口。
 
 <Note>
 将 SSH 限制为您的 IP 可以防止来自互联网的暴力破解攻击。如果您的 IP 发生变化，可以随时更新来源范围。Webhook（例如 Telegram）需要 `8080` 端口来向 IronClaw 发送事件。在 Linux 上，编排器内部 API 监听 `50051` 端口并绑定到 `0.0.0.0`；除非您为其添加防火墙规则，GCE 的默认拒绝所有入站流量策略仍会阻止外部访问。其他 IronClaw 监听器默认绑定到 `127.0.0.1`。
@@ -177,7 +177,8 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/nearai/ironclaw/release
 然后启动 IronClaw 并按照提示完成配置：
 
 ```bash
-ironclaw
+ironclaw onboard
+ironclaw serve
 ```
 
 <Tip>

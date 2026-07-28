@@ -105,7 +105,7 @@ use serde::{Deserialize, Serialize};
 
 use ironclaw_host_api::turn::IdempotencyKey;
 use ironclaw_host_api::{
-    ActivityId, Blocked, FailureKind, InstallationState, ProductSurface, ProductSurfaceCaller,
+    ActivityId, Blocked, FailureKind, LifecyclePublicState, ProductSurface, ProductSurfaceCaller,
     ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
     ProductSurfaceValidationCode, Resolution, SecretHandle, ThreadId, UserId,
 };
@@ -1787,6 +1787,78 @@ pub async fn set_outbound_preferences(
     Ok(Json(response))
 }
 
+/// HTTP disposition for a capability [`FailureKind`] surfaced through a
+/// product-surface mutation. One wildcard-free exhaustive match over the
+/// unified kind vocabulary — a new kind refuses to compile until its HTTP
+/// class is chosen here. Sites with kind-specific special cases
+/// (`OperationFailed`-as-validation, `GateDeclined`) match those explicitly
+/// before consulting this classifier.
+enum CapabilityFailureHttpClass {
+    /// The request itself was invalid (400).
+    BadRequest,
+    /// Authorization/policy refused it (403).
+    Forbidden,
+    /// The backing service hiccuped; retryable (503).
+    Unavailable,
+    /// Anything else is an internal fault (500).
+    Internal,
+}
+
+fn capability_failure_http_class(kind: FailureKind) -> CapabilityFailureHttpClass {
+    match kind {
+        FailureKind::InputEncode => CapabilityFailureHttpClass::BadRequest,
+        FailureKind::Authorization
+        | FailureKind::PolicyDenied
+        | FailureKind::NetworkDenied
+        | FailureKind::FilesystemDenied
+        | FailureKind::SecretDenied
+        | FailureKind::AuthRequired => CapabilityFailureHttpClass::Forbidden,
+        FailureKind::Backend
+        | FailureKind::Network
+        | FailureKind::Transient
+        | FailureKind::Unavailable
+        | FailureKind::StaleSurface => CapabilityFailureHttpClass::Unavailable,
+        // `Resource` is a quota/limit hit — `fate()` says ModelVisible, not
+        // retryable, so it must not ride the retryable-503 class: a caller
+        // retrying a quota failure can never succeed and only burns budget.
+        FailureKind::Resource
+        | FailureKind::MethodMissing
+        | FailureKind::UndeclaredCapability
+        | FailureKind::UnknownCapability
+        | FailureKind::UnknownProvider
+        | FailureKind::OperationFailed
+        | FailureKind::OutputTooLarge
+        | FailureKind::GateDeclined
+        | FailureKind::Guest
+        | FailureKind::ExitFailure
+        | FailureKind::OutputDecode
+        | FailureKind::InvalidResult
+        | FailureKind::Memory
+        | FailureKind::Manifest
+        | FailureKind::ExtensionRuntimeMismatch
+        | FailureKind::RuntimeMismatch
+        | FailureKind::MissingRuntimeBackend
+        | FailureKind::UnsupportedRunner
+        | FailureKind::MissingRuntime
+        | FailureKind::Client
+        | FailureKind::Executor
+        | FailureKind::Internal
+        | FailureKind::Unclassified
+        | FailureKind::Cancelled => CapabilityFailureHttpClass::Internal,
+    }
+}
+
+fn capability_failure_bad_request() -> ProductSurfaceError {
+    ProductSurfaceError {
+        code: ProductSurfaceErrorCode::InvalidRequest,
+        kind: ProductSurfaceErrorKind::Validation,
+        status_code: 400,
+        retryable: false,
+        field: None,
+        validation_code: Some(ProductSurfaceValidationCode::InvalidValue),
+    }
+}
+
 fn capability_resolution_succeeded(
     resolution: Resolution,
     label: &'static str,
@@ -1797,29 +1869,18 @@ fn capability_resolution_succeeded(
     match resolution {
         Resolution::Done(outcome) if outcome.verdict.is_success() => Ok(()),
         Resolution::Done(outcome) => match outcome.verdict.error_kind() {
-            Some(FailureKind::InvalidInput) => Err(ProductSurfaceError {
-                code: ProductSurfaceErrorCode::InvalidRequest,
-                kind: ProductSurfaceErrorKind::Validation,
-                status_code: 400,
-                retryable: false,
-                field: None,
-                validation_code: Some(ProductSurfaceValidationCode::InvalidValue),
-            }),
             Some(FailureKind::OperationFailed) if operation_failed_is_invalid_request => {
-                Err(ProductSurfaceError {
-                    code: ProductSurfaceErrorCode::InvalidRequest,
-                    kind: ProductSurfaceErrorKind::Validation,
-                    status_code: 400,
-                    retryable: false,
-                    field: None,
-                    validation_code: Some(ProductSurfaceValidationCode::InvalidValue),
-                })
+                Err(capability_failure_bad_request())
             }
-            Some(FailureKind::Authorization | FailureKind::PolicyDenied) => Err(forbidden()),
-            Some(FailureKind::Backend | FailureKind::Transient | FailureKind::Unavailable) => {
-                Err(unavailable(true))
-            }
-            _ => Err(ProductSurfaceError::internal_from(format!(
+            Some(kind) => match capability_failure_http_class(*kind) {
+                CapabilityFailureHttpClass::BadRequest => Err(capability_failure_bad_request()),
+                CapabilityFailureHttpClass::Forbidden => Err(forbidden()),
+                CapabilityFailureHttpClass::Unavailable => Err(unavailable(true)),
+                CapabilityFailureHttpClass::Internal => Err(ProductSurfaceError::internal_from(
+                    format!("{label} capability did not complete successfully"),
+                )),
+            },
+            None => Err(ProductSurfaceError::internal_from(format!(
                 "{label} capability did not complete successfully"
             ))),
         },
@@ -2062,23 +2123,18 @@ fn skill_mutation_succeeded(resolution: Resolution) -> Result<(), ProductSurface
     match resolution {
         Resolution::Done(outcome) if outcome.verdict.is_success() => Ok(()),
         Resolution::Done(outcome) => match outcome.verdict.error_kind() {
-            Some(FailureKind::InvalidInput | FailureKind::OperationFailed) => {
-                Err(ProductSurfaceError {
-                    code: ProductSurfaceErrorCode::InvalidRequest,
-                    kind: ProductSurfaceErrorKind::Validation,
-                    status_code: 400,
-                    retryable: false,
-                    field: None,
-                    validation_code: Some(ProductSurfaceValidationCode::InvalidValue),
-                })
-            }
-            Some(FailureKind::Authorization | FailureKind::PolicyDenied) => {
-                Err(skill_mutation_forbidden())
-            }
-            Some(FailureKind::Backend | FailureKind::Transient | FailureKind::Unavailable) => {
-                Err(skill_mutation_unavailable(true))
-            }
-            _ => Err(ProductSurfaceError::internal_from(
+            // Skill mutations treat a domain operation failure as an invalid
+            // request, alongside input-encode failures.
+            Some(FailureKind::OperationFailed) => Err(capability_failure_bad_request()),
+            Some(kind) => match capability_failure_http_class(*kind) {
+                CapabilityFailureHttpClass::BadRequest => Err(capability_failure_bad_request()),
+                CapabilityFailureHttpClass::Forbidden => Err(skill_mutation_forbidden()),
+                CapabilityFailureHttpClass::Unavailable => Err(skill_mutation_unavailable(true)),
+                CapabilityFailureHttpClass::Internal => Err(ProductSurfaceError::internal_from(
+                    "skill capability did not complete successfully",
+                )),
+            },
+            None => Err(ProductSurfaceError::internal_from(
                 "skill capability did not complete successfully",
             )),
         },
@@ -2216,14 +2272,8 @@ fn extension_lifecycle_mutation_succeeded(
     match resolution {
         Resolution::Done(outcome) if outcome.verdict.is_success() => Ok(()),
         Resolution::Done(outcome) => match outcome.verdict.error_kind() {
-            Some(FailureKind::InvalidInput) => Err(ProductSurfaceError {
-                code: ProductSurfaceErrorCode::InvalidRequest,
-                kind: ProductSurfaceErrorKind::Validation,
-                status_code: 400,
-                retryable: false,
-                field: None,
-                validation_code: Some(ProductSurfaceValidationCode::InvalidValue),
-            }),
+            // Lifecycle mutations report a domain operation failure as an
+            // invalid request, without a per-field validation code.
             Some(FailureKind::OperationFailed) => Err(ProductSurfaceError {
                 code: ProductSurfaceErrorCode::InvalidRequest,
                 kind: ProductSurfaceErrorKind::Validation,
@@ -2232,13 +2282,17 @@ fn extension_lifecycle_mutation_succeeded(
                 field: None,
                 validation_code: None,
             }),
-            Some(FailureKind::Authorization | FailureKind::PolicyDenied) => {
-                Err(extension_lifecycle_forbidden())
-            }
-            Some(FailureKind::Backend | FailureKind::Transient | FailureKind::Unavailable) => {
-                Err(extension_lifecycle_unavailable(true))
-            }
-            _ => Err(ProductSurfaceError::internal_from(
+            Some(kind) => match capability_failure_http_class(*kind) {
+                CapabilityFailureHttpClass::BadRequest => Err(capability_failure_bad_request()),
+                CapabilityFailureHttpClass::Forbidden => Err(extension_lifecycle_forbidden()),
+                CapabilityFailureHttpClass::Unavailable => {
+                    Err(extension_lifecycle_unavailable(true))
+                }
+                CapabilityFailureHttpClass::Internal => Err(ProductSurfaceError::internal_from(
+                    "extension lifecycle capability did not complete successfully",
+                )),
+            },
+            None => Err(ProductSurfaceError::internal_from(
                 "extension lifecycle capability did not complete successfully",
             )),
         },
@@ -2262,16 +2316,7 @@ async fn extension_install_succeeded(
                     services,
                     caller.clone(),
                     package_ref,
-                    |extension| {
-                        matches!(
-                            extension.installation_state,
-                            InstallationState::Active
-                                | InstallationState::Installed
-                                | InstallationState::Configured
-                                | InstallationState::Disabled
-                                | InstallationState::Failed
-                        )
-                    },
+                    membership_is_visible,
                 )
                 .await;
             } else if matches!(
@@ -2282,15 +2327,7 @@ async fn extension_install_succeeded(
                     services,
                     caller.clone(),
                     package_ref,
-                    |extension| {
-                        extension.needs_setup
-                            || matches!(
-                                extension.installation_state,
-                                InstallationState::Installed
-                                    | InstallationState::Configured
-                                    | InstallationState::Failed
-                            )
-                    },
+                    membership_landed_pending_setup,
                 )
                 .await;
                 match readback {
@@ -2302,19 +2339,34 @@ async fn extension_install_succeeded(
             }
         }
         Resolution::Blocked(Blocked::Auth(_)) => {
-            ensure_extension_inventory_readback(services, caller, package_ref, |extension| {
-                extension.needs_setup
-                    || matches!(
-                        extension.installation_state,
-                        InstallationState::Installed
-                            | InstallationState::Configured
-                            | InstallationState::Failed
-                    )
-            })
+            ensure_extension_inventory_readback(
+                services,
+                caller,
+                package_ref,
+                membership_landed_pending_setup,
+            )
             .await
         }
         other => extension_lifecycle_mutation_succeeded(other),
     }
+}
+
+/// The install landed: the caller can see their membership, in any resting
+/// public state. `Uninstalled` is never a listed entry, so this rejects only a
+/// projection that somehow reports the caller as a non-member.
+fn membership_is_visible(extension: &ironclaw_product::RebornExtensionInfo) -> bool {
+    matches!(
+        extension.installation_state,
+        LifecyclePublicState::Active | LifecyclePublicState::SetupNeeded
+    )
+}
+
+/// The install landed but the caller still owes setup (credentials, personal
+/// auth, or channel pairing). This is the expected readback when the mutation
+/// reported a blocked-auth or transient outcome: membership exists, readiness
+/// does not.
+fn membership_landed_pending_setup(extension: &ironclaw_product::RebornExtensionInfo) -> bool {
+    extension.installation_state == LifecyclePublicState::SetupNeeded
 }
 
 async fn ensure_extension_inventory_readback(
@@ -2959,46 +3011,30 @@ fn admin_configuration_unavailable(retryable: bool) -> ProductSurfaceError {
     }
 }
 
+fn admin_configuration_forbidden() -> ProductSurfaceError {
+    ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Forbidden,
+        kind: ProductSurfaceErrorKind::ParticipantDenied,
+        status_code: 403,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    }
+}
+
 fn admin_configuration_done_failure(error_kind: Option<&FailureKind>) -> ProductSurfaceError {
     match error_kind {
-        Some(FailureKind::InvalidInput) => ProductSurfaceError {
-            code: ProductSurfaceErrorCode::InvalidRequest,
-            kind: ProductSurfaceErrorKind::Validation,
-            status_code: 400,
-            retryable: false,
-            field: None,
-            validation_code: Some(ProductSurfaceValidationCode::InvalidValue),
+        // Admin configuration treats a user-declined gate as forbidden, unlike
+        // the generic mutation helpers where a declined gate is an internal
+        // wiring fault — preserve that special case ahead of the classifier.
+        Some(FailureKind::GateDeclined) => admin_configuration_forbidden(),
+        Some(kind) => match capability_failure_http_class(*kind) {
+            CapabilityFailureHttpClass::BadRequest => capability_failure_bad_request(),
+            CapabilityFailureHttpClass::Forbidden => admin_configuration_forbidden(),
+            CapabilityFailureHttpClass::Unavailable => admin_configuration_unavailable(true),
+            CapabilityFailureHttpClass::Internal => ProductSurfaceError::internal(),
         },
-        Some(
-            FailureKind::Backend
-            | FailureKind::Network
-            | FailureKind::Resource
-            | FailureKind::Transient
-            | FailureKind::Unavailable,
-        ) => admin_configuration_unavailable(true),
-        Some(
-            FailureKind::Authorization | FailureKind::PolicyDenied | FailureKind::GateDeclined,
-        ) => ProductSurfaceError {
-            code: ProductSurfaceErrorCode::Forbidden,
-            kind: ProductSurfaceErrorKind::ParticipantDenied,
-            status_code: 403,
-            retryable: false,
-            field: None,
-            validation_code: None,
-        },
-        Some(
-            FailureKind::Cancelled
-            | FailureKind::Dispatcher
-            | FailureKind::InvalidOutput
-            | FailureKind::MissingRuntime
-            | FailureKind::OperationFailed
-            | FailureKind::OutputTooLarge
-            | FailureKind::Process
-            | FailureKind::Internal
-            | FailureKind::Permanent
-            | FailureKind::Unknown(_),
-        )
-        | None => ProductSurfaceError::internal(),
+        None => ProductSurfaceError::internal(),
     }
 }
 
@@ -4006,6 +4042,33 @@ async fn ws_send_with_timeout(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression (#6684 review): the HTTP classifier must agree with
+    /// `FailureKind::fate()` on retryability — a kind that `fate()` says is
+    /// not retryable must never ride the retryable-503 `Unavailable` class
+    /// (a caller retrying a quota/limit failure can never succeed).
+    #[test]
+    fn http_class_retryability_agrees_with_failure_kind_fate() {
+        for &kind in FailureKind::ALL {
+            if matches!(
+                capability_failure_http_class(kind),
+                CapabilityFailureHttpClass::Unavailable
+            ) {
+                // StaleSurface is the one deliberate exception: the loop
+                // handles it model-visibly, but at the HTTP seam a re-issued
+                // request races a refreshed surface and can succeed.
+                assert!(
+                    kind.is_retryable() || kind == FailureKind::StaleSurface,
+                    "{kind:?} is not retryable per fate() but classified as retryable 503"
+                );
+            }
+        }
+        // The quota kind specifically must not be the retryable 503 class.
+        assert!(matches!(
+            capability_failure_http_class(FailureKind::Resource),
+            CapabilityFailureHttpClass::Internal
+        ));
+    }
 
     #[test]
     fn sse_poll_interval_backs_off_only_after_repeated_idle_drains() {
