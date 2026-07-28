@@ -29,6 +29,12 @@ pub enum RuntimeKind {
     /// makes many outbound calls, so it shares the multi-call
     /// credential-reuse set with `Mcp`/`Wasm` (see
     /// `runtime_reuses_staged_credentials`).
+    ///
+    /// Host-assigned only: whether an untrusted manifest may ever *request*
+    /// the sandbox lane is an open, deliberately-deferred question, so
+    /// `#[serde(skip_deserializing)]` closes it the same way as
+    /// `FirstParty`/`System` until that question is settled on purpose.
+    #[serde(skip_deserializing)]
     Sandbox,
     #[serde(skip_deserializing)]
     FirstParty,
@@ -96,6 +102,7 @@ fn trusted_runtime_kind_from_str(raw: &str) -> Result<RuntimeKind, serde::de::va
         // round-trip failure this helper exists to prevent).
         "first_party" => Ok(RuntimeKind::FirstParty),
         "system" => Ok(RuntimeKind::System),
+        "sandbox" => Ok(RuntimeKind::Sandbox),
         other => RuntimeKind::deserialize(serde::de::value::StrDeserializer::new(other)),
     }
 }
@@ -179,8 +186,15 @@ mod tests {
     // host-assigned privileged kinds, so untrusted JSON cannot forge them.
     #[test]
     fn default_deserialize_still_rejects_privileged_variants() {
+        // `Sandbox` is the container-execution lane; a third-party manifest
+        // must not be able to self-assert it any more than `first_party`/
+        // `system`. Folded in here (rather than a standalone test) because
+        // this table is exactly "privileged variants the untrusted derived
+        // impl must reject" — `Sandbox` only wasn't in it while it was still
+        // an open, deliberately-deferred security question.
         assert!(serde_json::from_str::<RuntimeKind>("\"system\"").is_err());
         assert!(serde_json::from_str::<RuntimeKind>("\"first_party\"").is_err());
+        assert!(serde_json::from_str::<RuntimeKind>("\"sandbox\"").is_err());
         assert!(serde_json::from_str::<RuntimeKind>("\"wasm\"").is_ok());
         assert!(serde_json::from_str::<RuntimeKind>("\"mcp\"").is_ok());
         assert!(serde_json::from_str::<RuntimeKind>("\"script\"").is_ok());
