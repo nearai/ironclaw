@@ -30,9 +30,10 @@ sha2 = "0.11"
 tracing = "0.1"
 
 [features]
-# Dev-only seam (cargo-features rule bar 4): exposes the provider-level
-# `MemoryService` contract suite (`test_support`) to downstream
-# provider crates' integration tests. Zero bytes in production builds.
+# Dev-only `test-support` seam (cargo-features rule bar 4): exposes the
+# provider-level `MemoryService` contract suite (`test_support`) to downstream
+# provider crates' integration tests, enabled only via [dev-dependencies].
+# Zero bytes in production builds.
 test-support = []
 
 [dev-dependencies]

@@ -97,6 +97,23 @@ pub async fn run() -> HarnessResult<()> {
         .await?;
     harness.submit_turn("anything worth remembering?").await?;
     harness.assert_reply_contains("nothing remembered").await?;
+    // `submit_turn` returns at `Completed`, but a MIS-wired after-turn record
+    // would run just after the status flip — inline on the scheduler worker
+    // (`turn_run_executor.rs`), not on a detached queue that could defer it
+    // arbitrarily. Poll-negative over a bounded window so such a stray call
+    // FAILS the zero assertions below instead of landing after them.
+    let mut waited = Duration::ZERO;
+    while waited < Duration::from_secs(1) {
+        let fired = silent.long_term_reads.load(Ordering::SeqCst)
+            + silent.short_term_reads.load(Ordering::SeqCst)
+            + silent.interaction_records.load(Ordering::SeqCst)
+            + silent.profile_reads.load(Ordering::SeqCst);
+        if fired > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        waited += Duration::from_millis(25);
+    }
     expect_count(
         "empty lifecycle / read_long_term",
         silent.long_term_reads.load(Ordering::SeqCst),

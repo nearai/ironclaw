@@ -208,11 +208,6 @@ impl RebornIntegrationHarness {
         .into())
     }
 
-    /// Assert some model-visible `System`-role prompt captured across all
-    /// requests captured by the harness so far contains `text`. Reads the
-    /// scripted `TraceLlm` retained before the `dyn LlmProvider` upcast —
-    /// proves prompt-injected content (safety banners, skill instructions,
-    /// profile lines) actually reached the model.
     /// A tool with this model-facing wire name (e.g. `ironclaw__memory__search`)
     /// was offered to the model on at least one captured request.
     pub fn assert_model_tool_offered(&self, tool_name: &str) -> HarnessResult<()> {
@@ -235,6 +230,11 @@ impl RebornIntegrationHarness {
         Ok(())
     }
 
+    /// Assert some model-visible `System`-role prompt captured across all
+    /// requests captured by the harness so far contains `text`. Reads the
+    /// scripted `TraceLlm` retained before the `dyn LlmProvider` upcast —
+    /// proves prompt-injected content (safety banners, skill instructions,
+    /// profile lines) actually reached the model.
     pub async fn assert_system_prompt_contains(&self, text: &str) -> HarnessResult<()> {
         let prompts = self.captured_system_prompts();
         if prompts.iter().any(|prompt| prompt.contains(text)) {

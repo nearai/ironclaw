@@ -43,12 +43,6 @@ impl RebornIntegrationGroupBuilder {
         self
     }
 
-    /// Install an in-memory `InMemoryTurnEventSink` into the group's ONE
-    /// planned runtime via production's `subscribe_best_effort` seam
-    /// (C-TRACECAP). Read back via
-    /// [`RebornIntegrationHarness::recorded_turn_events`] — the ONLY read
-    /// path; it slices `[baseline_turn_event_count..]` so threads don't see
-    /// siblings' events. No raw sink accessor, deliberately.
     /// E-MEMORY: bind `provider` as the group's memory provider with the
     /// lifecycle set its manifest declares. The group's ONE planned runtime
     /// derives its memory consumers through the production
@@ -63,6 +57,12 @@ impl RebornIntegrationGroupBuilder {
         self
     }
 
+    /// Install an in-memory `InMemoryTurnEventSink` into the group's ONE
+    /// planned runtime via production's `subscribe_best_effort` seam
+    /// (C-TRACECAP). Read back via
+    /// [`RebornIntegrationHarness::recorded_turn_events`] — the ONLY read
+    /// path; it slices `[baseline_turn_event_count..]` so threads don't see
+    /// siblings' events. No raw sink accessor, deliberately.
     pub fn with_turn_event_sink(mut self) -> Self {
         self.turn_event_sink = Some(Arc::new(InMemoryTurnEventSink::default()));
         self

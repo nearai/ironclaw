@@ -2488,7 +2488,7 @@ mem0_base_url = "https://mem0.example.com"
     }
 
     #[test]
-    fn memory_rejects_unknown_binding_key() {
+    fn memory_rejects_unknown_section_key() {
         let toml = r#"
 [memory]
 provider = "ironclaw.memory"

@@ -434,6 +434,16 @@ impl MemoryServiceError {
         }
     }
 
+    /// Input rejection that preserves the underlying validation cause for
+    /// logging (the model-visible classification stays `Input`).
+    pub fn input_from(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self {
+            kind: MemoryServiceErrorKind::Input,
+            message: "invalid memory request",
+            source: Some(Box::new(source)),
+        }
+    }
+
     /// Operation failure that preserves the underlying backend cause for logging.
     pub fn operation_from(source: impl std::error::Error + Send + Sync + 'static) -> Self {
         Self {

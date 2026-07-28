@@ -129,6 +129,16 @@ pub(crate) async fn core_builtin_tools(
         egress,
         include_memory_package,
     } = options;
+    // Fail loud instead of silently ignoring the knob: only the
+    // recording-egress branch threads a caller-shaped registry; the Live and
+    // RealPipeline builders wire their own fixed registries.
+    if !include_memory_package && !matches!(egress, EgressMode::Recording) {
+        return Err(
+            "without_memory_package() is only supported with recording egress; the Live/\
+             RealPipeline harness builders wire fixed registries"
+                .into(),
+        );
+    }
     // Inject the inert recording port by default so `builtin.shell`
     // invocations in tests never spawn a real OS process. `.with_live_shell()`
     // sets `recording_process = false`, which skips injection and lets

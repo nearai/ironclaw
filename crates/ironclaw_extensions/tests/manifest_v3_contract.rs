@@ -892,6 +892,17 @@ lifecycle = ["read_long_term", "read_short_term", "record_interaction", "profile
 const FULL_LIFECYCLE_LINE: &str =
     r#"lifecycle = ["read_long_term", "read_short_term", "record_interaction", "profile_read"]"#;
 
+/// Replace the baseline's full-lifecycle line, failing loudly if the needle
+/// ever drifts from the baseline — `str::replace` with an unmatched needle is
+/// a no-op that would silently run the test against the unmodified manifest.
+fn manifest_with_lifecycle_replaced(replacement: &str) -> String {
+    assert!(
+        MEMORY_PROVIDER_MANIFEST.contains(FULL_LIFECYCLE_LINE),
+        "FULL_LIFECYCLE_LINE drifted from MEMORY_PROVIDER_MANIFEST"
+    );
+    MEMORY_PROVIDER_MANIFEST.replace(FULL_LIFECYCLE_LINE, replacement)
+}
+
 #[test]
 fn memory_provider_manifest_baseline_parses_with_full_lifecycle() {
     let record = parse_v3(MEMORY_PROVIDER_MANIFEST).expect("memory provider manifest parses");
@@ -930,10 +941,8 @@ fn memory_surface_on_non_first_party_runtime_fails_closed() {
 /// implements is a legal manifest. Undeclared hooks resolve as not declared.
 #[test]
 fn memory_surface_accepts_a_lifecycle_subset() {
-    let toml = MEMORY_PROVIDER_MANIFEST.replace(
-        FULL_LIFECYCLE_LINE,
-        r#"lifecycle = ["read_long_term", "record_interaction"]"#,
-    );
+    let toml =
+        manifest_with_lifecycle_replaced(r#"lifecycle = ["read_long_term", "record_interaction"]"#);
     let record = parse_v3(&toml).expect("a lifecycle subset must parse");
     let memory = record
         .resolved()
@@ -951,7 +960,7 @@ fn memory_surface_accepts_a_lifecycle_subset() {
 /// host-initiated hook.
 #[test]
 fn memory_surface_with_empty_lifecycle_is_tools_only() {
-    let toml = MEMORY_PROVIDER_MANIFEST.replace(FULL_LIFECYCLE_LINE, "lifecycle = []");
+    let toml = manifest_with_lifecycle_replaced("lifecycle = []");
     let record = parse_v3(&toml).expect("[memory] with an empty lifecycle must parse");
     let memory = record
         .resolved()
@@ -964,7 +973,7 @@ fn memory_surface_with_empty_lifecycle_is_tools_only() {
 /// `lifecycle` may be absent entirely — equivalent to an empty declaration.
 #[test]
 fn memory_surface_with_absent_lifecycle_is_tools_only() {
-    let toml = MEMORY_PROVIDER_MANIFEST.replace(FULL_LIFECYCLE_LINE, "");
+    let toml = manifest_with_lifecycle_replaced("");
     let record = parse_v3(&toml).expect("[memory] with no lifecycle key must parse");
     let memory = record
         .resolved()
@@ -978,7 +987,7 @@ fn memory_surface_with_absent_lifecycle_is_tools_only() {
 /// `read_long_term | read_short_term | record_interaction | profile_read`.
 #[test]
 fn memory_surface_rejects_an_unknown_lifecycle_token() {
-    let toml = MEMORY_PROVIDER_MANIFEST.replace(FULL_LIFECYCLE_LINE, r#"lifecycle = ["on_boot"]"#);
+    let toml = manifest_with_lifecycle_replaced(r#"lifecycle = ["on_boot"]"#);
     parse_v3(&toml).expect_err("an unknown lifecycle token must fail closed");
 }
 
@@ -1029,9 +1038,14 @@ fn memory_provider_declares_tools_under_the_reserved_namespace() {
 /// ordinary provider-prefix rule rejects a foreign `ironclaw.memory.*` id.
 #[test]
 fn reserved_memory_namespace_requires_a_memory_surface() {
+    let memory_section = format!("[memory]\n{FULL_LIFECYCLE_LINE}\n");
+    assert!(
+        MEMORY_PROVIDER_MANIFEST.contains(&memory_section),
+        "[memory] section drifted from MEMORY_PROVIDER_MANIFEST"
+    );
     let toml = format!(
         "{}{RESERVED_NAMESPACE_SEARCH_TOOL}",
-        MEMORY_PROVIDER_MANIFEST.replace(&format!("[memory]\n{FULL_LIFECYCLE_LINE}\n"), "")
+        MEMORY_PROVIDER_MANIFEST.replace(&memory_section, "")
     );
     let error = parse_v3(&toml)
         .expect_err("a non-memory manifest must not declare reserved-namespace tools");

@@ -59,11 +59,12 @@ fn is_sanctioned(path: &str) -> bool {
         .any(|fragment| path.contains(fragment))
 }
 
-fn scan_dir(root: &Path, dir: &Path, hits: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
+/// A scan error is a gate failure, not a skip: an unreadable directory or
+/// file could hide a reintroduced term.
+fn scan_dir(root: &Path, dir: &Path, hits: &mut Vec<String>) -> std::io::Result<()> {
+    let entries = std::fs::read_dir(dir)?;
+    for entry in entries {
+        let entry = entry?;
         let path = entry.path();
         let name = entry.file_name();
         let name = name.to_string_lossy();
@@ -71,7 +72,7 @@ fn scan_dir(root: &Path, dir: &Path, hits: &mut Vec<String>) {
             if name == "target" || name == "node_modules" || name == ".git" {
                 continue;
             }
-            scan_dir(root, &path, hits);
+            scan_dir(root, &path, hits)?;
             continue;
         }
         let is_rust = name.ends_with(".rs");
@@ -92,23 +93,24 @@ fn scan_dir(root: &Path, dir: &Path, hits: &mut Vec<String>) {
         if is_sanctioned(&relative) {
             continue;
         }
-        let Ok(contents) = std::fs::read_to_string(&path) else {
-            continue;
-        };
+        let contents = std::fs::read_to_string(&path)
+            .map_err(|error| std::io::Error::new(error.kind(), format!("{relative}: {error}")))?;
         for term in RETIRED_TERMS {
             if contents.contains(term) {
                 hits.push(format!("{relative}: `{term}`"));
             }
         }
     }
+    Ok(())
 }
 
 #[test]
 fn reborn_code_never_references_retired_memory_vocabulary() {
     let root = workspace_root();
     let mut hits = Vec::new();
-    scan_dir(&root, &root.join("crates"), &mut hits);
-    scan_dir(&root, &root.join("tests/integration"), &mut hits);
+    scan_dir(&root, &root.join("crates"), &mut hits).expect("scan crates/ without I/O errors");
+    scan_dir(&root, &root.join("tests/integration"), &mut hits)
+        .expect("scan tests/integration without I/O errors");
     hits.sort();
     hits.dedup();
     assert!(

@@ -114,6 +114,7 @@ const MEM0_MEMORY_PACKAGE_ROOT: &str = "/system/extensions/mem0.local.memory";
 /// provider is the bound one: the package's declared tools are registered on
 /// the always-on lane, and the lifecycle set gates every host-initiated
 /// memory call.
+#[derive(Debug)]
 pub struct BundledMemoryProvider {
     pub package: ExtensionPackage,
     pub lifecycle: MemoryDescriptor,
@@ -152,7 +153,14 @@ fn memory_provider_bundle(
         reason: format!("{label} memory provider package is invalid: {error}"),
     };
     let record = memory_manifest_record(toml).map_err(|error| invalid(&error))?;
-    let lifecycle = record.resolved().memory.clone().unwrap_or_default();
+    // The manifest is the single source of truth for the provider's surface:
+    // a bundled provider manifest without `[memory]` is a contract break, not
+    // an empty lifecycle.
+    let lifecycle = record.resolved().memory.clone().ok_or_else(|| {
+        invalid(&format!(
+            "{label} memory provider manifest declares no [memory] surface"
+        ))
+    })?;
     let manifest = record
         .manifest()
         .clone()
@@ -171,6 +179,32 @@ mod tests {
         MEMORY_WRITE_CAPABILITY_ID,
     };
     use ironclaw_extensions::{CapabilityVisibility, ExtensionRuntimeV2};
+
+    /// The bundle loader is only for `[memory]`-declaring providers; a
+    /// bundled manifest that lost its `[memory]` section must fail loud, not
+    /// register tools with a silently empty lifecycle.
+    #[test]
+    fn provider_bundle_fails_loud_without_a_memory_surface() {
+        const NO_MEMORY_SURFACE_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v3"
+id = "acme.memoryless"
+name = "Acme Memoryless"
+version = "0.1.0"
+description = "Bundled provider fixture without a [memory] surface."
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "acme_memoryless_provider"
+"#;
+        let error = memory_provider_bundle(
+            NO_MEMORY_SURFACE_MANIFEST,
+            "/system/extensions/acme_memoryless",
+            "acme",
+        )
+        .expect_err("a bundled memory provider manifest must declare [memory]");
+        assert!(error.to_string().contains("[memory]"), "{error}");
+    }
 
     #[test]
     fn manifest_parses_as_host_bundled_first_party() {

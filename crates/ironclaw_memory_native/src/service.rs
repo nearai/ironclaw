@@ -99,7 +99,7 @@ impl NativeMemoryService {
     ) -> Result<MemoryServiceSearchResponse, MemoryServiceError> {
         let (_, context) = self.scoped_context(&invocation)?;
         let search_request = MemorySearchRequest::new(&request.query)
-            .map_err(|_| MemoryServiceError::input())?
+            .map_err(MemoryServiceError::input_from)?
             .with_limit(request.limit)
             .with_pre_fusion_limit(request.limit.max(20))
             .with_vector(false);
@@ -454,7 +454,7 @@ impl NativeMemoryService {
         let (_, context) = self.scoped_context(invocation)?;
         let fetch_limit = request.max_snippets.saturating_mul(8).max(64);
         let search_request = MemorySearchRequest::new(&request.query)
-            .map_err(|_| MemoryServiceError::input())?
+            .map_err(MemoryServiceError::input_from)?
             .with_limit(fetch_limit)
             .with_pre_fusion_limit(fetch_limit.max(20))
             // Full-text only: the native backend declares vector_search=false and

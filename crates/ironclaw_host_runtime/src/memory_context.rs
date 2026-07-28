@@ -399,6 +399,18 @@ mod tests {
         assert!(text.len() <= MAX_MEMORY_CONTEXT_SNIPPET_BYTES);
     }
 
+    /// Multibyte content drives the char-boundary walk-back in
+    /// `truncate_to_char_boundary` — the path a naive `&value[..n]` byte
+    /// slice would panic on when the cap lands inside a code point.
+    #[test]
+    fn sanitize_truncates_multibyte_text_on_a_char_boundary() {
+        // 3-byte code points; the byte cap cannot be a multiple of 3 and a
+        // multiple of the envelope overhead at once, so the walk-back runs.
+        let text = sanitize_snippet_text(&"日".repeat(1000)).expect("truncated text");
+        assert!(text.len() <= MAX_MEMORY_CONTEXT_SNIPPET_BYTES);
+        assert!(!text.is_empty(), "truncation must keep admissible content");
+    }
+
     #[test]
     fn sanitize_rejects_empty_after_stripping() {
         assert!(sanitize_snippet_text("\x00\x01\x02").is_none());
