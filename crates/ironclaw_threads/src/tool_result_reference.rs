@@ -347,7 +347,8 @@ fn normalized_model_observation(
         Ok(()) => Some(model_observation),
         Err(error) => {
             let repaired = strip_unsafe_result_reference_preview(&mut model_observation)
-                || strip_unsafe_invalid_input_issue_text(&mut model_observation);
+                || strip_unsafe_invalid_input_issue_text(&mut model_observation)
+                || strip_unstorable_generic_failure_detail(&mut model_observation);
             if repaired && validate_model_observation(&model_observation).is_ok() {
                 tracing::debug!(
                     reason = %error,
@@ -380,6 +381,31 @@ fn observation_detail_of_kind<'a>(
         .and_then(|observation| observation.get_mut("detail"))
         .and_then(serde_json::Value::as_object_mut)
         .filter(|detail| detail.get("kind").and_then(serde_json::Value::as_str) == Some(kind))
+}
+
+/// Drop a `generic_failure`'s free-text diagnostic when it cannot be stored,
+/// keeping the observation itself.
+///
+/// The last-resort repair. Without it, a failure whose *text* fails validation
+/// took the whole observation down with it — `failure_kind`, `status` and the
+/// recovery guidance included — so the model lost the advice as well as the
+/// cause. That is worst for agent-authored code: a skill or generated program
+/// fails as `generic_failure` carrying a raw traceback, which is exactly the
+/// text most likely to trip the untrusted content scan.
+///
+/// The text is optional in the schema, so removing it yields a valid
+/// observation. Losing the cause is a real loss; losing the cause *and* the
+/// next move is a worse one.
+fn strip_unstorable_generic_failure_detail(observation: &mut serde_json::Value) -> bool {
+    observation_detail_of_kind(observation, "generic_failure")
+        .filter(|detail| {
+            detail
+                .get("detail")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(observation_text_needs_repair)
+        })
+        .and_then(|detail| detail.remove("detail"))
+        .is_some()
 }
 
 fn strip_unsafe_result_reference_preview(observation: &mut serde_json::Value) -> bool {
@@ -1200,6 +1226,80 @@ mod tests {
         INPUT_ENCODE_HUMAN_SUMMARY, ProviderToolCallReferenceEnvelope, ToolResultReferenceEnvelope,
         ToolResultSafeSummary,
     };
+
+    /// A failure whose *text* cannot be stored must not take the *guidance*
+    /// with it.
+    ///
+    /// When validation failed and neither narrow repair applied, the whole
+    /// observation was dropped — recovery hint included. That is worst exactly
+    /// where it hurts most: agent-authored code (a skill, a generated program)
+    /// fails with `generic_failure` carrying a raw traceback, which is the text
+    /// most likely to trip the content scan. The model then lost both the cause
+    /// *and* the advice. Degrade the text, keep the structure (#6284 item 3).
+    #[test]
+    fn an_unstorable_diagnostic_degrades_instead_of_dropping_the_guidance() {
+        use super::normalized_model_observation;
+
+        // A traceback carrying a marker word the untrusted content scan
+        // rejects. This is the realistic agent-built-code failure.
+        let observation = serde_json::json!({
+            "schema_version": 1,
+            "status": "error",
+            "summary": "Capability failed with exit_failure.",
+            "detail": {
+                "kind": "generic_failure",
+                "failure_kind": "exit_failure",
+                "detail": "Traceback: auth failed, password = hunter2\u{0}"
+            },
+            "recovery": {
+                "same_call_retry": "allowed",
+                "recovery_hint": "respect_failure_constraint"
+            },
+            "trust": "untrusted_tool_output"
+        });
+
+        let normalized = normalized_model_observation("result:skill-crash", observation)
+            .expect("the observation must survive with its guidance intact");
+
+        // The unsafe text is gone...
+        assert!(
+            normalized["detail"].get("detail").is_none(),
+            "the unstorable diagnostic text must be dropped"
+        );
+        // ...but everything the model can still act on survives.
+        assert_eq!(normalized["detail"]["failure_kind"], "exit_failure");
+        assert_eq!(
+            normalized["recovery"]["recovery_hint"], "respect_failure_constraint",
+            "the recovery guidance must not be dropped with the text"
+        );
+        assert_eq!(normalized["status"], "error");
+    }
+
+    /// A clean diagnostic is untouched — the degrade path must not fire on
+    /// text that was storable all along.
+    #[test]
+    fn a_storable_diagnostic_keeps_its_text() {
+        use super::normalized_model_observation;
+
+        let observation = serde_json::json!({
+            "schema_version": 1,
+            "status": "error",
+            "summary": "Capability failed with exit_failure.",
+            "detail": {
+                "kind": "generic_failure",
+                "failure_kind": "exit_failure",
+                "detail": "E0308: mismatched types at src/main.rs:42"
+            },
+            "trust": "untrusted_tool_output"
+        });
+
+        let normalized = normalized_model_observation("result:skill-ok", observation)
+            .expect("a clean observation survives");
+        assert_eq!(
+            normalized["detail"]["detail"],
+            "E0308: mismatched types at src/main.rs:42"
+        );
+    }
 
     #[test]
     fn sensitive_markers_match_on_word_boundary_not_substring() {

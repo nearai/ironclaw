@@ -27,6 +27,20 @@ use super::{AgentLoopExecutorError, capability_host_error};
 const MAX_MODEL_OBSERVATION_INPUT_ISSUES: usize = 3;
 const MAX_MODEL_OBSERVATION_TEXT_BYTES: usize = 256;
 
+/// Appended to any model-visible text this module had to cut short.
+///
+/// Both cutters below used to slice to a UTF-8 boundary and return, leaving no
+/// sign the value was severed. A stack trace or compiler error cut mid-frame
+/// then reached the model looking complete, and the model would fix the wrong
+/// thing with confidence — worse than receiving no detail at all. This is the
+/// whole point of #6284 item 3's truncation box.
+///
+/// Free text rather than a structured flag because this channel *is* text: the
+/// model reads it directly, so an inline marker needs no rendering support and
+/// cannot be dropped by a consumer that ignores an unknown field. The marker is
+/// counted against the cap, never added on top of it.
+const TRUNCATION_MARKER: &str = " […truncated]";
+
 pub(super) fn capability_invocation_from_candidate(
     call: CapabilityCallCandidate,
     approval_resume: Option<CapabilityApprovalResume>,
@@ -400,14 +414,34 @@ pub(super) fn model_visible_capability_failure_observation(
 /// a UTF-8 boundary. The diagnostic is already secret-scrubbed by the producer.
 fn bounded_diagnostic_detail(value: &str) -> String {
     const MAX: usize = ironclaw_turns::run_profile::MODEL_OBSERVATION_DETAIL_MAX_BYTES;
-    if value.len() <= MAX {
+    truncate_marked(value, MAX)
+}
+
+/// Cut `value` to `max_bytes` **including** a [`TRUNCATION_MARKER`], on a UTF-8
+/// boundary. Text that already fits is returned unchanged and unmarked — a
+/// marker on a complete value would defeat the distinction this exists to draw.
+fn truncate_marked(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
         return value.to_string();
     }
-    let mut end = MAX;
+    // Reserve room for the marker so the result still honors the cap. If the
+    // cap cannot even hold the marker, fall back to a bare cut: an unmarked
+    // fragment beats overflowing a bound the persistence validator enforces.
+    let Some(budget) = max_bytes.checked_sub(TRUNCATION_MARKER.len()) else {
+        return cut_on_boundary(value, max_bytes).to_string();
+    };
+    format!("{}{TRUNCATION_MARKER}", cut_on_boundary(value, budget))
+}
+
+fn cut_on_boundary(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut end = max_bytes;
     while end > 0 && !value.is_char_boundary(end) {
         end -= 1;
     }
-    value[..end].to_string() // safety: `end` reduced to a valid UTF-8 boundary.
+    &value[..end] // safety: `end` reduced to a valid UTF-8 boundary.
 }
 
 fn model_visible_failure_summary(error_kind: FailureKind) -> String {
@@ -441,14 +475,7 @@ fn bounded_input_issues(issues: &[CapabilityInputIssue]) -> Vec<CapabilityInputI
 }
 
 fn truncate_model_observation_text(value: &str) -> String {
-    if value.len() <= MAX_MODEL_OBSERVATION_TEXT_BYTES {
-        return value.to_string();
-    }
-    let mut end = MAX_MODEL_OBSERVATION_TEXT_BYTES;
-    while end > 0 && !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    value[..end].to_string() // safety: `end` is reduced until it lands on a valid UTF-8 boundary.
+    truncate_marked(value, MAX_MODEL_OBSERVATION_TEXT_BYTES)
 }
 
 fn invalid_input_observation(issues: Vec<CapabilityInputIssue>) -> ModelVisibleToolObservation {
@@ -694,6 +721,68 @@ pub(super) fn push_completed_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A severed diagnostic must say it was severed.
+    ///
+    /// Both cutters sliced to a UTF-8 boundary and returned, with no marker of
+    /// any kind — so a stack trace or compiler error cut mid-frame reached the
+    /// model looking complete. That is worse than no detail: the model fixes
+    /// the wrong line with confidence. (#6284 item 3. Contrary to the epic's
+    /// note, the sibling summary path did NOT append `"..."` either — no
+    /// truncation marker existed anywhere in the product. The structured
+    /// `next_offset`/`total_bytes` on the *preview* path is a different
+    /// mechanism and does not cover free-text diagnostics.)
+    #[test]
+    fn a_severed_diagnostic_says_it_was_severed() {
+        let long = "E0308: mismatched types at src/main.rs:42 ".repeat(500);
+        let bounded = bounded_diagnostic_detail(&long);
+
+        assert!(
+            bounded.len() <= ironclaw_turns::run_profile::MODEL_OBSERVATION_DETAIL_MAX_BYTES,
+            "the marker must fit inside the cap, not push past it"
+        );
+        assert!(
+            bounded.ends_with(TRUNCATION_MARKER),
+            "a truncated diagnostic must be marked; got tail {:?}",
+            &bounded[bounded.len().saturating_sub(40)..]
+        );
+        // The real cause still leads.
+        assert!(bounded.starts_with("E0308: mismatched types"));
+    }
+
+    /// The same rule for the bounded per-field observation text.
+    #[test]
+    fn a_severed_observation_field_says_it_was_severed() {
+        let long = "a".repeat(MAX_MODEL_OBSERVATION_TEXT_BYTES * 3);
+        let bounded = truncate_model_observation_text(&long);
+
+        assert!(bounded.len() <= MAX_MODEL_OBSERVATION_TEXT_BYTES);
+        assert!(
+            bounded.ends_with(TRUNCATION_MARKER),
+            "a truncated observation field must be marked"
+        );
+    }
+
+    /// Text that fits is returned untouched — no marker on a complete value,
+    /// or the model cannot tell complete from severed after all.
+    #[test]
+    fn text_that_fits_is_never_marked() {
+        let short = "E0425: cannot find value `x` in this scope";
+        assert_eq!(bounded_diagnostic_detail(short), short);
+        assert_eq!(truncate_model_observation_text(short), short);
+    }
+
+    /// A multi-byte character must not be split by making room for the marker.
+    #[test]
+    fn marking_a_truncation_respects_utf8_boundaries() {
+        let long = "\u{e9}".repeat(ironclaw_turns::run_profile::MODEL_OBSERVATION_DETAIL_MAX_BYTES);
+        let bounded = bounded_diagnostic_detail(&long);
+        assert!(bounded.ends_with(TRUNCATION_MARKER));
+        // Round-trips as valid UTF-8 by construction; assert no replacement
+        // character crept in from a split boundary.
+        assert!(!bounded.contains('\u{fffd}'));
+    }
+
     use crate::test_support::test_run_context;
     use ironclaw_turns::run_profile::{CapabilityProgress, CapabilitySurfaceVersion};
 
