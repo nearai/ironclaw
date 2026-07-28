@@ -3,7 +3,9 @@
 import ast
 import importlib.util
 import json
+import os
 import re
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -428,6 +430,49 @@ def test_alone_lane_lists_every_mutating_journey():
     ]
     assert expected, "no mutating journeys: the alone lane would test nothing"
     assert module.mutating_journey_ids() == expected
+
+
+@pytest.mark.parametrize(
+    ("stub_body", "expected_returncode"),
+    [
+        ("exit 23\n", 23),
+        ("exit 0\n", 1),
+    ],
+)
+def test_alone_lane_rejects_failed_or_empty_inventory(
+    tmp_path,
+    stub_body,
+    expected_returncode,
+):
+    """The workflow must fail closed before replaying an invalid inventory."""
+    workflow = (ROOT / ".github/workflows/reborn-e2e.yml").read_text(encoding="utf-8")
+    step = re.search(
+        r"      - name: Replay each mutating journey alone\n"
+        r"(?:        .*\n)*?"
+        r"        run: \|\n"
+        r"(?P<script>(?:          .*\n)+)",
+        workflow,
+    )
+    assert step, "missing isolated journey replay workflow step"
+    script = "\n".join(
+        line.removeprefix("          ")
+        for line in step.group("script").splitlines()
+    )
+
+    python_stub = tmp_path / "python"
+    python_stub.write_text(
+        f"#!/usr/bin/env bash\n{stub_body}",
+        encoding="utf-8",
+    )
+    python_stub.chmod(0o755)
+    result = subprocess.run(
+        ["bash", "-c", script],
+        cwd=ROOT,
+        env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"},
+        check=False,
+    )
+
+    assert result.returncode == expected_returncode
 
 
 def test_every_journey_has_complete_typed_executable_evidence():

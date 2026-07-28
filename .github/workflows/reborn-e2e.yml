@@ -269,7 +269,12 @@ jobs:
           # and nowhere in the ordinary lane. The list is pinned by
           # test_alone_lane_lists_every_mutating_journey, so an empty loop
           # cannot quietly pass.
-          mapfile -t journeys < <(python scripts/ci/list_mutating_journeys.py)
+          journey_list="$(python scripts/ci/list_mutating_journeys.py)"
+          if [[ -z "${journey_list//[[:space:]]/}" ]]; then
+            echo "mutating journey list is empty" >&2
+            exit 1
+          fi
+          mapfile -t journeys <<<"${journey_list}"
           echo "replaying ${#journeys[@]} journeys alone"
           for journey in "${journeys[@]}"; do
             echo "::group::alone: $journey"
