@@ -188,11 +188,14 @@ async def test_reborn_v2_cancel_in_flight_turn_ends_cancelled(
                     )
                 for item in payload.get("state", {}).get("items", []):
                     status = item.get("run_status") or {}
-                    if status.get("status") == "cancelled":
+                    if (
+                        status.get("run_id") == run_id
+                        and status.get("status") == "cancelled"
+                    ):
                         return True
                 return False
 
-            event = await _wait_for_sse_event(
+            await _wait_for_sse_event(
                 stream,
                 "cancelled",
                 "projection_snapshot",
@@ -200,7 +203,6 @@ async def test_reborn_v2_cancel_in_flight_turn_ends_cancelled(
                 timeout=45,
                 match=is_cancelled,
             )
-            assert is_cancelled(event.get("type", "projection_update"), event)
 
 
 async def test_reborn_v2_approval_gate_resolves_and_resumes(
