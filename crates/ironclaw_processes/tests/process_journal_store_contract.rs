@@ -1050,6 +1050,19 @@ async fn process_checkpoint_records_are_durable_scoped_and_idempotent() {
     let debug = format!("{:?}", loaded.payload);
     assert!(debug.contains("<redacted>"));
     assert!(!debug.contains("checkpoint-body"));
+    assert_eq!(
+        reopened
+            .get_process_snapshot(GetProcessSnapshotRequest {
+                scope: scope.clone(),
+                process_id,
+            })
+            .await
+            .expect("load checkpointed process")
+            .checkpoint_ref,
+        Some(ProcessCheckpointRef::from_trusted(
+            checkpoint_id.as_str().to_string()
+        ))
+    );
 
     let mut wrong_scope = scope;
     wrong_scope.user_id = UserId::new("other-user").expect("other user");

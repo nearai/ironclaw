@@ -193,6 +193,7 @@ pub async fn fail_capability_process(
             worker_id: lease.worker_id,
             lease_token: lease.lease_token,
             failure,
+            checkpoint_ref: None,
             metadata: None,
         })
         .await

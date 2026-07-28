@@ -664,6 +664,7 @@ async fn record_failure(
                 worker_id: identity.worker_id.clone(),
                 lease_token: identity.lease_token.clone(),
                 failure: failure.clone(),
+                checkpoint_ref: None,
                 metadata: None,
             })
             .await

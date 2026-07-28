@@ -157,6 +157,7 @@ async fn retry_rebinds_checkpoint_through_the_real_process_store() {
             worker_id: claim.worker_id,
             lease_token: claim.lease_token,
             failure: SanitizedFailure::new("retryable_failure").expect("failure"),
+            checkpoint_ref: None,
             metadata: None,
         })
         .await

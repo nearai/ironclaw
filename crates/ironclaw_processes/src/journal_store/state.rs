@@ -917,7 +917,10 @@ impl ProcessJournalMaterializedState {
             };
         }
         self.checkpoints
-            .insert(request.checkpoint_id, record.clone());
+            .insert(request.checkpoint_id.clone(), record.clone());
+        self.process_mut(request.process_id)?.checkpoint_ref = Some(
+            ProcessCheckpointRef::from_trusted(request.checkpoint_id.as_str().to_string()),
+        );
         Ok(StoredCommandOutcome::Checkpointed(record))
     }
 

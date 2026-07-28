@@ -1022,6 +1022,8 @@ pub struct FailProcessRequest {
     pub lease_token: ProcessLeaseToken,
     pub failure: SanitizedFailure,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_ref: Option<ProcessCheckpointRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Value>,
 }
 

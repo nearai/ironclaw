@@ -890,6 +890,7 @@ where
             },
             ProcessTransitionMutation {
                 failure: Some(request.failure),
+                checkpoint_ref: request.checkpoint_ref,
                 metadata: request.metadata,
                 ..ProcessTransitionMutation::new(
                     ProcessLifecycleStatus::Failed,
