@@ -4393,9 +4393,10 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         })
     };
 
-    // The binary-assembled channel-extension extras (extension-runtime
-    // DEL-7): gate-reply classifiers + preference-target codecs registered
-    // on the assembly for every supplied channel binding.
+    // The binary-assembled channel-extension vendor extras (extension-runtime
+    // DEL-7): preference-target codecs registered on the assembly for every
+    // supplied channel binding. Inbound classification is a generic host
+    // invariant, not an adapter extra.
     if let Some(assembly) = channel_host_assembly.as_ref() {
         for binding in &services.channel_extension_bindings {
             assembly

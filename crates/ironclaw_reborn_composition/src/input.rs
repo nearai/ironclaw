@@ -763,8 +763,9 @@ impl RebornHostBindings {
     /// Supply the binary-assembled channel-adapter bindings for channel
     /// extensions whose runtime is not `first_party` (extension-runtime
     /// DEL-7): the generic loader binds each adapter at activation, and the
-    /// channel host assembly registers the accompanying extras (gate-reply
-    /// classifier, preference-target codec).
+    /// channel host assembly registers the accompanying vendor extras
+    /// (currently the preference-target codec). Generic inbound
+    /// classification is host-wide rather than adapter-supplied.
     pub fn with_channel_extension_bindings(
         mut self,
         bindings: Vec<ChannelExtensionBinding>,
