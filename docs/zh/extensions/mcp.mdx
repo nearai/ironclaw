@@ -8,6 +8,13 @@ description: 连接 Model Context Protocol 服务器扩展 IronClaw
 
 MCP 是扩展可以声明的运行时之一，与 WASM、first-party 并列。MCP 服务器通过被打包为扩展来接入代理，其清单会声明工具与访问端点 —— 系统中没有单独的 MCP 服务器注册表。
 
+<Info>
+host-bundled MCP 扩展必须使用 HTTPS。installed-local 扩展仅可在清单锁定精确
+IPv4 回环端点（`127.0.0.0/8`，包括协议、主机、端口和路径）时使用明文 HTTP；
+省略端口时固定为 80。IronClaw 会拒绝 `localhost`、IPv6、局域网/非回环私网地址、
+远程明文、registry-installed MCP 包以及 stdio 传输。
+</Info>
+
 ---
 
 ## 添加服务器

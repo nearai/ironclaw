@@ -65,6 +65,9 @@ pub(crate) struct HostRuntimeHarnessOptions {
         ExtensionPackage,
         Option<ironclaw_extensions::ResolvedExtensionManifest>,
     )>,
+    /// Installed-local fixtures need both the active package and the enabled
+    /// installation record that production authority derivation joins.
+    pub(crate) activate_installed_local_extensions_for_test: Vec<(ExtensionPackage, String)>,
     /// Fixture extension asset directories copied into the harness storage
     /// root's `/system/extensions/{id}` BEFORE composition builds, so the
     /// available-extension catalog discovers them like installed packages
@@ -138,6 +141,7 @@ impl HostRuntimeHarnessOptions {
             outbound_target_service: None,
             network_http_egress_for_test: None,
             activate_bundled_extensions_for_test: Vec::new(),
+            activate_installed_local_extensions_for_test: Vec::new(),
             fixture_extension_dirs: Vec::new(),
             native_extension_factories: Vec::new(),
             channel_extension_bindings: Vec::new(),
@@ -266,6 +270,16 @@ impl HostRuntimeHarnessOptions {
     ) -> Self {
         self.activate_bundled_extensions_for_test
             .push((package, Some(resolved)));
+        self
+    }
+
+    pub(crate) fn with_activated_installed_local_extension(
+        mut self,
+        package: ExtensionPackage,
+        raw_manifest: String,
+    ) -> Self {
+        self.activate_installed_local_extensions_for_test
+            .push((package, raw_manifest));
         self
     }
 

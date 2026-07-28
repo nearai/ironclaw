@@ -117,6 +117,11 @@ impl MockMcpServer {
         self.state.recorded_requests.lock().unwrap().clear();
     }
 
+    /// Permit credential-free requests for public-MCP dispatch tests.
+    pub fn allow_unauthenticated(&self) {
+        *self.state.allow_unauthenticated.lock().unwrap() = true;
+    }
+
     /// Shut down the server.
     pub async fn shutdown(mut self) {
         if let Some(tx) = self.shutdown_tx.take() {
@@ -172,6 +177,7 @@ struct MockState {
     /// (`text/event-stream`, `data:`-wrapped, keepalive-ping prefixed) instead of
     /// plain `application/json`. Default false. See `enable_sse_framing`.
     sse_framing: std::sync::Mutex<bool>,
+    allow_unauthenticated: std::sync::Mutex<bool>,
 }
 
 #[derive(Clone, Serialize)]
@@ -230,6 +236,7 @@ pub async fn start_mock_mcp_server(tool_responses: Vec<MockToolResponse>) -> Moc
         force_status: std::sync::Mutex::new(None),
         force_tool_call_error: std::sync::Mutex::new(None),
         sse_framing: std::sync::Mutex::new(false),
+        allow_unauthenticated: std::sync::Mutex::new(false),
     });
 
     let app = Router::new()
@@ -311,6 +318,7 @@ pub async fn start_mock_mcp_server_with_specs(specs: Vec<MockToolSpec>) -> MockM
         force_status: std::sync::Mutex::new(None),
         force_tool_call_error: std::sync::Mutex::new(None),
         sse_framing: std::sync::Mutex::new(false),
+        allow_unauthenticated: std::sync::Mutex::new(false),
     });
 
     let app = Router::new()
@@ -447,13 +455,13 @@ async fn handle_mcp(
             params: req.params.clone(),
         });
 
-    if !auth.starts_with("Bearer ")
+    let missing_bearer = !auth.starts_with("Bearer ")
         || auth
             .split_once(' ')
             .map(|(_, v)| v.trim())
             .unwrap_or("")
-            .is_empty()
-    {
+            .is_empty();
+    if missing_bearer && !*state.allow_unauthenticated.lock().unwrap() {
         // Return 401 with WWW-Authenticate header per MCP OAuth spec.
         let www_auth = format!(
             "Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource/mcp\"",

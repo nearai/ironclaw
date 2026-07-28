@@ -397,6 +397,7 @@ pub mod host_api;
 mod hosted_mcp_discovery;
 mod installations;
 mod lifecycle;
+mod mcp_http_endpoint;
 mod registry;
 pub mod resolved;
 pub mod v2;
@@ -413,6 +414,7 @@ pub use hosted_mcp_discovery::{
     HostedMcpDiscoveredTool, HostedMcpDiscoveredToolAnnotations, is_hosted_http_mcp_package,
     package_with_discovered_hosted_mcp_tools,
 };
+pub use mcp_http_endpoint::{McpHttpEndpoint, McpHttpScheme};
 pub use resolved::{
     ResolvedAuthSurface, ResolvedExtensionManifest, ResolvedHostApiRef, ResolvedMcpDeclaration,
     ResolvedSectionSurface,

@@ -674,6 +674,7 @@ impl HostRuntimeCapabilityHarness {
             outbound_target_service,
             network_http_egress_for_test,
             activate_bundled_extensions_for_test,
+            activate_installed_local_extensions_for_test,
             project_service_fault_injection,
             durable_capability_io,
             trigger_active_run_lookup_requested,
@@ -782,6 +783,39 @@ impl HostRuntimeCapabilityHarness {
                 .ok_or(
                     "local-dev Reborn services missing extension management for test publish",
                 )??;
+        }
+        for (package, raw_manifest) in &activate_installed_local_extensions_for_test {
+            use ironclaw_extensions::{
+                ExtensionInstallation, ExtensionInstallationId, ExtensionManifestRecord,
+                ExtensionManifestRef, InstallationOwner, ManifestSource,
+            };
+            let store = services
+                .extension_installation_store_for_test()
+                .ok_or("local-dev Reborn services missing installation store")?;
+            let contracts = ironclaw_host_runtime::default_host_api_contract_registry()?;
+            let manifest_record = ExtensionManifestRecord::from_toml(
+                raw_manifest.clone(),
+                ManifestSource::InstalledLocal,
+                &ironclaw_host_runtime::default_host_port_catalog()?,
+                None,
+                &contracts,
+            )?;
+            let resolved = manifest_record.resolved().clone();
+            let installation = ExtensionInstallation::new(
+                ExtensionInstallationId::new(format!("itest-{}", package.id.as_str()))?,
+                package.id.clone(),
+                ExtensionManifestRef::new(package.id.clone(), None),
+                Vec::new(),
+                chrono::Utc::now(),
+                InstallationOwner::Tenant,
+            )?;
+            store
+                .upsert_manifest_and_installation(manifest_record, installation)
+                .await?;
+            services
+                .publish_bundled_extension_for_test(package, Some(&resolved))
+                .await
+                .ok_or("local-dev Reborn services missing extension management")??;
         }
         let approval_parts = services.local_dev_approval_test_parts();
         let auto_approve_settings = services.local_dev_auto_approve_settings_for_test();

@@ -12,6 +12,14 @@ MCP is one of the runtimes an extension can declare, alongside WASM and first-pa
 server reaches your agent by being packaged as an extension whose manifest declares its
 tools and endpoint — there is no separate MCP server registry.
 
+<Info>
+Host-bundled MCP extensions must use HTTPS. An installed-local extension may use
+plaintext HTTP only when its manifest pins an exact literal IPv4 loopback endpoint
+(`127.0.0.0/8`), including scheme, host, port, and path; an omitted port is pinned to
+80. IronClaw rejects `localhost`, IPv6, LAN/private non-loopback addresses, remote
+plaintext, registry-installed MCP packages, and stdio transports.
+</Info>
+
 ---
 
 ## Adding a Server

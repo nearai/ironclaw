@@ -99,7 +99,6 @@ const FROZEN_OTHER_MODE_TYPES: &[&str] = &[
     "HostedMcpDiscoveredToolAnnotations",
     "HostedMcpDiscoveryEgress",
     "HostedMcpDiscoveryError",
-    "HostedMcpEndpoint",
     // --- Local* (non-LocalDev): the `local_trigger_access` module has been
     //     folded to a config value — fire-time trigger access is now the
     //     `TriggerFireAccessPolicy` on `RebornRuntimeInput`, backed by config

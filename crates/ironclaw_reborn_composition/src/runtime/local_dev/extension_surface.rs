@@ -172,6 +172,17 @@ impl ExtensionCapabilitySurface {
 }
 
 pub(crate) fn extension_network_policy(capability: &ActiveExtensionCapability) -> NetworkPolicy {
+    if let Some(target) = &capability.local_mcp_loopback_target {
+        return NetworkPolicy {
+            allowed_targets: vec![target.clone()],
+            // This target was derived from an InstalledLocal MCP runtime URL
+            // whose host is a literal loopback IP. Keep its authority to that
+            // single endpoint while allowing the network layer to reach it.
+            deny_private_ip_ranges: false,
+            max_egress_bytes: None,
+        };
+    }
+
     let mut targets = Vec::new();
     // Manifest-declared egress allowlist — the keyless-but-networked path. A
     // capability declares its egress hosts directly, without a credential
@@ -273,6 +284,7 @@ mod tests {
             default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
             network_targets: Vec::new(),
+            local_mcp_loopback_target: None,
             max_egress_bytes: None,
             owner,
         };
@@ -340,6 +352,7 @@ mod tests {
             default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
             network_targets: vec![https(EXA_MCP_HOST)],
+            local_mcp_loopback_target: None,
             max_egress_bytes: Some(WEB_ACCESS_EGRESS_LIMIT),
             owner: ironclaw_extensions::InstallationOwner::Tenant,
         };
@@ -360,6 +373,7 @@ mod tests {
             default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
             network_targets: vec![https(EXA_MCP_HOST)],
+            local_mcp_loopback_target: None,
             max_egress_bytes: Some(WEB_ACCESS_EGRESS_LIMIT),
             owner: ironclaw_extensions::InstallationOwner::Tenant,
         };
@@ -387,6 +401,7 @@ mod tests {
             default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
             network_targets: Vec::new(),
+            local_mcp_loopback_target: None,
             max_egress_bytes: Some(WEB_ACCESS_EGRESS_LIMIT),
             owner: ironclaw_extensions::InstallationOwner::Tenant,
         };
@@ -416,6 +431,7 @@ mod tests {
             default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
             network_targets: vec![https("news.ycombinator.com")],
+            local_mcp_loopback_target: None,
             max_egress_bytes: None,
             owner: ironclaw_extensions::InstallationOwner::Tenant,
         };
@@ -427,6 +443,34 @@ mod tests {
             policy.deny_private_ip_ranges,
             "a tool with declared egress keeps the private-IP SSRF guard"
         );
+        assert_eq!(policy.max_egress_bytes, None);
+    }
+
+    #[test]
+    fn installed_local_mcp_loopback_endpoint_gets_exact_private_range_exception() {
+        let target = NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Http),
+            host_pattern: "127.0.0.2".to_string(),
+            port: Some(4321),
+        };
+        let capability = ActiveExtensionCapability {
+            id: CapabilityId::new("local-mcp.search").unwrap(),
+            provider: ExtensionId::new("local-mcp").unwrap(),
+            effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
+            default_permission: PermissionMode::Ask,
+            runtime_credentials: Vec::new(),
+            // The runtime endpoint is authoritative; extra manifest targets
+            // must not widen the staged policy.
+            network_targets: vec![https("example.com")],
+            local_mcp_loopback_target: Some(target.clone()),
+            max_egress_bytes: Some(2 * 1024 * 1024),
+            owner: ironclaw_extensions::InstallationOwner::Tenant,
+        };
+
+        let policy = extension_network_policy(&capability);
+
+        assert_eq!(policy.allowed_targets, vec![target]);
+        assert!(!policy.deny_private_ip_ranges);
         assert_eq!(policy.max_egress_bytes, None);
     }
 
@@ -452,6 +496,7 @@ mod tests {
                 required: true,
             }],
             network_targets: vec![https(EXA_MCP_HOST)],
+            local_mcp_loopback_target: None,
             max_egress_bytes: Some(WEB_ACCESS_EGRESS_LIMIT),
             owner: ironclaw_extensions::InstallationOwner::Tenant,
         };
@@ -488,6 +533,7 @@ mod tests {
                 required: true,
             }],
             network_targets: google_api_network_targets(),
+            local_mcp_loopback_target: None,
             max_egress_bytes: Some(GSUITE_EGRESS_LIMIT),
             owner: ironclaw_extensions::InstallationOwner::Tenant,
         };
@@ -522,6 +568,7 @@ mod tests {
                 required: true,
             }],
             network_targets: google_api_network_targets(),
+            local_mcp_loopback_target: None,
             max_egress_bytes: Some(GSUITE_EGRESS_LIMIT),
             owner: ironclaw_extensions::InstallationOwner::Tenant,
         };

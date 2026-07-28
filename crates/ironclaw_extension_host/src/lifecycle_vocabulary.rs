@@ -15,6 +15,9 @@ pub struct ActiveExtensionCapability {
     pub runtime_credentials: Vec<RuntimeCredentialRequirement>,
     /// Manifest-declared network egress allowlist, independent of credentials.
     pub network_targets: Vec<NetworkTargetPattern>,
+    /// Exact runtime endpoint for an installed-local MCP server using plaintext
+    /// HTTP on a literal loopback IP. No other extension/runtime shape may set it.
+    pub local_mcp_loopback_target: Option<NetworkTargetPattern>,
     /// Manifest-declared per-capability egress cap in bytes. `None` means no cap.
     pub max_egress_bytes: Option<u64>,
     /// Owner of the providing extension installation.
@@ -31,7 +34,11 @@ pub enum ExtensionActivationMode {
 }
 
 impl ActiveExtensionCapability {
-    pub fn from_descriptor(descriptor: &CapabilityDescriptor, owner: InstallationOwner) -> Self {
+    pub fn from_descriptor(
+        descriptor: &CapabilityDescriptor,
+        owner: InstallationOwner,
+        local_mcp_loopback_target: Option<NetworkTargetPattern>,
+    ) -> Self {
         Self {
             id: descriptor.id.clone(),
             provider: descriptor.provider.clone(),
@@ -39,6 +46,7 @@ impl ActiveExtensionCapability {
             default_permission: descriptor.default_permission,
             runtime_credentials: descriptor.runtime_credentials.clone(),
             network_targets: descriptor.network_targets.clone(),
+            local_mcp_loopback_target,
             max_egress_bytes: descriptor.max_egress_bytes,
             owner,
         }

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- *(reborn)* allow installed-local MCP packages to use plaintext HTTP only at an exact literal-IPv4-loopback endpoint while keeping host-bundled remote MCP HTTPS-only and registry-installed and stdio MCP blocked.
 - **Agent-loop termination recovery:** tell the model when no-progress or the
   iteration limit would otherwise stop a run, preserve that one-shot warning
   across checkpoints, and allow one normal capability-enabled recovery turn

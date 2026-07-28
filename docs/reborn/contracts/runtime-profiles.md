@@ -420,6 +420,9 @@ Extension hooks can ask, annotate, or block early, but they are not the final se
 
 ## 11. Profile selection rules
 
+The stdio MCP row below is future profile guidance. Current Reborn dispatch
+rejects stdio MCP until the mediated process transport is implemented.
+
 Default selection should be conservative:
 
 | Entrypoint | Default profile |

@@ -55,6 +55,7 @@ pub trait ExtensionCredentialCleanup: Send + Sync {
     ) -> Result<SecretCleanupReport, ProductSurfaceError>;
 }
 
+use crate::mcp::installed_local_mcp_loopback_target;
 use crate::{
     ActiveExtensionCapability, AvailableExtensionCatalog, AvailableExtensionPackage,
     ExtensionActivationMode, ExtensionInstallPlan, imported_extension_package,
@@ -675,12 +676,18 @@ impl ExtensionLifecycleManager {
             .capabilities()
             .filter_map(|descriptor| {
                 let owner = owner_by_extension.get(&descriptor.provider)?;
+                let package = registry.get_extension(&descriptor.provider)?;
                 let model_visible = registry
                     .capability_visibility(&descriptor.id)
                     .unwrap_or(CapabilityVisibility::Model)
                     == CapabilityVisibility::Model;
-                model_visible
-                    .then(|| ActiveExtensionCapability::from_descriptor(descriptor, owner.clone()))
+                model_visible.then(|| {
+                    ActiveExtensionCapability::from_descriptor(
+                        descriptor,
+                        owner.clone(),
+                        installed_local_mcp_loopback_target(package),
+                    )
+                })
             })
             .collect())
     }

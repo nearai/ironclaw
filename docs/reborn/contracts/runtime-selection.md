@@ -20,6 +20,11 @@ IronClaw Reborn has several execution needs that look similar but have different
 
 This document fixes the selection rules so we do not collapse these needs into one mega-runtime or one mega-tool.
 
+Implementation status: stdio MCP entries below describe the intended
+process-backed lane, not a shipping Reborn transport. Current Reborn dispatch
+rejects stdio MCP; only the source-scoped HTTP behavior in
+`docs/reborn/contracts/mcp.md` is implemented.
+
 The guiding rule is:
 
 ```text
