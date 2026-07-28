@@ -257,6 +257,12 @@ async function route(input, init) {
   const rawUrl =
     typeof input === "string" || input instanceof URL ? String(input) : input.url;
   const url = new URL(rawUrl, window.location.origin);
+  // useTeeAttestation probes `api.<host-domain>` for a TEE report; on the
+  // demo host that domain is not ours, so answer 404 locally instead of
+  // letting the browser surface a CORS error in the console.
+  if (url.hostname.startsWith("api.") && url.pathname.endsWith("/attestation")) {
+    return notFound();
+  }
   if (url.origin !== window.location.origin) return null;
   const path = url.pathname;
   const isApi = path.startsWith(`${V2}/`) || path === V2;
