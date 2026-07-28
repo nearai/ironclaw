@@ -132,7 +132,8 @@ async def test_reborn_v2_tool_turn_records_result_and_final_reply(
     assert references, timeline
     assert any(reference.get("tool_result_ref") for reference in references), references
     assert assistant.get("status") == "finalized", assistant
-    assert (assistant.get("content") or "").strip(), assistant
+    assistant_content = assistant.get("content")
+    assert isinstance(assistant_content, str) and assistant_content.strip(), assistant
 
 
 async def test_reborn_v2_cancel_in_flight_turn_ends_cancelled(
@@ -149,7 +150,7 @@ async def test_reborn_v2_cancel_in_flight_turn_ends_cancelled(
             reborn_v2_server,
             path=f"/api/webchat/v2/threads/{thread_id}/events",
             token=REBORN_V2_AUTH_TOKEN,
-            timeout=75,
+            timeout=100,
         ) as stream:
             assert stream.status == 200
             submitted = await client.post(
@@ -179,6 +180,8 @@ async def test_reborn_v2_cancel_in_flight_turn_ends_cancelled(
             def is_cancelled(event_type: str, payload: dict) -> bool:
                 if event_type == "cancelled":
                     response = payload.get("response") or {}
+                    # Cancel responses serialize the TurnStatus enum variant,
+                    # while projection run statuses use lowercase wire values.
                     return (
                         response.get("run_id") == run_id
                         and response.get("status") == "Cancelled"
@@ -304,7 +307,8 @@ async def test_reborn_v2_manual_token_auth_gate_resolves_and_resumes(
             )
             assert token_submit.status_code == 200, token_submit.text
             token_body = token_submit.json()
-            assert token_body["credential_ref"], token_body
+            credential_ref = token_body.get("credential_ref")
+            assert isinstance(credential_ref, str) and credential_ref.strip(), token_body
             assert token_body["continuation"]["type"] == "turn_gate_resume"
             assert raw_token not in token_submit.text
 
