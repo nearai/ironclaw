@@ -3,7 +3,8 @@ use ironclaw_host_api::{
     ProjectId, ResourceScope, TenantId, ThreadId, UserId,
 };
 use ironclaw_network::{
-    NetworkRequest, StaticNetworkPolicyEnforcer, network_target_for_url, target_matches_pattern,
+    NetworkRequest, StaticNetworkPolicyEnforcer, network_target_for_url, parse_host_pattern,
+    target_matches_pattern,
 };
 
 #[tokio::test]
@@ -329,6 +330,62 @@ fn pattern(
         scheme,
         host_pattern: host_pattern.to_string(),
         port,
+    }
+}
+
+// `parse_host_pattern` is the chokepoint an untrusted operator-supplied
+// hostname string (e.g. the sandbox's `IRONCLAW_SANDBOX_EXTRA_ALLOWED_DOMAINS`)
+// must go through before becoming policy. Unlike `NetworkTargetPattern::
+// validate_declaration` (shape-only, permits a reviewed `*` for legitimate
+// full-access grants), this rejects the bare wildcard outright: a typo in an
+// env var was never reviewed, and `host_matches_pattern` treats `*` as
+// "match every host".
+#[test]
+fn parse_host_pattern_accepts_plain_and_wildcard_hostnames() {
+    let plain = parse_host_pattern("crates.io").unwrap();
+    assert_eq!(plain.host_pattern, "crates.io");
+    assert_eq!(plain.scheme, None);
+    assert_eq!(plain.port, None);
+
+    let wildcard = parse_host_pattern("*.corp.example.com").unwrap();
+    assert_eq!(wildcard.host_pattern, "*.corp.example.com");
+}
+
+#[test]
+fn parse_host_pattern_trims_surrounding_whitespace() {
+    let pattern = parse_host_pattern("  crates.io  ").unwrap();
+    assert_eq!(pattern.host_pattern, "crates.io");
+}
+
+#[test]
+fn parse_host_pattern_rejects_empty_and_bare_wildcard() {
+    assert!(parse_host_pattern("").unwrap_err().is_invalid_host_pattern());
+    assert!(
+        parse_host_pattern("   ")
+            .unwrap_err()
+            .is_invalid_host_pattern()
+    );
+    assert!(
+        parse_host_pattern("*")
+            .unwrap_err()
+            .is_invalid_host_pattern()
+    );
+}
+
+#[test]
+fn parse_host_pattern_rejects_malformed_hostnames() {
+    for bad in [
+        "not a host!",
+        "..leading-dot.com",
+        "trailing-dot.com.",
+        "double..dot.com",
+        "has space.com",
+        "embedded\0nul.com",
+    ] {
+        assert!(
+            parse_host_pattern(bad).unwrap_err().is_invalid_host_pattern(),
+            "expected {bad:?} to be rejected"
+        );
     }
 }
 

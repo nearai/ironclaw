@@ -26,7 +26,8 @@
 //! take it as an input, and because a list of hostnames is reviewable on its
 //! own in a way it will not be once it is buried in a proxy PR.
 use ironclaw_common::env_helpers::env_or_override;
-use ironclaw_host_api::{NetworkPolicy, NetworkTargetPattern};
+use ironclaw_host_api::NetworkPolicy;
+use ironclaw_network::NetworkPolicyError;
 
 /// Environment variable operators can set to add domains to the sandboxed
 /// shell's egress allowlist, on top of [`DEFAULT_SANDBOX_ALLOWED_DOMAINS`].
@@ -59,33 +60,36 @@ pub const DEFAULT_SANDBOX_ALLOWED_DOMAINS: &[&str] = &[
 /// Reads [`SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV`] and returns the operator's
 /// configured extra domains, trimmed and with empty entries dropped. Returns
 /// an empty `Vec` (never an error) when the variable is unset or empty — the
-/// extra-domains hook is optional.
+/// extra-domains hook itself is optional. Returns `Err` when a configured
+/// entry fails [`ironclaw_network::parse_host_pattern`]'s hostname-shape
+/// check (empty, bare `*`, or not a valid hostname / `*.`-wildcard) — see
+/// that function's doc comment for why a typo here is not survivable.
 ///
 /// Read through `env_or_override` rather than a bare `std::env::var`, so this
 /// key honors the same runtime-override precedence as the sibling
 /// `connect::DOCKER_HOST_ENV` — one env-reading convention across
 /// `sandbox_process`, not two.
-pub fn sandbox_extra_allowed_domains() -> Vec<String> {
-    env_or_override(SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV)
-        .map(|raw| {
-            raw.split(',')
-                .map(str::trim)
-                .filter(|domain| !domain.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
+pub fn sandbox_extra_allowed_domains() -> Result<Vec<String>, NetworkPolicyError> {
+    let Some(raw) = env_or_override(SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV) else {
+        return Ok(Vec::new());
+    };
+    raw.split(',')
+        .map(str::trim)
+        .filter(|domain| !domain.is_empty())
+        .map(|domain| ironclaw_network::parse_host_pattern(domain).map(|pattern| pattern.host_pattern))
+        .collect()
 }
 
 /// The full sandboxed-shell egress allowlist: [`DEFAULT_SANDBOX_ALLOWED_DOMAINS`]
 /// plus any operator-configured extras from
-/// [`sandbox_extra_allowed_domains`].
-pub fn sandbox_allowed_domains() -> Vec<String> {
-    DEFAULT_SANDBOX_ALLOWED_DOMAINS
+/// [`sandbox_extra_allowed_domains`]. `Err` when an extra domain fails
+/// hostname-shape validation — see [`sandbox_extra_allowed_domains`].
+pub fn sandbox_allowed_domains() -> Result<Vec<String>, NetworkPolicyError> {
+    Ok(DEFAULT_SANDBOX_ALLOWED_DOMAINS
         .iter()
         .map(|domain| (*domain).to_string())
-        .chain(sandbox_extra_allowed_domains())
-        .collect()
+        .chain(sandbox_extra_allowed_domains()?)
+        .collect())
 }
 
 /// [`sandbox_allowed_domains`], expressed as [`NetworkPolicy`] `allowed_targets`
@@ -93,11 +97,18 @@ pub fn sandbox_allowed_domains() -> Vec<String> {
 /// `validate_network_policy_metadata` (which rejects an empty allowlist)
 /// passes, and so the policy documents what the container is actually meant
 /// to reach.
-pub fn sandbox_network_policy() -> NetworkPolicy {
-    NetworkPolicy {
-        allowed_targets: sandbox_allowed_domains()
+///
+/// `Err` propagates a hostname-shape validation failure from
+/// [`sandbox_allowed_domains`] rather than silently dropping the bad entry or
+/// falling back to a narrowed allowlist — callers MUST treat this as a hard
+/// boot-time failure (refuse to start), never as "log and continue with
+/// whatever validated". A silently narrowed sandbox allowlist is invisible
+/// until someone audits traffic; a boot failure is loud and immediate.
+pub fn sandbox_network_policy() -> Result<NetworkPolicy, NetworkPolicyError> {
+    Ok(NetworkPolicy {
+        allowed_targets: sandbox_allowed_domains()?
             .into_iter()
-            .map(|host_pattern| NetworkTargetPattern {
+            .map(|host_pattern| ironclaw_host_api::NetworkTargetPattern {
                 scheme: None,
                 host_pattern,
                 port: None,
@@ -105,7 +116,7 @@ pub fn sandbox_network_policy() -> NetworkPolicy {
             .collect(),
         deny_private_ip_ranges: true,
         max_egress_bytes: None,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -134,7 +145,7 @@ mod tests {
 
     #[test]
     fn sandbox_network_policy_is_non_empty_and_denies_private_ips() {
-        let policy = sandbox_network_policy();
+        let policy = sandbox_network_policy().unwrap();
         assert!(
             !policy.allowed_targets.is_empty(),
             "sandboxed shell network policy must not be the empty (deny-all) default"
@@ -153,7 +164,56 @@ mod tests {
         let _guard = lock_env();
         remove_runtime_env(SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV);
 
-        assert!(sandbox_extra_allowed_domains().is_empty());
+        assert_eq!(sandbox_extra_allowed_domains().unwrap(), Vec::<String>::new());
+    }
+
+    // A bare `*` turns `host_matches_pattern` (ironclaw_network::policy) into
+    // "match every host" — one operator typo would silently convert the
+    // package-registry allowlist into allow-all egress for the one profile
+    // whose entire purpose is holding untrusted code. This must hard-fail,
+    // not silently drop the bad entry: a boot failure is loud, a silently
+    // narrowed allowlist is invisible until someone audits traffic.
+    #[test]
+    fn extra_domains_env_rejects_bare_wildcard() {
+        let _guard = lock_env();
+        set_runtime_env(SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV, "example.com,*");
+
+        let result = sandbox_extra_allowed_domains();
+
+        remove_runtime_env(SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV);
+
+        assert!(
+            result.is_err(),
+            "bare `*` in the extra-domains env must be rejected, not silently allowed"
+        );
+    }
+
+    #[test]
+    fn extra_domains_env_rejects_malformed_hostname() {
+        let _guard = lock_env();
+        set_runtime_env(SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV, "not a host!");
+
+        let result = sandbox_extra_allowed_domains();
+
+        remove_runtime_env(SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sandbox_network_policy_propagates_the_wildcard_rejection() {
+        let _guard = lock_env();
+        set_runtime_env(SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV, "*");
+
+        let result = sandbox_network_policy();
+
+        remove_runtime_env(SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV);
+
+        assert!(
+            result.is_err(),
+            "sandbox_network_policy must hard-fail (not fall back to a \
+             narrowed policy) when the operator-supplied allowlist is invalid"
+        );
     }
 
     #[test]
@@ -167,11 +227,11 @@ mod tests {
             " example.internal , , *.corp.example.com",
         );
 
-        let extras = sandbox_extra_allowed_domains();
+        let extras = sandbox_extra_allowed_domains().unwrap();
         // Asserted while the override is still set: `sandbox_allowed_domains`
         // must *append* to the defaults, not replace them. Clearing first
         // would make a replace-instead-of-chain regression invisible.
-        let all = sandbox_allowed_domains();
+        let all = sandbox_allowed_domains().unwrap();
 
         remove_runtime_env(SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV);
 
