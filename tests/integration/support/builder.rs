@@ -112,11 +112,6 @@ pub(crate) enum StorageReopen {
     },
     Postgres {
         database_url: String,
-        // PostgreSQL-backed matrix cases are serialized within one test
-        // binary. Instrumented coverage runs otherwise start several
-        // containers at once and make later cases fail transiently under
-        // runner resource pressure.
-        _serialization_permit: tokio::sync::OwnedSemaphorePermit,
         // Boxed: the container handle dwarfs the other variants
         // (clippy::large_enum_variant) and is only held for its Drop.
         _container: Box<
@@ -808,32 +803,6 @@ impl RebornIntegrationHarness {
         let run_id = self.submit_turn_async(text).await?;
         self.wait_for_status(run_id, TurnStatus::Completed).await?;
         Ok(run_id)
-    }
-
-    /// Submit one stable inbound event with bounded retries for a retryable
-    /// product-surface rejection. This models an external sender redelivering
-    /// the identical event, so a partially settled first attempt converges
-    /// through the production idempotency ledger.
-    pub async fn submit_turn_with_transient_retry(&self, text: &str) -> HarnessResult<TurnRunId> {
-        let (_, envelope) = self.build_user_envelope(text)?;
-        let mut last_error = None;
-        for _ in 0..3 {
-            match self.workflow.submit_inbound(envelope.clone()).await {
-                Ok(ack) => {
-                    let run_id = Self::run_id_from_ack(ack)?;
-                    self.wait_for_status(run_id, TurnStatus::Completed).await?;
-                    return Ok(run_id);
-                }
-                Err(error) if error.is_retryable() => {
-                    last_error = Some(error);
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-                Err(error) => return Err(error.into()),
-            }
-        }
-        Err(last_error
-            .expect("the bounded retry loop always makes at least one request")
-            .into())
     }
 
     /// Enqueue additional scripted replies AFTER the harness is built — for a
@@ -2149,10 +2118,6 @@ pub(crate) async fn build_storage_composite(
             }
         }
         StorageMode::Postgres => {
-            let serialization_permit = Arc::clone(postgres_test_semaphore())
-                .acquire_owned()
-                .await
-                .map_err(|error| format!("Postgres test semaphore closed unexpectedly: {error}"))?;
             let (container, database_url) = start_postgres_testcontainer().await?;
             let filesystem = Arc::new(ironclaw_filesystem::PostgresRootFilesystem::new(
                 postgres_pool(&database_url)?,
@@ -2167,17 +2132,11 @@ pub(crate) async fn build_storage_composite(
             )?;
             StorageReopen::Postgres {
                 database_url,
-                _serialization_permit: serialization_permit,
                 _container: Box::new(container),
             }
         }
     };
     Ok((Arc::new(composite), reopen))
-}
-
-fn postgres_test_semaphore() -> &'static Arc<tokio::sync::Semaphore> {
-    static SEMAPHORE: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
-    SEMAPHORE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1)))
 }
 
 /// Start a per-`build()` PostgreSQL testcontainer. A provisioning failure is
@@ -2224,19 +2183,13 @@ pub(crate) async fn start_postgres_testcontainer() -> HarnessResult<(
     ))
 }
 
-const POSTGRES_TEST_POOL_MAX_SIZE: usize = 16;
-
 pub(crate) fn postgres_pool(database_url: &str) -> HarnessResult<deadpool_postgres::Pool> {
     let config: tokio_postgres::Config = database_url
         .parse()
         .map_err(|error| format!("testcontainer database URL must parse: {error}"))?;
     let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
     deadpool_postgres::Pool::builder(manager)
-        // A full integration group runs the product, scheduler, process, and
-        // extension stores over this one production filesystem. A small pool
-        // can leave ingress waiting behind background journal and checkpoint
-        // work until the product timeout fires on instrumented CI runners.
-        .max_size(POSTGRES_TEST_POOL_MAX_SIZE)
+        .max_size(4)
         .build()
         .map_err(|error| format!("Postgres pool must build: {error}").into())
 }
@@ -2374,14 +2327,6 @@ mod tests {
                 ..
             })
         ));
-    }
-
-    #[test]
-    fn postgres_pool_has_headroom_for_the_full_runtime_graph() {
-        let pool = postgres_pool("postgres://postgres:postgres@localhost/ironclaw_test")
-            .expect("test pool");
-
-        assert_eq!(pool.status().max_size, POSTGRES_TEST_POOL_MAX_SIZE);
     }
 }
 

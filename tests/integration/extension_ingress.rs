@@ -24,10 +24,7 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -193,19 +190,6 @@ impl AcmeIngress {
         .await
     }
 
-    async fn post_signed_with_transient_retry(&self, body: &str) -> (StatusCode, Vec<u8>) {
-        let mut last = None;
-        for _ in 0..3 {
-            let response = self.post_signed(body).await;
-            if response.0 != StatusCode::SERVICE_UNAVAILABLE {
-                return response;
-            }
-            last = Some(response);
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        last.expect("the bounded retry loop always makes at least one request")
-    }
-
     async fn drain(&self) {
         self.parts.registry.drain().await;
     }
@@ -359,13 +343,8 @@ async fn signed_acme_post_flows_through_the_production_mount_into_a_turn() {
     // The genuine signed message: verified, normalized, durably admitted, and
     // submitted as a REAL turn through the existing workflow.
     let body = message_body("Ev-acme-1", "hello from the acme vendor");
-    let (status, response_body) = ingress.post_signed_with_transient_retry(&body).await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "signed ingress failed: {}",
-        String::from_utf8_lossy(&response_body)
-    );
+    let (status, _) = ingress.post_signed(&body).await;
+    assert_eq!(status, StatusCode::OK);
     ingress.drain().await;
     assert_eq!(
         ingress.accepted_count(),
@@ -400,22 +379,12 @@ async fn duplicate_and_restart_replay_converge_exactly_once(#[case] storage: Sto
     let ingress = AcmeIngress::register(parts.clone(), &inbound_thread);
 
     let body = message_body("Ev-acme-dedupe", "deliver exactly once");
-    let (status, response_body) = ingress.post_signed_with_transient_retry(&body).await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "initial delivery failed: {}",
-        String::from_utf8_lossy(&response_body)
-    );
+    let (status, _) = ingress.post_signed(&body).await;
+    assert_eq!(status, StatusCode::OK);
     // Vendor redelivery of the same event through the same sink: 2xx, no
     // second admission.
-    let (status, response_body) = ingress.post_signed_with_transient_retry(&body).await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "duplicate delivery failed: {}",
-        String::from_utf8_lossy(&response_body)
-    );
+    let (status, _) = ingress.post_signed(&body).await;
+    assert_eq!(status, StatusCode::OK);
     ingress.drain().await;
     assert_eq!(
         ingress.accepted_count(),
@@ -434,13 +403,8 @@ async fn duplicate_and_restart_replay_converge_exactly_once(#[case] storage: Sto
         .await
         .expect("restart thread builds");
     let restarted = AcmeIngress::register(parts, &restarted_thread);
-    let (status, response_body) = restarted.post_signed_with_transient_retry(&body).await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "restart replay failed: {}",
-        String::from_utf8_lossy(&response_body)
-    );
+    let (status, _) = restarted.post_signed(&body).await;
+    assert_eq!(status, StatusCode::OK);
     restarted.drain().await;
     assert_eq!(
         restarted.accepted_count(),

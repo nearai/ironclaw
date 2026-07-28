@@ -489,30 +489,6 @@ impl VendorIngress {
         (status, String::from_utf8_lossy(&body).into_owned())
     }
 
-    /// Model a vendor's bounded redelivery contract for transient 503s.
-    ///
-    /// PostgreSQL may reject one admission retryably while background
-    /// lifecycle reconciliation is settling. The router deliberately returns
-    /// 503 so the identical signed event is retried through the durable
-    /// idempotency ledger; a persistent failure still fails after three tries.
-    async fn post_with_transient_retry(
-        &self,
-        route: &str,
-        body: &str,
-        headers: Vec<(&'static str, String)>,
-    ) -> (StatusCode, String) {
-        let mut last = None;
-        for _ in 0..3 {
-            let response = self.post_with_body(route, body, headers.clone()).await;
-            if response.0 != StatusCode::SERVICE_UNAVAILABLE {
-                return response;
-            }
-            last = Some(response);
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        last.expect("the bounded retry loop always makes at least one request")
-    }
-
     /// Await every spawned post-admission observer — the full outbound
     /// delivery runs inside those tasks, so after this the wire and the
     /// outbound store are settled.
@@ -1121,8 +1097,8 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
 
     let timestamp = now_unix().to_string();
     let signature = slack_signature(&timestamp, &body);
-    let (status, response_body) = ingress
-        .post_with_transient_retry(
+    let status = ingress
+        .post(
             SLACK_ROUTE,
             &body,
             vec![
@@ -1131,13 +1107,8 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
             ],
         )
         .await;
+    assert_eq!(status, StatusCode::OK, "the signed event must be accepted");
     ingress.drain().await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "the signed event must be accepted; response: {response_body}; admission errors: {:?}",
-        observer.errors()
-    );
     assert_eq!(
         observer.accepted_count(),
         1,
@@ -1508,8 +1479,8 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
         "a rejected update must not add a turn delivery; earlier pairing feedback is preserved"
     );
 
-    let (status, response_body) = ingress
-        .post_with_transient_retry(
+    let status = ingress
+        .post(
             TELEGRAM_ROUTE,
             &body,
             vec![(
@@ -1518,11 +1489,7 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
             )],
         )
         .await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "the signed update must be accepted; response: {response_body}"
-    );
+    assert_eq!(status, StatusCode::OK, "the signed update must be accepted");
 
     // The model is deliberately paused so the generic observer must surface
     // a working indicator through the real Telegram adapter before the final

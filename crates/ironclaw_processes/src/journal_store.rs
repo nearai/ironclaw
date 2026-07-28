@@ -243,47 +243,57 @@ where
             };
             let mut state = std::mem::take(&mut loaded.state);
             let prefix = processes_prefix()?;
-            let reservation_count = command.cursor_reservation_count(state.processes.len());
+            // Determine the exact number of journal entries before touching the
+            // global cursor allocator. Polling an empty queue used to reserve
+            // `max_processes` cursors despite producing no entries, so idle
+            // supervisors continuously contended with real submissions.
+            let mut preview = state.clone();
+            preview.apply_command(command.clone())?;
+            let reservation_count = command.cursor_reservation_count(preview.journal.len());
             let sequence_path = self
                 .filesystem
                 .resolve(&ResourceScope::system(), &process_journal_sequence_path()?)?;
-            let mut cursor_txn = match self
-                .filesystem
-                .begin(&ResourceScope::system(), &prefix)
-                .await
-            {
-                Ok(txn) => txn,
-                Err(error) if rows::retryable_transaction_error(&error) => {
-                    rows::retry_transaction(attempt).await;
-                    continue;
-                }
-                Err(error) => return Err(error.into()),
-            };
             let mut first_cursor = None;
-            for _ in 0..reservation_count {
-                let reserved = match cursor_txn.reserve_sequence(&sequence_path).await {
-                    Ok(reserved) => reserved,
+            if reservation_count > 0 {
+                let mut cursor_txn = match self
+                    .filesystem
+                    .begin(&ResourceScope::system(), &prefix)
+                    .await
+                {
+                    Ok(txn) => txn,
                     Err(error) if rows::retryable_transaction_error(&error) => {
-                        cursor_txn.rollback().await;
                         rows::retry_transaction(attempt).await;
-                        continue 'transaction;
+                        continue;
                     }
-                    Err(error) => {
-                        cursor_txn.rollback().await;
-                        return Err(error.into());
-                    }
+                    Err(error) => return Err(error.into()),
                 };
-                first_cursor.get_or_insert(reserved.get());
-            }
-            match cursor_txn.commit().await {
-                Ok(()) => {}
-                Err(error) if rows::retryable_transaction_error(&error) => {
-                    rows::retry_transaction(attempt).await;
-                    continue;
+                for _ in 0..reservation_count {
+                    let reserved = match cursor_txn.reserve_sequence(&sequence_path).await {
+                        Ok(reserved) => reserved,
+                        Err(error) if rows::retryable_transaction_error(&error) => {
+                            cursor_txn.rollback().await;
+                            rows::retry_transaction(attempt).await;
+                            continue 'transaction;
+                        }
+                        Err(error) => {
+                            cursor_txn.rollback().await;
+                            return Err(error.into());
+                        }
+                    };
+                    first_cursor.get_or_insert(reserved.get());
                 }
-                Err(error) => return Err(error.into()),
+                match cursor_txn.commit().await {
+                    Ok(()) => {}
+                    Err(error) if rows::retryable_transaction_error(&error) => {
+                        rows::retry_transaction(attempt).await;
+                        continue;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
             }
-            state.next_cursor = first_cursor.unwrap_or(1);
+            if let Some(first_cursor) = first_cursor {
+                state.next_cursor = first_cursor;
+            }
             // Cursor reservation commits in its own short transaction. It may
             // leave a contiguous range unused after a later CAS retry, but it
             // does not hold the global sequence-row lock while materialized

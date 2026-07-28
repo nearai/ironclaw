@@ -351,6 +351,28 @@ async fn process_journal_pages_database_rows_beyond_backend_page_limit() {
 }
 
 #[tokio::test]
+async fn empty_claim_does_not_consume_process_journal_cursors() {
+    let store = ProcessJournalStore::new(in_memory_backed_processes_filesystem());
+
+    for _ in 0..3 {
+        let claimed = store
+            .claim_next_processes(ClaimProcessesRequest {
+                worker_id: ProcessWorkerId::from_trusted("idle-worker"),
+                scope_filter: None,
+                process_id_filter: None,
+                process_kind_filter: Some(ProcessKind::AgentTurn),
+                max_processes: 128,
+            })
+            .await
+            .expect("empty claim succeeds");
+        assert!(claimed.is_empty());
+    }
+
+    let submitted = submit_internal_process(&store, &scope(), ProcessId::new()).await;
+    assert_eq!(submitted.journal_cursor, ProcessJournalCursor(1));
+}
+
+#[tokio::test]
 async fn explicit_legacy_materialized_state_imports_before_row_native_commands() {
     let filesystem = in_memory_backed_processes_filesystem();
     let scope = scope();

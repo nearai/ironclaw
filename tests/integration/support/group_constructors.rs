@@ -397,18 +397,6 @@ impl RebornIntegrationGroupBuilder {
     /// Build a delivery-proof group. See
     /// [`RebornIntegrationGroup::extension_delivery`].
     pub async fn extension_delivery(mut self) -> HarnessResult<RebornIntegrationGroup> {
-        // These groups assemble the complete extension lifecycle, ingress,
-        // scheduler, and delivery runtime. Running several concurrently under
-        // llvm-cov can starve a PostgreSQL admission past the production
-        // ingress deadline even though the backend is healthy. Serialize this
-        // resource-intensive test preset within each test binary; backend
-        // concurrency is covered by focused storage tests.
-        let execution_permit = Arc::clone(extension_delivery_test_semaphore())
-            .acquire_owned()
-            .await
-            .map_err(|error| {
-                format!("extension-delivery test semaphore closed unexpectedly: {error}")
-            })?;
         let base = self.build_base().await?;
         let host_runtime = build_group_capability_with_base(
             super::super::harness::profiles::extension::extension_delivery_tools_profile()?,
@@ -433,9 +421,7 @@ impl RebornIntegrationGroupBuilder {
             )?;
         self.channel_connection = Some(Arc::new(channel_connection));
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
-        let mut group = self.into_group(base, capability).await?;
-        group._extension_delivery_permit = Some(execution_permit);
-        Ok(group)
+        self.into_group(base, capability).await
     }
 
     /// Build a visibility-probe group. See
@@ -633,9 +619,4 @@ impl RebornIntegrationGroupBuilder {
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.build_with_capability(capability).await
     }
-}
-
-fn extension_delivery_test_semaphore() -> &'static Arc<tokio::sync::Semaphore> {
-    static SEMAPHORE: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
-    SEMAPHORE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1)))
 }

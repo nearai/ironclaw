@@ -428,9 +428,6 @@ impl GroupCapability {
 /// file owns.
 pub struct RebornIntegrationGroup {
     pub(crate) shared: Arc<GroupSharedStorage>,
-    /// Keeps resource-intensive delivery groups from competing with each
-    /// other inside one coverage-instrumented test binary.
-    pub(crate) _extension_delivery_permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 impl RebornIntegrationGroup {
@@ -1128,7 +1125,6 @@ impl RebornIntegrationGroupBuilder {
                 real_gate_dispatch_services: self.real_gate_dispatch_services,
                 channel_connection: self.channel_connection,
             }),
-            _extension_delivery_permit: None,
         })
     }
 }

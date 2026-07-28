@@ -49,11 +49,13 @@ pub(super) enum StoredProcessCommand {
 }
 
 impl StoredProcessCommand {
-    pub(super) fn cursor_reservation_count(&self, loaded_process_count: usize) -> usize {
+    pub(super) fn cursor_reservation_count(&self, generated_entry_count: usize) -> usize {
         match self {
-            Self::Claim { request, .. } => request.max_processes.max(1),
-            Self::RecoverExpired(_) => loaded_process_count.max(1),
-            _ => 1,
+            // Legacy import preserves its own cursor assignments, but reserves
+            // once so a fresh backend's sequence allocator is initialized for
+            // the first row-native command.
+            Self::ImportLegacyState(_) => 1,
+            _ => generated_entry_count,
         }
     }
 

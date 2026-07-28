@@ -181,22 +181,6 @@ impl IngressResponse {
     }
 }
 
-#[cfg(feature = "test-support")]
-fn error_with_diagnostic(status: u16, category: &str, diagnostic: &str) -> IngressResponse {
-    let body = serde_json::json!({
-        "error": category,
-        "diagnostic": diagnostic,
-    });
-    IngressResponse {
-        status,
-        content_type: Some("application/json".to_string()),
-        body: match serde_json::to_vec(&body) {
-            Ok(body) => body,
-            Err(_) => b"{\"error\":\"temporarily_unavailable\"}".to_vec(),
-        },
-    }
-}
-
 /// Injected router dependencies (composition supplies concrete ports).
 pub struct ExtensionIngressRouterDeps {
     pub secrets: Arc<dyn IngressSecretsPort>,
@@ -469,9 +453,6 @@ impl ExtensionIngressRouter {
                         error = %error,
                         "inbound admission failed retryably"
                     );
-                    #[cfg(feature = "test-support")]
-                    return error_with_diagnostic(503, "temporarily_unavailable", &error.reason);
-                    #[cfg(not(feature = "test-support"))]
                     return IngressResponse::error(503, "temporarily_unavailable");
                 }
                 Err(error) => {
