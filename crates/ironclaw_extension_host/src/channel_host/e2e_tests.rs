@@ -453,12 +453,10 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
     };
     let assembly = GenericChannelHostAssembly::start(deps);
     let command_executions = Arc::new(RecordingCommandExecutionSurface::default());
-    assert!(
-        assembly.set_product_command_surface(
-            Arc::clone(&command_executions) as Arc<dyn ironclaw_host_api::ProductSurface>
-        ),
-        "test command surface fills exactly once"
+    let command_surface_set = assembly.set_product_command_surface(
+        Arc::clone(&command_executions) as Arc<dyn ironclaw_host_api::ProductSurface>
     );
+    assert!(command_surface_set); // safety: this file is included only by cfg(test).
     // Vendor extras exactly as the binary's channel-extension binding feeds
     // them: the preference-target codec — no storage-root override.
     assembly

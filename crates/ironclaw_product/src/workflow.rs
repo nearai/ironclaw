@@ -1704,9 +1704,9 @@ fn product_command_operation(
             .map_err(product_command_internal_error)?,
             "status".to_string(),
         )),
-        ProductCommand::Unknown { .. } => {
-            unreachable!("unknown product commands are rejected before operation mapping")
-        }
+        ProductCommand::Unknown { name, .. } => Err(ProductSurfaceFailure::UnsupportedActionKind {
+            kind: format!("unknown_product_command:{name}"),
+        }),
     }
 }
 
