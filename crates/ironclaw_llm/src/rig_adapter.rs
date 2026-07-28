@@ -1869,6 +1869,22 @@ mod tests {
                 "{message:?} is not an auth failure, but was classified as one — \
                  the run would terminate telling the user to fix their API key"
             );
+            // Through the caller, because the predicate is not what the run
+            // acts on: `map_rig_error` turns it into the error variant, and
+            // `retry::is_retryable` keys off that variant. A predicate fix
+            // that failed to change the classification would leave the bug
+            // exactly where it was.
+            let error = map_rig_error("openai", message);
+            assert!(
+                !matches!(error, LlmError::AuthFailed { .. }),
+                "{message:?} mapped to {error:?}; a transient condition must not \
+                 become a terminal auth failure"
+            );
+            assert!(
+                crate::retry::is_retryable(&error),
+                "{message:?} mapped to {error:?}, which is not retried — this is \
+                 the rate limit the fix exists for, and it would have cleared"
+            );
         }
     }
 
@@ -1885,6 +1901,18 @@ mod tests {
             assert!(
                 is_auth_error_message(message),
                 "{message:?} is a genuine auth failure and must be classified as one"
+            );
+            // The contract the run depends on: a real 401/403 becomes
+            // `AuthFailed`, which is neither retried nor allowed to trip the
+            // circuit breaker.
+            let error = map_rig_error("openai", message);
+            assert!(
+                matches!(error, LlmError::AuthFailed { ref provider } if provider == "openai"),
+                "{message:?} mapped to {error:?}, not AuthFailed"
+            );
+            assert!(
+                !crate::retry::is_retryable(&error),
+                "{message:?} is a bad credential; retrying it cannot help"
             );
         }
     }
