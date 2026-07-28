@@ -11,6 +11,7 @@ import json
 
 import aiohttp
 import httpx
+import pytest
 
 from helpers import REBORN_V2_AUTH_TOKEN, sse_stream, wait_for_sse_line
 from reborn_webui_harness import (
@@ -21,6 +22,76 @@ from reborn_webui_harness import (
 )
 
 pytest_plugins = ["reborn_webui_harness"]
+
+
+async def _next_sse_event(response, *, timeout: float = 45) -> dict:
+    """Read one complete SSE event block from a served response."""
+    event_id = None
+    event_name = None
+    data_lines = []
+    async with asyncio.timeout(timeout):
+        while True:
+            raw_line = await response.content.readline()
+            if not raw_line:
+                raise AssertionError("SSE stream closed before an event arrived")
+            line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+            if not line:
+                if not data_lines:
+                    continue
+                return {
+                    "id": event_id,
+                    "event": event_name,
+                    "data": json.loads("\n".join(data_lines)),
+                }
+            if line.startswith(":"):
+                continue
+            field, separator, value = line.partition(":")
+            if not separator:
+                value = ""
+            elif value.startswith(" "):
+                value = value[1:]
+            if field == "id":
+                event_id = value
+            elif field == "event":
+                event_name = value
+            elif field == "data":
+                data_lines.append(value)
+
+
+def _event_matches_run_status(event: dict, run_id: str, status: str) -> bool:
+    encoded = json.dumps(event["data"], separators=(",", ":"))
+    return run_id in encoded and f'"status":"{status}"' in encoded
+
+
+def _sse_payload_signature(event: dict) -> str:
+    """Compare logical frames while allowing a replay cursor to be re-based."""
+    payload = dict(event["data"])
+    payload.pop("cursor", None)
+    if payload.get("type") in {"projection_snapshot", "projection_update"}:
+        payload["type"] = "projection_state"
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+async def _collect_sse_until_run_status(
+    response,
+    run_id: str,
+    status: str,
+    *,
+    timeout: float = 60,
+) -> list[dict]:
+    events = []
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        event = await _next_sse_event(
+            response,
+            timeout=deadline - asyncio.get_running_loop().time(),
+        )
+        events.append(event)
+        if _event_matches_run_status(event, run_id, status):
+            return events
+    raise AssertionError(
+        f"Timed out waiting for run {run_id} to reach {status}; events={events}"
+    )
 
 
 async def _submit_message(
@@ -281,6 +352,141 @@ async def test_reborn_v2_sse_auth_scope_and_capacity_served(reborn_v2_server):
                 stream.close()
 
 
+async def test_reborn_v2_sse_reconnect_resumes_without_gap_or_duplicate_served(
+    reborn_v2_server,
+):
+    headers = reborn_bearer_headers()
+    async with httpx.AsyncClient(headers=headers) as client:
+        thread_id = await create_thread(client, reborn_v2_server)
+        events_path = f"/api/webchat/v2/threads/{thread_id}/events"
+
+        async with sse_stream(
+            reborn_v2_server,
+            path=events_path,
+            token=REBORN_V2_AUTH_TOKEN,
+            timeout=65,
+        ) as initial_stream:
+            assert initial_stream.status == 200
+            submitted = await _submit_message(
+                client,
+                reborn_v2_server,
+                thread_id,
+                "served Last-Event-ID replay: what is 2+2?",
+            )
+            initial_events = await _collect_sse_until_run_status(
+                initial_stream,
+                submitted["run_id"],
+                "completed",
+            )
+
+        initial_cursor_events = [event for event in initial_events if event["id"]]
+        initial_ids = [event["id"] for event in initial_cursor_events]
+        assert len(initial_ids) >= 2, initial_events
+        assert len(initial_ids) == len(set(initial_ids)), initial_ids
+        replay_from = initial_ids[0]
+        expected_terminal_payload = _sse_payload_signature(initial_events[-1])
+
+        async with sse_stream(
+            reborn_v2_server,
+            path=events_path,
+            token=REBORN_V2_AUTH_TOKEN,
+            headers={"Last-Event-ID": replay_from},
+            timeout=45,
+        ) as resumed_stream:
+            assert resumed_stream.status == 200
+            replayed_events = await _collect_sse_until_run_status(
+                resumed_stream,
+                submitted["run_id"],
+                "completed",
+                timeout=40,
+            )
+
+        replayed_cursor_events = [event for event in replayed_events if event["id"]]
+        replayed_ids = [event["id"] for event in replayed_cursor_events]
+        assert len(replayed_ids) == len(set(replayed_ids)), replayed_ids
+        assert replay_from not in replayed_ids
+        # Replay may compact live updates into a snapshot. The logical terminal
+        # projection must still be identical even when the frame kind changes.
+        assert _sse_payload_signature(replayed_events[-1]) == expected_terminal_payload
+
+
+async def test_reborn_v2_websocket_origin_projection_and_shared_capacity_served(
+    reborn_v2_server,
+):
+    headers = reborn_bearer_headers()
+    async with httpx.AsyncClient(headers=headers) as client:
+        thread_id = await create_thread(client, reborn_v2_server)
+
+    ws_base = reborn_v2_server.replace("http://", "ws://", 1).replace(
+        "https://", "wss://", 1
+    )
+    ws_url = f"{ws_base}/api/webchat/v2/threads/{thread_id}/ws"
+    events_url = f"{reborn_v2_server}/api/webchat/v2/threads/{thread_id}/events"
+    timeout = aiohttp.ClientTimeout(total=60, sock_read=45)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        with pytest.raises(aiohttp.WSServerHandshakeError) as rejected:
+            await session.ws_connect(
+                ws_url,
+                headers=headers,
+                origin="https://attacker.invalid",
+            )
+        assert rejected.value.status == 403
+
+        websocket = await session.ws_connect(
+            ws_url,
+            headers=headers,
+            origin=reborn_v2_server,
+        )
+        streams = []
+        try:
+            for _ in range(2):
+                response = await session.get(
+                    events_url,
+                    headers={
+                        **headers,
+                        "Accept": "text/event-stream",
+                    },
+                )
+                assert response.status == 200
+                streams.append(response)
+
+            exhausted = await session.get(
+                events_url,
+                headers={
+                    **headers,
+                    "Accept": "text/event-stream",
+                },
+            )
+            try:
+                assert exhausted.status == 429
+                exhausted_body = await exhausted.json()
+                assert exhausted_body["error"] == "rate_limited"
+                assert exhausted_body["retryable"] is True
+            finally:
+                exhausted.close()
+
+            async with httpx.AsyncClient(headers=headers) as client:
+                submitted = await _submit_message(
+                    client,
+                    reborn_v2_server,
+                    thread_id,
+                    "served WebSocket projection: what is 2+2?",
+                )
+
+            async with asyncio.timeout(45):
+                while True:
+                    message = await websocket.receive()
+                    assert message.type == aiohttp.WSMsgType.TEXT, message
+                    frame = json.loads(message.data)
+                    if submitted["run_id"] in json.dumps(frame):
+                        assert frame.get("projection_cursor"), frame
+                        break
+        finally:
+            for stream in streams:
+                stream.close()
+            await websocket.close()
+
+
 async def test_reborn_v2_cancel_and_gate_control_routes_served(reborn_v2_server):
     headers = reborn_bearer_headers()
     async with httpx.AsyncClient(headers=headers) as client:
@@ -451,3 +657,65 @@ async def test_reborn_v2_cancel_delayed_mock_llm_inference_releases_thread(
         )
 
     assert assistant["content"] == "The answer is 4."
+
+
+async def test_reborn_v2_protocol_error_and_limit_boundaries_served(
+    reborn_v2_server,
+):
+    headers = reborn_bearer_headers()
+    async with httpx.AsyncClient(headers=headers) as client:
+        malformed_thread = await client.get(
+            f"{reborn_v2_server}/api/webchat/v2/threads/"
+            "__ironclaw_reserved/timeline",
+            timeout=15,
+        )
+        assert malformed_thread.status_code == 400
+        assert malformed_thread.json() == {
+            "error": "invalid_request",
+            "kind": "validation",
+            "retryable": False,
+            "field": "thread_id",
+            "validation_code": "invalid_id",
+        }
+
+        missing_action_id = await client.post(
+            f"{reborn_v2_server}/api/webchat/v2/threads",
+            json={},
+            timeout=15,
+        )
+        assert missing_action_id.status_code == 400
+        missing_body = missing_action_id.json()
+        assert missing_body["error"] == "invalid_request"
+        assert missing_body["field"] == "client_action_id"
+        assert missing_body["validation_code"] == "missing_field"
+
+        oversized_body = await client.post(
+            f"{reborn_v2_server}/api/webchat/v2/threads",
+            json={
+                "client_action_id": client_action_id(),
+                "padding": "x" * (16 * 1024),
+            },
+            timeout=15,
+        )
+        assert oversized_body.status_code == 413
+        assert oversized_body.text == "Request body exceeds the route's body limit."
+
+        retry_url = (
+            f"{reborn_v2_server}/api/webchat/v2/threads/thread-rate-limit/"
+            "runs/00000000-0000-0000-0000-000000000000/retry"
+        )
+        for _ in range(60):
+            accepted_by_limiter = await client.post(
+                retry_url,
+                json={"client_action_id": client_action_id()},
+                timeout=15,
+            )
+            assert accepted_by_limiter.status_code != 429
+
+        rate_limited = await client.post(
+            retry_url,
+            json={"client_action_id": client_action_id()},
+            timeout=15,
+        )
+        assert rate_limited.status_code == 429
+        assert rate_limited.text == "Rate limit exceeded. Try again shortly."
