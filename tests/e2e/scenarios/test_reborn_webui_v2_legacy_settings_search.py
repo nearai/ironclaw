@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 
 from playwright.async_api import expect
 
-from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2
+from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2, capture_native_dialogs
 from reborn_webui_harness import (
     reborn_v2_browser,  # noqa: F401 - imported fixture
     reborn_v2_server,  # noqa: F401 - imported fixture
@@ -454,13 +454,7 @@ async def test_reborn_legacy_settings_skills_search_empty_state(
     try:
         page = harness["page"]
         search = harness["search"]
-        native_dialogs: list[str] = []
-
-        async def dismiss_native_dialog(dialog) -> None:
-            native_dialogs.append(dialog.type)
-            await dialog.dismiss()
-
-        page.on("dialog", dismiss_native_dialog)
+        native_dialogs = capture_native_dialogs(page)
 
         await expect(page.get_by_text("markdown-helper", exact=True)).to_be_visible(
             timeout=5000
@@ -638,13 +632,7 @@ async def test_reborn_legacy_settings_inference_edit_and_delete_custom_provider(
     try:
         page = harness["page"]
         legacy_card = _provider_card(page, "legacy-local")
-        native_dialogs: list[str] = []
-
-        async def dismiss_native_dialog(dialog) -> None:
-            native_dialogs.append(dialog.type)
-            await dialog.dismiss()
-
-        page.on("dialog", dismiss_native_dialog)
+        native_dialogs = capture_native_dialogs(page)
         await expect(legacy_card).to_be_visible(timeout=5000)
 
         await legacy_card.get_by_test_id(SEL_V2["llm_provider_disclosure"]).click()
@@ -676,7 +664,7 @@ async def test_reborn_legacy_settings_inference_edit_and_delete_custom_provider(
 
         await legacy_card.get_by_role("button", name="Delete").click()
         confirmation = page.get_by_role(
-            "dialog", name='Delete provider "legacy-local"?'
+            "dialog", name='Delete provider "Legacy Local"?'
         )
         await expect(confirmation).to_be_visible()
         await confirmation.locator(SEL_V2["confirm_dialog_cancel"]).click()

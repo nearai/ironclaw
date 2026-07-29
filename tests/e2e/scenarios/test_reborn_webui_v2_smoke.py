@@ -34,7 +34,7 @@ import aiohttp
 import httpx
 import pytest
 from playwright.async_api import expect
-from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2
+from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2, capture_native_dialogs
 from reborn_webui_harness import (
     USER_ID,
     create_thread as _create_thread,
@@ -2082,13 +2082,7 @@ async def test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context(
         context.locator(SEL_V2["logs_context_chip"].format(key="source"))
     ).to_contain_text("slack")
 
-    native_dialogs: list[str] = []
-
-    async def dismiss_native_dialog(dialog) -> None:
-        native_dialogs.append(dialog.type)
-        await dialog.dismiss()
-
-    reborn_v2_page.on("dialog", dismiss_native_dialog)
+    native_dialogs = capture_native_dialogs(reborn_v2_page)
     clear_button = reborn_v2_page.get_by_role("button", name="Clear", exact=True)
     await clear_button.click()
     confirmation = reborn_v2_page.get_by_role(
@@ -2326,13 +2320,7 @@ async def test_reborn_v2_thread_delete_uses_shared_confirmation_dialog(
     async with httpx.AsyncClient(headers=headers) as client:
         thread_id = await _create_thread(client, reborn_v2_server)
 
-    native_dialogs: list[str] = []
-
-    async def dismiss_native_dialog(dialog) -> None:
-        native_dialogs.append(dialog.type)
-        await dialog.dismiss()
-
-    reborn_v2_page.on("dialog", dismiss_native_dialog)
+    native_dialogs = capture_native_dialogs(reborn_v2_page)
     await reborn_v2_page.goto(
         f"{reborn_v2_server}/chat?token={REBORN_V2_AUTH_TOKEN}"
     )

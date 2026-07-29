@@ -227,6 +227,19 @@ EMULATE_GITHUB_SECONDARY_BEARER = "ghp_emulate_github_secondary_token"
 # which targets the legacy `ironclaw` web channel.
 REBORN_V2_AUTH_TOKEN = "e2e-reborn-v2-bearer-token-0123456789abcdef"
 
+
+def capture_native_dialogs(page) -> list[str]:
+    """Dismiss and record browser-native dialogs opened by a page."""
+    native_dialogs: list[str] = []
+
+    async def dismiss_native_dialog(dialog) -> None:
+        native_dialogs.append(dialog.type)
+        await dialog.dismiss()
+
+    page.on("dialog", dismiss_native_dialog)
+    return native_dialogs
+
+
 # Selectors for the Reborn WebUI v2 React SPA (served at /). The shell
 # DOM differs entirely from the legacy gateway in SEL, so keep these separate.
 SEL_V2 = {
