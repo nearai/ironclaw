@@ -133,6 +133,6 @@ Open PRs stay open: #6691 (composition builders) is directionally identical but 
 ## How to review
 
 - Skim this file, then read [PROPOSAL.md](PROPOSAL.md) §1–§5 for the argument and §8.3 for the exception-elimination proof.
-- Dive into your family via [families/](families/) — each file draws the hard line around its family (identity, what makes it distinct from its neighbors) and carries the ten-field contract for every crate in it (owns / never / deps / ports / security role / crate-vs-module / migration delta).
+- Dive into your family via [families/](families/) — each file is a **forward-looking specification** (the architecture as designed, no migration talk): the hard line around the family, what distinguishes it from each neighbor, and the full contract for every crate in it (purpose / owns / never contains / public surface / dependency direction / security role / why-a-crate). Migration and evidence stay in PROPOSAL/CHECKLIST/PLAN.
 - Challenge the [CHECKLIST.md](CHECKLIST.md): it is the definition of done — if you think something is missing, it goes there.
 - Argue sequencing in [PLAN.md](PLAN.md): waves, gates, and PR-sizing rules; nothing there is sacred except the ordering constraints called out as load-bearing.
