@@ -224,6 +224,19 @@ pub(crate) struct GeminiResponseMeta {
     pub(crate) total_token_count: Option<u32>,
 }
 
+impl GeminiResponseMeta {
+    fn is_empty(&self) -> bool {
+        self.model_version.is_none()
+            && self.prompt_feedback.is_none()
+            && self.grounding_metadata.is_none()
+            && self.citation_metadata.is_none()
+            && self.consumed_credits.is_empty()
+            && self.remaining_credits.is_empty()
+            && self.cached_content_token_count.is_none()
+            && self.total_token_count.is_none()
+    }
+}
+
 /// Token representation matching Node.js `Credentials` format from `google-auth-library`
 /// usually stored in `~/.gemini/oauth_creds.json`
 #[derive(Clone, Serialize, Deserialize)]
@@ -948,6 +961,52 @@ impl GeminiOauthProvider {
         })
     }
 
+    fn map_http_error(
+        &self,
+        status: reqwest::StatusCode,
+        body: &str,
+        parsed_body: &serde_json::Value,
+    ) -> LlmError {
+        let message = parsed_body
+            .get("error")
+            .and_then(|error| error.get("message"))
+            .and_then(|message| message.as_str())
+            .unwrap_or(body);
+        crate::error::map_provider_http_error(crate::error::ProviderHttpError {
+            adapter: crate::error::ProductionModelAdapter::GeminiOauth,
+            model: &self.config.model,
+            status: status.as_u16(),
+            body: message,
+            retry_after: Self::parse_retry_after(message),
+        })
+    }
+
+    async fn error_from_http_response(
+        &self,
+        response: reqwest::Response,
+    ) -> Result<LlmError, LlmError> {
+        let status = response.status();
+        let body_bytes = crate::error::read_bounded_provider_error_body(response)
+            .await
+            .map_err(|error| LlmError::RequestFailed {
+                provider: "gemini_oauth".to_string(),
+                reason: format!("Failed to read response body: {error}"),
+            })?;
+        let body = String::from_utf8_lossy(&body_bytes);
+        let parsed_body = if self.uses_cloud_code_api() {
+            let aggregate = Self::aggregate_cloud_code_sse(&body);
+            if !aggregate.meta.is_empty()
+                && let Ok(mut meta) = self.last_response_meta.lock()
+            {
+                *meta = aggregate.meta.clone();
+            }
+            aggregate.response.unwrap_or_else(|| serde_json::json!({}))
+        } else {
+            serde_json::from_slice(&body_bytes).unwrap_or_else(|_| serde_json::json!({}))
+        };
+        Ok(self.map_http_error(status, &body, &parsed_body))
+    }
+
     /// Inject thought signatures into model functionCall parts in the active loop.
     /// This prevents 400 errors from Gemini 3.x preview APIs.
     /// Mirrors `ensureActiveLoopHasThoughtSignatures` from the official Gemini CLI.
@@ -1255,7 +1314,7 @@ impl GeminiOauthProvider {
 
             let response = self
                 .http_client
-                .post(&url)
+                .post(url)
                 .headers(headers)
                 .json(&request_body)
                 .send()
@@ -1266,6 +1325,24 @@ impl GeminiOauthProvider {
                 })?;
 
             let status = response.status();
+            if status.as_u16() == 401 && allow_retry {
+                warn!(
+                    "Gemini OAuth request failed with 401. Force-refreshing token and retrying..."
+                );
+                if let Err(e) = self.cred_manager.force_refresh().await {
+                    error!("Failed to force-refresh token: {}", e);
+                    return Err(LlmError::SessionRenewalFailed {
+                        provider: "gemini_oauth".to_string(),
+                        reason: format!("OAuth refresh after HTTP 401 failed: {e}"),
+                    });
+                }
+                allow_retry = false;
+                continue;
+            }
+            if !status.is_success() {
+                return Err(self.error_from_http_response(response).await?);
+            }
+
             let body_bytes = response
                 .bytes()
                 .await
@@ -1296,39 +1373,16 @@ impl GeminiOauthProvider {
                 success = true;
             }
 
-            if !status.is_success() || !success {
+            if !success {
                 let err_msg = final_response
                     .get("error")
                     .and_then(|e| e.get("message"))
                     .and_then(|m| m.as_str())
                     .unwrap_or(&body_str);
 
-                if status.as_u16() == 401 && allow_retry {
-                    warn!(
-                        "Gemini OAuth request failed with 401. Force-refreshing token and retrying..."
-                    );
-                    if let Err(e) = self.cred_manager.force_refresh().await {
-                        error!("Failed to force-refresh token: {}", e);
-                        return Err(LlmError::RequestFailed {
-                            provider: "gemini_oauth".to_string(),
-                            reason: format!("Auth error 401 and refresh failed: {}", e),
-                        });
-                    }
-                    allow_retry = false;
-                    continue;
-                }
-
-                if status.as_u16() == 429 {
-                    let retry_after = Self::parse_retry_after(err_msg);
-                    return Err(LlmError::RateLimited {
-                        provider: "gemini_oauth".to_string(),
-                        retry_after,
-                    });
-                }
-
                 return Err(LlmError::InvalidResponse {
                     provider: "gemini_oauth".to_string(),
-                    reason: format!("HTTP {}: {}", status.as_u16(), err_msg),
+                    reason: err_msg.to_string(),
                 });
             }
 
@@ -2048,6 +2102,10 @@ impl GeminiOauthProvider {
 
 #[async_trait::async_trait]
 impl LlmProvider for GeminiOauthProvider {
+    fn provider_id(&self) -> String {
+        "gemini_oauth".to_string()
+    }
+
     fn model_name(&self) -> &str {
         &self.config.model
     }
@@ -2168,6 +2226,105 @@ impl LlmProvider for GeminiOauthProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn adapter_response_path_maps_oauth_http_413_to_context_overflow() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let provider = GeminiOauthProvider::new(GeminiOauthConfig {
+            model: "gemini-2.5-flash".to_string(),
+            credentials_path: PathBuf::from("unused-test-credentials.json"),
+        })
+        .expect("Gemini provider");
+        let body = r#"{"error":{"status":"INVALID_ARGUMENT","message":"request too large"}}"#;
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener");
+        let url = format!(
+            "http://{}",
+            listener.local_addr().expect("loopback address")
+        );
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let response = format!(
+                "HTTP/1.1 413 Payload Too Large\r\ncontent-type: application/json\r\n\
+                 content-length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write error response");
+        });
+        let response = reqwest::get(url).await.expect("loopback response");
+        let error = provider
+            .error_from_http_response(response)
+            .await
+            .expect("adapter reads error response");
+        server.await.expect("loopback server");
+
+        assert!(matches!(
+            error,
+            LlmError::ContextLengthExceeded { used: 0, limit: 0 }
+        ));
+    }
+
+    #[tokio::test]
+    async fn non_sse_error_does_not_erase_last_cloud_code_response_metadata() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let provider = GeminiOauthProvider::new(GeminiOauthConfig {
+            model: "gemini-2.5-flash".to_string(),
+            credentials_path: PathBuf::from("unused-test-credentials.json"),
+        })
+        .expect("Gemini provider");
+        provider
+            .last_response_meta
+            .lock()
+            .expect("metadata lock")
+            .model_version = Some("gemini-2.5-flash-001".to_string());
+
+        let body = r#"{"error":{"message":"permission denied"}}"#;
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener");
+        let url = format!(
+            "http://{}",
+            listener.local_addr().expect("loopback address")
+        );
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let response = format!(
+                "HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\n\
+                 content-length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write error response");
+        });
+
+        let response = reqwest::get(url).await.expect("loopback response");
+        let error = provider
+            .error_from_http_response(response)
+            .await
+            .expect("adapter reads error response");
+        server.await.expect("loopback server");
+
+        assert!(matches!(error, LlmError::AuthFailed { .. }));
+        assert_eq!(
+            provider
+                .last_response_meta
+                .lock()
+                .expect("metadata lock")
+                .model_version
+                .as_deref(),
+            Some("gemini-2.5-flash-001")
+        );
+    }
 
     #[test]
     fn test_deobfuscate_reconstructs_credentials() {

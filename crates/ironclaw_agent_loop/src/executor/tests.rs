@@ -4121,6 +4121,54 @@ async fn model_unrecoverable_host_error_carries_detail_to_executor_error() {
 }
 
 #[tokio::test]
+async fn model_unavailable_retry_advances_fallback_and_accepts_authoritative_evidence() {
+    let host = MockHost::new(vec![reply_response()]).with_model_errors(vec![
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "model provider is temporarily unavailable",
+        )
+        .with_next_fallback_index(1),
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("fallback retry completes");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    let requests = host.model_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].fallback_index, 0);
+    assert_eq!(requests[1].fallback_index, 1);
+    assert_eq!(final_staged_state(&host).model_state.fallback_index, 1);
+}
+
+#[tokio::test]
+async fn model_unavailable_without_fallback_evidence_retries_the_current_route() {
+    let host =
+        MockHost::new(vec![reply_response()]).with_model_errors(vec![AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "model provider is temporarily unavailable",
+        )]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("same-route availability retry completes");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    let requests = host.model_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].fallback_index, 0);
+    assert_eq!(requests[1].fallback_index, 0);
+    assert_eq!(final_staged_state(&host).model_state.fallback_index, 0);
+}
+
+#[tokio::test]
 async fn failed_exit_finalizes_explanation_and_failed_exit_refs_partial_first() {
     // Vehicle: iteration-limit abort. The retired capability `Permanent` kind
     // merged into model-visible `OperationFailed` under the unified

@@ -35,10 +35,11 @@ pub(crate) const MAX_RETRY_AFTER_SECS: u64 = 3600;
 /// Retryable: `RequestFailed`, `RateLimited`, `BadGateway`, `InvalidResponse`,
 /// `SessionRenewalFailed`, `Http`, `Io`.
 ///
-/// Non-retryable: `AuthFailed`, `SessionExpired`, `ContextLengthExceeded`,
-/// `ModelNotAvailable`, `Json`.
+/// Non-retryable: `InvalidRequest`, `AuthFailed`, `SessionExpired`,
+/// `ContextLengthExceeded`, `ModelNotAvailable`, `QuotaExceeded`, `Json`.
 /// - `SessionExpired` — handled by session renewal layer, not by retry
 /// - `ModelNotAvailable` — the model won't appear between attempts
+/// - `QuotaExceeded` — billing or credits require user action
 /// - `Json` — a serde parse bug, not a transient failure
 ///
 /// See also `circuit_breaker::is_transient()` which answers a different
@@ -141,6 +142,20 @@ pub fn parse_retry_after_value(header: &reqwest::header::HeaderValue) -> Duratio
 }
 
 const DEFAULT_RETRY_AFTER_SECS: u64 = 60;
+
+/// Preserve whether a provider supplied `Retry-After`, except that HTTP 429
+/// retains the historical 60-second floor when the header is absent.
+pub(crate) fn retry_after_for_status(
+    status: u16,
+    header: Option<&reqwest::header::HeaderValue>,
+) -> Option<Duration> {
+    let parsed = header.map(parse_retry_after_value);
+    if status == 429 {
+        parsed.or(Some(Duration::from_secs(DEFAULT_RETRY_AFTER_SECS)))
+    } else {
+        parsed
+    }
+}
 
 /// Configuration for the retry decorator.
 #[derive(Debug, Clone)]
@@ -337,6 +352,10 @@ impl CompletionStreamSink for StreamingAttemptSink {
 
 #[async_trait]
 impl LlmProvider for RetryProvider {
+    fn provider_id(&self) -> String {
+        self.inner.provider_id()
+    }
+
     fn model_name(&self) -> &str {
         self.inner.model_name()
     }
@@ -424,6 +443,14 @@ impl LlmProvider for RetryProvider {
 
     fn effective_model_name(&self, requested_model: Option<&str>) -> String {
         self.inner.effective_model_name(requested_model)
+    }
+
+    fn fallback_route(
+        &self,
+        fallback_index: u32,
+        requested_model: Option<&str>,
+    ) -> Result<crate::ModelFallbackRoute, LlmError> {
+        self.inner.fallback_route(fallback_index, requested_model)
     }
 
     fn active_model_name(&self) -> String {
@@ -1016,6 +1043,15 @@ mod tests {
         assert_eq!(
             cap_retry_after(Duration::from_secs(0)),
             Duration::from_secs(0)
+        );
+    }
+
+    #[test]
+    fn retry_after_presence_is_preserved_for_gateway_errors() {
+        assert_eq!(retry_after_for_status(503, None), None);
+        assert_eq!(
+            retry_after_for_status(429, None),
+            Some(Duration::from_secs(DEFAULT_RETRY_AFTER_SECS))
         );
     }
 

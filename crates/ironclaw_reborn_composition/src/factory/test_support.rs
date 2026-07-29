@@ -979,6 +979,7 @@ pub(crate) async fn open_local_dev_approval_settings_stores_for_test(
 pub(crate) async fn open_local_dev_trigger_repository_for_test(
     storage_root: &Path,
 ) -> Result<Arc<dyn TriggerRepository>, RebornBuildError> {
-    let db = open_local_dev_libsql_database(storage_root).await?;
-    local_dev_trigger_repository(&DurableBackend::LibSql(db)).await
+    let mut composite = CompositeRootFilesystem::new();
+    let backend = build_default_local_dev_database_roots(storage_root, &mut composite).await?;
+    local_dev_trigger_repository(&backend).await
 }

@@ -2070,13 +2070,13 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
                 .as_ref()
                 .expect("slack channel descriptor")
                 .commands,
-            ["status"],
-            "shipping Slack exposes only the exact status command"
+            ["model", "status"],
+            "shipping Slack exposes exactly the model and status commands"
         );
     }
 
     #[test]
-    fn bundled_telegram_package_declares_status_only() {
+    fn bundled_telegram_package_declares_model_and_status_commands() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram").unwrap();
@@ -2089,8 +2089,8 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
                 .as_ref()
                 .expect("telegram channel descriptor")
                 .commands,
-            ["status"],
-            "shipping Telegram exposes only the exact status command"
+            ["model", "status"],
+            "shipping Telegram exposes exactly the model and status commands"
         );
     }
 
