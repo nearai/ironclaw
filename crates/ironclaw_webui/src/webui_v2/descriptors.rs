@@ -5,6 +5,8 @@
 //! descriptor is the contract: changing a route's policy here changes what
 //! host composition enforces before the handler runs.
 
+// arch-exempt: large_file, one descriptor function per WebUI v2 route mirrors the handler/router split tracked for this whole module family, plan #5985
+
 use ironclaw_host_api::ingress::{
     AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
     IngressAuthScheme, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor, ListenerClass,
@@ -33,6 +35,8 @@ pub const WEBUI_V2_ROUTE_GET_RUN_ARTIFACT: &str = "webui.v2.get_run_artifact";
 pub const WEBUI_V2_ROUTE_GET_ATTACHMENT: &str = "webui.v2.get_attachment";
 pub const WEBUI_V2_ROUTE_STREAM_EVENTS: &str = "webui.v2.stream_events";
 pub const WEBUI_V2_ROUTE_STREAM_EVENTS_WS: &str = "webui.v2.stream_events_ws";
+pub const WEBUI_V2_ROUTE_LIST_COMMANDS: &str = "webui.v2.list_commands";
+pub const WEBUI_V2_ROUTE_EXECUTE_COMMAND: &str = "webui.v2.execute_command";
 pub const WEBUI_V2_ROUTE_LIST_AUTOMATIONS: &str = "webui.v2.list_automations";
 pub const WEBUI_V2_ROUTE_PAUSE_AUTOMATION: &str = "webui.v2.pause_automation";
 pub const WEBUI_V2_ROUTE_RESUME_AUTOMATION: &str = "webui.v2.resume_automation";
@@ -131,6 +135,8 @@ pub const WEBUI_V2_PATTERN_GET_ATTACHMENT: &str =
     "/api/webchat/v2/threads/{thread_id}/messages/{message_id}/attachments/{attachment_id}";
 pub const WEBUI_V2_PATTERN_STREAM_EVENTS: &str = "/api/webchat/v2/threads/{thread_id}/events";
 pub const WEBUI_V2_PATTERN_STREAM_EVENTS_WS: &str = "/api/webchat/v2/threads/{thread_id}/ws";
+pub const WEBUI_V2_PATTERN_LIST_COMMANDS: &str = "/api/webchat/v2/commands";
+pub const WEBUI_V2_PATTERN_EXECUTE_COMMAND: &str = "/api/webchat/v2/threads/{thread_id}/commands";
 pub const WEBUI_V2_PATTERN_LIST_AUTOMATIONS: &str = "/api/webchat/v2/automations";
 pub const WEBUI_V2_PATTERN_PAUSE_AUTOMATION: &str =
     "/api/webchat/v2/automations/{automation_id}/pause";
@@ -234,6 +240,8 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         cancel_run_descriptor(),
         resolve_gate_descriptor(),
         retry_run_descriptor(),
+        list_commands_descriptor(),
+        execute_command_descriptor(),
         list_automations_descriptor(),
         pause_automation_descriptor(),
         resume_automation_descriptor(),
@@ -856,6 +864,34 @@ fn stream_events_ws_descriptor() -> IngressRouteDescriptor {
             stream_rate_limit(),
             AuditTraceClass::StreamingSubscription,
             AllowedEffectPath::ProjectionOnly,
+        ),
+    )
+}
+
+fn list_commands_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_LIST_COMMANDS,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_LIST_COMMANDS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn execute_command_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_EXECUTE_COMMAND,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_EXECUTE_COMMAND,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }

@@ -15,6 +15,7 @@ use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::StatusCode;
@@ -28,12 +29,14 @@ use ironclaw_extensions::{
 use ironclaw_filesystem::{CompositeRootFilesystem, LibSqlRootFilesystem};
 use ironclaw_host_api::{
     AgentId, CapabilityId, EffectKind, ExtensionId, PermissionMode, ProductSurface,
-    ProductSurfaceCaller, ProductSurfaceStreamRequest, TenantId, UserId,
+    ProductSurfaceCaller, ProductSurfaceStreamRequest, SecretHandle, TenantId, UserId,
+};
+use ironclaw_product::{
+    AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
+    AdminUserSecretMeta, AdminUserService, AdminUserStatus, RebornOperatorToolCatalog,
+    RebornOperatorToolInfo, RebornServices, RebornStreamEventsRequest,
 };
 use ironclaw_product::{ProductOutboundEnvelope, ProductOutboundPayload};
-use ironclaw_product::{
-    RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornServices, RebornStreamEventsRequest,
-};
 use ironclaw_reborn_composition::test_support::BudgetTestGateway;
 use ironclaw_reborn_composition::{
     RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput, build_reborn_runtime,
@@ -48,6 +51,7 @@ use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
 use reborn_support::session_thread::RebornThreadHarness;
 use reborn_support::webui_mount::{get_json, mount_webui_v2_router, post_json, webui_caller_for};
+use secrecy::SecretString;
 use serde_json::Value;
 use tempfile::{TempDir, tempdir};
 use tower::ServiceExt;
@@ -2039,4 +2043,320 @@ async fn approval_gate_rediscovered_and_resolved_after_refresh() {
     h.assert_workspace_file_contains("api2_refresh_approved.txt", "API2_REFRESH_PAYLOAD")
         .await
         .expect("the approved write actually re-dispatched and persisted");
+}
+
+// ---------------------------------------------------------------------------
+// PR-2 WebUI command palette (Task 4): `GET /commands` / `POST
+// /threads/:thread_id/commands` mounted over the real `ProductSurface`.
+// ---------------------------------------------------------------------------
+
+/// Minimal `AdminUserService` double for the command-palette scenarios below.
+/// `caller_is_command_admin`
+/// (`crates/ironclaw_product/src/reborn_services/product_commands.rs`) only
+/// ever calls `get_user` on this port; every other method fails closed
+/// exactly like the production default (`RejectingAdminUserService`), since
+/// this fixture never exercises them.
+///
+/// A hand-built `RebornServices` in this file has no admin directory wired by
+/// default, so it falls back to that same rejecting default — proven at the
+/// crate tier by
+/// `list_commands_surfaces_directory_unavailable_as_retryable_503`
+/// (`crates/ironclaw_product/tests/reborn_services_contract.rs`). Without this
+/// double, every caller here would get a retryable 503 instead of a genuine
+/// member/admin result, so the audience-filtering distinction below could
+/// never reach the WebUI route as a 200.
+#[derive(Default)]
+struct StaticAdminUserService {
+    admin: Option<AdminUserRecord>,
+}
+
+impl StaticAdminUserService {
+    fn with_admin(user_id: &UserId, role: AdminUserRole) -> Self {
+        Self {
+            admin: Some(AdminUserRecord {
+                user_id: user_id.clone(),
+                email: None,
+                display_name: None,
+                status: AdminUserStatus::Active,
+                role,
+                created_at: "2026-07-29T00:00:00Z".to_string(),
+                updated_at: "2026-07-29T00:00:00Z".to_string(),
+                created_by: None,
+                last_login_at: None,
+                metadata: std::collections::BTreeMap::new(),
+            }),
+        }
+    }
+}
+
+#[async_trait]
+impl AdminUserService for StaticAdminUserService {
+    async fn list_users(
+        &self,
+        _tenant: &TenantId,
+        _status: Option<AdminUserStatus>,
+        _after: Option<&UserId>,
+        _limit: usize,
+    ) -> Result<Vec<AdminUserRecord>, AdminUserError> {
+        Err(AdminUserError::Unavailable)
+    }
+
+    async fn get_user(
+        &self,
+        _tenant: &TenantId,
+        user_id: &UserId,
+    ) -> Result<Option<AdminUserRecord>, AdminUserError> {
+        Ok(self
+            .admin
+            .as_ref()
+            .filter(|record| &record.user_id == user_id)
+            .cloned())
+    }
+
+    async fn create_user(
+        &self,
+        _tenant: &TenantId,
+        _actor: &UserId,
+        _fields: AdminCreateUserFields,
+    ) -> Result<AdminCreatedUser, AdminUserError> {
+        Err(AdminUserError::Unavailable)
+    }
+
+    async fn update_profile(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+        _display_name: Option<String>,
+        _metadata: Option<std::collections::BTreeMap<String, String>>,
+    ) -> Result<AdminUserRecord, AdminUserError> {
+        Err(AdminUserError::Unavailable)
+    }
+
+    async fn set_status(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+        _status: AdminUserStatus,
+    ) -> Result<AdminUserRecord, AdminUserError> {
+        Err(AdminUserError::Unavailable)
+    }
+
+    async fn set_role(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+        _role: AdminUserRole,
+    ) -> Result<AdminUserRecord, AdminUserError> {
+        Err(AdminUserError::Unavailable)
+    }
+
+    async fn delete_user(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+    ) -> Result<(), AdminUserError> {
+        Err(AdminUserError::Unavailable)
+    }
+
+    async fn count_active_admins(&self, _tenant: &TenantId) -> Result<usize, AdminUserError> {
+        Err(AdminUserError::Unavailable)
+    }
+
+    async fn list_secrets(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+    ) -> Result<Vec<AdminUserSecretMeta>, AdminUserError> {
+        Err(AdminUserError::Unavailable)
+    }
+
+    async fn put_secret(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+        _handle: SecretHandle,
+        _material: SecretString,
+    ) -> Result<AdminUserSecretMeta, AdminUserError> {
+        Err(AdminUserError::Unavailable)
+    }
+
+    async fn delete_secret(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+        _handle: SecretHandle,
+    ) -> Result<bool, AdminUserError> {
+        Err(AdminUserError::Unavailable)
+    }
+}
+
+/// `GET /commands` filters the registry by the caller's command-admin
+/// audience (member sees only the two `User`-audience commands; admin sees
+/// the full 12-entry registry, including the `Lifecycle` family), and
+/// executing an `Admin`-audience action (`/model set ...`) as a member is
+/// rejected at the audience gate before the LLM-config seam ever runs — a 200
+/// response carrying a body-level `rejection`, never a transport error. See
+/// `StaticAdminUserService` above for why the fake admin directory is needed.
+#[tokio::test]
+async fn command_list_and_model_execute_are_gated_by_command_admin_role() {
+    let h = RebornIntegrationHarness::test_default()
+        .build()
+        .await
+        .expect("harness builds");
+    let member_caller = webui_caller_for(&h.binding);
+    let admin_user_id = UserId::new("command-palette-admin").expect("user id");
+    let admin_caller = ProductSurfaceCaller::new(
+        member_caller.tenant_id.clone(),
+        admin_user_id.clone(),
+        member_caller.agent_id.clone(),
+        member_caller.project_id.clone(),
+    );
+    let services: Arc<dyn ProductSurface> = Arc::new(
+        RebornServices::new(h.thread_harness.service.clone(), h.coordinator.clone())
+            .with_admin_user_service(Arc::new(StaticAdminUserService::with_admin(
+                &admin_user_id,
+                AdminUserRole::Admin,
+            ))),
+    );
+
+    let (status, body) = get_json(
+        mount_webui_v2_router(Arc::clone(&services), member_caller.clone()),
+        "/api/webchat/v2/commands",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "member list response: {body}");
+    let member_names: Vec<&str> = body["commands"]
+        .as_array()
+        .expect("commands array")
+        .iter()
+        .map(|entry| entry["name"].as_str().expect("name is a string"))
+        .collect();
+    assert_eq!(
+        member_names,
+        vec!["model", "status"],
+        "member must see only the User-audience commands: {body}"
+    );
+
+    let (status, body) = get_json(
+        mount_webui_v2_router(Arc::clone(&services), admin_caller),
+        "/api/webchat/v2/commands",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "admin list response: {body}");
+    let admin_names: Vec<&str> = body["commands"]
+        .as_array()
+        .expect("commands array")
+        .iter()
+        .map(|entry| entry["name"].as_str().expect("name is a string"))
+        .collect();
+    assert_eq!(
+        admin_names.len(),
+        12,
+        "admin must see the full registry including the Lifecycle family: {body}"
+    );
+    assert!(
+        admin_names.contains(&"extension_list"),
+        "admin list must include a Lifecycle-family command: {body}"
+    );
+
+    let (status, body) = post_json(
+        mount_webui_v2_router(Arc::clone(&services), member_caller),
+        &format!(
+            "/api/webchat/v2/threads/{}/commands",
+            h.binding.thread_id.as_str()
+        ),
+        serde_json::json!({"text": "/model set some-model"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "member model-set response: {body}");
+    assert!(body["result"].is_null(), "{body}");
+    assert_eq!(body["rejection"]["kind"], "access_denied", "{body}");
+}
+
+/// `/status` on an owned thread with a completed run reflects real per-thread
+/// state (a `Run` field is present). A thread the caller does not own is
+/// intentionally indistinguishable from one that was never created at all —
+/// both settle to the same idle `CommandResultView`, never a 404. This
+/// mirrors the crate-tier design pin
+/// (`execute_status_on_foreign_thread_is_indistinguishable_from_unknown` in
+/// `crates/ironclaw_product/tests/reborn_services_contract.rs`): leaking
+/// "this thread_id exists but isn't yours" through a 404-vs-200 split would
+/// let a caller probe for other users' thread ids one guess at a time.
+#[tokio::test]
+async fn execute_status_command_reflects_owned_thread_and_hides_foreign_thread_existence() {
+    let h = RebornIntegrationHarness::test_default()
+        .script([RebornScriptedReply::text("pong")])
+        .build()
+        .await
+        .expect("harness builds");
+    h.submit_turn("ping").await.expect("turn completes");
+
+    let services: Arc<dyn ProductSurface> = Arc::new(RebornServices::new(
+        h.thread_harness.service.clone(),
+        h.coordinator.clone(),
+    ));
+    let owner_caller = webui_caller_for(&h.binding);
+    let owned_thread_path = format!(
+        "/api/webchat/v2/threads/{}/commands",
+        h.binding.thread_id.as_str()
+    );
+
+    let (status, body) = post_json(
+        mount_webui_v2_router(Arc::clone(&services), owner_caller),
+        &owned_thread_path,
+        serde_json::json!({"text": "/status"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "owner /status response: {body}");
+    assert!(body["rejection"].is_null(), "{body}");
+    assert_eq!(body["result"]["title"], "Status", "{body}");
+    let owner_fields = body["result"]["fields"].as_array().expect("fields array");
+    assert!(
+        owner_fields.iter().any(|field| field["label"] == "Run"),
+        "an owned thread with a completed run must surface its Run id: {body}"
+    );
+
+    // A caller who does not own this thread must get the SAME answer as a
+    // thread_id nobody ever created — never a 404 that would confirm the
+    // thread exists.
+    let foreign_caller = ProductSurfaceCaller::new(
+        h.binding.tenant_id.clone(),
+        UserId::new("command-palette-foreign-user").expect("user id"),
+        h.binding.agent_id.clone(),
+        h.binding.project_id.clone(),
+    );
+    let (status, foreign_body) = post_json(
+        mount_webui_v2_router(Arc::clone(&services), foreign_caller.clone()),
+        &owned_thread_path,
+        serde_json::json!({"text": "/status"}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "foreign-thread /status response: {foreign_body}"
+    );
+    assert!(foreign_body["rejection"].is_null(), "{foreign_body}");
+    assert_eq!(foreign_body["result"]["title"], "Status", "{foreign_body}");
+    assert_eq!(
+        foreign_body["result"]["fields"],
+        serde_json::json!([{"label": "State", "value": "idle"}]),
+        "a foreign thread must render the idle placeholder, not owner state: {foreign_body}"
+    );
+
+    let (status, never_created_body) = post_json(
+        mount_webui_v2_router(services, foreign_caller),
+        "/api/webchat/v2/threads/thread-command-palette-never-created/commands",
+        serde_json::json!({"text": "/status"}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "never-created-thread /status response: {never_created_body}"
+    );
+    assert_eq!(
+        foreign_body, never_created_body,
+        "a foreign thread must be indistinguishable from a nonexistent one"
+    );
 }
