@@ -2,14 +2,14 @@
  * Tabs
  *
  * Underline tab row built on `@radix-ui/react-tabs` for keyboard roving +
- * aria, with IronClaw underline motion (layoutId). Public API unchanged:
+ * aria, with a token-driven CSS underline entrance (`.v2-tab-underline`
+ * in tokens.css). CSS-only motion keeps the framer-motion runtime out of
+ * every route's initial bundle (see scripts/check-bundle-budgets.ts).
+ * Public API unchanged:
  *   tabs / value / onChange / ariaLabel / bordered / className
  */
 import * as TabsPrimitive from "@radix-ui/react-tabs";
-import { motion } from "motion/react";
-import { useId } from "react";
 import { cn } from "./cn";
-import { MOTION_DURATION, MOTION_EASE_OUT, useReducedMotion } from "./motion";
 
 export type TabItem = {
   value: string;
@@ -34,9 +34,6 @@ export function Tabs({
   bordered = true,
   className = "",
 }: TabsProps) {
-  const underlineId = useId();
-  const reducedMotion = useReducedMotion();
-
   return (
     <TabsPrimitive.Root value={value} onValueChange={onChange}>
       <TabsPrimitive.List
@@ -77,15 +74,9 @@ export function Tabs({
                 </span>
               )}
               {selected && (
-                <motion.span
+                <span
                   aria-hidden="true"
-                  layoutId={underlineId}
-                  className="absolute inset-x-0 -bottom-[2px] h-[2px] bg-[var(--v2-accent)]"
-                  transition={
-                    reducedMotion
-                      ? { duration: 0 }
-                      : { duration: MOTION_DURATION.menu, ease: MOTION_EASE_OUT }
-                  }
+                  className="v2-tab-underline absolute inset-x-0 -bottom-[2px] h-[2px] bg-[var(--v2-accent)]"
                 />
               )}
             </TabsPrimitive.Trigger>

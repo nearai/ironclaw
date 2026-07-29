@@ -135,7 +135,7 @@ export function ButtonSection() {
 
 /* ── Badge ────────────────────────────────────────────────────────── */
 
-const BADGE_TONES = ["success", "warning", "danger", "info", "accent", "muted"];
+const BADGE_TONES = ["success", "warning", "danger", "info", "accent", "muted"] as const;
 
 export function BadgeSection() {
   return (
@@ -197,7 +197,7 @@ export function BadgeSection() {
 
 /* ── Card ─────────────────────────────────────────────────────────── */
 
-const CARD_VARIANTS = ["default", "bordered", "flat", "subtle", "inset"];
+const CARD_VARIANTS = ["default", "bordered", "flat", "subtle", "inset"] as const;
 
 export function CardSection() {
   return (

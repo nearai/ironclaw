@@ -4,7 +4,16 @@ import { cn } from "@ironclaw/design-system";
 
 export function AutomationsSummaryStrip({ summary, activeFilter, onSelectFilter }) {
   const t = useT();
-  const cards = [
+  type SummaryCard = {
+    key: string;
+    label: string;
+    value: string | number;
+    tone: "muted" | "signal" | "info" | "danger" | "success";
+    detail?: string;
+    filter?: string | null;
+    valueClassName?: string;
+  };
+  const cards: SummaryCard[] = [
     {
       key: "scheduled",
       label: t("automations.summary.scheduled"),

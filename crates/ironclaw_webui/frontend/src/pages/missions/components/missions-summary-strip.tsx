@@ -7,7 +7,7 @@ function buildCards(t) {
     { key: "active", label: t("missions.summary.active"), tone: "signal" },
     { key: "paused", label: t("missions.summary.paused"), tone: "warning" },
     { key: "threads", label: t("missions.summary.spawnedThreads"), tone: "success" },
-  ];
+  ] as const;
 }
 
 export function MissionsSummaryStrip({ summary }) {

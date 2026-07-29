@@ -87,11 +87,11 @@ function ToolRow({ tool, pendingPermission, onPermissionChange, isSaved }) {
   const t = useT();
   const description = translatedToolDescription(t, tool);
   const permissionStates = [
-    { value: "default", label: t("tools.followDefault"), tone: "neutral" },
+    { value: "default", label: t("tools.followDefault"), tone: "muted" },
     { value: "always_allow", label: t("tools.alwaysAllow"), tone: "positive" },
     { value: "ask_each_time", label: t("tools.askEachTime"), tone: "warning" },
     { value: "disabled", label: t("tools.disabled"), tone: "danger" },
-  ];
+  ] as const;
   const sourceLabels = {
     default: t("tools.sourceDefault"),
     global: t("tools.sourceGlobal"),
@@ -154,7 +154,7 @@ function ToolRow({ tool, pendingPermission, onPermissionChange, isSaved }) {
           : (
               <SelectMenu
                 value={selectedState}
-                options={permissionStates}
+                options={[...permissionStates]}
                 onChange={(value) => onPermissionChange(tool.name, value)}
                 ariaLabel={t("tools.permissionFor", { name: tool.name })}
                 aria-busy={pendingPermission != null}

@@ -1,7 +1,7 @@
 {
   "name": "@ironclaw/design-system",
   "version": "0.1.0",
-  "description": "IronClaw design system — Radix-based, shadcn-patterned React components, --v2-* design tokens, and motion vocabulary. Source-first: consumers compile the TSX through their own bundler (Tailwind v4 + Vite recommended); `pnpm build` also emits a compiled ESM bundle in dist/ for non-Tailwind hosts.",
+  "description": "IronClaw design system \u2014 Radix-based, shadcn-patterned React components, --v2-* design tokens, and motion vocabulary. Source-first: consumers compile the TSX through their own bundler (Tailwind v4 + Vite recommended); `pnpm build` also emits a compiled ESM bundle in dist/ for non-Tailwind hosts.",
   "type": "module",
   "sideEffects": [
     "*.css"
@@ -12,7 +12,8 @@
     "./themes/soft.css": "./src/themes/soft.css",
     "./tokens": "./src/tokens.ts",
     "./motion": "./src/motion.ts",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./confirm-dialog": "./src/confirm-dialog.tsx"
   },
   "files": [
     "src",
@@ -63,7 +64,7 @@
     "@radix-ui/react-tooltip": "^1.2.12",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "lucide-react": "^1.24.0",
+    "framer-motion": "12.42.2",
     "motion": "12.42.2",
     "tailwind-merge": "^3.6.0"
   }

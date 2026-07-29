@@ -5,7 +5,7 @@ import { Icon } from "@ironclaw/design-system";
 import { toast } from "../../../lib/toast";
 import { ProjectFileChips } from "./project-file-chips";
 import { AttachmentChip } from "./attachment-chip";
-import { AttachmentPreviewModal } from "./attachment-preview";
+import { AttachmentPreviewModal } from "./attachment-preview-lazy";
 import { useT } from "../../../lib/i18n";
 import { fetchRunArtifact } from "../../../lib/api";
 import { saveBlob } from "../../../lib/download";

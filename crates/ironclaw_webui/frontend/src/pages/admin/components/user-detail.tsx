@@ -192,7 +192,7 @@ export function UserDetailView({ onBack, userQuery, usageQuery, adminState }) {
       </Panel>
 
       {statusError && (
-        <p className="text-sm text-red-200" role="alert" data-testid="admin-user-detail-status-error">
+        <p className="text-sm text-[var(--v2-danger-text)]" role="alert" data-testid="admin-user-detail-status-error">
           {adminUserActionErrorMessage(statusError, t)}
         </p>
       )}
@@ -241,7 +241,7 @@ export function UserDetailView({ onBack, userQuery, usageQuery, adminState }) {
           </Button>
         </div>
         {updateError && (
-          <p className="mt-4 text-sm text-red-200" role="alert" data-testid="admin-user-detail-role-error">
+          <p className="mt-4 text-sm text-[var(--v2-danger-text)]" role="alert" data-testid="admin-user-detail-role-error">
             {adminUserActionErrorMessage(updateError, t)}
           </p>
         )}

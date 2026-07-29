@@ -9,8 +9,9 @@ import {
 } from "../lib/api";
 import { ANON_SCOPE, authScope, setAuthScope } from "../lib/auth-scope";
 import { clearAllPins } from "../lib/pin-store";
-import { clearHistoryCache } from "../pages/chat/hooks/useHistory";
-import { clearAllDrafts } from "../pages/chat/lib/draft-store";
+// Chat-cache cleanup helpers are imported dynamically at the (rare)
+// identity-change moment: a static import here would drag the chat
+// history/draft modules into the app entry bundle (bundle budgets).
 
 // The Reborn host validates bearer tokens via OIDC; the SPA simply
 // carries whatever token the user supplies (via `?token=` URL param,
@@ -233,8 +234,12 @@ export function useAuthSession() {
       lastScopeRef.current !== ANON_SCOPE &&
       lastScopeRef.current !== nextScope;
     if (leavingRealIdentity) {
-      clearHistoryCache();
-      clearAllDrafts();
+      void import("../pages/chat/hooks/useHistory").then(({ clearHistoryCache }) =>
+        clearHistoryCache()
+      );
+      void import("../pages/chat/lib/draft-store").then(({ clearAllDrafts }) =>
+        clearAllDrafts()
+      );
       clearAllPins();
     }
     lastScopeRef.current = nextScope;

@@ -37,7 +37,7 @@ const SUMMARY_CARDS = [
     tone: "success",
     detail: "Routines with activity since local day start.",
   },
-];
+] as const;
 
 export function RoutinesSummaryStrip({ summary }) {
   return (

@@ -211,7 +211,7 @@ export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
                 )}
                 {secret.provided &&
                 (
-                  <span className="font-mono text-[10px] text-mint"
+                  <span className="font-mono text-[10px] text-[var(--v2-positive-text)]"
                     >{t("common.configured") || "configured"}</span
                   >
                 )}
@@ -278,7 +278,7 @@ export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
       {isActive &&
       (
         <div
-          className="mt-4 rounded-md border border-mint/20 bg-mint/10 px-3 py-2 text-xs text-mint"
+          className="mt-4 rounded-md border border-[color-mix(in_srgb,var(--v2-positive-text)_20%,transparent)] bg-[var(--v2-positive-soft)] px-3 py-2 text-xs text-[var(--v2-positive-text)]"
         >
           {t("extensions.activeConfigured")}
         </div>

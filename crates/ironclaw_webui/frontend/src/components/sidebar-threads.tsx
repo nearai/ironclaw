@@ -1,7 +1,7 @@
 import { NavLink } from "react-router";
 import React from "react";
 import { Icon } from "@ironclaw/design-system";
-import { ConfirmDialog } from "@ironclaw/design-system";
+import { ConfirmDialog } from "./confirm-dialog-lazy";
 import { useT } from "../lib/i18n";
 import { getPinnedIds, subscribePins, togglePin } from "../lib/pin-store";
 import { deleteThreadErrorMessage } from "../lib/thread-errors";

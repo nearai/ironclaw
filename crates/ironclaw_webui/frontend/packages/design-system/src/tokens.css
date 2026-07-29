@@ -349,6 +349,59 @@
 }
 
 /* Live badge dot breathing loop (Badge success/positive tones). */
+/* Modal motion — scrim fade + panel scale from center on entry, quicker
+   fade on exit (restrained-motion policy). Consumed by modal.tsx via
+   `.v2-modal-scrim` / `.v2-modal-panel` + data-state; reduced-motion
+   drops the movement but keeps the gentler opacity fade. */
+@keyframes v2-modal-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes v2-modal-fade-out {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}
+@keyframes v2-modal-panel-in {
+  from { opacity: 0; transform: scale(0.96) translateY(8px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes v2-modal-panel-out {
+  from { opacity: 1; transform: none; }
+  to   { opacity: 0; transform: scale(0.98); }
+}
+.v2-modal-scrim[data-state="open"] {
+  animation: v2-modal-fade-in var(--v2-duration-base) var(--v2-ease-out-expo) both;
+}
+.v2-modal-scrim[data-state="closed"] {
+  animation: v2-modal-fade-out var(--v2-duration-exit) var(--v2-ease-out-expo) both;
+}
+.v2-modal-panel[data-state="open"] {
+  animation: v2-modal-panel-in var(--v2-duration-base) var(--v2-ease-out-expo) both;
+}
+.v2-modal-panel[data-state="closed"] {
+  animation: v2-modal-panel-out var(--v2-duration-exit) var(--v2-ease-out-expo) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .v2-modal-panel[data-state="open"] {
+    animation-name: v2-modal-fade-in;
+  }
+  .v2-modal-panel[data-state="closed"] {
+    animation-name: v2-modal-fade-out;
+  }
+}
+
+/* Tabs underline — quick scale-in when a tab becomes active. */
+@keyframes v2-underline-in {
+  from { transform: scaleX(0.6); opacity: 0; }
+  to   { transform: scaleX(1); opacity: 1; }
+}
+.v2-tab-underline {
+  animation: v2-underline-in var(--v2-duration-menu) var(--v2-ease-out-expo) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .v2-tab-underline { animation: none; }
+}
+
 @keyframes v2-breathe {
   0%, 100% { opacity: 1; }
   50%       { opacity: 0.35; }

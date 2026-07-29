@@ -7,7 +7,7 @@ const SUMMARY_CARDS = [
   { key: "completed", label: "Completed", tone: "success", detail: "Finished without intervention." },
   { key: "failed", label: "Failed", tone: "danger", detail: "Runs that terminated with an error or interruption." },
   { key: "stuck", label: "Stuck", tone: "danger", detail: "Agent work needing recovery or operator attention." },
-];
+] as const;
 
 export function JobsSummaryStrip({ summary }) {
   return (

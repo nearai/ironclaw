@@ -8,14 +8,46 @@
  *
  * Portal is intentionally omitted so SSR / renderToStaticMarkup consumers
  * (ConfirmDialog tests) still see the dialog markup when `open`.
+ *
+ * Motion is CSS-only (`.v2-modal-scrim` / `.v2-modal-panel` keyframes in
+ * tokens.css, driven by data-state): the framer-motion runtime is ~50KB
+ * gzip and Modal sits in the chat route's initial import graph, so it must
+ * not pull an animation engine (see scripts/check-bundle-budgets.ts).
+ * Exit animations work by holding the tree mounted for the exit duration
+ * (`useExitPresence`) with data-state="closed" before unmounting.
  */
 import * as Dialog from "@radix-ui/react-dialog";
-import { AnimatePresence, motion } from "motion/react";
-import type { ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useDesignSystemT } from "./i18n";
 import { cn } from "./cn";
 import { Icon } from "./icons";
-import { MOTION_DURATION, MOTION_EASE_OUT, useReducedMotion } from "./motion";
+import { MOTION_DURATION } from "./motion";
+
+/* ─── Exit presence ───────────────────────────────────────────────── */
+
+const EXIT_MS = MOTION_DURATION.exit * 1000;
+
+/** Keeps the subtree mounted for `exitMs` after `open` flips false so the
+ *  CSS exit animation can play. Returns whether to render at all. */
+function useExitPresence(open: boolean, exitMs: number): boolean {
+  const [exiting, setExiting] = useState(false);
+  const wasOpen = useRef(open);
+
+  useEffect(() => {
+    if (open) {
+      wasOpen.current = true;
+      setExiting(false);
+      return;
+    }
+    if (!wasOpen.current) return;
+    wasOpen.current = false;
+    setExiting(true);
+    const id = window.setTimeout(() => setExiting(false), exitMs);
+    return () => window.clearTimeout(id);
+  }, [open, exitMs]);
+
+  return open || exiting;
+}
 
 /* ─── Size ────────────────────────────────────────────────────────── */
 
@@ -50,88 +82,70 @@ export function Modal({
   closeLabel,
   children,
 }: ModalProps) {
-  const reducedMotion = useReducedMotion();
-
-  const exitTransition = {
-    duration: MOTION_DURATION.exit,
-    ease: MOTION_EASE_OUT,
-  };
+  const present = useExitPresence(open, EXIT_MS);
+  const dataState = open ? "open" : "closed";
 
   return (
     <Dialog.Root
-      open={open}
+      open={present}
       onOpenChange={(nextOpen) => {
         if (!nextOpen) onClose?.();
       }}
     >
-      <AnimatePresence>
-        {open ? (
-          <div
-            key="modal"
-            className="fixed inset-0 z-50 flex items-end justify-center p-4 sm:items-center"
-          >
-            <Dialog.Overlay asChild>
-              <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0, transition: exitTransition }}
-                transition={{ duration: MOTION_DURATION.base, ease: "easeOut" }}
-                className="absolute inset-0 bg-[var(--v2-scrim)] backdrop-blur-sm"
-                aria-hidden="true"
-              />
-            </Dialog.Overlay>
+      {present ? (
+        <div
+          key="modal"
+          className="fixed inset-0 z-50 flex items-end justify-center p-4 sm:items-center"
+        >
+          <Dialog.Overlay asChild>
+            <div
+              data-state={dataState}
+              className="v2-modal-scrim absolute inset-0 bg-[var(--v2-scrim)] backdrop-blur-sm"
+              aria-hidden="true"
+            />
+          </Dialog.Overlay>
 
-            <Dialog.Content
-              asChild
-              aria-modal="true"
-              aria-label={typeof title === "string" ? title : undefined}
-              onEscapeKeyDown={(event) => {
-                if (!onClose) event.preventDefault();
-              }}
-              onPointerDownOutside={(event) => {
-                if (!onClose) {
-                  event.preventDefault();
-                  return;
-                }
-                onClose();
-              }}
-              onInteractOutside={(event) => {
-                if (!onClose) event.preventDefault();
-              }}
+          <Dialog.Content
+            asChild
+            aria-modal="true"
+            aria-label={typeof title === "string" ? title : undefined}
+            onEscapeKeyDown={(event) => {
+              if (!onClose) event.preventDefault();
+            }}
+            onPointerDownOutside={(event) => {
+              if (!onClose) {
+                event.preventDefault();
+                return;
+              }
+              onClose();
+            }}
+            onInteractOutside={(event) => {
+              if (!onClose) event.preventDefault();
+            }}
+          >
+            <div
+              data-state={dataState}
+              className={cn(
+                "v2-modal-panel relative z-10 w-full",
+                "bg-[var(--v2-card-bg)] border border-[var(--v2-panel-border)]",
+                "shadow-[var(--v2-shadow-modal)]",
+                "rounded-[var(--v2-radius-2xl)]",
+                "flex flex-col max-h-[90dvh] overflow-hidden",
+                "focus:outline-none",
+                SIZES[size] ?? SIZES.md,
+                className
+              )}
             >
-              <motion.div
-                initial={
-                  reducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.96, y: 8 }
-                }
-                animate={reducedMotion ? { opacity: 1 } : { opacity: 1, scale: 1, y: 0 }}
-                exit={{
-                  opacity: 0,
-                  ...(reducedMotion ? {} : { scale: 0.98 }),
-                  transition: exitTransition,
-                }}
-                transition={{ duration: MOTION_DURATION.base, ease: MOTION_EASE_OUT }}
-                className={cn(
-                  "relative z-10 w-full",
-                  "bg-[var(--v2-card-bg)] border border-[var(--v2-panel-border)]",
-                  "shadow-[var(--v2-shadow-modal)]",
-                  "rounded-[var(--v2-radius-2xl)]",
-                  "flex flex-col max-h-[90dvh] overflow-hidden",
-                  "focus:outline-none",
-                  SIZES[size] ?? SIZES.md,
-                  className
-                )}
-              >
-                {title ? (
-                  <ModalHeader onClose={onClose} closeLabel={closeLabel}>
-                    {title}
-                  </ModalHeader>
-                ) : null}
-                {children}
-              </motion.div>
-            </Dialog.Content>
-          </div>
-        ) : null}
-      </AnimatePresence>
+              {title ? (
+                <ModalHeader onClose={onClose} closeLabel={closeLabel}>
+                  {title}
+                </ModalHeader>
+              ) : null}
+              {children}
+            </div>
+          </Dialog.Content>
+        </div>
+      ) : null}
     </Dialog.Root>
   );
 }

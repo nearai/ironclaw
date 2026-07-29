@@ -2,9 +2,9 @@
  * Checkbox — `@radix-ui/react-checkbox` + IronClaw control tokens.
  */
 import * as CheckboxPrimitive from "@radix-ui/react-checkbox";
-import { Check } from "lucide-react";
 import type { ComponentPropsWithoutRef } from "react";
 import { cn } from "./cn";
+import { Icon } from "./icons";
 
 type CheckboxProps = ComponentPropsWithoutRef<typeof CheckboxPrimitive.Root> & {
   className?: string;
@@ -28,7 +28,7 @@ export function Checkbox({ className = "", ...props }: CheckboxProps) {
       {...props}
     >
       <CheckboxPrimitive.Indicator className="grid place-items-center text-current">
-        <Check className="h-3 w-3" strokeWidth={2.5} />
+        <Icon name="check" className="h-3 w-3" strokeWidth={2.5} />
       </CheckboxPrimitive.Indicator>
     </CheckboxPrimitive.Root>
   );

@@ -100,7 +100,7 @@ export const STATUS_CANON = [
   { status: "warning / degraded / attention", tone: "warning", text: "--v2-warning-text", fill: "--v2-warning-soft" },
   { status: "failure / error / cancelled", tone: "danger", text: "--v2-danger-text", fill: "--v2-danger-soft" },
   { status: "paused / idle / disabled", tone: "muted", text: "--v2-text-muted", fill: "--v2-surface-soft" },
-];
+] as const;
 
 /** Control-density scale — shared heights/paddings for interactive
  * controls (Button, Input, Select, …) so mixed rows align. */
