@@ -44,7 +44,17 @@ ironclaw_reborn_openai_compat = { path = "../ironclaw_reborn_openai_compat" }
 # Sliding-window per-route rate limiter (moved from composition's webui_rate_limit).
 lru = "0.18"
 # axum/tower-http middleware stack used by `webui_serve` (moved from composition).
-tower-http = { version = "0.6", features = ["cors", "set-header", "limit", "catch-panic"] }
+# Static compression is intentionally unconditional: it is part of the embedded
+# WebUI delivery contract, and optional build variants would leave cache and
+# transport behavior untested.
+tower-http = { version = "0.6", features = [
+    "cors",
+    "set-header",
+    "limit",
+    "catch-panic",
+    "compression-br",
+    "compression-gzip",
+] }
 jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 parking_lot = "0.12"
 rand = "0.10"
@@ -62,6 +72,9 @@ url = "2"
 urlencoding = "2"
 # `uuid` is consumed by the signed session token store and library tests.
 uuid = { version = "1", features = ["v4"] }
+
+[build-dependencies]
+sha2 = "0.11"
 
 [dev-dependencies]
 axum = { version = "0.8", features = ["macros"] }

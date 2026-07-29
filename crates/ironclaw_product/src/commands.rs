@@ -8,6 +8,7 @@ use crate::{InboundCommandPayload, ProductRejection, ProductRejectionKind};
 use ironclaw_host_api::HostApiError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeSet;
 
 use crate::lifecycle::{
     LifecycleCommandKind, LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef,
@@ -16,6 +17,7 @@ use crate::lifecycle::{
 
 pub const PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID: &str = "product.lifecycle.command";
 pub const PRODUCT_MODEL_COMMAND_OPERATION_ID: &str = "product.model.command";
+pub const PRODUCT_STATUS_COMMAND_OPERATION_ID: &str = "product.status.command";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProductLifecycleCommandInput {
@@ -25,6 +27,28 @@ pub struct ProductLifecycleCommandInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProductModelCommandInput {
     pub action: ProductModelCommand,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProductStatusCommandInput {
+    /// Filled from the resolved conversation binding, never external input.
+    pub thread_id: String,
+}
+
+/// Channel-neutral presentational result for product commands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandResultView {
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<CommandResultField>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lines: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandResultField {
+    pub label: String,
+    pub value: String,
 }
 
 /// Public command inventory metadata. Policy decisions based on actor,
@@ -68,6 +92,63 @@ pub fn product_command_descriptors() -> impl Iterator<Item = ProductCommandDescr
             aliases: &[],
         })
         .chain(COMMAND_SPECS.iter().map(|spec| spec.descriptor.clone()))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown product command `{name}`")]
+pub struct UnknownProductCommandName {
+    name: String,
+}
+
+pub fn validate_declared_product_command(name: &str) -> Result<(), UnknownProductCommandName> {
+    if product_command_descriptors()
+        .any(|descriptor| descriptor.name == name || descriptor.aliases.contains(&name))
+    {
+        return Ok(());
+    }
+    Err(UnknownProductCommandName {
+        name: name.to_string(),
+    })
+}
+
+pub fn declared_command_help_text<I, S>(commands: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let names = commands
+        .into_iter()
+        .map(|command| command.as_ref().to_string())
+        .collect::<BTreeSet<_>>();
+    if names.is_empty() {
+        return "Commands are not available in this channel.".to_string();
+    }
+    let names = names
+        .into_iter()
+        .map(|name| format!("/{name}"))
+        .collect::<Vec<_>>();
+    format!("Available commands:\n{}", names.join("\n"))
+}
+
+pub fn command_help_text() -> String {
+    let mut names = product_command_descriptors()
+        .map(|descriptor| format!("/{}", descriptor.name))
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    format!("Available commands:\n{}", names.join("\n"))
+}
+
+pub fn render_command_result_text(view: &CommandResultView) -> String {
+    let mut text = view.title.clone();
+    for field in &view.fields {
+        text.push_str(&format!("\n{}: {}", field.label, field.value));
+    }
+    for line in &view.lines {
+        text.push('\n');
+        text.push_str(line);
+    }
+    text
 }
 
 /// Typed command family produced from a normalized command payload.

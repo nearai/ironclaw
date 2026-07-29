@@ -162,7 +162,7 @@ where
                 | RuntimeKind::Mcp
                 | RuntimeKind::Wasm
                 | RuntimeKind::FirstParty => {}
-                RuntimeKind::System => self.push_issue(
+                RuntimeKind::System | RuntimeKind::Sandbox => self.push_issue(
                     &mut issues,
                     ProductionWiringComponent::RuntimeBackend,
                     ProductionWiringIssueKind::UnsupportedRequirement,

@@ -86,6 +86,9 @@ pub struct ChannelContext<'a> {
 pub struct VerifiedInbound<'a> {
     pub extension_id: &'a str,
     pub installation_id: &'a str,
+    /// Host-resolved, manifest-declared non-secret configuration for the
+    /// verified installation. Secret material remains host-side.
+    pub config: &'a [(String, String)],
     /// Request body bytes (bounded by the ingress body limit).
     pub body: &'a [u8],
     /// Request headers the host chose to forward (verification headers are
@@ -233,6 +236,11 @@ pub struct TargetCandidate {
 pub enum ChannelError {
     #[error("inbound request could not be parsed: {reason}")]
     Parse { reason: String },
+    /// Host-supplied adapter configuration is missing or invalid. Inbound
+    /// routers treat this as retryable because vendor redelivery may succeed
+    /// after an operator repairs configuration.
+    #[error("channel configuration is unavailable: {reason}")]
+    Configuration { reason: String },
     #[error("outbound rendering failed: {reason}")]
     Render { reason: String },
     #[error("vendor wiring failed: {reason}")]
