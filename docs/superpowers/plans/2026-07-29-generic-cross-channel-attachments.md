@@ -205,15 +205,15 @@ Persist one CAS-managed record per scoped run with ordered unique intents and a 
 
 ### Steps
 
-- [ ] Add failing in-memory and durable store contract tests for registration, ordering, idempotency, conflicts, limits, sealing, registration-after-seal, concurrent registration, and repeated sealing.
-- [ ] Run `cargo test -p ironclaw_outbound reply_attachment` and confirm the API is missing.
-- [ ] Add the public intent type and port.
-- [ ] Add a versioned persisted envelope with `#[serde(deny_unknown_fields)]` where compatible with existing state conventions.
-- [ ] Implement register/seal with the shared bounded `cas_update` helper; never hold a process-local lock across backend I/O.
-- [ ] Ensure stored data contains only stable scoped paths and metadata, never bytes or provider URLs.
-- [ ] Run `cargo test -p ironclaw_outbound reply_attachment --all-features`.
-- [ ] Run `cargo clippy -p ironclaw_outbound --all-targets --all-features -- -D warnings`.
-- [ ] Commit:
+- [x] Add failing in-memory and durable store contract tests for registration, ordering, idempotency, conflicts, limits, sealing, registration-after-seal, concurrent registration, and repeated sealing.
+- [x] Run `cargo test -p ironclaw_outbound reply_attachment` and confirm the API is missing.
+- [x] Add the public intent type and port.
+- [x] Add a versioned persisted envelope with `#[serde(deny_unknown_fields)]` where compatible with existing state conventions.
+- [x] Implement register/seal with the shared bounded `cas_update` helper; never hold a process-local lock across backend I/O.
+- [x] Ensure stored data contains only stable scoped paths and metadata, never bytes or provider URLs.
+- [x] Run `cargo test -p ironclaw_outbound reply_attachment --all-features`.
+- [x] Run `cargo clippy -p ironclaw_outbound --all-targets --all-features -- -D warnings`.
+- [x] Commit:
 
 ```bash
 git add crates/ironclaw_outbound

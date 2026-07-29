@@ -261,7 +261,10 @@ fn is_transient_validator_error(error: &OutboundError) -> bool {
         | OutboundError::PreferenceTargetMissing { .. }
         | OutboundError::SubscriptionScopeMismatch
         | OutboundError::AccessDenied
-        | OutboundError::DeliveryNotFound => false,
+        | OutboundError::DeliveryNotFound
+        | OutboundError::ReplyAttachmentIntentsSealed
+        | OutboundError::ReplyAttachmentIntentConflict
+        | OutboundError::ReplyAttachmentIntentLimitExceeded => false,
     }
 }
 

@@ -10,12 +10,12 @@ use ironclaw_event_projections::{ProjectionCursor, ProjectionScope};
 use ironclaw_events::{EventCursor, EventStreamKey, ReadScope};
 use ironclaw_filesystem::{
     BackendCapabilities, CasExpectation, ContentType, DirEntry, Entry, FileStat, FilesystemError,
-    FilesystemOperation, Filter, InMemoryBackend, IndexKind, IndexName, IndexSpec, Page,
-    RecordVersion, RootFilesystem, ScopedFilesystem, VersionedEntry,
+    FilesystemOperation, Filter, InMemoryBackend, IndexKind, IndexName, IndexSpec,
+    LibSqlRootFilesystem, Page, RecordVersion, RootFilesystem, ScopedFilesystem, VersionedEntry,
 };
 use ironclaw_host_api::{
-    AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId, ThreadId,
-    UserId, VirtualPath,
+    AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, RunId, ScopedPath,
+    TenantId, ThreadId, UserId, VirtualPath,
 };
 use ironclaw_outbound::*;
 use ironclaw_turns::{ReplyTargetBindingRef, RunOriginAdapter, TurnActor, TurnRunId, TurnScope};
@@ -58,6 +58,302 @@ fn build_outbound_store_with_permissions<F: RootFilesystem>(
     )])
     .expect("mount view");
     OutboundStateStore::new(Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts)))
+}
+
+fn reply_attachment_scope() -> ironclaw_host_api::ResourceScope {
+    turn_scope().to_resource_scope()
+}
+
+fn reply_attachment_intent(path: &str, size_bytes: u64) -> ReplyAttachmentIntent {
+    ReplyAttachmentIntent {
+        path: ScopedPath::new(path).expect("scoped attachment path"),
+        filename: path
+            .rsplit('/')
+            .next()
+            .expect("attachment path has a filename")
+            .to_string(),
+        mime_type: "text/plain".to_string(),
+        size_bytes,
+    }
+}
+
+#[tokio::test]
+async fn reply_attachment_intents_preserve_order_and_seal_idempotently() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let store = build_outbound_store_for_backend(backend);
+    let scope = reply_attachment_scope();
+    let run_id = RunId::new();
+    let first = reply_attachment_intent("/workspace/reports/first.txt", 5);
+    let second = reply_attachment_intent("/workspace/reports/second.txt", 7);
+
+    store
+        .register(&scope, &run_id, first.clone())
+        .await
+        .expect("register first attachment");
+    store
+        .register(&scope, &run_id, first.clone())
+        .await
+        .expect("identical retry is idempotent");
+    store
+        .register(&scope, &run_id, second.clone())
+        .await
+        .expect("register second attachment");
+
+    assert_eq!(
+        store
+            .seal(&scope, &run_id)
+            .await
+            .expect("seal attachment intents"),
+        vec![first.clone(), second.clone()]
+    );
+    assert_eq!(
+        store
+            .seal(&scope, &run_id)
+            .await
+            .expect("repeated sealing is idempotent"),
+        vec![first, second]
+    );
+}
+
+#[tokio::test]
+async fn reply_attachment_intents_fail_closed_on_conflict_or_post_seal_registration() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let store = build_outbound_store_for_backend(backend);
+    let scope = reply_attachment_scope();
+    let run_id = RunId::new();
+    let original = reply_attachment_intent("/workspace/report.txt", 5);
+    store
+        .register(&scope, &run_id, original.clone())
+        .await
+        .expect("register original attachment");
+
+    let mut conflicting = original.clone();
+    conflicting.mime_type = "application/json".to_string();
+    assert!(matches!(
+        store.register(&scope, &run_id, conflicting).await,
+        Err(OutboundError::ReplyAttachmentIntentConflict)
+    ));
+
+    store
+        .seal(&scope, &run_id)
+        .await
+        .expect("seal attachment intents");
+    assert!(matches!(
+        store
+            .register(
+                &scope,
+                &run_id,
+                reply_attachment_intent("/workspace/late.txt", 1),
+            )
+            .await,
+        Err(OutboundError::ReplyAttachmentIntentsSealed)
+    ));
+}
+
+#[tokio::test]
+async fn reply_attachment_intents_enforce_shared_count_and_byte_budgets() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let store = build_outbound_store_for_backend(backend);
+    let scope = reply_attachment_scope();
+    let count_run_id = RunId::new();
+
+    for index in 0..ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS.max_count {
+        store
+            .register(
+                &scope,
+                &count_run_id,
+                reply_attachment_intent(&format!("/workspace/count/{index}.txt"), 1),
+            )
+            .await
+            .expect("register attachment within count budget");
+    }
+    assert!(matches!(
+        store
+            .register(
+                &scope,
+                &count_run_id,
+                reply_attachment_intent("/workspace/count/overflow.txt", 1),
+            )
+            .await,
+        Err(OutboundError::ReplyAttachmentIntentLimitExceeded)
+    ));
+
+    let size_run_id = RunId::new();
+    assert!(matches!(
+        store
+            .register(
+                &scope,
+                &size_run_id,
+                reply_attachment_intent(
+                    "/workspace/too-large.txt",
+                    ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes as u64 + 1,
+                ),
+            )
+            .await,
+        Err(OutboundError::ReplyAttachmentIntentLimitExceeded)
+    ));
+
+    let total_run_id = RunId::new();
+    let half = ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS.max_total_bytes as u64 / 2;
+    store
+        .register(
+            &scope,
+            &total_run_id,
+            reply_attachment_intent("/workspace/total/first.txt", half + 1),
+        )
+        .await
+        .expect("register first attachment within total budget");
+    assert!(matches!(
+        store
+            .register(
+                &scope,
+                &total_run_id,
+                reply_attachment_intent("/workspace/total/second.txt", half + 1),
+            )
+            .await,
+        Err(OutboundError::ReplyAttachmentIntentLimitExceeded)
+    ));
+}
+
+#[tokio::test]
+async fn reply_attachment_intents_reject_unstable_paths_and_unsafe_metadata() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let store = build_outbound_store_for_backend(backend);
+    let scope = reply_attachment_scope();
+
+    let outside_workspace = reply_attachment_intent("/artifacts/report.txt", 1);
+    assert!(matches!(
+        store
+            .register(&scope, &RunId::new(), outside_workspace)
+            .await,
+        Err(OutboundError::InvalidRequest { .. })
+    ));
+
+    let mut unsafe_filename = reply_attachment_intent("/workspace/report.txt", 1);
+    unsafe_filename.filename = "../report.txt".to_string();
+    assert!(matches!(
+        store.register(&scope, &RunId::new(), unsafe_filename).await,
+        Err(OutboundError::InvalidRequest { .. })
+    ));
+
+    let mut invalid_mime = reply_attachment_intent("/workspace/report.txt", 1);
+    invalid_mime.mime_type = "text/plain; charset=utf-8".to_string();
+    assert!(matches!(
+        store.register(&scope, &RunId::new(), invalid_mime).await,
+        Err(OutboundError::InvalidRequest { .. })
+    ));
+}
+
+#[tokio::test]
+async fn reply_attachment_intents_merge_concurrent_writers_across_store_instances() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let first_store = Arc::new(build_outbound_store_for_backend(Arc::clone(&backend)));
+    let second_store = Arc::new(build_outbound_store_for_backend(backend));
+    let scope = reply_attachment_scope();
+    let run_id = RunId::new();
+    let first = reply_attachment_intent("/workspace/concurrent/first.txt", 5);
+    let second = reply_attachment_intent("/workspace/concurrent/second.txt", 7);
+
+    let (first_result, second_result) = tokio::join!(
+        first_store.register(&scope, &run_id, first.clone()),
+        second_store.register(&scope, &run_id, second.clone()),
+    );
+    first_result.expect("first concurrent registration");
+    second_result.expect("second concurrent registration");
+
+    let sealed = first_store
+        .seal(&scope, &run_id)
+        .await
+        .expect("seal merged attachment intents");
+    assert_eq!(sealed.len(), 2);
+    assert!(sealed.contains(&first));
+    assert!(sealed.contains(&second));
+}
+
+#[tokio::test]
+async fn reply_attachment_intents_survive_store_reopen_and_isolate_scope() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let first_store = build_outbound_store_for_backend(Arc::clone(&backend));
+    let scope = reply_attachment_scope();
+    let run_id = RunId::new();
+    let intent = reply_attachment_intent("/workspace/durable.txt", 9);
+    first_store
+        .register(&scope, &run_id, intent.clone())
+        .await
+        .expect("register durable attachment");
+    drop(first_store);
+
+    let reopened_store = build_outbound_store_for_backend(backend);
+    assert_eq!(
+        reopened_store
+            .seal(&scope, &run_id)
+            .await
+            .expect("seal attachment after reopening store"),
+        vec![intent]
+    );
+
+    let mut other_scope = scope;
+    other_scope.user_id = UserId::new("different-outbound-user").expect("user id");
+    assert!(
+        reopened_store
+            .seal(&other_scope, &run_id)
+            .await
+            .expect("seal isolated empty scope")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn reply_attachment_intents_persist_across_libsql_reopen() {
+    let directory = tempfile::tempdir().expect("temporary libSQL directory");
+    let database_path = directory.path().join("outbound-reply-attachments.db");
+    let scope = reply_attachment_scope();
+    let run_id = RunId::new();
+    let intent = reply_attachment_intent("/workspace/libsql-durable.txt", 11);
+
+    {
+        let database = Arc::new(
+            libsql::Builder::new_local(&database_path)
+                .build()
+                .await
+                .expect("build first libSQL database"),
+        );
+        let root = Arc::new(
+            LibSqlRootFilesystem::new(database).expect("build first libSQL root filesystem"),
+        );
+        root.run_migrations()
+            .await
+            .expect("migrate first libSQL filesystem");
+        let store = OutboundStateStore::new(build_scoped_fs(root, TEST_OUTBOUND_ROOT));
+        store
+            .register(&scope, &run_id, intent.clone())
+            .await
+            .expect("persist attachment intent");
+    }
+
+    let reopened_database = Arc::new(
+        libsql::Builder::new_local(&database_path)
+            .build()
+            .await
+            .expect("reopen libSQL database"),
+    );
+    let reopened_root = Arc::new(
+        LibSqlRootFilesystem::new(reopened_database).expect("reopen libSQL root filesystem"),
+    );
+    reopened_root
+        .run_migrations()
+        .await
+        .expect("migrate reopened libSQL filesystem");
+    let reopened_store =
+        OutboundStateStore::new(build_scoped_fs(reopened_root, TEST_OUTBOUND_ROOT));
+
+    assert_eq!(
+        reopened_store
+            .seal(&scope, &run_id)
+            .await
+            .expect("seal intent from reopened durable store"),
+        vec![intent]
+    );
 }
 
 #[tokio::test]
