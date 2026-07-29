@@ -1142,6 +1142,16 @@ pub fn sanitize_hook_label(label: impl Into<String>) -> String {
     sanitize_telemetry_label(label)
 }
 
+/// Collapse an unsafe recovery stage, class, or disposition into the fixed
+/// `unclassified` token before it crosses a durable or projection boundary.
+///
+/// Recovery labels share the same bounded `lower_snake_case` vocabulary as
+/// hook telemetry, but this named entry point keeps ownership explicit for
+/// downstream projection consumers.
+pub fn sanitize_recovery_label(label: impl Into<String>) -> String {
+    sanitize_telemetry_label(label)
+}
+
 fn sanitize_telemetry_label(label: impl Into<String>) -> String {
     let value = label.into();
     if is_safe_telemetry_label(&value) {

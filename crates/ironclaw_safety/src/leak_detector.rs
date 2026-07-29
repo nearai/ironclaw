@@ -614,7 +614,7 @@ fn default_patterns() -> Vec<LeakPattern> {
         // JSON begins immediately with `{`.
         LeakPattern {
             name: "bare_jwt".to_string(),
-            regex: Regex::new(r"\b[a-zA-Z0-9_-]{4,}\.[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}\b")
+            regex: Regex::new(r"\b[a-zA-Z0-9_-]{4,}\.[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}")
                 .unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::High,
             action: LeakAction::Redact,
@@ -648,10 +648,10 @@ fn default_patterns() -> Vec<LeakPattern> {
             action: LeakAction::Block,
         },
         // Telegram bot tokens (<8-12 digit bot_id>:AA<base64url, 30+ chars>)
-        // Word boundary prevents false positives on timestamp-keyed log entries.
+        // Leading word boundary prevents false positives on timestamp-keyed log entries.
         LeakPattern {
             name: "telegram_bot_token".to_string(),
-            regex: Regex::new(r"\b\d{8,12}:AA[A-Za-z0-9_-]{30,}\b").unwrap(), // safety: hardcoded literal
+            regex: Regex::new(r"\b\d{8,12}:AA[A-Za-z0-9_-]{30,}").unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
         },
@@ -956,6 +956,28 @@ mod tests {
         let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature123";
 
         let (redacted, changed) = detector.redact_all_secrets(jwt);
+
+        assert!(changed);
+        assert_eq!(redacted, "[REDACTED]");
+    }
+
+    #[test]
+    fn redact_all_secrets_masks_entire_bare_jwt_ending_in_dash() {
+        let detector = LeakDetector::new();
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature12-";
+
+        let (redacted, changed) = detector.redact_all_secrets(jwt);
+
+        assert!(changed);
+        assert_eq!(redacted, "[REDACTED]");
+    }
+
+    #[test]
+    fn redact_all_secrets_masks_entire_telegram_token_ending_in_dash() {
+        let detector = LeakDetector::new();
+        let token = "12345678901:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsa-";
+
+        let (redacted, changed) = detector.redact_all_secrets(token);
 
         assert!(changed);
         assert_eq!(redacted, "[REDACTED]");

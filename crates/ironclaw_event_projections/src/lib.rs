@@ -13,6 +13,7 @@ use chrono::Utc;
 use ironclaw_events::{
     AuditSink, DurableAuditLog, DurableEventLog, EventError, EventLogEntry, EventStreamKey,
     ReadScope, RuntimeEvent, RuntimeEventKind, UNCLASSIFIED_ERROR_KIND, sanitize_error_kind,
+    sanitize_recovery_label,
 };
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AgentId, ApprovalRequestId, AuditEnvelope, AuditEventId,
@@ -1710,9 +1711,12 @@ fn project_timeline_entry(entry: &EventLogEntry<RuntimeEvent>) -> TimelineEntry 
         hook_decision: event.hook_decision.clone(),
         hook_failure_category: event.hook_failure_category.clone(),
         hook_failure_disposition: event.hook_failure_disposition.clone(),
-        recovery_stage: event.recovery_stage.clone(),
-        recovery_class: event.recovery_class.clone(),
-        recovery_disposition: event.recovery_disposition.clone(),
+        recovery_stage: event.recovery_stage.clone().map(sanitize_recovery_label),
+        recovery_class: event.recovery_class.clone().map(sanitize_recovery_label),
+        recovery_disposition: event
+            .recovery_disposition
+            .clone()
+            .map(sanitize_recovery_label),
     }
 }
 
