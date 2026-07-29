@@ -176,6 +176,7 @@ mod tests {
             runtime: ironclaw_extensions::ExtensionRuntimeV2::FirstParty {
                 service: format!("{extension}/v1"),
             },
+            root: None,
             mcp: None,
             tools: Vec::new(),
             channel: None,

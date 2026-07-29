@@ -68,6 +68,7 @@ mod capability_io;
 #[cfg(feature = "test-support")]
 mod channel_connection;
 mod durable;
+mod libsql_host_bindings;
 mod oauth_product_auth;
 mod outbound_delivery;
 mod project_create;
@@ -104,6 +105,10 @@ pub use durable::{
     open_standalone_approval_settings_stores_for_test,
     open_standalone_outbound_preferences_store_for_test,
     open_standalone_trigger_repository_for_test,
+};
+pub use libsql_host_bindings::{
+    libsql_host_bindings_for_test, libsql_host_bindings_from_runtime_for_test,
+    libsql_host_bindings_with_resolved_secret_master_key_for_test,
 };
 pub use oauth_product_auth::build_google_oauth_product_auth_for_test;
 pub use oauth_product_auth::build_oauth_product_auth_for_test_on_libsql;

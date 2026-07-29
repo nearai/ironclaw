@@ -351,6 +351,8 @@ impl RebornRuntimeStores {
         &self,
         wiring: ChannelHostAssemblyTestWiring,
     ) -> Option<Arc<ironclaw_extension_host::channel_host::GenericChannelHostAssembly>> {
+        let admin_users =
+            crate::extension_host_assembly::channel_admin_users(self, &wiring.identity);
         crate::extension_host_assembly::start_channel_host_from_stores(
             self,
             crate::extension_host_assembly::ChannelHostAssemblyWiring {
@@ -363,6 +365,7 @@ impl RebornRuntimeStores {
                 blocked_auth_prompts: None,
                 auth_flow_cancel: None,
                 run_delivery_settings: wiring.run_delivery_settings,
+                admin_users,
             },
         )
     }
@@ -986,6 +989,7 @@ pub(crate) async fn open_standalone_approval_settings_stores_for_test(
 pub(crate) async fn open_standalone_trigger_repository_for_test(
     storage_root: &Path,
 ) -> Result<Arc<dyn TriggerRepository>, RebornBuildError> {
-    let db = open_standalone_libsql_database(storage_root).await?;
-    trigger_repository_for_durable_backend(&DurableBackend::LibSql(db)).await
+    let mut composite = CompositeRootFilesystem::new();
+    let backend = build_default_database_roots(storage_root, &mut composite).await?;
+    trigger_repository_for_durable_backend(&backend).await
 }

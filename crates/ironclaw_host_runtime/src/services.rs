@@ -882,7 +882,7 @@ fn local_testing_runtime_policy() -> EffectiveRuntimePolicy {
     .unwrap_or_else(|error| {
         panic!(
             "LocalSingleUser + Standalone runtime policy must resolve for local testing: {error}"
-        )
+        ) // safety: the fixed local deployment/profile pair is resolver-valid by construction.
     })
 }
 

@@ -315,11 +315,8 @@ const GENERIC_CAPABILITY_FAILURE_SUMMARIES: [&str; 2] = [
 ///
 /// Returns `None` when neither is available, so the projection keeps its
 /// existing `tool failed: <kind>` fallback.
-fn failure_display_summary(
-    safe_summary: &str,
-    detail: &Option<CapabilityFailureDetail>,
-) -> Option<String> {
-    if let Some(CapabilityFailureDetail::InvalidInput { issues }) = detail.as_ref()
+fn failure_display_summary(safe_summary: &str, detail: &CapabilityFailureDetail) -> Option<String> {
+    if let CapabilityFailureDetail::InvalidInput { issues } = detail
         && !issues.is_empty()
     {
         let rendered = issues
@@ -1613,10 +1610,11 @@ impl HostRuntimeLoopCapabilityPort {
                 // model-visible so the driver can retry instead of terminalizing the host.
                 // INVARIANT: synthetic capabilities must not use InvalidInvocation for
                 // internal or host-fatal conditions.
+                let detail = diagnostic_detail_from_raw(&error.safe_summary);
                 return Ok(GatedResolution::bare(resolution::failed(
                     FailureKind::InputEncode,
                     error.safe_summary,
-                    None,
+                    detail,
                 )));
             }
             Err(error) => return Err(error),
@@ -2625,10 +2623,13 @@ impl HostRuntimeLoopCapabilityPort {
                             && is_provider_tool_call_input_ref(effective_input_ref) =>
                     {
                         let host_error = *error.error;
+                        let detail = error.detail.unwrap_or_else(|| {
+                            diagnostic_detail_from_raw(&host_error.safe_summary)
+                        });
                         let result = Ok(GatedResolution::bare(resolution::failed(
                             FailureKind::InputEncode,
                             host_error.safe_summary,
-                            error.detail,
+                            detail,
                         )));
                         guard.commit();
                         self.record_loop_completed(
@@ -3611,7 +3612,7 @@ async fn runtime_outcome_to_loop(
                     unknown.message,
                     "capability invocation returned an unknown outcome",
                 ),
-                Some(CapabilityFailureDetail::Diagnostic { text: detail }),
+                CapabilityFailureDetail::Diagnostic { text: detail },
             ))
         }
     })
@@ -3625,7 +3626,7 @@ enum LoopFailureClass {
     Failed {
         error_kind: FailureKind,
         safe_summary: String,
-        detail: Option<CapabilityFailureDetail>,
+        detail: CapabilityFailureDetail,
     },
     Denied {
         reason_kind: CapabilityDeniedReasonKind,
@@ -3704,10 +3705,8 @@ fn runtime_failure_to_loop(
             runtime_model_visible_failure_to_loop(failure)
         }
         CapabilityFailureDisposition::RetrySameCall => {
-            let detail = match runtime_failure_detail_to_loop(failure.detail.clone()) {
-                Some(structured) => Some(structured),
-                None => Some(runtime_failure_diagnostic_detail(&failure)),
-            };
+            let detail = runtime_failure_detail_to_loop(failure.detail.clone())
+                .unwrap_or_else(|| runtime_failure_diagnostic_detail(&failure));
             Ok(LoopFailureClass::Failed {
                 error_kind: failure.kind,
                 safe_summary: runtime_failure_safe_summary(
@@ -3807,6 +3806,12 @@ fn model_visible_diagnostic_text(raw: &str) -> Option<String> {
     Some(normalized)
 }
 
+fn diagnostic_detail_from_raw(raw: &str) -> CapabilityFailureDetail {
+    let text = model_visible_diagnostic_text(raw)
+        .unwrap_or_else(|| ModelDiagnostic::unavailable().into_inner());
+    CapabilityFailureDetail::Diagnostic { text }
+}
+
 fn runtime_model_visible_failure_to_loop(
     failure: RuntimeCapabilityFailure,
 ) -> Result<LoopFailureClass, AgentLoopHostError> {
@@ -3822,10 +3827,8 @@ fn runtime_model_visible_failure_to_loop(
 
     let error_kind = failure.kind;
     let safe_summary = runtime_failure_safe_summary(&failure, "capability invocation failed");
-    let detail = match runtime_failure_detail_to_loop(failure.detail.clone()) {
-        Some(structured) => Some(structured),
-        None => Some(runtime_failure_diagnostic_detail(&failure)),
-    };
+    let detail = runtime_failure_detail_to_loop(failure.detail.clone())
+        .unwrap_or_else(|| runtime_failure_diagnostic_detail(&failure));
     Ok(LoopFailureClass::Failed {
         error_kind,
         safe_summary,
@@ -4284,9 +4287,9 @@ mod tests {
         );
         assert_eq!(
             detail,
-            Some(CapabilityFailureDetail::Diagnostic {
+            CapabilityFailureDetail::Diagnostic {
                 text: raw_invalid_input.to_string(),
-            })
+            }
         );
 
         let issue =
@@ -4309,7 +4312,7 @@ mod tests {
         assert!(matches!(
             detailed_invalid_input,
             LoopFailureClass::Failed {
-                detail: Some(CapabilityFailureDetail::InvalidInput { issues }),
+                detail: CapabilityFailureDetail::InvalidInput { issues },
                 ..
             } if issues.len() == 2
                 && issues[0].path == "schedule.kind"
@@ -4408,7 +4411,7 @@ mod tests {
         // The summary stays generic (the path tripped the strict validator) ...
         assert_eq!(safe_summary, "capability invocation failed");
         // ... but the raw path-bearing cause now rides the diagnostic detail.
-        let Some(CapabilityFailureDetail::Diagnostic { text }) = detail else {
+        let CapabilityFailureDetail::Diagnostic { text } = detail else {
             panic!("expected a diagnostic detail carrying the raw cause");
         };
         assert_eq!(text, path, "the path string must reach the model intact");
@@ -4428,7 +4431,7 @@ mod tests {
         let LoopFailureClass::Failed { detail, .. } = outcome else {
             panic!("expected a model-visible Failed outcome");
         };
-        let Some(CapabilityFailureDetail::Diagnostic { text }) = detail else {
+        let CapabilityFailureDetail::Diagnostic { text } = detail else {
             panic!("expected a diagnostic detail");
         };
         assert!(
@@ -4462,7 +4465,7 @@ mod tests {
         let LoopFailureClass::Failed { detail, .. } = outcome else {
             panic!("expected a model-visible Failed outcome");
         };
-        let Some(CapabilityFailureDetail::Diagnostic { text }) = detail else {
+        let CapabilityFailureDetail::Diagnostic { text } = detail else {
             panic!("expected a diagnostic detail");
         };
         assert!(
@@ -4502,7 +4505,7 @@ mod tests {
         let LoopFailureClass::Failed { detail, .. } = outcome else {
             panic!("expected a model-visible Failed outcome");
         };
-        let Some(CapabilityFailureDetail::Diagnostic { text }) = detail else {
+        let CapabilityFailureDetail::Diagnostic { text } = detail else {
             panic!("expected a diagnostic detail carrying the raw cause");
         };
         assert!(
@@ -4536,7 +4539,7 @@ mod tests {
         let LoopFailureClass::Failed { detail, .. } = outcome else {
             panic!("expected a model-visible Failed outcome");
         };
-        let Some(CapabilityFailureDetail::Diagnostic { text }) = detail else {
+        let CapabilityFailureDetail::Diagnostic { text } = detail else {
             panic!("expected a diagnostic detail");
         };
         assert!(
@@ -4576,7 +4579,7 @@ mod tests {
         let LoopFailureClass::Failed { detail, .. } = outcome else {
             panic!("expected a model-visible Failed outcome");
         };
-        let Some(CapabilityFailureDetail::Diagnostic { text }) = detail else {
+        let CapabilityFailureDetail::Diagnostic { text } = detail else {
             panic!("empty diagnostics must use the fixed fallback");
         };
         assert_eq!(text, ModelDiagnostic::unavailable().as_str());
@@ -4601,7 +4604,7 @@ mod tests {
 
     #[test]
     fn capability_failure_display_summary_renders_invalid_input_issues() {
-        let detail = Some(CapabilityFailureDetail::InvalidInput {
+        let detail = CapabilityFailureDetail::InvalidInput {
             issues: vec![
                 CapabilityInputIssue {
                     path: "schedule.kind".to_string(),
@@ -4618,7 +4621,7 @@ mod tests {
                     schema_path: None,
                 },
             ],
-        });
+        };
         let summary = failure_display_summary("tool input failed validation", &detail)
             .expect("invalid input renders a summary");
         assert!(summary.starts_with("Invalid input:"));
@@ -4633,15 +4636,20 @@ mod tests {
         // The `json` builtin reports invalid_input with a descriptive message
         // but no structured issues; that message must reach the preview.
         assert_eq!(
-            failure_display_summary("invalid JSON: expected value at line 1 column 1", &None)
-                .as_deref(),
+            failure_display_summary(
+                "invalid JSON: expected value at line 1 column 1",
+                &CapabilityFailureDetail::Diagnostic {
+                    text: ModelDiagnostic::unavailable().into_inner(),
+                },
+            )
+            .as_deref(),
             Some("invalid JSON: expected value at line 1 column 1")
         );
     }
 
     #[test]
     fn capability_failure_display_summary_skips_unsafe_input_issue_fields() {
-        let detail = Some(CapabilityFailureDetail::InvalidInput {
+        let detail = CapabilityFailureDetail::InvalidInput {
             issues: vec![CapabilityInputIssue {
                 path: "payload</script>".to_string(),
                 code: DispatchInputIssueCode::InvalidValue,
@@ -4649,7 +4657,7 @@ mod tests {
                 received: None,
                 schema_path: None,
             }],
-        });
+        };
 
         assert_eq!(
             failure_display_summary("input schema validation failed", &detail).as_deref(),
@@ -4659,7 +4667,7 @@ mod tests {
 
     #[test]
     fn capability_failure_display_summary_skips_sensitive_input_issue_fields() {
-        let detail = Some(CapabilityFailureDetail::InvalidInput {
+        let detail = CapabilityFailureDetail::InvalidInput {
             issues: vec![CapabilityInputIssue {
                 path: "secret_api_key".to_string(),
                 code: DispatchInputIssueCode::TypeMismatch,
@@ -4667,7 +4675,7 @@ mod tests {
                 received: None,
                 schema_path: None,
             }],
-        });
+        };
 
         assert_eq!(
             failure_display_summary("input schema validation failed", &detail).as_deref(),
@@ -4690,7 +4698,15 @@ mod tests {
 
     #[test]
     fn capability_failure_display_summary_is_none_for_generic_placeholder() {
-        assert!(failure_display_summary("capability invocation failed", &None).is_none());
+        assert!(
+            failure_display_summary(
+                "capability invocation failed",
+                &CapabilityFailureDetail::Diagnostic {
+                    text: ModelDiagnostic::unavailable().into_inner(),
+                },
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -8140,7 +8156,7 @@ mod tests {
         };
         assert_eq!(error_kind, &FailureKind::InputEncode);
         assert!(o.summary.as_str().contains("schema validation"));
-        let Some(ModelFailureDiagnostic::InvalidInput { issues }) = diagnostic else {
+        let ModelFailureDiagnostic::InvalidInput { issues } = diagnostic else {
             panic!("schema-invalid provider call should include invalid input detail");
         };
         assert_eq!(issues.len(), 1);
@@ -8235,7 +8251,7 @@ mod tests {
             panic!("expected schema-invalid provider call to fail");
         };
         assert_eq!(error_kind, &FailureKind::InputEncode);
-        let Some(ModelFailureDiagnostic::InvalidInput { issues }) = diagnostic else {
+        let ModelFailureDiagnostic::InvalidInput { issues } = diagnostic else {
             panic!("schema-invalid provider call should include invalid input detail");
         };
         assert!(
@@ -8332,7 +8348,7 @@ mod tests {
             panic!("expected schema-invalid provider call to fail");
         };
         assert_eq!(error_kind, &FailureKind::InputEncode);
-        let Some(ModelFailureDiagnostic::InvalidInput { issues }) = diagnostic else {
+        let ModelFailureDiagnostic::InvalidInput { issues } = diagnostic else {
             panic!("schema-invalid provider call should include invalid input detail");
         };
         assert!(

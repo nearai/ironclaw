@@ -77,7 +77,7 @@ async fn secret_persists_across_libsql_reopen() {
             .await
             .expect("open fresh libsql for reopen"),
     );
-    let fresh_fs = Arc::new(LibSqlRootFilesystem::new(db));
+    let fresh_fs = Arc::new(LibSqlRootFilesystem::new(db).expect("filesystem runtime"));
     // Migrations are idempotent — schema already exists from the first build.
     fresh_fs
         .run_migrations()

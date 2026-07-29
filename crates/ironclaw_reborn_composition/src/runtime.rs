@@ -1031,6 +1031,12 @@ impl RebornRuntime {
             channel_config: Arc::clone(&self.channel_config_service),
             channel_pairing: self.channel_pairing.clone(),
         };
+        let admin_users: Arc<dyn ironclaw_product::AdminUserService> =
+            Arc::new(crate::admin_user_directory::RebornAdminUserDirectory::new(
+                self.reborn_user_directory(),
+                self.reborn_admin_secret_provisioner(),
+                Arc::new(crate::admin_token::RejectingAdminApiTokenMinter),
+            ));
         Some(crate::extension_host_assembly::start_channel_host(
             &source,
             crate::extension_host_assembly::ChannelHostAssemblyWiring {
@@ -1043,6 +1049,7 @@ impl RebornRuntime {
                 blocked_auth_prompts: None,
                 auth_flow_cancel: None,
                 run_delivery_settings,
+                admin_users,
             },
         ))
     }

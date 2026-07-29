@@ -22,7 +22,8 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverHost,
         AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, AgentLoopHostError,
-        LoadCheckpointPayloadRequest, LoopCheckpointKind, LoopDriverId, LoopRunContext,
+        AgentLoopHostErrorKind, LoadCheckpointPayloadRequest, LoopCheckpointKind, LoopDriverId,
+        LoopRunContext,
     },
 };
 
@@ -315,14 +316,12 @@ pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriv
             kind,
             safe_summary,
             reason_kind,
-            diagnostic_ref,
             detail,
         } => {
             tracing::warn!(
                 stage = ?stage,
                 kind = ?kind,
                 reason_kind = ?reason_kind,
-                diagnostic_ref = ?diagnostic_ref,
                 safe_summary = %safe_summary,
                 "planned driver host stage unavailable"
             );
@@ -336,6 +335,15 @@ pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriv
                 // (ironclaw_agent_loop cannot depend on the hardened scrubber),
                 // so re-scrub through the full LeakDetector registry +
                 // injection fencing here, where the detail becomes visible.
+                let detail = detail
+                    .or_else(|| Some(safe_summary.as_str().to_string()))
+                    .map(ironclaw_loop_host::scrub_model_visible_detail);
+                return AgentLoopDriverError::Failed {
+                    reason_kind: category.to_string(),
+                    detail,
+                };
+            }
+            if let Some(category) = permanent_prompt_stage_failure_category(stage, kind) {
                 let detail = detail
                     .or_else(|| Some(safe_summary.as_str().to_string()))
                     .map(ironclaw_loop_host::scrub_model_visible_detail);
@@ -362,10 +370,34 @@ pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriv
                 detail: None,
             }
         }
+        AgentLoopExecutorError::RecoverySequenceExhausted => {
+            tracing::warn!("planned driver exhausted durable recovery event identity space");
+            AgentLoopDriverError::Failed {
+                reason_kind: "driver_bug".to_string(),
+                detail: None,
+            }
+        }
         AgentLoopExecutorError::Cancelled => AgentLoopDriverError::Failed {
             reason_kind: "interrupted_unexpectedly".to_string(),
             detail: None,
         },
+    }
+}
+
+fn permanent_prompt_stage_failure_category(
+    stage: HostStage,
+    kind: AgentLoopHostErrorKind,
+) -> Option<&'static str> {
+    if stage != HostStage::Prompt {
+        return None;
+    }
+
+    match kind {
+        AgentLoopHostErrorKind::PolicyDenied => Some(LoopFailureKind::PolicyDenied.as_str()),
+        AgentLoopHostErrorKind::InvalidInvocation
+        | AgentLoopHostErrorKind::Invalid
+        | AgentLoopHostErrorKind::ScopeMismatch => Some("driver_invalid_request"),
+        _ => None,
     }
 }
 
@@ -578,7 +610,6 @@ mod tests {
             kind: AgentLoopHostErrorKind::CredentialUnavailable,
             safe_summary: LoopSafeSummary::new("model credentials are unavailable").expect("safe"),
             reason_kind: None,
-            diagnostic_ref: None,
             detail: None,
         });
 
@@ -600,7 +631,6 @@ mod tests {
             safe_summary: LoopSafeSummary::new("resource accounting storage is unavailable")
                 .expect("safe"),
             reason_kind: None,
-            diagnostic_ref: None,
             detail: None,
         });
 
@@ -621,7 +651,6 @@ mod tests {
             safe_summary: LoopSafeSummary::new("safe summary wording is display-only")
                 .expect("safe"),
             reason_kind: Some(MODEL_CREDITS_EXHAUSTED_REASON_KIND),
-            diagnostic_ref: None,
             detail: None,
         });
 
@@ -641,7 +670,6 @@ mod tests {
             kind: AgentLoopHostErrorKind::CredentialUnavailable,
             safe_summary: LoopSafeSummary::new("model credentials are unavailable").expect("safe"),
             reason_kind: None,
-            diagnostic_ref: None,
             detail: Some("HTTP 404 model not found".to_string()),
         });
 
@@ -667,7 +695,6 @@ mod tests {
             kind: AgentLoopHostErrorKind::CredentialUnavailable,
             safe_summary: LoopSafeSummary::new("model credentials are unavailable").expect("safe"),
             reason_kind: None,
-            diagnostic_ref: None,
             detail: Some(format!("provider rejected token {secret} at /host/route")),
         });
 
@@ -699,7 +726,6 @@ mod tests {
             kind: AgentLoopHostErrorKind::CredentialUnavailable,
             safe_summary: LoopSafeSummary::new(CREDIT_SUMMARY).expect("safe"),
             reason_kind: Some(MODEL_CREDITS_EXHAUSTED_REASON_KIND),
-            diagnostic_ref: None,
             detail: None,
         });
 
@@ -719,7 +745,6 @@ mod tests {
             kind: AgentLoopHostErrorKind::CredentialUnavailable,
             safe_summary: LoopSafeSummary::new(CREDENTIAL_SUMMARY).expect("safe"),
             reason_kind: None,
-            diagnostic_ref: None,
             detail: None,
         });
 
@@ -729,6 +754,63 @@ mod tests {
                 reason: format!("Prompt: {CREDENTIAL_SUMMARY}")
             }
         );
+    }
+
+    #[test]
+    fn prompt_policy_denial_is_not_mapped_to_transient_unavailable() {
+        let mapped = map_executor_error(AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage: HostStage::Prompt,
+            kind: AgentLoopHostErrorKind::PolicyDenied,
+            safe_summary: LoopSafeSummary::new("explicit skill is ambiguous").expect("safe"),
+            reason_kind: None,
+            detail: None,
+        });
+
+        assert_eq!(
+            mapped,
+            AgentLoopDriverError::Failed {
+                reason_kind: "policy_denied".to_string(),
+                detail: Some("explicit skill is ambiguous".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn permanent_prompt_kinds_remain_unavailable_at_other_non_model_stages() {
+        for kind in [
+            AgentLoopHostErrorKind::PolicyDenied,
+            AgentLoopHostErrorKind::InvalidInvocation,
+            AgentLoopHostErrorKind::Invalid,
+            AgentLoopHostErrorKind::ScopeMismatch,
+        ] {
+            for stage in [
+                HostStage::Capability,
+                HostStage::Transcript,
+                HostStage::Checkpoint,
+                HostStage::Input,
+            ] {
+                let mapped =
+                    map_executor_error(AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+                        stage,
+                        kind,
+                        safe_summary: LoopSafeSummary::new("host stage rejected the operation")
+                            .expect("safe"),
+                        reason_kind: None,
+                        detail: None,
+                    });
+
+                assert_eq!(
+                    mapped,
+                    AgentLoopDriverError::Unavailable {
+                        reason: format!(
+                            "{}: host stage rejected the operation",
+                            host_stage_name(stage)
+                        )
+                    },
+                    "{stage:?}/{kind:?} must preserve its existing unavailable mapping"
+                );
+            }
+        }
     }
 
     #[tokio::test]

@@ -239,11 +239,10 @@ impl SyntheticCapabilityHandler for OutboundDeliveryTargetSetHandler {
                             .await;
                     }
                     OutboundDeliveryApprovalSettingsDecision::Deny => {
-                        return Ok(resolution::failed(
+                        return Ok(super::diagnostic_failure(
                             FailureKind::PolicyDenied,
                             "outbound delivery target setter is disabled by tool approval settings"
                                 .to_string(),
-                            None,
                         ));
                     }
                 },
@@ -772,29 +771,25 @@ fn input_error(error: OutboundDeliveryCapabilityInputError) -> AgentLoopHostErro
 fn outbound_delivery_outcome(error: ProductSurfaceError) -> Result<Resolution, AgentLoopHostError> {
     match error.code {
         ProductSurfaceErrorCode::InvalidRequest | ProductSurfaceErrorCode::NotFound => {
-            Ok(resolution::failed(
+            Ok(super::diagnostic_failure(
                 FailureKind::InputEncode,
                 "invalid outbound delivery request".to_string(),
-                None,
             ))
         }
         ProductSurfaceErrorCode::Unauthenticated | ProductSurfaceErrorCode::Forbidden => {
             approval_denied("not permitted to change the outbound delivery target")
         }
-        ProductSurfaceErrorCode::Conflict => Ok(resolution::failed(
+        ProductSurfaceErrorCode::Conflict => Ok(super::diagnostic_failure(
             FailureKind::OperationFailed,
             "outbound delivery target operation conflicted".to_string(),
-            None,
         )),
-        ProductSurfaceErrorCode::RateLimited => Ok(resolution::failed(
+        ProductSurfaceErrorCode::RateLimited => Ok(super::diagnostic_failure(
             FailureKind::Resource,
             "outbound delivery target operation rate limited".to_string(),
-            None,
         )),
-        ProductSurfaceErrorCode::Unavailable => Ok(resolution::failed(
+        ProductSurfaceErrorCode::Unavailable => Ok(super::diagnostic_failure(
             FailureKind::Unavailable,
             "outbound delivery service temporarily unavailable".to_string(),
-            None,
         )),
         ProductSurfaceErrorCode::Internal => Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::Internal,

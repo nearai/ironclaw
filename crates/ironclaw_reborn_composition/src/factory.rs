@@ -32,7 +32,7 @@ use crate::filesystem_assembly::{
 use crate::host_access_assembly::validate_workspace_skill_isolation;
 use crate::host_access_assembly::{WorkspaceFilesystems, build_host_access};
 use crate::input::{
-    LibsqlConnectionConfig, OAuthDcrCallbackConfig, OAuthProviderBackendConfig, PostgresPoolSource,
+    OAuthDcrCallbackConfig, OAuthProviderBackendConfig, PostgresPoolSource,
     RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput,
 };
 use crate::operator_tool_catalog::ActiveRegistryOperatorToolCatalog;
@@ -700,50 +700,6 @@ fn open_postgres_pool_from_source(
     }
 }
 
-/// Open a libSQL database from a build-time [`LibsqlConnectionConfig`]
-/// (Phase B). Scheme detection mirrors
-/// `ironclaw_reborn_event_store`'s libsql backend: recognised remote schemes
-/// (`libsql://`, `https://`, `http://`, case-insensitive) route through
-/// `Builder::new_remote` with the auth token; everything else is a local file.
-async fn open_libsql_database_from_connection(
-    connection: &LibsqlConnectionConfig,
-) -> Result<Arc<libsql::Database>, RebornBuildError> {
-    use secrecy::ExposeSecret;
-
-    let path_or_url = connection.path_or_url.as_str();
-    let build_result = if is_remote_libsql_target(path_or_url) {
-        libsql::Builder::new_remote(
-            path_or_url.to_string(),
-            connection
-                .auth_token
-                .as_ref()
-                .map(|token| token.expose_secret().to_string())
-                .unwrap_or_default(),
-        )
-        .build()
-        .await
-    } else {
-        libsql::Builder::new_local(path_or_url).build().await
-    };
-    build_result
-        .map(Arc::new)
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("libSQL database could not be opened: {error}"),
-        })
-}
-
-/// Detect a remote libSQL endpoint by recognised URL scheme, case-insensitively
-/// (mirrors `ironclaw_reborn_event_store::libsql_backed::is_remote_libsql`).
-fn is_remote_libsql_target(path_or_url: &str) -> bool {
-    let Some(scheme_end) = path_or_url.find("://") else {
-        return false;
-    };
-    let scheme = &path_or_url[..scheme_end];
-    scheme.eq_ignore_ascii_case("libsql")
-        || scheme.eq_ignore_ascii_case("https")
-        || scheme.eq_ignore_ascii_case("http")
-}
-
 pub(crate) async fn build_secret_store<F>(
     root: &Path,
     scoped_filesystem: Arc<ScopedFilesystem<F>>,
@@ -785,7 +741,7 @@ pub async fn open_standalone_secret_store(
     root: &Path,
 ) -> Result<Arc<dyn SecretStorePort>, RebornBuildError> {
     let db = open_standalone_libsql_database(root).await?;
-    let filesystem = Arc::new(LibSqlRootFilesystem::new(db));
+    let filesystem = Arc::new(LibSqlRootFilesystem::new(db)?);
     filesystem.run_migrations().await?;
     let scoped = crate::wrap_scoped(filesystem);
     let (store, _crypto) = build_secret_store(root, scoped, None).await?;

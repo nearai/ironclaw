@@ -408,7 +408,8 @@ Look at:
 - `thread_store_writes`, `turn_store`, `resource_governor`, and
   `context_reads`: runtime/storage latency while provider calls are in flight.
 - error buckets such as `model_provider_rate_limited`, `model_provider_auth`,
-  `model_provider_model_unavailable`, and `model_provider_error`.
+  `model_provider_invalid_request`, `model_provider_model_unavailable`,
+  `model_provider_quota_exceeded`, and `model_provider_error`.
 
 Keep early runs small. Provider mode can spend real tokens, hit rate limits,
 and exercise retries/circuit breakers.

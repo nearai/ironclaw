@@ -272,16 +272,6 @@ pub(crate) enum PostgresPoolSource {
     Prebuilt(deadpool_postgres::Pool),
 }
 
-/// Declarative libSQL connection config (Phase B). `path_or_url` / `auth_token`
-/// flow to the durable event-store config regardless of whether the database
-/// handle is opened at build time or supplied pre-opened, so they live here
-/// rather than inside [`RebornStorageInput::Libsql`]'s handle.
-#[derive(Clone)]
-pub(crate) struct LibsqlConnectionConfig {
-    pub(crate) path_or_url: String,
-    pub(crate) auth_token: Option<ironclaw_secrets::SecretMaterial>,
-}
-
 pub(crate) enum RebornStorageInput {
     Disabled,
     LocalFilesystem {
@@ -297,12 +287,10 @@ pub(crate) enum RebornStorageInput {
         secret_master_key: ironclaw_secrets::SecretMaterial,
         process_local_resource_governor_singleton: bool,
     },
+    #[cfg(any(test, feature = "test-support"))]
     Libsql {
-        connection: LibsqlConnectionConfig,
-        /// Test escape hatch: a caller-supplied, already-opened database the
-        /// build prefers over opening from `connection`. When `None` the build
-        /// opens the handle from `connection` at build time.
-        prebuilt_db: Option<Arc<libsql::Database>>,
+        database_path_or_url: String,
+        runtime: Arc<ironclaw_libsql_runtime::LibSqlRuntime>,
         secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
         process_local_resource_governor_singleton: bool,
     },
@@ -572,52 +560,70 @@ impl RebornHostBindings {
                     || policy.secret_mode == SecretMode::InheritedEnv
             })
     }
+}
 
-    pub fn libsql(
-        profile: RebornCompositionProfile,
-        owner_id: impl Into<String>,
-        db: Arc<libsql::Database>,
-        path_or_url: impl Into<String>,
-        auth_token: Option<ironclaw_secrets::SecretMaterial>,
-        secret_master_key: ironclaw_secrets::SecretMaterial,
-    ) -> Self {
-        Self::new(
-            DeploymentConfig::for_profile(profile, false),
-            owner_id,
-            RebornStorageInput::Libsql {
-                connection: LibsqlConnectionConfig {
-                    path_or_url: path_or_url.into(),
-                    auth_token,
-                },
-                prebuilt_db: Some(db),
-                secret_master_key: Some(secret_master_key),
-                process_local_resource_governor_singleton: true,
-            },
-        )
-    }
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn libsql_host_bindings_for_test(
+    profile: RebornCompositionProfile,
+    owner_id: impl Into<String>,
+    db: Arc<libsql::Database>,
+    database_path_or_url: impl Into<String>,
+    _auth_token: Option<ironclaw_secrets::SecretMaterial>,
+    secret_master_key: ironclaw_secrets::SecretMaterial,
+) -> Result<RebornHostBindings, RebornBuildError> {
+    Ok(RebornHostBindings::new(
+        DeploymentConfig::for_profile(profile, false),
+        owner_id,
+        RebornStorageInput::Libsql {
+            database_path_or_url: database_path_or_url.into(),
+            runtime: Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(db)?),
+            secret_master_key: Some(secret_master_key),
+            process_local_resource_governor_singleton: true,
+        },
+    ))
+}
 
-    pub fn libsql_with_resolved_secret_master_key(
-        profile: RebornCompositionProfile,
-        owner_id: impl Into<String>,
-        db: Arc<libsql::Database>,
-        path_or_url: impl Into<String>,
-        auth_token: Option<ironclaw_secrets::SecretMaterial>,
-    ) -> Self {
-        Self::new(
-            DeploymentConfig::for_profile(profile, false),
-            owner_id,
-            RebornStorageInput::Libsql {
-                connection: LibsqlConnectionConfig {
-                    path_or_url: path_or_url.into(),
-                    auth_token,
-                },
-                prebuilt_db: Some(db),
-                secret_master_key: None,
-                process_local_resource_governor_singleton: true,
-            },
-        )
-    }
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn libsql_host_bindings_from_runtime_for_test(
+    profile: RebornCompositionProfile,
+    owner_id: impl Into<String>,
+    runtime: Arc<ironclaw_libsql_runtime::LibSqlRuntime>,
+    database_path_or_url: impl Into<String>,
+    secret_master_key: ironclaw_secrets::SecretMaterial,
+) -> RebornHostBindings {
+    RebornHostBindings::new(
+        DeploymentConfig::for_profile(profile, false),
+        owner_id,
+        RebornStorageInput::Libsql {
+            database_path_or_url: database_path_or_url.into(),
+            runtime,
+            secret_master_key: Some(secret_master_key),
+            process_local_resource_governor_singleton: true,
+        },
+    )
+}
 
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn libsql_host_bindings_with_resolved_secret_master_key_for_test(
+    profile: RebornCompositionProfile,
+    owner_id: impl Into<String>,
+    db: Arc<libsql::Database>,
+    database_path_or_url: impl Into<String>,
+    _auth_token: Option<ironclaw_secrets::SecretMaterial>,
+) -> Result<RebornHostBindings, RebornBuildError> {
+    Ok(RebornHostBindings::new(
+        DeploymentConfig::for_profile(profile, false),
+        owner_id,
+        RebornStorageInput::Libsql {
+            database_path_or_url: database_path_or_url.into(),
+            runtime: Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(db)?),
+            secret_master_key: None,
+            process_local_resource_governor_singleton: true,
+        },
+    ))
+}
+
+impl RebornHostBindings {
     pub fn postgres(
         profile: RebornCompositionProfile,
         owner_id: impl Into<String>,

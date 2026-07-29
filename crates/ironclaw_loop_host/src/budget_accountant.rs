@@ -865,6 +865,7 @@ mod tests {
             messages: vec![],
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         }
     }

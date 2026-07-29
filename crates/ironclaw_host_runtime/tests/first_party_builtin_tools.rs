@@ -7584,7 +7584,7 @@ async fn builtin_coding_blocks_sensitive_resolved_libsql_paths() {
     let db_dir = tempfile::tempdir().unwrap();
     let db_path = db_dir.path().join("filesystem.db");
     let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-    let filesystem = LibSqlRootFilesystem::new(db);
+    let filesystem = LibSqlRootFilesystem::new(db).expect("filesystem runtime");
     filesystem.run_migrations().await.unwrap();
     filesystem
         .create_dir_all(&VirtualPath::new("/projects/p").unwrap())

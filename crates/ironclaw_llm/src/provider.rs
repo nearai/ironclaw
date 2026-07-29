@@ -357,6 +357,21 @@ impl CompletionRequest {
         self
     }
 
+    /// Select an already-resolved entry in an ordered provider fallback chain.
+    pub fn set_fallback_index(&mut self, fallback_index: u32) {
+        self.metadata.insert(
+            FALLBACK_INDEX_METADATA_KEY.to_string(),
+            fallback_index.to_string(),
+        );
+    }
+
+    /// Return the host-selected ordered fallback index, when present.
+    pub fn fallback_index(&self) -> Option<u32> {
+        self.metadata
+            .get(FALLBACK_INDEX_METADATA_KEY)
+            .and_then(|value| value.parse().ok())
+    }
+
     /// Set temperature.
     pub fn with_temperature(mut self, temperature: f32) -> Self {
         self.temperature = Some(temperature);
@@ -640,6 +655,13 @@ impl ToolCompletionRequest {
         let model = self.model.take();
         normalized_model_override(model.as_deref()).map(str::to_string)
     }
+
+    /// Return the host-selected ordered fallback index, when present.
+    pub fn fallback_index(&self) -> Option<u32> {
+        self.metadata
+            .get(FALLBACK_INDEX_METADATA_KEY)
+            .and_then(|value| value.parse().ok())
+    }
 }
 
 /// Normalize a requested model override.
@@ -686,9 +708,29 @@ pub struct ModelMetadata {
     pub context_length: Option<u32>,
 }
 
+/// Metadata key used by host-managed callers to select one route from an
+/// ordered provider fallback chain.
+pub(crate) const FALLBACK_INDEX_METADATA_KEY: &str = "ironclaw_fallback_index";
+
+/// Deterministic selection evidence for an ordered provider fallback chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelFallbackRoute {
+    pub fallback_index: u32,
+    pub model: String,
+}
+
 /// Trait for LLM providers.
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
+    /// Stable provider identity used in typed errors and routing evidence.
+    ///
+    /// Production adapters and decorators override this; the default keeps
+    /// external test doubles source-compatible without pretending a model slug
+    /// is a provider identity.
+    fn provider_id(&self) -> String {
+        "unknown".to_string()
+    }
+
     /// Get the model name.
     fn model_name(&self) -> &str;
 
@@ -749,6 +791,30 @@ pub trait LlmProvider: Send + Sync {
         normalized_model_override(requested_model)
             .map(std::borrow::ToOwned::to_owned)
             .unwrap_or_else(|| self.active_model_name())
+    }
+
+    /// Resolve an ordered fallback index without making a model call.
+    ///
+    /// Leaf providers expose only index zero. Ordered provider decorators
+    /// override this method and wrappers delegate it so host routing can fail
+    /// deterministically before dispatch when a requested fallback is absent.
+    fn fallback_route(
+        &self,
+        fallback_index: u32,
+        requested_model: Option<&str>,
+    ) -> Result<ModelFallbackRoute, LlmError> {
+        if fallback_index == 0 {
+            return Ok(ModelFallbackRoute {
+                fallback_index,
+                model: self.effective_model_name(requested_model),
+            });
+        }
+        Err(LlmError::ModelNotAvailable {
+            provider: self.provider_id(),
+            model: normalized_model_override(requested_model)
+                .map(str::to_string)
+                .unwrap_or_else(|| self.active_model_name()),
+        })
     }
 
     /// Get the currently active model name.
@@ -857,6 +923,19 @@ mod model_override_tests {
             provider.effective_model_name(Some("  DEFAULT  ")),
             "stub-model"
         );
+    }
+
+    #[test]
+    fn default_missing_fallback_does_not_mislabel_the_model_as_provider() {
+        let error = StubProvider
+            .fallback_route(1, Some("requested-model"))
+            .expect_err("leaf providers expose only fallback index zero");
+
+        assert!(matches!(
+            error,
+            LlmError::ModelNotAvailable { provider, model }
+                if provider == "unknown" && model == "requested-model"
+        ));
     }
 
     #[test]

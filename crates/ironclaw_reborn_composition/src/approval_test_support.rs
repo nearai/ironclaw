@@ -185,7 +185,7 @@ pub(crate) async fn invoke_with_standalone_approval(
                     .approve_spawn(&context.resource_scope, gate.approval_request_id, approval)
                     .await
                     .expect("standalone approval issues spawn resume lease"), // safety: test-only helper in #[cfg(test)] module.
-                other => panic!("unexpected standalone approval action: {other:?}"),
+                other => panic!("unexpected standalone approval action: {other:?}"), // safety: test-only helper validates dispatch/spawn actions above.
             };
 
             host_runtime

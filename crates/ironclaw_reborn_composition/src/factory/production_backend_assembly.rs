@@ -8,16 +8,25 @@ where
     TPolicy: ironclaw_trust::TrustPolicy + 'static,
     TWake: ironclaw_turns::TurnRunWakeNotifier + 'static,
 {
+    if !config.runtime.target_matches(&config.database_path_or_url) {
+        return Err(crate::RebornCompositionError::InvalidConfig {
+            reason: "libSQL production runtime target provenance does not match the configured durable target".to_string(),
+        });
+    }
     ensure_libsql_resource_governor_authority(config.process_local_resource_governor_singleton)?;
-    let filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&config.database)));
+    let filesystem = Arc::new(LibSqlRootFilesystem::from_runtime(config.runtime));
     filesystem.run_migrations().await?;
     let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
     let resource_governor = FilesystemResourceGovernor::new(scoped_filesystem);
+    let event_store = ironclaw_reborn_event_store::RebornEventStoreConfig::LibsqlFilesystem {
+        filesystem: Arc::clone(&filesystem),
+        path_or_url: config.database_path_or_url,
+    };
     build_filesystem_production_host_runtime_services(
         FilesystemProductionHostRuntimeServicesInput {
             filesystem,
             resource_governor,
-            event_store: ProductionEventStoresInput::Config(config.event_store),
+            event_store: ProductionEventStoresInput::Config(event_store),
             secret_master_key: config.secret_master_key,
             trust_policy: config.trust_policy,
             runtime_policy: config.runtime_policy,
@@ -39,6 +48,7 @@ fn ensure_libsql_resource_governor_authority(
     })
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn ensure_libsql_resource_governor_authority_for_build(
     process_local_singleton: bool,
 ) -> Result<(), RebornBuildError> {
@@ -1048,7 +1058,7 @@ pub(super) async fn build_backend_production(
     let admin_configuration_resolver_for_generic = Arc::clone(&admin_configuration_resolver);
     let channel_pairing_registry;
     let channel_host_wiring = {
-        let reserved_capability_ids: std::collections::BTreeSet<_> = services
+        let mut reserved_capability_ids: std::collections::BTreeSet<_> = services
             .shared_extension_registry()
             .snapshot()
             .capabilities()
@@ -1057,6 +1067,8 @@ pub(super) async fn build_backend_production(
             })
             .map(|descriptor| descriptor.id.clone())
             .collect();
+        reserved_capability_ids
+            .extend(ironclaw_runner::tool_disclosure_bridge::bridge_capability_ids());
         let generic_installation_store = extension_management.installation_store_handle();
         let backend_extension_host =
             build_backend_extension_host(BackendExtensionHostAssemblyInput {
@@ -1226,37 +1238,43 @@ async fn finish_production_backend(
     build_backend_production(context, stores, trigger_repository, leader_lock).await
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(super) async fn build_libsql_production(
     context: RebornProductionBuildContext,
-    db: Arc<libsql::Database>,
+    runtime: Arc<ironclaw_libsql_runtime::LibSqlRuntime>,
     path_or_url: String,
-    auth_token: Option<ironclaw_secrets::SecretMaterial>,
     secret_master_key: ironclaw_secrets::SecretMaterial,
     process_local_resource_governor_singleton: bool,
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
     use ironclaw_filesystem::LibSqlRootFilesystem;
 
     ensure_libsql_resource_governor_authority_for_build(process_local_resource_governor_singleton)?;
-    let database_filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&db)));
+    let database_filesystem = Arc::new(LibSqlRootFilesystem::from_runtime(Arc::clone(&runtime)));
     database_filesystem.run_migrations().await?;
-    let trigger_repository = Arc::new(ironclaw_triggers::LibSqlTriggerRepository::new(db));
+    let trigger_repository = Arc::new(ironclaw_triggers::LibSqlTriggerRepository::from_runtime(
+        runtime,
+    ));
     trigger_repository
         .run_migrations()
         .await
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("libSQL trigger repository migrations failed: {error}"),
         })?;
-    let filesystem =
-        production_database_root_filesystem(database_filesystem, "production-libsql-reborn-state")?;
+    let filesystem = production_database_root_filesystem(
+        Arc::clone(&database_filesystem),
+        "production-libsql-reborn-state",
+    )?;
+    let event_store_config =
+        ironclaw_reborn_event_store::RebornEventStoreConfig::LibsqlFilesystem {
+            filesystem: database_filesystem,
+            path_or_url,
+        };
     finish_production_backend(
         context,
         filesystem,
         trigger_repository,
         secret_master_key,
-        ironclaw_reborn_event_store::RebornEventStoreConfig::Libsql {
-            path_or_url,
-            auth_token,
-        },
+        event_store_config,
         ironclaw_auth::CredentialRefreshLeaderLock::always_leader_for_single_writer(),
     )
     .await

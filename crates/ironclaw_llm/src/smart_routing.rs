@@ -896,6 +896,10 @@ impl SmartRoutingProvider {
 
 #[async_trait]
 impl LlmProvider for SmartRoutingProvider {
+    fn provider_id(&self) -> String {
+        self.primary.provider_id()
+    }
+
     fn model_name(&self) -> &str {
         self.primary.model_name()
     }
@@ -995,6 +999,14 @@ impl LlmProvider for SmartRoutingProvider {
 
     fn effective_model_name(&self, requested_model: Option<&str>) -> String {
         self.primary.effective_model_name(requested_model)
+    }
+
+    fn fallback_route(
+        &self,
+        fallback_index: u32,
+        requested_model: Option<&str>,
+    ) -> Result<crate::ModelFallbackRoute, LlmError> {
+        self.primary.fallback_route(fallback_index, requested_model)
     }
 
     fn active_model_name(&self) -> String {

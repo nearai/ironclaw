@@ -413,7 +413,6 @@ async fn cancellation_after_pending_input_ack_permissive_profile_propagates_chec
             kind: AgentLoopHostErrorKind::Unavailable,
             safe_summary: LoopSafeSummary::new("scripted checkpoint payload failure").unwrap(),
             reason_kind: None,
-            diagnostic_ref: None,
             detail: None,
         }
     );
@@ -479,15 +478,15 @@ async fn model_cancelled_returns_cancelled_without_retry() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn cancellation_during_availability_backoff_wakes_the_sleep() {
-    // Availability backoffs run up to 60s per attempt; a cancel request must
+async fn cancellation_during_internal_error_backoff_wakes_the_sleep() {
+    // Internal-error backoffs run up to 60s per attempt; a cancel request must
     // wake the executor out of the backoff sleep instead of waiting it out.
     // Under paused time a non-cancellation-aware sleep would auto-advance the
     // clock by the full first backoff (1s), so the elapsed-time assertion
     // pins the select-over-cancellation behavior.
     let host = MockHost::new(Vec::new()).with_model_errors(vec![AgentLoopHostError::new(
-        AgentLoopHostErrorKind::Unavailable,
-        "model unavailable",
+        AgentLoopHostErrorKind::Internal,
+        "model provider failed internally",
     )]);
     let executor = CanonicalAgentLoopExecutor;
     let state = LoopExecutionState::initial_for_run(host.run_context());
@@ -496,7 +495,7 @@ async fn cancellation_during_availability_backoff_wakes_the_sleep() {
     let family = crate::families::default();
     let run = executor.execute_family(&family, &host, state);
     let cancel = async {
-        // Fires while the executor is inside the 1s availability backoff.
+        // Fires while the executor is inside the 1s internal-error backoff.
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         host.request_cancellation(LoopCancelReasonKind::UserRequested);
     };
@@ -543,7 +542,7 @@ async fn capability_cancelled_returns_cancelled_exit_without_retry() {
             resolutions: vec![resolution::failed(
                 FailureKind::Cancelled,
                 "capability cancelled".to_string(),
-                None,
+                super::diagnostic_failure_detail("capability cancelled"),
             )],
             stopped_on_suspension: false,
         },
@@ -741,7 +740,6 @@ async fn cancellation_checkpoint_payload_unavailable_propagates_for_permissive_p
             kind: AgentLoopHostErrorKind::Unavailable,
             safe_summary: LoopSafeSummary::model_gateway_failed(),
             reason_kind: None,
-            diagnostic_ref: None,
             detail: Some(raw_summary.to_string()),
         }
     );

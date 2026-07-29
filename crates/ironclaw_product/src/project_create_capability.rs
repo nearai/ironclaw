@@ -10,8 +10,8 @@ use ironclaw_loop_host::{
     SyntheticCapabilityHandler, SyntheticCapabilityInvocation,
 };
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityProgress, ConcurrencyHint,
-    LoopRunContext, resolution,
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, CapabilityProgress,
+    ConcurrencyHint, LoopRunContext, resolution,
 };
 
 pub const PROJECT_CREATE_CAPABILITY_ID: &str = "builtin.project_create";
@@ -219,7 +219,15 @@ fn project_service_outcome(error: ProjectServiceError) -> Result<Resolution, Age
             ));
         }
     };
-    Ok(resolution::failed(error_kind, safe_summary, None))
+    Ok(diagnostic_failure(error_kind, safe_summary))
+}
+
+fn diagnostic_failure(error_kind: FailureKind, safe_summary: String) -> Resolution {
+    resolution::failed(
+        error_kind,
+        safe_summary.clone(),
+        CapabilityFailureDetail::Diagnostic { text: safe_summary },
+    )
 }
 
 /// Resolve the user the run acts on behalf of: the explicit thread owner, else
@@ -248,10 +256,13 @@ mod tests {
         expected_kind: ironclaw_host_api::FailureKind,
     ) {
         match resolution {
-            Resolution::Done(outcome) => assert_eq!(
-                outcome.verdict,
-                ironclaw_host_api::ToolVerdict::recoverable_failure(expected_kind)
-            ),
+            Resolution::Done(outcome) => {
+                assert_eq!(outcome.verdict.error_kind(), Some(&expected_kind));
+                assert!(
+                    outcome.verdict.diagnostic().is_some(),
+                    "recoverable failures must carry a model-visible cause"
+                );
+            }
             other => panic!("expected recoverable failure, got {other:?}"),
         }
     }

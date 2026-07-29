@@ -15,11 +15,10 @@ mod parity_qa_support;
 mod reborn_support;
 mod support;
 
+use ironclaw_event_projections::TimelineEntryKind;
 use ironclaw_host_api::CapabilityId;
 use ironclaw_loop_host::{HostManagedModelErrorKind, HostManagedModelResponse};
-use ironclaw_runner::failure_lane::{FailureLane, failure_lane};
-use ironclaw_runner::retry_disposition::{RetryDisposition, retry_disposition};
-use ironclaw_turns::{TurnRunState, TurnStatus, run_profile::LoopHostMilestoneKind};
+use ironclaw_turns::{TurnRunId, TurnRunState, TurnStatus, run_profile::LoopHostMilestoneKind};
 use parity_qa_support::{
     binary_e2e::RebornBinaryE2EHarness,
     model_replay::{
@@ -78,6 +77,14 @@ async fn reborn_single_stale_model_request_redrives_in_loop_to_completion() {
         "one stale request must cause exactly one same-run model re-drive"
     );
     assert_eq!(harness.remaining_model_responses(), 0);
+    assert_single_durable_recovery(
+        &harness,
+        submitted.run_id,
+        "model",
+        "model_stale_request",
+        "retried",
+    )
+    .await;
 
     harness.shutdown().await;
 }
@@ -128,12 +135,7 @@ async fn reborn_model_failure_is_retryable_and_retry_resumes_to_completion() {
         .wait_for_status(submitted.run_id, TurnStatus::Failed)
         .await
         .expect("failed run");
-    assert_failure_lane_alignment(
-        &failed,
-        "model_stale_request",
-        FailureLane::Retriable,
-        RetryDisposition::Auto,
-    );
+    assert_failure_retry_contract(&failed, "model_stale_request", true);
 
     // 2) The failed run is retryable: it preserved a resumable checkpoint. This
     //    is exactly what the projection surfaces as `retryable: true`.
@@ -255,12 +257,7 @@ async fn reborn_inflight_model_cancelled_preserves_interrupted_unexpectedly() {
     // and `sanitized_driver_failure` now preserves it end-to-end, so the
     // durable run failure carries the original category instead of the
     // masking "driver_failed".
-    assert_failure_lane_alignment(
-        &failed,
-        "interrupted_unexpectedly",
-        FailureLane::Retriable,
-        RetryDisposition::UserInitiated,
-    );
+    assert_failure_retry_contract(&failed, "interrupted_unexpectedly", true);
     assert!(
         failed.checkpoint_id.is_some(),
         "a model-stage cancellation before a trustworthy LoopExit still preserves the BeforeModel checkpoint"
@@ -273,6 +270,70 @@ async fn reborn_inflight_model_cancelled_preserves_interrupted_unexpectedly() {
         "a cancelled model call must not fabricate a final assistant reply"
     );
     assert_eq!(harness.remaining_model_responses(), 0);
+
+    harness.shutdown().await;
+}
+
+/// A caller-shaped capability-port failure is surfaced to the model and the
+/// same run completes. The recovery numerator must cross the real progress
+/// port and runner milestone adapter into the durable runtime projection once.
+#[tokio::test]
+async fn reborn_capability_failure_recovers_model_visibly_with_one_durable_event() {
+    let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
+        RebornModelReplayStep::ProviderToolCalls {
+            calls: vec![RebornScriptedProviderToolCall::new(
+                CapabilityId::new("test.echo").expect("valid capability id"),
+                "call-capability-recovers",
+                json!({"message": "please use the test capability"}),
+            )],
+            expected_tool_results: Vec::new(),
+        },
+        RebornModelReplayStep::ResponseForRequest {
+            request_contains: "input_encode".to_string(),
+            response: HostManagedModelResponse::assistant_reply(
+                "Recovered after the model-visible capability failure.",
+            ),
+            expected_tool_results: Vec::new(),
+        },
+    ]);
+    let mut harness = RebornBinaryE2EHarness::with_model_gateway(
+        "room-capability-model-visible-recovery",
+        model_gateway,
+        RecordingTestCapabilityPort::recoverable_port_error(),
+    )
+    .await
+    .expect("harness");
+    harness.start();
+
+    let submitted = harness
+        .submit_text(
+            "event-capability-model-visible-recovery",
+            "Use the test capability and recover from a caller-shaped failure",
+        )
+        .await
+        .expect("submit text");
+    let completed = harness
+        .wait_for_status(submitted.run_id, TurnStatus::Completed)
+        .await
+        .expect("caller-shaped capability failure remains model-recoverable");
+    assert!(completed.failure.is_none());
+    harness
+        .assert_final_reply("Recovered after the model-visible capability failure.")
+        .await
+        .expect("recovered capability reply persisted to the thread");
+    assert_eq!(
+        harness.capability_invocations().len(),
+        1,
+        "model-visible recovery must not duplicate the failed capability call"
+    );
+    assert_single_durable_recovery(
+        &harness,
+        submitted.run_id,
+        "capability",
+        "input_encode",
+        "model_visible",
+    )
+    .await;
 
     harness.shutdown().await;
 }
@@ -320,12 +381,7 @@ async fn reborn_capability_failure_is_retryable_and_retry_resumes_to_completion(
         .wait_for_status(submitted.run_id, TurnStatus::Failed)
         .await
         .expect("failed run");
-    assert_failure_lane_alignment(
-        &failed,
-        "host_stage_unavailable_capability",
-        FailureLane::Retriable,
-        RetryDisposition::Auto,
-    );
+    assert_failure_retry_contract(&failed, "host_stage_unavailable_capability", true);
     assert!(
         failed.checkpoint_id.is_some(),
         "a retryable capability-stage failure must preserve a resume checkpoint"
@@ -366,11 +422,61 @@ async fn reborn_capability_failure_is_retryable_and_retry_resumes_to_completion(
     harness.shutdown().await;
 }
 
-fn assert_failure_lane_alignment(
+async fn assert_single_durable_recovery(
+    harness: &RebornBinaryE2EHarness,
+    run_id: TurnRunId,
+    expected_stage: &str,
+    expected_class: &str,
+    expected_disposition: &str,
+) {
+    let projection = harness
+        .runtime_projection(run_id)
+        .await
+        .expect("durable runtime events replay through the production projection");
+    let recovery_entries = projection
+        .timeline
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.kind == TimelineEntryKind::FailureRecovered
+                && entry.invocation_id.as_uuid() == run_id.as_uuid()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        recovery_entries.len(),
+        1,
+        "one applied recovery must emit exactly one durable numerator event"
+    );
+    let recovery = recovery_entries[0];
+    assert_eq!(
+        recovery.recovery_stage.as_deref(),
+        Some(expected_stage),
+        "recovery stage must remain authoritative through projection"
+    );
+    assert_eq!(
+        recovery.recovery_class.as_deref(),
+        Some(expected_class),
+        "recovery class must remain authoritative through projection"
+    );
+    assert_eq!(
+        recovery.recovery_disposition.as_deref(),
+        Some(expected_disposition),
+        "recovery disposition must remain authoritative through projection"
+    );
+    assert!(
+        projection.timeline.entries.iter().any(|entry| {
+            entry.kind == TimelineEntryKind::AssistantReplyFinalized
+                && entry.invocation_id.as_uuid() == run_id.as_uuid()
+        }),
+        "the same durable projection must contain the caller-visible finalized reply"
+    );
+}
+
+fn assert_failure_retry_contract(
     state: &TurnRunState,
     expected_category: &str,
-    expected_lane: FailureLane,
-    expected_disposition: RetryDisposition,
+    expected_retryable: bool,
 ) {
     let failure = state.failure.as_ref().expect("failure category");
     let category = failure.category();
@@ -380,19 +486,5 @@ fn assert_failure_lane_alignment(
         category, expected_category,
         "sanitized failure category: {failure:?}"
     );
-    assert_eq!(
-        failure_lane(category, retryable),
-        expected_lane,
-        "{category}: FailureLane must match the emitted category + retryable signal"
-    );
-    let disposition = retry_disposition(category, retryable);
-    assert_eq!(
-        disposition, expected_disposition,
-        "{category}: RetryDisposition must match the emitted category + retryable signal"
-    );
-    assert_eq!(
-        disposition.failure_lane(),
-        expected_lane,
-        "{category}: RetryDisposition must imply the same FailureLane"
-    );
+    assert_eq!(retryable, expected_retryable, "{category}: retryability");
 }

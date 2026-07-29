@@ -324,6 +324,7 @@ pub(crate) struct ChannelHostAssemblyWiring {
     pub(crate) blocked_auth_prompts: Option<Arc<dyn BlockedAuthPromptSource>>,
     pub(crate) auth_flow_cancel: Option<Arc<dyn BlockedAuthFlowCanceller>>,
     pub(crate) run_delivery_settings: RunDeliverySettings,
+    pub(crate) admin_users: Arc<dyn ironclaw_product::AdminUserService>,
 }
 
 pub(crate) struct RuntimeExtensionHostAssemblyWiring<'a> {
@@ -371,6 +372,25 @@ fn channel_host_source(services: &RebornRuntimeStores) -> Option<ChannelHostAsse
     })
 }
 
+pub(crate) fn channel_admin_users(
+    services: &RebornRuntimeStores,
+    identity: &ironclaw_extension_host::channel_host::ChannelHostIdentity,
+) -> Arc<dyn ironclaw_product::AdminUserService> {
+    let directory: Arc<dyn ironclaw_reborn_identity::RebornUserDirectory> =
+        crate::factory::filesystem_reborn_identity_store(
+            Arc::clone(&services.scoped_filesystem),
+            identity.tenant_id.clone(),
+            identity.operator_user_id.clone(),
+            identity.agent_id.clone(),
+            identity.project_id.clone(),
+        );
+    Arc::new(crate::admin_user_directory::RebornAdminUserDirectory::new(
+        directory,
+        Arc::clone(&services.admin_secret_provisioner),
+        Arc::new(crate::admin_token::RejectingAdminApiTokenMinter),
+    ))
+}
+
 pub(crate) fn start_channel_host(
     source: &ChannelHostAssemblySource,
     wiring: ChannelHostAssemblyWiring,
@@ -390,6 +410,7 @@ pub(crate) fn start_channel_host(
         blocked_auth_prompts,
         auth_flow_cancel,
         run_delivery_settings,
+        admin_users,
     } = wiring;
     let ChannelHostAssemblySource {
         generic_host,
@@ -435,6 +456,7 @@ pub(crate) fn start_channel_host(
         identity_lookup,
         delivery,
         channel_pairing: channel_pairing.clone(),
+        admin_users,
     })
 }
 
@@ -466,6 +488,13 @@ pub(crate) async fn build_runtime_channel_host(
         ),
     ) as Arc<dyn BlockedAuthPromptSource>);
     let auth_flow_cancel = crate::runtime::blocked_auth_flow_canceller(&services.product_auth);
+    let identity = ironclaw_extension_host::channel_host::ChannelHostIdentity {
+        tenant_id: thread_scope.tenant_id.clone(),
+        agent_id: thread_scope.agent_id.clone(),
+        project_id: thread_scope.project_id.clone(),
+        operator_user_id: actor_user_id,
+    };
+    let admin_users = channel_admin_users(services, &identity);
     let assembly = start_channel_host(
         &source,
         ChannelHostAssemblyWiring {
@@ -473,16 +502,12 @@ pub(crate) async fn build_runtime_channel_host(
             turn_coordinator,
             approval_interaction: Some(approval_interaction),
             auth_interaction: Some(auth_interaction),
-            identity: ironclaw_extension_host::channel_host::ChannelHostIdentity {
-                tenant_id: thread_scope.tenant_id.clone(),
-                agent_id: thread_scope.agent_id.clone(),
-                project_id: thread_scope.project_id.clone(),
-                operator_user_id: actor_user_id,
-            },
+            identity,
             approval_context,
             blocked_auth_prompts,
             auth_flow_cancel,
             run_delivery_settings: ironclaw_product::triggered_run_delivery_settings(),
+            admin_users,
         },
     );
 

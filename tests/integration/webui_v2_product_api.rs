@@ -76,7 +76,7 @@ async fn thread_history_cold_get_and_libsql_reopen() {
             .await
             .expect("open fresh libsql for reopen"),
     );
-    let fresh_fs = Arc::new(LibSqlRootFilesystem::new(db));
+    let fresh_fs = Arc::new(LibSqlRootFilesystem::new(db).expect("filesystem runtime"));
     fresh_fs
         .run_migrations()
         .await
@@ -733,6 +733,7 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
         &ironclaw_host_api::HostPortCatalog::empty(),
         catalog_manifest.manifest_hash().cloned(),
         &contracts,
+        None,
     )
     .expect("orphan manifest parses");
     store

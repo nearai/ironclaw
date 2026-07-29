@@ -27,7 +27,10 @@ pub(crate) struct FilesystemAssembly {
 }
 
 pub(crate) enum DurableBackend {
-    LibSql(Arc<libsql::Database>),
+    LibSql {
+        runtime: Arc<ironclaw_libsql_runtime::LibSqlRuntime>,
+        filesystem: Arc<LibSqlRootFilesystem>,
+    },
     Postgres(deadpool_postgres::Pool),
 }
 
@@ -87,10 +90,14 @@ pub(crate) async fn build_default_database_roots(
     composite: &mut CompositeRootFilesystem,
 ) -> Result<DurableBackend, RebornBuildError> {
     let db = open_standalone_libsql_database(root).await?;
-    let database = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&db)));
+    let runtime = Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(db)?);
+    let database = Arc::new(LibSqlRootFilesystem::from_runtime(Arc::clone(&runtime)));
     database.run_migrations().await?;
-    mount_database_roots(composite, database)?;
-    Ok(DurableBackend::LibSql(db))
+    mount_database_roots(composite, Arc::clone(&database))?;
+    Ok(DurableBackend::LibSql {
+        runtime,
+        filesystem: database,
+    })
 }
 
 fn host_disk_filesystem(

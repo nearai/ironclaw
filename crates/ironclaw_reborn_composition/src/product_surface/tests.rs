@@ -107,6 +107,7 @@ async fn operator_tool_catalog_hides_foreign_private_tools() {
             &HostPortCatalog::empty(),
             None,
             &product_extension_host_api_contract_registry().expect("contracts"),
+            None,
         )
         .expect("manifest record")
     }

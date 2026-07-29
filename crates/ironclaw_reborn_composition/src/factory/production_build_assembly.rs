@@ -161,9 +161,10 @@ pub(super) async fn build_production_shaped(
             )
             .await
         }
+        #[cfg(any(test, feature = "test-support"))]
         RebornStorageInput::Libsql {
-            connection,
-            prebuilt_db,
+            database_path_or_url,
+            runtime,
             secret_master_key,
             process_local_resource_governor_singleton,
         } => {
@@ -176,16 +177,11 @@ pub(super) async fn build_production_shaped(
                 runtime_process_binding,
             )?;
             let secret_master_key = resolve_secret_master_key(secret_master_key).await?;
-            let db = match prebuilt_db {
-                Some(db) => db,
-                None => open_libsql_database_from_connection(&connection).await?,
-            };
             let context = build_context(production_wiring, scheduler_wake_wiring);
             build_libsql_production(
                 context,
-                db,
-                connection.path_or_url,
-                connection.auth_token,
+                runtime,
+                database_path_or_url,
                 secret_master_key,
                 process_local_resource_governor_singleton,
             )
@@ -269,14 +265,16 @@ async fn build_local_storage_production_shaped(
     let trigger_repository =
         trigger_repository_for_durable_backend(&filesystem_bundle.durable_backend).await?;
     let refresh_lock_pool = match &filesystem_bundle.durable_backend {
-        DurableBackend::LibSql(_) => None,
+        DurableBackend::LibSql { .. } => None,
         DurableBackend::Postgres(pool) => Some(pool.clone()),
     };
     let event_store = match &filesystem_bundle.durable_backend {
-        DurableBackend::LibSql(_) => ironclaw_reborn_event_store::RebornEventStoreConfig::Libsql {
-            path_or_url: standalone_db_path(root).to_string_lossy().into_owned(),
-            auth_token: None,
-        },
+        DurableBackend::LibSql { filesystem, .. } => {
+            ironclaw_reborn_event_store::RebornEventStoreConfig::LibsqlFilesystem {
+                filesystem: Arc::clone(filesystem),
+                path_or_url: standalone_db_path(root).to_string_lossy().into_owned(),
+            }
+        }
         DurableBackend::Postgres(pool) => {
             ironclaw_reborn_event_store::RebornEventStoreConfig::PostgresPool { pool: pool.clone() }
         }

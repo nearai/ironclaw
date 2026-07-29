@@ -727,10 +727,10 @@ pub fn standalone_unrestricted_runtime_policy(
     .map_err(|error| match error {
         RebornRuntimeProfileError::Policy(error) => error,
         RebornRuntimeProfileError::UnsupportedProfile { .. } => {
-            unreachable!("standalone-unrestricted is a local runtime profile")
+            unreachable!("standalone-unrestricted is a local runtime profile") // safety: the fixed profile is mapped to a local deployment configuration.
         }
         RebornRuntimeProfileError::MissingPolicyRequest { .. } => {
-            unreachable!("standalone-unrestricted carries a runtime-policy request")
+            unreachable!("standalone-unrestricted carries a runtime-policy request") // safety: the fixed profile always constructs a runtime-policy request.
         }
     })
 }
@@ -754,7 +754,7 @@ fn local_host_runtime_policy_for_profile_label(
     .map_err(|error| match error {
         RebornRuntimeProfileError::Policy(error) => error,
         RebornRuntimeProfileError::UnsupportedProfile { .. } => {
-            unreachable!("{profile_name} uses the local-host runtime policy shape")
+            unreachable!("{profile_name} uses the local-host runtime policy shape") // safety: callers pass fixed labels for the standalone local-host profile.
         }
         RebornRuntimeProfileError::MissingPolicyRequest { .. } => {
             unreachable!("{profile_name} carries a runtime-policy request")

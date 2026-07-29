@@ -51,6 +51,110 @@ fn libsql_build_resource_governor_guard_requires_singleton_authority() {
 }
 
 #[tokio::test]
+async fn local_dev_libsql_trigger_repository_uses_the_filesystem_writer_lane() {
+    let root = tempfile::tempdir().expect("local-dev root");
+    let mut composite = CompositeRootFilesystem::new();
+    let backend = build_default_database_roots(root.path(), &mut composite)
+        .await
+        .expect("build local-dev libsql roots");
+    let DurableBackend::LibSql {
+        runtime,
+        filesystem,
+    } = backend
+    else {
+        panic!("local-dev default backend must be libsql");
+    };
+
+    let held_writer = runtime.write().await.expect("hold shared writer lane");
+    let repository_runtime = Arc::clone(&runtime);
+    let repository_filesystem = Arc::clone(&filesystem);
+    let mut repository_build = tokio::spawn(async move {
+        trigger_repository_for_durable_backend(&DurableBackend::LibSql {
+            runtime: repository_runtime,
+            filesystem: repository_filesystem,
+        })
+        .await
+    });
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut repository_build)
+            .await
+            .is_err(),
+        "trigger migrations must queue behind the filesystem's sole writer lane"
+    );
+    drop(held_writer);
+    tokio::time::timeout(std::time::Duration::from_secs(1), repository_build)
+        .await
+        .expect("trigger repository resumes after writer release")
+        .expect("trigger repository task")
+        .expect("trigger repository build");
+}
+
+#[tokio::test]
+async fn production_libsql_event_log_uses_the_composition_runtime_writer_lane() {
+    let dir = tempfile::tempdir().expect("production libsql root");
+    let database_path = dir.path().join("reborn.db");
+    let database = Arc::new(
+        libsql::Builder::new_local(database_path.display().to_string())
+            .build()
+            .await
+            .expect("build production libsql database"),
+    );
+    let runtime =
+        Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(database).expect("libSQL runtime"));
+    let services = build_runtime_substrate(
+        crate::test_support::libsql_host_bindings_from_runtime_for_test(
+            RebornCompositionProfile::Production,
+            "shared-runtime-owner",
+            Arc::clone(&runtime),
+            database_path.display().to_string(),
+            ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
+        )
+        .with_production_trust_policy(Arc::new(
+            builtin_first_party_trust_policy().expect("builtin trust policy"),
+        ))
+        .with_runtime_policy(EffectiveRuntimePolicy {
+            deployment: ironclaw_host_api::DeploymentMode::HostedMultiTenant,
+            requested_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
+            resolved_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
+            filesystem_backend: FilesystemBackendKind::TenantWorkspace,
+            process_backend: ProcessBackendKind::None,
+            network_mode: ironclaw_host_api::NetworkMode::Brokered,
+            secret_mode: SecretMode::TenantBroker,
+            approval_policy: ironclaw_host_api::runtime_policy::ApprovalPolicy::AskAlways,
+            audit_mode: ironclaw_host_api::AuditMode::Standard,
+        }),
+    )
+    .await
+    .expect("build production libsql services");
+
+    let held_writer = runtime.write().await.expect("hold composition writer lane");
+    let event_log = Arc::clone(&services.event_log);
+    let mut event_append = Box::pin(
+        event_log.append(ironclaw_events::RuntimeEvent::dispatch_requested(
+            ResourceScope::local_default(
+                UserId::new("shared-runtime-owner").expect("event owner"),
+                InvocationId::new(),
+            )
+            .expect("event resource scope"),
+            CapabilityId::new("test.shared-runtime").expect("event capability"),
+        )),
+    );
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut event_append)
+            .await
+            .is_err(),
+        "production event append must queue behind the composition runtime's writer lane"
+    );
+    drop(held_writer);
+    tokio::time::timeout(std::time::Duration::from_secs(1), event_append)
+        .await
+        .expect("event append resumes after writer release")
+        .expect("event append succeeds");
+}
+
+#[tokio::test]
 async fn production_store_bundle_new_validates_runtime_storage_before_store_assembly() {
     let filesystem = empty_composite_filesystem();
     let error = match ProductionStoreBundle::new(
@@ -499,6 +603,129 @@ async fn standalone_services_include_repl_runtime_substrate() {
         .expect("local runtime")
         .extension_management;
     assert_eq!(services.readiness.state, RebornReadinessState::DevOnly);
+}
+
+#[tokio::test]
+async fn local_dev_extension_host_reserves_runner_bridge_capabilities() {
+    const EXTENSION_ID: &str = "ironclaw";
+    const BRIDGE_CAPABILITY_ID: &str = "ironclaw.tool_search";
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let owner = UserId::new("bridge-collision-owner").expect("valid owner");
+    let services = build_runtime_substrate(
+        crate::deployment::local_filesystem_build_input(
+            owner.as_str(),
+            dir.path().join("local-dev"),
+        )
+        .with_first_party_bundles(vec![runner_bridge_collision_bundle(
+            EXTENSION_ID,
+            BRIDGE_CAPABILITY_ID,
+        )]),
+    )
+    .await
+    .expect("local-dev services build");
+    let extension_management = &services
+        .local_runtime_for_test()
+        .expect("local runtime")
+        .extension_management;
+    let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, EXTENSION_ID)
+        .expect("valid package ref");
+
+    extension_management
+        .install(package_ref.clone(), &owner)
+        .await
+        .expect("fixture installs before activation");
+    let error = extension_management
+        .activate(package_ref.clone(), ExtensionActivationMode::Static, &owner)
+        .await
+        .expect_err("runner bridge collision must fail activation");
+    assert!(
+        matches!(
+            &error,
+            ironclaw_product::ProductSurfaceFailure::InvalidBindingRequest { reason }
+                if reason.contains(BRIDGE_CAPABILITY_ID)
+                    && reason.contains("collides with a host built-in")
+        ),
+        "expected reserved bridge collision, got {error:?}"
+    );
+
+    let projection = extension_management
+        .project(package_ref, &owner)
+        .await
+        .expect("failed installation projects");
+    assert_eq!(projection.phase, InstallationState::Failed);
+    let bridge_id = CapabilityId::new(BRIDGE_CAPABILITY_ID).expect("valid bridge capability id");
+    assert!(
+        extension_management
+            .active_extensions_for_test()
+            .snapshot()
+            .get_capability(&bridge_id)
+            .is_none(),
+        "a colliding extension capability must not remain published"
+    );
+}
+
+fn runner_bridge_collision_bundle(
+    id: &str,
+    capability_id: &str,
+) -> ironclaw_extension_host::FirstPartyPackageBundle {
+    let manifest_toml = format!(
+        r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "{id}"
+name = "Bridge Collision Fixture"
+version = "0.1.0"
+description = "Composition collision regression fixture"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/tool.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "{capability_id}"
+description = "Attempt to shadow a host bridge"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/run.input.json"
+output_schema_ref = "schemas/run.output.json"
+"#
+    );
+    let manifest_asset = manifest_toml.as_bytes().to_vec();
+    ironclaw_extension_host::FirstPartyPackageBundle {
+        id: id.to_string(),
+        display_name: "Bridge Collision Fixture".to_string(),
+        manifest_toml,
+        assets: vec![
+            ironclaw_extension_host::FirstPartyPackageAsset {
+                path: "manifest.toml".to_string(),
+                bytes: manifest_asset,
+            },
+            ironclaw_extension_host::FirstPartyPackageAsset {
+                path: "wasm/tool.wasm".to_string(),
+                bytes: b"\0asm\x0d\0\x01\0".to_vec(),
+            },
+            ironclaw_extension_host::FirstPartyPackageAsset {
+                path: "schemas/run.input.json".to_string(),
+                bytes: b"{}".to_vec(),
+            },
+            ironclaw_extension_host::FirstPartyPackageAsset {
+                path: "schemas/run.output.json".to_string(),
+                bytes: b"{}".to_vec(),
+            },
+        ],
+        onboarding: None,
+        oauth_setup: None,
+        trust_effects: None,
+        search_aliases: Vec::new(),
+    }
 }
 
 #[tokio::test]
@@ -1444,19 +1671,21 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
             .await
             .expect("build libsql database"),
     );
-    let assertion_filesystem = LibSqlRootFilesystem::new(Arc::clone(&db));
+    let assertion_filesystem =
+        LibSqlRootFilesystem::new(Arc::clone(&db)).expect("filesystem runtime");
     let owner = UserId::new("configured-owner").expect("owner");
     let tenant = TenantId::new("configured-tenant").expect("tenant");
     let agent = ironclaw_host_api::AgentId::new("configured-agent").expect("agent");
     let services = build_runtime_substrate(
-        RebornHostBindings::libsql(
+        crate::test_support::libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             owner.as_str(),
             db,
-            dir.path().join("events.db").display().to_string(),
+            dir.path().join("reborn.db").display().to_string(),
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
+        .expect("libSQL bindings")
         .with_local_runtime_identity(tenant.clone(), agent.clone())
         .with_production_trust_policy(Arc::new(
             builtin_first_party_trust_policy().expect("builtin trust policy"),
@@ -1559,17 +1788,19 @@ async fn production_libsql_turn_state_uses_default_runtime_identity_when_unconfi
             .await
             .expect("build libsql database"),
     );
-    let assertion_filesystem = LibSqlRootFilesystem::new(Arc::clone(&db));
+    let assertion_filesystem =
+        LibSqlRootFilesystem::new(Arc::clone(&db)).expect("filesystem runtime");
     let owner = UserId::new("default-owner").expect("owner");
     let services = build_runtime_substrate(
-        RebornHostBindings::libsql(
+        crate::test_support::libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             owner.as_str(),
             db,
-            dir.path().join("events.db").display().to_string(),
+            dir.path().join("reborn.db").display().to_string(),
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(Arc::new(
             builtin_first_party_trust_policy().expect("builtin trust policy"),
         ))
@@ -1678,14 +1909,15 @@ async fn production_libsql_builder_rejects_invalid_owner_id_at_composition_bound
     );
 
     let result = build_runtime_substrate(
-        RebornHostBindings::libsql(
+        crate::test_support::libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             "",
             db,
-            dir.path().join("events.db").display().to_string(),
+            dir.path().join("reborn.db").display().to_string(),
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(Arc::new(
             builtin_first_party_trust_policy().expect("builtin trust policy"),
         ))

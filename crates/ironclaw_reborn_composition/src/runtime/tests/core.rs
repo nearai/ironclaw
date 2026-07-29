@@ -559,7 +559,6 @@ use ironclaw_turns::{
 use rust_decimal_macros::dec;
 
 use crate::RebornRuntimeProcessBinding;
-use crate::input::RebornHostBindings;
 use crate::observability::hooks::HooksActivationConfig;
 use crate::runtime_input::{
     PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerFireAccessCheck,
@@ -1573,6 +1572,7 @@ fn nearai_gateway_test_request() -> HostManagedModelRequest {
         }],
         surface_version: None,
         resolved_model_route: None,
+        fallback_index: 0,
         run_id: TurnRunId::new(),
         turn_id: TurnId::new(),
     }
@@ -2638,14 +2638,15 @@ async fn production_runtime_wires_enabled_hooks_through_unified_runtime() {
     );
 
     let input = RebornRuntimeInput::from_build_input(
-        RebornHostBindings::libsql(
+        crate::test_support::libsql_host_bindings_for_test(
             crate::RebornCompositionProfile::Production,
             "runtime-production-hooks-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(Arc::new(
             crate::builtin_first_party_trust_policy().expect("trust policy"),
         ))
@@ -2699,14 +2700,15 @@ async fn build_reborn_runtime_allows_validated_production_readiness() {
     });
 
     let input = RebornRuntimeInput::from_build_input(
-        RebornHostBindings::libsql(
+        crate::test_support::libsql_host_bindings_for_test(
             crate::RebornCompositionProfile::Production,
             "runtime-production-cutover-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(Arc::new(
             crate::builtin_first_party_trust_policy().expect("trust policy"),
         ))
@@ -2771,14 +2773,15 @@ async fn build_reborn_runtime_wires_trajectory_observer_through_unified_runtime(
     let observer = Arc::new(RecordingTrajectoryObserver::default());
 
     let input = RebornRuntimeInput::from_build_input(
-        RebornHostBindings::libsql(
+        crate::test_support::libsql_host_bindings_for_test(
             crate::RebornCompositionProfile::Production,
             "runtime-observer-reject-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(Arc::new(
             crate::builtin_first_party_trust_policy().expect("trust policy"),
         ))
@@ -3852,8 +3855,8 @@ async fn send_user_message_uses_caller_supplied_skill_context_source() {
     assert_ne!(reply.status, TurnStatus::Completed);
     assert_eq!(
         skill_context_source.calls.load(Ordering::SeqCst),
-        1,
-        "composition should pass caller-supplied skill context into the planned runtime"
+        ironclaw_turns::TurnStateStoreLimits::default().max_crash_recovery_reclaims as usize,
+        "composition should retry caller-supplied transient skill context failures only up to the durable claim bound"
     );
     assert!(
         requests

@@ -3733,6 +3733,7 @@ async fn after_model_fires_exactly_once_at_durable_boundary() {
         messages: bundle.messages.clone(),
         surface_version: None,
         model_preference: None,
+        fallback_index: 0,
         capability_view: None,
     })
     .await

@@ -57,7 +57,7 @@ use std::time::Duration;
 use ironclaw_extensions::ExtensionInstallationStorePort;
 use ironclaw_filesystem::CompositeRootFilesystem;
 use ironclaw_host_api::{ResourceScope, UserId};
-use ironclaw_llm::testing::provider_chain_over;
+use ironclaw_llm::testing::{provider_chain_over, provider_chain_over_with_fallback};
 use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
 use ironclaw_loop_host::{
     CapabilityAllowSet, CapabilitySurfaceProfileResolver, HostManagedModelGateway,
@@ -123,8 +123,10 @@ use super::product_surface::RebornProductSurfaceHarness;
 use super::reply::RebornScriptedReply;
 use super::scope_gateway::ScopeRegistryGateway;
 use super::scripted_provider::{
-    ErrLlm, ErrLlmKind, ModelProviderCallProbe, ParkingModelGate, RecoverableModelFailureScript,
-    SCRIPTED_MODEL_NAME, parking_trace_llm, recoverable_failure_trace_llm, scripted_trace_llm,
+    ErrLlm, ErrLlmKind, FallbackProviderCallProbe, ModelProviderCallProbe, ParkingModelGate,
+    RecoverableModelFailureScript, SCRIPTED_FALLBACK_MODEL_NAME, SCRIPTED_MODEL_NAME,
+    parking_trace_llm, recoverable_failure_trace_llm, scripted_fallback_vendor_pair,
+    scripted_trace_llm,
 };
 use super::session_thread::RebornThreadHarness;
 use super::test_adapter::RebornTestIngress;
@@ -140,7 +142,8 @@ mod group_constructors;
 
 /// Optional-runtime-wiring setters (`storage`, `safety_context`,
 /// `with_turn_event_sink`, `with_trace_capture`, `with_tool_disclosure_bridged`,
-/// `budget_accounting`, `communication_context_provider`,
+/// `with_narrowed_capability_allow_set_for_bridged_test`, `budget_accounting`,
+/// `communication_context_provider`,
 /// `hook_dispatcher_builder_factory`) on
 /// [`RebornIntegrationGroupBuilder`]. A private child module (not `pub mod`
 /// from `mod.rs`), same precedent as `group_constructors` above — it reaches
@@ -443,6 +446,7 @@ impl RebornIntegrationGroup {
             turn_event_sink: None,
             trace_capture: false,
             tool_disclosure: None,
+            narrowed_bridged_allow_set: None,
             budget: false,
             communication_context_provider: None,
             hook_dispatcher_builder_factory: None,
@@ -716,6 +720,10 @@ pub struct RebornIntegrationGroupBuilder {
     /// `.with_tool_disclosure_bridged()` has been called; `None` resolves via
     /// `ToolDisclosureMode::from_env()` in `into_group` (today's behavior).
     tool_disclosure: Option<ToolDisclosureMode>,
+    /// #5647 RED-pin seam: opt-in override of the forced `CapabilityAllowSet::All`
+    /// for Bridged-mode groups. `None` preserves today's behavior; only
+    /// consumed when `tool_disclosure == Some(Bridged)` (`into_group` fails fast otherwise).
+    narrowed_bridged_allow_set: Option<CapabilityAllowSet>,
     /// C-BUDGET: when `true`, `into_group` wires the production
     /// `build_default_budget_accountant` (in-memory governor + gate store +
     /// zero-cost table + compiled-default seeding) into the group's ONE planned
@@ -840,6 +848,19 @@ impl RebornIntegrationGroupBuilder {
         base: GroupBaseData,
         capability: GroupCapability,
     ) -> HarnessResult<RebornIntegrationGroup> {
+        // Harness-seam misuse guard (§7): fail fast instead of a silent no-op
+        // if the override is set without Bridged mode also selected.
+        if self.narrowed_bridged_allow_set.is_some()
+            && self.tool_disclosure != Some(ToolDisclosureMode::Bridged)
+        {
+            return Err(
+                "with_narrowed_capability_allow_set_for_bridged_test() was set but \
+                 tool_disclosure is not Bridged — the override only applies to \
+                 bridged-disclosure groups; call .with_tool_disclosure_bridged() too"
+                    .into(),
+            );
+        }
+
         let scope_gateway = Arc::new(ScopeRegistryGateway::new());
 
         // Issue #5476 lease-wedge coverage: `.with_limits` is the store's own
@@ -883,18 +904,16 @@ impl RebornIntegrationGroupBuilder {
         )?;
 
         // Enabler (b): production resolves `CapabilityAllowSet::All` for a
-        // top-level user turn, making `CapabilitySurfaceProfileFilter` a no-op
-        // — so the disclosure decorator's synthetic bridge ids
-        // (`ironclaw.tool_search` etc., never in any granted set) survive to
-        // the model. The harness default (allowlist of exactly the granted
-        // capability ids) is NARROWER than production there and would strip
-        // the deferred bridge surface down to zero tools. Mirror production
-        // for bridged groups only; every non-bridged group keeps the strict
-        // allowlist.
+        // top-level user turn; mirror that for bridged groups (narrowed
+        // override = the #5647 seam). Bridge ids now survive narrowing via
+        // the filter's host-exempt set, so this is production parity, not a
+        // bug dodge.
         let capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver> =
             if self.tool_disclosure == Some(ToolDisclosureMode::Bridged) {
                 Arc::new(StaticCapabilitySurfaceProfileResolver {
-                    allow_set: CapabilityAllowSet::All,
+                    allow_set: self
+                        .narrowed_bridged_allow_set
+                        .unwrap_or(CapabilityAllowSet::All),
                 })
             } else {
                 capability_surface_resolver
@@ -1267,11 +1286,21 @@ pub(crate) enum ThreadModelMode {
     /// Reports a recoverable provider failure a bounded number of times, then
     /// resumes normal scripted playback.
     Recoverable(RecoverableModelFailureScript),
+    /// Primary vendor failure followed by ordered fallback success through the
+    /// production retry/failover/circuit-breaker/decorator chain.
+    FallbackAdvance,
     /// This thread's model call always fails with a fixed non-retryable
     /// `LlmError` (E-GATEWAY seam, C-ERRORS) instead of playing back
     /// `replies`. See [`super::scripted_provider::ErrLlm`].
     Failing(ErrLlmKind),
 }
+
+type ThreadModelProviderParts = (
+    Arc<dyn LlmProvider>,
+    Option<ModelProviderCallProbe>,
+    Option<Arc<dyn LlmProvider>>,
+    Option<FallbackProviderCallProbe>,
+);
 
 impl<'g> RebornThreadBuilder<'g> {
     /// Set the scripted model replies for this thread (consumed in order at the
@@ -1318,6 +1347,13 @@ impl<'g> RebornThreadBuilder<'g> {
     /// provider-error mapping.
     pub fn fail_model_auth(mut self) -> Self {
         self.model_mode = ThreadModelMode::Failing(ErrLlmKind::AuthFailed);
+        self
+    }
+
+    /// Fail the primary vendor route as unavailable and let loop recovery
+    /// advance to the scripted fallback provider.
+    pub fn advance_fallback_after_unavailable(mut self) -> Self {
+        self.model_mode = ThreadModelMode::FallbackAdvance;
         self
     }
 
@@ -1388,12 +1424,12 @@ impl<'g> RebornThreadBuilder<'g> {
         // `Parked` swaps in the parking wrapper. `ThreadModelMode` keeps all
         // provider modes mutually exclusive by construction — no priority
         // rule is needed here.
-        let (raw, model_provider_call_probe): (
-            Arc<dyn LlmProvider>,
-            Option<ModelProviderCallProbe>,
-        ) = match self.model_mode {
+        let (raw, model_provider_call_probe, fallback_raw, fallback_provider_call_probe):
+            ThreadModelProviderParts = match self.model_mode {
             ThreadModelMode::Parked(gate) => (
                 Arc::new(parking_trace_llm(gate, scripted_llm.clone())),
+                None,
+                None,
                 None,
             ),
             ThreadModelMode::Recoverable(script) => {
@@ -1403,10 +1439,20 @@ impl<'g> RebornThreadBuilder<'g> {
                     script.failures,
                     scripted_llm.clone(),
                 );
-                (Arc::new(provider), Some(probe))
+                (Arc::new(provider), Some(probe), None, None)
             }
-            ThreadModelMode::Failing(kind) => (Arc::new(ErrLlm::new(kind)), None),
-            ThreadModelMode::Normal => (scripted_llm.clone(), None),
+            ThreadModelMode::FallbackAdvance => {
+                let (primary, fallback, probe) =
+                    scripted_fallback_vendor_pair(scripted_llm.clone());
+                (
+                    Arc::new(primary),
+                    None,
+                    Some(Arc::new(fallback)),
+                    Some(probe),
+                )
+            }
+            ThreadModelMode::Failing(kind) => (Arc::new(ErrLlm::new(kind)), None, None, None),
+            ThreadModelMode::Normal => (scripted_llm.clone(), None, None, None),
         };
         let session = create_session_manager(SessionConfig {
             session_path: shared
@@ -1416,8 +1462,16 @@ impl<'g> RebornThreadBuilder<'g> {
             ..SessionConfig::default()
         })
         .await;
-        let llm_config = ironclaw_llm::testing::nearai_test_config(SCRIPTED_MODEL_NAME);
-        let provider = provider_chain_over(raw, &llm_config, session).await?;
+        let mut llm_config = ironclaw_llm::testing::nearai_test_config(SCRIPTED_MODEL_NAME);
+        let provider = if let Some(fallback) = fallback_raw {
+            llm_config.max_retries = 1;
+            llm_config.circuit_breaker_threshold = Some(2);
+            llm_config.response_cache_enabled = true;
+            llm_config.nearai.fallback_model = Some(SCRIPTED_FALLBACK_MODEL_NAME.to_string());
+            provider_chain_over_with_fallback(raw, fallback, &llm_config, session).await?
+        } else {
+            provider_chain_over(raw, &llm_config, session).await?
+        };
         let model_profile_id = ModelProfileId::new(INTERACTIVE_MODEL_PROFILE)
             .map_err(|reason| format!("invalid model profile id: {reason}"))?;
         let policy = LlmModelProfilePolicy::new()
@@ -1533,6 +1587,7 @@ impl<'g> RebornThreadBuilder<'g> {
             capability_recorder,
             scripted_llm,
             model_provider_call_probe,
+            fallback_provider_call_probe,
             _shared: Arc::clone(&shared),
             baseline_invocation_count,
             baseline_egress_count,

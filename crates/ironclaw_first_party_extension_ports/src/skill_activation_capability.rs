@@ -9,7 +9,8 @@ use ironclaw_loop_host::{
     SyntheticCapabilityDescriptor, SyntheticCapabilityHandler, SyntheticCapabilityInvocation,
 };
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, ConcurrencyHint, resolution,
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, ConcurrencyHint,
+    resolution,
 };
 
 use crate::{
@@ -233,18 +234,24 @@ fn skill_activation_selection_outcome(
         // A resource limit, not an encoding fault — `Resource` keeps the
         // precise kind for downstream fate/wire/UI projections (both kinds
         // are ModelVisible, so recoverability is unchanged).
-        SelectionError::ContextBudgetExceeded => Ok(resolution::failed(
+        SelectionError::ContextBudgetExceeded => Ok(diagnostic_failure(
             FailureKind::Resource,
             "skill activation exceeds the per-run skill context budget; activate fewer or smaller skills".to_string(),
-            None,
         )),
-        SelectionError::AmbiguousSkill { .. } => Ok(resolution::failed(
+        SelectionError::AmbiguousSkill { .. } => Ok(diagnostic_failure(
             FailureKind::InputEncode,
             "ambiguous skill name; specify a single unique skill to activate".to_string(),
-            None,
         )),
         other => Err(skill_activation_host_error(other)),
     }
+}
+
+fn diagnostic_failure(error_kind: FailureKind, safe_summary: String) -> Resolution {
+    resolution::failed(
+        error_kind,
+        safe_summary.clone(),
+        CapabilityFailureDetail::Diagnostic { text: safe_summary },
+    )
 }
 
 #[cfg(test)]
@@ -316,10 +323,13 @@ mod tests {
         expected_kind: ironclaw_host_api::FailureKind,
     ) {
         match resolution {
-            ironclaw_host_api::Resolution::Done(outcome) => assert_eq!(
-                outcome.verdict,
-                ironclaw_host_api::ToolVerdict::recoverable_failure(expected_kind)
-            ),
+            ironclaw_host_api::Resolution::Done(outcome) => {
+                assert_eq!(outcome.verdict.error_kind(), Some(&expected_kind));
+                assert!(
+                    outcome.verdict.diagnostic().is_some(),
+                    "recoverable failures must carry a model-visible cause"
+                );
+            }
             other => panic!("expected Resolution::Done recoverable failure, got {other:?}"),
         }
     }

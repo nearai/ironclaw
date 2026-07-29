@@ -66,6 +66,10 @@ where
         TurnStateRowStore::blocked_auth_runs(self, &query).await
     }
 }
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use row_store::{
+    snapshot_cache_is_initialized_for_test, snapshot_state_is_locked_for_test,
+};
 pub use turn_state_engine::TurnStateStoreLimits;
 
 /// Legacy filesystem-backed durable sink for a full [`TurnPersistenceSnapshot`].

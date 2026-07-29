@@ -27,6 +27,7 @@ pub mod available_extension_import;
 pub mod available_extensions;
 pub mod bundled_skills;
 pub mod capability_surface;
+pub mod channel_command_roles;
 pub mod channel_config;
 pub mod channel_connection;
 pub mod channel_delivery;

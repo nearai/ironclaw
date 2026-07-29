@@ -109,8 +109,9 @@ pub(crate) async fn trigger_repository_for_durable_backend(
     backend: &DurableBackend,
 ) -> Result<Arc<dyn TriggerRepository>, RebornBuildError> {
     match backend {
-        DurableBackend::LibSql(database) => {
-            let repository = ironclaw_triggers::LibSqlTriggerRepository::new(Arc::clone(database));
+        DurableBackend::LibSql { runtime, .. } => {
+            let repository =
+                ironclaw_triggers::LibSqlTriggerRepository::from_runtime(Arc::clone(runtime));
             repository
                 .run_migrations()
                 .await
